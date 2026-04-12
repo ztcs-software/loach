@@ -1,0 +1,52 @@
+use std::sync::Arc;
+
+use dashmap::DashMap;
+use serde::Serialize;
+use tokio::sync::Notify;
+
+/// Tracks in-flight streaming generations so we can cancel them from the frontend.
+#[derive(Clone)]
+pub struct StreamRegistry {
+    inner: Arc<DashMap<String, Arc<Notify>>>,
+}
+
+impl StreamRegistry {
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(DashMap::new()),
+        }
+    }
+
+    pub fn register(&self, id: String) -> Arc<Notify> {
+        let n = Arc::new(Notify::new());
+        self.inner.insert(id, n.clone());
+        n
+    }
+
+    pub fn cancel(&self, id: &str) {
+        if let Some((_, n)) = self.inner.remove(id) {
+            n.notify_waiters();
+        }
+    }
+
+    pub fn finish(&self, id: &str) {
+        self.inner.remove(id);
+    }
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum StreamEvent {
+    Token { delta: String },
+    Done,
+    Error { message: String },
+    Metrics {
+        tokens: u32,
+        elapsed_ms: u64,
+        tokens_per_second: f64,
+    },
+}
+
+pub fn event_channel(stream_id: &str) -> String {
+    format!("chat://{stream_id}")
+}

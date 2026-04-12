@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install:*)",
+      "mcp__Claude_Preview__preview_start",
+      "Bash(where cargo:*)",
+      "Bash(where rustc:*)",
+      "Read(//c/Users/Andrzej/.cargo/**)",
+      "Bash(netstat -ano)",
+      "Bash(findstr :1420)",
+      "Bash(tasklist /FI \"PID eq 23732\")",
+      "Bash(tasklist //FI \"PID eq 23732\")",
+      "Bash(powershell.exe -NoProfile -Command ':*)",
+      "Bash(npx tauri:*)",
+      "Bash(findstr LISTENING)",
+      "Bash(tasklist //FI \"PID eq 127460\")",
+      "Bash(find components:*)",
+      "Bash(npm run:*)",
+      "Bash(npx vite:*)",
+      "Bash(npm ls:*)",
+      "Bash(cargo check:*)",
+      "Bash(npx kill-port:*)",
+      "Bash(taskkill //F //FI \"WINDOWTITLE eq npm*\")"
+    ]
+  }
+}

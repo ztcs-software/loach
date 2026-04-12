@@ -1,0 +1,52 @@
+[package]
+name = "loach"
+version = "0.1.0"
+description = "Native local LLM chat client (Ollama + OpenAI-compatible)."
+authors = ["Loach"]
+edition = "2021"
+rust-version = "1.77"
+
+[lib]
+name = "loach_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-shell = "2"
+
+# Async runtime + HTTP
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"], default-features = false }
+futures-util = "0.3"
+async-stream = "0.3"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Storage
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Secrets
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
+
+# Utilities
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+base64 = "0.22"
+anyhow = "1"
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+once_cell = "1"
+dashmap = "6"
+
+[features]
+# this feature is used for production builds or when a dev server is not specified
+# DO NOT REMOVE!!
+custom-protocol = ["tauri/custom-protocol"]
