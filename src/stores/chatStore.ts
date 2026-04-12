@@ -249,9 +249,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   sendUserMessage: async (rawContent, attachments) => {
+    // If viewing a space, exit the space view and create a session in that space
+    const spaceStore = useSpaceStore.getState();
+    const viewingSpaceId = spaceStore.viewingSpaceId;
+    if (viewingSpaceId) {
+      // Clear view but keep activeSpaceId so newSession picks it up
+      useSpaceStore.setState({ viewingSpaceId: null });
+    }
+
     const state = get();
     let sessionId = state.activeSessionId;
-    if (!sessionId) {
+    // If we came from a space view, or have no session, create one
+    if (!sessionId || (viewingSpaceId && state.sessions.find(s => s.id === sessionId)?.space_id !== viewingSpaceId)) {
       const created = await get().newSession();
       sessionId = created.id;
     }
