@@ -246,7 +246,10 @@ function SessionRow({
           setMenuOpen(true);
         }}
       >
-        {session.space_id && (
+        {session.pinned_at && (
+          <Pin className="mr-1.5 h-3 w-3 shrink-0 text-foreground/35" />
+        )}
+        {session.space_id && !session.pinned_at && (
           <Layers className="mr-1.5 h-3 w-3 shrink-0 text-foreground/35" />
         )}
         <span className="min-w-0 flex-1 truncate">{session.title}</span>
