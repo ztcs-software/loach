@@ -57,6 +57,15 @@ pub async fn rename_session(
 }
 
 #[tauri::command]
+pub async fn pin_session(
+    state: State<'_, AppState>,
+    id: String,
+    pinned: bool,
+) -> Result<(), String> {
+    state.db.pin_session(&id, pinned).map_err(err)
+}
+
+#[tauri::command]
 pub async fn delete_session(state: State<'_, AppState>, id: String) -> Result<(), String> {
     state.db.delete_session(&id).map_err(err)
 }

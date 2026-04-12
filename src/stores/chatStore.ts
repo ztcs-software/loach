@@ -8,6 +8,7 @@ import {
   listSessions,
   makeRequestId,
   ollamaUnloadModel,
+  pinSession,
   renameSession,
   startChatStream,
   updateMessage,
@@ -46,6 +47,7 @@ interface ChatState {
   selectSession: (id: string | null) => Promise<void>;
   newSession: (provider?: ProviderId, model?: string) => Promise<Session>;
   rename: (id: string, title: string) => Promise<void>;
+  pin: (id: string, pinned: boolean) => Promise<void>;
   remove: (id: string) => Promise<void>;
   setSessionModel: (id: string, provider: ProviderId, model: string) => Promise<void>;
   setSessionSystemPrompt: (id: string, prompt: string) => Promise<void>;
@@ -195,6 +197,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
     await renameSession(id, title);
     set((s) => ({
       sessions: s.sessions.map((x) => (x.id === id ? { ...x, title } : x)),
+    }));
+  },
+
+  pin: async (id, pinned) => {
+    await pinSession(id, pinned);
+    const pinned_at = pinned ? Date.now() : null;
+    set((s) => ({
+      sessions: s.sessions.map((x) =>
+        x.id === id ? { ...x, pinned_at } : x,
+      ),
     }));
   },
 

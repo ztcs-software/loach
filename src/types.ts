@@ -8,6 +8,7 @@ export interface Session {
   system_prompt: string | null;
   params_json: string | null;
   space_id: string | null;
+  pinned_at: number | null;
   created_at: number;
   updated_at: number;
 }

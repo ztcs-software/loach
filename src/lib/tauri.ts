@@ -49,6 +49,7 @@ export function createSession(args: {
       system_prompt: args.system_prompt ?? null,
       params_json: null,
       space_id: args.space_id ?? null,
+      pinned_at: null,
       created_at: now,
       updated_at: now,
     });
@@ -59,6 +60,11 @@ export function createSession(args: {
 export function renameSession(id: string, title: string): Promise<void> {
   if (!isTauri) return notInTauri(undefined);
   return invoke("rename_session", { id, title });
+}
+
+export function pinSession(id: string, pinned: boolean): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("pin_session", { id, pinned });
 }
 
 export function deleteSession(id: string): Promise<void> {
