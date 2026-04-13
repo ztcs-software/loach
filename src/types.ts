@@ -8,6 +8,7 @@ export interface Session {
   system_prompt: string | null;
   params_json: string | null;
   space_id: string | null;
+  pinned_at: number | null;
   created_at: number;
   updated_at: number;
 }
@@ -39,10 +40,10 @@ export interface SpaceContext {
 }
 
 export interface Attachment {
-  kind: "image" | "text";
+  kind: "image" | "text" | "file";
   name: string;
   mime: string;
-  /** base64 (no data: prefix) for images, plain text for text files */
+  /** base64 (no data: prefix) for images and files, plain text for text files */
   data: string;
 }
 

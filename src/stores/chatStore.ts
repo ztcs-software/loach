@@ -8,6 +8,7 @@ import {
   listSessions,
   makeRequestId,
   ollamaUnloadModel,
+  pinSession,
   renameSession,
   startChatStream,
   updateMessage,
@@ -46,6 +47,7 @@ interface ChatState {
   selectSession: (id: string | null) => Promise<void>;
   newSession: (provider?: ProviderId, model?: string) => Promise<Session>;
   rename: (id: string, title: string) => Promise<void>;
+  pin: (id: string, pinned: boolean) => Promise<void>;
   remove: (id: string) => Promise<void>;
   setSessionModel: (id: string, provider: ProviderId, model: string) => Promise<void>;
   setSessionSystemPrompt: (id: string, prompt: string) => Promise<void>;
@@ -198,6 +200,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }));
   },
 
+  pin: async (id, pinned) => {
+    await pinSession(id, pinned);
+    const pinned_at = pinned ? Date.now() : null;
+    set((s) => ({
+      sessions: s.sessions.map((x) =>
+        x.id === id ? { ...x, pinned_at } : x,
+      ),
+    }));
+  },
+
   remove: async (id) => {
     await deleteSession(id);
     set((s) => {
@@ -249,9 +261,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   sendUserMessage: async (rawContent, attachments) => {
+    // If viewing a space, exit the space view and create a session in that space
+    const spaceStore = useSpaceStore.getState();
+    const viewingSpaceId = spaceStore.viewingSpaceId;
+    if (viewingSpaceId) {
+      // Clear view but keep activeSpaceId so newSession picks it up
+      useSpaceStore.setState({ viewingSpaceId: null });
+    }
+
     const state = get();
     let sessionId = state.activeSessionId;
-    if (!sessionId) {
+    // If we came from a space view, or have no session, create one
+    if (!sessionId || (viewingSpaceId && state.sessions.find(s => s.id === sessionId)?.space_id !== viewingSpaceId)) {
       const created = await get().newSession();
       sessionId = created.id;
     }
@@ -267,8 +288,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         kind: a.kind,
         name: a.name,
         mime: a.mime,
-        // Only persist a marker for images to keep DB small.
-        data: a.kind === "image" ? `[image:${a.mime}]` : a.data,
+        data: a.data,
       })),
     );
 

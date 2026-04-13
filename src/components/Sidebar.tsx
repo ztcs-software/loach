@@ -5,6 +5,8 @@ import {
   Layers,
   MessageSquare,
   MoreHorizontal,
+  Pin,
+  PinOff,
   Plus,
   Settings,
   PanelLeftClose,
@@ -163,7 +165,12 @@ function ChatList({
       {expanded && (
         <ScrollArea className="flex-1 px-2">
           <ul className="space-y-0.5 pb-4">
-            {[...groups.today, ...groups.yesterday, ...groups.week, ...groups.older].map((s) => (
+            {(() => {
+              const all = [...groups.today, ...groups.yesterday, ...groups.week, ...groups.older];
+              const pinned = all.filter((s) => s.pinned_at).sort((a, b) => (b.pinned_at ?? 0) - (a.pinned_at ?? 0));
+              const unpinned = all.filter((s) => !s.pinned_at);
+              return [...pinned, ...unpinned];
+            })().map((s) => (
               <SessionRow
                 key={s.id}
                 session={s}
@@ -194,6 +201,7 @@ function SessionRow({
   onSelect: (id: string) => void;
 }) {
   const rename = useChatStore((s) => s.rename);
+  const pinChat = useChatStore((s) => s.pin);
   const remove = useChatStore((s) => s.remove);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(session.title);
@@ -238,7 +246,10 @@ function SessionRow({
           setMenuOpen(true);
         }}
       >
-        {session.space_id && (
+        {session.pinned_at && (
+          <Pin className="mr-1.5 h-3 w-3 shrink-0 text-foreground/35" />
+        )}
+        {session.space_id && !session.pinned_at && (
           <Layers className="mr-1.5 h-3 w-3 shrink-0 text-foreground/35" />
         )}
         <span className="min-w-0 flex-1 truncate">{session.title}</span>
@@ -266,6 +277,13 @@ function SessionRow({
             onClick={(e) => e.stopPropagation()}
           >
             <DropdownMenuLabel>Chat</DropdownMenuLabel>
+            <DropdownMenuItem onSelect={() => pinChat(session.id, !session.pinned_at)}>
+              {session.pinned_at ? (
+                <><PinOff className="h-4 w-4" /> Unpin</>
+              ) : (
+                <><Pin className="h-4 w-4" /> Pin this chat</>
+              )}
+            </DropdownMenuItem>
             <DropdownMenuItem onSelect={() => setEditing(true)}>
               <Pencil className="h-4 w-4" /> Rename
             </DropdownMenuItem>

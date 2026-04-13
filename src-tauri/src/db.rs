@@ -16,6 +16,7 @@ pub struct Session {
     pub system_prompt: Option<String>,
     pub params_json: Option<String>,
     pub space_id: Option<String>,
+    pub pinned_at: Option<i64>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -134,6 +135,16 @@ impl Database {
             )?;
         }
 
+        // Add pinned_at column to sessions if missing.
+        let has_pinned_at = conn
+            .prepare("SELECT pinned_at FROM sessions LIMIT 0")
+            .is_ok();
+        if !has_pinned_at {
+            conn.execute_batch(
+                "ALTER TABLE sessions ADD COLUMN pinned_at INTEGER;",
+            )?;
+        }
+
         Ok(())
     }
 
@@ -142,7 +153,7 @@ impl Database {
     pub fn list_sessions(&self) -> Result<Vec<Session>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, title, provider, model, system_prompt, params_json, space_id, created_at, updated_at
+            "SELECT id, title, provider, model, system_prompt, params_json, space_id, pinned_at, created_at, updated_at
              FROM sessions ORDER BY updated_at DESC",
         )?;
         let rows = stmt
@@ -155,8 +166,9 @@ impl Database {
                     system_prompt: r.get(4)?,
                     params_json: r.get(5)?,
                     space_id: r.get(6)?,
-                    created_at: r.get(7)?,
-                    updated_at: r.get(8)?,
+                    pinned_at: r.get(7)?,
+                    created_at: r.get(8)?,
+                    updated_at: r.get(9)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -187,6 +199,7 @@ impl Database {
             system_prompt: system_prompt.map(|s| s.to_string()),
             params_json: None,
             space_id: space_id.map(|s| s.to_string()),
+            pinned_at: None,
             created_at: now,
             updated_at: now,
         })
@@ -235,6 +248,20 @@ impl Database {
         Ok(())
     }
 
+    pub fn pin_session(&self, id: &str, pinned: bool) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let pinned_at: Option<i64> = if pinned {
+            Some(Utc::now().timestamp_millis())
+        } else {
+            None
+        };
+        conn.execute(
+            "UPDATE sessions SET pinned_at = ?1 WHERE id = ?2",
+            params![pinned_at, id],
+        )?;
+        Ok(())
+    }
+
     pub fn delete_session(&self, id: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM sessions WHERE id = ?1", params![id])?;
@@ -244,7 +271,7 @@ impl Database {
     pub fn get_session(&self, id: &str) -> Result<Option<Session>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, title, provider, model, system_prompt, params_json, space_id, created_at, updated_at
+            "SELECT id, title, provider, model, system_prompt, params_json, space_id, pinned_at, created_at, updated_at
              FROM sessions WHERE id = ?1",
         )?;
         let mut rows = stmt.query(params![id])?;
@@ -257,8 +284,9 @@ impl Database {
                 system_prompt: r.get(4)?,
                 params_json: r.get(5)?,
                 space_id: r.get(6)?,
-                created_at: r.get(7)?,
-                updated_at: r.get(8)?,
+                pinned_at: r.get(7)?,
+                created_at: r.get(8)?,
+                updated_at: r.get(9)?,
             }))
         } else {
             Ok(None)

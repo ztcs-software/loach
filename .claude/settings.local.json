@@ -20,7 +20,11 @@
       "Bash(npm ls:*)",
       "Bash(cargo check:*)",
       "Bash(npx kill-port:*)",
-      "Bash(taskkill //F //FI \"WINDOWTITLE eq npm*\")"
+      "Bash(taskkill //F //FI \"WINDOWTITLE eq npm*\")",
+      "Bash(taskkill //F //IM loach.exe)",
+      "Bash(taskkill //F //IM Loach.exe)",
+      "Bash(npx tsc:*)",
+      "Bash(taskkill //F //PID 233688)"
     ]
   }
 }

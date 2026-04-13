@@ -1,6 +1,6 @@
-import { Bot, User } from "lucide-react";
+import { Bot, File, FileText, User } from "lucide-react";
 import { Markdown } from "./Markdown";
-import type { Message as ChatMessage, MessageMetrics } from "@/types";
+import type { Attachment, Message as ChatMessage, MessageMetrics } from "@/types";
 import { cn } from "@/lib/utils";
 
 interface MessageProps {
@@ -18,6 +18,15 @@ function parseMetrics(json: string | null): MessageMetrics | null {
   }
 }
 
+function parseAttachments(json: string | null): Attachment[] {
+  if (!json) return [];
+  try {
+    return JSON.parse(json) as Attachment[];
+  } catch {
+    return [];
+  }
+}
+
 export function MessageItem({ message, isStreaming, metrics }: MessageProps) {
   if (message.role === "system") {
     return (
@@ -30,6 +39,9 @@ export function MessageItem({ message, isStreaming, metrics }: MessageProps) {
   const isUser = message.role === "user";
   const persistedMetrics = parseMetrics(message.metrics_json);
   const showMetrics = metrics ?? persistedMetrics;
+  const attachments = isUser ? parseAttachments(message.attachments_json) : [];
+  const images = attachments.filter((a) => a.kind === "image");
+  const files = attachments.filter((a) => a.kind === "text" || a.kind === "file");
 
   return (
     <div
@@ -51,6 +63,35 @@ export function MessageItem({ message, isStreaming, metrics }: MessageProps) {
             : "rounded-3xl rounded-tl-lg text-foreground/95",
         )}
       >
+        {isUser && images.length > 0 && (
+          <div className="mb-2 flex flex-wrap gap-1.5">
+            {images.map((img, i) => (
+              <img
+                key={i}
+                src={`data:${img.mime};base64,${img.data}`}
+                alt={img.name}
+                className="h-20 w-20 rounded-lg object-cover"
+              />
+            ))}
+          </div>
+        )}
+        {isUser && files.length > 0 && (
+          <div className="mb-2 flex flex-wrap gap-1.5">
+            {files.map((f, i) => (
+              <span
+                key={i}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-foreground/10 bg-foreground/[0.05] px-2.5 py-1 text-xs text-foreground/70"
+              >
+                {f.kind === "text" ? (
+                  <FileText className="h-3.5 w-3.5 shrink-0" />
+                ) : (
+                  <File className="h-3.5 w-3.5 shrink-0" />
+                )}
+                {f.name}
+              </span>
+            ))}
+          </div>
+        )}
         {message.content.length === 0 && isStreaming ? (
           <div className="flex items-center gap-1.5 py-1 text-muted-foreground">
             <span className="inline-block h-1.5 w-1.5 animate-blink rounded-full bg-current" />
