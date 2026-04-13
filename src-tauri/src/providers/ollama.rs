@@ -108,6 +108,8 @@ struct OllamaChunk {
 struct OllamaChunkMsg {
     #[serde(default)]
     content: Option<String>,
+    #[serde(default)]
+    thinking: Option<String>,
 }
 
 pub async fn chat_stream(
@@ -204,6 +206,14 @@ pub async fn chat_stream(
                             match serde_json::from_slice::<OllamaChunk>(line) {
                                 Ok(parsed) => {
                                     if let Some(msg) = parsed.message {
+                                        if let Some(ref think) = msg.thinking {
+                                            if !think.is_empty() {
+                                                let _ = app.emit(
+                                                    &channel,
+                                                    StreamEvent::Thinking { delta: think.clone() },
+                                                );
+                                            }
+                                        }
                                         if let Some(delta) = msg.content {
                                             if !delta.is_empty() {
                                                 token_count += 1;

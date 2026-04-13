@@ -366,6 +366,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     const streamId = makeRequestId();
     let buffered = "";
+    let thinkingBuf = "";
     let metrics: MessageMetrics | null = null;
 
     try {
@@ -380,7 +381,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
           params,
         },
         (ev) => {
-          if (ev.kind === "token") {
+          if (ev.kind === "thinking") {
+            thinkingBuf += ev.delta;
+            set((s) => ({
+              messages: {
+                ...s.messages,
+                [sessionId!]: (s.messages[sessionId!] ?? []).map((m) =>
+                  m.id === assistantMsg.id ? { ...m, thinking: thinkingBuf } : m,
+                ),
+              },
+            }));
+          } else if (ev.kind === "token") {
             buffered += ev.delta;
             set((s) => ({
               messages: {
@@ -416,6 +427,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             void updateMessage({
               id: assistantMsg.id,
               content: buffered,
+              thinking: thinkingBuf || null,
               metrics_json: metrics ? JSON.stringify(metrics) : null,
             }).catch(() => {});
             set((s) => {

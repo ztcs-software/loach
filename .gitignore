@@ -29,3 +29,6 @@ src-tauri/gen/
 *.exe
 *.deb
 *.AppImage
+
+# Claude Code
+.claude/

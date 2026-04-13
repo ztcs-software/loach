@@ -58,6 +58,7 @@ export interface Message {
   session_id: string;
   role: "user" | "assistant" | "system";
   content: string;
+  thinking: string | null;
   attachments_json: string | null;
   metrics_json: string | null;
   created_at: number;
@@ -107,6 +108,7 @@ export interface ChatRequest {
 
 export type StreamEvent =
   | { kind: "token"; delta: string }
+  | { kind: "thinking"; delta: string }
   | { kind: "done" }
   | { kind: "error"; message: string }
   | {

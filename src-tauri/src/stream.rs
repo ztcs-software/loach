@@ -38,6 +38,7 @@ impl StreamRegistry {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum StreamEvent {
     Token { delta: String },
+    Thinking { delta: String },
     Done,
     Error { message: String },
     Metrics {

@@ -157,6 +157,7 @@ pub async fn append_message(
 pub struct UpdateMessageArgs {
     pub id: String,
     pub content: String,
+    pub thinking: Option<String>,
     pub metrics_json: Option<String>,
 }
 
@@ -167,7 +168,12 @@ pub async fn update_message(
 ) -> Result<(), String> {
     state
         .db
-        .update_message(&args.id, &args.content, args.metrics_json.as_deref())
+        .update_message(
+            &args.id,
+            &args.content,
+            args.thinking.as_deref(),
+            args.metrics_json.as_deref(),
+        )
         .map_err(err)
 }
 

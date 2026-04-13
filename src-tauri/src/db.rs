@@ -50,6 +50,7 @@ pub struct Message {
     pub session_id: String,
     pub role: String, // "user" | "assistant" | "system"
     pub content: String,
+    pub thinking: Option<String>,
     pub attachments_json: Option<String>,
     pub metrics_json: Option<String>,
     pub created_at: i64,
@@ -142,6 +143,16 @@ impl Database {
         if !has_pinned_at {
             conn.execute_batch(
                 "ALTER TABLE sessions ADD COLUMN pinned_at INTEGER;",
+            )?;
+        }
+
+        // Add thinking column to messages if missing.
+        let has_thinking = conn
+            .prepare("SELECT thinking FROM messages LIMIT 0")
+            .is_ok();
+        if !has_thinking {
+            conn.execute_batch(
+                "ALTER TABLE messages ADD COLUMN thinking TEXT;",
             )?;
         }
 
@@ -298,7 +309,7 @@ impl Database {
     pub fn list_messages(&self, session_id: &str) -> Result<Vec<Message>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, session_id, role, content, attachments_json, metrics_json, created_at
+            "SELECT id, session_id, role, content, thinking, attachments_json, metrics_json, created_at
              FROM messages WHERE session_id = ?1 ORDER BY created_at ASC",
         )?;
         let rows = stmt
@@ -308,9 +319,10 @@ impl Database {
                     session_id: r.get(1)?,
                     role: r.get(2)?,
                     content: r.get(3)?,
-                    attachments_json: r.get(4)?,
-                    metrics_json: r.get(5)?,
-                    created_at: r.get(6)?,
+                    thinking: r.get(4)?,
+                    attachments_json: r.get(5)?,
+                    metrics_json: r.get(6)?,
+                    created_at: r.get(7)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -329,8 +341,8 @@ impl Database {
         {
             let conn = self.conn.lock().unwrap();
             conn.execute(
-                "INSERT INTO messages (id, session_id, role, content, attachments_json, metrics_json, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6)",
+                "INSERT INTO messages (id, session_id, role, content, thinking, attachments_json, metrics_json, created_at)
+                 VALUES (?1, ?2, ?3, ?4, NULL, ?5, NULL, ?6)",
                 params![id, session_id, role, content, attachments_json, now],
             )?;
         }
@@ -340,6 +352,7 @@ impl Database {
             session_id: session_id.to_string(),
             role: role.to_string(),
             content: content.to_string(),
+            thinking: None,
             attachments_json: attachments_json.map(|s| s.to_string()),
             metrics_json: None,
             created_at: now,
@@ -350,12 +363,13 @@ impl Database {
         &self,
         id: &str,
         content: &str,
+        thinking: Option<&str>,
         metrics_json: Option<&str>,
     ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "UPDATE messages SET content = ?1, metrics_json = COALESCE(?2, metrics_json) WHERE id = ?3",
-            params![content, metrics_json, id],
+            "UPDATE messages SET content = ?1, thinking = ?2, metrics_json = COALESCE(?3, metrics_json) WHERE id = ?4",
+            params![content, thinking, metrics_json, id],
         )?;
         Ok(())
     }

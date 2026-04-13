@@ -96,6 +96,7 @@ export function appendMessage(args: {
       session_id: args.session_id,
       role: args.role,
       content: args.content,
+      thinking: null,
       attachments_json: args.attachments_json ?? null,
       metrics_json: null,
       created_at: Date.now(),
@@ -107,6 +108,7 @@ export function appendMessage(args: {
 export function updateMessage(args: {
   id: string;
   content: string;
+  thinking?: string | null;
   metrics_json?: string | null;
 }): Promise<void> {
   if (!isTauri) return notInTauri(undefined);

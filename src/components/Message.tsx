@@ -1,4 +1,5 @@
-import { Bot, File, FileText, User } from "lucide-react";
+import { useState } from "react";
+import { Bot, ChevronDown, ChevronRight, File, FileText, Brain, User } from "lucide-react";
 import { Markdown } from "./Markdown";
 import type { Attachment, Message as ChatMessage, MessageMetrics } from "@/types";
 import { cn } from "@/lib/utils";
@@ -25,6 +26,32 @@ function parseAttachments(json: string | null): Attachment[] {
   } catch {
     return [];
   }
+}
+
+function ThinkingBlock({ text, isStreaming }: { text: string; isStreaming?: boolean }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="mb-2">
+      <button
+        type="button"
+        onClick={() => setOpen(!open)}
+        className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground/70 transition-colors"
+      >
+        {open ? (
+          <ChevronDown className="h-3.5 w-3.5" />
+        ) : (
+          <ChevronRight className="h-3.5 w-3.5" />
+        )}
+        <Brain className="h-3.5 w-3.5" />
+        <span>{isStreaming && !open ? "Thinking…" : "Thinking"}</span>
+      </button>
+      {open && (
+        <div className="mt-1.5 ml-5 rounded-lg border border-foreground/[0.06] bg-foreground/[0.03] px-3 py-2 text-xs text-muted-foreground leading-relaxed whitespace-pre-wrap">
+          {text}
+        </div>
+      )}
+    </div>
+  );
 }
 
 export function MessageItem({ message, isStreaming, metrics }: MessageProps) {
@@ -92,7 +119,13 @@ export function MessageItem({ message, isStreaming, metrics }: MessageProps) {
             ))}
           </div>
         )}
-        {message.content.length === 0 && isStreaming ? (
+        {!isUser && message.thinking && (
+          <ThinkingBlock
+            text={message.thinking}
+            isStreaming={isStreaming && message.content.length === 0}
+          />
+        )}
+        {message.content.length === 0 && isStreaming && !message.thinking ? (
           <div className="flex items-center gap-1.5 py-1 text-muted-foreground">
             <span className="inline-block h-1.5 w-1.5 animate-blink rounded-full bg-current" />
             <span className="inline-block h-1.5 w-1.5 animate-blink rounded-full bg-current [animation-delay:200ms]" />

@@ -61,6 +61,8 @@ struct Choice {
 struct DeltaMsg {
     #[serde(default)]
     content: Option<String>,
+    #[serde(default)]
+    reasoning_content: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -225,6 +227,14 @@ pub async fn chat_stream(
                                 if let Ok(parsed) = serde_json::from_str::<SseChunk>(data) {
                                     for c in parsed.choices {
                                         if let Some(d) = c.delta {
+                                            if let Some(ref think) = d.reasoning_content {
+                                                if !think.is_empty() {
+                                                    let _ = app.emit(
+                                                        &channel,
+                                                        StreamEvent::Thinking { delta: think.clone() },
+                                                    );
+                                                }
+                                            }
                                             if let Some(delta) = d.content {
                                                 if !delta.is_empty() {
                                                     token_count += 1;
