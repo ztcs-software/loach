@@ -288,8 +288,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         kind: a.kind,
         name: a.name,
         mime: a.mime,
-        // Only persist a marker for images to keep DB small.
-        data: a.kind === "image" ? `[image:${a.mime}]` : a.data,
+        data: a.data,
       })),
     );
 

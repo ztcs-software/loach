@@ -6,7 +6,6 @@ import { FileChip } from "./FileChip";
 import {
   fileToAttachment,
   FileTooLargeError,
-  UnsupportedFileError,
 } from "@/lib/files";
 import { useChatStore } from "@/stores/chatStore";
 import { useUIStore } from "@/stores/uiStore";
@@ -91,8 +90,6 @@ export function ChatInput({ centered = false }: ChatInputProps) {
       } catch (e) {
         if (e instanceof FileTooLargeError) {
           setError(`${e.name} is larger than 15 MB.`);
-        } else if (e instanceof UnsupportedFileError) {
-          setError(`${e.name}: only images and .txt/.md/.csv are supported.`);
         } else {
           setError("Failed to read file");
         }
@@ -169,7 +166,7 @@ export function ChatInput({ centered = false }: ChatInputProps) {
             ref={fileInputRef}
             type="file"
             multiple
-            accept=".txt,.md,.csv,.json,.log,image/*"
+            accept="*/*"
             className="hidden"
             onChange={onPick}
           />
