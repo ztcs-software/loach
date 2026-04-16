@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { ChevronRight, ChevronDown, Dice5, X } from "lucide-react";
+import { ChevronRight, ChevronDown, Dice5, RotateCcw, X } from "lucide-react";
 import { Slider } from "@/components/ui/slider";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
@@ -41,9 +41,30 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
     setSessionParams(session.id, next);
   };
 
+  // Restores every sampling / length / repetition / reproducibility value to
+  // DEFAULT_PARAMS. The per-chat system prompt lives outside `params` and is
+  // deliberately left untouched so users don't lose long custom instructions
+  // when they just want sane sliders back.
+  const resetParams = () => {
+    if (!session) return;
+    const next = { ...DEFAULT_PARAMS };
+    setParams(next);
+    setSessionParams(session.id, next);
+  };
+
   if (!open) return null;
 
   const isOpenAI = session?.provider === "openai";
+
+  // Context-length stops — powers of two are the grid models are trained on
+  // and the granularity VRAM allocation cares about. Users shouldn't be able
+  // to land on meaningless values like 11_847.
+  const CTX_STOPS = [1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072];
+  const formatK = (n: number) => {
+    if (n >= 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)}M`;
+    if (n >= 1024) return `${Math.round(n / 1024)}K`;
+    return String(n);
+  };
 
   return (
     <aside className="glass-subtle relative flex h-full w-72 flex-col overflow-hidden">
@@ -68,12 +89,12 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
             <Section title="Sampling">
               <SliderRow
                 label="Temperature"
-                value={params.temperature ?? 0.7}
+                value={Math.min(params.temperature ?? 0.7, 1)}
                 min={0}
-                max={2}
+                max={1}
                 step={0.05}
                 onChange={(v) => update({ temperature: v })}
-                hint="Higher values make output more creative and diverse; lower values stay focused and deterministic."
+                hint="Higher values make output more creative and diverse; lower values stay focused and deterministic. Values above 1.0 typically produce incoherent output, so the range is capped at 1."
               />
               <SliderRow
                 label="Top-P"
@@ -121,15 +142,16 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
               <SliderRow
                 label="Context Length"
                 value={params.num_ctx ?? 8192}
-                min={1024}
-                max={131072}
-                step={1024}
-                precision={0}
+                min={0}
+                max={0}
+                step={1}
                 onChange={(v) => update({ num_ctx: Math.round(v) })}
+                stops={CTX_STOPS}
+                format={formatK}
                 hint={
                   isOpenAI
                     ? "How many tokens of history the model sees — ignored by OpenAI providers (the server decides)."
-                    : "How many tokens of history the model sees. Raising this uses more VRAM."
+                    : "How many tokens of history the model sees. Each step doubles the window; higher values use more VRAM."
                 }
                 dimmed={isOpenAI}
               />
@@ -190,6 +212,20 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
               </div>
             )}
 
+            <div className="flex justify-start pt-1">
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={resetParams}
+                className="h-7 gap-1.5 rounded-md px-2 text-[11px] font-medium text-foreground/55 hover:bg-foreground/[0.06] hover:text-foreground"
+                title="Restore every parameter (sampling, length, advanced) to its default. Does not change the system prompt."
+              >
+                <RotateCcw className="h-3 w-3" />
+                Reset to defaults
+              </Button>
+            </div>
+
             <div className="h-px bg-foreground/[0.08]" />
 
             <div>
@@ -248,6 +284,8 @@ function SliderRow({
   onChange,
   hint,
   dimmed,
+  stops,
+  format,
 }: {
   label: string;
   value: number;
@@ -258,7 +296,34 @@ function SliderRow({
   onChange: (v: number) => void;
   hint?: string;
   dimmed?: boolean;
+  /** When present the slider snaps to these discrete values instead of sliding continuously between `min` and `max`. */
+  stops?: number[];
+  /** Custom display formatter; default is `value.toFixed(precision)`. */
+  format?: (v: number) => string;
 }) {
+  const usingStops = stops && stops.length > 0;
+
+  // Find the stop index closest to the current value so a pre-existing
+  // legacy value (e.g. 6144 from before the stops migration) lands sensibly.
+  const stopIdx = usingStops
+    ? (() => {
+        let best = 0;
+        let bestDiff = Infinity;
+        for (let i = 0; i < stops!.length; i++) {
+          const d = Math.abs(stops![i] - value);
+          if (d < bestDiff) {
+            bestDiff = d;
+            best = i;
+          }
+        }
+        return best;
+      })()
+    : 0;
+  const displayValue = usingStops ? stops![stopIdx] : value;
+  const displayText = format
+    ? format(displayValue)
+    : displayValue.toFixed(precision);
+
   return (
     <div className={dimmed ? "opacity-55" : undefined}>
       <div className="mb-1.5 flex items-baseline justify-between gap-3">
@@ -266,16 +331,26 @@ function SliderRow({
           {label}
         </Label>
         <span className="font-mono text-xs tabular-nums text-foreground/85">
-          {value.toFixed(precision)}
+          {displayText}
         </span>
       </div>
-      <Slider
-        value={[value]}
-        min={min}
-        max={max}
-        step={step}
-        onValueChange={(v) => onChange(v[0])}
-      />
+      {usingStops ? (
+        <Slider
+          value={[stopIdx]}
+          min={0}
+          max={stops!.length - 1}
+          step={1}
+          onValueChange={(v) => onChange(stops![v[0]])}
+        />
+      ) : (
+        <Slider
+          value={[value]}
+          min={min}
+          max={max}
+          step={step}
+          onValueChange={(v) => onChange(v[0])}
+        />
+      )}
       {hint && (
         <p className="mt-1.5 text-[10.5px] leading-snug text-foreground/50">
           {hint}
