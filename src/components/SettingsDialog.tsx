@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { BookOpen, Github } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -14,6 +15,21 @@ import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useUIStore } from "@/stores/uiStore";
+import { isTauri } from "@/lib/tauri";
+import pkg from "../../package.json";
+
+const GITHUB_URL = "https://github.com/ztcs-software/loach";
+const DOCS_URL = "#";
+
+async function openExternal(url: string) {
+  if (url === "#" || !url) return;
+  if (isTauri) {
+    const { open } = await import("@tauri-apps/plugin-shell");
+    await open(url);
+  } else {
+    window.open(url, "_blank", "noopener,noreferrer");
+  }
+}
 
 export function SettingsDialog() {
   const open = useUIStore((s) => s.settingsOpen);
@@ -37,6 +53,7 @@ export function SettingsDialog() {
             <TabsTrigger value="providers">Providers</TabsTrigger>
             <TabsTrigger value="prompt">System prompt</TabsTrigger>
             <TabsTrigger value="appearance">Appearance</TabsTrigger>
+            <TabsTrigger value="about">About</TabsTrigger>
           </TabsList>
           <TabsContent value="providers" className="space-y-5 pt-2">
             <div>
@@ -162,6 +179,39 @@ export function SettingsDialog() {
                 Gradient = animated mesh blur. Solid = a single flat surface that
                 follows the active theme.
               </p>
+            </div>
+          </TabsContent>
+          <TabsContent value="about" className="space-y-5 pt-2">
+            <div className="flex items-baseline gap-3">
+              <h3 className="text-2xl font-semibold tracking-tight">Loach</h3>
+              <span className="text-xs font-mono text-foreground/50">
+                v{pkg.version}
+              </span>
+            </div>
+            <p className="text-sm leading-relaxed text-foreground/75">
+              A native desktop chat client for local and OpenAI-compatible LLMs.
+              Your conversations, keys, and files stay on your machine.
+            </p>
+            <Separator />
+            <div className="flex flex-wrap gap-2">
+              <Button
+                variant="outline"
+                onClick={() => void openExternal(GITHUB_URL)}
+                className="gap-2"
+              >
+                <Github className="h-4 w-4" />
+                GitHub
+              </Button>
+              <Button
+                variant="outline"
+                onClick={() => void openExternal(DOCS_URL)}
+                className="gap-2"
+                disabled={DOCS_URL === "#"}
+                title={DOCS_URL === "#" ? "Coming soon" : undefined}
+              >
+                <BookOpen className="h-4 w-4" />
+                Docs
+              </Button>
             </div>
           </TabsContent>
         </Tabs>
