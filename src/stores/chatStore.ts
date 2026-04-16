@@ -45,7 +45,18 @@ interface ChatState {
 
   hydrate: () => Promise<void>;
   selectSession: (id: string | null) => Promise<void>;
-  newSession: (provider?: ProviderId, model?: string) => Promise<Session>;
+  newSession: (opts?: {
+    provider?: ProviderId;
+    model?: string;
+    /**
+     * Which Space the session belongs to.
+     * - `undefined` (default) → inherit the current `activeSpaceId` (used by
+     *   SpaceView's "Start chat" and auto-create inside sendUserMessage).
+     * - `null` → force a simple, space-less chat (used by the sidebar's
+     *   "+ New chat" button regardless of where the user currently is).
+     */
+    spaceId?: string | null;
+  }) => Promise<Session>;
   rename: (id: string, title: string) => Promise<void>;
   pin: (id: string, pinned: boolean) => Promise<void>;
   remove: (id: string) => Promise<void>;
@@ -155,7 +166,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  newSession: async (provider, model) => {
+  newSession: async (opts) => {
     // Remove all existing empty sessions (no messages) before creating a new one.
     const { sessions, messages } = get();
     const emptyIds: string[] = [];
@@ -176,9 +187,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
 
     const settings = useSettingsStore.getState();
-    const spaceId = useSpaceStore.getState().activeSpaceId;
-    const p: ProviderId = provider ?? settings.default_provider;
-    const m = model ?? settings.default_model ?? "";
+    // `spaceId === undefined` → inherit activeSpaceId; `null` → force space-less.
+    const spaceId =
+      opts?.spaceId !== undefined
+        ? opts.spaceId
+        : useSpaceStore.getState().activeSpaceId;
+    const p: ProviderId = opts?.provider ?? settings.default_provider;
+    const m = opts?.model ?? settings.default_model ?? "";
     const session = await createSession({
       provider: p,
       model: m,

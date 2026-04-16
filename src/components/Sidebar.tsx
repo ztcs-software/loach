@@ -29,6 +29,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { useChatStore } from "@/stores/chatStore";
+import { useSpaceStore } from "@/stores/spaceStore";
 import { useUIStore } from "@/stores/uiStore";
 import { cn, relativeDay } from "@/lib/utils";
 import { exportSessionToFile } from "@/lib/export";
@@ -40,9 +41,18 @@ export function Sidebar() {
   const activeId = useChatStore((s) => s.activeSessionId);
   const select = useChatStore((s) => s.selectSession);
   const newSession = useChatStore((s) => s.newSession);
+  const setViewingSpace = useSpaceStore((s) => s.setViewingSpace);
   const sidebarOpen = useUIStore((s) => s.sidebarOpen);
   const toggleSidebar = useUIStore((s) => s.toggleSidebar);
   const setSettingsOpen = useUIStore((s) => s.setSettingsOpen);
+
+  // "+ New chat" always creates a simple, space-less chat regardless of the
+  // current view — and exits the Space view if one is open, so the new chat
+  // is actually shown.
+  const handleNewChat = () => {
+    setViewingSpace(null);
+    void newSession({ spaceId: null });
+  };
 
   const groups = useMemo(() => {
     const out: Record<string, Session[]> = { today: [], yesterday: [], week: [], older: [] };
@@ -67,7 +77,7 @@ export function Sidebar() {
         <Button
           variant="ghost"
           size="icon"
-          onClick={() => newSession()}
+          onClick={handleNewChat}
           aria-label="New chat"
           className="rounded-xl text-foreground/70 hover:bg-foreground/10 hover:text-foreground"
         >
@@ -93,7 +103,7 @@ export function Sidebar() {
         <Button
           className="flex-1 justify-start rounded-2xl border-foreground/10 bg-foreground/[0.04] text-foreground/85 hover:bg-foreground/10 hover:text-foreground"
           variant="outline"
-          onClick={() => newSession()}
+          onClick={handleNewChat}
         >
           <Plus className="h-4 w-4" />
           New chat
