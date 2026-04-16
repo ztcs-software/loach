@@ -87,13 +87,21 @@ struct OllamaOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     top_p: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    top_k: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    min_p: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     num_predict: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    num_ctx: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repeat_penalty: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     frequency_penalty: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     presence_penalty: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    num_ctx: Option<u32>,
+    seed: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -146,10 +154,14 @@ pub async fn chat_stream(
         "options": OllamaOptions {
             temperature: req.params.temperature,
             top_p: req.params.top_p,
+            top_k: req.params.top_k,
+            min_p: req.params.min_p,
             num_predict: req.params.max_tokens,
+            num_ctx: req.params.num_ctx,
+            repeat_penalty: req.params.repeat_penalty,
             frequency_penalty: req.params.frequency_penalty,
             presence_penalty: req.params.presence_penalty,
-            num_ctx: req.params.num_ctx,
+            seed: req.params.seed,
         }
     });
 

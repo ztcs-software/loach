@@ -75,19 +75,28 @@ export interface ModelInfo {
 export interface GenerationParams {
   temperature?: number;
   top_p?: number;
+  top_k?: number;
+  min_p?: number;
   max_tokens?: number;
+  num_ctx?: number;
+  repeat_penalty?: number;
   frequency_penalty?: number;
   presence_penalty?: number;
-  num_ctx?: number;
+  /** Integer; omit / undefined = random each run. */
+  seed?: number | null;
 }
 
 export const DEFAULT_PARAMS: GenerationParams = {
   temperature: 0.7,
   top_p: 0.95,
-  max_tokens: 2048,
+  top_k: 40,
+  min_p: 0.05,
+  max_tokens: 4096,
+  num_ctx: 8192,
+  repeat_penalty: 1.1,
   frequency_penalty: 0,
   presence_penalty: 0,
-  num_ctx: 4096,
+  seed: null,
 };
 
 export interface ChatMessageIn {

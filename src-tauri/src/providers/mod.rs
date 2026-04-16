@@ -21,13 +21,21 @@ pub struct GenerationParams {
     #[serde(default)]
     pub top_p: Option<f32>,
     #[serde(default)]
+    pub top_k: Option<u32>,
+    #[serde(default)]
+    pub min_p: Option<f32>,
+    #[serde(default)]
     pub max_tokens: Option<u32>,
+    #[serde(default)]
+    pub num_ctx: Option<u32>,
+    #[serde(default)]
+    pub repeat_penalty: Option<f32>,
     #[serde(default)]
     pub frequency_penalty: Option<f32>,
     #[serde(default)]
     pub presence_penalty: Option<f32>,
     #[serde(default)]
-    pub num_ctx: Option<u32>,
+    pub seed: Option<i64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

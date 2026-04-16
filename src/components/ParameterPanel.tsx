@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
-import { ChevronRight } from "lucide-react";
+import { ChevronRight, ChevronDown, Dice5, X } from "lucide-react";
 import { Slider } from "@/components/ui/slider";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
-import { Separator } from "@/components/ui/separator";
+import { Input } from "@/components/ui/input";
 import { useChatStore } from "@/stores/chatStore";
 import { useUIStore } from "@/stores/uiStore";
 import { DEFAULT_PARAMS, type GenerationParams, type Session } from "@/types";
@@ -27,6 +27,7 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
   const initial = useMemo(() => readParams(session), [session]);
   const [params, setParams] = useState<GenerationParams>(initial);
   const [systemPrompt, setSystemPrompt] = useState(session?.system_prompt ?? "");
+  const [advancedOpen, setAdvancedOpen] = useState(false);
 
   useEffect(() => {
     setParams(initial);
@@ -42,93 +43,198 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
 
   if (!open) return null;
 
+  const isOpenAI = session?.provider === "openai";
+
   return (
-    <aside className="flex h-full w-72 flex-col border-l border-border/60 bg-background/40">
-      <div className="flex h-12 items-center justify-between border-b border-border/60 px-3">
-        <span className="text-sm font-semibold">Parameters</span>
-        <Button variant="ghost" size="icon" onClick={toggle} aria-label="Close panel">
+    <aside className="glass-subtle relative flex h-full w-72 flex-col overflow-hidden">
+      <div className="relative flex h-12 shrink-0 items-center justify-between px-4">
+        <span className="text-sm font-semibold tracking-tight">Parameters</span>
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={toggle}
+          aria-label="Close panel"
+          className="h-7 w-7 rounded-full text-foreground/60 hover:bg-foreground/10 hover:text-foreground"
+        >
           <ChevronRight className="h-4 w-4" />
         </Button>
       </div>
-      <div className="flex-1 overflow-y-auto px-4 py-3">
+
+      <div className="scrollbar-hidden relative flex-1 overflow-y-auto px-4 pb-6 pt-1">
         {!session ? (
           <p className="text-xs text-muted-foreground">Open a chat to adjust parameters.</p>
         ) : (
-          <div className="space-y-5">
-            <SliderRow
-              label="Temperature"
-              value={params.temperature ?? 0.7}
-              min={0}
-              max={2}
-              step={0.05}
-              onChange={(v) => update({ temperature: v })}
-            />
-            <SliderRow
-              label="Top-P"
-              value={params.top_p ?? 0.95}
-              min={0}
-              max={1}
-              step={0.01}
-              onChange={(v) => update({ top_p: v })}
-            />
-            <SliderRow
-              label="Max Tokens"
-              value={params.max_tokens ?? 2048}
-              min={64}
-              max={32768}
-              step={64}
-              precision={0}
-              onChange={(v) => update({ max_tokens: Math.round(v) })}
-            />
-            <SliderRow
-              label="Frequency Penalty"
-              value={params.frequency_penalty ?? 0}
-              min={-2}
-              max={2}
-              step={0.05}
-              onChange={(v) => update({ frequency_penalty: v })}
-            />
-            <SliderRow
-              label="Presence Penalty"
-              value={params.presence_penalty ?? 0}
-              min={-2}
-              max={2}
-              step={0.05}
-              onChange={(v) => update({ presence_penalty: v })}
-            />
-            <SliderRow
-              label="Context Length"
-              value={params.num_ctx ?? 4096}
-              min={512}
-              max={131072}
-              step={256}
-              precision={0}
-              onChange={(v) => update({ num_ctx: Math.round(v) })}
-              hint={
-                session.provider === "openai"
-                  ? "Ignored for OpenAI providers."
-                  : "Overrides the model default (Ollama only)."
-              }
-            />
-            <Separator />
+          <div className="space-y-6">
+            <Section title="Sampling">
+              <SliderRow
+                label="Temperature"
+                value={params.temperature ?? 0.7}
+                min={0}
+                max={2}
+                step={0.05}
+                onChange={(v) => update({ temperature: v })}
+                hint="Higher values make output more creative and diverse; lower values stay focused and deterministic."
+              />
+              <SliderRow
+                label="Top-P"
+                value={params.top_p ?? 0.95}
+                min={0}
+                max={1}
+                step={0.01}
+                onChange={(v) => update({ top_p: v })}
+                hint="Sample from the smallest set of tokens whose combined probability reaches this value."
+              />
+              <SliderRow
+                label="Top-K"
+                value={params.top_k ?? 40}
+                min={0}
+                max={200}
+                step={1}
+                precision={0}
+                onChange={(v) => update({ top_k: Math.round(v) })}
+                hint={`Only consider the ${params.top_k ?? 40} most likely tokens at each step (0 disables the cutoff)${isOpenAI ? " — ignored by OpenAI providers" : ""}.`}
+                dimmed={isOpenAI}
+              />
+              <SliderRow
+                label="Min-P"
+                value={params.min_p ?? 0.05}
+                min={0}
+                max={0.5}
+                step={0.01}
+                onChange={(v) => update({ min_p: v })}
+                hint={`Drop any token whose probability is below this fraction of the top token's probability${isOpenAI ? " — ignored by OpenAI providers" : ""}.`}
+                dimmed={isOpenAI}
+              />
+            </Section>
+
+            <Section title="Length">
+              <SliderRow
+                label="Max Tokens"
+                value={params.max_tokens ?? 4096}
+                min={128}
+                max={32768}
+                step={128}
+                precision={0}
+                onChange={(v) => update({ max_tokens: Math.round(v) })}
+                hint="Upper bound on the number of tokens the model may generate in a single reply."
+              />
+              <SliderRow
+                label="Context Length"
+                value={params.num_ctx ?? 8192}
+                min={1024}
+                max={131072}
+                step={1024}
+                precision={0}
+                onChange={(v) => update({ num_ctx: Math.round(v) })}
+                hint={
+                  isOpenAI
+                    ? "How many tokens of history the model sees — ignored by OpenAI providers (the server decides)."
+                    : "How many tokens of history the model sees. Raising this uses more VRAM."
+                }
+                dimmed={isOpenAI}
+              />
+            </Section>
+
+            <button
+              type="button"
+              onClick={() => setAdvancedOpen((v) => !v)}
+              className="flex w-full items-center justify-between rounded-lg px-1 py-1 text-xs font-medium uppercase tracking-[0.12em] text-foreground/55 transition-colors hover:text-foreground/80"
+            >
+              <span>Advanced</span>
+              {advancedOpen ? (
+                <ChevronDown className="h-3.5 w-3.5" />
+              ) : (
+                <ChevronRight className="h-3.5 w-3.5" />
+              )}
+            </button>
+
+            {advancedOpen && (
+              <div className="space-y-6">
+                <Section title="Repetition">
+                  <SliderRow
+                    label="Repeat Penalty"
+                    value={params.repeat_penalty ?? 1.1}
+                    min={0.8}
+                    max={2}
+                    step={0.05}
+                    onChange={(v) => update({ repeat_penalty: v })}
+                    hint={`Penalizes tokens seen in recent context to reduce loops; 1.0 disables it${isOpenAI ? " — ignored by OpenAI providers" : ""}.`}
+                    dimmed={isOpenAI}
+                  />
+                  <SliderRow
+                    label="Frequency Penalty"
+                    value={params.frequency_penalty ?? 0}
+                    min={-2}
+                    max={2}
+                    step={0.05}
+                    onChange={(v) => update({ frequency_penalty: v })}
+                    hint="Scales down tokens proportional to how often they've already appeared in this reply."
+                  />
+                  <SliderRow
+                    label="Presence Penalty"
+                    value={params.presence_penalty ?? 0}
+                    min={-2}
+                    max={2}
+                    step={0.05}
+                    onChange={(v) => update({ presence_penalty: v })}
+                    hint="Flat penalty applied to any token that has already appeared at least once."
+                  />
+                </Section>
+
+                <Section title="Reproducibility">
+                  <SeedRow
+                    value={params.seed ?? null}
+                    onChange={(seed) => update({ seed })}
+                  />
+                </Section>
+              </div>
+            )}
+
+            <div className="h-px bg-foreground/[0.08]" />
+
             <div>
-              <Label htmlFor="session-system-prompt">System prompt (this chat)</Label>
+              <Label
+                htmlFor="session-system-prompt"
+                className="text-xs font-semibold uppercase tracking-[0.12em] text-foreground/70"
+              >
+                System prompt (this chat)
+              </Label>
               <Textarea
                 id="session-system-prompt"
                 rows={5}
                 placeholder="Override the global system prompt for this chat…"
-                className="mt-1.5"
+                className="mt-2 resize-none border-foreground/10 bg-foreground/[0.04] text-sm focus-visible:border-foreground/25 focus-visible:ring-0"
                 value={systemPrompt}
                 onChange={(e) => setSystemPrompt(e.target.value)}
                 onBlur={() =>
                   session && setSessionSystemPrompt(session.id, systemPrompt)
                 }
               />
+              <p className="mt-1.5 text-[11px] leading-relaxed text-foreground/50">
+                Only applies to this conversation; leave empty to use the global prompt.
+              </p>
             </div>
           </div>
         )}
       </div>
     </aside>
+  );
+}
+
+function Section({
+  title,
+  children,
+}: {
+  title: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="space-y-4">
+      <h4 className="text-xs font-semibold uppercase tracking-[0.12em] text-foreground/70">
+        {title}
+      </h4>
+      <div className="space-y-4">{children}</div>
+    </div>
   );
 }
 
@@ -141,6 +247,7 @@ function SliderRow({
   precision = 2,
   onChange,
   hint,
+  dimmed,
 }: {
   label: string;
   value: number;
@@ -150,12 +257,15 @@ function SliderRow({
   precision?: number;
   onChange: (v: number) => void;
   hint?: string;
+  dimmed?: boolean;
 }) {
   return (
-    <div>
-      <div className="mb-1.5 flex items-center justify-between">
-        <Label>{label}</Label>
-        <span className="font-mono text-xs text-muted-foreground">
+    <div className={dimmed ? "opacity-55" : undefined}>
+      <div className="mb-1.5 flex items-baseline justify-between gap-3">
+        <Label className="text-[11px] font-semibold uppercase tracking-[0.1em] text-foreground/70">
+          {label}
+        </Label>
+        <span className="font-mono text-xs tabular-nums text-foreground/85">
           {value.toFixed(precision)}
         </span>
       </div>
@@ -166,7 +276,99 @@ function SliderRow({
         step={step}
         onValueChange={(v) => onChange(v[0])}
       />
-      {hint && <p className="mt-1 text-[10px] text-muted-foreground">{hint}</p>}
+      {hint && (
+        <p className="mt-1.5 text-[10.5px] leading-snug text-foreground/50">
+          {hint}
+        </p>
+      )}
+    </div>
+  );
+}
+
+function SeedRow({
+  value,
+  onChange,
+}: {
+  value: number | null;
+  onChange: (v: number | null) => void;
+}) {
+  const [draft, setDraft] = useState(value === null ? "" : String(value));
+
+  useEffect(() => {
+    setDraft(value === null ? "" : String(value));
+  }, [value]);
+
+  const commit = (raw: string) => {
+    const trimmed = raw.trim();
+    if (trimmed === "") {
+      onChange(null);
+      return;
+    }
+    const n = Number(trimmed);
+    if (Number.isFinite(n) && Number.isInteger(n)) onChange(n);
+  };
+
+  return (
+    <div>
+      <div className="mb-1.5 flex items-baseline justify-between">
+        <Label className="text-[11px] font-semibold uppercase tracking-[0.1em] text-foreground/70">
+          Seed
+        </Label>
+        <span className="font-mono text-[10px] text-foreground/45">
+          {value === null ? "random" : "fixed"}
+        </span>
+      </div>
+      <div className="flex items-center gap-1.5">
+        <Input
+          type="text"
+          inputMode="numeric"
+          pattern="[0-9]*"
+          placeholder="Random"
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={() => commit(draft)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              commit(draft);
+              (e.target as HTMLInputElement).blur();
+            }
+          }}
+          className="h-8 border-foreground/10 bg-foreground/[0.04] text-sm tabular-nums focus-visible:border-foreground/25 focus-visible:ring-0"
+        />
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          className="h-8 w-8 shrink-0 rounded-md text-foreground/60 hover:bg-foreground/10 hover:text-foreground"
+          onClick={() => {
+            const n = Math.floor(Math.random() * 2_000_000_000);
+            setDraft(String(n));
+            onChange(n);
+          }}
+          title="Generate a random seed"
+        >
+          <Dice5 className="h-4 w-4" />
+        </Button>
+        {value !== null && (
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8 shrink-0 rounded-md text-foreground/60 hover:bg-foreground/10 hover:text-foreground"
+            onClick={() => {
+              setDraft("");
+              onChange(null);
+            }}
+            title="Clear seed (use random each run)"
+          >
+            <X className="h-4 w-4" />
+          </Button>
+        )}
+      </div>
+      <p className="mt-1.5 text-[10.5px] leading-snug text-foreground/50">
+        Use a fixed integer to make the model's output reproducible; leave empty for a fresh random seed each run.
+      </p>
     </div>
   );
 }

@@ -145,6 +145,9 @@ pub async fn chat_stream(
     if let Some(v) = req.params.presence_penalty {
         body["presence_penalty"] = json!(v);
     }
+    if let Some(v) = req.params.seed {
+        body["seed"] = json!(v);
+    }
 
     let url = format!("{}/chat/completions", req.base_url.trim_end_matches('/'));
     let mut http_req = http.post(url).json(&body);
