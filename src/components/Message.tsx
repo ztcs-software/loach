@@ -1,6 +1,23 @@
 import { useState } from "react";
-import { Bot, ChevronDown, ChevronRight, File, FileText, Brain, User } from "lucide-react";
+import {
+  Bot,
+  Brain,
+  Check,
+  ChevronDown,
+  ChevronRight,
+  Copy,
+  File,
+  FileText,
+  MoreHorizontal,
+  User,
+} from "lucide-react";
 import { Markdown } from "./Markdown";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import type { Attachment, Message as ChatMessage, MessageMetrics } from "@/types";
 import { cn } from "@/lib/utils";
 import { stripInlinedAttachments } from "@/lib/files";
@@ -56,6 +73,22 @@ function ThinkingBlock({ text, isStreaming }: { text: string; isStreaming?: bool
 }
 
 export function MessageItem({ message, isStreaming, metrics }: MessageProps) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  // Copy the raw assistant content — full markdown, untouched — so pasting
+  // into a code editor keeps fences / tables / headings intact.
+  const copyContent = async () => {
+    try {
+      await navigator.clipboard.writeText(message.content);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1200);
+    } catch {
+      // Clipboard may be unavailable in some sandboxed WebView contexts;
+      // fail silently rather than surface a fatal error for a secondary action.
+    }
+  };
+
   if (message.role === "system") {
     return (
       <div className="mx-auto my-3 max-w-2xl rounded-md border border-dashed border-border/60 bg-muted/30 px-3 py-2 text-center text-xs text-muted-foreground">
@@ -142,11 +175,45 @@ export function MessageItem({ message, isStreaming, metrics }: MessageProps) {
         ) : (
           <Markdown content={message.content} />
         )}
-        {!isUser && showMetrics && (
-          <div className="mt-1.5 text-[11px] font-mono text-muted-foreground">
-            ⏱ {showMetrics.tokens_per_second.toFixed(1)} tok/s ·{" "}
-            {showMetrics.tokens} tok ·{" "}
-            {(showMetrics.elapsed_ms / 1000).toFixed(2)}s
+        {!isUser && message.content.length > 0 && (
+          <div className="mt-1.5 flex items-center gap-2">
+            {showMetrics && (
+              <span className="text-[11px] font-mono text-muted-foreground">
+                ⏱ {showMetrics.tokens_per_second.toFixed(1)} tok/s ·{" "}
+                {showMetrics.tokens} tok ·{" "}
+                {(showMetrics.elapsed_ms / 1000).toFixed(2)}s
+              </span>
+            )}
+            <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
+              <DropdownMenuTrigger asChild>
+                <button
+                  type="button"
+                  aria-label="Message actions"
+                  className={cn(
+                    "inline-flex h-7 w-7 items-center justify-center rounded-full text-foreground/60 transition-colors hover:bg-foreground/10 hover:text-foreground",
+                    menuOpen && "bg-foreground/10 text-foreground",
+                  )}
+                >
+                  {copied ? (
+                    <Check className="h-4 w-4 text-emerald-400" />
+                  ) : (
+                    <MoreHorizontal className="h-4 w-4" />
+                  )}
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent
+                align="start"
+                className="!bg-none !bg-foreground/[0.08] border border-foreground/10 backdrop-blur-xl min-w-[140px]"
+              >
+                <DropdownMenuItem
+                  onSelect={() => void copyContent()}
+                  className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
+                >
+                  <Copy className="h-4 w-4 text-foreground/60" />
+                  Copy
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
           </div>
         )}
       </div>
