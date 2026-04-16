@@ -3,6 +3,7 @@ import { Bot, ChevronDown, ChevronRight, File, FileText, Brain, User } from "luc
 import { Markdown } from "./Markdown";
 import type { Attachment, Message as ChatMessage, MessageMetrics } from "@/types";
 import { cn } from "@/lib/utils";
+import { stripInlinedAttachments } from "@/lib/files";
 
 interface MessageProps {
   message: ChatMessage;
@@ -69,6 +70,9 @@ export function MessageItem({ message, isStreaming, metrics }: MessageProps) {
   const attachments = isUser ? parseAttachments(message.attachments_json) : [];
   const images = attachments.filter((a) => a.kind === "image");
   const files = attachments.filter((a) => a.kind === "text" || a.kind === "file");
+  // Attachment bodies are inlined into the stored user content for the model;
+  // strip that tail when rendering so the user sees just their typed prompt.
+  const displayContent = isUser ? stripInlinedAttachments(message.content) : message.content;
 
   return (
     <div
@@ -132,7 +136,9 @@ export function MessageItem({ message, isStreaming, metrics }: MessageProps) {
             <span className="inline-block h-1.5 w-1.5 animate-blink rounded-full bg-current [animation-delay:400ms]" />
           </div>
         ) : isUser ? (
-          <p className="whitespace-pre-wrap text-sm leading-relaxed">{message.content}</p>
+          displayContent.length > 0 && (
+            <p className="whitespace-pre-wrap text-sm leading-relaxed">{displayContent}</p>
+          )
         ) : (
           <Markdown content={message.content} />
         )}
