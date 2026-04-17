@@ -18,6 +18,7 @@ import {
   imagesFromAttachments,
   inlineTextAttachments,
 } from "@/lib/files";
+import { applyTemporalAwareness } from "@/lib/temporal";
 import {
   DEFAULT_PARAMS,
   type Attachment,
@@ -407,6 +408,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
         console.warn("Failed to load space context", e);
       }
     }
+
+    // Temporal awareness — always substitute {{CURRENT_*}} placeholders, and
+    // (when enabled) prepend a short "Current date/time" preamble so the
+    // model can answer "what day is it today?" without hallucinating.
+    effectiveSystemPrompt = applyTemporalAwareness(
+      effectiveSystemPrompt,
+      settings.temporal_awareness,
+    );
 
     const streamId = makeRequestId();
     let buffered = "";

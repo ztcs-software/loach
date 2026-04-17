@@ -1,6 +1,7 @@
 import { useState } from "react";
 import {
   BookOpen,
+  Clock,
   Github,
   Info,
   MessageSquareText,
@@ -181,7 +182,7 @@ export function SettingsDialog() {
                 </div>
               </TabsContent>
 
-              <TabsContent value="prompt" className="mt-0 space-y-4 focus-visible:ring-0 focus-visible:ring-offset-0">
+              <TabsContent value="prompt" className="mt-0 space-y-6 focus-visible:ring-0 focus-visible:ring-offset-0">
                 <SectionTitle>System prompt</SectionTitle>
                 <div>
                   <Label>Global system prompt</Label>
@@ -197,6 +198,54 @@ export function SettingsDialog() {
                   <p className="mt-1.5 text-[11px] text-foreground/50">
                     Applied to every new chat. Individual chats can override this from the parameter panel.
                   </p>
+                </div>
+
+                <Separator />
+
+                <div>
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="min-w-0">
+                      <Label className="flex items-center gap-1.5">
+                        <Clock className="h-3.5 w-3.5 text-foreground/60" />
+                        Temporal awareness
+                      </Label>
+                      <p className="mt-1 text-[11px] text-foreground/50">
+                        Inject the current date, time, weekday, and timezone
+                        into every system prompt so the model can answer
+                        questions like "what day is it today?". Drawn from
+                        your local clock.
+                      </p>
+                    </div>
+                    <Button
+                      variant={settings.temporal_awareness ? "default" : "outline"}
+                      onClick={() =>
+                        settings.update(
+                          "temporal_awareness",
+                          !settings.temporal_awareness,
+                        )
+                      }
+                      className="shrink-0"
+                    >
+                      {settings.temporal_awareness ? "On" : "Off"}
+                    </Button>
+                  </div>
+                  <div className="mt-3 rounded-xl border border-foreground/10 bg-foreground/[0.03] p-3 text-[11px] leading-relaxed text-foreground/60">
+                    <p className="mb-1 font-medium text-foreground/75">
+                      Template variables
+                    </p>
+                    <p>
+                      Use these inside any system prompt to place the values
+                      exactly where you want them. When used, the automatic
+                      preamble is skipped.
+                    </p>
+                    <ul className="mt-1.5 space-y-0.5 font-mono text-[11px]">
+                      <li>{"{{CURRENT_DATE}}"} → 2026-04-17</li>
+                      <li>{"{{CURRENT_TIME}}"} → 14:32</li>
+                      <li>{"{{CURRENT_WEEKDAY}}"} → Friday</li>
+                      <li>{"{{CURRENT_DATETIME}}"} → 2026-04-17 14:32</li>
+                      <li>{"{{CURRENT_TIMEZONE}}"} → Europe/Warsaw</li>
+                    </ul>
+                  </div>
                 </div>
               </TabsContent>
 

@@ -31,9 +31,18 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     try {
       const rows = await getSettings();
       const merged: Settings = { ...DEFAULT_SETTINGS };
+      // Settings live in a string-keyed KV table; coerce each value back into
+      // the type implied by DEFAULT_SETTINGS so booleans don't arrive as the
+      // literal string "false" (which is truthy).
       (Object.keys(DEFAULT_SETTINGS) as (keyof Settings)[]).forEach((k) => {
         const v = rows[k];
-        if (v !== undefined) (merged as Record<string, unknown>)[k as string] = v;
+        if (v === undefined) return;
+        const def = DEFAULT_SETTINGS[k];
+        if (typeof def === "boolean") {
+          (merged as Record<string, unknown>)[k as string] = v === "true";
+        } else {
+          (merged as Record<string, unknown>)[k as string] = v;
+        }
       });
       const hasKey = await getOpenAIKeyStatus().catch(() => false);
       set({ ...merged, openai_key_set: hasKey, hydrated: true });

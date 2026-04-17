@@ -156,6 +156,11 @@ export interface Settings {
   global_system_prompt: string;
   default_provider: ProviderId;
   default_model: string;
+  /** When true, the current date / time / weekday / timezone are injected
+   *  into the system prompt of every request. Compatible with Open WebUI
+   *  temporal template variables (`{{CURRENT_DATE}}`, `{{CURRENT_TIME}}`,
+   *  `{{CURRENT_WEEKDAY}}`, `{{CURRENT_DATETIME}}`, `{{CURRENT_TIMEZONE}}`). */
+  temporal_awareness: boolean;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -166,4 +171,5 @@ export const DEFAULT_SETTINGS: Settings = {
   global_system_prompt: "",
   default_provider: "ollama",
   default_model: "",
+  temporal_awareness: true,
 };
