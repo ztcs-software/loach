@@ -31,6 +31,7 @@ import {
 } from "@/types";
 import { useSettingsStore } from "./settingsStore";
 import { useSpaceStore } from "./spaceStore";
+import { useUIStore } from "./uiStore";
 
 interface ActiveStream {
   stop: () => Promise<void>;
@@ -191,6 +192,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
         ),
       }));
     }
+
+    // Wipe any leftover composer primer (e.g. a suggestion chip the user
+    // clicked but never sent). Bump the seq so a currently-mounted ChatInput
+    // also resets its local text state. Callers that want to seed the new
+    // chat's composer (Snippets "Run") call primeComposer AFTER newSession,
+    // so their primer still wins.
+    useUIStore.setState((s) => ({
+      composerDraft: "",
+      composerAttachments: [],
+      composerInsertSeq: s.composerInsertSeq + 1,
+    }));
 
     const settings = useSettingsStore.getState();
     // `spaceId === undefined` → inherit activeSpaceId; `null` → force space-less.
