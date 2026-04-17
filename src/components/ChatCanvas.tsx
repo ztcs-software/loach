@@ -1,5 +1,7 @@
 import { useEffect, useRef } from "react";
+import { Hourglass, Zap, X } from "lucide-react";
 import { MessageItem } from "./Message";
+import { Button } from "@/components/ui/button";
 import { useChatStore } from "@/stores/chatStore";
 import type { Message } from "@/types";
 
@@ -14,6 +16,16 @@ export function ChatCanvas() {
   );
   const isStreaming = useChatStore((s) => s.isStreaming);
   const streamingByMessage = useChatStore((s) => s.streamingByMessage);
+  // A chat is "waiting" when it has a task parked in the global queue
+  // (runningTask is a DIFFERENT session). We render a banner instead of
+  // the assistant streaming dots so the user knows it's cross-chat gating,
+  // not just a slow model.
+  const waitingHere = useChatStore((s) =>
+    !!s.activeSessionId &&
+    s.queue.some((t) => t.sessionId === s.activeSessionId),
+  );
+  const promoteSession = useChatStore((s) => s.promoteSession);
+  const cancelForSession = useChatStore((s) => s.cancelForSession);
 
   const scrollerRef = useRef<HTMLDivElement>(null);
   const stickToBottom = useRef(true);
@@ -33,7 +45,7 @@ export function ChatCanvas() {
     if (!stickToBottom.current) return;
     const el = scrollerRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [messages, isStreaming]);
+  }, [messages, isStreaming, waitingHere]);
 
   if (!sessionId) {
     return (
@@ -64,7 +76,69 @@ export function ChatCanvas() {
             />
           );
         })}
+        {/* Banner shown only while THIS chat's task is parked behind another
+            chat's running task. Replaces the assistant streaming-dots bubble
+            (which would otherwise mislead the user into thinking the model
+            is thinking). */}
+        {waitingHere && sessionId && (
+          <WaitingForOtherChats
+            onRespondNow={() => void promoteSession(sessionId)}
+            onCancel={() => void cancelForSession(sessionId)}
+          />
+        )}
         <div className="h-4" />
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Shown on a chat whose prompt is waiting behind another chat's reply.
+ * "Respond now" cancels the currently-running chat (in whichever session
+ * that is) and promotes this chat to the front of the queue.
+ */
+function WaitingForOtherChats({
+  onRespondNow,
+  onCancel,
+}: {
+  onRespondNow: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div className="py-4">
+      <div className="flex items-start gap-3">
+        <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-2xl border border-dashed border-foreground/15 bg-foreground/[0.03] backdrop-blur-md">
+          <Hourglass className="h-4 w-4 animate-pulse text-foreground/50" />
+        </div>
+        <div className="flex min-w-0 max-w-[78%] flex-col gap-2">
+          <div className="rounded-3xl rounded-tl-lg border border-dashed border-foreground/15 bg-foreground/[0.04] px-4 py-2.5 text-sm text-foreground/70 backdrop-blur-xl">
+            Waiting for other chats to finish…
+          </div>
+          <div className="flex items-center gap-2 pl-1">
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={onRespondNow}
+              className="h-7 gap-1.5 rounded-full bg-foreground/[0.06] px-3 text-[11px] font-medium text-foreground/75 hover:bg-foreground/10 hover:text-foreground"
+              title="Interrupt the chat currently generating and jump this chat to the front of the queue"
+            >
+              <Zap className="h-3 w-3" />
+              Respond now
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={onCancel}
+              className="h-7 gap-1.5 rounded-full px-3 text-[11px] font-medium text-foreground/55 hover:bg-foreground/10 hover:text-destructive"
+              title="Drop this prompt from the queue"
+            >
+              <X className="h-3 w-3" />
+              Cancel
+            </Button>
+          </div>
+        </div>
       </div>
     </div>
   );
