@@ -21,6 +21,7 @@ export function ChatInput({ centered = false }: ChatInputProps) {
   const send = useChatStore((s) => s.sendUserMessage);
   const cancel = useChatStore((s) => s.cancelStream);
   const composerDraft = useUIStore((s) => s.composerDraft);
+  const composerAttachments = useUIStore((s) => s.composerAttachments);
   const composerInsertSeq = useUIStore((s) => s.composerInsertSeq);
   const setComposerDraft = useUIStore((s) => s.setComposerDraft);
 
@@ -31,9 +32,15 @@ export function ChatInput({ centered = false }: ChatInputProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  // External insert (e.g. from suggestion chips) bumps the seq counter.
+  // External insert (e.g. from suggestion chips or a Snippet "Run") bumps
+  // the seq counter. Text always reseeds; attachments reseed only when the
+  // primer supplied some (so plain suggestion-chip inserts don't wipe the
+  // user's pending file picks).
   useEffect(() => {
     setText(composerDraft);
+    if (composerAttachments.length > 0) {
+      setAttachments(composerAttachments);
+    }
     const el = textareaRef.current;
     if (el) {
       requestAnimationFrame(() => {

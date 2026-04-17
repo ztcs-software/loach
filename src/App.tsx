@@ -9,8 +9,11 @@ import { SettingsDialog } from "@/components/SettingsDialog";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { SpaceForm } from "@/components/SpaceForm";
 import { SpaceView } from "@/components/SpaceView";
+import { SnippetsView } from "@/components/SnippetsView";
+import { SnippetDialog } from "@/components/SnippetDialog";
 import { useChatStore } from "@/stores/chatStore";
 import { useSettingsStore } from "@/stores/settingsStore";
+import { useSnippetStore } from "@/stores/snippetStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useUIStore } from "@/stores/uiStore";
 import { cn } from "@/lib/utils";
@@ -22,8 +25,10 @@ export default function App() {
   const hydrateSettings = useSettingsStore((s) => s.hydrate);
   const hydrateChats = useChatStore((s) => s.hydrate);
   const hydrateSpaces = useSpaceStore((s) => s.hydrate);
+  const hydrateSnippets = useSnippetStore((s) => s.hydrate);
   const backgroundStyle = useSettingsStore((s) => s.background_style);
   const viewingSpaceId = useSpaceStore((s) => s.viewingSpaceId);
+  const viewingSnippets = useUIStore((s) => s.viewingSnippets);
   const session = useChatStore((s) =>
     s.activeSessionId ? s.sessions.find((x) => x.id === s.activeSessionId) : undefined,
   );
@@ -36,9 +41,10 @@ export default function App() {
     (async () => {
       await hydrateSettings();
       await hydrateSpaces();
+      await hydrateSnippets();
       await hydrateChats();
     })();
-  }, [hydrateSettings, hydrateSpaces, hydrateChats]);
+  }, [hydrateSettings, hydrateSpaces, hydrateSnippets, hydrateChats]);
 
   return (
     <TooltipProvider delayDuration={250}>
@@ -55,7 +61,9 @@ export default function App() {
         <TitleBar />
         <div className="flex min-h-0 flex-1">
           <Sidebar />
-          {viewingSpaceId ? (
+          {viewingSnippets ? (
+            <SnippetsView />
+          ) : viewingSpaceId ? (
             <SpaceView />
           ) : (
             <>
@@ -76,6 +84,7 @@ export default function App() {
         </div>
         <SettingsDialog />
         <SpaceForm />
+        <SnippetDialog />
       </div>
     </TooltipProvider>
   );

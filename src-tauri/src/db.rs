@@ -45,6 +45,20 @@ pub struct SpaceFile {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct Snippet {
+    pub id: String,
+    pub title: String,
+    pub prompt: String,
+    pub attachments_json: Option<String>,
+    /// Optional default provider ("ollama" | "openai") — when set, running the
+    /// snippet creates a new chat pre-selected to this provider/model pair.
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Message {
     pub id: String,
     pub session_id: String,
@@ -122,6 +136,18 @@ impl Database {
             );
             CREATE INDEX IF NOT EXISTS idx_space_files_space
                 ON space_files(space_id, position);
+
+            -- Snippets: reusable prompts with optional attachments.
+            CREATE TABLE IF NOT EXISTS snippets (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                prompt TEXT NOT NULL,
+                attachments_json TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_snippets_updated
+                ON snippets(updated_at DESC);
             "#,
         )?;
 
@@ -153,6 +179,18 @@ impl Database {
         if !has_thinking {
             conn.execute_batch(
                 "ALTER TABLE messages ADD COLUMN thinking TEXT;",
+            )?;
+        }
+
+        // Add provider + model columns to snippets if missing (for pinning a
+        // default model to a snippet).
+        let has_snippet_provider = conn
+            .prepare("SELECT provider FROM snippets LIMIT 0")
+            .is_ok();
+        if !has_snippet_provider {
+            conn.execute_batch(
+                "ALTER TABLE snippets ADD COLUMN provider TEXT;
+                 ALTER TABLE snippets ADD COLUMN model TEXT;",
             )?;
         }
 
@@ -557,6 +595,86 @@ impl Database {
     pub fn remove_space_file(&self, file_id: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM space_files WHERE id = ?1", params![file_id])?;
+        Ok(())
+    }
+
+    // ------------ snippets ------------
+
+    pub fn list_snippets(&self) -> Result<Vec<Snippet>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, title, prompt, attachments_json, provider, model,
+                    created_at, updated_at
+             FROM snippets ORDER BY updated_at DESC",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(Snippet {
+                    id: r.get(0)?,
+                    title: r.get(1)?,
+                    prompt: r.get(2)?,
+                    attachments_json: r.get(3)?,
+                    provider: r.get(4)?,
+                    model: r.get(5)?,
+                    created_at: r.get(6)?,
+                    updated_at: r.get(7)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn create_snippet(
+        &self,
+        title: &str,
+        prompt: &str,
+        attachments_json: Option<&str>,
+        provider: Option<&str>,
+        model: Option<&str>,
+    ) -> Result<Snippet> {
+        let id = Uuid::new_v4().to_string();
+        let now = Utc::now().timestamp_millis();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO snippets (id, title, prompt, attachments_json, provider, model, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+            params![id, title, prompt, attachments_json, provider, model, now],
+        )?;
+        Ok(Snippet {
+            id,
+            title: title.to_string(),
+            prompt: prompt.to_string(),
+            attachments_json: attachments_json.map(|s| s.to_string()),
+            provider: provider.map(|s| s.to_string()),
+            model: model.map(|s| s.to_string()),
+            created_at: now,
+            updated_at: now,
+        })
+    }
+
+    pub fn update_snippet(
+        &self,
+        id: &str,
+        title: &str,
+        prompt: &str,
+        attachments_json: Option<&str>,
+        provider: Option<&str>,
+        model: Option<&str>,
+    ) -> Result<()> {
+        let now = Utc::now().timestamp_millis();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE snippets SET title = ?1, prompt = ?2, attachments_json = ?3,
+                                 provider = ?4, model = ?5, updated_at = ?6
+             WHERE id = ?7",
+            params![title, prompt, attachments_json, provider, model, now, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_snippet(&self, id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM snippets WHERE id = ?1", params![id])?;
         Ok(())
     }
 }

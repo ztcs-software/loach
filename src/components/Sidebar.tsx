@@ -11,6 +11,7 @@ import {
   Settings,
   PanelLeftClose,
   PanelLeftOpen,
+  Sparkles,
   Trash2,
   Pencil,
   Download,
@@ -45,13 +46,26 @@ export function Sidebar() {
   const sidebarOpen = useUIStore((s) => s.sidebarOpen);
   const toggleSidebar = useUIStore((s) => s.toggleSidebar);
   const setSettingsOpen = useUIStore((s) => s.setSettingsOpen);
+  const viewingSnippets = useUIStore((s) => s.viewingSnippets);
+  const setViewingSnippets = useUIStore((s) => s.setViewingSnippets);
 
   // "+ New chat" always creates a simple, space-less chat regardless of the
   // current view — and exits the Space view if one is open, so the new chat
   // is actually shown.
   const handleNewChat = () => {
     setViewingSpace(null);
+    setViewingSnippets(false);
     void newSession({ spaceId: null });
+  };
+
+  const handleOpenSnippets = () => {
+    setViewingSpace(null);
+    setViewingSnippets(true);
+  };
+
+  const handleSelectSession = (id: string) => {
+    setViewingSnippets(false);
+    void select(id);
   };
 
   const groups = useMemo(() => {
@@ -82,6 +96,18 @@ export function Sidebar() {
           className="rounded-xl text-foreground/70 hover:bg-foreground/10 hover:text-foreground"
         >
           <Plus className="h-4 w-4" />
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={handleOpenSnippets}
+          aria-label="Snippets"
+          className={cn(
+            "rounded-xl text-foreground/70 hover:bg-foreground/10 hover:text-foreground",
+            viewingSnippets && "bg-foreground/[0.10] text-foreground",
+          )}
+        >
+          <Sparkles className="h-4 w-4" />
         </Button>
         <div className="flex-1" />
         <Button
@@ -121,11 +147,22 @@ export function Sidebar() {
       <SpaceList />
       <ChatList
         groups={groups}
-        activeId={activeId}
-        onSelect={select}
+        activeId={viewingSnippets ? null : activeId}
+        onSelect={handleSelectSession}
         empty={sessions.length === 0}
       />
       <div className="border-t border-foreground/5 p-2">
+        <Button
+          variant="ghost"
+          className={cn(
+            "w-full justify-start rounded-xl text-foreground/70 hover:bg-foreground/10 hover:text-foreground",
+            viewingSnippets && "bg-foreground/[0.10] text-foreground",
+          )}
+          onClick={handleOpenSnippets}
+        >
+          <Sparkles className="h-4 w-4" />
+          Snippets
+        </Button>
         <Button
           variant="ghost"
           className="w-full justify-start rounded-xl text-foreground/70 hover:bg-foreground/10 hover:text-foreground"

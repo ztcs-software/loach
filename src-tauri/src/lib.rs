@@ -141,6 +141,10 @@ pub fn run() {
             commands::add_space_file,
             commands::remove_space_file,
             commands::get_space_context,
+            commands::list_snippets,
+            commands::create_snippet,
+            commands::update_snippet,
+            commands::delete_snippet,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Loach");

@@ -39,6 +39,22 @@ export interface SpaceContext {
   files: SpaceFile[];
 }
 
+export interface Snippet {
+  id: string;
+  title: string;
+  prompt: string;
+  /** JSON-encoded Attachment[] — stored verbatim so large base64 payloads
+   *  don't explode column counts and so the frontend owns the shape.
+   *  Currently unused in the UI; kept as a column for forward compat. */
+  attachments_json: string | null;
+  /** Default provider pinned to this snippet (null → use current default). */
+  provider: ProviderId | null;
+  /** Default model pinned to this snippet (null → use current default). */
+  model: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
 export interface Attachment {
   kind: "image" | "text" | "file";
   name: string;

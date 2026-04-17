@@ -6,6 +6,7 @@ import type {
   Message,
   ModelInfo,
   Session,
+  Snippet,
   Space,
   SpaceContext,
   SpaceFile,
@@ -253,6 +254,53 @@ export function getSpaceContext(spaceId: string): Promise<SpaceContext> {
       files: [],
     });
   return invoke("get_space_context", { spaceId });
+}
+
+// ------------ snippets ------------
+
+export function listSnippets(): Promise<Snippet[]> {
+  if (!isTauri) return notInTauri([]);
+  return invoke("list_snippets");
+}
+
+export function createSnippet(args: {
+  title: string;
+  prompt: string;
+  attachments_json?: string | null;
+  provider?: string | null;
+  model?: string | null;
+}): Promise<Snippet> {
+  if (!isTauri) {
+    const now = Date.now();
+    return notInTauri<Snippet>({
+      id: `mock-snip-${now}`,
+      title: args.title,
+      prompt: args.prompt,
+      attachments_json: args.attachments_json ?? null,
+      provider: (args.provider ?? null) as Snippet["provider"],
+      model: args.model ?? null,
+      created_at: now,
+      updated_at: now,
+    });
+  }
+  return invoke("create_snippet", { args });
+}
+
+export function updateSnippet(args: {
+  id: string;
+  title: string;
+  prompt: string;
+  attachments_json?: string | null;
+  provider?: string | null;
+  model?: string | null;
+}): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("update_snippet", { args });
+}
+
+export function deleteSnippet(id: string): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("delete_snippet", { id });
 }
 
 // ------------ chat streaming ------------

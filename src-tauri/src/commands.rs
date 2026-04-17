@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
 use uuid::Uuid;
 
-use crate::db::{Message, Session, Space, SpaceFile};
+use crate::db::{Message, Session, Snippet, Space, SpaceFile};
 use crate::providers::{self, ChatRequest, ModelInfo};
 use crate::secrets;
 use crate::AppState;
@@ -369,6 +369,72 @@ pub async fn get_space_context(
         .ok_or_else(|| "space not found".to_string())?;
     let files = state.db.list_space_files(&space_id).map_err(err)?;
     Ok(SpaceContext { space, files })
+}
+
+// ---------- snippets ----------
+
+#[tauri::command]
+pub async fn list_snippets(state: State<'_, AppState>) -> Result<Vec<Snippet>, String> {
+    state.db.list_snippets().map_err(err)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateSnippetArgs {
+    pub title: String,
+    pub prompt: String,
+    pub attachments_json: Option<String>,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+}
+
+#[tauri::command]
+pub async fn create_snippet(
+    state: State<'_, AppState>,
+    args: CreateSnippetArgs,
+) -> Result<Snippet, String> {
+    state
+        .db
+        .create_snippet(
+            &args.title,
+            &args.prompt,
+            args.attachments_json.as_deref(),
+            args.provider.as_deref(),
+            args.model.as_deref(),
+        )
+        .map_err(err)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateSnippetArgs {
+    pub id: String,
+    pub title: String,
+    pub prompt: String,
+    pub attachments_json: Option<String>,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+}
+
+#[tauri::command]
+pub async fn update_snippet(
+    state: State<'_, AppState>,
+    args: UpdateSnippetArgs,
+) -> Result<(), String> {
+    state
+        .db
+        .update_snippet(
+            &args.id,
+            &args.title,
+            &args.prompt,
+            args.attachments_json.as_deref(),
+            args.provider.as_deref(),
+            args.model.as_deref(),
+        )
+        .map_err(err)
+}
+
+#[tauri::command]
+pub async fn delete_snippet(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    state.db.delete_snippet(&id).map_err(err)
 }
 
 // ---------- chat streaming ----------
