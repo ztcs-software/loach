@@ -15,6 +15,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useChatStore } from "@/stores/chatStore";
+import { useUIStore } from "@/stores/uiStore";
 import { fileToAttachment } from "@/lib/files";
 import { cn, relativeDay } from "@/lib/utils";
 import { ChatInput } from "@/components/ChatInput";
@@ -35,6 +36,7 @@ export function SpaceView() {
   const sessions = useChatStore((s) => s.sessions);
   const selectSession = useChatStore((s) => s.selectSession);
   const newSession = useChatStore((s) => s.newSession);
+  const setViewingSpacesList = useUIStore((s) => s.setViewingSpacesList);
 
   const space = spaces.find((s) => s.id === viewingSpaceId);
 
@@ -71,7 +73,10 @@ export function SpaceView() {
   if (!space) return null;
 
   const handleBack = () => {
+    // "← All spaces" surfaces the full spaces browser rather than falling
+    // back to the default chat view.
     setViewingSpace(null);
+    setViewingSpacesList(true);
   };
 
   const handleSaveName = async () => {

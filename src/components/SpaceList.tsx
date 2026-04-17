@@ -2,6 +2,7 @@ import { useState } from "react";
 import {
   ChevronDown,
   ChevronRight,
+  LayoutGrid,
   Layers,
   MoreHorizontal,
   Pencil,
@@ -16,6 +17,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useSpaceStore } from "@/stores/spaceStore";
+import { useUIStore } from "@/stores/uiStore";
 import { cn } from "@/lib/utils";
 
 export function SpaceList() {
@@ -28,8 +30,14 @@ export function SpaceList() {
   const removeSpace = useSpaceStore((s) => s.deleteSpace);
 
   const setViewingSpace = useSpaceStore((s) => s.setViewingSpace);
+  const setViewingSpacesList = useUIStore((s) => s.setViewingSpacesList);
+  const setViewingSnippets = useUIStore((s) => s.setViewingSnippets);
+  const setViewingArchive = useUIStore((s) => s.setViewingArchive);
 
   const handleSelectSpace = (id: string | null) => {
+    setViewingSpacesList(false);
+    setViewingSnippets(false);
+    setViewingArchive(false);
     if (id) {
       // Open the full space view
       setViewingSpace(id);
@@ -37,6 +45,13 @@ export function SpaceList() {
       selectSpace(null);
       setViewingSpace(null);
     }
+  };
+
+  const handleBrowseAll = () => {
+    setViewingSpace(null);
+    setViewingSnippets(false);
+    setViewingArchive(false);
+    setViewingSpacesList(true);
   };
 
   const handleCreate = () => {
@@ -71,14 +86,28 @@ export function SpaceList() {
             <span className="ml-0.5 text-foreground/25">{spaces.length}</span>
           )}
         </button>
-        <Button
-          variant="ghost"
-          size="icon"
-          onClick={handleCreate}
-          className="h-6 w-6 rounded-lg text-foreground/50 hover:text-foreground hover:bg-foreground/10"
-        >
-          <Plus className="h-3.5 w-3.5" />
-        </Button>
+        <div className="flex items-center gap-0.5">
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={handleBrowseAll}
+            aria-label="View all spaces"
+            title="View all spaces"
+            className="h-6 w-6 rounded-lg text-foreground/50 hover:text-foreground hover:bg-foreground/10"
+          >
+            <LayoutGrid className="h-3.5 w-3.5" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={handleCreate}
+            aria-label="New space"
+            title="New space"
+            className="h-6 w-6 rounded-lg text-foreground/50 hover:text-foreground hover:bg-foreground/10"
+          >
+            <Plus className="h-3.5 w-3.5" />
+          </Button>
+        </div>
       </div>
 
       {expanded && (

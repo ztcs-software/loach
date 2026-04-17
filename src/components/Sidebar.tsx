@@ -51,6 +51,7 @@ export function Sidebar() {
   const setViewingSnippets = useUIStore((s) => s.setViewingSnippets);
   const viewingArchive = useUIStore((s) => s.viewingArchive);
   const setViewingArchive = useUIStore((s) => s.setViewingArchive);
+  const setViewingSpacesList = useUIStore((s) => s.setViewingSpacesList);
 
   // "+ New chat" always creates a simple, space-less chat regardless of the
   // current view — and exits the Space view if one is open, so the new chat
@@ -59,24 +60,32 @@ export function Sidebar() {
     setViewingSpace(null);
     setViewingSnippets(false);
     setViewingArchive(false);
+    setViewingSpacesList(false);
     void newSession({ spaceId: null });
   };
 
   const handleOpenSnippets = () => {
     setViewingSpace(null);
     setViewingArchive(false);
+    setViewingSpacesList(false);
     setViewingSnippets(true);
   };
 
   const handleOpenArchive = () => {
     setViewingSpace(null);
     setViewingSnippets(false);
+    setViewingSpacesList(false);
     setViewingArchive(true);
   };
 
   const handleSelectSession = (id: string) => {
     setViewingSnippets(false);
     setViewingArchive(false);
+    setViewingSpacesList(false);
+    // Must also exit the Space view — App.tsx renders SpaceView whenever
+    // `viewingSpaceId` is set regardless of which chat is active, so without
+    // this the sidebar click appears to "do nothing".
+    setViewingSpace(null);
     void select(id);
   };
 

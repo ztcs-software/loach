@@ -12,6 +12,7 @@ import { SpaceView } from "@/components/SpaceView";
 import { SnippetsView } from "@/components/SnippetsView";
 import { SnippetDialog } from "@/components/SnippetDialog";
 import { ArchiveView } from "@/components/ArchiveView";
+import { SpacesView } from "@/components/SpacesView";
 import { useChatStore } from "@/stores/chatStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useSnippetStore } from "@/stores/snippetStore";
@@ -31,6 +32,7 @@ export default function App() {
   const viewingSpaceId = useSpaceStore((s) => s.viewingSpaceId);
   const viewingSnippets = useUIStore((s) => s.viewingSnippets);
   const viewingArchive = useUIStore((s) => s.viewingArchive);
+  const viewingSpacesList = useUIStore((s) => s.viewingSpacesList);
   const session = useChatStore((s) =>
     s.activeSessionId ? s.sessions.find((x) => x.id === s.activeSessionId) : undefined,
   );
@@ -69,6 +71,8 @@ export default function App() {
             <SnippetsView />
           ) : viewingSpaceId ? (
             <SpaceView />
+          ) : viewingSpacesList ? (
+            <SpacesView />
           ) : (
             <>
               <main className="relative flex min-w-0 flex-1 flex-col">

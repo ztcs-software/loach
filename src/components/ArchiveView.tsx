@@ -29,6 +29,7 @@ export function ArchiveView() {
   const select = useChatStore((s) => s.selectSession);
   const setViewingArchive = useUIStore((s) => s.setViewingArchive);
   const setViewingSnippets = useUIStore((s) => s.setViewingSnippets);
+  const setViewingSpacesList = useUIStore((s) => s.setViewingSpacesList);
   const setViewingSpace = useSpaceStore((s) => s.setViewingSpace);
 
   const archived = sessions
@@ -44,6 +45,7 @@ export function ArchiveView() {
     // archived — only the user's explicit Unarchive action changes that.
     setViewingArchive(false);
     setViewingSnippets(false);
+    setViewingSpacesList(false);
     setViewingSpace(null);
     await select(id);
   };

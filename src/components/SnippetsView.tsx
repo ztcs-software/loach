@@ -31,6 +31,7 @@ export function SnippetsView() {
   const newSession = useChatStore((s) => s.newSession);
   const setViewingSpace = useSpaceStore((s) => s.setViewingSpace);
   const setViewingSnippets = useUIStore((s) => s.setViewingSnippets);
+  const setViewingSpacesList = useUIStore((s) => s.setViewingSpacesList);
   const primeComposer = useUIStore((s) => s.primeComposer);
 
   // Snippets hydrate on mount — we deliberately skip eager hydration on app
@@ -44,6 +45,7 @@ export function SnippetsView() {
     // matches the behaviour of the sidebar's "+ New chat" so running a snippet
     // never silently inherits unrelated context.
     setViewingSnippets(false);
+    setViewingSpacesList(false);
     setViewingSpace(null);
     await newSession({
       spaceId: null,
