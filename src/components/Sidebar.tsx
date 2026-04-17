@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import {
+  Archive,
   ChevronDown,
   ChevronRight,
   Layers,
@@ -48,6 +49,8 @@ export function Sidebar() {
   const setSettingsOpen = useUIStore((s) => s.setSettingsOpen);
   const viewingSnippets = useUIStore((s) => s.viewingSnippets);
   const setViewingSnippets = useUIStore((s) => s.setViewingSnippets);
+  const viewingArchive = useUIStore((s) => s.viewingArchive);
+  const setViewingArchive = useUIStore((s) => s.setViewingArchive);
 
   // "+ New chat" always creates a simple, space-less chat regardless of the
   // current view — and exits the Space view if one is open, so the new chat
@@ -55,22 +58,34 @@ export function Sidebar() {
   const handleNewChat = () => {
     setViewingSpace(null);
     setViewingSnippets(false);
+    setViewingArchive(false);
     void newSession({ spaceId: null });
   };
 
   const handleOpenSnippets = () => {
     setViewingSpace(null);
+    setViewingArchive(false);
     setViewingSnippets(true);
+  };
+
+  const handleOpenArchive = () => {
+    setViewingSpace(null);
+    setViewingSnippets(false);
+    setViewingArchive(true);
   };
 
   const handleSelectSession = (id: string) => {
     setViewingSnippets(false);
+    setViewingArchive(false);
     void select(id);
   };
 
   const groups = useMemo(() => {
     const out: Record<string, Session[]> = { today: [], yesterday: [], week: [], older: [] };
+    // Archived chats live in the dedicated Archive view — hide them from the
+    // main chat list regardless of recency.
     for (const s of sessions) {
+      if (s.archived_at) continue;
       out[relativeDay(s.updated_at)].push(s);
     }
     return out;
@@ -108,6 +123,18 @@ export function Sidebar() {
           )}
         >
           <Sparkles className="h-4 w-4" />
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={handleOpenArchive}
+          aria-label="Archive"
+          className={cn(
+            "rounded-xl text-foreground/70 hover:bg-foreground/10 hover:text-foreground",
+            viewingArchive && "bg-foreground/[0.10] text-foreground",
+          )}
+        >
+          <Archive className="h-4 w-4" />
         </Button>
         <div className="flex-1" />
         <Button
@@ -147,9 +174,9 @@ export function Sidebar() {
       <SpaceList />
       <ChatList
         groups={groups}
-        activeId={viewingSnippets ? null : activeId}
+        activeId={viewingSnippets || viewingArchive ? null : activeId}
         onSelect={handleSelectSession}
-        empty={sessions.length === 0}
+        empty={groups.today.length + groups.yesterday.length + groups.week.length + groups.older.length === 0}
       />
       <div className="border-t border-foreground/5 p-2">
         <Button
@@ -162,6 +189,17 @@ export function Sidebar() {
         >
           <Sparkles className="h-4 w-4" />
           Snippets
+        </Button>
+        <Button
+          variant="ghost"
+          className={cn(
+            "w-full justify-start rounded-xl text-foreground/70 hover:bg-foreground/10 hover:text-foreground",
+            viewingArchive && "bg-foreground/[0.10] text-foreground",
+          )}
+          onClick={handleOpenArchive}
+        >
+          <Archive className="h-4 w-4" />
+          Archive
         </Button>
         <Button
           variant="ghost"
@@ -249,6 +287,7 @@ function SessionRow({
 }) {
   const rename = useChatStore((s) => s.rename);
   const pinChat = useChatStore((s) => s.pin);
+  const archiveChat = useChatStore((s) => s.archive);
   const remove = useChatStore((s) => s.remove);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(session.title);
@@ -345,6 +384,11 @@ function SessionRow({
               <FileJson className="h-4 w-4" /> Export as JSON
             </DropdownMenuItem>
             <DropdownMenuSeparator />
+            <DropdownMenuItem
+              onSelect={() => void archiveChat(session.id, true)}
+            >
+              <Archive className="h-4 w-4" /> Move to Archive
+            </DropdownMenuItem>
             <DropdownMenuItem
               onSelect={() => remove(session.id)}
               className="text-destructive focus:text-destructive"

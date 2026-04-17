@@ -17,6 +17,9 @@ pub struct Session {
     pub params_json: Option<String>,
     pub space_id: Option<String>,
     pub pinned_at: Option<i64>,
+    /// When non-null, the session is archived and hidden from the main chat
+    /// list. The value is the ms-timestamp of when it was archived.
+    pub archived_at: Option<i64>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -194,6 +197,18 @@ impl Database {
             )?;
         }
 
+        // Add archived_at column to sessions if missing. Null = live chat;
+        // otherwise the ms-timestamp the session was archived.
+        let has_archived_at = conn
+            .prepare("SELECT archived_at FROM sessions LIMIT 0")
+            .is_ok();
+        if !has_archived_at {
+            conn.execute_batch(
+                "ALTER TABLE sessions ADD COLUMN archived_at INTEGER;
+                 CREATE INDEX IF NOT EXISTS idx_sessions_archived ON sessions(archived_at);",
+            )?;
+        }
+
         Ok(())
     }
 
@@ -202,7 +217,7 @@ impl Database {
     pub fn list_sessions(&self) -> Result<Vec<Session>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, title, provider, model, system_prompt, params_json, space_id, pinned_at, created_at, updated_at
+            "SELECT id, title, provider, model, system_prompt, params_json, space_id, pinned_at, archived_at, created_at, updated_at
              FROM sessions ORDER BY updated_at DESC",
         )?;
         let rows = stmt
@@ -216,8 +231,9 @@ impl Database {
                     params_json: r.get(5)?,
                     space_id: r.get(6)?,
                     pinned_at: r.get(7)?,
-                    created_at: r.get(8)?,
-                    updated_at: r.get(9)?,
+                    archived_at: r.get(8)?,
+                    created_at: r.get(9)?,
+                    updated_at: r.get(10)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -249,6 +265,7 @@ impl Database {
             params_json: None,
             space_id: space_id.map(|s| s.to_string()),
             pinned_at: None,
+            archived_at: None,
             created_at: now,
             updated_at: now,
         })
@@ -311,6 +328,24 @@ impl Database {
         Ok(())
     }
 
+    pub fn archive_session(&self, id: &str, archived: bool) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let archived_at: Option<i64> = if archived {
+            Some(Utc::now().timestamp_millis())
+        } else {
+            None
+        };
+        // Archiving also clears the pinned flag so an unarchived chat doesn't
+        // silently re-appear as a pinned item.
+        conn.execute(
+            "UPDATE sessions SET archived_at = ?1,
+                                 pinned_at = CASE WHEN ?1 IS NULL THEN pinned_at ELSE NULL END
+             WHERE id = ?2",
+            params![archived_at, id],
+        )?;
+        Ok(())
+    }
+
     pub fn delete_session(&self, id: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM sessions WHERE id = ?1", params![id])?;
@@ -320,7 +355,7 @@ impl Database {
     pub fn get_session(&self, id: &str) -> Result<Option<Session>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, title, provider, model, system_prompt, params_json, space_id, pinned_at, created_at, updated_at
+            "SELECT id, title, provider, model, system_prompt, params_json, space_id, pinned_at, archived_at, created_at, updated_at
              FROM sessions WHERE id = ?1",
         )?;
         let mut rows = stmt.query(params![id])?;
@@ -334,8 +369,9 @@ impl Database {
                 params_json: r.get(5)?,
                 space_id: r.get(6)?,
                 pinned_at: r.get(7)?,
-                created_at: r.get(8)?,
-                updated_at: r.get(9)?,
+                archived_at: r.get(8)?,
+                created_at: r.get(9)?,
+                updated_at: r.get(10)?,
             }))
         } else {
             Ok(None)

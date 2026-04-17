@@ -66,6 +66,15 @@ pub async fn pin_session(
 }
 
 #[tauri::command]
+pub async fn archive_session(
+    state: State<'_, AppState>,
+    id: String,
+    archived: bool,
+) -> Result<(), String> {
+    state.db.archive_session(&id, archived).map_err(err)
+}
+
+#[tauri::command]
 pub async fn delete_session(state: State<'_, AppState>, id: String) -> Result<(), String> {
     state.db.delete_session(&id).map_err(err)
 }

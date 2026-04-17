@@ -6,6 +6,7 @@ interface UIState {
   paramsOpen: boolean;
   settingsOpen: boolean;
   viewingSnippets: boolean;
+  viewingArchive: boolean;
   composerDraft: string;
   /** Files that should land in the composer when it next mounts / the primer
    *  seq bumps. Kept separate from `composerDraft` so suggestion chips (which
@@ -16,6 +17,7 @@ interface UIState {
   toggleParams: () => void;
   setSettingsOpen: (open: boolean) => void;
   setViewingSnippets: (open: boolean) => void;
+  setViewingArchive: (open: boolean) => void;
   setComposerDraft: (text: string) => void;
   insertComposerDraft: (text: string) => void;
   /** One-shot: seed both text and attachments into the composer. Used by
@@ -28,6 +30,7 @@ export const useUIStore = create<UIState>((set) => ({
   paramsOpen: false,
   settingsOpen: false,
   viewingSnippets: false,
+  viewingArchive: false,
   composerDraft: "",
   composerAttachments: [],
   composerInsertSeq: 0,
@@ -35,6 +38,7 @@ export const useUIStore = create<UIState>((set) => ({
   toggleParams: () => set((s) => ({ paramsOpen: !s.paramsOpen })),
   setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
   setViewingSnippets: (viewingSnippets) => set({ viewingSnippets }),
+  setViewingArchive: (viewingArchive) => set({ viewingArchive }),
   setComposerDraft: (composerDraft) => set({ composerDraft }),
   insertComposerDraft: (text) =>
     set((s) => ({

@@ -9,6 +9,8 @@ export interface Session {
   params_json: string | null;
   space_id: string | null;
   pinned_at: number | null;
+  /** Null → live chat; ms timestamp → archived at that time. */
+  archived_at: number | null;
   created_at: number;
   updated_at: number;
 }

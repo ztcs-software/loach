@@ -51,6 +51,7 @@ export function createSession(args: {
       params_json: null,
       space_id: args.space_id ?? null,
       pinned_at: null,
+      archived_at: null,
       created_at: now,
       updated_at: now,
     });
@@ -66,6 +67,11 @@ export function renameSession(id: string, title: string): Promise<void> {
 export function pinSession(id: string, pinned: boolean): Promise<void> {
   if (!isTauri) return notInTauri(undefined);
   return invoke("pin_session", { id, pinned });
+}
+
+export function archiveSession(id: string, archived: boolean): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("archive_session", { id, archived });
 }
 
 export function deleteSession(id: string): Promise<void> {

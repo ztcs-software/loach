@@ -11,6 +11,7 @@ import { SpaceForm } from "@/components/SpaceForm";
 import { SpaceView } from "@/components/SpaceView";
 import { SnippetsView } from "@/components/SnippetsView";
 import { SnippetDialog } from "@/components/SnippetDialog";
+import { ArchiveView } from "@/components/ArchiveView";
 import { useChatStore } from "@/stores/chatStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useSnippetStore } from "@/stores/snippetStore";
@@ -29,6 +30,7 @@ export default function App() {
   const backgroundStyle = useSettingsStore((s) => s.background_style);
   const viewingSpaceId = useSpaceStore((s) => s.viewingSpaceId);
   const viewingSnippets = useUIStore((s) => s.viewingSnippets);
+  const viewingArchive = useUIStore((s) => s.viewingArchive);
   const session = useChatStore((s) =>
     s.activeSessionId ? s.sessions.find((x) => x.id === s.activeSessionId) : undefined,
   );
@@ -61,7 +63,9 @@ export default function App() {
         <TitleBar />
         <div className="flex min-h-0 flex-1">
           <Sidebar />
-          {viewingSnippets ? (
+          {viewingArchive ? (
+            <ArchiveView />
+          ) : viewingSnippets ? (
             <SnippetsView />
           ) : viewingSpaceId ? (
             <SpaceView />

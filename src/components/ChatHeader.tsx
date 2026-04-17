@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { ChevronDown, Sliders, RefreshCw, CircleAlert, CircleCheck } from "lucide-react";
+import { Archive, ChevronDown, Sliders, RefreshCw, CircleAlert, CircleCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -80,6 +80,12 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
           <span className="flex items-center gap-1 rounded-full bg-foreground/[0.07] px-2.5 py-0.5 text-[11px] font-medium text-foreground/60">
             <Layers className="h-3 w-3" />
             {spaceName}
+          </span>
+        )}
+        {session?.archived_at != null && (
+          <span className="flex items-center gap-1 rounded-full bg-foreground/[0.07] px-2.5 py-0.5 text-[11px] font-medium text-foreground/60">
+            <Archive className="h-3 w-3" />
+            Archived
           </span>
         )}
         <DropdownMenu>

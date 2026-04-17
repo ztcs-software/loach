@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import {
   appendMessage,
+  archiveSession,
   createSession,
   deleteSession,
   getSpaceContext,
@@ -59,6 +60,7 @@ interface ChatState {
   }) => Promise<Session>;
   rename: (id: string, title: string) => Promise<void>;
   pin: (id: string, pinned: boolean) => Promise<void>;
+  archive: (id: string, archived: boolean) => Promise<void>;
   remove: (id: string) => Promise<void>;
   setSessionModel: (id: string, provider: ProviderId, model: string) => Promise<void>;
   setSessionSystemPrompt: (id: string, prompt: string) => Promise<void>;
@@ -128,11 +130,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
       set({ sessions });
 
       // Remove all empty sessions (no messages) on startup, keep at most one.
+      // Archived sessions are left alone even if empty — the user explicitly
+      // moved them to the archive and shouldn't have them silently culled.
       const emptySessions: Session[] = [];
       for (const s of sessions) {
         const msgs = await listMessages(s.id);
         set((st) => ({ messages: { ...st.messages, [s.id]: msgs } }));
-        if (msgs.length === 0) emptySessions.push(s);
+        if (msgs.length === 0 && !s.archived_at) emptySessions.push(s);
       }
 
       // Delete all empty sessions except the first (most recent)
@@ -171,6 +175,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const { sessions, messages } = get();
     const emptyIds: string[] = [];
     for (const s of sessions) {
+      if (s.archived_at) continue; // leave archived chats untouched
       const msgs = messages[s.id] ?? await listMessages(s.id);
       if (msgs.length === 0) emptyIds.push(s.id);
     }
@@ -223,6 +228,30 @@ export const useChatStore = create<ChatState>((set, get) => ({
         x.id === id ? { ...x, pinned_at } : x,
       ),
     }));
+  },
+
+  archive: async (id, archived) => {
+    await archiveSession(id, archived);
+    const archived_at = archived ? Date.now() : null;
+    set((s) => {
+      const sessions = s.sessions.map((x) =>
+        x.id === id
+          ? {
+              ...x,
+              archived_at,
+              // Archiving also clears the pinned flag on the backend; mirror
+              // that here so the UI doesn't briefly show a stale pin icon.
+              pinned_at: archived ? null : x.pinned_at,
+            }
+          : x,
+      );
+      // If we just archived the currently active session, drop selection so
+      // the main view doesn't keep rendering a chat that's no longer in the
+      // normal list.
+      const active =
+        archived && s.activeSessionId === id ? null : s.activeSessionId;
+      return { sessions, activeSessionId: active };
+    });
   },
 
   remove: async (id) => {
