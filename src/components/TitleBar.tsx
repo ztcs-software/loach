@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Minus, Square, X, Copy } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { isTauri } from "@/lib/tauri";
+import { SearchBar } from "@/components/SearchBar";
 
 export function TitleBar() {
   const [isMaximized, setIsMaximized] = useState(false);
@@ -52,13 +53,24 @@ export function TitleBar() {
   return (
     <div
       data-tauri-drag-region
-      className="relative z-20 flex h-9 items-center justify-between border-b border-foreground/8 bg-foreground/[0.03] px-3 select-none backdrop-blur-2xl"
+      className="relative z-20 flex h-9 items-center gap-3 border-b border-foreground/8 bg-foreground/[0.03] px-3 select-none backdrop-blur-2xl"
     >
-      <div className="flex items-center gap-2 pointer-events-none">
+      {/* Left — app identity. pointer-events-none so the drag region
+          underneath captures the drag even over the logo. */}
+      <div className="flex shrink-0 items-center gap-2 pointer-events-none">
         <div className="h-2.5 w-2.5 rounded-full bg-gradient-to-br from-orange-400 to-rose-500 shadow-[0_0_12px_rgba(255,120,60,0.6)]" />
         <span className="text-xs font-medium tracking-wide text-foreground/80">Loach</span>
       </div>
-      <div className="flex items-center">
+
+      {/* Center — global search. Centered via the two flex-1 spacers on
+          each side so the input stays optically middle regardless of the
+          left/right block widths. */}
+      <div className="flex min-w-0 flex-1 items-center justify-center">
+        <SearchBar />
+      </div>
+
+      {/* Right — window controls. */}
+      <div className="flex shrink-0 items-center">
         <TitleButton onClick={minimize} ariaLabel="Minimize">
           <Minus className="h-3.5 w-3.5" />
         </TitleButton>

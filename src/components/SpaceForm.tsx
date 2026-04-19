@@ -4,14 +4,12 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { useSpaceStore } from "@/stores/spaceStore";
-import { useUIStore } from "@/stores/uiStore";
 
 export function SpaceForm() {
   const open = useSpaceStore((s) => s.spaceFormOpen);
   const setOpen = useSpaceStore((s) => s.setSpaceFormOpen);
   const doCreate = useSpaceStore((s) => s.createSpace);
   const setViewingSpace = useSpaceStore((s) => s.setViewingSpace);
-  const setViewingSpacesList = useUIStore((s) => s.setViewingSpacesList);
 
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
@@ -39,9 +37,7 @@ export function SpaceForm() {
       setOpen(false);
       setName("");
       setDescription("");
-      // Navigate to the new space view (also exits the Spaces browser if
-      // the user opened the form from there).
-      setViewingSpacesList(false);
+      // Jump into the newly-created space's detail view.
       setViewingSpace(space.id);
     } catch (e) {
       setError(String(e));

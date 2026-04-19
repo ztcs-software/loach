@@ -1,20 +1,20 @@
 import { useMemo, useState } from "react";
 import {
   Archive,
-  ChevronDown,
-  ChevronRight,
+  Cpu,
   Layers,
   MessageSquare,
   MoreHorizontal,
+  Pencil,
   Pin,
   PinOff,
+  Play,
   Plus,
   Settings,
+  Sparkles,
   PanelLeftClose,
   PanelLeftOpen,
-  Sparkles,
   Trash2,
-  Pencil,
   Download,
   FileJson,
   FileText,
@@ -31,259 +31,264 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { useChatStore } from "@/stores/chatStore";
+import { useSnippetStore } from "@/stores/snippetStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useUIStore } from "@/stores/uiStore";
+import type { SidebarTab } from "@/stores/uiStore";
 import { cn, relativeDay } from "@/lib/utils";
 import { exportSessionToFile } from "@/lib/export";
-import { SpaceList } from "@/components/SpaceList";
-import type { Session } from "@/types";
+import type { Session, Snippet, Space } from "@/types";
 
 export function Sidebar() {
-  const sessions = useChatStore((s) => s.sessions);
-  const activeId = useChatStore((s) => s.activeSessionId);
-  const select = useChatStore((s) => s.selectSession);
-  const newSession = useChatStore((s) => s.newSession);
-  const setViewingSpace = useSpaceStore((s) => s.setViewingSpace);
   const sidebarOpen = useUIStore((s) => s.sidebarOpen);
   const toggleSidebar = useUIStore((s) => s.toggleSidebar);
-  const setSettingsOpen = useUIStore((s) => s.setSettingsOpen);
-  const viewingSnippets = useUIStore((s) => s.viewingSnippets);
-  const setViewingSnippets = useUIStore((s) => s.setViewingSnippets);
-  const viewingArchive = useUIStore((s) => s.viewingArchive);
-  const setViewingArchive = useUIStore((s) => s.setViewingArchive);
-  const setViewingSpacesList = useUIStore((s) => s.setViewingSpacesList);
+  const sidebarTab = useUIStore((s) => s.sidebarTab);
+  const setSidebarTab = useUIStore((s) => s.setSidebarTab);
+  const openSettingsTab = useUIStore((s) => s.openSettingsTab);
 
-  // "+ New chat" always creates a simple, space-less chat regardless of the
-  // current view — and exits the Space view if one is open, so the new chat
-  // is actually shown.
-  const handleNewChat = () => {
-    setViewingSpace(null);
-    setViewingSnippets(false);
-    setViewingArchive(false);
-    setViewingSpacesList(false);
-    void newSession({ spaceId: null });
-  };
-
-  const handleOpenSnippets = () => {
-    setViewingSpace(null);
-    setViewingArchive(false);
-    setViewingSpacesList(false);
-    setViewingSnippets(true);
-  };
-
-  const handleOpenArchive = () => {
-    setViewingSpace(null);
-    setViewingSnippets(false);
-    setViewingSpacesList(false);
-    setViewingArchive(true);
-  };
-
-  const handleSelectSession = (id: string) => {
-    setViewingSnippets(false);
-    setViewingArchive(false);
-    setViewingSpacesList(false);
-    // Must also exit the Space view — App.tsx renders SpaceView whenever
-    // `viewingSpaceId` is set regardless of which chat is active, so without
-    // this the sidebar click appears to "do nothing".
-    setViewingSpace(null);
-    void select(id);
-  };
-
-  const groups = useMemo(() => {
-    const out: Record<string, Session[]> = { today: [], yesterday: [], week: [], older: [] };
-    // Archived chats live in the dedicated Archive view — hide them from the
-    // main chat list regardless of recency.
-    for (const s of sessions) {
-      if (s.archived_at) continue;
-      out[relativeDay(s.updated_at)].push(s);
-    }
-    return out;
-  }, [sessions]);
-
+  // Collapsed form: just the icon rail (no right column).
   if (!sidebarOpen) {
     return (
-      <div className="glass-subtle flex h-full w-14 flex-col items-center gap-2 border-r py-3">
-        <Button
-          variant="ghost"
-          size="icon"
-          onClick={toggleSidebar}
-          aria-label="Open sidebar"
-          className="rounded-xl text-foreground/70 hover:bg-foreground/10 hover:text-foreground"
-        >
-          <PanelLeftOpen className="h-4 w-4" />
-        </Button>
-        <Button
-          variant="ghost"
-          size="icon"
-          onClick={handleNewChat}
-          aria-label="New chat"
-          className="rounded-xl text-foreground/70 hover:bg-foreground/10 hover:text-foreground"
-        >
-          <Plus className="h-4 w-4" />
-        </Button>
-        <Button
-          variant="ghost"
-          size="icon"
-          onClick={handleOpenSnippets}
-          aria-label="Snippets"
-          className={cn(
-            "rounded-xl text-foreground/70 hover:bg-foreground/10 hover:text-foreground",
-            viewingSnippets && "bg-foreground/[0.10] text-foreground",
-          )}
-        >
-          <Sparkles className="h-4 w-4" />
-        </Button>
-        <Button
-          variant="ghost"
-          size="icon"
-          onClick={handleOpenArchive}
-          aria-label="Archive"
-          className={cn(
-            "rounded-xl text-foreground/70 hover:bg-foreground/10 hover:text-foreground",
-            viewingArchive && "bg-foreground/[0.10] text-foreground",
-          )}
-        >
-          <Archive className="h-4 w-4" />
-        </Button>
-        <div className="flex-1" />
-        <Button
-          variant="ghost"
-          size="icon"
-          onClick={() => setSettingsOpen(true)}
-          aria-label="Settings"
-          className="rounded-xl text-foreground/70 hover:bg-foreground/10 hover:text-foreground"
-        >
-          <Settings className="h-4 w-4" />
-        </Button>
-      </div>
+      <IconRail
+        collapsed
+        activeTab={sidebarTab}
+        onSelectTab={setSidebarTab}
+        onToggleSidebar={toggleSidebar}
+        onOpenSettings={() => openSettingsTab("providers")}
+      />
     );
   }
 
+  // Open form: icon rail + contextual list panel.
   return (
-    <aside className="glass-subtle flex h-full w-64 flex-col border-r">
-      <div className="flex items-center gap-2 p-3">
-        <Button
-          className="flex-1 justify-start rounded-2xl border-foreground/10 bg-foreground/[0.04] text-foreground/85 hover:bg-foreground/10 hover:text-foreground"
-          variant="outline"
-          onClick={handleNewChat}
-        >
-          <Plus className="h-4 w-4" />
-          New chat
-        </Button>
-        <Button
-          variant="ghost"
-          size="icon"
-          onClick={toggleSidebar}
-          aria-label="Collapse sidebar"
-          className="rounded-xl text-foreground/60 hover:bg-foreground/10 hover:text-foreground"
-        >
-          <PanelLeftClose className="h-4 w-4" />
-        </Button>
-      </div>
-      <SpaceList />
-      <ChatList
-        groups={groups}
-        activeId={viewingSnippets || viewingArchive ? null : activeId}
-        onSelect={handleSelectSession}
-        empty={groups.today.length + groups.yesterday.length + groups.week.length + groups.older.length === 0}
+    <aside className="flex h-full">
+      <IconRail
+        activeTab={sidebarTab}
+        onSelectTab={setSidebarTab}
+        onToggleSidebar={toggleSidebar}
+        onOpenSettings={() => openSettingsTab("providers")}
       />
-      <div className="border-t border-foreground/5 p-2">
-        <Button
-          variant="ghost"
-          className={cn(
-            "w-full justify-start rounded-xl text-foreground/70 hover:bg-foreground/10 hover:text-foreground",
-            viewingSnippets && "bg-foreground/[0.10] text-foreground",
-          )}
-          onClick={handleOpenSnippets}
-        >
-          <Sparkles className="h-4 w-4" />
-          Snippets
-        </Button>
-        <Button
-          variant="ghost"
-          className={cn(
-            "w-full justify-start rounded-xl text-foreground/70 hover:bg-foreground/10 hover:text-foreground",
-            viewingArchive && "bg-foreground/[0.10] text-foreground",
-          )}
-          onClick={handleOpenArchive}
-        >
-          <Archive className="h-4 w-4" />
-          Archive
-        </Button>
-        <Button
-          variant="ghost"
-          className="w-full justify-start rounded-xl text-foreground/70 hover:bg-foreground/10 hover:text-foreground"
-          onClick={() => setSettingsOpen(true)}
-        >
-          <Settings className="h-4 w-4" />
-          Settings
-        </Button>
+      <div className="glass-subtle flex h-full w-64 flex-col border-r">
+        {sidebarTab === "chats" && <ChatsPanel />}
+        {sidebarTab === "spaces" && <SpacesPanel />}
+        {sidebarTab === "snippets" && <SnippetsPanel />}
       </div>
     </aside>
   );
 }
 
-function ChatList({
-  groups,
-  activeId,
-  onSelect,
-  empty,
-}: {
-  groups: Record<string, Session[]>;
-  activeId: string | null;
-  onSelect: (id: string) => void;
-  empty: boolean;
-}) {
-  const [expanded, setExpanded] = useState(true);
-  const totalCount = Object.values(groups).reduce((n, arr) => n + arr.length, 0);
+// ---------------------------------------------------------------------------
+// Left icon rail — tabs + Settings pinned at the bottom.
+// ---------------------------------------------------------------------------
 
+const RAIL_TABS: { value: SidebarTab; label: string; icon: typeof MessageSquare }[] = [
+  { value: "chats", label: "Chats", icon: MessageSquare },
+  { value: "spaces", label: "Spaces", icon: Layers },
+  { value: "snippets", label: "Snippets", icon: Sparkles },
+];
+
+function IconRail({
+  activeTab,
+  onSelectTab,
+  onToggleSidebar,
+  onOpenSettings,
+  collapsed = false,
+}: {
+  activeTab: SidebarTab;
+  onSelectTab: (tab: SidebarTab) => void;
+  onToggleSidebar: () => void;
+  onOpenSettings: () => void;
+  collapsed?: boolean;
+}) {
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex items-center justify-between px-3 py-1">
-        <button
-          onClick={() => setExpanded(!expanded)}
-          className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-foreground/35 hover:text-foreground/60 transition-colors"
+    <div className="glass-subtle flex h-full w-20 flex-col items-stretch border-r py-2">
+      <div className="mb-1 flex justify-center">
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={onToggleSidebar}
+          aria-label={collapsed ? "Open sidebar" : "Collapse sidebar"}
+          className="rounded-xl text-foreground/70 hover:bg-foreground/10 hover:text-foreground"
         >
-          {expanded ? (
-            <ChevronDown className="h-3 w-3" />
+          {collapsed ? (
+            <PanelLeftOpen className="h-4 w-4" />
           ) : (
-            <ChevronRight className="h-3 w-3" />
+            <PanelLeftClose className="h-4 w-4" />
           )}
-          <MessageSquare className="h-3 w-3" />
-          Chats
-          {totalCount > 0 && (
-            <span className="ml-0.5 text-foreground/25">{totalCount}</span>
-          )}
-        </button>
+        </Button>
       </div>
-      {expanded && (
-        <ScrollArea className="flex-1 px-2">
-          <ul className="space-y-0.5 pb-4">
-            {(() => {
-              const all = [...groups.today, ...groups.yesterday, ...groups.week, ...groups.older];
-              const pinned = all.filter((s) => s.pinned_at).sort((a, b) => (b.pinned_at ?? 0) - (a.pinned_at ?? 0));
-              const unpinned = all.filter((s) => !s.pinned_at);
-              return [...pinned, ...unpinned];
-            })().map((s) => (
-              <SessionRow
-                key={s.id}
-                session={s}
-                active={s.id === activeId}
-                onSelect={onSelect}
-              />
-            ))}
-            {empty && (
-              <p className="px-3 text-xs text-foreground/40">
-                No chats yet. Click "New chat" to start.
-              </p>
-            )}
-          </ul>
-        </ScrollArea>
-      )}
+
+      <nav className="flex flex-1 flex-col items-stretch gap-0.5 px-2">
+        {RAIL_TABS.map(({ value, label, icon: Icon }) => (
+          <RailButton
+            key={value}
+            icon={<Icon className="h-5 w-5" />}
+            label={label}
+            active={activeTab === value}
+            onClick={() => onSelectTab(value)}
+          />
+        ))}
+      </nav>
+
+      <div className="mt-1 flex flex-col items-stretch gap-0.5 border-t border-foreground/5 px-2 pt-2">
+        <RailButton
+          icon={<Settings className="h-5 w-5" />}
+          label="Settings"
+          active={false}
+          onClick={onOpenSettings}
+        />
+      </div>
     </div>
   );
 }
 
+function RailButton({
+  icon,
+  label,
+  active,
+  onClick,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={cn(
+        "flex flex-col items-center gap-1 rounded-xl py-2 text-[10px] font-medium leading-none transition-colors",
+        "text-foreground/60 hover:bg-foreground/[0.07] hover:text-foreground",
+        active && "bg-foreground/[0.10] text-foreground",
+      )}
+    >
+      <span className="flex h-6 w-6 items-center justify-center">{icon}</span>
+      <span className="tracking-tight">{label}</span>
+    </button>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Chats panel — list of sessions with "+ New chat" at top.
+// ---------------------------------------------------------------------------
+
+function ChatsPanel() {
+  const sessions = useChatStore((s) => s.sessions);
+  const activeId = useChatStore((s) => s.activeSessionId);
+  const select = useChatStore((s) => s.selectSession);
+  const newSession = useChatStore((s) => s.newSession);
+  const setViewingSpace = useSpaceStore((s) => s.setViewingSpace);
+
+  const visible = useMemo(
+    () =>
+      sessions
+        // Archived chats live in Settings → Archive. Hide them here.
+        .filter((s) => !s.archived_at),
+    [sessions],
+  );
+
+  // Split pinned from the rest; the relativeDay groupings keep a visual
+  // rhythm users know from the old sidebar.
+  const { pinned, groups, empty } = useMemo(() => {
+    const pinnedArr = visible
+      .filter((s) => s.pinned_at)
+      .sort((a, b) => (b.pinned_at ?? 0) - (a.pinned_at ?? 0));
+    const rest = visible.filter((s) => !s.pinned_at);
+    const gs: Record<string, Session[]> = {
+      today: [],
+      yesterday: [],
+      week: [],
+      older: [],
+    };
+    for (const s of rest) gs[relativeDay(s.updated_at)].push(s);
+    return {
+      pinned: pinnedArr,
+      groups: gs,
+      empty: visible.length === 0,
+    };
+  }, [visible]);
+
+  const handleNewChat = () => {
+    setViewingSpace(null);
+    void newSession({ spaceId: null });
+  };
+
+  const handleSelect = (id: string) => {
+    setViewingSpace(null);
+    void select(id);
+  };
+
+  return (
+    <>
+      <PanelHeader title="Chats">
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={handleNewChat}
+          aria-label="New chat"
+          title="New chat"
+          className="h-7 w-7 rounded-lg text-foreground/60 hover:bg-foreground/10 hover:text-foreground"
+        >
+          <Plus className="h-4 w-4" />
+        </Button>
+      </PanelHeader>
+
+      <ScrollArea className="flex-1 px-2 pb-2">
+        {empty && (
+          <p className="px-3 py-2 text-xs text-foreground/40">
+            No chats yet. Click "+" to start.
+          </p>
+        )}
+        {pinned.length > 0 && (
+          <GroupedList label="Pinned" sessions={pinned} activeId={activeId} onSelect={handleSelect} />
+        )}
+        {groups.today.length > 0 && (
+          <GroupedList label="Today" sessions={groups.today} activeId={activeId} onSelect={handleSelect} />
+        )}
+        {groups.yesterday.length > 0 && (
+          <GroupedList label="Yesterday" sessions={groups.yesterday} activeId={activeId} onSelect={handleSelect} />
+        )}
+        {groups.week.length > 0 && (
+          <GroupedList label="This week" sessions={groups.week} activeId={activeId} onSelect={handleSelect} />
+        )}
+        {groups.older.length > 0 && (
+          <GroupedList label="Older" sessions={groups.older} activeId={activeId} onSelect={handleSelect} />
+        )}
+      </ScrollArea>
+    </>
+  );
+}
+
+function GroupedList({
+  label,
+  sessions,
+  activeId,
+  onSelect,
+}: {
+  label: string;
+  sessions: Session[];
+  activeId: string | null;
+  onSelect: (id: string) => void;
+}) {
+  return (
+    <div className="mb-1">
+      <div className="px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-foreground/35">
+        {label}
+      </div>
+      <ul className="space-y-0.5">
+        {sessions.map((s) => (
+          <SessionRow
+            key={s.id}
+            session={s}
+            active={s.id === activeId}
+            onSelect={onSelect}
+          />
+        ))}
+      </ul>
+    </div>
+  );
+}
 
 function SessionRow({
   session,
@@ -349,11 +354,13 @@ function SessionRow({
         )}
         <span className="min-w-0 flex-1 truncate">{session.title}</span>
         {/* Fade overlay under the "..." button on hover or when menu is open */}
-        <span className={cn(
-          "pointer-events-none absolute right-0 top-0 h-full w-12 bg-gradient-to-l to-transparent transition-opacity",
-          active ? "from-foreground/[0.10]" : "from-foreground/[0.07]",
-          (menuOpen) ? "opacity-100" : "opacity-0 group-hover:opacity-100",
-        )} />
+        <span
+          className={cn(
+            "pointer-events-none absolute right-0 top-0 h-full w-12 bg-gradient-to-l to-transparent transition-opacity",
+            active ? "from-foreground/[0.10]" : "from-foreground/[0.07]",
+            menuOpen ? "opacity-100" : "opacity-0 group-hover:opacity-100",
+          )}
+        />
         <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
           <DropdownMenuTrigger asChild>
             <button
@@ -367,16 +374,17 @@ function SessionRow({
               <MoreHorizontal className="h-4 w-4" />
             </button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent
-            align="end"
-            onClick={(e) => e.stopPropagation()}
-          >
+          <DropdownMenuContent align="end" onClick={(e) => e.stopPropagation()}>
             <DropdownMenuLabel>Chat</DropdownMenuLabel>
             <DropdownMenuItem onSelect={() => pinChat(session.id, !session.pinned_at)}>
               {session.pinned_at ? (
-                <><PinOff className="h-4 w-4" /> Unpin</>
+                <>
+                  <PinOff className="h-4 w-4" /> Unpin
+                </>
               ) : (
-                <><Pin className="h-4 w-4" /> Pin this chat</>
+                <>
+                  <Pin className="h-4 w-4" /> Pin this chat
+                </>
               )}
             </DropdownMenuItem>
             <DropdownMenuItem onSelect={() => setEditing(true)}>
@@ -393,9 +401,7 @@ function SessionRow({
               <FileJson className="h-4 w-4" /> Export as JSON
             </DropdownMenuItem>
             <DropdownMenuSeparator />
-            <DropdownMenuItem
-              onSelect={() => void archiveChat(session.id, true)}
-            >
+            <DropdownMenuItem onSelect={() => void archiveChat(session.id, true)}>
               <Archive className="h-4 w-4" /> Move to Archive
             </DropdownMenuItem>
             <DropdownMenuItem
@@ -409,5 +415,256 @@ function SessionRow({
         <Download className="hidden h-4 w-4" />
       </div>
     </li>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Spaces panel — lists all spaces, click opens the SpaceView.
+// ---------------------------------------------------------------------------
+
+function SpacesPanel() {
+  const spaces = useSpaceStore((s) => s.spaces);
+  const viewingSpaceId = useSpaceStore((s) => s.viewingSpaceId);
+  const setViewingSpace = useSpaceStore((s) => s.setViewingSpace);
+  const setFormOpen = useSpaceStore((s) => s.setSpaceFormOpen);
+  const removeSpace = useSpaceStore((s) => s.deleteSpace);
+
+  return (
+    <>
+      <PanelHeader title="Spaces">
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={() => setFormOpen(true)}
+          aria-label="New space"
+          title="New space"
+          className="h-7 w-7 rounded-lg text-foreground/60 hover:bg-foreground/10 hover:text-foreground"
+        >
+          <Plus className="h-4 w-4" />
+        </Button>
+      </PanelHeader>
+
+      <ScrollArea className="flex-1 px-2 pb-2">
+        {spaces.length === 0 && (
+          <p className="px-3 py-2 text-xs text-foreground/40">
+            No spaces yet. Click "+" to create one.
+          </p>
+        )}
+        <ul className="space-y-0.5">
+          {spaces.map((space) => (
+            <SpaceRow
+              key={space.id}
+              space={space}
+              active={space.id === viewingSpaceId}
+              onOpen={() => setViewingSpace(space.id)}
+              onDelete={() => void removeSpace(space.id)}
+            />
+          ))}
+        </ul>
+      </ScrollArea>
+    </>
+  );
+}
+
+function SpaceRow({
+  space,
+  active,
+  onOpen,
+  onDelete,
+}: {
+  space: Space;
+  active: boolean;
+  onOpen: () => void;
+  onDelete: () => void;
+}) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  return (
+    <li>
+      <div
+        className={cn(
+          "group relative flex items-center rounded-2xl px-3 py-2 text-[13px] text-foreground/70 cursor-pointer transition-colors hover:bg-foreground/[0.07] hover:text-foreground overflow-hidden",
+          active && "bg-foreground/[0.10] text-foreground",
+        )}
+        onClick={onOpen}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          setMenuOpen(true);
+        }}
+      >
+        <Layers className="mr-1.5 h-3 w-3 shrink-0 text-foreground/35" />
+        <span className="min-w-0 flex-1 truncate">{space.name}</span>
+        <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
+          <DropdownMenuTrigger asChild>
+            <button
+              className={cn(
+                "absolute right-1 top-1/2 -translate-y-1/2 rounded p-1 hover:bg-foreground/10 transition-opacity z-10",
+                menuOpen ? "opacity-100" : "opacity-0 group-hover:opacity-100",
+              )}
+              onClick={(e) => e.stopPropagation()}
+              aria-label="Space actions"
+            >
+              <MoreHorizontal className="h-4 w-4" />
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" onClick={(e) => e.stopPropagation()}>
+            <DropdownMenuItem onSelect={onOpen}>
+              <Pencil className="h-4 w-4" /> Open / edit
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              onSelect={onDelete}
+              className="text-destructive focus:text-destructive"
+            >
+              <Trash2 className="h-4 w-4" /> Delete
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
+    </li>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Snippets panel — lists saved prompts, click runs into a fresh chat.
+// ---------------------------------------------------------------------------
+
+function SnippetsPanel() {
+  const snippets = useSnippetStore((s) => s.snippets);
+  const openDialog = useSnippetStore((s) => s.openDialog);
+  const remove = useSnippetStore((s) => s.remove);
+  const newSession = useChatStore((s) => s.newSession);
+  const setViewingSpace = useSpaceStore((s) => s.setViewingSpace);
+  const primeComposer = useUIStore((s) => s.primeComposer);
+
+  const runSnippet = async (snippet: Snippet) => {
+    setViewingSpace(null);
+    await newSession({
+      spaceId: null,
+      provider: snippet.provider ?? undefined,
+      model: snippet.model ?? undefined,
+    });
+    primeComposer(snippet.prompt, []);
+  };
+
+  return (
+    <>
+      <PanelHeader title="Snippets">
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={() => openDialog("new")}
+          aria-label="New snippet"
+          title="New snippet"
+          className="h-7 w-7 rounded-lg text-foreground/60 hover:bg-foreground/10 hover:text-foreground"
+        >
+          <Plus className="h-4 w-4" />
+        </Button>
+      </PanelHeader>
+
+      <ScrollArea className="flex-1 px-2 pb-2">
+        {snippets.length === 0 && (
+          <p className="px-3 py-2 text-xs text-foreground/40">
+            No snippets yet. Click "+" to save a reusable prompt.
+          </p>
+        )}
+        <ul className="space-y-0.5">
+          {snippets.map((snippet) => (
+            <SnippetRow
+              key={snippet.id}
+              snippet={snippet}
+              onRun={() => void runSnippet(snippet)}
+              onEdit={() => openDialog(snippet)}
+              onDelete={() => void remove(snippet.id)}
+            />
+          ))}
+        </ul>
+      </ScrollArea>
+    </>
+  );
+}
+
+function SnippetRow({
+  snippet,
+  onRun,
+  onEdit,
+  onDelete,
+}: {
+  snippet: Snippet;
+  onRun: () => void;
+  onEdit: () => void;
+  onDelete: () => void;
+}) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  return (
+    <li>
+      <div
+        className="group relative flex items-center rounded-2xl px-3 py-2 text-[13px] text-foreground/70 cursor-pointer transition-colors hover:bg-foreground/[0.07] hover:text-foreground overflow-hidden"
+        onClick={onRun}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          setMenuOpen(true);
+        }}
+        title={snippet.prompt}
+      >
+        <Sparkles className="mr-1.5 h-3 w-3 shrink-0 text-foreground/35" />
+        <div className="flex min-w-0 flex-1 flex-col">
+          <span className="truncate">{snippet.title}</span>
+          {snippet.provider && snippet.model && (
+            <span className="mt-0.5 flex items-center gap-1 truncate text-[10px] text-foreground/40">
+              <Cpu className="h-2.5 w-2.5" />
+              {snippet.model}
+            </span>
+          )}
+        </div>
+        <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
+          <DropdownMenuTrigger asChild>
+            <button
+              className={cn(
+                "absolute right-1 top-1/2 -translate-y-1/2 rounded p-1 hover:bg-foreground/10 transition-opacity z-10",
+                menuOpen ? "opacity-100" : "opacity-0 group-hover:opacity-100",
+              )}
+              onClick={(e) => e.stopPropagation()}
+              aria-label="Snippet actions"
+            >
+              <MoreHorizontal className="h-4 w-4" />
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" onClick={(e) => e.stopPropagation()}>
+            <DropdownMenuItem onSelect={onRun}>
+              <Play className="h-4 w-4" /> Run
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={onEdit}>
+              <Pencil className="h-4 w-4" /> Edit
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              onSelect={onDelete}
+              className="text-destructive focus:text-destructive"
+            >
+              <Trash2 className="h-4 w-4" /> Delete
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
+    </li>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Shared panel header.
+// ---------------------------------------------------------------------------
+
+function PanelHeader({
+  title,
+  children,
+}: {
+  title: string;
+  children?: React.ReactNode;
+}) {
+  return (
+    <div className="flex items-center justify-between px-3 py-3">
+      <h2 className="text-sm font-semibold tracking-tight text-foreground/85">
+        {title}
+      </h2>
+      <div className="flex items-center gap-1">{children}</div>
+    </div>
   );
 }

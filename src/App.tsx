@@ -9,10 +9,7 @@ import { SettingsDialog } from "@/components/SettingsDialog";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { SpaceForm } from "@/components/SpaceForm";
 import { SpaceView } from "@/components/SpaceView";
-import { SnippetsView } from "@/components/SnippetsView";
 import { SnippetDialog } from "@/components/SnippetDialog";
-import { ArchiveView } from "@/components/ArchiveView";
-import { SpacesView } from "@/components/SpacesView";
 import { useChatStore } from "@/stores/chatStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useSnippetStore } from "@/stores/snippetStore";
@@ -30,9 +27,6 @@ export default function App() {
   const hydrateSnippets = useSnippetStore((s) => s.hydrate);
   const backgroundStyle = useSettingsStore((s) => s.background_style);
   const viewingSpaceId = useSpaceStore((s) => s.viewingSpaceId);
-  const viewingSnippets = useUIStore((s) => s.viewingSnippets);
-  const viewingArchive = useUIStore((s) => s.viewingArchive);
-  const viewingSpacesList = useUIStore((s) => s.viewingSpacesList);
   const session = useChatStore((s) =>
     s.activeSessionId ? s.sessions.find((x) => x.id === s.activeSessionId) : undefined,
   );
@@ -65,14 +59,8 @@ export default function App() {
         <TitleBar />
         <div className="flex min-h-0 flex-1">
           <Sidebar />
-          {viewingArchive ? (
-            <ArchiveView />
-          ) : viewingSnippets ? (
-            <SnippetsView />
-          ) : viewingSpaceId ? (
+          {viewingSpaceId ? (
             <SpaceView />
-          ) : viewingSpacesList ? (
-            <SpacesView />
           ) : (
             <>
               <main className="relative flex min-w-0 flex-1 flex-col">

@@ -36,7 +36,7 @@ export function SpaceView() {
   const sessions = useChatStore((s) => s.sessions);
   const selectSession = useChatStore((s) => s.selectSession);
   const newSession = useChatStore((s) => s.newSession);
-  const setViewingSpacesList = useUIStore((s) => s.setViewingSpacesList);
+  const setSidebarTab = useUIStore((s) => s.setSidebarTab);
 
   const space = spaces.find((s) => s.id === viewingSpaceId);
 
@@ -73,10 +73,10 @@ export function SpaceView() {
   if (!space) return null;
 
   const handleBack = () => {
-    // "← All spaces" surfaces the full spaces browser rather than falling
-    // back to the default chat view.
+    // Back out of the space-detail view and drop the user onto the Spaces
+    // tab of the sidebar so they see the list they came from.
     setViewingSpace(null);
-    setViewingSpacesList(true);
+    setSidebarTab("spaces");
   };
 
   const handleSaveName = async () => {
