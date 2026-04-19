@@ -62,10 +62,11 @@ export function TitleBar() {
         <span className="text-xs font-medium tracking-wide text-foreground/80">Loach</span>
       </div>
 
-      {/* Center — global search. Centered via the two flex-1 spacers on
-          each side so the input stays optically middle regardless of the
-          left/right block widths. */}
-      <div className="flex min-w-0 flex-1 items-center justify-center">
+      {/* Center — global search. The outer flex spacer is pointer-events-none
+          so empty gaps next to the search bar stay part of the drag region
+          (drag + double-click-to-maximize keep working); the SearchBar itself
+          re-enables pointer events on its own root. */}
+      <div className="pointer-events-none flex min-w-0 flex-1 items-center justify-center">
         <SearchBar />
       </div>
 

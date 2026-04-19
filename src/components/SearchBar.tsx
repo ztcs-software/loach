@@ -247,7 +247,14 @@ export function SearchBar() {
   const headerLabel = query.trim() ? "Results" : "Suggestions";
 
   return (
-    <div ref={rootRef} className="relative w-full max-w-md">
+    // pointer-events-auto: the TitleBar wrapper is pointer-events-none so
+    // its empty space keeps behaving as a Tauri drag region (click-to-drag,
+    // double-click-to-maximize). Re-enable events here so the search input
+    // itself stays focusable/clickable.
+    <div
+      ref={rootRef}
+      className="pointer-events-auto relative w-full max-w-md"
+    >
       <div
         className={cn(
           "flex h-7 items-center gap-2 rounded-full border border-foreground/10 bg-foreground/[0.05] px-3 transition-colors",
