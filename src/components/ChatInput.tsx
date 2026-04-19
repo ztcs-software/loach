@@ -71,34 +71,62 @@ export function ChatInput({ centered = false }: ChatInputProps) {
     el.style.height = `${Math.min(el.scrollHeight, 220)}px`;
   }, [text]);
 
-  // Drag-and-drop on the whole window
+  // ------- Drag-and-drop from the OS file manager --------------------------
+  //
+  // Reliable enter/leave tracking needs a counter: browsers fire `dragenter`
+  // on the new element AND `dragleave` on the old one each time the pointer
+  // crosses a boundary, so a plain on/off flag flickers. We increment on
+  // enter, decrement on leave, and only flip `dragging` when the counter
+  // hits 0 or 1.
+  //
+  // Tauri requires `dragDropEnabled: false` in tauri.conf.json — otherwise
+  // the native OS handler eats the drop before it reaches the webview and
+  // these listeners never fire with real files.
   useEffect(() => {
+    let depth = 0;
+
+    const hasFiles = (e: DragEvent) =>
+      !!e.dataTransfer && e.dataTransfer.types.includes("Files");
+
+    const onDragEnter = (e: DragEvent) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      depth += 1;
+      if (depth === 1) setDragging(true);
+    };
     const onDragOver = (e: DragEvent) => {
-      if (e.dataTransfer?.types.includes("Files")) {
-        e.preventDefault();
-        setDragging(true);
-      }
+      if (!hasFiles(e)) return;
+      // Must preventDefault on dragover for the subsequent `drop` event to
+      // fire. Setting the dropEffect here also changes the OS cursor to the
+      // "copy" affordance.
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
     };
     const onDragLeave = (e: DragEvent) => {
-      if ((e as DragEvent).clientX === 0 && (e as DragEvent).clientY === 0) {
-        setDragging(false);
-      }
+      if (!hasFiles(e)) return;
+      depth = Math.max(0, depth - 1);
+      if (depth === 0) setDragging(false);
     };
     const onDrop = async (e: DragEvent) => {
-      if (!e.dataTransfer?.files?.length) return;
+      if (!hasFiles(e)) return;
       e.preventDefault();
+      depth = 0;
       setDragging(false);
-      await ingest(Array.from(e.dataTransfer.files));
+      const files = e.dataTransfer?.files;
+      if (files && files.length) await ingest(Array.from(files));
     };
+
+    window.addEventListener("dragenter", onDragEnter);
     window.addEventListener("dragover", onDragOver);
     window.addEventListener("dragleave", onDragLeave);
     window.addEventListener("drop", onDrop);
     return () => {
+      window.removeEventListener("dragenter", onDragEnter);
       window.removeEventListener("dragover", onDragOver);
       window.removeEventListener("dragleave", onDragLeave);
       window.removeEventListener("drop", onDrop);
     };
-  });
+  }, []);
 
   const ingest = async (files: File[]) => {
     setError(null);
@@ -187,11 +215,6 @@ export function ChatInput({ centered = false }: ChatInputProps) {
         centered ? "py-0" : "pb-5 pt-3",
       )}
     >
-      {dragging && (
-        <div className="pointer-events-none absolute inset-2 z-10 flex items-center justify-center rounded-3xl border-2 border-dashed border-orange-300/60 bg-orange-400/10 text-sm text-orange-100 backdrop-blur-md">
-          <FileUp className="mr-2 h-4 w-4" /> Drop files to attach
-        </div>
-      )}
       <div className="mx-auto w-full max-w-3xl">
         {/* Small "Stop generating" pill above the composer, shown only when
             THIS chat is the one currently streaming. The waiting-banner in
@@ -210,7 +233,24 @@ export function ChatInput({ centered = false }: ChatInputProps) {
             ))}
           </div>
         )}
-        <div className="glass-prompt flex items-end gap-2 rounded-[28px] px-4 py-3 transition-all">
+        <div
+          className={cn(
+            "glass-prompt relative flex items-end gap-2 rounded-[28px] px-4 py-3 transition-all",
+            dragging && "drop-zone-target",
+          )}
+        >
+          {/* Drag hint — rendered only while the user is dragging files.
+              Sits over the textarea row with `pointer-events-none` so the
+              window-level `drop` handler still sees the event. Colors are
+              theme-aware: deep orange on light (contrasts white glass),
+              pale orange on dark (contrasts dark glass). */}
+          {dragging && (
+            <div className="drop-zone-hint pointer-events-none absolute inset-0 flex items-center justify-center gap-2 rounded-[28px] text-sm font-semibold text-orange-700 dark:text-orange-100">
+              <FileUp className="h-4 w-4" strokeWidth={2.25} />
+              <span>Drop files here to attach</span>
+            </div>
+          )}
+
           <Button
             type="button"
             variant="ghost"
@@ -235,7 +275,10 @@ export function ChatInput({ centered = false }: ChatInputProps) {
             onChange={(e) => setText(e.target.value)}
             onKeyDown={onKeyDown}
             placeholder={placeholder}
-            className="min-h-[28px] max-h-[220px] flex-1 resize-none border-none bg-transparent backdrop-blur-none px-1 py-1.5 text-[15px] leading-relaxed text-foreground placeholder:text-foreground/40 shadow-none ring-0 outline-none focus-visible:ring-0 focus-visible:border-none focus-visible:outline-none focus-visible:bg-transparent rounded-none scrollbar-hidden"
+            className={cn(
+              "min-h-[28px] max-h-[220px] flex-1 resize-none border-none bg-transparent backdrop-blur-none px-1 py-1.5 text-[15px] leading-relaxed text-foreground placeholder:text-foreground/40 shadow-none ring-0 outline-none focus-visible:ring-0 focus-visible:border-none focus-visible:outline-none focus-visible:bg-transparent rounded-none scrollbar-hidden transition-opacity",
+              dragging && "opacity-0",
+            )}
             rows={1}
           />
           <Button
@@ -295,3 +338,4 @@ function StopPill() {
     </div>
   );
 }
+

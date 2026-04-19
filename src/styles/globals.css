@@ -35,6 +35,15 @@
     --glass-highlight: 0.90;
     --glass-shadow: 0 20px 60px -22px rgba(24, 18, 44, 0.22);
     --prompt-glow: 0 10px 40px -8px rgba(255, 110, 50, 0.18);
+
+    /* File-drop highlight (light): deeper orange — the near-white glass
+       washes out pastel oranges, so we go saturated with a coloured border
+       instead of a glow. */
+    --drop-border-strong: hsl(18 92% 48% / 0.85);
+    --drop-ring-soft:     hsl(18 92% 48% / 0.45);
+    --drop-ring-strong:   hsl(14 92% 45% / 0.75);
+    --drop-glow-soft:     rgba(230, 80, 30, 0.30);
+    --drop-glow-strong:   rgba(230, 80, 30, 0.45);
   }
 
   .dark {
@@ -67,6 +76,14 @@
     --glass-highlight: 0.14;
     --glass-shadow: 0 30px 80px -20px rgba(0, 0, 0, 0.70);
     --prompt-glow: 0 10px 40px -8px rgba(255, 110, 50, 0.28);
+
+    /* File-drop highlight (dark): warmer / lighter orange since the dark
+       glass swallows saturated reds. Stronger glow, softer ring. */
+    --drop-border-strong: hsl(25 95% 65% / 0.60);
+    --drop-ring-soft:     hsl(25 95% 65% / 0.35);
+    --drop-ring-strong:   hsl(30 100% 72% / 0.65);
+    --drop-glow-soft:     rgba(255, 110, 50, 0.45);
+    --drop-glow-strong:   rgba(255, 130, 60, 0.70);
   }
 
   * {
@@ -252,6 +269,48 @@
   .chip-glass:hover {
     background: rgb(var(--glass-tint) / var(--glass-surface-a));
     border-color: hsl(var(--foreground) / 0.22);
+  }
+
+  /* --- File drop highlight -----------------------------------------------
+     Applied to the prompt bar (and the hint that sits inside it) only while
+     the user is dragging real OS files over the window. Kept contained to
+     the composer — no viewport-wide overlay.
+
+     Theme-aware via the three --drop-* vars defined on :root / .dark above. */
+
+  .drop-zone-target {
+    border-color: var(--drop-border-strong) !important;
+    animation: drop-bar-breathe 1.8s ease-in-out infinite;
+  }
+
+  .drop-zone-hint {
+    animation: drop-hint-in 160ms ease-out both;
+  }
+}
+
+@keyframes drop-bar-breathe {
+  0%, 100% {
+    box-shadow:
+      0 0 0 1px var(--drop-ring-soft),
+      0 1px 0 0 rgb(255 255 255 / var(--glass-highlight)) inset,
+      0 10px 40px -10px var(--drop-glow-soft);
+  }
+  50% {
+    box-shadow:
+      0 0 0 2px var(--drop-ring-strong),
+      0 1px 0 0 rgb(255 255 255 / var(--glass-highlight)) inset,
+      0 14px 56px -10px var(--drop-glow-strong);
+  }
+}
+
+@keyframes drop-hint-in {
+  from {
+    opacity: 0;
+    transform: translateY(2px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
   }
 }
 
