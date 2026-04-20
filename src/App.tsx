@@ -10,7 +10,9 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { SpaceForm } from "@/components/SpaceForm";
 import { SpaceView } from "@/components/SpaceView";
 import { SnippetDialog } from "@/components/SnippetDialog";
+import { ModelsView } from "@/components/ModelsView";
 import { useChatStore } from "@/stores/chatStore";
+import { useModelsStore } from "@/stores/modelsStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useSnippetStore } from "@/stores/snippetStore";
 import { useSpaceStore } from "@/stores/spaceStore";
@@ -25,8 +27,10 @@ export default function App() {
   const hydrateChats = useChatStore((s) => s.hydrate);
   const hydrateSpaces = useSpaceStore((s) => s.hydrate);
   const hydrateSnippets = useSnippetStore((s) => s.hydrate);
+  const hydrateModels = useModelsStore((s) => s.hydrate);
   const backgroundStyle = useSettingsStore((s) => s.background_style);
   const viewingSpaceId = useSpaceStore((s) => s.viewingSpaceId);
+  const viewingModel = useModelsStore((s) => s.viewingModel);
   const session = useChatStore((s) =>
     s.activeSessionId ? s.sessions.find((x) => x.id === s.activeSessionId) : undefined,
   );
@@ -41,8 +45,11 @@ export default function App() {
       await hydrateSpaces();
       await hydrateSnippets();
       await hydrateChats();
+      // Model list is cheap (one Ollama /api/tags call) but network-bound, so
+      // fire it last — failure here shouldn't block the rest of the UI.
+      await hydrateModels();
     })();
-  }, [hydrateSettings, hydrateSpaces, hydrateSnippets, hydrateChats]);
+  }, [hydrateSettings, hydrateSpaces, hydrateSnippets, hydrateChats, hydrateModels]);
 
   return (
     <TooltipProvider delayDuration={250}>
@@ -61,6 +68,8 @@ export default function App() {
           <Sidebar />
           {viewingSpaceId ? (
             <SpaceView />
+          ) : viewingModel ? (
+            <ModelsView />
           ) : (
             <>
               <main className="relative flex min-w-0 flex-1 flex-col">

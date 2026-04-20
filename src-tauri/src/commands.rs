@@ -247,6 +247,136 @@ pub async fn ollama_unload_model(
         .map_err(err)
 }
 
+// ------------ ollama model admin ------------
+//
+// Everything below is used by the Models panel: inspect a model, delete it,
+// duplicate it, pull a new one from the registry, or create a derived model
+// with a customized Modelfile (system prompt / template / parameters).
+//
+// Create & pull stream progress frames on the `admin://{stream_id}` channel
+// using the same StreamRegistry as chat so cancellation is uniform.
+
+#[tauri::command]
+pub async fn ollama_show_model(
+    state: State<'_, AppState>,
+    base_url: String,
+    name: String,
+) -> Result<providers::ollama::OllamaShowResponse, String> {
+    providers::ollama::show_model(&state.http, &base_url, &name)
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
+pub async fn ollama_delete_model(
+    state: State<'_, AppState>,
+    base_url: String,
+    name: String,
+) -> Result<(), String> {
+    providers::ollama::delete_model(&state.http, &base_url, &name)
+        .await
+        .map_err(err)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OllamaCopyArgs {
+    pub base_url: String,
+    pub source: String,
+    pub destination: String,
+}
+
+#[tauri::command]
+pub async fn ollama_copy_model(
+    state: State<'_, AppState>,
+    args: OllamaCopyArgs,
+) -> Result<(), String> {
+    providers::ollama::copy_model(&state.http, &args.base_url, &args.source, &args.destination)
+        .await
+        .map_err(err)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OllamaPullArgs {
+    pub base_url: String,
+    pub name: String,
+    /// Frontend-supplied stream id so the UI can `listen()` on
+    /// `admin://{stream_id}` before the task emits its first frame.
+    pub stream_id: String,
+}
+
+#[tauri::command]
+pub async fn ollama_pull_model(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    args: OllamaPullArgs,
+) -> Result<StreamHandle, String> {
+    let stream_id = if args.stream_id.is_empty() {
+        Uuid::new_v4().to_string()
+    } else {
+        args.stream_id
+    };
+    let http = state.http.clone();
+    let registry = state.streams.clone();
+    let sid = stream_id.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(e) =
+            providers::ollama::pull_model(app, http, registry, &args.base_url, &args.name, sid)
+                .await
+        {
+            tracing::warn!("ollama pull ended with error: {e:?}");
+        }
+    });
+    Ok(StreamHandle { stream_id })
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OllamaCreateArgs {
+    pub base_url: String,
+    pub name: String,
+    pub modelfile: String,
+    pub stream_id: String,
+}
+
+#[tauri::command]
+pub async fn ollama_create_model(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    args: OllamaCreateArgs,
+) -> Result<StreamHandle, String> {
+    let stream_id = if args.stream_id.is_empty() {
+        Uuid::new_v4().to_string()
+    } else {
+        args.stream_id
+    };
+    let http = state.http.clone();
+    let registry = state.streams.clone();
+    let sid = stream_id.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(e) = providers::ollama::create_model(
+            app,
+            http,
+            registry,
+            &args.base_url,
+            &args.name,
+            &args.modelfile,
+            sid,
+        )
+        .await
+        {
+            tracing::warn!("ollama create ended with error: {e:?}");
+        }
+    });
+    Ok(StreamHandle { stream_id })
+}
+
+/// Cancel an in-flight admin stream (pull / create). Same registry as chat,
+/// but a named-aliased command so the frontend's intent is obvious.
+#[tauri::command]
+pub async fn admin_cancel(state: State<'_, AppState>, stream_id: String) -> Result<(), String> {
+    state.streams.cancel(&stream_id);
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn openai_list_models(
     state: State<'_, AppState>,

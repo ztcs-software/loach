@@ -51,3 +51,33 @@ pub enum StreamEvent {
 pub fn event_channel(stream_id: &str) -> String {
     format!("chat://{stream_id}")
 }
+
+/// Event channel used by long-running model-admin operations (pull / create).
+/// Kept separate from the chat channel so the UI can listen for progress
+/// updates without colliding with a concurrent chat stream that happens to
+/// share the same id space.
+pub fn admin_channel(stream_id: &str) -> String {
+    format!("admin://{stream_id}")
+}
+
+/// Progress frame for model-admin streams. Emitted by Ollama pull / create
+/// endpoints. Fields mirror Ollama's NDJSON keys (`status`, `digest`,
+/// `total`, `completed`). Any of them may be absent depending on which
+/// phase the daemon is reporting.
+#[derive(Debug, Serialize, Clone)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AdminEvent {
+    Progress {
+        status: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        digest: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        total: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        completed: Option<u64>,
+    },
+    Done,
+    Error {
+        message: String,
+    },
+}

@@ -1,11 +1,13 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
+  AdminEvent,
   ChatRequest,
   FetchedPage,
   GenerationParams,
   Message,
   ModelInfo,
+  OllamaShowResponse,
   Session,
   Snippet,
   Space,
@@ -170,6 +172,103 @@ export function ollamaUnloadModel(baseUrl: string, model: string): Promise<void>
 export function openaiListModels(baseUrl: string): Promise<ModelInfo[]> {
   if (!isTauri) return notInTauri([]);
   return invoke("openai_list_models", { baseUrl });
+}
+
+// ------------ ollama model admin ------------
+
+/** `POST /api/show` — returns the Modelfile, template, system prompt,
+ *  parameters, license and model_info for a locally installed Ollama model.
+ *  Used by the Models editor to prefill the form when deriving a new model. */
+export function ollamaShowModel(
+  baseUrl: string,
+  name: string,
+): Promise<OllamaShowResponse> {
+  if (!isTauri)
+    return notInTauri<OllamaShowResponse>({
+      modelfile: null,
+      parameters: null,
+      template: null,
+      system: null,
+      license: null,
+      details: null,
+      model_info: null,
+    });
+  return invoke("ollama_show_model", { baseUrl, name });
+}
+
+/** `DELETE /api/delete` — remove a locally installed model. Irreversible. */
+export function ollamaDeleteModel(baseUrl: string, name: string): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("ollama_delete_model", { baseUrl, name });
+}
+
+/** `POST /api/copy` — duplicate a model under a new tag. */
+export function ollamaCopyModel(args: {
+  base_url: string;
+  source: string;
+  destination: string;
+}): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("ollama_copy_model", { args });
+}
+
+/** `POST /api/pull` — download a model by tag from the registry. Emits
+ *  `AdminEvent` progress frames on `admin://{stream_id}` while running.
+ *  Caller provides the `stream_id` so it can subscribe before starting. */
+export async function ollamaPullModel(
+  args: { base_url: string; name: string; stream_id: string },
+  onEvent: (ev: AdminEvent) => void,
+): Promise<{ streamId: string; stop: () => Promise<void>; unlisten: UnlistenFn }> {
+  if (!isTauri) {
+    return {
+      streamId: args.stream_id,
+      stop: async () => {},
+      unlisten: (() => undefined) as UnlistenFn,
+    };
+  }
+  const channel = `admin://${args.stream_id}`;
+  const unlisten = await listen<AdminEvent>(channel, (payload) =>
+    onEvent(payload.payload),
+  );
+  const handle = await invoke<{ stream_id: string }>("ollama_pull_model", {
+    args,
+  });
+  return {
+    streamId: handle.stream_id,
+    stop: async () => {
+      await invoke("admin_cancel", { streamId: handle.stream_id });
+    },
+    unlisten,
+  };
+}
+
+/** `POST /api/create` — build a new model from a Modelfile. Streams progress
+ *  the same way `ollamaPullModel` does. */
+export async function ollamaCreateModel(
+  args: { base_url: string; name: string; modelfile: string; stream_id: string },
+  onEvent: (ev: AdminEvent) => void,
+): Promise<{ streamId: string; stop: () => Promise<void>; unlisten: UnlistenFn }> {
+  if (!isTauri) {
+    return {
+      streamId: args.stream_id,
+      stop: async () => {},
+      unlisten: (() => undefined) as UnlistenFn,
+    };
+  }
+  const channel = `admin://${args.stream_id}`;
+  const unlisten = await listen<AdminEvent>(channel, (payload) =>
+    onEvent(payload.payload),
+  );
+  const handle = await invoke<{ stream_id: string }>("ollama_create_model", {
+    args,
+  });
+  return {
+    streamId: handle.stream_id,
+    stop: async () => {
+      await invoke("admin_cancel", { streamId: handle.stream_id });
+    },
+    unlisten,
+  };
 }
 
 // ------------ spaces ------------

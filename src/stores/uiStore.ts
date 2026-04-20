@@ -3,7 +3,7 @@ import type { Attachment } from "@/types";
 
 /** Which section of the sidebar's right column is visible. Swapped by the
  *  narrow icon rail on the far left. */
-export type SidebarTab = "chats" | "spaces" | "snippets";
+export type SidebarTab = "chats" | "spaces" | "snippets" | "models";
 
 /** Deep-link target when opening the Settings dialog. "archive" is the new
  *  home for the chat archive (previously a dedicated full-page view). */

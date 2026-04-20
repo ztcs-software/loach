@@ -191,3 +191,78 @@ export interface FetchedPage {
   bytes: number;
   truncated: boolean;
 }
+
+// ---------------------------------------------------------------------------
+// Model admin — Ollama
+// ---------------------------------------------------------------------------
+
+/** Response from `POST /api/show`. Every field is optional because older
+ *  Ollama versions omit some of them and custom-created models may not have
+ *  a template or system prompt baked in. */
+export interface OllamaShowResponse {
+  modelfile: string | null;
+  parameters: string | null;
+  template: string | null;
+  system: string | null;
+  license: string | null;
+  /** Raw `details` sub-object — family, parameter_size, quantization_level,
+   *  format, parent_model. Shape varies by model so we keep it loose. */
+  details: Record<string, unknown> | null;
+  /** `model_info` k/v map (e.g. `general.parameter_count`,
+   *  `llama.context_length`). Shape varies — kept loose on purpose. */
+  model_info: Record<string, unknown> | null;
+}
+
+/** Parameters that can be set in a `PARAMETER …` line of a Modelfile. Only
+ *  the ones we expose in the UI — the full list has more obscure knobs but
+ *  these are the knobs users actually reach for. */
+export interface ModelfileParams {
+  temperature?: number | null;
+  top_p?: number | null;
+  top_k?: number | null;
+  min_p?: number | null;
+  num_ctx?: number | null;
+  num_predict?: number | null;
+  num_batch?: number | null;
+  num_gpu?: number | null;
+  num_thread?: number | null;
+  repeat_penalty?: number | null;
+  repeat_last_n?: number | null;
+  frequency_penalty?: number | null;
+  presence_penalty?: number | null;
+  tfs_z?: number | null;
+  typical_p?: number | null;
+  mirostat?: number | null;
+  mirostat_eta?: number | null;
+  mirostat_tau?: number | null;
+  seed?: number | null;
+  /** Free-form multi-value `PARAMETER stop …` entries. */
+  stop?: string[];
+}
+
+/** Everything the Models editor controls. Maps 1:1 to the Modelfile we POST
+ *  to `/api/create`. `from` is the base model the derived one is built on
+ *  top of (`FROM …` directive). */
+export interface ModelfileForm {
+  /** Tag to save the derived model under, e.g. `my-llama:v1`. */
+  name: string;
+  /** Base model (`FROM …`). */
+  from: string;
+  system: string;
+  template: string;
+  params: ModelfileParams;
+}
+
+/** Event emitted on the `admin://{stream_id}` channel during long-running
+ *  pull / create operations. Mirrors
+ *  `src-tauri/src/stream.rs::AdminEvent`. */
+export type AdminEvent =
+  | {
+      kind: "progress";
+      status: string;
+      digest?: string;
+      total?: number;
+      completed?: number;
+    }
+  | { kind: "done" }
+  | { kind: "error"; message: string };
