@@ -7,6 +7,7 @@ use uuid::Uuid;
 use crate::db::{Message, Session, Snippet, Space, SpaceFile};
 use crate::providers::{self, ChatRequest, ModelInfo};
 use crate::secrets;
+use crate::tools::fetch_url::{self as fetch_url_tool, FetchedPage};
 use crate::AppState;
 
 fn err<E: std::fmt::Display>(e: E) -> String {
@@ -488,4 +489,17 @@ pub async fn chat_stream(
 pub async fn chat_cancel(state: State<'_, AppState>, stream_id: String) -> Result<(), String> {
     state.streams.cancel(&stream_id);
     Ok(())
+}
+
+// ---------- tools ----------
+
+/// Fetch a public URL and return cleaned, bounded text the frontend can
+/// inline into the user's prompt. See [`crate::tools::fetch_url`] for the
+/// hardening details (SSRF guard, timeout, body cap).
+#[tauri::command]
+pub async fn fetch_url(
+    state: State<'_, AppState>,
+    url: String,
+) -> Result<FetchedPage, String> {
+    fetch_url_tool::fetch(&state.http, &url).await
 }

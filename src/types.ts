@@ -161,6 +161,11 @@ export interface Settings {
    *  temporal template variables (`{{CURRENT_DATE}}`, `{{CURRENT_TIME}}`,
    *  `{{CURRENT_WEEKDAY}}`, `{{CURRENT_DATETIME}}`, `{{CURRENT_TIMEZONE}}`). */
   temporal_awareness: boolean;
+  /** When true, URLs detected in the user's prompt are fetched and their
+   *  plain-text content is inlined into the outgoing message. Requires a
+   *  network round-trip per URL — default is off so Loach stays offline-first
+   *  unless the user opts in. */
+  web_fetch_enabled: boolean;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -172,4 +177,17 @@ export const DEFAULT_SETTINGS: Settings = {
   default_provider: "ollama",
   default_model: "",
   temporal_awareness: true,
+  web_fetch_enabled: false,
 };
+
+/** Shape returned by the Rust `fetch_url` command. Kept in sync with
+ *  `src-tauri/src/tools/fetch_url.rs::FetchedPage`. */
+export interface FetchedPage {
+  url: string;
+  final_url: string;
+  title: string | null;
+  text: string;
+  content_type: string;
+  bytes: number;
+  truncated: boolean;
+}

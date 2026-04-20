@@ -5,6 +5,7 @@ import {
   BookOpen,
   Clock,
   Github,
+  Globe,
   Info,
   Layers,
   MessageSquareText,
@@ -198,6 +199,39 @@ export function SettingsDialog() {
                     Stored in your OS credential manager (Windows Credential Manager / Linux Secret Service).
                     Never written to disk in plain text.
                   </p>
+                </div>
+
+                <Separator />
+
+                <div>
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="min-w-0">
+                      <Label className="flex items-center gap-1.5">
+                        <Globe className="h-3.5 w-3.5 text-foreground/60" />
+                        Web fetch
+                      </Label>
+                      <p className="mt-1 text-[11px] text-foreground/50">
+                        When your message contains an{" "}
+                        <span className="font-mono">http(s)://</span> URL,
+                        Loach downloads the page, extracts the readable text,
+                        and appends it to the prompt so the model can read it.
+                        Up to 3 URLs per message, 5&nbsp;MB each, 15&nbsp;s
+                        timeout. Private IPs are blocked.
+                      </p>
+                    </div>
+                    <Button
+                      variant={settings.web_fetch_enabled ? "default" : "outline"}
+                      onClick={() =>
+                        settings.update(
+                          "web_fetch_enabled",
+                          !settings.web_fetch_enabled,
+                        )
+                      }
+                      className="shrink-0"
+                    >
+                      {settings.web_fetch_enabled ? "On" : "Off"}
+                    </Button>
+                  </div>
                 </div>
               </TabsContent>
 

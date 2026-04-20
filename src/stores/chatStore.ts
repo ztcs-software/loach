@@ -20,6 +20,11 @@ import {
 } from "@/lib/files";
 import { applyTemporalAwareness } from "@/lib/temporal";
 import {
+  extractUrls,
+  fetchAll,
+  inlineFetchedPages,
+} from "@/lib/webFetch";
+import {
   DEFAULT_PARAMS,
   type Attachment,
   type ChatMessageIn,
@@ -609,7 +614,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       snap.queue.some((t) => t.sessionId === sessionId);
     if (alreadyBusy) return;
 
-    const inlinedContent = inlineTextAttachments(rawContent, attachments);
+    let inlinedContent = inlineTextAttachments(rawContent, attachments);
     const images = imagesFromAttachments(attachments);
     const attachmentsJson = JSON.stringify(
       attachments.map((a) => ({
@@ -619,6 +624,28 @@ export const useChatStore = create<ChatState>((set, get) => ({
         data: a.data,
       })),
     );
+
+    // Optional web-fetch step: pull plain-text bodies for any http(s) URLs in
+    // the user's raw prompt and append them as fenced blocks so the model has
+    // the page content as prompt context. Silent on failure — a dead link
+    // should never block the send. Off by default; opt-in in Settings.
+    {
+      const s = useSettingsStore.getState();
+      if (s.web_fetch_enabled) {
+        const urls = extractUrls(rawContent);
+        if (urls.length > 0) {
+          try {
+            const outcomes = await fetchAll(urls);
+            inlinedContent = inlineFetchedPages(inlinedContent, outcomes);
+          } catch (e) {
+            // fetchAll itself never throws, but be defensive — a thrown
+            // exception here would eat the whole submit, and we'd rather
+            // send the prompt without the fetched context than not at all.
+            console.warn("web fetch step failed", e);
+          }
+        }
+      }
+    }
 
     // 1. Persist user message.
     const userMsg = await appendMessage({

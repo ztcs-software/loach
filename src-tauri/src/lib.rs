@@ -3,6 +3,7 @@ mod db;
 mod providers;
 mod secrets;
 mod stream;
+mod tools;
 
 use std::sync::Arc;
 
@@ -146,6 +147,7 @@ pub fn run() {
             commands::create_snippet,
             commands::update_snippet,
             commands::delete_snippet,
+            commands::fetch_url,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Loach");

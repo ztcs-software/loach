@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   ChatRequest,
+  FetchedPage,
   GenerationParams,
   Message,
   ModelInfo,
@@ -372,4 +373,18 @@ export function mergeParams(
   override?: GenerationParams | null,
 ): GenerationParams {
   return { ...base, ...(override ?? {}) };
+}
+
+// ------------ tools ------------
+
+/** Fetch a public URL via the Rust backend. SSRF-guarded, 15 s timeout, body
+ *  capped at 5 MB, text output capped at ~12 000 chars. See
+ *  `src-tauri/src/tools/fetch_url.rs` for the full story. Rejects with the
+ *  underlying error string on failure (invalid URL, private IP, HTTP 4xx/5xx,
+ *  timeout, network error). */
+export function fetchUrl(url: string): Promise<FetchedPage> {
+  if (!isTauri) {
+    return Promise.reject(new Error("fetch_url requires the Tauri runtime"));
+  }
+  return invoke<FetchedPage>("fetch_url", { url });
 }

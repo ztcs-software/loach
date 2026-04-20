@@ -197,7 +197,12 @@ export function imagesFromAttachments(attachments: Attachment[]): string[] {
  * from the first attachment header onwards.
  */
 export function stripInlinedAttachments(content: string): string {
-  const marker = /\n\n---\n(?:Attached |The user also attached )/;
+  // Also matches the "Fetched URL" / "Failed to fetch" headers produced by
+  // `inlineFetchedPages` — same idea, same treatment: hide the bulky context
+  // from the user's own bubble while keeping it in the stored content so the
+  // model sees it on replay.
+  const marker =
+    /\n\n---\n(?:Attached |The user also attached |Fetched URL: |Failed to fetch )/;
   const m = marker.exec(content);
   return m ? content.slice(0, m.index).trimEnd() : content;
 }
