@@ -1,6 +1,24 @@
 import { useEffect, useMemo, useState } from "react";
-import { Archive, ChevronDown, Sliders, RefreshCw, CircleAlert, CircleCheck } from "lucide-react";
+import {
+  Archive,
+  Check,
+  ChevronDown,
+  CircleAlert,
+  CircleCheck,
+  Copy,
+  FileText,
+  MoreHorizontal,
+  RefreshCw,
+  Sliders,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -14,6 +32,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useUIStore } from "@/stores/uiStore";
 import {
+  exportSession,
   ollamaListModels,
   ollamaProbe,
   openaiListModels,
@@ -30,6 +49,41 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
   const [openaiModels, setOpenaiModels] = useState<ModelInfo[]>([]);
   const [ollamaUp, setOllamaUp] = useState<boolean | null>(null);
   const [loading, setLoading] = useState(false);
+
+  /** Export-context dialog state. `text` is null while the Markdown is still
+   *  being fetched from the Rust side so we can show a "Loading…" placeholder
+   *  instead of an empty textarea. `error` surfaces any failure inline. */
+  const [exportOpen, setExportOpen] = useState(false);
+  const [exportText, setExportText] = useState<string | null>(null);
+  const [exportError, setExportError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  const openExport = async () => {
+    if (!session) return;
+    setExportOpen(true);
+    setExportText(null);
+    setExportError(null);
+    setCopied(false);
+    try {
+      const md = await exportSession(session.id, "md");
+      setExportText(md);
+    } catch (e) {
+      setExportError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const copyExport = async () => {
+    if (!exportText) return;
+    try {
+      await navigator.clipboard.writeText(exportText);
+      setCopied(true);
+      // Snap back to the default "Copy" label after a short beat so the user
+      // can copy again if needed without reopening the dialog.
+      window.setTimeout(() => setCopied(false), 1500);
+    } catch (e) {
+      console.warn("clipboard write failed", e);
+    }
+  };
 
   const refresh = useMemo(
     () => async () => {
@@ -147,6 +201,24 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
         </DropdownMenu>
       </div>
       <div className="flex items-center gap-1">
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild disabled={!session}>
+            <Button
+              variant="ghost"
+              size="icon"
+              aria-label="Chat actions"
+              className="rounded-xl text-foreground/70 hover:bg-foreground/10 hover:text-foreground"
+            >
+              <MoreHorizontal className="h-4 w-4" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="min-w-[180px]">
+            <DropdownMenuItem onSelect={() => void openExport()}>
+              <FileText className="mr-2 h-4 w-4" />
+              Export context
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
         <Button
           variant="ghost"
           size="icon"
@@ -157,6 +229,62 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
           <Sliders className="h-4 w-4" />
         </Button>
       </div>
+
+      <Dialog open={exportOpen} onOpenChange={setExportOpen}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>Export context</DialogTitle>
+            <DialogDescription>
+              The full chat context in Markdown — copy it to share or reuse
+              elsewhere.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="mt-2">
+            {exportError ? (
+              <div className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
+                {exportError}
+              </div>
+            ) : exportText === null ? (
+              <div className="flex h-64 items-center justify-center rounded-md border border-foreground/10 text-sm text-foreground/60">
+                Loading…
+              </div>
+            ) : (
+              <textarea
+                readOnly
+                value={exportText}
+                className="h-64 w-full resize-none rounded-md border border-foreground/10 bg-background/60 p-3 font-mono text-xs leading-relaxed text-foreground/80 focus:outline-none focus:ring-1 focus:ring-foreground/20"
+                onFocus={(e) => e.currentTarget.select()}
+              />
+            )}
+          </div>
+          <div className="mt-3 flex items-center justify-end gap-2">
+            <Button
+              variant="outline"
+              onClick={() => setExportOpen(false)}
+              className="rounded-lg"
+            >
+              Close
+            </Button>
+            <Button
+              onClick={copyExport}
+              disabled={!exportText}
+              className="rounded-lg"
+            >
+              {copied ? (
+                <>
+                  <Check className="mr-2 h-4 w-4" />
+                  Copied
+                </>
+              ) : (
+                <>
+                  <Copy className="mr-2 h-4 w-4" />
+                  Copy
+                </>
+              )}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
