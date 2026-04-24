@@ -83,11 +83,22 @@ const config: Config = {
           "0%, 100%": { opacity: "1" },
           "50%": { opacity: "0" },
         },
+        // A gentle, slow opacity breathing — used as the streaming
+        // indicator halo on the send/stop morph button. Tailwind's
+        // built-in `animate-ping` (175 % scale + fade) and `animate-pulse`
+        // (1.0 → 0.5) both read as too attention-grabbing for a "we're
+        // working in the background" cue, so we use a calmer envelope
+        // with a longer period and a low ceiling.
+        "pulse-soft": {
+          "0%, 100%": { opacity: "0.45" },
+          "50%": { opacity: "0.12" },
+        },
       },
       animation: {
         "accordion-down": "accordion-down 0.2s ease-out",
         "accordion-up": "accordion-up 0.2s ease-out",
         blink: "blink 1s step-start infinite",
+        "pulse-soft": "pulse-soft 2.4s ease-in-out infinite",
       },
       // Typography overrides — the chat content sits on the translucent
       // glass / gradient backdrop, so the default prose theme (which assumes

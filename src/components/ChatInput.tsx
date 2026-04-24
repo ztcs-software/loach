@@ -1,5 +1,11 @@
-import { useEffect, useRef, useState } from "react";
-import { Paperclip, ArrowUp, FileUp, Square } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  ArrowUp,
+  FileUp,
+  Mic,
+  Paperclip,
+  Square,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { FileChip } from "./FileChip";
@@ -21,7 +27,8 @@ export function ChatInput({ centered = false }: ChatInputProps) {
   // tokens for the active session. "Waiting in this chat" means this chat
   // has a task parked in the cross-chat queue. Either state counts as "busy"
   // for the purposes of disabling the send button — one in-flight prompt per
-  // chat, period.
+  // chat, period. The streaming case additionally morphs the send button
+  // into a stop button (see "Send/Stop morph" below).
   const activeSessionId = useChatStore((s) => s.activeSessionId);
   const streamingSessionId = useChatStore((s) => s.streamingSessionId);
   const waitingHere = useChatStore((s) =>
@@ -30,8 +37,8 @@ export function ChatInput({ centered = false }: ChatInputProps) {
   );
   const streamingThisChat =
     !!activeSessionId && streamingSessionId === activeSessionId;
-  const thisChatBusy = streamingThisChat || waitingHere;
   const send = useChatStore((s) => s.sendUserMessage);
+  const cancelForSession = useChatStore((s) => s.cancelForSession);
   const composerDraft = useUIStore((s) => s.composerDraft);
   const composerAttachments = useUIStore((s) => s.composerAttachments);
   const composerInsertSeq = useUIStore((s) => s.composerInsertSeq);
@@ -151,6 +158,172 @@ export function ChatInput({ centered = false }: ChatInputProps) {
     e.target.value = "";
   };
 
+  // ------- Clipboard paste ------------------------------------------------
+  //
+  // Mirrors the file picker / drag-and-drop paths, but driven by Ctrl+V on
+  // the textarea. The clipboard exposes pasted files (screenshots from
+  // Win+Shift+S, an image copied off a web page, real files copied from
+  // Explorer) via two related but slightly different surfaces:
+  //
+  //   - `clipboardData.files` — modern, always a `FileList`. Used first.
+  //   - `clipboardData.items` — older but still shipped; some sources only
+  //     populate `items[]` with `kind === "file"`. We fall back to it when
+  //     `files` is empty so we don't miss a screenshot in browsers that
+  //     route it through the items[] path.
+  //
+  // If we found ANY files we call `preventDefault()` so the textarea
+  // doesn't also receive a stray "[object File]" / filename string. If the
+  // clipboard only has text we let React's default behaviour handle it.
+  const onPaste = async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const dt = e.clipboardData;
+    if (!dt) return;
+
+    const fromFiles = Array.from(dt.files ?? []);
+    let picked: File[] = fromFiles;
+
+    if (picked.length === 0 && dt.items && dt.items.length > 0) {
+      const fileItems: File[] = [];
+      for (let i = 0; i < dt.items.length; i++) {
+        const it = dt.items[i];
+        if (it.kind === "file") {
+          const f = it.getAsFile();
+          if (f) fileItems.push(f);
+        }
+      }
+      picked = fileItems;
+    }
+
+    if (picked.length > 0) {
+      e.preventDefault();
+      await ingest(picked);
+    }
+    // No files? Let the default paste flow handle plain-text content.
+  };
+
+  // ------- Voice dictation (Web Speech API) -------------------------------
+  //
+  // Available in Chromium / WebView2 (Windows) as `SpeechRecognition`,
+  // and in older Chromium / Safari as `webkitSpeechRecognition`. Memoised
+  // so feature-detection only runs once per mount, and so the mic button
+  // is hidden entirely on platforms that don't ship the API (currently
+  // most Linux WebKit builds — there's no stable polyfill that doesn't
+  // ship audio off-device, which would violate Loach's offline-first
+  // guarantee).
+  const SR = useMemo(
+    () =>
+      typeof window !== "undefined"
+        ? window.SpeechRecognition ?? window.webkitSpeechRecognition
+        : undefined,
+    [],
+  );
+  const speechSupported = !!SR;
+
+  const recognitionRef = useRef<SpeechRecognition | null>(null);
+  const [listening, setListening] = useState(false);
+  // Anchor the dictation against the text that was already in the box when
+  // the user pressed the mic. Each interim result is rendered as
+  // `baseText + interim`; each final result is committed back into
+  // `baseText`. This way the user can keep typing between phrases without
+  // having their typing clobbered by a mid-sentence interim update.
+  const baseTextRef = useRef("");
+
+  // Tear down recognition on unmount so we don't leave the mic hot.
+  useEffect(
+    () => () => {
+      try {
+        recognitionRef.current?.abort();
+      } catch {
+        /* no-op */
+      }
+    },
+    [],
+  );
+
+  const startDictation = () => {
+    if (!SR || listening) return;
+    setError(null);
+    let recognition: SpeechRecognition;
+    try {
+      recognition = new SR();
+    } catch {
+      setError("Voice dictation isn't available on this device.");
+      return;
+    }
+    recognition.lang = navigator.language || "en-US";
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.maxAlternatives = 1;
+    baseTextRef.current = text;
+
+    const joinWithSpace = (a: string, b: string) =>
+      a.length === 0 || /\s$/.test(a) || b.length === 0 ? a + b : `${a} ${b}`;
+
+    recognition.onresult = (ev) => {
+      let interim = "";
+      let appendedFinal = "";
+      for (let i = ev.resultIndex; i < ev.results.length; i++) {
+        const result = ev.results[i];
+        const transcript = result[0]?.transcript ?? "";
+        if (result.isFinal) {
+          appendedFinal += transcript;
+        } else {
+          interim += transcript;
+        }
+      }
+      if (appendedFinal) {
+        baseTextRef.current = joinWithSpace(baseTextRef.current, appendedFinal);
+      }
+      const next = interim
+        ? joinWithSpace(baseTextRef.current, interim)
+        : baseTextRef.current;
+      setText(next);
+      setComposerDraft(next);
+    };
+
+    recognition.onerror = (ev) => {
+      // `not-allowed` fires when the user denies the mic permission, and
+      // `service-not-allowed` when the underlying network speech service
+      // is unreachable (Chromium routes through Google's hosted ASR when
+      // available; WebView2 falls back to the on-device engine).
+      const code = ev.error;
+      if (code === "no-speech" || code === "aborted") {
+        // Benign — happens when the user stops without saying anything.
+      } else if (code === "not-allowed" || code === "service-not-allowed") {
+        setError(
+          "Microphone access was blocked. Allow it in your OS sound settings to dictate.",
+        );
+      } else {
+        setError(`Dictation error: ${code}`);
+      }
+      setListening(false);
+    };
+
+    recognition.onend = () => {
+      setListening(false);
+      recognitionRef.current = null;
+    };
+
+    try {
+      recognition.start();
+      recognitionRef.current = recognition;
+      setListening(true);
+      // Keep focus in the textarea so the caret blinks where the words
+      // will land — important affordance.
+      textareaRef.current?.focus();
+    } catch {
+      setError("Couldn't start dictation. Try again.");
+    }
+  };
+
+  const stopDictation = () => {
+    try {
+      recognitionRef.current?.stop();
+    } catch {
+      /* no-op */
+    }
+    setListening(false);
+  };
+
   const submit = async () => {
     const trimmed = text.trim();
     if (!trimmed && attachments.length === 0) return;
@@ -170,6 +343,10 @@ export function ChatInput({ centered = false }: ChatInputProps) {
     // in this state too — this is belt-and-suspenders.
     if (busyHere) return;
 
+    // Stop dictation before sending so the recogniser doesn't keep writing
+    // into the now-empty textarea.
+    if (listening) stopDictation();
+
     setText("");
     setComposerDraft("");
     const toSend = attachments;
@@ -187,26 +364,48 @@ export function ChatInput({ centered = false }: ChatInputProps) {
     }
   };
 
-  const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
-      e.preventDefault();
-      void submit();
+  // ------- Send/Stop morph -------------------------------------------------
+  //
+  // Single hit-target. The same circular button at bottom-right serves
+  // three states:
+  //
+  //   - idle + has content → enabled "Send" (ArrowUp icon)
+  //   - idle + empty       → disabled "Send"
+  //   - this chat streaming → enabled "Stop" (square fill icon)
+  //
+  // The waiting-in-queue case still disables the button: that chat already
+  // has a pending prompt, and the canvas's waiting banner exposes a
+  // dedicated Cancel for the queued task.
+  const onPrimaryClick = () => {
+    if (streamingThisChat && activeSessionId) {
+      void cancelForSession(activeSessionId);
+      return;
     }
+    void submit();
   };
+
+  const primaryDisabled =
+    !streamingThisChat &&
+    ((!text.trim() && attachments.length === 0) || waitingHere);
 
   // Placeholder / disabled-title tracks the three states the user can be in:
   // busy-running, busy-waiting, or idle.
   let placeholder = "Ask anything…";
   let disabledTitle: string | null = null;
   if (streamingThisChat) {
-    placeholder = "This chat is replying — stop it to send another…";
-    disabledTitle =
-      "Only one prompt per chat is accepted while it's replying. Stop the reply to send again.";
+    placeholder = "Replying — press the Stop button to cancel and ask again…";
   } else if (waitingHere) {
     placeholder = "This chat is waiting in the queue…";
     disabledTitle =
       "This chat already has a prompt waiting. Cancel it or wait for it to run before sending another.";
   }
+
+  const primaryAriaLabel = streamingThisChat
+    ? "Stop generating"
+    : "Send message";
+  const primaryTitle = streamingThisChat
+    ? "Stop generating"
+    : (disabledTitle ?? "Send");
 
   return (
     <div
@@ -216,12 +415,6 @@ export function ChatInput({ centered = false }: ChatInputProps) {
       )}
     >
       <div className="mx-auto w-full max-w-3xl">
-        {/* Small "Stop generating" pill above the composer, shown only when
-            THIS chat is the one currently streaming. The waiting-banner in
-            the canvas handles its own Cancel, so the pill isn't needed for
-            the waiting state. */}
-        <StopPill />
-
         {attachments.length > 0 && (
           <div className="mb-3 flex flex-wrap gap-2">
             {attachments.map((a, i) => (
@@ -257,6 +450,7 @@ export function ChatInput({ centered = false }: ChatInputProps) {
             size="icon"
             onClick={() => fileInputRef.current?.click()}
             aria-label="Attach file"
+            title="Attach file"
             className="rounded-full text-foreground/65 hover:bg-foreground/10 hover:text-foreground"
           >
             <Paperclip className="h-4 w-4" />
@@ -269,11 +463,18 @@ export function ChatInput({ centered = false }: ChatInputProps) {
             className="hidden"
             onChange={onPick}
           />
+
           <Textarea
             ref={textareaRef}
             value={text}
             onChange={(e) => setText(e.target.value)}
-            onKeyDown={onKeyDown}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+                e.preventDefault();
+                void submit();
+              }
+            }}
+            onPaste={(e) => void onPaste(e)}
             placeholder={placeholder}
             className={cn(
               "min-h-[28px] max-h-[220px] flex-1 resize-none border-none bg-transparent backdrop-blur-none px-1 py-1.5 text-[15px] leading-relaxed text-foreground placeholder:text-foreground/40 shadow-none ring-0 outline-none focus-visible:ring-0 focus-visible:border-none focus-visible:outline-none focus-visible:bg-transparent rounded-none scrollbar-hidden transition-opacity",
@@ -281,19 +482,53 @@ export function ChatInput({ centered = false }: ChatInputProps) {
             )}
             rows={1}
           />
-          <Button
-            type="button"
-            size="icon"
-            onClick={submit}
-            disabled={
-              (!text.trim() && attachments.length === 0) || thisChatBusy
-            }
-            aria-label={thisChatBusy ? "This chat is busy" : "Send"}
-            title={disabledTitle ?? "Send"}
-            className="h-10 w-10 shrink-0 rounded-full bg-gradient-to-br from-orange-500 to-rose-600 text-white shadow-[0_6px_24px_-4px_rgba(255,90,40,0.75)] transition-all hover:from-orange-400 hover:to-rose-500 hover:shadow-[0_8px_28px_-4px_rgba(255,90,40,0.90)] disabled:from-orange-500/70 disabled:to-rose-600/70 disabled:text-white/85 disabled:shadow-[0_4px_18px_-6px_rgba(255,90,40,0.45)] disabled:cursor-not-allowed"
-          >
-            <ArrowUp className="h-5 w-5" strokeWidth={2.5} />
-          </Button>
+
+          {/* Voice dictation — hidden entirely when the platform doesn't
+              expose the Web Speech API (most Linux WebKit builds). Sits
+              immediately to the left of the primary send button so the
+              two related actions (speak / send) are co-located on the
+              right edge of the composer, mirroring the placement used by
+              ChatGPT, Claude, and Gemini. When recording, the icon
+              pulses and the button background tints rose to make the
+              live state unmissable. */}
+          {speechSupported && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              onClick={listening ? stopDictation : startDictation}
+              aria-label={listening ? "Stop voice dictation" : "Start voice dictation"}
+              aria-pressed={listening}
+              title={listening ? "Stop dictation" : "Voice dictation"}
+              className={cn(
+                "relative rounded-full transition-colors",
+                listening
+                  ? "bg-rose-500/15 text-rose-300 hover:bg-rose-500/25 hover:text-rose-200"
+                  : "text-foreground/65 hover:bg-foreground/10 hover:text-foreground",
+              )}
+            >
+              <Mic
+                className={cn(
+                  "h-4 w-4 transition-transform",
+                  listening && "animate-pulse",
+                )}
+              />
+              {listening && (
+                <span
+                  aria-hidden
+                  className="pointer-events-none absolute inset-0 rounded-full ring-2 ring-rose-500/40 ring-offset-0 animate-pulse"
+                />
+              )}
+            </Button>
+          )}
+
+          <PrimaryButton
+            streaming={streamingThisChat}
+            disabled={primaryDisabled}
+            ariaLabel={primaryAriaLabel}
+            title={primaryTitle}
+            onClick={onPrimaryClick}
+          />
         </div>
         {error && (
           <p className="mt-2 text-xs text-rose-300">{error}</p>
@@ -308,34 +543,90 @@ export function ChatInput({ centered = false }: ChatInputProps) {
   );
 }
 
-/**
- * "Stop generating" pill shown above the composer — only in the chat whose
- * reply is currently being streamed. Viewing another chat while a sibling
- * chat streams does not show this. Cancelling here tears down the active
- * stream and immediately promotes the next waiter in the global queue.
- */
-function StopPill() {
-  const activeSessionId = useChatStore((s) => s.activeSessionId);
-  const streamingSessionId = useChatStore((s) => s.streamingSessionId);
-  const streamingThisChat =
-    !!activeSessionId && streamingSessionId === activeSessionId;
-  const cancelForSession = useChatStore((s) => s.cancelForSession);
+// ---------------------------------------------------------------------------
+// PrimaryButton — Send/Stop morph
+//
+// One circular button. Two stacked icons cross-fade with a gentle
+// scale + rotate so the swap reads as a *transform* rather than a flicker.
+// While streaming, a soft halo pulses outside the button so the morphed
+// state is visible at a glance even from across the canvas. Visual style
+// stays on the same warm gradient — semantics are carried by the icon and
+// the halo, not by a colour shift, which keeps the composer's colour
+// language consistent.
+// ---------------------------------------------------------------------------
 
-  if (!streamingThisChat || !activeSessionId) return null;
-
-  return (
-    <div className="mb-2 flex justify-center">
-      <Button
-        type="button"
-        variant="ghost"
-        size="sm"
-        onClick={() => void cancelForSession(activeSessionId)}
-        className="h-7 gap-1.5 rounded-full bg-foreground/[0.06] px-3 text-[11px] font-medium text-foreground/70 hover:bg-foreground/10 hover:text-foreground"
-      >
-        <Square className="h-3 w-3 fill-current" />
-        Stop generating
-      </Button>
-    </div>
-  );
+interface PrimaryButtonProps {
+  streaming: boolean;
+  disabled: boolean;
+  ariaLabel: string;
+  title: string;
+  onClick: () => void;
 }
 
+function PrimaryButton({
+  streaming,
+  disabled,
+  ariaLabel,
+  title,
+  onClick,
+}: PrimaryButtonProps) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      aria-label={ariaLabel}
+      title={title}
+      className={cn(
+        "relative h-10 w-10 shrink-0 rounded-full",
+        "bg-gradient-to-br from-orange-500 to-rose-600 text-white",
+        "shadow-[0_6px_24px_-4px_rgba(255,90,40,0.75)]",
+        "transition-all duration-200",
+        "hover:from-orange-400 hover:to-rose-500 hover:shadow-[0_8px_28px_-4px_rgba(255,90,40,0.90)]",
+        "disabled:from-orange-500/70 disabled:to-rose-600/70 disabled:text-white/85",
+        "disabled:shadow-[0_4px_18px_-6px_rgba(255,90,40,0.45)] disabled:cursor-not-allowed",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-400/60 focus-visible:ring-offset-0",
+      )}
+    >
+      {/* Crossfading icon stack. Both icons live on top of each other in
+          a fixed 20×20 grid cell; the transform-based fade keeps the
+          centre stable so the morph reads as a single object changing
+          shape, not two icons swapping places. */}
+      <span className="relative grid h-5 w-5 place-items-center mx-auto">
+        <ArrowUp
+          aria-hidden
+          strokeWidth={2.5}
+          className={cn(
+            "absolute h-5 w-5 transition-all duration-200 ease-out",
+            streaming
+              ? "scale-50 rotate-90 opacity-0"
+              : "scale-100 rotate-0 opacity-100",
+          )}
+        />
+        <Square
+          aria-hidden
+          className={cn(
+            "absolute h-3 w-3 fill-current transition-all duration-200 ease-out",
+            streaming
+              ? "scale-100 rotate-0 opacity-100"
+              : "scale-50 -rotate-90 opacity-0",
+          )}
+        />
+      </span>
+
+      {/* Streaming indicator — a calm 1 px breathing ring inside the
+          button outline. The earlier `animate-ping` (radar pulse,
+          175 % scale) read as too attention-grabbing for a "we're
+          working in the background" cue once the stop icon was already
+          visible. The icon swap carries the primary signal; this halo
+          is the supporting hint. Pointer-events off so it never eats
+          the click. */}
+      {streaming && (
+        <span
+          aria-hidden
+          className="pointer-events-none absolute inset-0 rounded-full ring-1 ring-rose-200/40 animate-pulse-soft"
+        />
+      )}
+    </button>
+  );
+}
