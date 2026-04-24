@@ -32,3 +32,6 @@ src-tauri/gen/
 
 # Claude Code
 .claude/
+
+# Other
+*.pdf

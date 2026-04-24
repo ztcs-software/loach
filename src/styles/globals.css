@@ -314,16 +314,31 @@
   }
 }
 
-/* Tighten typography for chat content */
-.prose pre {
-  margin: 0;
+/* Typography fine-tuning for chat content
+   ----------------------------------------
+   The bulk of the prose theming lives in `tailwind.config.ts` under
+   `theme.extend.typography` (registered via `@tailwindcss/typography`).
+   These rules cover the few things that don't compose cleanly through
+   the plugin's CSS-vars surface: the inner highlight.js block (we own
+   the wrapping <pre> via CodeBlock so prose mustn't double-pad) and a
+   word-wrap guard for narrow chat bubbles. */
+
+.prose pre code.hljs {
+  display: block;
   background: transparent;
+  padding: 0;
+  font-size: inherit;
+  line-height: inherit;
 }
 
+/* Long unbroken tokens (URLs, hashes, base64) shouldn't blow out the
+   message bubble's max-width. NOTE: deliberately scoped to paragraphs
+   and list items only. Applying `anywhere` to table cells lets the
+   browser's auto-table-layout shrink columns to a single character wide
+   (it considers every char a valid break point), which produces the
+   "Featur / e", "Multim / odality" header wrapping. Cells get the
+   tamer `break-word` rule below — they only fragment a word when it is
+   genuinely too long for the column. */
 .prose :where(p, li) {
-  color: hsl(var(--foreground));
-}
-
-.prose :where(h1, h2, h3, h4) {
-  color: hsl(var(--foreground));
+  overflow-wrap: anywhere;
 }
