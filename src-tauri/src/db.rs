@@ -61,6 +61,29 @@ pub struct Snippet {
     pub updated_at: i64,
 }
 
+/// A user-configured MCP (Model Context Protocol) server. Loach only
+/// speaks the Streamable-HTTP transport — one URL, POST JSON-RPC bodies,
+/// optional auth headers. The underlying SQLite table still carries the
+/// (now-unused) `transport` / `command` / `args_json` / `env_json` columns
+/// from an earlier revision so migrations stay a no-op; new writes leave
+/// them NULL.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct McpServer {
+    pub id: String,
+    pub name: String,
+    /// The endpoint URL (Streamable HTTP).
+    pub url: String,
+    /// JSON-encoded `{k: v}` map of request headers (typically
+    /// `Authorization`, `X-API-Key`, etc.). Null means no headers.
+    pub headers_json: Option<String>,
+    /// When `false` the server is kept in the config but not surfaced to the
+    /// model — lets users disable a flaky integration without losing its
+    /// config.
+    pub enabled: bool,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Message {
     pub id: String,
@@ -151,6 +174,30 @@ impl Database {
             );
             CREATE INDEX IF NOT EXISTS idx_snippets_updated
                 ON snippets(updated_at DESC);
+
+            -- MCP (Model Context Protocol) servers. Scope is always "user"
+            -- (global to this install); we don't track per-project scope
+            -- because Loach is a chat app, not a per-repo CLI.
+            --
+            -- `transport`, `command`, `args_json`, `env_json` are holdovers
+            -- from when we also spoke stdio + SSE. Kept here so existing
+            -- databases migrate cleanly; new rows leave them unset and the
+            -- Rust struct no longer reads them.
+            CREATE TABLE IF NOT EXISTS mcp_servers (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                transport TEXT NOT NULL DEFAULT 'http',
+                command TEXT,
+                args_json TEXT,
+                env_json TEXT,
+                url TEXT,
+                headers_json TEXT,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_mcp_servers_updated
+                ON mcp_servers(updated_at DESC);
             "#,
         )?;
 
@@ -711,6 +758,133 @@ impl Database {
     pub fn delete_snippet(&self, id: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM snippets WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    // ------------ mcp servers ------------
+    //
+    // Only the HTTP transport is supported, so every row has a URL and the
+    // legacy stdio-flavoured columns stay NULL.
+
+    pub fn list_mcp_servers(&self) -> Result<Vec<McpServer>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, name, url, headers_json, enabled, created_at, updated_at
+             FROM mcp_servers ORDER BY name ASC",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(McpServer {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    url: r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                    headers_json: r.get(3)?,
+                    enabled: r.get::<_, i64>(4)? != 0,
+                    created_at: r.get(5)?,
+                    updated_at: r.get(6)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn get_mcp_server(&self, id: &str) -> Result<Option<McpServer>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, name, url, headers_json, enabled, created_at, updated_at
+             FROM mcp_servers WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query(params![id])?;
+        if let Some(r) = rows.next()? {
+            Ok(Some(McpServer {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                url: r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                headers_json: r.get(3)?,
+                enabled: r.get::<_, i64>(4)? != 0,
+                created_at: r.get(5)?,
+                updated_at: r.get(6)?,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Upsert: create a new row if `id` is empty, otherwise update the
+    /// existing one. Returns the row as it now stands in the DB.
+    pub fn upsert_mcp_server(
+        &self,
+        id: Option<&str>,
+        name: &str,
+        url: &str,
+        headers_json: Option<&str>,
+        enabled: bool,
+    ) -> Result<McpServer> {
+        let now = Utc::now().timestamp_millis();
+        let conn = self.conn.lock().unwrap();
+
+        match id {
+            Some(id) if !id.is_empty() => {
+                conn.execute(
+                    "UPDATE mcp_servers SET name = ?1, url = ?2, headers_json = ?3,
+                                             enabled = ?4, updated_at = ?5
+                     WHERE id = ?6",
+                    params![
+                        name,
+                        url,
+                        headers_json,
+                        if enabled { 1_i64 } else { 0_i64 },
+                        now,
+                        id,
+                    ],
+                )?;
+                let mut stmt =
+                    conn.prepare("SELECT created_at FROM mcp_servers WHERE id = ?1")?;
+                let created_at: i64 = stmt.query_row(params![id], |r| r.get(0))?;
+                Ok(McpServer {
+                    id: id.to_string(),
+                    name: name.to_string(),
+                    url: url.to_string(),
+                    headers_json: headers_json.map(|s| s.to_string()),
+                    enabled,
+                    created_at,
+                    updated_at: now,
+                })
+            }
+            _ => {
+                let new_id = Uuid::new_v4().to_string();
+                // The legacy `transport` column is NOT NULL; hard-code it to
+                // 'http' so inserts succeed on databases that were created
+                // before the stdio/sse removal.
+                conn.execute(
+                    "INSERT INTO mcp_servers (id, name, transport, url, headers_json,
+                                               enabled, created_at, updated_at)
+                     VALUES (?1, ?2, 'http', ?3, ?4, ?5, ?6, ?6)",
+                    params![
+                        new_id,
+                        name,
+                        url,
+                        headers_json,
+                        if enabled { 1_i64 } else { 0_i64 },
+                        now,
+                    ],
+                )?;
+                Ok(McpServer {
+                    id: new_id,
+                    name: name.to_string(),
+                    url: url.to_string(),
+                    headers_json: headers_json.map(|s| s.to_string()),
+                    enabled,
+                    created_at: now,
+                    updated_at: now,
+                })
+            }
+        }
+    }
+
+    pub fn delete_mcp_server(&self, id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM mcp_servers WHERE id = ?1", params![id])?;
         Ok(())
     }
 }

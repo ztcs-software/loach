@@ -11,6 +11,7 @@ import {
   MessageSquareText,
   MoreHorizontal,
   Palette,
+  Plug,
   Server,
   Trash2,
 } from "lucide-react";
@@ -36,6 +37,7 @@ import { useChatStore } from "@/stores/chatStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useUIStore } from "@/stores/uiStore";
+import { McpPanel } from "@/components/McpPanel";
 import { isTauri } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
 import type { Session } from "@/types";
@@ -57,6 +59,7 @@ async function openExternal(url: string) {
 const NAV = [
   { value: "providers", label: "Providers", icon: Server },
   { value: "prompt", label: "System prompt", icon: MessageSquareText },
+  { value: "mcp", label: "MCP", icon: Plug },
   { value: "appearance", label: "Appearance", icon: Palette },
   { value: "archive", label: "Archive", icon: Archive },
   { value: "about", label: "About", icon: Info },
@@ -300,6 +303,10 @@ export function SettingsDialog() {
                     </ul>
                   </div>
                 </div>
+              </TabsContent>
+
+              <TabsContent value="mcp" className="mt-0 focus-visible:ring-0 focus-visible:ring-offset-0">
+                <McpPanel />
               </TabsContent>
 
               <TabsContent value="appearance" className="mt-0 space-y-6 focus-visible:ring-0 focus-visible:ring-offset-0">

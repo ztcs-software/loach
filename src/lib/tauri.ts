@@ -5,6 +5,9 @@ import type {
   ChatRequest,
   FetchedPage,
   GenerationParams,
+  McpServer,
+  McpServerInput,
+  McpTestResult,
   Message,
   ModelInfo,
   OllamaShowResponse,
@@ -486,4 +489,42 @@ export function fetchUrl(url: string): Promise<FetchedPage> {
     return Promise.reject(new Error("fetch_url requires the Tauri runtime"));
   }
   return invoke<FetchedPage>("fetch_url", { url });
+}
+
+// ------------ mcp servers ------------
+
+/** List all user-configured MCP servers, sorted by name. */
+export function mcpList(): Promise<McpServer[]> {
+  if (!isTauri) return notInTauri([]);
+  return invoke<McpServer[]>("mcp_list");
+}
+
+/** Upsert — create if `input.id` is undefined, update otherwise. Resolves
+ *  to the row as it now stands in the DB. */
+export function mcpSave(input: McpServerInput): Promise<McpServer> {
+  if (!isTauri) {
+    return Promise.reject(new Error("mcp_save requires the Tauri runtime"));
+  }
+  return invoke<McpServer>("mcp_save", { input });
+}
+
+export function mcpDelete(id: string): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("mcp_delete", { id });
+}
+
+/** Probe the given config (handshake + tools/list) without persisting it.
+ *  Always resolves — failures land inside `McpTestResult.error`. */
+export function mcpTest(input: McpServerInput): Promise<McpTestResult> {
+  if (!isTauri) {
+    return Promise.resolve({
+      ok: false,
+      server_name: null,
+      server_version: null,
+      protocol_version: null,
+      tools: [],
+      error: "mcp_test requires the Tauri runtime",
+    });
+  }
+  return invoke<McpTestResult>("mcp_test", { input });
 }

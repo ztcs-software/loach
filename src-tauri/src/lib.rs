@@ -1,5 +1,6 @@
 mod commands;
 mod db;
+mod mcp;
 mod providers;
 mod secrets;
 mod stream;
@@ -154,6 +155,10 @@ pub fn run() {
             commands::update_snippet,
             commands::delete_snippet,
             commands::fetch_url,
+            commands::mcp_list,
+            commands::mcp_save,
+            commands::mcp_delete,
+            commands::mcp_test,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Loach");

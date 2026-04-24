@@ -4,7 +4,8 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
 use uuid::Uuid;
 
-use crate::db::{Message, Session, Snippet, Space, SpaceFile};
+use crate::db::{McpServer, Message, Session, Snippet, Space, SpaceFile};
+use crate::mcp::{self, McpTestResult};
 use crate::providers::{self, ChatRequest, ModelInfo};
 use crate::secrets;
 use crate::tools::fetch_url::{self as fetch_url_tool, FetchedPage};
@@ -575,6 +576,100 @@ pub async fn update_snippet(
 #[tauri::command]
 pub async fn delete_snippet(state: State<'_, AppState>, id: String) -> Result<(), String> {
     state.db.delete_snippet(&id).map_err(err)
+}
+
+// ---------- mcp servers ----------
+
+/// Input for `mcp_save`. Matches the frontend `McpServerInput` shape: `id`
+/// is optional (undefined → insert, set → update). Loach only speaks the
+/// Streamable-HTTP transport, so the only connection fields are `url` and
+/// the optional `headers` k/v map (stored JSON-encoded to dodge a child
+/// table).
+#[derive(Debug, Deserialize)]
+pub struct McpServerInput {
+    pub id: Option<String>,
+    pub name: String,
+    pub url: String,
+    #[serde(default)]
+    pub headers: Option<HashMap<String, String>>,
+    #[serde(default)]
+    pub enabled: Option<bool>,
+}
+
+impl McpServerInput {
+    /// Build an ephemeral `McpServer` (no DB id / timestamps) for use with
+    /// the test command when we want to dry-run a config before saving.
+    fn to_draft(&self) -> McpServer {
+        McpServer {
+            id: self.id.clone().unwrap_or_default(),
+            name: self.name.clone(),
+            url: self.url.clone(),
+            headers_json: self
+                .headers
+                .as_ref()
+                .map(|m| serde_json::to_string(m).unwrap_or_default()),
+            enabled: self.enabled.unwrap_or(true),
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+}
+
+fn validate_mcp_input(input: &McpServerInput) -> Result<(), String> {
+    if input.name.trim().is_empty() {
+        return Err("server name is required".into());
+    }
+    if input.url.trim().is_empty() {
+        return Err("server URL is required".into());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn mcp_list(state: State<'_, AppState>) -> Result<Vec<McpServer>, String> {
+    state.db.list_mcp_servers().map_err(err)
+}
+
+#[tauri::command]
+pub async fn mcp_save(
+    state: State<'_, AppState>,
+    input: McpServerInput,
+) -> Result<McpServer, String> {
+    validate_mcp_input(&input)?;
+
+    let headers_json = input
+        .headers
+        .as_ref()
+        .map(|m| serde_json::to_string(m).map_err(err))
+        .transpose()?;
+
+    state
+        .db
+        .upsert_mcp_server(
+            input.id.as_deref(),
+            input.name.trim(),
+            input.url.trim(),
+            headers_json.as_deref(),
+            input.enabled.unwrap_or(true),
+        )
+        .map_err(err)
+}
+
+#[tauri::command]
+pub async fn mcp_delete(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    state.db.delete_mcp_server(&id).map_err(err)
+}
+
+/// Probe the given MCP server config (handshake + list tools). Accepts the
+/// *input* rather than an id so the user can try a config before saving it.
+#[tauri::command]
+pub async fn mcp_test(
+    state: State<'_, AppState>,
+    input: McpServerInput,
+) -> Result<McpTestResult, String> {
+    validate_mcp_input(&input)?;
+    let draft = input.to_draft();
+    Ok(mcp::test_server(&draft, &state.http).await)
 }
 
 // ---------- chat streaming ----------

@@ -266,3 +266,50 @@ export type AdminEvent =
     }
   | { kind: "done" }
   | { kind: "error"; message: string };
+
+// ---------------------------------------------------------------------------
+// MCP (Model Context Protocol)
+// ---------------------------------------------------------------------------
+
+/** An MCP server row as persisted in SQLite. Loach only speaks the
+ *  Streamable-HTTP transport — one endpoint URL plus an optional map of
+ *  request headers (typically auth). The `headers_json` blob arrives as a
+ *  JSON string and is parsed lazily in `mcpStore`. */
+export interface McpServer {
+  id: string;
+  name: string;
+  url: string;
+  /** JSON-encoded `Record<string, string>`. */
+  headers_json: string | null;
+  enabled: boolean;
+  created_at: number;
+  updated_at: number;
+}
+
+/** Shape the Settings editor hands to `mcp_save` / `mcp_test`. Strings are
+ *  trimmed and validated on the Rust side; `id` being undefined means
+ *  "create new". */
+export interface McpServerInput {
+  id?: string;
+  name: string;
+  url: string;
+  headers?: Record<string, string>;
+  enabled?: boolean;
+}
+
+export interface McpTool {
+  name: string;
+  description: string | null;
+}
+
+/** Result of `mcp_test` — a connectivity probe that does
+ *  `initialize` + `tools/list`. On failure, `ok === false` and `error`
+ *  carries a human-readable reason. */
+export interface McpTestResult {
+  ok: boolean;
+  server_name: string | null;
+  server_version: string | null;
+  protocol_version: string | null;
+  tools: McpTool[];
+  error: string | null;
+}

@@ -10,6 +10,7 @@ export type SidebarTab = "chats" | "spaces" | "snippets" | "models";
 export type SettingsTab =
   | "providers"
   | "prompt"
+  | "mcp"
   | "appearance"
   | "archive"
   | "about";
