@@ -887,4 +887,342 @@ impl Database {
         conn.execute("DELETE FROM mcp_servers WHERE id = ?1", params![id])?;
         Ok(())
     }
+
+    // ------------ snapshot / wipe (Data tab) ------------
+    //
+    // The Data tab in Settings offers four operations: export, import,
+    // archive-all, and erase. They all boil down to bulk reads or writes
+    // that touch every table at once, which is why they live here rather
+    // than being patched together from the per-entity helpers above.
+    //
+    // Export → `snapshot()` returns a `DatabaseSnapshot` that serialises
+    // straight to JSON. Import → `restore_snapshot()` clears every table
+    // then re-inserts in FK-safe order. Erase → `wipe_user_data()` clears
+    // the user-owned tables (sessions/spaces/snippets/mcp) while leaving
+    // `settings` alone; `wipe_all()` also drops `settings` for a true
+    // factory reset.
+
+    /// Read every message across every session. Used by the export path —
+    /// callers normally fetch messages per-session.
+    pub fn all_messages(&self) -> Result<Vec<Message>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, session_id, role, content, thinking, attachments_json, metrics_json, created_at
+             FROM messages ORDER BY session_id, created_at",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(Message {
+                    id: r.get(0)?,
+                    session_id: r.get(1)?,
+                    role: r.get(2)?,
+                    content: r.get(3)?,
+                    thinking: r.get(4)?,
+                    attachments_json: r.get(5)?,
+                    metrics_json: r.get(6)?,
+                    created_at: r.get(7)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Read every space file across every space.
+    pub fn all_space_files(&self) -> Result<Vec<SpaceFile>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, space_id, name, mime, kind, data, size, position, created_at
+             FROM space_files ORDER BY space_id, position",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(SpaceFile {
+                    id: r.get(0)?,
+                    space_id: r.get(1)?,
+                    name: r.get(2)?,
+                    mime: r.get(3)?,
+                    kind: r.get(4)?,
+                    data: r.get(5)?,
+                    size: r.get(6)?,
+                    position: r.get(7)?,
+                    created_at: r.get(8)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Capture the full database state in a plain data struct the frontend
+    /// can ship to disk as JSON. `settings` is a key/value list — its
+    /// shape is deliberately loose so future settings keys don't require
+    /// a schema bump.
+    pub fn snapshot(&self) -> Result<DatabaseSnapshot> {
+        Ok(DatabaseSnapshot {
+            schema: "loach/v1".to_string(),
+            exported_at: Utc::now().timestamp_millis(),
+            loach_version: env!("CARGO_PKG_VERSION").to_string(),
+            data: SnapshotData {
+                sessions: self.list_sessions()?,
+                messages: self.all_messages()?,
+                spaces: self.list_spaces()?,
+                space_files: self.all_space_files()?,
+                snippets: self.list_snippets()?,
+                mcp_servers: self.list_mcp_servers()?,
+                settings: self.all_settings()?,
+            },
+        })
+    }
+
+    /// Replace the contents of every table with the snapshot. Returns a
+    /// row-count breakdown for the UI to display ("Imported 12 chats, 145
+    /// messages, …"). FK enforcement is disabled for the duration so a
+    /// snapshot that's missing e.g. a referenced space_id for a session
+    /// still imports cleanly (the orphan FK becomes NULL at next write).
+    pub fn restore_snapshot(&self, snap: &DatabaseSnapshot) -> Result<ImportStats> {
+        let mut conn = self.conn.lock().unwrap();
+
+        // PRAGMA foreign_keys cannot be toggled inside a transaction, so
+        // flip it before begin and restore after commit.
+        conn.pragma_update(None, "foreign_keys", "OFF")?;
+
+        let tx = conn.transaction()?;
+        tx.execute_batch(
+            r#"
+            DELETE FROM messages;
+            DELETE FROM space_files;
+            DELETE FROM sessions;
+            DELETE FROM spaces;
+            DELETE FROM snippets;
+            DELETE FROM mcp_servers;
+            DELETE FROM settings;
+            "#,
+        )?;
+
+        let d = &snap.data;
+
+        for s in &d.sessions {
+            tx.execute(
+                "INSERT INTO sessions (id, title, provider, model, system_prompt, params_json,
+                                       space_id, pinned_at, archived_at, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                params![
+                    s.id,
+                    s.title,
+                    s.provider,
+                    s.model,
+                    s.system_prompt,
+                    s.params_json,
+                    s.space_id,
+                    s.pinned_at,
+                    s.archived_at,
+                    s.created_at,
+                    s.updated_at,
+                ],
+            )?;
+        }
+
+        for m in &d.messages {
+            tx.execute(
+                "INSERT INTO messages (id, session_id, role, content, thinking,
+                                       attachments_json, metrics_json, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    m.id,
+                    m.session_id,
+                    m.role,
+                    m.content,
+                    m.thinking,
+                    m.attachments_json,
+                    m.metrics_json,
+                    m.created_at,
+                ],
+            )?;
+        }
+
+        for sp in &d.spaces {
+            tx.execute(
+                "INSERT INTO spaces (id, name, description, instructions, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    sp.id,
+                    sp.name,
+                    sp.description,
+                    sp.instructions,
+                    sp.created_at,
+                    sp.updated_at,
+                ],
+            )?;
+        }
+
+        for f in &d.space_files {
+            tx.execute(
+                "INSERT INTO space_files (id, space_id, name, mime, kind, data, size, position, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    f.id,
+                    f.space_id,
+                    f.name,
+                    f.mime,
+                    f.kind,
+                    f.data,
+                    f.size,
+                    f.position,
+                    f.created_at,
+                ],
+            )?;
+        }
+
+        for sn in &d.snippets {
+            tx.execute(
+                "INSERT INTO snippets (id, title, prompt, attachments_json, provider, model,
+                                       created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    sn.id,
+                    sn.title,
+                    sn.prompt,
+                    sn.attachments_json,
+                    sn.provider,
+                    sn.model,
+                    sn.created_at,
+                    sn.updated_at,
+                ],
+            )?;
+        }
+
+        for mcp in &d.mcp_servers {
+            // Legacy `transport` column is NOT NULL — hard-code 'http' so
+            // inserts succeed on databases that still carry the older schema.
+            tx.execute(
+                "INSERT INTO mcp_servers (id, name, transport, url, headers_json,
+                                           enabled, created_at, updated_at)
+                 VALUES (?1, ?2, 'http', ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    mcp.id,
+                    mcp.name,
+                    mcp.url,
+                    mcp.headers_json,
+                    if mcp.enabled { 1_i64 } else { 0_i64 },
+                    mcp.created_at,
+                    mcp.updated_at,
+                ],
+            )?;
+        }
+
+        for (k, v) in &d.settings {
+            tx.execute(
+                "INSERT INTO settings (key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![k, v],
+            )?;
+        }
+
+        let stats = ImportStats {
+            sessions: d.sessions.len(),
+            messages: d.messages.len(),
+            spaces: d.spaces.len(),
+            space_files: d.space_files.len(),
+            snippets: d.snippets.len(),
+            mcp_servers: d.mcp_servers.len(),
+            settings: d.settings.len(),
+        };
+
+        tx.commit()?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+        Ok(stats)
+    }
+
+    /// Archive every session that isn't already archived. Pinned flags are
+    /// cleared for parity with `archive_session`. Returns the number of
+    /// rows that were newly archived so the UI can show a toast.
+    pub fn archive_all_sessions(&self) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        let now = Utc::now().timestamp_millis();
+        let affected = conn.execute(
+            "UPDATE sessions SET archived_at = ?1, pinned_at = NULL
+             WHERE archived_at IS NULL",
+            params![now],
+        )?;
+        Ok(affected as i64)
+    }
+
+    /// Delete everything the user created (chats, spaces, snippets,
+    /// MCP servers) while leaving app settings intact. `messages` and
+    /// `space_files` fall via ON DELETE CASCADE.
+    pub fn wipe_user_data(&self) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        conn.pragma_update(None, "foreign_keys", "OFF")?;
+        let tx = conn.transaction()?;
+        tx.execute_batch(
+            r#"
+            DELETE FROM messages;
+            DELETE FROM space_files;
+            DELETE FROM sessions;
+            DELETE FROM spaces;
+            DELETE FROM snippets;
+            DELETE FROM mcp_servers;
+            "#,
+        )?;
+        tx.commit()?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+        Ok(())
+    }
+
+    /// Factory reset: everything `wipe_user_data` does, plus a settings
+    /// purge. Caller is responsible for clearing the OS-kept OpenAI key
+    /// since that lives outside SQLite.
+    pub fn wipe_all(&self) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        conn.pragma_update(None, "foreign_keys", "OFF")?;
+        let tx = conn.transaction()?;
+        tx.execute_batch(
+            r#"
+            DELETE FROM messages;
+            DELETE FROM space_files;
+            DELETE FROM sessions;
+            DELETE FROM spaces;
+            DELETE FROM snippets;
+            DELETE FROM mcp_servers;
+            DELETE FROM settings;
+            "#,
+        )?;
+        tx.commit()?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DatabaseSnapshot {
+    /// Wire-format tag — bump when the shape changes so loaders can
+    /// reject or migrate older dumps.
+    pub schema: String,
+    pub exported_at: i64,
+    pub loach_version: String,
+    pub data: SnapshotData,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SnapshotData {
+    pub sessions: Vec<Session>,
+    pub messages: Vec<Message>,
+    pub spaces: Vec<Space>,
+    pub space_files: Vec<SpaceFile>,
+    pub snippets: Vec<Snippet>,
+    pub mcp_servers: Vec<McpServer>,
+    /// Key/value settings as stored in the `settings` table. A plain list
+    /// (not a map) so round-trip order is stable.
+    pub settings: Vec<(String, String)>,
+}
+
+/// Row-count breakdown returned after a successful import.
+#[derive(Debug, Serialize)]
+pub struct ImportStats {
+    pub sessions: usize,
+    pub messages: usize,
+    pub spaces: usize,
+    pub space_files: usize,
+    pub snippets: usize,
+    pub mcp_servers: usize,
+    pub settings: usize,
 }

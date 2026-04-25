@@ -1,20 +1,26 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
+  AlertTriangle,
   Archive,
   ArchiveRestore,
   BookOpen,
   Check,
   Clock,
+  Database,
+  Download,
   Github,
   Globe,
   Info,
   Layers,
+  Loader2,
   MessageSquareText,
   MoreHorizontal,
   Palette,
   Plug,
+  RotateCcw,
   Server,
   Trash2,
+  Upload,
 } from "lucide-react";
 import {
   Dialog,
@@ -39,9 +45,16 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useUIStore } from "@/stores/uiStore";
 import { McpPanel } from "@/components/McpPanel";
-import { isTauri } from "@/lib/tauri";
+import {
+  archiveAllSessions,
+  exportDataJson,
+  factoryReset,
+  importDataJson,
+  isTauri,
+  wipeUserData,
+} from "@/lib/tauri";
 import { cn } from "@/lib/utils";
-import type { Session } from "@/types";
+import type { ImportStats, Session } from "@/types";
 import pkg from "../../package.json";
 
 const GITHUB_URL = "https://github.com/ztcs-software/loach";
@@ -63,6 +76,7 @@ const NAV = [
   { value: "mcp", label: "MCP", icon: Plug },
   { value: "appearance", label: "Appearance", icon: Palette },
   { value: "archive", label: "Archive", icon: Archive },
+  { value: "data", label: "Data", icon: Database },
   { value: "about", label: "About", icon: Info },
 ] as const;
 
@@ -382,6 +396,17 @@ export function SettingsDialog() {
                   them back, or delete permanently.
                 </p>
                 <ArchivePanel onOpenChat={() => setOpen(false)} />
+              </TabsContent>
+
+              <TabsContent value="data" className="mt-0 space-y-5 focus-visible:ring-0 focus-visible:ring-offset-0">
+                <SectionTitle>Data</SectionTitle>
+                <p className="text-[13px] text-foreground/55">
+                  Back up, restore, or clear everything Loach has stored on
+                  this machine. Exports include chats, messages, spaces,
+                  snippets, MCP servers, and app settings — never your API
+                  key (that stays in your OS credential manager).
+                </p>
+                <DataPanel onCloseDialog={() => setOpen(false)} />
               </TabsContent>
 
               <TabsContent value="about" className="mt-0 space-y-5 focus-visible:ring-0 focus-visible:ring-offset-0">
@@ -773,5 +798,554 @@ function ArchivedRow({
         </DropdownMenuContent>
       </DropdownMenu>
     </li>
+  );
+}
+
+/* ───────────────────────── Data tab panel ─────────────────────────
+ *
+ * Four bulk operations live here:
+ *
+ *   1. Export   — dump the whole DB to a JSON file via a save dialog.
+ *   2. Import   — pick a JSON dump, replace everything with its contents,
+ *                 then reload the window so every store re-hydrates from
+ *                 the freshly-written DB.
+ *   3. Archive all — flip every live chat to archived in one shot.
+ *   4. Erase    — two-mode destructive flow (user-data vs factory reset),
+ *                 gated on a typed "YES" confirmation.
+ *
+ * The destructive actions rebuild the whole app by calling
+ * `window.location.reload()` — every Zustand store derives from SQLite
+ * on mount (see App.tsx's hydrate useEffect), so a reload is the
+ * cheapest way to get back to a consistent state without writing a
+ * bespoke rehydrate function per store.
+ * ─────────────────────────────────────────────────────────────────── */
+
+type BusyKind = "export" | "import" | "archive-all" | null;
+
+function DataPanel({ onCloseDialog: _onCloseDialog }: { onCloseDialog: () => void }) {
+  const [busy, setBusy] = useState<BusyKind>(null);
+  const [message, setMessage] = useState<{
+    tone: "info" | "error";
+    text: string;
+  } | null>(null);
+  const [eraseOpen, setEraseOpen] = useState(false);
+
+  // A tiny toast-lite: the feedback message auto-clears after 5s so long-
+  // running exports don't leave stale success chips behind when the user
+  // pokes Export a second time.
+  const flash = (tone: "info" | "error", text: string) => {
+    setMessage({ tone, text });
+    window.setTimeout(() => {
+      setMessage((m) => (m && m.text === text ? null : m));
+    }, 5000);
+  };
+
+  const handleExport = async () => {
+    if (!isTauri) {
+      flash("error", "Export requires the desktop app.");
+      return;
+    }
+    setBusy("export");
+    try {
+      const [{ save }, { writeTextFile }] = await Promise.all([
+        import("@tauri-apps/plugin-dialog"),
+        import("@tauri-apps/plugin-fs"),
+      ]);
+      const stamp = new Date().toISOString().slice(0, 10);
+      const path = await save({
+        defaultPath: `loach-export-${stamp}.json`,
+        filters: [{ name: "Loach export", extensions: ["json"] }],
+      });
+      if (!path) {
+        setBusy(null);
+        return; // user cancelled
+      }
+      const payload = await exportDataJson();
+      await writeTextFile(path, payload);
+      flash("info", `Exported to ${path}`);
+    } catch (e) {
+      flash("error", e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const handleImport = async () => {
+    if (!isTauri) {
+      flash("error", "Import requires the desktop app.");
+      return;
+    }
+    const confirmed = window.confirm(
+      "Importing replaces ALL current chats, spaces, snippets, MCP servers, " +
+        "and settings with the contents of the file. Your stored OpenAI API " +
+        "key is not touched. Continue?",
+    );
+    if (!confirmed) return;
+
+    setBusy("import");
+    try {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const selected = await open({
+        multiple: false,
+        filters: [{ name: "Loach export", extensions: ["json"] }],
+      });
+      // The open() API returns a string | null on single-select in Tauri 2.
+      const path = typeof selected === "string" ? selected : null;
+      if (!path) {
+        setBusy(null);
+        return;
+      }
+      const stats = await importDataJson(path);
+      flash("info", formatImportSummary(stats));
+      // Give the toast a beat, then reload so every store re-hydrates
+      // from the freshly-written DB.
+      window.setTimeout(() => {
+        window.location.reload();
+      }, 900);
+    } catch (e) {
+      flash("error", e instanceof Error ? e.message : String(e));
+      setBusy(null);
+    }
+  };
+
+  const handleArchiveAll = async () => {
+    if (!isTauri) {
+      flash("error", "Archive requires the desktop app.");
+      return;
+    }
+    const live = useChatStore
+      .getState()
+      .sessions.filter((s) => !s.archived_at).length;
+    if (live === 0) {
+      flash("info", "No live chats to archive.");
+      return;
+    }
+    const confirmed = window.confirm(
+      `Move all ${live} live chat${live === 1 ? "" : "s"} to the archive? ` +
+        "You can unarchive any of them later from Settings → Archive.",
+    );
+    if (!confirmed) return;
+
+    setBusy("archive-all");
+    try {
+      const n = await archiveAllSessions();
+      // Re-hydrate the chat store so the sidebar collapses the now-archived
+      // sessions and a fresh blank chat is created for the user to land in.
+      await useChatStore.getState().hydrate();
+      flash("info", `Archived ${n} chat${n === 1 ? "" : "s"}.`);
+    } catch (e) {
+      flash("error", e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <>
+      <div className="divide-y divide-foreground/[0.06] rounded-2xl border border-foreground/10 bg-foreground/[0.02]">
+        <DataRow
+          icon={<Download className="h-4 w-4" />}
+          title="Export data"
+          description="Save a full database dump — chats, spaces, snippets, MCP servers, and settings — to a JSON file."
+          action={
+            <Button
+              variant="outline"
+              onClick={handleExport}
+              disabled={busy !== null}
+              className="shrink-0"
+            >
+              {busy === "export" ? (
+                <>
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  Exporting…
+                </>
+              ) : (
+                <>
+                  <Download className="h-3.5 w-3.5" />
+                  Export
+                </>
+              )}
+            </Button>
+          }
+        />
+        <DataRow
+          icon={<Upload className="h-4 w-4" />}
+          title="Import data"
+          description="Restore from a previously exported JSON dump. Replaces everything in the current database."
+          action={
+            <Button
+              variant="outline"
+              onClick={handleImport}
+              disabled={busy !== null}
+              className="shrink-0"
+            >
+              {busy === "import" ? (
+                <>
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  Importing…
+                </>
+              ) : (
+                <>
+                  <Upload className="h-3.5 w-3.5" />
+                  Import
+                </>
+              )}
+            </Button>
+          }
+        />
+        <DataRow
+          icon={<Archive className="h-4 w-4" />}
+          title="Archive all chats"
+          description="Move every live chat to the archive. Nothing is deleted — unarchive individually any time."
+          action={
+            <Button
+              variant="outline"
+              onClick={handleArchiveAll}
+              disabled={busy !== null}
+              className="shrink-0"
+            >
+              {busy === "archive-all" ? (
+                <>
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  Archiving…
+                </>
+              ) : (
+                <>
+                  <Archive className="h-3.5 w-3.5" />
+                  Archive all
+                </>
+              )}
+            </Button>
+          }
+        />
+      </div>
+
+      {/* Danger zone — a dedicated visually-distinct card so Erase can't be
+          mistaken for the more routine Export / Import rows. */}
+      <div className="mt-5 rounded-2xl border border-destructive/30 bg-destructive/[0.06] p-4">
+        <div className="flex items-start gap-3">
+          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-destructive/15 text-destructive">
+            <AlertTriangle className="h-4 w-4" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <h4 className="text-[13.5px] font-semibold text-foreground">
+              Erase &amp; Reset
+            </h4>
+            <p className="mt-1 text-[12px] leading-relaxed text-foreground/60">
+              Permanently delete your data, or factory-reset the app to its
+              default state. Neither operation can be undone — consider
+              exporting first.
+            </p>
+          </div>
+          <Button
+            variant="destructive"
+            onClick={() => setEraseOpen(true)}
+            disabled={busy !== null}
+            className="shrink-0"
+          >
+            <RotateCcw className="h-3.5 w-3.5" />
+            Erase…
+          </Button>
+        </div>
+      </div>
+
+      {message && (
+        <div
+          role="status"
+          className={cn(
+            "mt-4 rounded-xl border px-3.5 py-2.5 text-[12.5px]",
+            message.tone === "error"
+              ? "border-destructive/40 bg-destructive/10 text-destructive"
+              : "border-foreground/10 bg-foreground/[0.04] text-foreground/75",
+          )}
+        >
+          {message.text}
+        </div>
+      )}
+
+      <EraseDialog
+        open={eraseOpen}
+        onOpenChange={setEraseOpen}
+        onDone={(text) => {
+          flash("info", text);
+          // Full reload so every zustand store re-hydrates from the now-
+          // empty DB. Small delay so the success state is visible first.
+          window.setTimeout(() => {
+            window.location.reload();
+          }, 900);
+        }}
+      />
+    </>
+  );
+}
+
+/** One row in the Data tab's action list. Kept purely presentational so the
+ *  busy / disabled logic stays in `DataPanel`. */
+function DataRow({
+  icon,
+  title,
+  description,
+  action,
+}: {
+  icon: React.ReactNode;
+  title: string;
+  description: string;
+  action: React.ReactNode;
+}) {
+  return (
+    <div className="flex items-start justify-between gap-4 p-4">
+      <div className="flex min-w-0 items-start gap-3">
+        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-foreground/[0.07] text-foreground/75">
+          {icon}
+        </div>
+        <div className="min-w-0">
+          <h4 className="text-[13.5px] font-medium text-foreground">{title}</h4>
+          <p className="mt-1 text-[12px] leading-relaxed text-foreground/55">
+            {description}
+          </p>
+        </div>
+      </div>
+      {action}
+    </div>
+  );
+}
+
+function formatImportSummary(s: ImportStats): string {
+  const parts: string[] = [];
+  if (s.sessions) parts.push(`${s.sessions} chat${s.sessions === 1 ? "" : "s"}`);
+  if (s.messages) parts.push(`${s.messages} message${s.messages === 1 ? "" : "s"}`);
+  if (s.spaces) parts.push(`${s.spaces} space${s.spaces === 1 ? "" : "s"}`);
+  if (s.snippets) parts.push(`${s.snippets} snippet${s.snippets === 1 ? "" : "s"}`);
+  if (s.mcp_servers)
+    parts.push(`${s.mcp_servers} MCP server${s.mcp_servers === 1 ? "" : "s"}`);
+  const body = parts.length > 0 ? parts.join(" · ") : "0 records";
+  return `Imported ${body}. Reloading…`;
+}
+
+/* ───────────────── Erase & Reset confirmation dialog ─────────────────
+ *
+ * Two-step destructive UI:
+ *   1. User picks a mode — "my data only" vs "factory reset" — via a
+ *      pair of card-style radio options.
+ *   2. User types YES (case-insensitive "yes" accepted) to unlock the
+ *      red "Erase" button. Both the radio choice and the text input
+ *      reset on every re-open so a closed-then-reopened dialog always
+ *      starts clean.
+ * ─────────────────────────────────────────────────────────────────── */
+
+type EraseMode = "user-data" | "factory-reset";
+
+function EraseDialog({
+  open,
+  onOpenChange,
+  onDone,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onDone: (successMessage: string) => void;
+}) {
+  const [mode, setMode] = useState<EraseMode>("user-data");
+  const [confirmText, setConfirmText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Reset the form whenever the dialog is opened — never carry state across
+  // mount/unmount cycles for a destructive action.
+  useEffect(() => {
+    if (open) {
+      setMode("user-data");
+      setConfirmText("");
+      setBusy(false);
+      setError(null);
+    }
+  }, [open]);
+
+  const armed = confirmText.trim().toUpperCase() === "YES";
+
+  const handleConfirm = async () => {
+    if (!armed) return;
+    setBusy(true);
+    setError(null);
+    try {
+      if (mode === "user-data") {
+        await wipeUserData();
+        onDone("All chats, spaces, snippets, and MCP servers deleted. Reloading…");
+      } else {
+        await factoryReset();
+        onDone("Loach has been reset to factory defaults. Reloading…");
+      }
+      onOpenChange(false);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={busy ? undefined : onOpenChange}>
+      <DialogContent className="max-w-lg gap-5">
+        <div>
+          <DialogTitle className="flex items-center gap-2 text-base font-semibold">
+            <AlertTriangle className="h-4 w-4 text-destructive" />
+            Erase &amp; Reset
+          </DialogTitle>
+          <DialogDescription className="mt-1.5 text-[13px] text-foreground/60">
+            Choose what to erase. Nothing happens until you type{" "}
+            <span className="font-mono font-semibold text-foreground/80">YES</span>{" "}
+            and press the red button.
+          </DialogDescription>
+        </div>
+
+        <div className="space-y-2.5">
+          <EraseOption
+            selected={mode === "user-data"}
+            onClick={() => setMode("user-data")}
+            title="Remove my data"
+            body={
+              <>
+                Delete all <strong>chats</strong>, <strong>spaces</strong>,{" "}
+                <strong>snippets</strong>, and <strong>MCP servers</strong>.
+                Keeps your settings (theme, provider URLs, system prompt) and
+                your stored OpenAI API key.
+              </>
+            }
+          />
+          <EraseOption
+            selected={mode === "factory-reset"}
+            onClick={() => setMode("factory-reset")}
+            title="Factory reset"
+            emphasis="danger"
+            body={
+              <>
+                Everything above, <strong>plus</strong> all app settings and
+                your stored <strong>OpenAI API key</strong>. The app will
+                look like a fresh install.
+              </>
+            }
+          />
+        </div>
+
+        <div>
+          <Label htmlFor="erase-confirm" className="text-[12px]">
+            Type <span className="font-mono font-semibold">YES</span> to confirm
+          </Label>
+          <Input
+            id="erase-confirm"
+            className="mt-1.5 font-mono"
+            autoComplete="off"
+            autoCorrect="off"
+            spellCheck={false}
+            value={confirmText}
+            onChange={(e) => setConfirmText(e.target.value)}
+            placeholder="YES"
+            disabled={busy}
+          />
+        </div>
+
+        {error && (
+          <div className="rounded-xl border border-destructive/40 bg-destructive/10 px-3 py-2 text-[12px] text-destructive">
+            {error}
+          </div>
+        )}
+
+        <div className="flex items-center justify-end gap-2">
+          <Button
+            variant="outline"
+            onClick={() => onOpenChange(false)}
+            disabled={busy}
+          >
+            Cancel
+          </Button>
+          <Button
+            variant="destructive"
+            disabled={!armed || busy}
+            onClick={handleConfirm}
+          >
+            {busy ? (
+              <>
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                Erasing…
+              </>
+            ) : mode === "factory-reset" ? (
+              <>
+                <RotateCcw className="h-3.5 w-3.5" />
+                Factory reset
+              </>
+            ) : (
+              <>
+                <Trash2 className="h-3.5 w-3.5" />
+                Erase my data
+              </>
+            )}
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function EraseOption({
+  selected,
+  onClick,
+  title,
+  body,
+  emphasis,
+}: {
+  selected: boolean;
+  onClick: () => void;
+  title: string;
+  body: React.ReactNode;
+  emphasis?: "danger";
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={selected}
+      className={cn(
+        "group flex w-full items-start gap-3 rounded-2xl border-2 p-3.5 text-left transition-all",
+        selected
+          ? emphasis === "danger"
+            ? "border-destructive bg-destructive/[0.07]"
+            : "border-primary bg-primary/[0.06]"
+          : "border-foreground/10 hover:border-foreground/25 hover:bg-foreground/[0.02]",
+      )}
+    >
+      <span
+        className={cn(
+          "mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border-2 transition-all",
+          selected
+            ? emphasis === "danger"
+              ? "border-destructive"
+              : "border-primary"
+            : "border-foreground/30 group-hover:border-foreground/50",
+        )}
+        aria-hidden
+      >
+        {selected && (
+          <span
+            className={cn(
+              "h-2 w-2 rounded-full",
+              emphasis === "danger" ? "bg-destructive" : "bg-primary",
+            )}
+          />
+        )}
+      </span>
+      <div className="min-w-0">
+        <div
+          className={cn(
+            "text-[13px] font-semibold",
+            selected && emphasis === "danger"
+              ? "text-destructive"
+              : "text-foreground",
+          )}
+        >
+          {title}
+        </div>
+        <p className="mt-0.5 text-[12px] leading-relaxed text-foreground/60">
+          {body}
+        </p>
+      </div>
+    </button>
   );
 }

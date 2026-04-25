@@ -4,7 +4,9 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
 use uuid::Uuid;
 
-use crate::db::{McpServer, Message, Session, Snippet, Space, SpaceFile};
+use crate::db::{
+    DatabaseSnapshot, ImportStats, McpServer, Message, Session, Snippet, Space, SpaceFile,
+};
 use crate::mcp::{self, McpTestResult};
 use crate::providers::{self, ChatRequest, ModelInfo};
 use crate::secrets;
@@ -727,4 +729,78 @@ pub async fn fetch_url(
     url: String,
 ) -> Result<FetchedPage, String> {
     fetch_url_tool::fetch(&state.http, &url).await
+}
+
+// ---------- data (export / import / wipe) ----------
+//
+// Powers the Settings → Data tab. Keeping all four actions here (rather
+// than scattered across files) makes the surface area obvious: the user
+// can dump their entire DB, restore from a dump, bulk-archive, or nuke
+// it back to factory defaults — and nothing else in the Rust layer needs
+// to know these exist.
+
+/// Serialise every table to a JSON string. Pretty-printed so users can
+/// diff or grep an export manually. The schema tag `"loach/v1"` is the
+/// forward-compat knob — `import_data_json` rejects anything else.
+#[tauri::command]
+pub async fn export_data_json(state: State<'_, AppState>) -> Result<String, String> {
+    let snap = state.db.snapshot().map_err(err)?;
+    serde_json::to_string_pretty(&snap).map_err(err)
+}
+
+/// Read a JSON file from disk and replace every table with its contents.
+/// Returns a per-table row-count breakdown so the UI can show a toast
+/// like "Imported 12 chats · 145 messages · 3 spaces".
+///
+/// We take a path (not the raw text) so the frontend doesn't need `fs`
+/// read permission: the dialog plugin hands us a user-blessed path, we
+/// open it ourselves.
+#[tauri::command]
+pub async fn import_data_json(
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<ImportStats, String> {
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| format!("couldn't read {path}: {e}"))?;
+    let snap: DatabaseSnapshot = serde_json::from_str(&text)
+        .map_err(|e| format!("file doesn't look like a Loach export: {e}"))?;
+    if snap.schema != "loach/v1" {
+        return Err(format!(
+            "unsupported export schema '{}' — this build expects 'loach/v1'",
+            snap.schema
+        ));
+    }
+    state.db.restore_snapshot(&snap).map_err(err)
+}
+
+/// Archive every non-archived session in one go. The Rust side returns
+/// the number of rows it actually flipped so the UI can say "Archived 8
+/// chats" vs. "Nothing to archive".
+#[tauri::command]
+pub async fn archive_all_sessions(state: State<'_, AppState>) -> Result<i64, String> {
+    state.db.archive_all_sessions().map_err(err)
+}
+
+/// Delete chats / spaces / snippets / MCP servers but leave app
+/// settings (theme, provider URLs, system prompt, etc.) intact. The
+/// OpenAI key — which lives in the OS credential manager, not SQLite —
+/// also survives. Use [`factory_reset`] for the nuclear option.
+#[tauri::command]
+pub async fn wipe_user_data(state: State<'_, AppState>) -> Result<(), String> {
+    state.db.wipe_user_data().map_err(err)
+}
+
+/// Factory reset: wipe_user_data + drop all settings + clear the stored
+/// OpenAI key. After this the app should look exactly like a fresh
+/// install, save for the DB file itself (which is empty but preserved).
+#[tauri::command]
+pub async fn factory_reset(state: State<'_, AppState>) -> Result<(), String> {
+    state.db.wipe_all().map_err(err)?;
+    // Best-effort: if the user never had a key we silently ignore the
+    // NoEntry branch inside `clear_openai_key`. A hard failure here
+    // (keyring daemon dead, etc.) shouldn't undo the DB wipe.
+    if let Err(e) = secrets::clear_openai_key() {
+        tracing::warn!("clear_openai_key during factory_reset failed: {e:?}");
+    }
+    Ok(())
 }

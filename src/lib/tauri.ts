@@ -5,6 +5,7 @@ import type {
   ChatRequest,
   FetchedPage,
   GenerationParams,
+  ImportStats,
   McpServer,
   McpServerInput,
   McpTestResult,
@@ -527,4 +528,41 @@ export function mcpTest(input: McpServerInput): Promise<McpTestResult> {
     });
   }
   return invoke<McpTestResult>("mcp_test", { input });
+}
+
+// ------------ data (export / import / wipe) ------------
+
+/** Returns a JSON string representing every table in the DB. The caller
+ *  is responsible for `dialog.save` + `writeTextFile` to put it on disk. */
+export function exportDataJson(): Promise<string> {
+  if (!isTauri) return Promise.reject(new Error("export requires the Tauri runtime"));
+  return invoke<string>("export_data_json");
+}
+
+/** Replace every table with the contents of the JSON file at `path`.
+ *  Resolves to a per-table row-count breakdown on success; rejects with
+ *  a human-readable message if the file isn't a Loach export. */
+export function importDataJson(path: string): Promise<ImportStats> {
+  if (!isTauri) return Promise.reject(new Error("import requires the Tauri runtime"));
+  return invoke<ImportStats>("import_data_json", { path });
+}
+
+/** Archive every non-archived session. Returns how many rows moved. */
+export function archiveAllSessions(): Promise<number> {
+  if (!isTauri) return notInTauri(0);
+  return invoke<number>("archive_all_sessions");
+}
+
+/** Drop all user-authored content (chats, spaces, snippets, MCP servers)
+ *  while leaving app settings and the stored OpenAI key intact. */
+export function wipeUserData(): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke<void>("wipe_user_data");
+}
+
+/** Factory reset — wipe_user_data + drop all settings + clear the OS
+ *  credential-store OpenAI key. Irreversible. */
+export function factoryReset(): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke<void>("factory_reset");
 }

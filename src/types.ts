@@ -313,3 +313,19 @@ export interface McpTestResult {
   tools: McpTool[];
   error: string | null;
 }
+
+// ---------------------------------------------------------------------------
+// Data tab (export / import / wipe)
+// ---------------------------------------------------------------------------
+
+/** Per-table row-count breakdown returned from a successful `import_data_json`.
+ *  Powers the post-import toast ("Imported 12 chats · 145 messages · …"). */
+export interface ImportStats {
+  sessions: number;
+  messages: number;
+  spaces: number;
+  space_files: number;
+  snippets: number;
+  mcp_servers: number;
+  settings: number;
+}

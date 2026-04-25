@@ -159,6 +159,11 @@ pub fn run() {
             commands::mcp_save,
             commands::mcp_delete,
             commands::mcp_test,
+            commands::export_data_json,
+            commands::import_data_json,
+            commands::archive_all_sessions,
+            commands::wipe_user_data,
+            commands::factory_reset,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Loach");

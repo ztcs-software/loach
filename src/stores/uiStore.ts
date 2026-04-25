@@ -13,6 +13,7 @@ export type SettingsTab =
   | "mcp"
   | "appearance"
   | "archive"
+  | "data"
   | "about";
 
 interface UIState {
