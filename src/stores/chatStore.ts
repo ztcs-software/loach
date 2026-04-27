@@ -37,6 +37,7 @@ import {
 import { useSettingsStore } from "./settingsStore";
 import { useSpaceStore } from "./spaceStore";
 import { useUIStore } from "./uiStore";
+import { useModelsStore } from "./modelsStore";
 
 interface ActiveStream {
   stop: () => Promise<void>;
@@ -109,7 +110,10 @@ interface ChatState {
   remove: (id: string) => Promise<void>;
   setSessionModel: (id: string, provider: ProviderId, model: string) => Promise<void>;
   setSessionSystemPrompt: (id: string, prompt: string) => Promise<void>;
-  setSessionParams: (id: string, params: GenerationParams) => Promise<void>;
+  /** Set per-session generation parameters. Pass `null` to remove the
+   *  override entirely so the session falls back to (model defaults +
+   *  app defaults). */
+  setSessionParams: (id: string, params: GenerationParams | null) => Promise<void>;
 
   sendUserMessage: (content: string, attachments: Attachment[]) => Promise<void>;
   /** Interrupts whatever is happening for `sessionId`:
@@ -141,18 +145,39 @@ let runningBuffers: {
   metrics: MessageMetrics | null;
 } | null = null;
 
-function parseParams(json: string | null): GenerationParams {
-  if (!json) return { ...DEFAULT_PARAMS };
+function parseOverrides(json: string | null): Partial<GenerationParams> {
+  if (!json) return {};
   try {
-    return { ...DEFAULT_PARAMS, ...JSON.parse(json) };
+    return JSON.parse(json) as Partial<GenerationParams>;
   } catch {
-    return { ...DEFAULT_PARAMS };
+    return {};
   }
 }
 
+/**
+ * Resolve the effective parameters for a session, layering in this order:
+ *
+ *   1. App defaults (`DEFAULT_PARAMS`) — the universal fallback.
+ *   2. Model defaults (Ollama only) — parsed from the Modelfile via
+ *      `modelsStore.loadModelDefaults`. Only present if the cache was
+ *      warmed; otherwise this layer is empty and we fall back to (1).
+ *   3. Session overrides — whatever the user persisted by touching a slider
+ *      (`params_json`). When `params_json` is `null` the session inherits
+ *      from layers 1 + 2 only, which is how "follow model defaults" works.
+ *
+ * Read synchronously so the chat send path doesn't pay an async hop on
+ * every message. Cache warming happens up-front in `newSession` /
+ * `setSessionModel` so by the time the user hits Enter the merge has the
+ * right data.
+ */
 function readSessionParams(session: Session | undefined): GenerationParams {
   if (!session) return { ...DEFAULT_PARAMS };
-  return parseParams(session.params_json);
+  const overrides = parseOverrides(session.params_json);
+  const modelDefaults =
+    session.provider === "ollama"
+      ? useModelsStore.getState().modelDefaults[session.model] ?? {}
+      : {};
+  return { ...DEFAULT_PARAMS, ...modelDefaults, ...overrides };
 }
 
 function chatHistory(messages: Message[], userText: string, images: string[]): ChatMessageIn[] {
@@ -481,6 +506,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
       activeSessionId: session.id,
       messages: { ...s.messages, [session.id]: [] },
     }));
+    // Warm the model-defaults cache for the session's model so the parameter
+    // panel and the first send already see Modelfile values without having
+    // to wait on the show_model round-trip. Fire-and-forget — failure here
+    // just means we fall back to DEFAULT_PARAMS, same as before this feature.
+    if (p === "ollama" && m) {
+      void useModelsStore.getState().loadModelDefaults(m);
+    }
     return session;
   },
 
@@ -566,6 +598,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const baseUrl = useSettingsStore.getState().ollama_base_url;
       ollamaUnloadModel(baseUrl, prev.model).catch(() => {});
     }
+    // Warm the new model's defaults so the parameter panel snaps to its
+    // values once the user opens it.
+    if (provider === "ollama" && model) {
+      void useModelsStore.getState().loadModelDefaults(model);
+    }
   },
 
   setSessionSystemPrompt: async (id, prompt) => {
@@ -577,9 +614,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   setSessionParams: async (id, params) => {
+    const next = params === null ? null : JSON.stringify(params);
     set((s) => ({
       sessions: s.sessions.map((x) =>
-        x.id === id ? { ...x, params_json: JSON.stringify(params) } : x,
+        x.id === id ? { ...x, params_json: next } : x,
       ),
     }));
   },

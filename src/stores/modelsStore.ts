@@ -10,8 +10,10 @@ import {
   makeRequestId,
 } from "@/lib/tauri";
 import { useSettingsStore } from "./settingsStore";
+import { parseModelParameters } from "@/lib/modelParams";
 import type {
   AdminEvent,
+  GenerationParams,
   ModelInfo,
   OllamaShowResponse,
 } from "@/types";
@@ -53,9 +55,21 @@ interface ModelsState {
    *  (the user might queue a few at once) so we keep them separate. */
   runs: Record<string, AdminProgress>;
 
+  /** Per-model default parameters parsed from the Modelfile (`/api/show`
+   *  `parameters` block). Lazy-populated by `loadModelDefaults`; entries are
+   *  keyed by model id (e.g. `llama3.1:8b`). Empty `{}` is a valid result
+   *  meaning "we looked, the model lists no overrides" — distinct from
+   *  "missing key" which means "we haven't asked yet". */
+  modelDefaults: Record<string, Partial<GenerationParams>>;
+
   hydrate: () => Promise<void>;
   refresh: () => Promise<void>;
   setViewingModel: (name: string | null) => void;
+  /** Lazily fetch + parse a model's PARAMETER block. Returns the cached
+   *  patch when one exists, otherwise hits `/api/show` and stores the
+   *  result. OpenAI models resolve to `{}` immediately (the catalog endpoint
+   *  doesn't expose Modelfile-equivalent parameters). */
+  loadModelDefaults: (modelId: string) => Promise<Partial<GenerationParams>>;
 
   showModel: (name: string) => Promise<OllamaShowResponse>;
   deleteModel: (name: string) => Promise<void>;
@@ -81,6 +95,7 @@ export const useModelsStore = create<ModelsState>((set, get) => ({
   error: null,
   viewingModel: null,
   runs: {},
+  modelDefaults: {},
 
   hydrate: async () => {
     await get().refresh();
@@ -123,6 +138,37 @@ export const useModelsStore = create<ModelsState>((set, get) => ({
   showModel: async (name) => {
     const base = useSettingsStore.getState().ollama_base_url;
     return ollamaShowModel(base, name);
+  },
+
+  loadModelDefaults: async (modelId) => {
+    if (!modelId) return {};
+    const cached = get().modelDefaults[modelId];
+    if (cached) return cached;
+
+    // OpenAI catalog: the listing endpoint doesn't return Modelfile-style
+    // parameters, so we cache an empty patch and move on. Identifying it
+    // through the existing `models` array works as long as the user has
+    // refreshed at least once; if they haven't, we conservatively try
+    // Ollama's `/api/show` and let it 404 — cached as `{}` either way.
+    const known = get().models.find((m) => m.id === modelId);
+    if (known && known.provider !== "ollama") {
+      set((s) => ({ modelDefaults: { ...s.modelDefaults, [modelId]: {} } }));
+      return {};
+    }
+
+    const base = useSettingsStore.getState().ollama_base_url;
+    let patch: Partial<GenerationParams> = {};
+    try {
+      const resp = await ollamaShowModel(base, modelId);
+      patch = parseModelParameters(resp.parameters);
+    } catch {
+      // Network / 404 — cache empty so we don't retry on every render.
+      // The user will still see app defaults; it's the same behaviour as
+      // before this feature landed.
+      patch = {};
+    }
+    set((s) => ({ modelDefaults: { ...s.modelDefaults, [modelId]: patch } }));
+    return patch;
   },
 
   deleteModel: async (name) => {

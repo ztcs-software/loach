@@ -1,20 +1,21 @@
 import { useEffect, useMemo, useState } from "react";
-import { ChevronRight, ChevronDown, Dice5, RotateCcw, X } from "lucide-react";
+import { ChevronRight, ChevronDown, Dice5, Info, RotateCcw, X } from "lucide-react";
 import { Slider } from "@/components/ui/slider";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useChatStore } from "@/stores/chatStore";
+import { useModelsStore } from "@/stores/modelsStore";
 import { useUIStore } from "@/stores/uiStore";
 import { DEFAULT_PARAMS, type GenerationParams, type Session } from "@/types";
 
-function readParams(s: Session | undefined): GenerationParams {
-  if (!s?.params_json) return { ...DEFAULT_PARAMS };
+function parseOverrides(json: string | null): Partial<GenerationParams> {
+  if (!json) return {};
   try {
-    return { ...DEFAULT_PARAMS, ...JSON.parse(s.params_json) };
+    return JSON.parse(json) as Partial<GenerationParams>;
   } catch {
-    return { ...DEFAULT_PARAMS };
+    return {};
   }
 }
 
@@ -23,8 +24,31 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
   const toggle = useUIStore((s) => s.toggleParams);
   const setSessionParams = useChatStore((s) => s.setSessionParams);
   const setSessionSystemPrompt = useChatStore((s) => s.setSessionSystemPrompt);
+  const loadModelDefaults = useModelsStore((s) => s.loadModelDefaults);
 
-  const initial = useMemo(() => readParams(session), [session]);
+  // Subscribe to the per-model patch so this component re-renders the moment
+  // the lazy fetch lands. The selector returns the raw object reference, so
+  // identity stability falls out of the cache structure (we always return
+  // the same `{}` for "not Ollama", same patch for cached models).
+  const modelDefaults = useModelsStore((s) =>
+    session?.provider === "ollama" && session.model
+      ? s.modelDefaults[session.model]
+      : undefined,
+  );
+
+  const overrides = useMemo(
+    () => parseOverrides(session?.params_json ?? null),
+    [session?.params_json],
+  );
+  const hasOverrides = Object.keys(overrides).length > 0;
+
+  // The merge order mirrors `chatStore.readSessionParams` exactly so the
+  // sliders show the same numbers the request will actually use.
+  const initial = useMemo<GenerationParams>(
+    () => ({ ...DEFAULT_PARAMS, ...(modelDefaults ?? {}), ...overrides }),
+    [overrides, modelDefaults],
+  );
+
   const [params, setParams] = useState<GenerationParams>(initial);
   const [systemPrompt, setSystemPrompt] = useState(session?.system_prompt ?? "");
   const [advancedOpen, setAdvancedOpen] = useState(false);
@@ -34,27 +58,47 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
     setSystemPrompt(session?.system_prompt ?? "");
   }, [session?.id, initial, session?.system_prompt]);
 
+  // Defensive — newSession / setSessionModel already prefetch, but the panel
+  // can also be opened on a session created before this code shipped.
+  useEffect(() => {
+    if (session?.provider === "ollama" && session.model && !modelDefaults) {
+      void loadModelDefaults(session.model);
+    }
+  }, [session?.provider, session?.model, modelDefaults, loadModelDefaults]);
+
   const update = (patch: Partial<GenerationParams>) => {
     if (!session) return;
     const next = { ...params, ...patch };
     setParams(next);
+    // Touching any slider snapshots the current effective values into the
+    // session's overrides — including any model-default values the user
+    // hasn't touched, so future model swaps don't silently shift those.
     setSessionParams(session.id, next);
   };
 
-  // Restores every sampling / length / repetition / reproducibility value to
-  // DEFAULT_PARAMS. The per-chat system prompt lives outside `params` and is
-  // deliberately left untouched so users don't lose long custom instructions
-  // when they just want sane sliders back.
+  // Reset clears the override entirely so the session falls back to (model
+  // defaults + app defaults). For Ollama models that's the Modelfile values;
+  // for OpenAI it's just app defaults.
   const resetParams = () => {
     if (!session) return;
-    const next = { ...DEFAULT_PARAMS };
-    setParams(next);
-    setSessionParams(session.id, next);
+    setParams({ ...DEFAULT_PARAMS, ...(modelDefaults ?? {}) });
+    setSessionParams(session.id, null);
   };
 
   if (!open) return null;
 
   const isOpenAI = session?.provider === "openai";
+  const hasModelDefaults =
+    !!modelDefaults && Object.keys(modelDefaults).length > 0;
+  const sourceLabel = hasOverrides
+    ? "Custom — adjusted for this chat."
+    : isOpenAI
+      ? "Using app defaults — OpenAI doesn't expose per-model defaults."
+      : hasModelDefaults
+        ? `Using ${session!.model}'s Modelfile defaults.`
+        : modelDefaults === undefined
+          ? "Loading model defaults…"
+          : "Using app defaults — this model lists no overrides.";
 
   // Context-length stops — powers of two are the grid models are trained on
   // and the granularity VRAM allocation cares about. Users shouldn't be able
@@ -86,6 +130,11 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
           <p className="text-xs text-muted-foreground">Open a chat to adjust parameters.</p>
         ) : (
           <div className="space-y-6">
+            <div className="flex items-start gap-1.5 rounded-lg bg-foreground/[0.04] px-2.5 py-2 text-[11px] text-foreground/65">
+              <Info className="mt-0.5 h-3 w-3 shrink-0 text-foreground/45" />
+              <span className="leading-snug">{sourceLabel}</span>
+            </div>
+
             <Section title="Sampling">
               <SliderRow
                 label="Temperature"
@@ -218,11 +267,16 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
                 variant="ghost"
                 size="sm"
                 onClick={resetParams}
-                className="h-7 gap-1.5 rounded-md px-2 text-[11px] font-medium text-foreground/55 hover:bg-foreground/[0.06] hover:text-foreground"
-                title="Restore every parameter (sampling, length, advanced) to its default. Does not change the system prompt."
+                disabled={!hasOverrides}
+                className="h-7 gap-1.5 rounded-md px-2 text-[11px] font-medium text-foreground/55 hover:bg-foreground/[0.06] hover:text-foreground disabled:opacity-40"
+                title={
+                  hasModelDefaults
+                    ? "Drop your overrides and follow this model's Modelfile defaults again."
+                    : "Drop your overrides and follow the app defaults again."
+                }
               >
                 <RotateCcw className="h-3 w-3" />
-                Reset to defaults
+                {hasModelDefaults ? "Reset to model defaults" : "Reset to defaults"}
               </Button>
             </div>
 
