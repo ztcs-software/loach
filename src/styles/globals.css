@@ -46,6 +46,23 @@
     --drop-glow-strong:   rgba(230, 80, 30, 0.45);
   }
 
+  /* Solid background variant flips the accent to azure (#007FFF). The
+     gradient mesh's ember palette pairs naturally with orange; on a flat
+     light surface the same orange reads as harsh, so users opting into the
+     calmer "Solid" background also get a calmer accent. The class is
+     toggled on <html> by `applyBackgroundStyle` in settingsStore.ts. */
+  .theme-solid {
+    --primary: 210 100% 50%;       /* #007FFF */
+    --primary-foreground: 0 0% 100%;
+    --ring: 210 100% 50%;
+  }
+
+  .dark.theme-solid {
+    --primary: 210 100% 60%;       /* slightly lighter so it pops on dark */
+    --primary-foreground: 0 0% 100%;
+    --ring: 210 100% 60%;
+  }
+
   .dark {
     --background: 230 30% 6%;
     --foreground: 0 0% 98%;

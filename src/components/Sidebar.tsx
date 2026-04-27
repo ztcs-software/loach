@@ -35,52 +35,38 @@ import { exportSessionToFile } from "@/lib/export";
 import type { Session } from "@/types";
 
 /**
- * ChatGPT-style single-column sidebar.
+ * ChatGPT-style sidebar with two states. The sidebar is ALWAYS rendered —
+ * the toggle lives in a fixed vertical slot at the top and just swaps the
+ * column's width between a narrow rail and the full panel.
  *
- * Layout (top → bottom):
+ *   Expanded (w-64)              Collapsed rail (w-14)
+ *   ┌────────────────────────┐   ┌────┐
+ *   │              [⊟]       │   │ ⊟  │   ← toggle, same vertical slot
+ *   │  ✎  New chat           │   │ ✎  │
+ *   │  ⌕  Search chats       │   │ ⌕  │
+ *   │  ▢  Spaces             │   │ ▢  │
+ *   │  ✦  Snippets           │   │ ✦  │
+ *   │  ▣  Models             │   │ ▣  │
+ *   │                        │   │    │
+ *   │  PINNED                │   │    │
+ *   │   …chats…              │   │    │
+ *   │  TODAY                 │   │    │
+ *   │   …chats…              │   │    │
+ *   ├────────────────────────┤   ├────┤
+ *   │  ⚙  Settings           │   │ ⚙  │
+ *   └────────────────────────┘   └────┘
  *
- *   ┌────────────────────────────┐
- *   │  Loach            [⊟]      │  ← brand + collapse toggle
- *   │                            │
- *   │  ✎  New chat               │  ← quick actions
- *   │  ⌕  Search chats           │
- *   │  ▢  Spaces                 │
- *   │  ✦  Snippets               │
- *   │  ▣  Models                 │
- *   │                            │
- *   │  PINNED                    │  ← chat history, grouped by date
- *   │   …chats…                  │
- *   │  TODAY                     │
- *   │   …chats…                  │
- *   │                            │
- *   ├────────────────────────────┤
- *   │  ⚙  Settings               │  ← bottom-pinned action
- *   └────────────────────────────┘
- *
- * Why one column (not the previous icon-rail + panel pattern):
- *
- * - Quick actions, navigation tabs, and the chat list share the same column,
- *   so users always know where to look. The old design split them across a
- *   narrow rail and a wider panel; clicking a tab "swapped" the panel out,
- *   which made the collapse toggle's effect inconsistent across tabs.
- * - Spaces / Snippets / Models are now full-canvas surfaces (see their
- *   `*Library.tsx` files). The sidebar's role becomes purely chat navigation
- *   plus quick links into those galleries — exactly what ChatGPT, Claude
- *   and Gemini do.
- * - One sidebar shape means `sidebarOpen` is the single source of truth for
- *   visibility. The toggle in the sidebar's top-right always collapses;
- *   the toggle in the TitleBar only renders when the sidebar is hidden,
- *   and always expands. Two states, two locations, one button visible at a
- *   time.
+ * Why never collapse to zero: the rail keeps the user's primary navigation
+ * always one click away. The previous "disappear entirely" mode forced the
+ * toggle to live in two places (sidebar when open, TitleBar when closed),
+ * which the user found confusing — now the toggle stays put in both states.
  */
 export function Sidebar() {
   const sidebarOpen = useUIStore((s) => s.sidebarOpen);
 
-  // Collapsed: render nothing. The TitleBar carries an expand button so the
-  // user can bring the sidebar back. We deliberately don't render a thin
-  // "rail" placeholder — the chat canvas takes the full width, which is what
-  // users expect when they explicitly hid the sidebar.
-  if (!sidebarOpen) return null;
+  if (!sidebarOpen) {
+    return <CollapsedRail />;
+  }
 
   return (
     <aside className="glass-subtle relative flex h-full w-64 flex-col border-r">
@@ -91,6 +77,127 @@ export function Sidebar() {
       </ScrollArea>
       <SidebarFooter />
     </aside>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Collapsed rail — narrow icon-only column shown when `sidebarOpen` is false.
+// Mirrors the expanded layout's regions exactly (toggle on top, primary
+// actions, tab navigators, settings on the bottom) so toggling the panel
+// looks like a width animation, not a layout swap.
+// ---------------------------------------------------------------------------
+
+function CollapsedRail() {
+  const sidebarTab = useUIStore((s) => s.sidebarTab);
+  const setSidebarTab = useUIStore((s) => s.setSidebarTab);
+  const toggleSidebar = useUIStore((s) => s.toggleSidebar);
+  const openSettingsTab = useUIStore((s) => s.openSettingsTab);
+  const newSession = useChatStore((s) => s.newSession);
+  const setViewingSpace = useSpaceStore((s) => s.setViewingSpace);
+
+  const goToTab = (tab: SidebarTab) => {
+    setViewingSpace(null);
+    setSidebarTab(tab);
+  };
+
+  const handleNewChat = () => {
+    setViewingSpace(null);
+    setSidebarTab("chats");
+    void newSession({ spaceId: null });
+  };
+
+  const handleSearch = () => {
+    window.dispatchEvent(new CustomEvent("loach:focus-search"));
+  };
+
+  return (
+    <aside className="glass-subtle relative flex h-full w-14 shrink-0 flex-col items-center border-r">
+      {/* Top slot — toggle. Same vertical position as in the expanded view's
+          SidebarTop so the icon doesn't appear to jump when the user clicks
+          it: both states reserve a `h-10` band at the top of the column. */}
+      <div className="flex h-10 w-full items-center justify-center">
+        <button
+          type="button"
+          onClick={toggleSidebar}
+          aria-label="Show sidebar"
+          title="Show sidebar"
+          className="inline-flex h-7 w-7 items-center justify-center rounded-md text-foreground/55 hover:bg-foreground/10 hover:text-foreground transition-colors"
+        >
+          <PanelLeft className="h-4 w-4" />
+        </button>
+      </div>
+
+      <nav className="flex flex-col items-center gap-1 px-1 pt-1">
+        <RailIcon
+          icon={<SquarePen className="h-4 w-4" />}
+          label="New chat"
+          onClick={handleNewChat}
+        />
+        <RailIcon
+          icon={<Search className="h-4 w-4" />}
+          label="Search chats"
+          onClick={handleSearch}
+        />
+        <RailIcon
+          icon={<Layers className="h-4 w-4" />}
+          label="Spaces"
+          onClick={() => goToTab("spaces")}
+          active={sidebarTab === "spaces"}
+        />
+        <RailIcon
+          icon={<Sparkles className="h-4 w-4" />}
+          label="Snippets"
+          onClick={() => goToTab("snippets")}
+          active={sidebarTab === "snippets"}
+        />
+        <RailIcon
+          icon={<Boxes className="h-4 w-4" />}
+          label="Models"
+          onClick={() => goToTab("models")}
+          active={sidebarTab === "models"}
+        />
+      </nav>
+
+      <div className="flex-1" />
+
+      {/* Bottom slot — settings, mirrors the expanded sidebar's footer. */}
+      <div className="border-t border-foreground/[0.06] w-full p-2 flex justify-center">
+        <RailIcon
+          icon={<Settings className="h-4 w-4" />}
+          label="Settings"
+          onClick={() => openSettingsTab("providers")}
+        />
+      </div>
+    </aside>
+  );
+}
+
+function RailIcon({
+  icon,
+  label,
+  onClick,
+  active = false,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  onClick: () => void;
+  active?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label={label}
+      title={label}
+      className={cn(
+        "inline-flex h-9 w-9 items-center justify-center rounded-lg transition-colors",
+        active
+          ? "bg-foreground/[0.10] text-foreground"
+          : "text-foreground/65 hover:bg-foreground/[0.07] hover:text-foreground",
+      )}
+    >
+      {icon}
+    </button>
   );
 }
 

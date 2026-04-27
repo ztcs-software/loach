@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import {
   Bot,
   Brain,
@@ -44,6 +44,69 @@ function parseAttachments(json: string | null): Attachment[] {
   } catch {
     return [];
   }
+}
+
+/**
+ * User prompts are rendered verbatim with `whitespace-pre-wrap`, which means
+ * a long paste (a stack trace, a dumped article, a multi-paragraph spec)
+ * fills the whole bubble and pushes the assistant reply down past the fold.
+ *
+ * This wrapper clamps the prompt to ~10 lines and surfaces a "Show more"
+ * toggle when it actually overflows. We measure post-render via a layout
+ * effect (cheaper than counting newlines, also handles soft-wrapped lines
+ * that exceed the bubble's max-width) and skip the toggle entirely for
+ * short prompts so the UI stays quiet for the common case.
+ */
+function ExpandableUserText({ content }: { content: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const [overflowing, setOverflowing] = useState(false);
+  const ref = useRef<HTMLParagraphElement>(null);
+
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    // Compare the natural height (no clamp) against what the user would see
+    // when clamped. If they differ, there's content to reveal. We measure
+    // whatever's currently rendered and trust the clamp class to land us
+    // back in the right spot — `scrollHeight` ignores the line-clamp visual
+    // truncation but reflects the height the element WOULD take.
+    setOverflowing(el.scrollHeight - el.clientHeight > 1);
+  }, [content, expanded]);
+
+  return (
+    <div>
+      <p
+        ref={ref}
+        className={cn(
+          "whitespace-pre-wrap text-sm leading-relaxed",
+          // `line-clamp-[10]` falls back gracefully when the content is
+          // shorter than the limit (no visible clamp, no toggle rendered).
+          !expanded && "line-clamp-[10]",
+        )}
+      >
+        {content}
+      </p>
+      {(overflowing || expanded) && (
+        <button
+          type="button"
+          onClick={() => setExpanded((v) => !v)}
+          className="mt-1.5 inline-flex items-center gap-1 text-[11.5px] font-medium text-foreground/55 transition-colors hover:text-foreground"
+        >
+          {expanded ? (
+            <>
+              <ChevronDown className="h-3 w-3 rotate-180 transition-transform" />
+              Show less
+            </>
+          ) : (
+            <>
+              <ChevronDown className="h-3 w-3 transition-transform" />
+              Show more
+            </>
+          )}
+        </button>
+      )}
+    </div>
+  );
 }
 
 function ThinkingBlock({ text, isStreaming }: { text: string; isStreaming?: boolean }) {
@@ -170,7 +233,7 @@ export function MessageItem({ message, isStreaming, metrics }: MessageProps) {
           </div>
         ) : isUser ? (
           displayContent.length > 0 && (
-            <p className="whitespace-pre-wrap text-sm leading-relaxed">{displayContent}</p>
+            <ExpandableUserText content={displayContent} />
           )
         ) : (
           <Markdown content={message.content} />

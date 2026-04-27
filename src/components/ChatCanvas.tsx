@@ -1,5 +1,5 @@
-import { useEffect, useRef } from "react";
-import { Hourglass, Zap, X } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { ArrowDown, Hourglass, Zap, X } from "lucide-react";
 import { MessageItem } from "./Message";
 import { Button } from "@/components/ui/button";
 import { useChatStore } from "@/stores/chatStore";
@@ -29,6 +29,10 @@ export function ChatCanvas() {
 
   const scrollerRef = useRef<HTMLDivElement>(null);
   const stickToBottom = useRef(true);
+  // Mirror of the ref into React state — the scroll-to-bottom button needs
+  // to re-render when this flips, which a ref alone can't trigger. Kept in
+  // sync via the same scroll handler that updates `stickToBottom`.
+  const [showScrollButton, setShowScrollButton] = useState(false);
 
   useEffect(() => {
     const el = scrollerRef.current;
@@ -36,6 +40,10 @@ export function ChatCanvas() {
     const onScroll = () => {
       const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
       stickToBottom.current = distance < 80;
+      // Only show the button when there's a meaningful chunk above the
+      // fold; the same 200px threshold ChatGPT uses keeps tiny scroll
+      // jitter (e.g. mid-token reflow) from flashing the chip on/off.
+      setShowScrollButton(distance > 200);
     };
     el.addEventListener("scroll", onScroll, { passive: true });
     return () => el.removeEventListener("scroll", onScroll);
@@ -46,6 +54,14 @@ export function ChatCanvas() {
     const el = scrollerRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages, isStreaming, waitingHere]);
+
+  const scrollToBottom = () => {
+    const el = scrollerRef.current;
+    if (!el) return;
+    el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+    stickToBottom.current = true;
+    setShowScrollButton(false);
+  };
 
   if (!sessionId) {
     return (
@@ -63,31 +79,49 @@ export function ChatCanvas() {
   }
 
   return (
-    <div ref={scrollerRef} className="flex-1 overflow-y-auto">
-      <div className="mx-auto w-full max-w-3xl px-4">
-        {messages.map((m, i) => {
-          const isLast = i === messages.length - 1;
-          return (
-            <MessageItem
-              key={m.id}
-              message={m}
-              isStreaming={isLast && isStreaming && m.role === "assistant"}
-              metrics={streamingByMessage[m.id] ?? null}
+    <div className="relative flex-1 overflow-hidden">
+      <div ref={scrollerRef} className="h-full overflow-y-auto">
+        <div className="mx-auto w-full max-w-3xl px-4">
+          {messages.map((m, i) => {
+            const isLast = i === messages.length - 1;
+            return (
+              <MessageItem
+                key={m.id}
+                message={m}
+                isStreaming={isLast && isStreaming && m.role === "assistant"}
+                metrics={streamingByMessage[m.id] ?? null}
+              />
+            );
+          })}
+          {/* Banner shown only while THIS chat's task is parked behind another
+              chat's running task. Replaces the assistant streaming-dots bubble
+              (which would otherwise mislead the user into thinking the model
+              is thinking). */}
+          {waitingHere && sessionId && (
+            <WaitingForOtherChats
+              onRespondNow={() => void promoteSession(sessionId)}
+              onCancel={() => void cancelForSession(sessionId)}
             />
-          );
-        })}
-        {/* Banner shown only while THIS chat's task is parked behind another
-            chat's running task. Replaces the assistant streaming-dots bubble
-            (which would otherwise mislead the user into thinking the model
-            is thinking). */}
-        {waitingHere && sessionId && (
-          <WaitingForOtherChats
-            onRespondNow={() => void promoteSession(sessionId)}
-            onCancel={() => void cancelForSession(sessionId)}
-          />
-        )}
-        <div className="h-4" />
+          )}
+          <div className="h-4" />
+        </div>
       </div>
+
+      {/* Floating "scroll to bottom" pill. Shown only when the user has
+          scrolled meaningfully up (~200px) — close to ChatGPT's behaviour.
+          Pinned to the bottom-center so it stays out of the way of message
+          actions on the right edge of bubbles. */}
+      {showScrollButton && (
+        <button
+          type="button"
+          onClick={scrollToBottom}
+          aria-label="Scroll to bottom"
+          title="Scroll to bottom"
+          className="absolute bottom-4 left-1/2 -translate-x-1/2 inline-flex h-8 w-8 items-center justify-center rounded-full border border-foreground/15 bg-background/90 text-foreground/70 backdrop-blur-md transition-colors hover:bg-foreground/[0.08] hover:text-foreground"
+        >
+          <ArrowDown className="h-4 w-4" />
+        </button>
+      )}
     </div>
   );
 }

@@ -47,6 +47,7 @@ import { useSpaceStore } from "@/stores/spaceStore";
 import { useUIStore } from "@/stores/uiStore";
 import { McpPanel } from "@/components/McpPanel";
 import { SecurityPanel } from "@/components/SecurityPanel";
+import { Logo } from "@/components/Logo";
 import {
   archiveAllSessions,
   exportDataJson,
@@ -95,7 +96,25 @@ export function SettingsDialog() {
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
-      <DialogContent className="max-w-3xl !rounded-3xl overflow-hidden p-0 gap-0">
+      {/* Slide-in/out from the LEFT — the Settings entry lives in the
+          sidebar's bottom-left corner, so animating from the same side gives
+          the click a clear sense of origin.
+
+          Subtle but important: the base DialogContent centres itself with
+          `-translate-x-1/2 -translate-y-1/2`, but tailwindcss-animate's
+          enter/exit keyframes set `transform: translate3d(...)` directly,
+          which *replaces* that centring during the animation. If we used a
+          fixed-pixel slide like `slide-in-from-left-8`, the dialog would
+          start at `translate(-2rem, 0)` (near the top of the viewport
+          centre, not centred), then snap down to `translate(-50%, -50%)`
+          when the animation ends — which the eye reads as "from the upper
+          right", not the left.
+
+          So we pin the Y translate to `-50%` (no vertical motion) and start
+          the X translate at `-65%` (15% of the dialog's width to the left
+          of centred), animating to the natural `-50%`. The result: a clean
+          horizontal slide of ~15% of the dialog's width, no vertical jump. */}
+      <DialogContent className="max-w-3xl !rounded-3xl overflow-hidden p-0 gap-0 duration-200 data-[state=open]:fade-in-0 data-[state=open]:slide-in-from-top-1/2 data-[state=open]:slide-in-from-left-[65%] data-[state=closed]:fade-out-0 data-[state=closed]:slide-out-to-top-1/2 data-[state=closed]:slide-out-to-left-[65%]">
         {/* Keep Radix a11y metadata — visually hidden since the sidebar owns the heading */}
         <DialogTitle className="sr-only">Settings</DialogTitle>
         <DialogDescription className="sr-only">
@@ -421,11 +440,14 @@ export function SettingsDialog() {
 
               <TabsContent value="about" className="mt-0 space-y-5 focus-visible:ring-0 focus-visible:ring-offset-0">
                 <SectionTitle>About</SectionTitle>
-                <div className="flex items-baseline gap-3">
-                  <h3 className="text-2xl font-semibold tracking-tight">Loach</h3>
-                  <span className="font-mono text-xs text-foreground/50">
-                    v{pkg.version}
-                  </span>
+                <div className="flex items-center gap-4">
+                  <Logo size={56} ariaHidden />
+                  <div className="flex items-baseline gap-3">
+                    <h3 className="text-2xl font-semibold tracking-tight">Loach</h3>
+                    <span className="font-mono text-xs text-foreground/50">
+                      v{pkg.version}
+                    </span>
+                  </div>
                 </div>
                 <p className="text-sm leading-relaxed text-foreground/75">
                   A native desktop chat client for local and OpenAI-compatible LLMs.
