@@ -15,6 +15,7 @@ import { SnippetsLibrary } from "@/components/SnippetsLibrary";
 import { ModelsView } from "@/components/ModelsView";
 import { ModelsLibrary } from "@/components/ModelsLibrary";
 import { LockScreen } from "@/components/LockScreen";
+import { CodeCanvas } from "@/components/CodeCanvas";
 import { useChatStore } from "@/stores/chatStore";
 import { useModelsStore } from "@/stores/modelsStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -22,6 +23,7 @@ import { useSnippetStore } from "@/stores/snippetStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useSecurityStore, lockUntilHydrated } from "@/stores/securityStore";
 import { useUIStore } from "@/stores/uiStore";
+import { useCanvasStore } from "@/stores/canvasStore";
 import { cn } from "@/lib/utils";
 import type { Message } from "@/types";
 
@@ -41,6 +43,7 @@ export default function App() {
   const viewingSpaceId = useSpaceStore((s) => s.viewingSpaceId);
   const viewingModel = useModelsStore((s) => s.viewingModel);
   const sidebarTab = useUIStore((s) => s.sidebarTab);
+  const canvasOpen = useCanvasStore((s) => s.isOpen);
   const session = useChatStore((s) =>
     s.activeSessionId ? s.sessions.find((x) => x.id === s.activeSessionId) : undefined,
   );
@@ -137,7 +140,13 @@ export default function App() {
                   <HeroComposer />
                 )}
               </main>
-              <ParameterPanel session={session} />
+              {/* Right slot: code canvas wins over parameters when both are
+                  open. Stacking them would need a tab UI we haven't designed
+                  yet; mutually exclusive matches ChatGPT's behaviour and
+                  keeps the layout legible. The canvas store survives across
+                  this swap, so the user's snippet is still there if they
+                  toggle params back. */}
+              {canvasOpen ? <CodeCanvas /> : <ParameterPanel session={session} />}
             </>
           )}
         </div>

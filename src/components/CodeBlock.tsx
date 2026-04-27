@@ -1,5 +1,7 @@
-import { useState } from "react";
-import { Check, Copy } from "lucide-react";
+import { useMemo, useState } from "react";
+import { Check, Copy, Download, PanelRight } from "lucide-react";
+import { useCanvasStore } from "@/stores/canvasStore";
+import { saveCodeToFile, defaultFilename } from "@/lib/codeExport";
 import { cn } from "@/lib/utils";
 
 interface CodeBlockProps {
@@ -21,9 +23,32 @@ interface CodeBlockProps {
  * for separation. Highlight.js still renders its github-dark palette
  * over the top — most of its colours have enough chroma to remain
  * legible against the warmer backdrop.
+ *
+ * Layout: a left gutter of line numbers + the highlighted source.
+ *
+ *   ┌──────────────────────────────────────────────┐
+ *   │ python                       Open · Export · Copy│  ← toolbar
+ *   ├─────┬────────────────────────────────────────┤
+ *   │  1  │ # comment                              │
+ *   │  2  │ print("Hello, world!")                 │
+ *   └─────┴────────────────────────────────────────┘
+ *
+ * The line numbers live in their own `<pre>` next to the code so they stay
+ * aligned without splitting the highlighted span tree across lines (which
+ * `rehype-highlight` doesn't help with). Both blocks share the same
+ * monospace font + line-height so rows line up exactly.
  */
 export function CodeBlock({ className, children, raw, language }: CodeBlockProps) {
   const [copied, setCopied] = useState(false);
+  const openCanvas = useCanvasStore((s) => s.open);
+
+  const lineCount = useMemo(() => {
+    if (!raw) return 1;
+    // Trailing newlines would render as phantom blank rows; trim them off
+    // for the gutter (the original `raw` is preserved for copy / export).
+    return raw.replace(/\n+$/, "").split("\n").length;
+  }, [raw]);
+
   const onCopy = async () => {
     try {
       await navigator.clipboard.writeText(raw);
@@ -33,6 +58,15 @@ export function CodeBlock({ className, children, raw, language }: CodeBlockProps
       /* ignore */
     }
   };
+
+  const onExport = () => {
+    void saveCodeToFile(raw, language, defaultFilename(language));
+  };
+
+  const onOpenCanvas = () => {
+    openCanvas({ code: raw, language: language ?? null });
+  };
+
   return (
     <div
       className={cn(
@@ -43,42 +77,89 @@ export function CodeBlock({ className, children, raw, language }: CodeBlockProps
     >
       <div
         className={cn(
-          "flex items-center justify-between px-3 py-1.5",
+          "flex items-center justify-between gap-2 px-3 py-1.5",
           "border-b border-foreground/[0.08] bg-foreground/[0.04]",
         )}
       >
         <span className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground">
           {language || "text"}
         </span>
-        <button
-          onClick={onCopy}
-          className={cn(
-            "inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px]",
-            "text-muted-foreground transition-colors",
-            "hover:bg-foreground/10 hover:text-foreground",
-          )}
-          aria-label="Copy code"
-        >
-          {copied ? (
-            <>
-              <Check className="h-3 w-3 text-emerald-400" /> Copied
-            </>
-          ) : (
-            <>
-              <Copy className="h-3 w-3" /> Copy
-            </>
-          )}
-        </button>
+        <div className="flex shrink-0 items-center gap-0.5">
+          <ToolbarButton
+            onClick={onOpenCanvas}
+            label="Open in canvas"
+            icon={<PanelRight className="h-3 w-3" />}
+          >
+            Open
+          </ToolbarButton>
+          <ToolbarButton
+            onClick={onExport}
+            label={`Export to .${language ?? "txt"} file`}
+            icon={<Download className="h-3 w-3" />}
+          >
+            Export
+          </ToolbarButton>
+          <ToolbarButton
+            onClick={() => void onCopy()}
+            label="Copy code"
+            icon={
+              copied ? (
+                <Check className="h-3 w-3 text-emerald-400" />
+              ) : (
+                <Copy className="h-3 w-3" />
+              )
+            }
+          >
+            {copied ? "Copied" : "Copy"}
+          </ToolbarButton>
+        </div>
       </div>
-      <pre
-        className={cn(
-          "overflow-x-auto px-3.5 py-3 text-[12.5px] leading-relaxed",
-          "font-mono text-foreground/95",
-          className,
-        )}
-      >
-        {children}
-      </pre>
+
+      <div className="flex font-mono text-[12.5px] leading-relaxed">
+        <pre
+          aria-hidden
+          className="select-none px-3 py-3 text-right tabular-nums text-foreground/30"
+        >
+          {Array.from({ length: lineCount }, (_, i) => i + 1).join("\n")}
+        </pre>
+        <pre
+          className={cn(
+            "flex-1 overflow-x-auto px-3.5 py-3 text-foreground/95",
+            className,
+          )}
+        >
+          {children}
+        </pre>
+      </div>
     </div>
+  );
+}
+
+function ToolbarButton({
+  onClick,
+  label,
+  icon,
+  children,
+}: {
+  onClick: () => void;
+  label: string;
+  icon: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label={label}
+      title={label}
+      className={cn(
+        "inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px]",
+        "text-muted-foreground transition-colors",
+        "hover:bg-foreground/10 hover:text-foreground",
+      )}
+    >
+      {icon}
+      {children}
+    </button>
   );
 }
