@@ -13,6 +13,7 @@ import {
   Info,
   Layers,
   Loader2,
+  Lock,
   MessageSquareText,
   MoreHorizontal,
   Palette,
@@ -45,6 +46,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useUIStore } from "@/stores/uiStore";
 import { McpPanel } from "@/components/McpPanel";
+import { SecurityPanel } from "@/components/SecurityPanel";
 import {
   archiveAllSessions,
   exportDataJson,
@@ -77,6 +79,7 @@ const NAV = [
   { value: "appearance", label: "Appearance", icon: Palette },
   { value: "archive", label: "Archive", icon: Archive },
   { value: "data", label: "Data", icon: Database },
+  { value: "security", label: "Security", icon: Lock },
   { value: "about", label: "About", icon: Info },
 ] as const;
 
@@ -407,6 +410,13 @@ export function SettingsDialog() {
                   key (that stays in your OS credential manager).
                 </p>
                 <DataPanel onCloseDialog={() => setOpen(false)} />
+              </TabsContent>
+
+              <TabsContent value="security" className="mt-0 focus-visible:ring-0 focus-visible:ring-offset-0">
+                <SectionTitle>Security</SectionTitle>
+                <div className="mt-5">
+                  <SecurityPanel />
+                </div>
               </TabsContent>
 
               <TabsContent value="about" className="mt-0 space-y-5 focus-visible:ring-0 focus-visible:ring-offset-0">

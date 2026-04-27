@@ -10,6 +10,7 @@ use crate::db::{
 use crate::mcp::{self, McpTestResult};
 use crate::providers::{self, ChatRequest, ModelInfo};
 use crate::secrets;
+use crate::security::{self, LockMethod, LockStatus};
 use crate::tools::fetch_url::{self as fetch_url_tool, FetchedPage};
 use crate::AppState;
 
@@ -220,6 +221,55 @@ pub async fn get_openai_key_status() -> Result<bool, String> {
 #[tauri::command]
 pub async fn clear_openai_key() -> Result<(), String> {
     secrets::clear_openai_key().map_err(err)
+}
+
+// ---------- security (app lock) ----------
+
+#[tauri::command]
+pub async fn security_status() -> Result<LockStatus, String> {
+    security::status().map_err(err)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SecuritySetupArgs {
+    pub method: LockMethod,
+    pub pin: Option<String>,
+    pub password: Option<String>,
+    pub pin_length: Option<u8>,
+    pub hint: Option<String>,
+}
+
+#[tauri::command]
+pub async fn security_setup(args: SecuritySetupArgs) -> Result<(), String> {
+    security::setup(
+        args.method,
+        args.pin.as_deref(),
+        args.password.as_deref(),
+        args.pin_length,
+        args.hint,
+    )
+    .map_err(err)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SecurityUnlockArgs {
+    pub pin: Option<String>,
+    pub password: Option<String>,
+}
+
+#[tauri::command]
+pub async fn security_unlock(args: SecurityUnlockArgs) -> Result<bool, String> {
+    security::unlock(args.pin.as_deref(), args.password.as_deref()).map_err(err)
+}
+
+#[tauri::command]
+pub async fn security_get_hint() -> Result<Option<String>, String> {
+    security::get_hint().map_err(err)
+}
+
+#[tauri::command]
+pub async fn security_clear() -> Result<(), String> {
+    security::clear().map_err(err)
 }
 
 // ---------- providers ----------
@@ -801,6 +851,9 @@ pub async fn factory_reset(state: State<'_, AppState>) -> Result<(), String> {
     // (keyring daemon dead, etc.) shouldn't undo the DB wipe.
     if let Err(e) = secrets::clear_openai_key() {
         tracing::warn!("clear_openai_key during factory_reset failed: {e:?}");
+    }
+    if let Err(e) = security::clear() {
+        tracing::warn!("security::clear during factory_reset failed: {e:?}");
     }
     Ok(())
 }

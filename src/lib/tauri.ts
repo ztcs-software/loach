@@ -156,6 +156,69 @@ export function clearOpenAIKey(): Promise<void> {
   return invoke("clear_openai_key");
 }
 
+// ------------ security (app lock) ------------
+
+/**
+ * Lock method picked by the user. Three combinations are supported; everything
+ * else is intentionally absent (no biometrics yet, no recovery codes — keep
+ * the surface narrow until the spec calls for more).
+ */
+export type LockMethod = "pin" | "password" | "both";
+
+export interface LockStatus {
+  configured: boolean;
+  method: LockMethod | null;
+  /** 4 / 6 / 8, or null when no PIN is configured. */
+  pin_length: number | null;
+  has_hint: boolean;
+}
+
+export interface SecuritySetupArgs {
+  method: LockMethod;
+  pin?: string;
+  password?: string;
+  /** Required when `method` involves a PIN. */
+  pin_length?: 4 | 6 | 8;
+  hint?: string;
+}
+
+export function securityStatus(): Promise<LockStatus> {
+  if (!isTauri)
+    return notInTauri<LockStatus>({
+      configured: false,
+      method: null,
+      pin_length: null,
+      has_hint: false,
+    });
+  return invoke("security_status");
+}
+
+export function securitySetup(args: SecuritySetupArgs): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("security_setup", { args });
+}
+
+export function securityUnlock(args: {
+  pin?: string;
+  password?: string;
+}): Promise<boolean> {
+  // In non-Tauri (preview / mock mode) we don't enforce the lock — there's
+  // no way to verify against a real keyring, and pretending to do so would
+  // be a footgun for anyone running `vite preview`.
+  if (!isTauri) return notInTauri(true);
+  return invoke("security_unlock", { args });
+}
+
+export function securityGetHint(): Promise<string | null> {
+  if (!isTauri) return notInTauri<string | null>(null);
+  return invoke("security_get_hint");
+}
+
+export function securityClear(): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("security_clear");
+}
+
 // ------------ providers ------------
 
 export function ollamaProbe(baseUrl: string): Promise<boolean> {

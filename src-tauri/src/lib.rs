@@ -3,6 +3,7 @@ mod db;
 mod mcp;
 mod providers;
 mod secrets;
+mod security;
 mod stream;
 mod tools;
 
@@ -129,6 +130,11 @@ pub fn run() {
             commands::set_openai_key,
             commands::get_openai_key_status,
             commands::clear_openai_key,
+            commands::security_status,
+            commands::security_setup,
+            commands::security_unlock,
+            commands::security_get_hint,
+            commands::security_clear,
             commands::ollama_list_models,
             commands::ollama_probe,
             commands::openai_list_models,

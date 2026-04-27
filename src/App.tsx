@@ -14,11 +14,13 @@ import { SnippetDialog } from "@/components/SnippetDialog";
 import { SnippetsLibrary } from "@/components/SnippetsLibrary";
 import { ModelsView } from "@/components/ModelsView";
 import { ModelsLibrary } from "@/components/ModelsLibrary";
+import { LockScreen } from "@/components/LockScreen";
 import { useChatStore } from "@/stores/chatStore";
 import { useModelsStore } from "@/stores/modelsStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useSnippetStore } from "@/stores/snippetStore";
 import { useSpaceStore } from "@/stores/spaceStore";
+import { useSecurityStore, lockUntilHydrated } from "@/stores/securityStore";
 import { useUIStore } from "@/stores/uiStore";
 import { cn } from "@/lib/utils";
 import type { Message } from "@/types";
@@ -31,6 +33,10 @@ export default function App() {
   const hydrateSpaces = useSpaceStore((s) => s.hydrate);
   const hydrateSnippets = useSnippetStore((s) => s.hydrate);
   const hydrateModels = useModelsStore((s) => s.hydrate);
+  const hydrateSecurity = useSecurityStore((s) => s.hydrate);
+  const securityHydrated = useSecurityStore((s) => s.hydrated);
+  const securityConfigured = useSecurityStore((s) => s.status.configured);
+  const unlocked = useSecurityStore((s) => s.unlocked);
   const backgroundStyle = useSettingsStore((s) => s.background_style);
   const viewingSpaceId = useSpaceStore((s) => s.viewingSpaceId);
   const viewingModel = useModelsStore((s) => s.viewingModel);
@@ -43,7 +49,20 @@ export default function App() {
   );
   const hasMessages = messages.length > 0;
 
+  // Phase 1 — security probe. Pessimistically lock (so the chat UI never
+  // flashes) and ask the backend whether a lock is configured. The store's
+  // hydrate() flips `unlocked` back to true when no lock exists.
   useEffect(() => {
+    lockUntilHydrated();
+    void hydrateSecurity();
+  }, [hydrateSecurity]);
+
+  // Phase 2 — once we're past the lock screen, hydrate the rest of the app.
+  // Doing this after unlock keeps the lock surface snappy and avoids
+  // shipping any chat data into memory while the user is still proving
+  // they're allowed to see it.
+  useEffect(() => {
+    if (!unlocked) return;
     (async () => {
       await hydrateSettings();
       await hydrateSpaces();
@@ -53,7 +72,20 @@ export default function App() {
       // fire it last — failure here shouldn't block the rest of the UI.
       await hydrateModels();
     })();
-  }, [hydrateSettings, hydrateSpaces, hydrateSnippets, hydrateChats, hydrateModels]);
+  }, [
+    unlocked,
+    hydrateSettings,
+    hydrateSpaces,
+    hydrateSnippets,
+    hydrateChats,
+    hydrateModels,
+  ]);
+
+  // While waiting for the security probe to land, render only the
+  // background — no titlebar, no sidebar, no chat. Otherwise users would
+  // see a brief flash of the unlocked UI before the lock screen mounts.
+  const showLock = securityHydrated && securityConfigured && !unlocked;
+  const probing = !securityHydrated;
 
   return (
     <TooltipProvider delayDuration={250}>
@@ -66,6 +98,18 @@ export default function App() {
         aria-hidden
       />
 
+      {/* Lock gate. While the security probe is in flight we render nothing
+          past the background so the app boot doesn't briefly leak chat UI
+          before the lock screen mounts. Once a lock is confirmed and the
+          user is still locked, the LockScreen takes over. The TitleBar
+          mounts above the LockScreen so the window controls (min/max/
+          close-to-tray) keep working at the lock screen too. */}
+      {probing ? null : showLock ? (
+        <div className="relative flex h-full flex-col overflow-hidden text-foreground">
+          <TitleBar />
+          <LockScreen />
+        </div>
+      ) : (
       <div className="relative flex h-full flex-col overflow-hidden text-foreground">
         <TitleBar />
         <div className="flex min-h-0 flex-1">
@@ -101,6 +145,7 @@ export default function App() {
         <SpaceForm />
         <SnippetDialog />
       </div>
+      )}
     </TooltipProvider>
   );
 }
