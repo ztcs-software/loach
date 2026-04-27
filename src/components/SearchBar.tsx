@@ -78,18 +78,28 @@ export function SearchBar() {
     return () => document.removeEventListener("mousedown", onDown);
   }, [open]);
 
-  // Ctrl/Cmd+K focuses the search from anywhere.
+  // Ctrl/Cmd+K focuses the search from anywhere. We also listen for a
+  // custom `loach:focus-search` event so non-keyboard surfaces (the sidebar's
+  // "Search chats" quick action) can route through the same path without
+  // synthesizing keyboard events.
   useEffect(() => {
+    const focus = () => {
+      inputRef.current?.focus();
+      inputRef.current?.select();
+      setOpen(true);
+    };
     const onKey = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
-        inputRef.current?.focus();
-        inputRef.current?.select();
-        setOpen(true);
+        focus();
       }
     };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    window.addEventListener("loach:focus-search", focus);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("loach:focus-search", focus);
+    };
   }, []);
 
   const results = useMemo<Result[]>(() => {

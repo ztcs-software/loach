@@ -9,8 +9,11 @@ import { SettingsDialog } from "@/components/SettingsDialog";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { SpaceForm } from "@/components/SpaceForm";
 import { SpaceView } from "@/components/SpaceView";
+import { SpacesLibrary } from "@/components/SpacesLibrary";
 import { SnippetDialog } from "@/components/SnippetDialog";
+import { SnippetsLibrary } from "@/components/SnippetsLibrary";
 import { ModelsView } from "@/components/ModelsView";
+import { ModelsLibrary } from "@/components/ModelsLibrary";
 import { useChatStore } from "@/stores/chatStore";
 import { useModelsStore } from "@/stores/modelsStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -31,6 +34,7 @@ export default function App() {
   const backgroundStyle = useSettingsStore((s) => s.background_style);
   const viewingSpaceId = useSpaceStore((s) => s.viewingSpaceId);
   const viewingModel = useModelsStore((s) => s.viewingModel);
+  const sidebarTab = useUIStore((s) => s.sidebarTab);
   const session = useChatStore((s) =>
     s.activeSessionId ? s.sessions.find((x) => x.id === s.activeSessionId) : undefined,
   );
@@ -70,6 +74,12 @@ export default function App() {
             <SpaceView />
           ) : viewingModel ? (
             <ModelsView />
+          ) : sidebarTab === "spaces" ? (
+            <SpacesLibrary />
+          ) : sidebarTab === "snippets" ? (
+            <SnippetsLibrary />
+          ) : sidebarTab === "models" ? (
+            <ModelsLibrary />
           ) : (
             <>
               <main className="relative flex min-w-0 flex-1 flex-col">

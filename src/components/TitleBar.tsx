@@ -1,11 +1,14 @@
 import { useEffect, useState } from "react";
-import { Minus, Square, X, Copy } from "lucide-react";
+import { Minus, Square, X, Copy, PanelLeft } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { isTauri } from "@/lib/tauri";
 import { SearchBar } from "@/components/SearchBar";
+import { useUIStore } from "@/stores/uiStore";
 
 export function TitleBar() {
   const [isMaximized, setIsMaximized] = useState(false);
+  const sidebarOpen = useUIStore((s) => s.sidebarOpen);
+  const toggleSidebar = useUIStore((s) => s.toggleSidebar);
 
   useEffect(() => {
     if (!isTauri) return;
@@ -53,10 +56,26 @@ export function TitleBar() {
   return (
     <div
       data-tauri-drag-region
-      className="relative z-20 flex h-9 items-center gap-3 border-b border-foreground/8 bg-foreground/[0.03] px-3 select-none backdrop-blur-2xl"
+      className="relative z-20 flex h-9 items-center gap-2 border-b border-foreground/8 bg-foreground/[0.03] pl-2 pr-0 select-none backdrop-blur-2xl"
     >
-      {/* Left — app identity. pointer-events-none so the drag region
-          underneath captures the drag even over the logo. */}
+      {/* Sidebar expand toggle. Only rendered when the sidebar is hidden —
+          the in-sidebar toggle handles the open state. This way exactly one
+          collapse/expand button is visible at any time, and each one always
+          does something visible (open expands, in-sidebar collapses). */}
+      {!sidebarOpen && (
+        <button
+          type="button"
+          onClick={toggleSidebar}
+          aria-label="Show sidebar"
+          title="Show sidebar"
+          className="inline-flex h-7 w-7 items-center justify-center rounded-md text-foreground/55 hover:bg-foreground/10 hover:text-foreground transition-colors"
+        >
+          <PanelLeft className="h-3.5 w-3.5" />
+        </button>
+      )}
+
+      {/* App identity. pointer-events-none so the drag region underneath
+          captures the drag even over the logo. */}
       <div className="flex shrink-0 items-center gap-2 pointer-events-none">
         <div className="h-2.5 w-2.5 rounded-full bg-gradient-to-br from-orange-400 to-rose-500 shadow-[0_0_12px_rgba(255,120,60,0.6)]" />
         <span className="text-xs font-medium tracking-wide text-foreground/80">Loach</span>
