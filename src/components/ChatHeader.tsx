@@ -5,6 +5,7 @@ import {
   ChevronDown,
   CircleAlert,
   CircleCheck,
+  ClipboardPaste,
   Copy,
   FileText,
   MoreHorizontal,
@@ -38,10 +39,12 @@ import {
   openaiListModels,
 } from "@/lib/tauri";
 import { Layers } from "lucide-react";
+import { parseImportContext, type ParsedImport } from "@/lib/importContext";
 import type { ModelInfo, ProviderId, Session } from "@/types";
 
 export function ChatHeader({ session }: { session: Session | undefined }) {
   const setSessionModel = useChatStore((s) => s.setSessionModel);
+  const importMessages = useChatStore((s) => s.importMessages);
   const toggleParams = useUIStore((s) => s.toggleParams);
   const settings = useSettingsStore();
 
@@ -58,6 +61,20 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
   const [exportError, setExportError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
+  /** Import-context dialog state. The textarea binds straight to `importText`;
+   *  format detection runs on every keystroke via `parseImportContext` so the
+   *  preview line below the textarea always reflects what an Import click
+   *  would actually do. `importBusy` blocks the button while the per-message
+   *  appendMessage round-trips are in flight. */
+  const [importOpen, setImportOpen] = useState(false);
+  const [importText, setImportText] = useState("");
+  const [importBusy, setImportBusy] = useState(false);
+  const [importError, setImportError] = useState<string | null>(null);
+  const importPreview: ParsedImport = useMemo(
+    () => parseImportContext(importText),
+    [importText],
+  );
+
   const openExport = async () => {
     if (!session) return;
     setExportOpen(true);
@@ -69,6 +86,34 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
       setExportText(md);
     } catch (e) {
       setExportError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const openImport = () => {
+    if (!session) return;
+    setImportOpen(true);
+    setImportText("");
+    setImportError(null);
+  };
+
+  const doImport = async () => {
+    if (!session) return;
+    if (importPreview.messages.length === 0) {
+      setImportError(
+        "Nothing to import — paste an exported chat (JSON or Markdown) or any text to add as a user message.",
+      );
+      return;
+    }
+    setImportBusy(true);
+    setImportError(null);
+    try {
+      await importMessages(session.id, importPreview.messages);
+      setImportOpen(false);
+      setImportText("");
+    } catch (e) {
+      setImportError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setImportBusy(false);
     }
   };
 
@@ -217,6 +262,10 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
               <FileText className="mr-2 h-4 w-4" />
               Export context
             </DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => openImport()}>
+              <ClipboardPaste className="mr-2 h-4 w-4" />
+              Import context
+            </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
         <Button
@@ -229,6 +278,67 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
           <Sliders className="h-4 w-4" />
         </Button>
       </div>
+
+      <Dialog open={importOpen} onOpenChange={setImportOpen}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>Import context</DialogTitle>
+            <DialogDescription>
+              Paste an exported chat (JSON or Markdown) to bring its messages
+              into this conversation, or paste any text to drop it in as a
+              single user message. Imported messages append to the end of
+              this chat.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="mt-2">
+            <textarea
+              autoFocus
+              value={importText}
+              onChange={(e) => {
+                setImportText(e.target.value);
+                if (importError) setImportError(null);
+              }}
+              placeholder={
+                "Paste an exported chat or any text…\n\n" +
+                "Examples we recognise:\n" +
+                "  • JSON: { messages: [{ role: 'user', content: '…' }, …] }\n" +
+                "  • Markdown: ## You / ## Assistant / ## System sections\n" +
+                "  • Plain text: imported as one user message"
+              }
+              className="h-72 w-full resize-none rounded-md border border-foreground/10 bg-background/60 p-3 font-mono text-xs leading-relaxed text-foreground/85 focus:outline-none focus:ring-1 focus:ring-foreground/20"
+            />
+            <div className="mt-2 flex items-center justify-between text-[11px] text-foreground/55">
+              <ImportFormatHint preview={importPreview} />
+              {importError && (
+                <span className="text-destructive">{importError}</span>
+              )}
+            </div>
+          </div>
+          <div className="mt-3 flex items-center justify-end gap-2">
+            <Button
+              variant="outline"
+              onClick={() => setImportOpen(false)}
+              disabled={importBusy}
+              className="rounded-lg"
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={() => void doImport()}
+              disabled={
+                importBusy || importPreview.messages.length === 0 || !session
+              }
+              className="rounded-lg"
+            >
+              {importBusy
+                ? "Importing…"
+                : importPreview.messages.length > 0
+                  ? `Import ${importPreview.messages.length} message${importPreview.messages.length === 1 ? "" : "s"}`
+                  : "Import"}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={exportOpen} onOpenChange={setExportOpen}>
         <DialogContent className="max-w-2xl">
@@ -286,5 +396,31 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
         </DialogContent>
       </Dialog>
     </div>
+  );
+}
+
+/**
+ * One-line caption under the import textarea telling the user what format
+ * the parser inferred. Stays out of the way when the textarea is empty so
+ * a fresh dialog doesn't lead with "Empty — paste something".
+ */
+function ImportFormatHint({ preview }: { preview: ParsedImport }) {
+  if (preview.format === "empty") {
+    return <span className="opacity-60">Paste content above to begin.</span>;
+  }
+  const label =
+    preview.format === "json"
+      ? "JSON"
+      : preview.format === "markdown"
+        ? "Markdown"
+        : "Plain text";
+  const count = preview.messages.length;
+  return (
+    <span>
+      Detected{" "}
+      <span className="font-medium text-foreground/80">{label}</span>
+      {" · "}
+      {count} message{count === 1 ? "" : "s"} ready to import
+    </span>
   );
 }

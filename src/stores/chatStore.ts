@@ -114,6 +114,15 @@ interface ChatState {
    *  override entirely so the session falls back to (model defaults +
    *  app defaults). */
   setSessionParams: (id: string, params: GenerationParams | null) => Promise<void>;
+  /** Append parsed messages onto the end of a session's transcript. Used by
+   *  the "Import context" dialog — see `lib/importContext.ts` for the
+   *  parser that produces the input shape. Each message is persisted via
+   *  the same `append_message` command that real user/assistant turns use,
+   *  so imported context shows up in exports too. */
+  importMessages: (
+    id: string,
+    messages: { role: "user" | "assistant" | "system"; content: string }[],
+  ) => Promise<void>;
 
   sendUserMessage: (content: string, attachments: Attachment[]) => Promise<void>;
   /** Interrupts whatever is happening for `sessionId`:
@@ -619,6 +628,29 @@ export const useChatStore = create<ChatState>((set, get) => ({
       sessions: s.sessions.map((x) =>
         x.id === id ? { ...x, params_json: next } : x,
       ),
+    }));
+  },
+
+  importMessages: async (id, parsed) => {
+    if (parsed.length === 0) return;
+    // Persist each message in order so timestamps line up monotonically
+    // (the backend stamps `created_at = now()` on insert). We append to the
+    // local cache only after the round-trip resolves so a backend failure
+    // doesn't leave ghost messages in the UI.
+    const created: Message[] = [];
+    for (const p of parsed) {
+      const m = await appendMessage({
+        session_id: id,
+        role: p.role,
+        content: p.content,
+      });
+      created.push(m);
+    }
+    set((s) => ({
+      messages: {
+        ...s.messages,
+        [id]: [...(s.messages[id] ?? []), ...created],
+      },
     }));
   },
 
