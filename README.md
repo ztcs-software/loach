@@ -304,24 +304,6 @@ Loach launches and works completely offline as long as you stick to local provid
 
 ---
 
-## Keyboard shortcuts
-
-| Shortcut | Action |
-|---|---|
-| `Ctrl/Cmd + K` | Open the global search palette |
-| `Ctrl/Cmd + C` / `V` / `X` / `A` | Standard clipboard / select-all in inputs |
-| `Esc` | Close the active dialog / palette / overlay |
-| `Enter` | Submit chat from the composer |
-| `Shift + Enter` | New line in the composer |
-| `↑` / `↓` (in palette / search) | Navigate matches |
-| `Enter` (in palette / search) | Commit the active result / next match |
-| `Shift + Enter` (in chat search) | Previous match |
-| `F12` | Toggle DevTools (development builds) |
-
-Note: the WebView's native right-click menu is suppressed globally. Custom context menus (e.g. the chat-row kebab) still open on right-click — they have their own React handlers.
-
----
-
 ## License
 
 [MIT](LICENSE) © ZTCS
