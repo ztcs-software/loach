@@ -324,4 +324,4 @@ Note: the WebView's native right-click menu is suppressed globally. Custom conte
 
 ## License
 
-[MIT](LICENSE) © Loach contributors
+[MIT](LICENSE) © ZTCS
