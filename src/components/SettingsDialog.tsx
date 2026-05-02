@@ -48,6 +48,7 @@ import { useUIStore } from "@/stores/uiStore";
 import { McpPanel } from "@/components/McpPanel";
 import { SecurityPanel } from "@/components/SecurityPanel";
 import { Logo } from "@/components/Logo";
+import { Switch } from "@/components/ui/switch";
 import {
   archiveAllSessions,
   exportDataJson,
@@ -259,18 +260,18 @@ export function SettingsDialog() {
                         timeout. Private IPs are blocked.
                       </p>
                     </div>
-                    <Button
-                      variant={settings.web_fetch_enabled ? "default" : "outline"}
-                      onClick={() =>
-                        settings.update(
-                          "web_fetch_enabled",
-                          !settings.web_fetch_enabled,
-                        )
+                    <Switch
+                      checked={settings.web_fetch_enabled}
+                      onCheckedChange={(next) =>
+                        settings.update("web_fetch_enabled", next)
                       }
                       className="shrink-0"
-                    >
-                      {settings.web_fetch_enabled ? "On" : "Off"}
-                    </Button>
+                      aria-label={
+                        settings.web_fetch_enabled
+                          ? "Disable web fetch"
+                          : "Enable web fetch"
+                      }
+                    />
                   </div>
                 </div>
               </TabsContent>
@@ -309,18 +310,18 @@ export function SettingsDialog() {
                         your local clock.
                       </p>
                     </div>
-                    <Button
-                      variant={settings.temporal_awareness ? "default" : "outline"}
-                      onClick={() =>
-                        settings.update(
-                          "temporal_awareness",
-                          !settings.temporal_awareness,
-                        )
+                    <Switch
+                      checked={settings.temporal_awareness}
+                      onCheckedChange={(next) =>
+                        settings.update("temporal_awareness", next)
                       }
                       className="shrink-0"
-                    >
-                      {settings.temporal_awareness ? "On" : "Off"}
-                    </Button>
+                      aria-label={
+                        settings.temporal_awareness
+                          ? "Disable temporal awareness"
+                          : "Enable temporal awareness"
+                      }
+                    />
                   </div>
                   <div className="mt-3 rounded-xl border border-foreground/10 bg-foreground/[0.03] p-3 text-[11px] leading-relaxed text-foreground/60">
                     <p className="mb-1 font-medium text-foreground/75">

@@ -36,6 +36,14 @@ pub struct GenerationParams {
     pub presence_penalty: Option<f32>,
     #[serde(default)]
     pub seed: Option<i64>,
+    /// Reasoning toggle for thinking-capable models (Qwen3, DeepSeek-R1,
+    /// GPT-OSS, …). `Some(true)` forces a chain-of-thought before the
+    /// reply; `Some(false)` suppresses it; `None` lets Ollama use the
+    /// model's own default. Models without thinking capability ignore the
+    /// flag — Ollama returns an error for them, but the frontend gates the
+    /// toggle on the model's `capabilities` so we never send it for those.
+    #[serde(default)]
+    pub think: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

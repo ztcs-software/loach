@@ -5,12 +5,10 @@ import {
   Pencil,
   Play,
   Plus,
-  Search,
   Sparkles,
   Trash2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   DropdownMenu,
@@ -44,19 +42,10 @@ export function SnippetsLibrary() {
   const setSidebarTab = useUIStore((s) => s.setSidebarTab);
   const primeComposer = useUIStore((s) => s.primeComposer);
 
-  const [query, setQuery] = useState("");
-
-  const filtered = useMemo(() => {
-    const sorted = [...snippets].sort((a, b) => b.updated_at - a.updated_at);
-    const q = query.trim().toLowerCase();
-    if (!q) return sorted;
-    return sorted.filter(
-      (s) =>
-        s.title.toLowerCase().includes(q) ||
-        s.prompt.toLowerCase().includes(q) ||
-        (s.model?.toLowerCase().includes(q) ?? false),
-    );
-  }, [snippets, query]);
+  const sorted = useMemo(
+    () => [...snippets].sort((a, b) => b.updated_at - a.updated_at),
+    [snippets],
+  );
 
   const runSnippet = async (snippet: Snippet) => {
     // Land the user on the chats canvas so primeComposer's draft has a place
@@ -108,21 +97,6 @@ export function SnippetsLibrary() {
             </Button>
           </header>
 
-          {snippets.length > 0 && (
-            <div className="relative mb-6 max-w-md">
-              <Search
-                className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-foreground/40"
-                aria-hidden
-              />
-              <Input
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search snippets…"
-                className="h-10 rounded-xl border-foreground/10 bg-foreground/[0.04] pl-9 text-sm"
-              />
-            </div>
-          )}
-
           {snippets.length === 0 ? (
             <EmptyLibraryState
               icon={<Sparkles className="h-7 w-7 text-foreground/45" />}
@@ -138,17 +112,9 @@ export function SnippetsLibrary() {
                 </Button>
               }
             />
-          ) : filtered.length === 0 ? (
-            <p className="px-3 py-12 text-center text-sm text-foreground/50">
-              No snippets match{" "}
-              <span className="font-medium text-foreground/70">
-                "{query}"
-              </span>
-              .
-            </p>
           ) : (
             <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-              {filtered.map((snippet) => (
+              {sorted.map((snippet) => (
                 <SnippetCard
                   key={snippet.id}
                   snippet={snippet}
@@ -177,15 +143,28 @@ function SnippetCard({
 }: {
   snippet: Snippet;
   onRun: () => void;
+  /** Tile body click + kebab "Edit" both use this — opens the snippet
+   *  editor dialog. The "Run" footer button is the dominant verb so it
+   *  stays separate. */
   onEdit: () => void;
   onDelete: () => void;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
   return (
     <article
+      role="button"
+      tabIndex={0}
+      onClick={onEdit}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onEdit();
+        }
+      }}
       className={cn(
-        "group relative flex h-full flex-col rounded-2xl border border-foreground/10 bg-foreground/[0.025]",
+        "group relative flex h-full cursor-pointer flex-col rounded-2xl border border-foreground/10 bg-foreground/[0.025]",
         "p-5 transition-colors hover:border-foreground/20 hover:bg-foreground/[0.04]",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
       )}
     >
       {/* Title + actions menu */}
@@ -198,6 +177,7 @@ function SnippetCard({
             <button
               type="button"
               aria-label="Snippet actions"
+              onClick={(e) => e.stopPropagation()}
               className={cn(
                 "-m-1 rounded-md p-1 text-foreground/45 transition-opacity hover:bg-foreground/10 hover:text-foreground",
                 menuOpen ? "opacity-100" : "opacity-0 group-hover:opacity-100 focus-visible:opacity-100",
@@ -206,7 +186,7 @@ function SnippetCard({
               <MoreHorizontal className="h-4 w-4" />
             </button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="end">
+          <DropdownMenuContent align="end" onClick={(e) => e.stopPropagation()}>
             <DropdownMenuItem onSelect={onRun}>
               <Play className="h-4 w-4" /> Run
             </DropdownMenuItem>
@@ -255,7 +235,13 @@ function SnippetCard({
         </div>
         <Button
           size="sm"
-          onClick={onRun}
+          variant="outline"
+          onClick={(e) => {
+            // Tile body opens the editor; Run is its own action and
+            // shouldn't bubble up to the tile-level handler.
+            e.stopPropagation();
+            onRun();
+          }}
           className="h-8 gap-1 rounded-lg px-3 text-xs"
         >
           <Play className="h-3 w-3 fill-current" />

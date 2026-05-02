@@ -5,7 +5,7 @@ import {
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
-import { Search, MessageSquare, Layers, Sparkles } from "lucide-react";
+import { Search, MessageSquare, Layers, Sparkles, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useChatStore } from "@/stores/chatStore";
 import { useSpaceStore } from "@/stores/spaceStore";
@@ -14,25 +14,32 @@ import { useUIStore } from "@/stores/uiStore";
 import type { Attachment, Session, Snippet, Space } from "@/types";
 
 /**
- * A compact "command-palette"-style search that lives in the TitleBar.
+ * Floating command-palette-style search.
  *
- * Behavior:
- * - Click / focus → opens a dropdown with suggestions (recent chats / spaces
- *   / snippets) even when the query is empty.
- * - Typing filters across all three stores with a case-insensitive substring
- *   match on the most-relevant fields (chat title, space name+description,
- *   snippet title+prompt).
- * - ↑/↓ move the active row, Enter commits it, Esc clears then closes.
- * - Picking a result navigates without duplicating logic already present in
- *   the sidebar:
- *     chat    → select session, flip sidebar to "chats"
- *     space   → open SpaceView, flip sidebar to "spaces"
- *     snippet → open a fresh chat and prime the composer (same as
- *               SnippetsPanel.runSnippet)
+ * Used to live as an in-place pill inside the TitleBar; now mounts as a
+ * centred overlay (Linear / Raycast / ChatGPT "Search chats" pattern) so
+ * the title bar stays minimal and the same surface is reachable from any
+ * tab without competing with the in-app brand row for space.
  *
- * NOTE: the TitleBar is a Tauri drag region. Interactive descendants
- * (button, input) are excluded by Tauri's built-in rule, so focus/typing
- * work without fighting the drag behavior.
+ * Trigger paths (any of):
+ *   - Ctrl/Cmd + K (window-level listener)
+ *   - Custom `loach:focus-search` event — fired by the sidebar's "Search"
+ *     quick action so non-keyboard surfaces share the same path
+ *
+ * Behaviour while open:
+ *   - Empty query → "suggestions" mix of recent chats / spaces / snippets
+ *   - Typing filters across all three stores with case-insensitive substring
+ *     match on the most-relevant fields
+ *   - ↑/↓ move the active row, Enter commits, Esc closes (clears query first
+ *     if non-empty)
+ *   - Click on the backdrop closes
+ *
+ * Picking a result navigates without duplicating logic already present in
+ * the sidebar:
+ *   chat    → select session, flip sidebar to "chats"
+ *   space   → open SpaceView, flip sidebar to "spaces"
+ *   snippet → open a fresh chat and prime the composer (mirrors
+ *             SnippetsLibrary.runSnippet)
  */
 
 type ResultKind = "chat" | "space" | "snippet";
@@ -64,29 +71,20 @@ export function SearchBar() {
   const [open, setOpen] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
 
-  const rootRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  // Close when the user clicks anywhere outside the bar or the dropdown.
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (e: MouseEvent) => {
-      const root = rootRef.current;
-      if (root && !root.contains(e.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", onDown);
-    return () => document.removeEventListener("mousedown", onDown);
-  }, [open]);
-
-  // Ctrl/Cmd+K focuses the search from anywhere. We also listen for a
-  // custom `loach:focus-search` event so non-keyboard surfaces (the sidebar's
-  // "Search chats" quick action) can route through the same path without
-  // synthesizing keyboard events.
+  // Two open paths: Ctrl/Cmd+K and the `loach:focus-search` custom event the
+  // sidebar fires when its "Search" quicklink is clicked. Both end up here so
+  // there's a single source of truth for "show the palette".
   useEffect(() => {
     const focus = () => {
-      inputRef.current?.focus();
-      inputRef.current?.select();
       setOpen(true);
+      // Defer the focus call so the input has been mounted by the time we
+      // try to grab focus.
+      setTimeout(() => {
+        inputRef.current?.focus();
+        inputRef.current?.select();
+      }, 0);
     };
     const onKey = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
@@ -189,15 +187,14 @@ export function SearchBar() {
     setActiveIndex(0);
   }, [query, results.length]);
 
-  const reset = () => {
-    setQuery("");
+  const close = () => {
     setOpen(false);
+    setQuery("");
     setActiveIndex(0);
   };
 
   const commit = async (r: Result) => {
-    reset();
-    inputRef.current?.blur();
+    close();
 
     if (r.kind === "chat") {
       setViewingSpace(null);
@@ -214,6 +211,7 @@ export function SearchBar() {
 
     // snippet — same handler as the sidebar's "Run" action.
     setViewingSpace(null);
+    setSidebarTab("chats");
     await newSession({
       spaceId: null,
       provider: r.snippet.provider ?? undefined,
@@ -225,7 +223,6 @@ export function SearchBar() {
   const onKeyDown = (e: ReactKeyboardEvent<HTMLInputElement>) => {
     if (e.key === "ArrowDown") {
       e.preventDefault();
-      setOpen(true);
       setActiveIndex((i) =>
         results.length === 0 ? 0 : Math.min(i + 1, results.length - 1),
       );
@@ -245,54 +242,69 @@ export function SearchBar() {
       return;
     }
     if (e.key === "Escape") {
+      e.preventDefault();
+      // First Esc clears the query, second closes — same pattern as
+      // Linear / Raycast: lets the user keep the palette open while
+      // refining the search.
       if (query) {
         setQuery("");
       } else {
-        setOpen(false);
-        inputRef.current?.blur();
+        close();
       }
     }
   };
 
+  if (!open) return null;
+
   const headerLabel = query.trim() ? "Results" : "Suggestions";
 
   return (
-    // pointer-events-auto: the TitleBar wrapper is pointer-events-none so
-    // its empty space keeps behaving as a Tauri drag region (click-to-drag,
-    // double-click-to-maximize). Re-enable events here so the search input
-    // itself stays focusable/clickable.
-    <div
-      ref={rootRef}
-      className="pointer-events-auto relative w-full max-w-md"
-    >
+    <>
+      {/* Backdrop — full-window, semi-opaque + backdrop blur. Clicking
+          anywhere outside the palette card closes the overlay. We attach
+          to mousedown rather than click so the input doesn't blur first
+          (which would race the close handler on some browsers). */}
       <div
-        className={cn(
-          "flex h-7 items-center gap-2 rounded-full border border-foreground/10 bg-foreground/[0.05] px-3 transition-colors",
-          open && "border-foreground/25 bg-foreground/[0.08]",
-        )}
-      >
-        <Search className="h-3.5 w-3.5 shrink-0 text-foreground/45" />
-        <input
-          ref={inputRef}
-          value={query}
-          onChange={(e) => {
-            setQuery(e.target.value);
-            setOpen(true);
-          }}
-          onFocus={() => setOpen(true)}
-          onKeyDown={onKeyDown}
-          placeholder="Search chats, spaces, snippets..."
-          spellCheck={false}
-          className="min-w-0 flex-1 bg-transparent text-xs text-foreground placeholder:text-foreground/40 focus:outline-none"
-        />
-        <kbd className="hidden rounded border border-foreground/10 bg-foreground/[0.05] px-1.5 py-0.5 text-[10px] tracking-wider text-foreground/40 sm:inline">
-          Ctrl K
-        </kbd>
-      </div>
+        className="fixed inset-0 z-[55] bg-background/55 backdrop-blur-sm"
+        onMouseDown={close}
+        aria-hidden
+      />
 
-      {open && (
-        <div className="absolute left-0 right-0 top-full z-40 mt-1.5 overflow-hidden rounded-xl border border-foreground/10 bg-popover/95 shadow-lg backdrop-blur-2xl">
-          <div className="flex items-center justify-between border-b border-foreground/5 px-3 py-1.5">
+      {/* Palette card — centred horizontally, ~15% from the top so the
+          eye lands on it without it feeling like a modal dialog. Stops
+          propagation so backdrop clicks INSIDE the card don't close. */}
+      <div
+        className="fixed left-1/2 top-[12%] z-[56] w-full max-w-xl -translate-x-1/2 px-4"
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        <div className="overflow-hidden rounded-2xl border border-foreground/10 bg-popover/95 shadow-2xl backdrop-blur-2xl">
+          {/* Input row */}
+          <div className="flex items-center gap-3 border-b border-foreground/[0.06] px-4 py-3">
+            <Search className="h-4 w-4 shrink-0 text-foreground/45" aria-hidden />
+            <input
+              ref={inputRef}
+              autoFocus
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={onKeyDown}
+              placeholder="Search chats, spaces, snippets…"
+              spellCheck={false}
+              className="min-w-0 flex-1 bg-transparent text-sm text-foreground placeholder:text-foreground/40 focus:outline-none"
+            />
+            <kbd className="hidden rounded border border-foreground/10 bg-foreground/[0.05] px-1.5 py-0.5 font-mono text-[10px] tracking-wider text-foreground/40 sm:inline">
+              Esc
+            </kbd>
+            <button
+              type="button"
+              onClick={close}
+              aria-label="Close search"
+              className="-mr-1 inline-flex h-7 w-7 items-center justify-center rounded-md text-foreground/45 transition-colors hover:bg-foreground/10 hover:text-foreground sm:hidden"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+
+          <div className="flex items-center justify-between border-b border-foreground/[0.04] px-4 py-1.5">
             <span className="text-[10px] font-medium uppercase tracking-wider text-foreground/45">
               {headerLabel}
             </span>
@@ -305,13 +317,13 @@ export function SearchBar() {
           </div>
 
           {results.length === 0 ? (
-            <div className="px-3 py-4 text-xs text-foreground/45">
+            <div className="px-4 py-6 text-center text-xs text-foreground/45">
               {query.trim()
                 ? `No matches for "${query.trim()}"`
                 : "Nothing yet — start a chat, create a space, or save a snippet."}
             </div>
           ) : (
-            <ul className="max-h-80 overflow-y-auto py-1">
+            <ul className="max-h-[60vh] overflow-y-auto py-1">
               {results.map((r, i) => (
                 <li key={`${r.kind}-${r.id}`}>
                   <button
@@ -322,7 +334,7 @@ export function SearchBar() {
                     onMouseDown={(e) => e.preventDefault()}
                     onClick={() => void commit(r)}
                     className={cn(
-                      "flex w-full items-center gap-2.5 px-3 py-2 text-left text-xs transition-colors",
+                      "flex w-full items-center gap-2.5 px-4 py-2 text-left text-sm transition-colors",
                       i === activeIndex
                         ? "bg-foreground/10"
                         : "hover:bg-foreground/[0.06]",
@@ -334,7 +346,7 @@ export function SearchBar() {
                         {r.label || "Untitled"}
                       </div>
                       {r.sub && (
-                        <div className="truncate text-[11px] text-foreground/45">
+                        <div className="truncate text-[12px] text-foreground/45">
                           {r.sub}
                         </div>
                       )}
@@ -348,13 +360,13 @@ export function SearchBar() {
             </ul>
           )}
         </div>
-      )}
-    </div>
+      </div>
+    </>
   );
 }
 
 function ResultIcon({ kind }: { kind: ResultKind }) {
-  const cls = "h-3.5 w-3.5 shrink-0 text-foreground/55";
+  const cls = "h-4 w-4 shrink-0 text-foreground/55";
   if (kind === "chat") return <MessageSquare className={cls} />;
   if (kind === "space") return <Layers className={cls} />;
   return <Sparkles className={cls} />;

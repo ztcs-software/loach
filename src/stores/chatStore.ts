@@ -90,6 +90,12 @@ interface ChatState {
    *  waiting combined) — enforced in `sendUserMessage`. */
   queue: QueueTask[];
 
+  /** Per-session "has an unseen assistant reply" flag. Set when an
+   *  assistant message finishes streaming on a session the user is NOT
+   *  actively viewing; cleared by `selectSession` when the user opens
+   *  that chat. Drives the accent dot in the sidebar's chat list. */
+  unread: Record<string, boolean>;
+
   hydrate: () => Promise<void>;
   selectSession: (id: string | null) => Promise<void>;
   newSession: (opts?: {
@@ -170,9 +176,13 @@ function parseOverrides(json: string | null): Partial<GenerationParams> {
  *   2. Model defaults (Ollama only) — parsed from the Modelfile via
  *      `modelsStore.loadModelDefaults`. Only present if the cache was
  *      warmed; otherwise this layer is empty and we fall back to (1).
- *   3. Session overrides — whatever the user persisted by touching a slider
+ *   3. Per-model user prefs (Ollama only) — currently just the Thinking
+ *      toggle from ModelsView (`modelThinkPrefs`). Layered above the
+ *      Modelfile so a user who turns thinking off for a model overrides
+ *      Ollama's "thinking on by default" for capable models.
+ *   4. Session overrides — whatever the user persisted by touching a slider
  *      (`params_json`). When `params_json` is `null` the session inherits
- *      from layers 1 + 2 only, which is how "follow model defaults" works.
+ *      from layers 1 – 3 only.
  *
  * Read synchronously so the chat send path doesn't pay an async hop on
  * every message. Cache warming happens up-front in `newSession` /
@@ -182,11 +192,13 @@ function parseOverrides(json: string | null): Partial<GenerationParams> {
 function readSessionParams(session: Session | undefined): GenerationParams {
   if (!session) return { ...DEFAULT_PARAMS };
   const overrides = parseOverrides(session.params_json);
-  const modelDefaults =
-    session.provider === "ollama"
-      ? useModelsStore.getState().modelDefaults[session.model] ?? {}
-      : {};
-  return { ...DEFAULT_PARAMS, ...modelDefaults, ...overrides };
+  const isOllama = session.provider === "ollama";
+  const modelsState = isOllama ? useModelsStore.getState() : null;
+  const modelDefaults = modelsState?.modelDefaults[session.model] ?? {};
+  const thinkPref = modelsState?.modelThinkPrefs[session.model];
+  const thinkLayer: Partial<GenerationParams> =
+    thinkPref === undefined ? {} : { think: thinkPref };
+  return { ...DEFAULT_PARAMS, ...modelDefaults, ...thinkLayer, ...overrides };
 }
 
 function chatHistory(messages: Message[], userText: string, images: string[]): ChatMessageIn[] {
@@ -248,6 +260,19 @@ function finishRunning(get: Getter, set: Setter) {
       metrics_json: buf.metrics ? JSON.stringify(buf.metrics) : null,
     }).catch(() => {});
   }
+
+  // If the chat that just finished streaming isn't the one the user is
+  // currently viewing, mark it unread so the sidebar shows the accent dot.
+  // We also require some content — a cancelled-on-user-message task that
+  // produced no assistant output shouldn't pretend to be a "new reply".
+  const activeId = get().activeSessionId;
+  const finishedId = running?.sessionId;
+  const producedContent = !!buf && buf.content.trim().length > 0;
+  let unreadPatch: Record<string, boolean> | null = null;
+  if (finishedId && producedContent && finishedId !== activeId) {
+    unreadPatch = { ...get().unread, [finishedId]: true };
+  }
+
   runningBuffers = null;
 
   const stream = get().activeStream;
@@ -263,6 +288,7 @@ function finishRunning(get: Getter, set: Setter) {
     isStreaming: false,
     streamingSessionId: null,
     runningTask: null,
+    ...(unreadPatch ? { unread: unreadPatch } : {}),
   });
   promoteQueueHead(get, set);
 }
@@ -417,6 +443,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   streamingSessionId: null,
   runningTask: null,
   queue: [],
+  unread: {},
 
   hydrate: async () => {
     try {
@@ -456,7 +483,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   selectSession: async (id) => {
-    set({ activeSessionId: id });
+    // Opening a chat clears its unread flag — the user is now looking at
+    // whatever the assistant produced. We do this regardless of whether
+    // the chat had unread content; harmless when the entry was already
+    // false / missing, and a single set is cheaper than a state read +
+    // conditional set.
+    set((s) => {
+      const next = { ...s.unread };
+      if (id && next[id]) delete next[id];
+      return { activeSessionId: id, unread: next };
+    });
     if (!id) return;
     if (!get().messages[id]) {
       const msgs = await listMessages(id);

@@ -47,7 +47,6 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       const hasKey = await getOpenAIKeyStatus().catch(() => false);
       set({ ...merged, openai_key_set: hasKey, hydrated: true });
       applyTheme(merged.theme);
-      applyBackgroundStyle(merged.background_style);
     } catch (e) {
       console.error("settings hydrate failed", e);
       set({ hydrated: true });
@@ -58,8 +57,6 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     set({ [key]: value } as Partial<SettingsState>);
     await setSetting(String(key), String(value));
     if (key === "theme") applyTheme(value as Settings["theme"]);
-    if (key === "background_style")
-      applyBackgroundStyle(value as Settings["background_style"]);
   },
 
   setOpenAIKey: async (key: string) => {
@@ -106,12 +103,4 @@ function applyTheme(theme: Settings["theme"]) {
     systemThemeListener = () => resolve();
     mm.addEventListener("change", systemThemeListener);
   }
-}
-
-/** Toggles the `theme-solid` class on <html> so CSS overrides in
- *  globals.css can swap the accent palette to azure when the user picks
- *  the Solid background. Mirrors `applyTheme`'s shape so the wiring in
- *  hydrate / update reads consistently. */
-function applyBackgroundStyle(style: Settings["background_style"]) {
-  document.documentElement.classList.toggle("theme-solid", style === "solid");
 }

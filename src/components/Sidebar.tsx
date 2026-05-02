@@ -1,12 +1,12 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Archive,
   Boxes,
   FileJson,
   FileText,
   Layers,
+  Loader2,
   MoreHorizontal,
-  PanelLeft,
   Pencil,
   Pin,
   PinOff,
@@ -27,6 +27,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useChatStore } from "@/stores/chatStore";
+import { useSnippetStore } from "@/stores/snippetStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useUIStore } from "@/stores/uiStore";
 import type { SidebarTab } from "@/stores/uiStore";
@@ -36,14 +37,14 @@ import type { Session } from "@/types";
 
 /**
  * ChatGPT-style sidebar with two states. The sidebar is ALWAYS rendered —
- * the toggle lives in a fixed vertical slot at the top and just swaps the
- * column's width between a narrow rail and the full panel.
+ * primary navigation is always one click away. The collapse/expand toggle
+ * lives in the chat title bar (`ChatHeader`), so neither state of the
+ * sidebar carries a toggle itself — items start flush at the top.
  *
  *   Expanded (w-64)              Collapsed rail (w-14)
  *   ┌────────────────────────┐   ┌────┐
- *   │              [⊟]       │   │ ⊟  │   ← toggle, same vertical slot
  *   │  ✎  New chat           │   │ ✎  │
- *   │  ⌕  Search chats       │   │ ⌕  │
+ *   │  ⌕  Search             │   │ ⌕  │
  *   │  ▢  Spaces             │   │ ▢  │
  *   │  ✦  Snippets           │   │ ✦  │
  *   │  ▣  Models             │   │ ▣  │
@@ -57,9 +58,7 @@ import type { Session } from "@/types";
  *   └────────────────────────┘   └────┘
  *
  * Why never collapse to zero: the rail keeps the user's primary navigation
- * always one click away. The previous "disappear entirely" mode forced the
- * toggle to live in two places (sidebar when open, TitleBar when closed),
- * which the user found confusing — now the toggle stays put in both states.
+ * always one click away regardless of which canvas surface is active.
  */
 export function Sidebar() {
   const sidebarOpen = useUIStore((s) => s.sidebarOpen);
@@ -70,7 +69,6 @@ export function Sidebar() {
 
   return (
     <aside className="glass-subtle relative flex h-full w-64 flex-col border-r">
-      <SidebarTop />
       <Quicklinks />
       <ScrollArea className="flex-1 px-2 pb-2">
         <ChatList />
@@ -82,15 +80,15 @@ export function Sidebar() {
 
 // ---------------------------------------------------------------------------
 // Collapsed rail — narrow icon-only column shown when `sidebarOpen` is false.
-// Mirrors the expanded layout's regions exactly (toggle on top, primary
-// actions, tab navigators, settings on the bottom) so toggling the panel
-// looks like a width animation, not a layout swap.
+// Mirrors the expanded layout's regions: primary actions, tab navigators,
+// settings on the bottom. The collapse/expand toggle now lives in the chat
+// title bar, so neither state of the sidebar carries it itself — both
+// states' navigation starts flush at the top.
 // ---------------------------------------------------------------------------
 
 function CollapsedRail() {
   const sidebarTab = useUIStore((s) => s.sidebarTab);
   const setSidebarTab = useUIStore((s) => s.setSidebarTab);
-  const toggleSidebar = useUIStore((s) => s.toggleSidebar);
   const openSettingsTab = useUIStore((s) => s.openSettingsTab);
   const newSession = useChatStore((s) => s.newSession);
   const setViewingSpace = useSpaceStore((s) => s.setViewingSpace);
@@ -112,22 +110,7 @@ function CollapsedRail() {
 
   return (
     <aside className="glass-subtle relative flex h-full w-14 shrink-0 flex-col items-center border-r">
-      {/* Top slot — toggle. Same vertical position as in the expanded view's
-          SidebarTop so the icon doesn't appear to jump when the user clicks
-          it: both states reserve a `h-10` band at the top of the column. */}
-      <div className="flex h-10 w-full items-center justify-center">
-        <button
-          type="button"
-          onClick={toggleSidebar}
-          aria-label="Show sidebar"
-          title="Show sidebar"
-          className="inline-flex h-7 w-7 items-center justify-center rounded-md text-foreground/55 hover:bg-foreground/10 hover:text-foreground transition-colors"
-        >
-          <PanelLeft className="h-4 w-4" />
-        </button>
-      </div>
-
-      <nav className="flex flex-col items-center gap-1 px-1 pt-1">
+      <nav className="flex flex-col items-center gap-1 px-1 pt-3">
         <RailIcon
           icon={<SquarePen className="h-4 w-4" />}
           label="New chat"
@@ -135,7 +118,7 @@ function CollapsedRail() {
         />
         <RailIcon
           icon={<Search className="h-4 w-4" />}
-          label="Search chats"
+          label="Search"
           onClick={handleSearch}
         />
         <RailIcon
@@ -202,29 +185,6 @@ function RailIcon({
 }
 
 // ---------------------------------------------------------------------------
-// Top — collapse toggle. We keep the brand in the TitleBar (avoids a
-// duplicate Loach logo at the top of the window) and just put the toggle
-// here, aligned to the right where ChatGPT, Notion, Linear all put it.
-// ---------------------------------------------------------------------------
-
-function SidebarTop() {
-  const toggleSidebar = useUIStore((s) => s.toggleSidebar);
-  return (
-    <div className="flex h-10 items-center justify-end px-2">
-      <button
-        type="button"
-        onClick={toggleSidebar}
-        aria-label="Hide sidebar"
-        title="Hide sidebar"
-        className="inline-flex h-7 w-7 items-center justify-center rounded-md text-foreground/55 hover:bg-foreground/10 hover:text-foreground transition-colors"
-      >
-        <PanelLeft className="h-4 w-4" />
-      </button>
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
 // Quicklinks — primary navigation. New chat is first, the three "library"
 // surfaces follow, and Search lives between New chat and the libraries
 // because it's the second-most-common verb.
@@ -236,6 +196,8 @@ function Quicklinks() {
   const newSession = useChatStore((s) => s.newSession);
   const activeSessionId = useChatStore((s) => s.activeSessionId);
   const setViewingSpace = useSpaceStore((s) => s.setViewingSpace);
+  const setSpaceFormOpen = useSpaceStore((s) => s.setSpaceFormOpen);
+  const openSnippetDialog = useSnippetStore((s) => s.openDialog);
 
   const goToTab = (tab: SidebarTab) => {
     // Clearing override views ensures the new tab's canvas actually renders;
@@ -249,6 +211,9 @@ function Quicklinks() {
     setSidebarTab("chats");
     void newSession({ spaceId: null });
   };
+
+  const handleNewSpace = () => setSpaceFormOpen(true);
+  const handleNewSnippet = () => openSnippetDialog("new");
 
   const handleSearch = () => {
     // Focus the global SearchBar that lives in the TitleBar — same UX as
@@ -268,15 +233,15 @@ function Quicklinks() {
       : sidebarTab === t;
 
   return (
-    <nav className="space-y-0.5 px-2 pb-3">
-      <Quicklink
-        icon={<SquarePen className="h-4 w-4" />}
-        label="New chat"
-        onClick={handleNewChat}
+    <nav className="space-y-0.5 px-2 pb-3 pt-3">
+      <NewChatButton
+        onNewChat={handleNewChat}
+        onNewSpace={handleNewSpace}
+        onNewSnippet={handleNewSnippet}
       />
       <Quicklink
         icon={<Search className="h-4 w-4" />}
-        label="Search chats"
+        label="Search"
         onClick={handleSearch}
         kbd="⌘K"
       />
@@ -337,6 +302,154 @@ function Quicklink({
           {kbd}
         </span>
       )}
+    </button>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// NewChatButton — a plain Quicklink that also reveals a hover dropdown with
+// "New space" / "New snippet". Visually identical to the surrounding
+// Quicklinks (Search, Spaces, Snippets, Models) — no border, no special
+// fill, no accent — so the sidebar's primary navigation reads as a single
+// uniform list. The flyout is the only added affordance.
+//
+//   • Click anywhere on the button → start a New chat. Predictable, single
+//     dominant verb; the dropdown never intercepts the click.
+//   • Hover (after a small entry delay so the dropdown doesn't flicker on
+//     accidental cursor passes) → a glass card slides into view directly
+//     below the button with the two extra creation actions.
+//   • Mouse leaves both the button AND the flyout for >180 ms → flyout
+//     closes. The forgiveness window lets the user diagonal-cross the gap
+//     without losing the menu.
+//
+// We roll our own hover handling rather than pulling in @radix-ui/react-
+// hover-card — this is a single-button + 2-item flyout, the surface doesn't
+// justify a new dep.
+// ---------------------------------------------------------------------------
+
+const HOVER_OPEN_MS = 80;
+const HOVER_CLOSE_MS = 180;
+
+function NewChatButton({
+  onNewChat,
+  onNewSpace,
+  onNewSnippet,
+}: {
+  onNewChat: () => void;
+  onNewSpace: () => void;
+  onNewSnippet: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const openTimer = useRef<number | null>(null);
+  const closeTimer = useRef<number | null>(null);
+
+  const clearTimers = () => {
+    if (openTimer.current) {
+      window.clearTimeout(openTimer.current);
+      openTimer.current = null;
+    }
+    if (closeTimer.current) {
+      window.clearTimeout(closeTimer.current);
+      closeTimer.current = null;
+    }
+  };
+
+  const scheduleOpen = () => {
+    if (closeTimer.current) {
+      window.clearTimeout(closeTimer.current);
+      closeTimer.current = null;
+    }
+    if (open || openTimer.current) return;
+    openTimer.current = window.setTimeout(() => {
+      setOpen(true);
+      openTimer.current = null;
+    }, HOVER_OPEN_MS);
+  };
+
+  const scheduleClose = () => {
+    if (openTimer.current) {
+      window.clearTimeout(openTimer.current);
+      openTimer.current = null;
+    }
+    if (closeTimer.current) return;
+    closeTimer.current = window.setTimeout(() => {
+      setOpen(false);
+      closeTimer.current = null;
+    }, HOVER_CLOSE_MS);
+  };
+
+  useEffect(() => clearTimers, []);
+
+  const handleClick = () => {
+    // The dropdown is a hover-only affordance; click always commits the
+    // primary action. Close any flyout that happened to be open.
+    clearTimers();
+    setOpen(false);
+    onNewChat();
+  };
+
+  const pickAndClose = (action: () => void) => {
+    clearTimers();
+    setOpen(false);
+    action();
+  };
+
+  return (
+    <div
+      className="relative"
+      onMouseEnter={scheduleOpen}
+      onMouseLeave={scheduleClose}
+    >
+      <Quicklink
+        icon={<SquarePen className="h-4 w-4" />}
+        label="New chat"
+        onClick={handleClick}
+      />
+
+      {open && (
+        // top-full with no margin → no actual gap between button and
+        // flyout, so the wrapper's mouseleave doesn't fire on diagonal
+        // cursor crossings between the two halves. The flyout is its own
+        // floating glass card — high enough opacity (`bg-popover/85`) plus
+        // a 24-px backdrop blur to fully occlude the Quicklinks below it.
+        <div className="absolute left-0 right-0 top-full z-30 pt-1">
+          <div className="overflow-hidden rounded-lg border border-foreground/[0.14] bg-popover/85 p-1 shadow-lg backdrop-blur-xl">
+            <FlyoutItem
+              icon={<Layers className="h-4 w-4" />}
+              label="New space"
+              onClick={() => pickAndClose(onNewSpace)}
+            />
+            <FlyoutItem
+              icon={<Sparkles className="h-4 w-4" />}
+              label="New snippet"
+              onClick={() => pickAndClose(onNewSnippet)}
+            />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FlyoutItem({
+  icon,
+  label,
+  onClick,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="flex w-full items-center gap-3 rounded-md px-3 py-1.5 text-[13px] font-medium text-foreground/85 transition-colors hover:bg-foreground/[0.08] hover:text-foreground"
+    >
+      <span className="flex h-4 w-4 shrink-0 items-center justify-center text-foreground/55">
+        {icon}
+      </span>
+      <span className="min-w-0 flex-1 truncate text-left">{label}</span>
     </button>
   );
 }
@@ -455,6 +568,19 @@ function SessionRow({
   const pinChat = useChatStore((s) => s.pin);
   const archiveChat = useChatStore((s) => s.archive);
   const remove = useChatStore((s) => s.remove);
+  // Per-row activity flags. `generating` is true if this session has the
+  // running stream OR is parked in the queue waiting for it. `unread` is
+  // a sticky flag set by the store when an assistant turn finishes on a
+  // session the user wasn't viewing — cleared by `selectSession`.
+  // We keep generating winning over unread: a chat that's still streaming
+  // hasn't produced a "new reply to read" yet, so the spinner is the
+  // truthful signal.
+  const generating = useChatStore(
+    (s) =>
+      (s.runningTask?.sessionId === session.id && s.isStreaming) ||
+      s.queue.some((t) => t.sessionId === session.id),
+  );
+  const unread = useChatStore((s) => !!s.unread[session.id]);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(session.title);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -505,6 +631,32 @@ function SessionRow({
           <Layers className="mr-1.5 h-3 w-3 shrink-0 text-foreground/35" />
         )}
         <span className="min-w-0 flex-1 truncate">{session.title}</span>
+
+        {/* Activity indicator — shares the right-side slot with the kebab.
+            When the row isn't hovered (and the menu isn't open), this is
+            visible: a spinner if the chat is still generating, an accent
+            dot if it has unread assistant content. On hover the kebab
+            takes the slot and the indicator fades out. */}
+        {(generating || unread) && (
+          <span
+            aria-hidden
+            aria-label={
+              generating ? "Generating reply" : "Unread assistant reply"
+            }
+            className={cn(
+              "pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 transition-opacity",
+              menuOpen
+                ? "opacity-0"
+                : "opacity-100 group-hover/row:opacity-0",
+            )}
+          >
+            {generating ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
+            ) : (
+              <span className="block h-2 w-2 rounded-full bg-primary shadow-[0_0_4px_hsl(var(--primary)/0.55)]" />
+            )}
+          </span>
+        )}
 
         {/* Fade gradient under the kebab so the truncated title doesn't
             butt up against the icon when it appears on hover. */}

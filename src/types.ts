@@ -102,6 +102,11 @@ export interface GenerationParams {
   presence_penalty?: number;
   /** Integer; omit / undefined = random each run. */
   seed?: number | null;
+  /** Reasoning toggle for thinking-capable models. `true`/`false` is sent
+   *  through to Ollama's `/api/chat` `think` parameter; `undefined` omits
+   *  the field so the model uses its own default. The UI only surfaces this
+   *  toggle for models whose `capabilities` include `"thinking"`. */
+  think?: boolean;
 }
 
 export const DEFAULT_PARAMS: GenerationParams = {
@@ -211,6 +216,11 @@ export interface OllamaShowResponse {
   /** `model_info` k/v map (e.g. `general.parameter_count`,
    *  `llama.context_length`). Shape varies — kept loose on purpose. */
   model_info: Record<string, unknown> | null;
+  /** Capability tags from newer Ollama versions:
+   *  `["completion", "tools", "thinking", "vision", …]`. Older Ollama
+   *  builds omit the field entirely — null is the "we don't know" state,
+   *  in which case features that gate on a capability fall back to off. */
+  capabilities?: string[] | null;
 }
 
 /** Parameters that can be set in a `PARAMETER …` line of a Modelfile. Only

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
-import { ChevronRight, ChevronDown, Dice5, Info, RotateCcw, X } from "lucide-react";
+import { Brain, ChevronRight, ChevronDown, Dice5, Info, RotateCcw, X } from "lucide-react";
 import { Slider } from "@/components/ui/slider";
+import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
@@ -35,6 +36,18 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
       ? s.modelDefaults[session.model]
       : undefined,
   );
+  const modelCapabilities = useModelsStore((s) =>
+    session?.provider === "ollama" && session.model
+      ? s.modelCapabilities[session.model]
+      : undefined,
+  );
+  const modelThinkPref = useModelsStore((s) =>
+    session?.provider === "ollama" && session.model
+      ? s.modelThinkPrefs[session.model]
+      : undefined,
+  );
+  const supportsThinking =
+    session?.provider === "ollama" && (modelCapabilities?.includes("thinking") ?? false);
 
   const overrides = useMemo(
     () => parseOverrides(session?.params_json ?? null),
@@ -43,10 +56,16 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
   const hasOverrides = Object.keys(overrides).length > 0;
 
   // The merge order mirrors `chatStore.readSessionParams` exactly so the
-  // sliders show the same numbers the request will actually use.
+  // sliders (and the Thinking toggle) show the same values the request
+  // will actually use.
   const initial = useMemo<GenerationParams>(
-    () => ({ ...DEFAULT_PARAMS, ...(modelDefaults ?? {}), ...overrides }),
-    [overrides, modelDefaults],
+    () => ({
+      ...DEFAULT_PARAMS,
+      ...(modelDefaults ?? {}),
+      ...(modelThinkPref === undefined ? {} : { think: modelThinkPref }),
+      ...overrides,
+    }),
+    [overrides, modelDefaults, modelThinkPref],
   );
 
   const [params, setParams] = useState<GenerationParams>(initial);
@@ -134,6 +153,36 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
               <Info className="mt-0.5 h-3 w-3 shrink-0 text-foreground/45" />
               <span className="leading-snug">{sourceLabel}</span>
             </div>
+
+            {/* Thinking — placed above Sampling because it's a coarser
+                "what kind of answer do I want?" lever, while Sampling is
+                fine-grained "how does the model decide each token?". The
+                row stays visible on every chat so users learn it exists,
+                but the toggle itself is disabled (and visibly muted) when
+                the active model doesn't list `thinking` in its
+                `/api/show` capabilities — flipping it would just be
+                ignored by Ollama, so we make that obvious upfront. */}
+            <Section title="Thinking">
+              <ThinkingRow
+                checked={
+                  // For supporting models the in-memory `think` from
+                  // params drives the switch. `undefined` means "no
+                  // explicit override" — for thinking-capable models the
+                  // implicit default is ON (Ollama's behaviour for those
+                  // models), so we surface that as ON.
+                  params.think ?? supportsThinking
+                }
+                disabled={!supportsThinking}
+                disabledHint={
+                  isOpenAI
+                    ? "Ignored by OpenAI providers — chain-of-thought is internal to the model."
+                    : modelCapabilities === undefined
+                      ? "Loading model capabilities…"
+                      : "This model doesn't support a thinking step."
+                }
+                onChange={(next) => update({ think: next })}
+              />
+            </Section>
 
             <Section title="Sampling">
               <SliderRow
@@ -324,6 +373,48 @@ function Section({
         {title}
       </h4>
       <div className="space-y-4">{children}</div>
+    </div>
+  );
+}
+
+/**
+ * Single-row layout used by the "Thinking" section. Same visual rhythm as
+ * a SliderRow (label on the left, control on the right) so the panel
+ * feels consistent. Disabled state mutes the row but keeps the label
+ * legible — users still get the affordance + a hint about WHY it's off.
+ */
+function ThinkingRow({
+  checked,
+  disabled,
+  disabledHint,
+  onChange,
+}: {
+  checked: boolean;
+  disabled: boolean;
+  disabledHint: string;
+  onChange: (next: boolean) => void;
+}) {
+  return (
+    <div className={disabled ? "opacity-55" : undefined}>
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-1.5">
+          <Brain className="h-3.5 w-3.5 shrink-0 text-foreground/70" />
+          <Label className="text-[11px] font-semibold uppercase tracking-[0.1em] text-foreground/70">
+            Thinking
+          </Label>
+        </div>
+        <Switch
+          checked={checked}
+          disabled={disabled}
+          onCheckedChange={onChange}
+          aria-label={checked ? "Disable thinking" : "Enable thinking"}
+        />
+      </div>
+      <p className="mt-1.5 text-[10.5px] leading-snug text-foreground/50">
+        {disabled
+          ? disabledHint
+          : "Let the model reason step-by-step before replying. Adds latency on long answers but often improves quality on complex prompts."}
+      </p>
     </div>
   );
 }

@@ -9,8 +9,8 @@ import {
   MoreHorizontal,
   Plus,
   RefreshCw,
-  Search,
   Sliders,
+  SquarePen,
   Trash2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -23,10 +23,13 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { useChatStore } from "@/stores/chatStore";
 import { useModelsStore } from "@/stores/modelsStore";
 import type { AdminProgress } from "@/stores/modelsStore";
+import { useSpaceStore } from "@/stores/spaceStore";
+import { useUIStore } from "@/stores/uiStore";
 import { cn, formatBytes } from "@/lib/utils";
-import type { ModelInfo } from "@/types";
+import type { ModelInfo, ProviderId } from "@/types";
 
 /**
  * Full-canvas browse-and-act surface for installed models. Mirrors
@@ -51,10 +54,12 @@ export function ModelsLibrary() {
   const runs = useModelsStore((s) => s.runs);
   const dismissRun = useModelsStore((s) => s.dismissRun);
   const cancelRun = useModelsStore((s) => s.cancelRun);
+  const newSession = useChatStore((s) => s.newSession);
+  const setSidebarTab = useUIStore((s) => s.setSidebarTab);
+  const setViewingSpace = useSpaceStore((s) => s.setViewingSpace);
 
   const [pullOpen, setPullOpen] = useState(false);
   const [pullTag, setPullTag] = useState("");
-  const [query, setQuery] = useState("");
 
   // Lazy hydrate on first mount.
   useEffect(() => {
@@ -70,25 +75,6 @@ export function ModelsLibrary() {
     [models],
   );
 
-  const filterFn = (m: ModelInfo) => {
-    const q = query.trim().toLowerCase();
-    if (!q) return true;
-    return (
-      m.id.toLowerCase().includes(q) ||
-      (m.family ?? "").toLowerCase().includes(q) ||
-      (m.label ?? "").toLowerCase().includes(q)
-    );
-  };
-
-  const filteredOllama = useMemo(
-    () => ollamaModels.filter(filterFn),
-    [ollamaModels, query],
-  );
-  const filteredOpenAI = useMemo(
-    () => openaiModels.filter(filterFn),
-    [openaiModels, query],
-  );
-
   const activeRuns = Object.entries(runs);
 
   const handleStartPull = async () => {
@@ -97,6 +83,20 @@ export function ModelsLibrary() {
     setPullOpen(false);
     setPullTag("");
     await pullModel(tag);
+  };
+
+  // Land on the chats canvas first so the new session's composer renders,
+  // then open a chat pinned to the chosen model. We clear any stale
+  // viewing-space state so we don't drop into a SpaceView with the wrong
+  // model — Models tiles aren't space-aware.
+  const newChatWithModel = (m: ModelInfo) => {
+    setViewingSpace(null);
+    setSidebarTab("chats");
+    void newSession({
+      spaceId: null,
+      provider: m.provider as ProviderId,
+      model: m.id,
+    });
   };
 
   return (
@@ -206,28 +206,8 @@ export function ModelsLibrary() {
             </div>
           )}
 
-          {/* Search */}
-          {models.length > 0 && (
-            <div className="relative mb-6 max-w-md">
-              <Search
-                className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-foreground/40"
-                aria-hidden
-              />
-              <Input
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search models…"
-                className="h-10 rounded-xl border-foreground/10 bg-foreground/[0.04] pl-9 text-sm"
-              />
-            </div>
-          )}
-
           {/* Ollama section */}
-          <SectionLabel
-            label="Ollama"
-            count={ollamaModels.length}
-            visible={filteredOllama.length}
-          />
+          <SectionLabel label="Ollama" count={ollamaModels.length} />
           {ollamaModels.length === 0 && !loading ? (
             <div className="mx-auto mt-4 flex max-w-md flex-col items-center justify-center rounded-2xl border border-dashed border-foreground/10 bg-foreground/[0.015] px-8 py-10 text-center">
               <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-2xl bg-foreground/[0.05]">
@@ -241,21 +221,14 @@ export function ModelsLibrary() {
                 download a tag from the Ollama library.
               </p>
             </div>
-          ) : filteredOllama.length === 0 ? (
-            <p className="px-3 py-8 text-center text-sm text-foreground/50">
-              No Ollama models match{" "}
-              <span className="font-medium text-foreground/70">
-                "{query}"
-              </span>
-              .
-            </p>
           ) : (
             <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-              {filteredOllama.map((m) => (
+              {ollamaModels.map((m) => (
                 <ModelTile
                   key={`ollama-${m.id}`}
                   model={m}
                   onCustomize={() => setViewingModel(m.id)}
+                  onNewChat={() => newChatWithModel(m)}
                   onDuplicate={() => {
                     const dest = prompt(
                       `Duplicate "${m.id}" as…`,
@@ -286,28 +259,21 @@ export function ModelsLibrary() {
                 <SectionLabel
                   label="OpenAI"
                   count={openaiModels.length}
-                  visible={filteredOpenAI.length}
                   hint="Read-only catalog from your OpenAI-compatible endpoint"
                 />
               </div>
-              {filteredOpenAI.length === 0 ? (
-                <p className="px-3 py-6 text-center text-sm text-foreground/50">
-                  No OpenAI models match this query.
-                </p>
-              ) : (
-                <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
-                  {filteredOpenAI.map((m) => (
-                    <div
-                      key={`openai-${m.id}`}
-                      className="flex items-center gap-2 rounded-xl border border-foreground/[0.06] bg-foreground/[0.02] px-3 py-2 text-[13px] text-foreground/75"
-                      title="OpenAI-compatible models are read-only"
-                    >
-                      <Cpu className="h-3.5 w-3.5 shrink-0 text-foreground/40" />
-                      <span className="min-w-0 flex-1 truncate">{m.label}</span>
-                    </div>
-                  ))}
-                </div>
-              )}
+              <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+                {openaiModels.map((m) => (
+                  <div
+                    key={`openai-${m.id}`}
+                    className="flex items-center gap-2 rounded-xl border border-foreground/[0.06] bg-foreground/[0.02] px-3 py-2 text-[13px] text-foreground/75"
+                    title="OpenAI-compatible models are read-only"
+                  >
+                    <Cpu className="h-3.5 w-3.5 shrink-0 text-foreground/40" />
+                    <span className="min-w-0 flex-1 truncate">{m.label}</span>
+                  </div>
+                ))}
+              </div>
             </>
           )}
         </div>
@@ -323,12 +289,10 @@ export function ModelsLibrary() {
 function SectionLabel({
   label,
   count,
-  visible,
   hint,
 }: {
   label: string;
   count: number;
-  visible: number;
   hint?: string;
 }) {
   return (
@@ -337,7 +301,7 @@ function SectionLabel({
         {label}
       </h2>
       <span className="rounded-full bg-foreground/[0.06] px-2 py-0.5 text-[10.5px] font-medium text-foreground/60">
-        {visible === count ? count : `${visible} of ${count}`}
+        {count}
       </span>
       {hint && (
         <span className="hidden truncate text-[11px] italic text-foreground/40 sm:inline">
@@ -355,11 +319,16 @@ function SectionLabel({
 function ModelTile({
   model,
   onCustomize,
+  onNewChat,
   onDuplicate,
   onDelete,
 }: {
   model: ModelInfo;
+  /** Tile body click + kebab "Customize" both use this — opens the model
+   *  editor view. */
   onCustomize: () => void;
+  /** Footer button — starts a new chat pinned to this model. */
+  onNewChat: () => void;
   onDuplicate: () => void;
   onDelete: () => void;
 }) {
@@ -367,9 +336,19 @@ function ModelTile({
   const sizeLabel = model.size ? formatBytes(model.size) : null;
   return (
     <article
+      role="button"
+      tabIndex={0}
+      onClick={onCustomize}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onCustomize();
+        }
+      }}
       className={cn(
-        "group relative flex h-full flex-col rounded-2xl border border-foreground/10 bg-foreground/[0.025]",
+        "group relative flex h-full cursor-pointer flex-col rounded-2xl border border-foreground/10 bg-foreground/[0.025]",
         "p-4 transition-colors hover:border-foreground/20 hover:bg-foreground/[0.04]",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
       )}
     >
       <header className="flex items-start justify-between gap-2">
@@ -384,6 +363,7 @@ function ModelTile({
             <button
               type="button"
               aria-label="Model actions"
+              onClick={(e) => e.stopPropagation()}
               className={cn(
                 "-m-1 rounded-md p-1 text-foreground/45 transition-opacity hover:bg-foreground/10 hover:text-foreground",
                 menuOpen
@@ -394,7 +374,7 @@ function ModelTile({
               <MoreHorizontal className="h-4 w-4" />
             </button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="end">
+          <DropdownMenuContent align="end" onClick={(e) => e.stopPropagation()}>
             <DropdownMenuItem onSelect={onCustomize}>
               <Sliders className="h-4 w-4" /> Customize
             </DropdownMenuItem>
@@ -432,11 +412,16 @@ function ModelTile({
         <Button
           size="sm"
           variant="outline"
-          onClick={onCustomize}
+          onClick={(e) => {
+            // Tile body opens Customize; the footer is a separate verb
+            // (New chat with this model) and shouldn't double-trigger.
+            e.stopPropagation();
+            onNewChat();
+          }}
           className="h-8 gap-1 rounded-lg px-3 text-xs"
         >
-          <Sliders className="h-3 w-3" />
-          Customize
+          <SquarePen className="h-3 w-3" />
+          New chat
         </Button>
       </footer>
     </article>

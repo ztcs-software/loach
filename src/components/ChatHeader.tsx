@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Archive,
+  ArchiveRestore,
   Check,
   ChevronDown,
   CircleAlert,
@@ -9,8 +10,13 @@ import {
   Copy,
   FileText,
   MoreHorizontal,
+  Pencil,
+  Pin,
+  PinOff,
   RefreshCw,
+  Search,
   Sliders,
+  Trash2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -45,6 +51,14 @@ import type { ModelInfo, ProviderId, Session } from "@/types";
 export function ChatHeader({ session }: { session: Session | undefined }) {
   const setSessionModel = useChatStore((s) => s.setSessionModel);
   const importMessages = useChatStore((s) => s.importMessages);
+  // Single-chat actions piped through chatStore. We deliberately don't keep
+  // local mirrors of these — the store re-renders ChatHeader's `session`
+  // prop when state flips, so labels (Pin/Unpin, Move/Restore) stay
+  // truthful without our help.
+  const renameSession = useChatStore((s) => s.rename);
+  const pinSession = useChatStore((s) => s.pin);
+  const archiveSession = useChatStore((s) => s.archive);
+  const removeSession = useChatStore((s) => s.remove);
   const toggleParams = useUIStore((s) => s.toggleParams);
   const settings = useSettingsStore();
 
@@ -61,6 +75,20 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
   const [exportError, setExportError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
+  /** Marks the "Search in chat" path so we can skip Radix's
+   *  `onCloseAutoFocus` for that one menu item. Without this, Radix
+   *  restores keyboard focus to the trigger button after the menu closes,
+   *  which steals focus from the search overlay's input that the
+   *  ChatCanvas useEffect just placed there. Set right before dispatching
+   *  the open event; consumed (and reset) by the auto-focus handler. */
+  const skipMenuRefocus = useRef(false);
+
+  /** Rename-chat dialog state. Local-only — committed to the store on Save
+   *  so the user can back out of an in-progress edit by hitting Cancel /
+   *  Esc without bumping the persisted title. */
+  const [renameOpen, setRenameOpen] = useState(false);
+  const [renameDraft, setRenameDraft] = useState("");
+
   /** Import-context dialog state. The textarea binds straight to `importText`;
    *  format detection runs on every keystroke via `parseImportContext` so the
    *  preview line below the textarea always reflects what an Import click
@@ -74,6 +102,58 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
     () => parseImportContext(importText),
     [importText],
   );
+
+  // ChatCanvas listens for `loach:open-chat-search` and toggles its
+  // top-bar finder overlay. Mirrors the global Cmd-K palette wiring —
+  // event-driven so we don't need a ref or a shared store flag.
+  //
+  // Setting `skipMenuRefocus` before dispatch tells the DropdownMenu's
+  // onCloseAutoFocus handler (below) to skip Radix's default behaviour of
+  // returning focus to the trigger button. Without that flip, Radix
+  // would steal the focus we're about to place on the search input.
+  const openChatSearch = () => {
+    if (!session) return;
+    skipMenuRefocus.current = true;
+    window.dispatchEvent(new CustomEvent("loach:open-chat-search"));
+  };
+
+  const togglePin = () => {
+    if (!session) return;
+    void pinSession(session.id, !session.pinned_at);
+  };
+
+  const startRename = () => {
+    if (!session) return;
+    setRenameDraft(session.title);
+    setRenameOpen(true);
+  };
+
+  const commitRename = () => {
+    if (!session) return;
+    const next = renameDraft.trim();
+    if (!next || next === session.title) {
+      setRenameOpen(false);
+      return;
+    }
+    void renameSession(session.id, next);
+    setRenameOpen(false);
+  };
+
+  const toggleArchive = () => {
+    if (!session) return;
+    void archiveSession(session.id, session.archived_at == null);
+  };
+
+  const handleDelete = () => {
+    if (!session) return;
+    if (
+      confirm(
+        `Delete this chat (${session.title || "Untitled"})? This cannot be undone — all messages and metrics will be removed.`,
+      )
+    ) {
+      void removeSession(session.id);
+    }
+  };
 
   const openExport = async () => {
     if (!session) return;
@@ -257,7 +337,45 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
               <MoreHorizontal className="h-4 w-4" />
             </Button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className="min-w-[180px]">
+          <DropdownMenuContent
+            align="end"
+            className="min-w-[200px]"
+            // When the user picked "Search in chat", we want focus to land on
+            // the search overlay's input — not be yanked back to the trigger
+            // button by Radix's default close-focus behaviour. The ref is
+            // single-use: consume it here, then reset so other items
+            // (Pin / Rename / Delete) keep the standard "return focus to
+            // trigger" UX a keyboard user expects.
+            onCloseAutoFocus={(e) => {
+              if (skipMenuRefocus.current) {
+                e.preventDefault();
+                skipMenuRefocus.current = false;
+              }
+            }}
+          >
+            <DropdownMenuItem onSelect={openChatSearch}>
+              <Search className="mr-2 h-4 w-4" />
+              Search in chat
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onSelect={togglePin}>
+              {session?.pinned_at ? (
+                <>
+                  <PinOff className="mr-2 h-4 w-4" />
+                  Unpin
+                </>
+              ) : (
+                <>
+                  <Pin className="mr-2 h-4 w-4" />
+                  Pin this chat
+                </>
+              )}
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={startRename}>
+              <Pencil className="mr-2 h-4 w-4" />
+              Rename
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
             <DropdownMenuItem onSelect={() => void openExport()}>
               <FileText className="mr-2 h-4 w-4" />
               Export context
@@ -265,6 +383,27 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
             <DropdownMenuItem onSelect={() => openImport()}>
               <ClipboardPaste className="mr-2 h-4 w-4" />
               Import context
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onSelect={toggleArchive}>
+              {session?.archived_at != null ? (
+                <>
+                  <ArchiveRestore className="mr-2 h-4 w-4" />
+                  Restore from archive
+                </>
+              ) : (
+                <>
+                  <Archive className="mr-2 h-4 w-4" />
+                  Move to archive
+                </>
+              )}
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              onSelect={handleDelete}
+              className="text-destructive focus:text-destructive"
+            >
+              <Trash2 className="mr-2 h-4 w-4" />
+              Delete
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
@@ -278,6 +417,58 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
           <Sliders className="h-4 w-4" />
         </Button>
       </div>
+
+      {/* Rename dialog — small surface, single Input + Save/Cancel.
+          Committing on Enter mirrors the sidebar's inline-rename UX so the
+          two paths feel consistent. The dialog stays a dialog (not inline
+          editing) because the chat title isn't displayed in the header
+          itself — there's no obvious place to flip to an editor in-place. */}
+      <Dialog open={renameOpen} onOpenChange={setRenameOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Rename chat</DialogTitle>
+            <DialogDescription>
+              The new title is saved to your local database; existing
+              exports won't change retroactively.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="mt-2">
+            <input
+              autoFocus
+              value={renameDraft}
+              onChange={(e) => setRenameDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  commitRename();
+                }
+                if (e.key === "Escape") {
+                  e.preventDefault();
+                  setRenameOpen(false);
+                }
+              }}
+              placeholder="Untitled"
+              className="h-9 w-full rounded-md border border-foreground/10 bg-background/60 px-3 text-sm focus:outline-none focus:ring-1 focus:ring-foreground/20"
+            />
+          </div>
+          <div className="mt-3 flex items-center justify-end gap-2">
+            <Button
+              variant="outline"
+              onClick={() => setRenameOpen(false)}
+              className="rounded-lg"
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={commitRename}
+              disabled={!renameDraft.trim()}
+              className="rounded-lg"
+            >
+              Save
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={importOpen} onOpenChange={setImportOpen}>
         <DialogContent className="max-w-2xl">

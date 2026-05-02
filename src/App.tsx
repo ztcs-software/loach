@@ -16,6 +16,7 @@ import { ModelsView } from "@/components/ModelsView";
 import { ModelsLibrary } from "@/components/ModelsLibrary";
 import { LockScreen } from "@/components/LockScreen";
 import { CodeCanvas } from "@/components/CodeCanvas";
+import { SearchBar } from "@/components/SearchBar";
 import { useChatStore } from "@/stores/chatStore";
 import { useModelsStore } from "@/stores/modelsStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -155,6 +156,12 @@ export default function App() {
         <SnippetDialog />
       </div>
       )}
+      {/* Global Cmd-K search palette. Lives at the App root so it floats
+          above every surface (chat / library / lock screen-adjacent) and
+          isn't tied to whichever main view is currently rendered. The
+          component renders nothing until the user opens it via Ctrl/Cmd+K
+          or the `loach:focus-search` event the sidebar fires. */}
+      {!showLock && <SearchBar />}
     </TooltipProvider>
   );
 }

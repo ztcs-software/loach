@@ -62,13 +62,34 @@ interface ModelsState {
    *  "missing key" which means "we haven't asked yet". */
   modelDefaults: Record<string, Partial<GenerationParams>>;
 
+  /** Per-model capability tags from `/api/show` (e.g. `"thinking"`,
+   *  `"tools"`, `"vision"`). Populated alongside `modelDefaults` by
+   *  `loadModelDefaults`. Empty `[]` means "we looked and the model lists
+   *  none"; missing key means "we haven't asked yet". Older Ollama builds
+   *  that omit the field show up as `[]` here. */
+  modelCapabilities: Record<string, string[]>;
+
+  /** User-set "default thinking" preference per model (the Thinking toggle
+   *  in ModelsView). Sits as a layer between Modelfile defaults and
+   *  per-session overrides — sessions still win when the user touches the
+   *  toggle in ParameterPanel. Absence of an entry means "no preference,
+   *  use the model's natural default" (which is ON for thinking-capable
+   *  models, omitted for the rest). */
+  modelThinkPrefs: Record<string, boolean>;
+  /** Set / clear the per-model thinking preference. Pass `null` to clear
+   *  back to the model's natural default; passing `true` / `false`
+   *  records an explicit override. Stored in-memory only for now — no
+   *  persistence layer yet. */
+  setModelThinkPref: (modelId: string, value: boolean | null) => void;
+
   hydrate: () => Promise<void>;
   refresh: () => Promise<void>;
   setViewingModel: (name: string | null) => void;
-  /** Lazily fetch + parse a model's PARAMETER block. Returns the cached
-   *  patch when one exists, otherwise hits `/api/show` and stores the
-   *  result. OpenAI models resolve to `{}` immediately (the catalog endpoint
-   *  doesn't expose Modelfile-equivalent parameters). */
+  /** Lazily fetch + parse a model's PARAMETER block AND capabilities. The
+   *  returned promise resolves with the parsed defaults; capabilities land
+   *  in `modelCapabilities` as a side effect (they're not on the
+   *  GenerationParams shape). OpenAI models cache to `{}` and `[]` since
+   *  the catalog endpoint doesn't expose this info. */
   loadModelDefaults: (modelId: string) => Promise<Partial<GenerationParams>>;
 
   showModel: (name: string) => Promise<OllamaShowResponse>;
@@ -96,6 +117,16 @@ export const useModelsStore = create<ModelsState>((set, get) => ({
   viewingModel: null,
   runs: {},
   modelDefaults: {},
+  modelCapabilities: {},
+  modelThinkPrefs: {},
+
+  setModelThinkPref: (modelId, value) =>
+    set((s) => {
+      const next = { ...s.modelThinkPrefs };
+      if (value === null) delete next[modelId];
+      else next[modelId] = value;
+      return { modelThinkPrefs: next };
+    }),
 
   hydrate: async () => {
     await get().refresh();
@@ -152,22 +183,31 @@ export const useModelsStore = create<ModelsState>((set, get) => ({
     // Ollama's `/api/show` and let it 404 — cached as `{}` either way.
     const known = get().models.find((m) => m.id === modelId);
     if (known && known.provider !== "ollama") {
-      set((s) => ({ modelDefaults: { ...s.modelDefaults, [modelId]: {} } }));
+      set((s) => ({
+        modelDefaults: { ...s.modelDefaults, [modelId]: {} },
+        modelCapabilities: { ...s.modelCapabilities, [modelId]: [] },
+      }));
       return {};
     }
 
     const base = useSettingsStore.getState().ollama_base_url;
     let patch: Partial<GenerationParams> = {};
+    let caps: string[] = [];
     try {
       const resp = await ollamaShowModel(base, modelId);
       patch = parseModelParameters(resp.parameters);
+      caps = resp.capabilities ?? [];
     } catch {
       // Network / 404 — cache empty so we don't retry on every render.
       // The user will still see app defaults; it's the same behaviour as
       // before this feature landed.
       patch = {};
+      caps = [];
     }
-    set((s) => ({ modelDefaults: { ...s.modelDefaults, [modelId]: patch } }));
+    set((s) => ({
+      modelDefaults: { ...s.modelDefaults, [modelId]: patch },
+      modelCapabilities: { ...s.modelCapabilities, [modelId]: caps },
+    }));
     return patch;
   },
 

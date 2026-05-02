@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
+import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { useMcpStore, type McpServerView } from "@/stores/mcpStore";
 import type { McpServerInput, McpTestResult } from "@/types";
@@ -172,22 +173,19 @@ function ServerRow({
           {server.url || "(no URL)"}
         </span>
       </button>
-      <Button
-        variant={server.enabled ? "default" : "outline"}
-        size="sm"
+      <Switch
+        checked={server.enabled}
         disabled={toggling}
-        onClick={async () => {
+        onCheckedChange={async (next) => {
           setToggling(true);
           try {
-            await onToggle(!server.enabled);
+            await onToggle(next);
           } finally {
             setToggling(false);
           }
         }}
-        className="h-7 px-3 text-[11px]"
-      >
-        {server.enabled ? "Enabled" : "Disabled"}
-      </Button>
+        aria-label={server.enabled ? "Disable server" : "Enable server"}
+      />
       <Button
         variant="ghost"
         size="icon"
@@ -359,13 +357,12 @@ function McpEditor({ initial, onCancel, onSaved }: EditorProps) {
             model.
           </p>
         </div>
-        <Button
-          variant={enabled ? "default" : "outline"}
-          onClick={() => setEnabled((v) => !v)}
+        <Switch
+          checked={enabled}
+          onCheckedChange={setEnabled}
           className="shrink-0"
-        >
-          {enabled ? "On" : "Off"}
-        </Button>
+          aria-label={enabled ? "Disable server" : "Enable server"}
+        />
       </div>
 
       {saveError && (

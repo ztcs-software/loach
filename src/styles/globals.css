@@ -4,14 +4,20 @@
 
 @layer base {
   :root {
-    /* Light palette — used when <html> has no `dark` class */
+    /* Light palette — used when <html> has no `dark` class.
+
+       Accent is azure (#007FFF). The companion `.dark` block keeps the
+       original orange accent — the swap is purely light↔dark and applies
+       to both background variants (Aurora gradient and Solid) the same
+       way, so users picking either gradient or flat get the same
+       light=azure / dark=orange relationship. */
     --background: 30 25% 97%;
     --foreground: 230 25% 12%;
     --card: 0 0% 100%;
     --card-foreground: 230 25% 12%;
     --popover: 0 0% 100%;
     --popover-foreground: 230 25% 12%;
-    --primary: 22 95% 52%;
+    --primary: 210 100% 50%;       /* #007FFF */
     --primary-foreground: 0 0% 100%;
     --secondary: 230 15% 92%;
     --secondary-foreground: 230 25% 12%;
@@ -23,7 +29,7 @@
     --destructive-foreground: 0 0% 98%;
     --border: 230 25% 12% / 0.12;
     --input: 230 25% 12% / 0.10;
-    --ring: 22 95% 52%;
+    --ring: 210 100% 50%;
     --radius: 1.25rem;
 
     /* Glass tokens flipped per theme */
@@ -46,23 +52,6 @@
     --drop-glow-strong:   rgba(230, 80, 30, 0.45);
   }
 
-  /* Solid background variant flips the accent to azure (#007FFF). The
-     gradient mesh's ember palette pairs naturally with orange; on a flat
-     light surface the same orange reads as harsh, so users opting into the
-     calmer "Solid" background also get a calmer accent. The class is
-     toggled on <html> by `applyBackgroundStyle` in settingsStore.ts. */
-  .theme-solid {
-    --primary: 210 100% 50%;       /* #007FFF */
-    --primary-foreground: 0 0% 100%;
-    --ring: 210 100% 50%;
-  }
-
-  .dark.theme-solid {
-    --primary: 210 100% 60%;       /* slightly lighter so it pops on dark */
-    --primary-foreground: 0 0% 100%;
-    --ring: 210 100% 60%;
-  }
-
   .dark {
     --background: 230 30% 6%;
     --foreground: 0 0% 98%;
@@ -70,6 +59,10 @@
     --card-foreground: 0 0% 98%;
     --popover: 230 35% 10%;
     --popover-foreground: 0 0% 98%;
+    /* Orange accent in dark mode; light mode uses azure (`:root` above).
+       The split is purely light/dark — both background variants (Aurora
+       gradient and Solid) inherit the same accent for their tone, so the
+       relationship between accent and theme stays predictable. */
     --primary: 22 95% 60%;
     --primary-foreground: 0 0% 100%;
     --secondary: 230 20% 14%;

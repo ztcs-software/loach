@@ -46,6 +46,12 @@ pub struct OllamaShowResponse {
     /// `general.parameter_count`, `llama.context_length`, etc.
     #[serde(default)]
     pub model_info: Option<serde_json::Value>,
+    /// Capability tags reported by newer Ollama versions:
+    /// `["completion", "tools", "thinking", "vision", …]`. Older Ollama
+    /// builds omit the field — `default` makes us tolerant of that. The
+    /// frontend uses this to gate features like the "Thinking" toggle.
+    #[serde(default)]
+    pub capabilities: Option<Vec<String>>,
 }
 
 pub async fn show_model(
@@ -391,7 +397,11 @@ pub async fn chat_stream(
         });
     }
 
-    let body = serde_json::json!({
+    // Build the body as a mut Map so we can conditionally include `think`
+    // only when the user (or model default) has explicitly set it. Sending
+    // `think: null` to Ollama is fine but verbose; omitting the field
+    // entirely is the cleanest way to express "use the model default".
+    let mut body = serde_json::json!({
         "model": req.model,
         "messages": messages,
         "stream": true,
@@ -408,6 +418,9 @@ pub async fn chat_stream(
             seed: req.params.seed,
         }
     });
+    if let Some(think) = req.params.think {
+        body["think"] = serde_json::Value::Bool(think);
+    }
 
     let url = format!("{}/api/chat", req.base_url.trim_end_matches('/'));
     let resp = match http.post(url).json(&body).send().await {

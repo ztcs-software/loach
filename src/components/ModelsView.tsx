@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   ArrowLeft,
+  Brain,
   Cpu,
   Download,
   Eye,
@@ -19,6 +20,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { useChatStore } from "@/stores/chatStore";
 import { useModelsStore } from "@/stores/modelsStore";
@@ -58,6 +60,13 @@ export function ModelsView() {
   const newSession = useChatStore((s) => s.newSession);
   const setViewingSpace = useSpaceStore((s) => s.setViewingSpace);
   const setSidebarTab = useUIStore((s) => s.setSidebarTab);
+  // Per-model thinking preference. Stored in modelsStore so the chat-send
+  // path (`readSessionParams`) and the per-chat ParameterPanel both pick
+  // it up automatically — this view just exposes the lever.
+  const thinkPref = useModelsStore((s) =>
+    viewingModel ? s.modelThinkPrefs[viewingModel] : undefined,
+  );
+  const setThinkPref = useModelsStore((s) => s.setModelThinkPref);
 
   const [details, setDetails] = useState<OllamaShowResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -340,6 +349,29 @@ export function ModelsView() {
 
               <Separator />
 
+              {/* Thinking — request-time toggle, not a Modelfile thing.
+                  Sits above Parameters because it's a coarser switch
+                  (whether to reason at all) than the fine-grained sliders
+                  below. The toggle is disabled when the model's
+                  `/api/show` capabilities don't list "thinking", because
+                  flipping it would just be ignored by Ollama at chat time. */}
+              <section>
+                <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-foreground/85">
+                  <Brain className="h-4 w-4 text-foreground/60" />
+                  Thinking
+                </div>
+                <ThinkingSection
+                  capabilities={details?.capabilities ?? null}
+                  pref={thinkPref}
+                  onChange={(next) => {
+                    if (!viewingModel) return;
+                    setThinkPref(viewingModel, next);
+                  }}
+                />
+              </section>
+
+              <Separator />
+
               {/* Parameters */}
               <section>
                 <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-foreground/85">
@@ -493,6 +525,81 @@ const NUMERIC_FIELDS: {
   { key: "mirostat_tau", label: "Mirostat τ", step: 0.5 },
   { key: "seed", label: "Seed (blank = random)", step: 1 },
 ];
+
+/**
+ * Thinking toggle row for ModelsView. Three states the user might land in:
+ *
+ *   - **Capabilities still loading** (caps === null) — toggle disabled with
+ *     a "loading" hint so the row doesn't briefly flash as "unsupported"
+ *     between mount and the `/api/show` round-trip.
+ *   - **Model doesn't support thinking** — toggle disabled with a
+ *     "this model doesn't support thinking" explanation. Common case for
+ *     non-reasoning models like llama3.x or mistral.
+ *   - **Model supports thinking** — toggle live. Off-state means the user
+ *     has explicitly disabled thinking; on-state means either an explicit
+ *     pref or the model's natural default (Ollama's behaviour for
+ *     thinking-capable models is to think unless told otherwise).
+ *
+ * The pref is stored in modelsStore (in-memory) and feeds into
+ * `chatStore.readSessionParams` so all new chats with this model pick
+ * it up. Per-chat overrides via the Parameter sidebar still win.
+ */
+function ThinkingSection({
+  capabilities,
+  pref,
+  onChange,
+}: {
+  capabilities: string[] | null;
+  pref: boolean | undefined;
+  onChange: (next: boolean | null) => void;
+}) {
+  const loading = capabilities === null;
+  const supports = !loading && capabilities.includes("thinking");
+  // When the user hasn't set a preference, the natural default for
+  // thinking-capable models is ON; for everything else we just show the
+  // toggle as off (and disabled).
+  const checked = pref ?? supports;
+  const hint = loading
+    ? "Reading model capabilities…"
+    : supports
+      ? pref === undefined
+        ? "Using this model's default. Toggle to record an explicit preference for new chats."
+        : "Default for new chats with this model. Per-chat overrides still apply via the Parameters sidebar."
+      : "This model doesn't list a thinking capability — flipping the toggle would have no effect.";
+
+  return (
+    <div className={!supports || loading ? "opacity-65" : undefined}>
+      <div className="flex items-center justify-between gap-3">
+        <Label className="text-sm">
+          {supports ? "Allow thinking step" : "Thinking — not supported"}
+        </Label>
+        <div className="flex items-center gap-2">
+          {pref !== undefined && supports && (
+            <button
+              type="button"
+              onClick={() => onChange(null)}
+              className="rounded-md px-2 py-0.5 text-[11px] font-medium text-foreground/55 transition-colors hover:bg-foreground/[0.06] hover:text-foreground"
+              title="Clear the override and follow the model's natural default"
+            >
+              Reset
+            </button>
+          )}
+          <Switch
+            checked={checked}
+            disabled={!supports || loading}
+            onCheckedChange={(next) => onChange(next)}
+            aria-label={
+              checked ? "Disable thinking for this model" : "Enable thinking for this model"
+            }
+          />
+        </div>
+      </div>
+      <p className="mt-2 text-xs leading-relaxed text-foreground/55">
+        {hint}
+      </p>
+    </div>
+  );
+}
 
 function ParamsGrid({
   params,

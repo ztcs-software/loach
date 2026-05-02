@@ -1,16 +1,14 @@
 import { useMemo, useState } from "react";
 import {
-  ArrowRight,
   Layers,
   MessageSquareText,
   MoreHorizontal,
   Pencil,
   Plus,
-  Search,
+  SquarePen,
   Trash2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   DropdownMenu,
@@ -20,6 +18,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { useChatStore } from "@/stores/chatStore";
 import { useSpaceStore } from "@/stores/spaceStore";
+import { useUIStore } from "@/stores/uiStore";
 import { cn, relativeTime } from "@/lib/utils";
 import type { Space } from "@/types";
 
@@ -39,8 +38,8 @@ export function SpacesLibrary() {
   const setFormOpen = useSpaceStore((s) => s.setSpaceFormOpen);
   const removeSpace = useSpaceStore((s) => s.deleteSpace);
   const sessions = useChatStore((s) => s.sessions);
-
-  const [query, setQuery] = useState("");
+  const newSession = useChatStore((s) => s.newSession);
+  const setSidebarTab = useUIStore((s) => s.setSidebarTab);
 
   // Per-space chat counts (live conversations only — archived chats aren't a
   // useful "freshness" signal). Memoized once per session list so we don't
@@ -55,17 +54,10 @@ export function SpacesLibrary() {
     return counts;
   }, [sessions]);
 
-  const filtered = useMemo(() => {
-    const sorted = [...spaces].sort((a, b) => b.updated_at - a.updated_at);
-    const q = query.trim().toLowerCase();
-    if (!q) return sorted;
-    return sorted.filter(
-      (s) =>
-        s.name.toLowerCase().includes(q) ||
-        s.description.toLowerCase().includes(q) ||
-        s.instructions.toLowerCase().includes(q),
-    );
-  }, [spaces, query]);
+  const sorted = useMemo(
+    () => [...spaces].sort((a, b) => b.updated_at - a.updated_at),
+    [spaces],
+  );
 
   const handleDelete = (space: Space) => {
     if (
@@ -75,6 +67,16 @@ export function SpacesLibrary() {
     ) {
       void removeSpace(space.id);
     }
+  };
+
+  // Land on the chats canvas first so the new session's composer has a place
+  // to render, then create the session bound to this space. The setViewingSpace
+  // call clears any leftover space-detail state — we don't want to drop into
+  // SpaceView, we want the chat itself.
+  const newChatInSpace = (space: Space) => {
+    setViewingSpace(null);
+    setSidebarTab("chats");
+    void newSession({ spaceId: space.id });
   };
 
   return (
@@ -102,21 +104,6 @@ export function SpacesLibrary() {
             </Button>
           </header>
 
-          {spaces.length > 0 && (
-            <div className="relative mb-6 max-w-md">
-              <Search
-                className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-foreground/40"
-                aria-hidden
-              />
-              <Input
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search spaces…"
-                className="h-10 rounded-xl border-foreground/10 bg-foreground/[0.04] pl-9 text-sm"
-              />
-            </div>
-          )}
-
           {spaces.length === 0 ? (
             <EmptyLibraryState
               icon={<Layers className="h-7 w-7 text-foreground/45" />}
@@ -132,23 +119,15 @@ export function SpacesLibrary() {
                 </Button>
               }
             />
-          ) : filtered.length === 0 ? (
-            <p className="px-3 py-12 text-center text-sm text-foreground/50">
-              No spaces match{" "}
-              <span className="font-medium text-foreground/70">
-                "{query}"
-              </span>
-              .
-            </p>
           ) : (
             <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-              {filtered.map((space) => (
+              {sorted.map((space) => (
                 <SpaceCard
                   key={space.id}
                   space={space}
                   chatCount={chatCounts[space.id] ?? 0}
                   onOpen={() => setViewingSpace(space.id)}
-                  onEdit={() => setViewingSpace(space.id)}
+                  onNewChat={() => newChatInSpace(space)}
                   onDelete={() => handleDelete(space)}
                 />
               ))}
@@ -168,22 +147,36 @@ function SpaceCard({
   space,
   chatCount,
   onOpen,
-  onEdit,
+  onNewChat,
   onDelete,
 }: {
   space: Space;
   chatCount: number;
+  /** Tile body click + kebab "Open / edit" both use this — drops the user
+   *  into SpaceView for the space's instructions / files / chat list. */
   onOpen: () => void;
-  onEdit: () => void;
+  /** Footer button — creates a fresh chat scoped to this space and lands
+   *  the user on the chat canvas. */
+  onNewChat: () => void;
   onDelete: () => void;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const hasInstructions = space.instructions.trim().length > 0;
   return (
     <article
+      role="button"
+      tabIndex={0}
+      onClick={onOpen}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onOpen();
+        }
+      }}
       className={cn(
-        "group relative flex h-full flex-col rounded-2xl border border-foreground/10 bg-foreground/[0.025]",
+        "group relative flex h-full cursor-pointer flex-col rounded-2xl border border-foreground/10 bg-foreground/[0.025]",
         "p-5 transition-colors hover:border-foreground/20 hover:bg-foreground/[0.04]",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
       )}
     >
       {/* Title + actions menu */}
@@ -196,6 +189,7 @@ function SpaceCard({
             <button
               type="button"
               aria-label="Space actions"
+              onClick={(e) => e.stopPropagation()}
               className={cn(
                 "-m-1 rounded-md p-1 text-foreground/45 transition-opacity hover:bg-foreground/10 hover:text-foreground",
                 menuOpen ? "opacity-100" : "opacity-0 group-hover:opacity-100 focus-visible:opacity-100",
@@ -204,8 +198,8 @@ function SpaceCard({
               <MoreHorizontal className="h-4 w-4" />
             </button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="end">
-            <DropdownMenuItem onSelect={onEdit}>
+          <DropdownMenuContent align="end" onClick={(e) => e.stopPropagation()}>
+            <DropdownMenuItem onSelect={onOpen}>
               <Pencil className="h-4 w-4" /> Open / edit
             </DropdownMenuItem>
             <DropdownMenuItem
@@ -263,11 +257,17 @@ function SpaceCard({
         <Button
           size="sm"
           variant="outline"
-          onClick={onOpen}
+          onClick={(e) => {
+            // Stop propagation so the tile-level onClick doesn't ALSO
+            // navigate to the SpaceView — the user wants the chat canvas,
+            // not the space's detail page.
+            e.stopPropagation();
+            onNewChat();
+          }}
           className="h-8 gap-1 rounded-lg px-3 text-xs"
         >
-          Open
-          <ArrowRight className="h-3 w-3" />
+          <SquarePen className="h-3 w-3" />
+          New chat
         </Button>
       </footer>
     </article>
