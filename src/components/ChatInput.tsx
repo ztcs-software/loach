@@ -1,10 +1,14 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowUp,
+  ClipboardCopy,
+  ClipboardPaste,
   FileUp,
   Mic,
   Paperclip,
+  Scissors,
   Square,
+  TextCursorInput,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -48,8 +52,12 @@ export function ChatInput({ centered = false }: ChatInputProps) {
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
+  const [ctxMenu, setCtxMenu] = useState<
+    { x: number; y: number; selStart: number; selEnd: number } | null
+  >(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const ctxMenuRef = useRef<HTMLDivElement>(null);
 
   // External insert (e.g. from suggestion chips or a Snippet "Run") bumps
   // the seq counter. Text always reseeds; attachments reseed only when the
@@ -69,6 +77,30 @@ export function ChatInput({ centered = false }: ChatInputProps) {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [composerInsertSeq]);
+
+  // Dismiss the right-click menu on any outside interaction. Bound globally
+  // so a click elsewhere, a scroll, or pressing Escape closes it.
+  useEffect(() => {
+    if (!ctxMenu) return;
+    const dismiss = (e: MouseEvent) => {
+      const el = ctxMenuRef.current;
+      if (el && e.target instanceof Node && el.contains(e.target)) return;
+      setCtxMenu(null);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setCtxMenu(null);
+    };
+    const onScroll = () => setCtxMenu(null);
+    // Use mousedown so we close before a focus-stealing click lands.
+    window.addEventListener("mousedown", dismiss);
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("scroll", onScroll, true);
+    return () => {
+      window.removeEventListener("mousedown", dismiss);
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("scroll", onScroll, true);
+    };
+  }, [ctxMenu]);
 
   // Auto-grow textarea
   useEffect(() => {
@@ -198,6 +230,77 @@ export function ChatInput({ centered = false }: ChatInputProps) {
       await ingest(picked);
     }
     // No files? Let the default paste flow handle plain-text content.
+  };
+
+  // Triggered by the right-click "Paste" menu item. Reads plain text from the
+  // OS clipboard and inserts it at the textarea's caret (replacing any current
+  // selection), mirroring how Ctrl+V would behave for text. File paste stays
+  // on Ctrl+V — the Clipboard API's `read()` for arbitrary file types is
+  // permission-gated and inconsistent across WebView builds, so we keep this
+  // entry point text-only and let the keyboard path handle the rest.
+  //
+  // The right-click menu captures the selection range at open time and passes
+  // it back here, because by the time the menu item fires the textarea has
+  // lost focus and its `selectionStart` has collapsed.
+  const pasteFromClipboard = async (sel?: { start: number; end: number }) => {
+    let clip = "";
+    try {
+      clip = await navigator.clipboard.readText();
+    } catch {
+      setError("Clipboard access was blocked.");
+      return;
+    }
+    if (!clip) return;
+    const el = textareaRef.current;
+    const start = sel?.start ?? el?.selectionStart ?? text.length;
+    const end = sel?.end ?? el?.selectionEnd ?? text.length;
+    const next = text.slice(0, start) + clip + text.slice(end);
+    setText(next);
+    setComposerDraft(next);
+    requestAnimationFrame(() => {
+      if (!el) return;
+      el.focus();
+      const caret = start + clip.length;
+      el.setSelectionRange(caret, caret);
+    });
+  };
+
+  const cutSelection = async (sel: { start: number; end: number }) => {
+    if (sel.start === sel.end) return;
+    const slice = text.slice(sel.start, sel.end);
+    try {
+      await navigator.clipboard.writeText(slice);
+    } catch {
+      setError("Clipboard access was blocked.");
+      return;
+    }
+    const next = text.slice(0, sel.start) + text.slice(sel.end);
+    setText(next);
+    setComposerDraft(next);
+    requestAnimationFrame(() => {
+      const el = textareaRef.current;
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(sel.start, sel.start);
+    });
+  };
+
+  const copySelection = async (sel: { start: number; end: number }) => {
+    if (sel.start === sel.end) return;
+    try {
+      await navigator.clipboard.writeText(text.slice(sel.start, sel.end));
+    } catch {
+      setError("Clipboard access was blocked.");
+    }
+  };
+
+  const selectAll = () => {
+    const el = textareaRef.current;
+    if (!el || text.length === 0) return;
+    requestAnimationFrame(() => {
+      el.focus();
+      el.setSelectionRange(0, text.length);
+    });
   };
 
   // ------- Voice dictation (Web Speech API) -------------------------------
@@ -475,6 +578,17 @@ export function ChatInput({ centered = false }: ChatInputProps) {
               }
             }}
             onPaste={(e) => void onPaste(e)}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              const el = textareaRef.current;
+              setCtxMenu({
+                x: e.clientX,
+                y: e.clientY,
+                selStart: el?.selectionStart ?? 0,
+                selEnd: el?.selectionEnd ?? 0,
+              });
+            }}
             placeholder={placeholder}
             className={cn(
               "min-h-[28px] max-h-[220px] flex-1 resize-none border-none bg-transparent backdrop-blur-none px-1 py-1.5 text-[15px] leading-relaxed text-foreground placeholder:text-foreground/40 shadow-none ring-0 outline-none focus-visible:ring-0 focus-visible:border-none focus-visible:outline-none focus-visible:bg-transparent rounded-none scrollbar-hidden transition-opacity",
@@ -529,6 +643,7 @@ export function ChatInput({ centered = false }: ChatInputProps) {
             title={primaryTitle}
             onClick={onPrimaryClick}
           />
+
         </div>
         {error && (
           <p className="mt-2 text-xs text-rose-300">{error}</p>
@@ -539,6 +654,31 @@ export function ChatInput({ centered = false }: ChatInputProps) {
           </p>
         )}
       </div>
+      {ctxMenu && (
+        <TextareaContextMenu
+          ref={ctxMenuRef}
+          x={ctxMenu.x}
+          y={ctxMenu.y}
+          hasSelection={ctxMenu.selStart !== ctxMenu.selEnd}
+          hasText={text.length > 0}
+          onCut={() => {
+            setCtxMenu(null);
+            void cutSelection({ start: ctxMenu.selStart, end: ctxMenu.selEnd });
+          }}
+          onCopy={() => {
+            setCtxMenu(null);
+            void copySelection({ start: ctxMenu.selStart, end: ctxMenu.selEnd });
+          }}
+          onPaste={() => {
+            setCtxMenu(null);
+            void pasteFromClipboard({ start: ctxMenu.selStart, end: ctxMenu.selEnd });
+          }}
+          onSelectAll={() => {
+            setCtxMenu(null);
+            selectAll();
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -627,6 +767,117 @@ function PrimaryButton({
           className="pointer-events-none absolute inset-0 rounded-full ring-1 ring-rose-200/40 animate-pulse-soft"
         />
       )}
+    </button>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// TextareaContextMenu — Cut / Copy / Paste / Select All
+//
+// Cursor-positioned menu shown on right-click in the prompt textarea. Cut and
+// Copy disable when there is no selection at the moment the menu opened (the
+// caller snapshots the textarea's `selectionStart` / `selectionEnd` because
+// opening the menu would otherwise blur the textarea and collapse the range).
+// Paste stays enabled unconditionally — checking the clipboard requires an
+// async `readText()` and a permission round-trip, so an enabled item that
+// no-ops on empty clipboards is friendlier than a flicker of disabled state.
+// ---------------------------------------------------------------------------
+
+interface TextareaContextMenuProps {
+  x: number;
+  y: number;
+  hasSelection: boolean;
+  hasText: boolean;
+  onCut: () => void;
+  onCopy: () => void;
+  onPaste: () => void;
+  onSelectAll: () => void;
+}
+
+const TextareaContextMenu = React.forwardRef<HTMLDivElement, TextareaContextMenuProps>(
+  function TextareaContextMenu(
+    { x, y, hasSelection, hasText, onCut, onCopy, onPaste, onSelectAll },
+    ref,
+  ) {
+    return (
+      <div
+        ref={ref}
+        role="menu"
+        style={{ left: x, top: y }}
+        className="fixed z-50 min-w-[200px] overflow-hidden rounded-md border border-foreground/10 bg-popover/95 p-1 text-popover-foreground shadow-lg backdrop-blur-xl"
+      >
+        <CtxItem
+          icon={<Scissors className="h-4 w-4" />}
+          label="Cut"
+          shortcut="Ctrl+X"
+          disabled={!hasSelection}
+          onSelect={onCut}
+        />
+        <CtxItem
+          icon={<ClipboardCopy className="h-4 w-4" />}
+          label="Copy"
+          shortcut="Ctrl+C"
+          disabled={!hasSelection}
+          onSelect={onCopy}
+        />
+        <CtxItem
+          icon={<ClipboardPaste className="h-4 w-4" />}
+          label="Paste"
+          shortcut="Ctrl+V"
+          onSelect={onPaste}
+        />
+        <div className="my-1 h-px bg-foreground/10" />
+        <CtxItem
+          icon={<TextCursorInput className="h-4 w-4" />}
+          label="Select All"
+          shortcut="Ctrl+A"
+          disabled={!hasText}
+          onSelect={onSelectAll}
+        />
+      </div>
+    );
+  },
+);
+
+function CtxItem({
+  icon,
+  label,
+  shortcut,
+  disabled,
+  onSelect,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  shortcut: string;
+  disabled?: boolean;
+  onSelect: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="menuitem"
+      disabled={disabled}
+      // mousedown rather than click so the action runs before the global
+      // dismiss listener (also bound to mousedown) tears the menu down.
+      onMouseDown={(e) => {
+        if (disabled) return;
+        e.preventDefault();
+        onSelect();
+      }}
+      className={cn(
+        "flex w-full items-center gap-2.5 rounded-sm px-3 py-2 text-left text-sm transition-colors",
+        disabled
+          ? "cursor-default text-foreground/35"
+          : "text-foreground/85 hover:bg-foreground/10 hover:text-foreground",
+      )}
+    >
+      <span className={cn("shrink-0", disabled ? "text-foreground/30" : "text-foreground/60")}>
+        {icon}
+      </span>
+      <span className="flex-1">{label}</span>
+      <span className={cn("text-xs tabular-nums", disabled ? "text-foreground/30" : "text-foreground/45")}>
+        {shortcut}
+      </span>
     </button>
   );
 }

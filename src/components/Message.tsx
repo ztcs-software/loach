@@ -1,6 +1,5 @@
 import { useLayoutEffect, useRef, useState } from "react";
 import {
-  Bot,
   Brain,
   Check,
   ChevronDown,
@@ -9,7 +8,6 @@ import {
   File,
   FileText,
   MoreHorizontal,
-  User,
 } from "lucide-react";
 import { Markdown } from "./Markdown";
 import {
@@ -21,6 +19,8 @@ import {
 import type { Attachment, Message as ChatMessage, MessageMetrics } from "@/types";
 import { cn } from "@/lib/utils";
 import { stripInlinedAttachments } from "@/lib/files";
+import { Bookmark } from "lucide-react";
+import { useSnippetStore } from "@/stores/snippetStore";
 
 interface MessageProps {
   message: ChatMessage;
@@ -137,7 +137,9 @@ function ThinkingBlock({ text, isStreaming }: { text: string; isStreaming?: bool
 
 export function MessageItem({ message, isStreaming, metrics }: MessageProps) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [copied, setCopied] = useState(false);
+  const openSnippetDialog = useSnippetStore((s) => s.openDialog);
 
   // Copy the raw assistant content — full markdown, untouched — so pasting
   // into a code editor keeps fences / tables / headings intact.
@@ -149,6 +151,14 @@ export function MessageItem({ message, isStreaming, metrics }: MessageProps) {
     } catch {
       // Clipboard may be unavailable in some sandboxed WebView contexts;
       // fail silently rather than surface a fatal error for a secondary action.
+    }
+  };
+
+  const copyUserContent = async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      // see copyContent above
     }
   };
 
@@ -173,23 +183,59 @@ export function MessageItem({ message, isStreaming, metrics }: MessageProps) {
   return (
     <div
       className={cn(
-        "group flex gap-3 py-4",
+        "group flex py-4",
         isUser ? "justify-end" : "justify-start",
       )}
     >
-      {!isUser && (
-        <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-2xl border border-foreground/10 bg-foreground/[0.06] backdrop-blur-md">
-          <Bot className="h-4 w-4 text-orange-300" />
-        </div>
-      )}
       <div
         className={cn(
-          "min-w-0 max-w-[78%]",
+          "relative min-w-0 max-w-[88%]",
           isUser
             ? "rounded-3xl rounded-tr-lg border border-foreground/10 bg-foreground/[0.08] px-4 py-2.5 text-foreground backdrop-blur-xl"
             : "rounded-3xl rounded-tl-lg text-foreground/95",
         )}
+        onContextMenu={
+          isUser
+            ? (e) => {
+                e.preventDefault();
+                setUserMenuOpen(true);
+              }
+            : undefined
+        }
       >
+        {isUser && (
+          <DropdownMenu open={userMenuOpen} onOpenChange={setUserMenuOpen}>
+            <DropdownMenuTrigger asChild>
+              <button
+                type="button"
+                aria-hidden
+                tabIndex={-1}
+                className="pointer-events-none absolute right-3 top-2 h-0 w-0 opacity-0"
+              />
+            </DropdownMenuTrigger>
+            <DropdownMenuContent
+              align="end"
+              className="!bg-none !bg-foreground/[0.08] border border-foreground/10 backdrop-blur-xl min-w-[180px]"
+            >
+              <DropdownMenuItem
+                onSelect={() => void copyUserContent(displayContent)}
+                className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
+              >
+                <Copy className="h-4 w-4 text-foreground/60" />
+                Copy
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                onSelect={() =>
+                  openSnippetDialog({ seedPrompt: displayContent })
+                }
+                className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
+              >
+                <Bookmark className="h-4 w-4 text-foreground/60" />
+                Save as Snippet
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        )}
         {isUser && images.length > 0 && (
           <div className="mb-2 flex flex-wrap gap-1.5">
             {images.map((img, i) => (
@@ -233,10 +279,14 @@ export function MessageItem({ message, isStreaming, metrics }: MessageProps) {
           </div>
         ) : isUser ? (
           displayContent.length > 0 && (
-            <ExpandableUserText content={displayContent} />
+            <div data-message-content>
+              <ExpandableUserText content={displayContent} />
+            </div>
           )
         ) : (
-          <Markdown content={message.content} />
+          <div data-message-content>
+            <Markdown content={message.content} />
+          </div>
         )}
         {!isUser && message.content.length > 0 && (
           <div className="mt-1.5 flex items-center gap-2">
@@ -280,11 +330,6 @@ export function MessageItem({ message, isStreaming, metrics }: MessageProps) {
           </div>
         )}
       </div>
-      {isUser && (
-        <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-2xl border border-foreground/10 bg-foreground/[0.06] backdrop-blur-md">
-          <User className="h-4 w-4 text-foreground/80" />
-        </div>
-      )}
     </div>
   );
 }

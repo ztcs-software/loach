@@ -7,11 +7,17 @@ import {
 } from "@/lib/tauri";
 import type { Attachment, ProviderId, Snippet } from "@/types";
 
+/** Open a fresh snippet dialog with the prompt textarea pre-filled. */
+export interface NewSnippetSeed {
+  seedPrompt: string;
+}
+
 interface SnippetState {
   snippets: Snippet[];
   /** When non-null, the dialog opens in edit mode; when `"new"`, it opens in
-   *  create mode. `null` keeps the dialog closed. */
-  dialogTarget: Snippet | "new" | null;
+   *  create mode; when a `NewSnippetSeed`, opens in create mode with the
+   *  prompt pre-filled. `null` keeps the dialog closed. */
+  dialogTarget: Snippet | "new" | NewSnippetSeed | null;
 
   hydrate: () => Promise<void>;
   create: (
@@ -28,7 +34,7 @@ interface SnippetState {
     model: string | null,
   ) => Promise<void>;
   remove: (id: string) => Promise<void>;
-  openDialog: (target: Snippet | "new") => void;
+  openDialog: (target: Snippet | "new" | NewSnippetSeed) => void;
   closeDialog: () => void;
 }
 

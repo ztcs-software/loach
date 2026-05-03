@@ -39,7 +39,15 @@ export function SnippetDialog() {
   const create = useSnippetStore((s) => s.create);
   const update = useSnippetStore((s) => s.update);
 
-  const editing = target && target !== "new" ? target : null;
+  const isSeed =
+    target !== null &&
+    target !== "new" &&
+    typeof target === "object" &&
+    "seedPrompt" in target;
+  const editing =
+    target && target !== "new" && !isSeed
+      ? (target as Exclude<typeof target, "new" | null | { seedPrompt: string }>)
+      : null;
   const isEditMode = !!editing;
 
   const [title, setTitle] = useState("");
@@ -57,14 +65,19 @@ export function SnippetDialog() {
       setPrompt("");
       setProvider(null);
       setModel(null);
-    } else {
-      setTitle(target.title);
-      setPrompt(target.prompt);
-      setProvider(target.provider);
-      setModel(target.model);
+    } else if (isSeed) {
+      setTitle("");
+      setPrompt((target as { seedPrompt: string }).seedPrompt);
+      setProvider(null);
+      setModel(null);
+    } else if (editing) {
+      setTitle(editing.title);
+      setPrompt(editing.prompt);
+      setProvider(editing.provider);
+      setModel(editing.model);
     }
     setError(null);
-  }, [target]);
+  }, [target, isSeed, editing]);
 
   if (!target) return null;
 
