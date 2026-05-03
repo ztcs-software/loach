@@ -258,7 +258,7 @@ export function SettingsDialog() {
                     className="mt-1.5"
                     value={settings.user_name}
                     onChange={(e) => settings.update("user_name", e.target.value)}
-                    placeholder="e.g. Andrzej"
+                    placeholder="Your name"
                   />
                   <p className="mt-1.5 text-[11px] text-foreground/50">
                     Optional. Available as{" "}
