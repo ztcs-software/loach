@@ -44,6 +44,17 @@ pub struct GenerationParams {
     /// toggle on the model's `capabilities` so we never send it for those.
     #[serde(default)]
     pub think: Option<bool>,
+    /// Number of model layers to offload to the GPU (Ollama `num_gpu`).
+    /// `Some(0)` forces CPU-only inference, `Some(n)` offloads `n` layers,
+    /// `None` lets Ollama auto-detect based on available VRAM. Useful for
+    /// users whose model OOMs the GPU and need to dial offload down.
+    #[serde(default)]
+    pub num_gpu: Option<u32>,
+    /// Enable Ollama's low-VRAM mode. `Some(true)` opts in (smaller batches,
+    /// reduced KV cache); `None` / `Some(false)` follows Ollama's default
+    /// (off). Pairs with `num_gpu` for memory-constrained setups.
+    #[serde(default)]
+    pub low_vram: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

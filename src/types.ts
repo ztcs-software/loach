@@ -107,6 +107,16 @@ export interface GenerationParams {
    *  the field so the model uses its own default. The UI only surfaces this
    *  toggle for models whose `capabilities` include `"thinking"`. */
   think?: boolean;
+  /** Ollama-only: how many model layers to offload to the GPU. `0` forces
+   *  CPU-only inference, a positive integer offloads that many layers, and
+   *  `undefined` lets Ollama auto-detect. Lets users dial offload down when
+   *  the model OOMs the GPU. Ignored by OpenAI providers. */
+  num_gpu?: number;
+  /** Ollama-only: opt into low-VRAM mode. `true` shrinks batch sizes and
+   *  the KV cache; `undefined` / `false` leaves Ollama's default (off).
+   *  Pairs with `num_gpu` for memory-constrained setups. Ignored by OpenAI
+   *  providers. */
+  low_vram?: boolean;
 }
 
 export const DEFAULT_PARAMS: GenerationParams = {

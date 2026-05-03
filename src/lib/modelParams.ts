@@ -16,6 +16,7 @@ const KEY_MAP: Record<string, keyof GenerationParams> = {
   min_p: "min_p",
   num_predict: "max_tokens",
   num_ctx: "num_ctx",
+  num_gpu: "num_gpu",
   repeat_penalty: "repeat_penalty",
   frequency_penalty: "frequency_penalty",
   presence_penalty: "presence_penalty",
