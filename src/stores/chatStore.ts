@@ -695,8 +695,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const spaceStore = useSpaceStore.getState();
     const viewingSpaceId = spaceStore.viewingSpaceId;
     if (viewingSpaceId) {
-      // Clear view but keep activeSpaceId so newSession picks it up
+      // Clear view but keep activeSpaceId so newSession picks it up.
+      // Also flip the sidebar back to "chats" — otherwise the main view
+      // falls through to the Spaces library tiles (App.tsx routing) instead
+      // of the new chat we're about to stream into.
       useSpaceStore.setState({ viewingSpaceId: null });
+      if (useUIStore.getState().sidebarTab !== "chats") {
+        useUIStore.getState().setSidebarTab("chats");
+      }
     }
 
     const state = get();
