@@ -1,7 +1,7 @@
 {
   "name": "loach",
   "private": true,
-  "version": "1.0.0-alpha-1",
+  "version": "1.0.0-alpha-2",
   "type": "module",
   "description": "Native local LLM chat client for Windows and Linux (Ollama + OpenAI-compatible).",
   "license": "MIT",
@@ -32,7 +32,7 @@
     "highlight.js": "^11.10.0",
     "lucide-react": "^0.454.0",
     "mammoth": "^1.12.0",
-    "pdfjs-dist": "^5.6.205",
+    "pdfjs-dist": "^5.7.284",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-markdown": "^9.0.1",

@@ -1,6 +1,5 @@
 import { save } from "@tauri-apps/plugin-dialog";
-import { writeTextFile } from "@tauri-apps/plugin-fs";
-import { exportSession } from "./tauri";
+import { exportSession, writeTextFile } from "./tauri";
 
 export async function exportSessionToFile(
   sessionId: string,

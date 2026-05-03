@@ -5,7 +5,7 @@ import {
   Pencil,
   Play,
   Plus,
-  Sparkles,
+  SquareTerminal,
   Trash2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -78,7 +78,7 @@ export function SnippetsLibrary() {
           <header className="mb-6 flex flex-wrap items-end justify-between gap-4">
             <div className="min-w-0">
               <h1 className="flex items-center gap-2.5 text-3xl font-semibold tracking-tight text-foreground">
-                <Sparkles className="h-6 w-6 text-foreground/60" />
+                <SquareTerminal className="h-6 w-6 text-foreground/60" />
                 Snippets
               </h1>
               <p className="mt-2 max-w-xl text-sm text-foreground/55">
@@ -99,7 +99,7 @@ export function SnippetsLibrary() {
 
           {snippets.length === 0 ? (
             <EmptyLibraryState
-              icon={<Sparkles className="h-7 w-7 text-foreground/45" />}
+              icon={<SquareTerminal className="h-7 w-7 text-foreground/45" />}
               title="No snippets yet"
               description="Save a prompt you send often — code review checklists, summary templates, persona setups — and run it with one click later."
               cta={

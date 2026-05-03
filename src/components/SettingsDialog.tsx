@@ -1,10 +1,11 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
   Archive,
   ArchiveRestore,
   BookOpen,
   Check,
+  ChevronDown,
   Clock,
   Database,
   Download,
@@ -14,7 +15,6 @@ import {
   Layers,
   Loader2,
   Lock,
-  MessageSquareText,
   MoreHorizontal,
   Palette,
   Plug,
@@ -22,6 +22,8 @@ import {
   Server,
   Trash2,
   Upload,
+  User,
+  Wrench,
 } from "lucide-react";
 import {
   Dialog,
@@ -42,6 +44,7 @@ import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import { useChatStore } from "@/stores/chatStore";
+import { useModelsStore } from "@/stores/modelsStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useUIStore } from "@/stores/uiStore";
@@ -56,9 +59,10 @@ import {
   importDataJson,
   isTauri,
   wipeUserData,
+  writeTextFile,
 } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
-import type { ImportStats, Session } from "@/types";
+import type { ImportStats, ModelInfo, ProviderId, Session } from "@/types";
 import pkg from "../../package.json";
 
 const GITHUB_URL = "https://github.com/ztcs-software/loach";
@@ -75,10 +79,11 @@ async function openExternal(url: string) {
 }
 
 const NAV = [
+  { value: "general", label: "General", icon: User },
   { value: "providers", label: "Providers", icon: Server },
-  { value: "prompt", label: "System prompt", icon: MessageSquareText },
-  { value: "mcp", label: "MCP", icon: Plug },
+  { value: "tools", label: "Tools", icon: Wrench },
   { value: "appearance", label: "Appearance", icon: Palette },
+  { value: "mcp", label: "MCP", icon: Plug },
   { value: "archive", label: "Archive", icon: Archive },
   { value: "data", label: "Data", icon: Database },
   { value: "security", label: "Security", icon: Lock },
@@ -242,46 +247,45 @@ export function SettingsDialog() {
                   </p>
                 </div>
 
+              </TabsContent>
+
+              <TabsContent value="general" className="mt-0 space-y-6 focus-visible:ring-0 focus-visible:ring-offset-0">
+                <SectionTitle>General</SectionTitle>
+
+                <div>
+                  <Label>Your name</Label>
+                  <Input
+                    className="mt-1.5"
+                    value={settings.user_name}
+                    onChange={(e) => settings.update("user_name", e.target.value)}
+                    placeholder="Your name"
+                  />
+                  <p className="mt-1.5 text-[11px] text-foreground/50">
+                    Optional. Available as{" "}
+                    <span className="font-mono">{"{{USER_NAME}}"}</span> in
+                    custom instructions, so you can write things like
+                    "Address me as {"{{USER_NAME}}"}".
+                  </p>
+                </div>
+
                 <Separator />
 
                 <div>
-                  <div className="flex items-start justify-between gap-4">
-                    <div className="min-w-0">
-                      <Label className="flex items-center gap-1.5">
-                        <Globe className="h-3.5 w-3.5 text-foreground/60" />
-                        Web fetch
-                      </Label>
-                      <p className="mt-1 text-[11px] text-foreground/50">
-                        When your message contains an{" "}
-                        <span className="font-mono">http(s)://</span> URL,
-                        Loach downloads the page, extracts the readable text,
-                        and appends it to the prompt so the model can read it.
-                        Up to 3 URLs per message, 5&nbsp;MB each, 15&nbsp;s
-                        timeout. Private IPs are blocked.
-                      </p>
-                    </div>
-                    <Switch
-                      checked={settings.web_fetch_enabled}
-                      onCheckedChange={(next) =>
-                        settings.update("web_fetch_enabled", next)
-                      }
-                      className="shrink-0"
-                      aria-label={
-                        settings.web_fetch_enabled
-                          ? "Disable web fetch"
-                          : "Enable web fetch"
-                      }
-                    />
-                  </div>
+                  <Label>Default model</Label>
+                  <p className="mt-1 text-[11px] text-foreground/50">
+                    Which model new chats start in. "Use most recent" is
+                    usually the right pick — it just picks up wherever you
+                    left off.
+                  </p>
+                  <DefaultModelPicker className="mt-2.5" />
                 </div>
-              </TabsContent>
 
-              <TabsContent value="prompt" className="mt-0 space-y-6 focus-visible:ring-0 focus-visible:ring-offset-0">
-                <SectionTitle>System prompt</SectionTitle>
+                <Separator />
+
                 <div>
-                  <Label>Global system prompt</Label>
+                  <Label>Custom instructions</Label>
                   <Textarea
-                    rows={12}
+                    rows={10}
                     className="mt-1.5 resize-none"
                     value={settings.global_system_prompt}
                     onChange={(e) =>
@@ -290,7 +294,9 @@ export function SettingsDialog() {
                     placeholder="You are a helpful assistant…"
                   />
                   <p className="mt-1.5 text-[11px] text-foreground/50">
-                    Applied to every new chat. Individual chats can override this from the parameter panel.
+                    Applied to every new chat. Individual chats can override
+                    this from the parameter panel. Supports the template
+                    variables below.
                   </p>
                 </div>
 
@@ -328,17 +334,58 @@ export function SettingsDialog() {
                       Template variables
                     </p>
                     <p>
-                      Use these inside any system prompt to place the values
-                      exactly where you want them. When used, the automatic
-                      preamble is skipped.
+                      Use these inside Custom instructions (or any per-chat
+                      system prompt) to place the values exactly where you
+                      want them. When a temporal variable is used, the
+                      automatic preamble is skipped.
                     </p>
                     <ul className="mt-1.5 space-y-0.5 font-mono text-[11px]">
+                      <li>{"{{USER_NAME}}"} → {settings.user_name || "(unset)"}</li>
                       <li>{"{{CURRENT_DATE}}"} → 2026-04-17</li>
                       <li>{"{{CURRENT_TIME}}"} → 14:32</li>
                       <li>{"{{CURRENT_WEEKDAY}}"} → Friday</li>
                       <li>{"{{CURRENT_DATETIME}}"} → 2026-04-17 14:32</li>
                       <li>{"{{CURRENT_TIMEZONE}}"} → Europe/Warsaw</li>
                     </ul>
+                  </div>
+                </div>
+              </TabsContent>
+
+              <TabsContent value="tools" className="mt-0 space-y-6 focus-visible:ring-0 focus-visible:ring-offset-0">
+                <SectionTitle>Tools</SectionTitle>
+                <p className="text-[13px] text-foreground/55">
+                  Capabilities Loach can offer the model alongside its own
+                  knowledge. Each is opt-in.
+                </p>
+
+                <div>
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="min-w-0">
+                      <Label className="flex items-center gap-1.5">
+                        <Globe className="h-3.5 w-3.5 text-foreground/60" />
+                        Web fetch
+                      </Label>
+                      <p className="mt-1 text-[11px] text-foreground/50">
+                        When your message contains an{" "}
+                        <span className="font-mono">http(s)://</span> URL,
+                        Loach downloads the page, extracts the readable text,
+                        and appends it to the prompt so the model can read it.
+                        Up to 3 URLs per message, 5&nbsp;MB each, 15&nbsp;s
+                        timeout. Private IPs are blocked.
+                      </p>
+                    </div>
+                    <Switch
+                      checked={settings.web_fetch_enabled}
+                      onCheckedChange={(next) =>
+                        settings.update("web_fetch_enabled", next)
+                      }
+                      className="shrink-0"
+                      aria-label={
+                        settings.web_fetch_enabled
+                          ? "Disable web fetch"
+                          : "Enable web fetch"
+                      }
+                    />
                   </div>
                 </div>
               </TabsContent>
@@ -487,6 +534,177 @@ export function SettingsDialog() {
 function SectionTitle({ children }: { children: React.ReactNode }) {
   return (
     <h3 className="text-lg font-semibold tracking-tight">{children}</h3>
+  );
+}
+
+/* ─────────────────────── Default-model picker ───────────────────────
+ *
+ * Encodes the user's "what model should new chats start in" preference
+ * as a single string so it round-trips through the string-keyed KV
+ * settings table without serialisation gymnastics:
+ *
+ *   "recent"                  → use whatever the user touched last
+ *   "provider:<id>"           → pin to that provider (most recent model)
+ *   "model:<provider>:<id>"   → always start in this exact model
+ *
+ * The encoding lives in `chatStore.resolveDefaultModelChoice` too — keep
+ * the two in sync.
+ *
+ * The picker reads the live model list from `useModelsStore`; if it's
+ * empty (e.g. Ollama unreachable, no OpenAI key) the model section just
+ * collapses and the user is left with "recent" + per-provider choices,
+ * which still works.
+ * ─────────────────────────────────────────────────────────────────── */
+
+function decodeModelChoice(
+  choice: string,
+):
+  | { kind: "recent" }
+  | { kind: "provider"; provider: ProviderId }
+  | { kind: "model"; provider: ProviderId; model: string } {
+  if (choice.startsWith("model:")) {
+    const rest = choice.slice("model:".length);
+    const sep = rest.indexOf(":");
+    if (sep > 0) {
+      const p = rest.slice(0, sep);
+      const m = rest.slice(sep + 1);
+      if ((p === "ollama" || p === "openai") && m) {
+        return { kind: "model", provider: p, model: m };
+      }
+    }
+  }
+  if (choice.startsWith("provider:")) {
+    const p = choice.slice("provider:".length);
+    if (p === "ollama" || p === "openai") {
+      return { kind: "provider", provider: p };
+    }
+  }
+  return { kind: "recent" };
+}
+
+function describeChoice(
+  choice: string,
+  models: ModelInfo[],
+): string {
+  const decoded = decodeModelChoice(choice);
+  if (decoded.kind === "recent") return "Use most recent";
+  if (decoded.kind === "provider") {
+    return decoded.provider === "ollama"
+      ? "Use last Ollama model"
+      : "Use last OpenAI model";
+  }
+  // Show the model's friendly label if we have it; fall back to the raw id
+  // so a model that's currently unreachable still reads as something
+  // recognisable.
+  const hit = models.find(
+    (m) => m.provider === decoded.provider && m.id === decoded.model,
+  );
+  return hit?.label || decoded.model;
+}
+
+function DefaultModelPicker({ className }: { className?: string }) {
+  const choice = useSettingsStore((s) => s.default_model_choice);
+  const update = useSettingsStore((s) => s.update);
+  const models = useModelsStore((s) => s.models);
+
+  // Group by provider so the menu reads "Ollama / OpenAI" rather than a
+  // flat alphabetical wall. Memoised because `models` is a new array on
+  // every refresh.
+  const grouped = useMemo(() => {
+    const ollama = models.filter((m) => m.provider === "ollama");
+    const openai = models.filter((m) => m.provider === "openai");
+    return { ollama, openai };
+  }, [models]);
+
+  const label = describeChoice(choice, models);
+
+  const set = (next: string) => void update("default_model_choice", next);
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          className={cn(
+            "flex w-full items-center justify-between gap-2 rounded-xl border border-foreground/10 bg-foreground/[0.03] px-3 py-2 text-left text-[13px] transition-colors",
+            "hover:bg-foreground/[0.06] focus:outline-none focus:ring-2 focus:ring-primary/40",
+            className,
+          )}
+        >
+          <span className="truncate text-foreground/85">{label}</span>
+          <ChevronDown className="h-4 w-4 shrink-0 text-foreground/55" />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent
+        align="start"
+        className="max-h-[60vh] w-[--radix-dropdown-menu-trigger-width] overflow-y-auto"
+      >
+        <DropdownMenuItem onSelect={() => set("recent")}>
+          <ChoiceCheck active={choice === "recent"} />
+          Use most recent
+        </DropdownMenuItem>
+
+        <div className="px-2 pb-1 pt-2 text-[10px] font-medium uppercase tracking-wider text-foreground/45">
+          Pin to provider
+        </div>
+        <DropdownMenuItem onSelect={() => set("provider:ollama")}>
+          <ChoiceCheck active={choice === "provider:ollama"} />
+          Use last Ollama model
+        </DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => set("provider:openai")}>
+          <ChoiceCheck active={choice === "provider:openai"} />
+          Use last OpenAI model
+        </DropdownMenuItem>
+
+        {grouped.ollama.length > 0 && (
+          <>
+            <div className="px-2 pb-1 pt-2 text-[10px] font-medium uppercase tracking-wider text-foreground/45">
+              Ollama models
+            </div>
+            {grouped.ollama.map((m) => {
+              const v = `model:ollama:${m.id}`;
+              return (
+                <DropdownMenuItem key={v} onSelect={() => set(v)}>
+                  <ChoiceCheck active={choice === v} />
+                  <span className="truncate">{m.label}</span>
+                </DropdownMenuItem>
+              );
+            })}
+          </>
+        )}
+
+        {grouped.openai.length > 0 && (
+          <>
+            <div className="px-2 pb-1 pt-2 text-[10px] font-medium uppercase tracking-wider text-foreground/45">
+              OpenAI models
+            </div>
+            {grouped.openai.map((m) => {
+              const v = `model:openai:${m.id}`;
+              return (
+                <DropdownMenuItem key={v} onSelect={() => set(v)}>
+                  <ChoiceCheck active={choice === v} />
+                  <span className="truncate">{m.label}</span>
+                </DropdownMenuItem>
+              );
+            })}
+          </>
+        )}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+function ChoiceCheck({ active }: { active: boolean }) {
+  return (
+    <span
+      aria-hidden
+      className={cn(
+        "flex h-3.5 w-3.5 shrink-0 items-center justify-center",
+        active ? "text-primary" : "text-transparent",
+      )}
+    >
+      <Check className="h-3.5 w-3.5" strokeWidth={3} />
+    </span>
   );
 }
 
@@ -880,10 +1098,7 @@ function DataPanel({ onCloseDialog: _onCloseDialog }: { onCloseDialog: () => voi
     }
     setBusy("export");
     try {
-      const [{ save }, { writeTextFile }] = await Promise.all([
-        import("@tauri-apps/plugin-dialog"),
-        import("@tauri-apps/plugin-fs"),
-      ]);
+      const { save } = await import("@tauri-apps/plugin-dialog");
       const stamp = new Date().toISOString().slice(0, 10);
       const path = await save({
         defaultPath: `loach-export-${stamp}.json`,

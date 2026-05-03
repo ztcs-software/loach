@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useState } from "react";
 import {
   Archive,
-  Boxes,
+  Cpu,
   FileJson,
   FileText,
   Layers,
@@ -10,10 +10,9 @@ import {
   Pencil,
   Pin,
   PinOff,
-  Search,
   Settings,
   SquarePen,
-  Sparkles,
+  SquareTerminal,
   Trash2,
 } from "lucide-react";
 import {
@@ -27,7 +26,6 @@ import {
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useChatStore } from "@/stores/chatStore";
-import { useSnippetStore } from "@/stores/snippetStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useUIStore } from "@/stores/uiStore";
 import type { SidebarTab } from "@/stores/uiStore";
@@ -44,10 +42,9 @@ import type { Session } from "@/types";
  *   Expanded (w-64)              Collapsed rail (w-14)
  *   ┌────────────────────────┐   ┌────┐
  *   │  ✎  New chat           │   │ ✎  │
- *   │  ⌕  Search             │   │ ⌕  │
  *   │  ▢  Spaces             │   │ ▢  │
- *   │  ✦  Snippets           │   │ ✦  │
- *   │  ▣  Models             │   │ ▣  │
+ *   │  ▤  Snippets           │   │ ▤  │
+ *   │  ⌘  Models             │   │ ⌘  │
  *   │                        │   │    │
  *   │  PINNED                │   │    │
  *   │   …chats…              │   │    │
@@ -104,10 +101,6 @@ function CollapsedRail() {
     void newSession({ spaceId: null });
   };
 
-  const handleSearch = () => {
-    window.dispatchEvent(new CustomEvent("loach:focus-search"));
-  };
-
   return (
     <aside className="glass-subtle relative flex h-full w-14 shrink-0 flex-col items-center border-r">
       <nav className="flex flex-col items-center gap-1 px-1 pt-3">
@@ -117,24 +110,19 @@ function CollapsedRail() {
           onClick={handleNewChat}
         />
         <RailIcon
-          icon={<Search className="h-4 w-4" />}
-          label="Search"
-          onClick={handleSearch}
-        />
-        <RailIcon
           icon={<Layers className="h-4 w-4" />}
           label="Spaces"
           onClick={() => goToTab("spaces")}
           active={sidebarTab === "spaces"}
         />
         <RailIcon
-          icon={<Sparkles className="h-4 w-4" />}
+          icon={<SquareTerminal className="h-4 w-4" />}
           label="Snippets"
           onClick={() => goToTab("snippets")}
           active={sidebarTab === "snippets"}
         />
         <RailIcon
-          icon={<Boxes className="h-4 w-4" />}
+          icon={<Cpu className="h-4 w-4" />}
           label="Models"
           onClick={() => goToTab("models")}
           active={sidebarTab === "models"}
@@ -148,7 +136,7 @@ function CollapsedRail() {
         <RailIcon
           icon={<Settings className="h-4 w-4" />}
           label="Settings"
-          onClick={() => openSettingsTab("providers")}
+          onClick={() => openSettingsTab("general")}
         />
       </div>
     </aside>
@@ -186,8 +174,8 @@ function RailIcon({
 
 // ---------------------------------------------------------------------------
 // Quicklinks — primary navigation. New chat is first, the three "library"
-// surfaces follow, and Search lives between New chat and the libraries
-// because it's the second-most-common verb.
+// surfaces follow. Search lives in the title bar (centered pill); it is not
+// duplicated here.
 // ---------------------------------------------------------------------------
 
 function Quicklinks() {
@@ -196,8 +184,6 @@ function Quicklinks() {
   const newSession = useChatStore((s) => s.newSession);
   const activeSessionId = useChatStore((s) => s.activeSessionId);
   const setViewingSpace = useSpaceStore((s) => s.setViewingSpace);
-  const setSpaceFormOpen = useSpaceStore((s) => s.setSpaceFormOpen);
-  const openSnippetDialog = useSnippetStore((s) => s.openDialog);
 
   const goToTab = (tab: SidebarTab) => {
     // Clearing override views ensures the new tab's canvas actually renders;
@@ -212,16 +198,6 @@ function Quicklinks() {
     void newSession({ spaceId: null });
   };
 
-  const handleNewSpace = () => setSpaceFormOpen(true);
-  const handleNewSnippet = () => openSnippetDialog("new");
-
-  const handleSearch = () => {
-    // Focus the global SearchBar that lives in the TitleBar — same UX as
-    // hitting Ctrl/Cmd+K. We dispatch a custom event the SearchBar listens
-    // for, so we don't have to hold a ref across the component tree.
-    window.dispatchEvent(new CustomEvent("loach:focus-search"));
-  };
-
   // A quicklink is "active" when its tab matches the current sidebarTab,
   // EXCEPT for "chats" which we only mark active when the user is actually
   // looking at a chat (an active session id) — otherwise the active row in
@@ -234,16 +210,10 @@ function Quicklinks() {
 
   return (
     <nav className="space-y-0.5 px-2 pb-3 pt-3">
-      <NewChatButton
-        onNewChat={handleNewChat}
-        onNewSpace={handleNewSpace}
-        onNewSnippet={handleNewSnippet}
-      />
       <Quicklink
-        icon={<Search className="h-4 w-4" />}
-        label="Search"
-        onClick={handleSearch}
-        kbd="⌘K"
+        icon={<SquarePen className="h-4 w-4" />}
+        label="New chat"
+        onClick={handleNewChat}
       />
       <Quicklink
         icon={<Layers className="h-4 w-4" />}
@@ -252,13 +222,13 @@ function Quicklinks() {
         active={tabActive("spaces")}
       />
       <Quicklink
-        icon={<Sparkles className="h-4 w-4" />}
+        icon={<SquareTerminal className="h-4 w-4" />}
         label="Snippets"
         onClick={() => goToTab("snippets")}
         active={tabActive("snippets")}
       />
       <Quicklink
-        icon={<Boxes className="h-4 w-4" />}
+        icon={<Cpu className="h-4 w-4" />}
         label="Models"
         onClick={() => goToTab("models")}
         active={tabActive("models")}
@@ -302,154 +272,6 @@ function Quicklink({
           {kbd}
         </span>
       )}
-    </button>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// NewChatButton — a plain Quicklink that also reveals a hover dropdown with
-// "New space" / "New snippet". Visually identical to the surrounding
-// Quicklinks (Search, Spaces, Snippets, Models) — no border, no special
-// fill, no accent — so the sidebar's primary navigation reads as a single
-// uniform list. The flyout is the only added affordance.
-//
-//   • Click anywhere on the button → start a New chat. Predictable, single
-//     dominant verb; the dropdown never intercepts the click.
-//   • Hover (after a small entry delay so the dropdown doesn't flicker on
-//     accidental cursor passes) → a glass card slides into view directly
-//     below the button with the two extra creation actions.
-//   • Mouse leaves both the button AND the flyout for >180 ms → flyout
-//     closes. The forgiveness window lets the user diagonal-cross the gap
-//     without losing the menu.
-//
-// We roll our own hover handling rather than pulling in @radix-ui/react-
-// hover-card — this is a single-button + 2-item flyout, the surface doesn't
-// justify a new dep.
-// ---------------------------------------------------------------------------
-
-const HOVER_OPEN_MS = 80;
-const HOVER_CLOSE_MS = 180;
-
-function NewChatButton({
-  onNewChat,
-  onNewSpace,
-  onNewSnippet,
-}: {
-  onNewChat: () => void;
-  onNewSpace: () => void;
-  onNewSnippet: () => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const openTimer = useRef<number | null>(null);
-  const closeTimer = useRef<number | null>(null);
-
-  const clearTimers = () => {
-    if (openTimer.current) {
-      window.clearTimeout(openTimer.current);
-      openTimer.current = null;
-    }
-    if (closeTimer.current) {
-      window.clearTimeout(closeTimer.current);
-      closeTimer.current = null;
-    }
-  };
-
-  const scheduleOpen = () => {
-    if (closeTimer.current) {
-      window.clearTimeout(closeTimer.current);
-      closeTimer.current = null;
-    }
-    if (open || openTimer.current) return;
-    openTimer.current = window.setTimeout(() => {
-      setOpen(true);
-      openTimer.current = null;
-    }, HOVER_OPEN_MS);
-  };
-
-  const scheduleClose = () => {
-    if (openTimer.current) {
-      window.clearTimeout(openTimer.current);
-      openTimer.current = null;
-    }
-    if (closeTimer.current) return;
-    closeTimer.current = window.setTimeout(() => {
-      setOpen(false);
-      closeTimer.current = null;
-    }, HOVER_CLOSE_MS);
-  };
-
-  useEffect(() => clearTimers, []);
-
-  const handleClick = () => {
-    // The dropdown is a hover-only affordance; click always commits the
-    // primary action. Close any flyout that happened to be open.
-    clearTimers();
-    setOpen(false);
-    onNewChat();
-  };
-
-  const pickAndClose = (action: () => void) => {
-    clearTimers();
-    setOpen(false);
-    action();
-  };
-
-  return (
-    <div
-      className="relative"
-      onMouseEnter={scheduleOpen}
-      onMouseLeave={scheduleClose}
-    >
-      <Quicklink
-        icon={<SquarePen className="h-4 w-4" />}
-        label="New chat"
-        onClick={handleClick}
-      />
-
-      {open && (
-        // top-full with no margin → no actual gap between button and
-        // flyout, so the wrapper's mouseleave doesn't fire on diagonal
-        // cursor crossings between the two halves. The flyout is its own
-        // floating glass card — high enough opacity (`bg-popover/85`) plus
-        // a 24-px backdrop blur to fully occlude the Quicklinks below it.
-        <div className="absolute left-0 right-0 top-full z-30 pt-1">
-          <div className="overflow-hidden rounded-lg border border-foreground/[0.14] bg-popover/85 p-1 shadow-lg backdrop-blur-xl">
-            <FlyoutItem
-              icon={<Layers className="h-4 w-4" />}
-              label="New space"
-              onClick={() => pickAndClose(onNewSpace)}
-            />
-            <FlyoutItem
-              icon={<Sparkles className="h-4 w-4" />}
-              label="New snippet"
-              onClick={() => pickAndClose(onNewSnippet)}
-            />
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function FlyoutItem({
-  icon,
-  label,
-  onClick,
-}: {
-  icon: React.ReactNode;
-  label: string;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className="flex w-full items-center gap-3 rounded-md px-3 py-1.5 text-[13px] font-medium text-foreground/85 transition-colors hover:bg-foreground/[0.08] hover:text-foreground"
-    >
-      <span className="flex h-4 w-4 shrink-0 items-center justify-center text-foreground/55">
-        {icon}
-      </span>
-      <span className="min-w-0 flex-1 truncate text-left">{label}</span>
     </button>
   );
 }
@@ -735,7 +557,7 @@ function SidebarFooter() {
     <div className="border-t border-foreground/[0.06] p-2">
       <button
         type="button"
-        onClick={() => openSettingsTab("providers")}
+        onClick={() => openSettingsTab("general")}
         className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-[13px] font-medium text-foreground/75 transition-colors hover:bg-foreground/[0.07] hover:text-foreground"
       >
         <Settings className="h-4 w-4 text-foreground/55" />

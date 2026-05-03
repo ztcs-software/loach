@@ -122,11 +122,13 @@ export function SpaceView() {
   const handleStartChat = async () => {
     const session = await newSession();
     setViewingSpace(null);
+    setSidebarTab("chats");
     void selectSession(session.id);
   };
 
   const handleOpenChat = (sessionId: string) => {
     setViewingSpace(null);
+    setSidebarTab("chats");
     void selectSession(sessionId);
   };
 

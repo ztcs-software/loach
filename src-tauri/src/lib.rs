@@ -167,6 +167,7 @@ pub fn run() {
             commands::mcp_test,
             commands::export_data_json,
             commands::import_data_json,
+            commands::write_text_file,
             commands::archive_all_sessions,
             commands::wipe_user_data,
             commands::factory_reset,

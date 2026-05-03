@@ -602,6 +602,16 @@ export function exportDataJson(): Promise<string> {
   return invoke<string>("export_data_json");
 }
 
+/** Write `contents` to `path` as UTF-8, going through a Rust command rather
+ *  than `@tauri-apps/plugin-fs`. The fs plugin's scope only covers a few
+ *  known directories, so writing a user-picked path on the Desktop (etc.)
+ *  silently fails — we hand the path the dialog returned to Rust and let
+ *  it do the write directly. */
+export function writeTextFile(path: string, contents: string): Promise<void> {
+  if (!isTauri) return Promise.reject(new Error("file write requires the Tauri runtime"));
+  return invoke<void>("write_text_file", { path, contents });
+}
+
 /** Replace every table with the contents of the JSON file at `path`.
  *  Resolves to a per-table row-count breakdown on success; rejects with
  *  a human-readable message if the file isn't a Loach export. */

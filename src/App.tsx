@@ -17,6 +17,7 @@ import { ModelsLibrary } from "@/components/ModelsLibrary";
 import { LockScreen } from "@/components/LockScreen";
 import { CodeCanvas } from "@/components/CodeCanvas";
 import { SearchBar } from "@/components/SearchBar";
+import { SelectionCopyButton } from "@/components/SelectionCopyButton";
 import { useChatStore } from "@/stores/chatStore";
 import { useModelsStore } from "@/stores/modelsStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -162,6 +163,7 @@ export default function App() {
           component renders nothing until the user opens it via Ctrl/Cmd+K
           or the `loach:focus-search` event the sidebar fires. */}
       {!showLock && <SearchBar />}
+      {!showLock && <SelectionCopyButton />}
     </TooltipProvider>
   );
 }

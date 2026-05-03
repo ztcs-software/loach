@@ -5,7 +5,7 @@ import {
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
-import { Search, MessageSquare, Layers, Sparkles, X } from "lucide-react";
+import { Search, MessageSquare, Layers, SquareTerminal, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useChatStore } from "@/stores/chatStore";
 import { useSpaceStore } from "@/stores/spaceStore";
@@ -369,5 +369,5 @@ function ResultIcon({ kind }: { kind: ResultKind }) {
   const cls = "h-4 w-4 shrink-0 text-foreground/55";
   if (kind === "chat") return <MessageSquare className={cls} />;
   if (kind === "space") return <Layers className={cls} />;
-  return <Sparkles className={cls} />;
+  return <SquareTerminal className={cls} />;
 }
