@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Archive,
-  Boxes,
+  Cpu,
   FileJson,
   FileText,
   Layers,
@@ -13,7 +13,7 @@ import {
   Search,
   Settings,
   SquarePen,
-  Sparkles,
+  SquareTerminal,
   Trash2,
 } from "lucide-react";
 import {
@@ -46,8 +46,8 @@ import type { Session } from "@/types";
  *   │  ✎  New chat           │   │ ✎  │
  *   │  ⌕  Search             │   │ ⌕  │
  *   │  ▢  Spaces             │   │ ▢  │
- *   │  ✦  Snippets           │   │ ✦  │
- *   │  ▣  Models             │   │ ▣  │
+ *   │  ▤  Snippets           │   │ ▤  │
+ *   │  ⌘  Models             │   │ ⌘  │
  *   │                        │   │    │
  *   │  PINNED                │   │    │
  *   │   …chats…              │   │    │
@@ -128,13 +128,13 @@ function CollapsedRail() {
           active={sidebarTab === "spaces"}
         />
         <RailIcon
-          icon={<Sparkles className="h-4 w-4" />}
+          icon={<SquareTerminal className="h-4 w-4" />}
           label="Snippets"
           onClick={() => goToTab("snippets")}
           active={sidebarTab === "snippets"}
         />
         <RailIcon
-          icon={<Boxes className="h-4 w-4" />}
+          icon={<Cpu className="h-4 w-4" />}
           label="Models"
           onClick={() => goToTab("models")}
           active={sidebarTab === "models"}
@@ -252,13 +252,13 @@ function Quicklinks() {
         active={tabActive("spaces")}
       />
       <Quicklink
-        icon={<Sparkles className="h-4 w-4" />}
+        icon={<SquareTerminal className="h-4 w-4" />}
         label="Snippets"
         onClick={() => goToTab("snippets")}
         active={tabActive("snippets")}
       />
       <Quicklink
-        icon={<Boxes className="h-4 w-4" />}
+        icon={<Cpu className="h-4 w-4" />}
         label="Models"
         onClick={() => goToTab("models")}
         active={tabActive("models")}
@@ -420,7 +420,7 @@ function NewChatButton({
               onClick={() => pickAndClose(onNewSpace)}
             />
             <FlyoutItem
-              icon={<Sparkles className="h-4 w-4" />}
+              icon={<SquareTerminal className="h-4 w-4" />}
               label="New snippet"
               onClick={() => pickAndClose(onNewSnippet)}
             />

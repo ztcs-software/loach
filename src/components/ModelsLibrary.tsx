@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
 import {
-  Boxes,
   CircleAlert,
   Copy,
   Cpu,
@@ -106,7 +105,7 @@ export function ModelsLibrary() {
           <header className="mb-6 flex flex-wrap items-end justify-between gap-4">
             <div className="min-w-0">
               <h1 className="flex items-center gap-2.5 text-3xl font-semibold tracking-tight text-foreground">
-                <Boxes className="h-6 w-6 text-foreground/60" />
+                <Cpu className="h-6 w-6 text-foreground/60" />
                 Models
               </h1>
               <p className="mt-2 max-w-xl text-sm text-foreground/55">
@@ -211,7 +210,7 @@ export function ModelsLibrary() {
           {ollamaModels.length === 0 && !loading ? (
             <div className="mx-auto mt-4 flex max-w-md flex-col items-center justify-center rounded-2xl border border-dashed border-foreground/10 bg-foreground/[0.015] px-8 py-10 text-center">
               <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-2xl bg-foreground/[0.05]">
-                <Boxes className="h-6 w-6 text-foreground/45" />
+                <Cpu className="h-6 w-6 text-foreground/45" />
               </div>
               <h2 className="text-sm font-semibold text-foreground/85">
                 No Ollama models installed
