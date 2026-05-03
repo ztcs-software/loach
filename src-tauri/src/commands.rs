@@ -781,6 +781,16 @@ pub async fn fetch_url(
     fetch_url_tool::fetch(&state.http, &url).await
 }
 
+/// Write `contents` to `path` as UTF-8. The path comes from the dialog
+/// plugin's save sheet, so the user has explicitly authorised it — we do
+/// the IO in Rust to sidestep the `fs` plugin's scope, which only covers
+/// a handful of known directories and silently rejects things like the
+/// Desktop. Mirrors the read-side trick in [`import_data_json`].
+#[tauri::command]
+pub async fn write_text_file(path: String, contents: String) -> Result<(), String> {
+    std::fs::write(&path, contents).map_err(|e| format!("couldn't write {path}: {e}"))
+}
+
 // ---------- data (export / import / wipe) ----------
 //
 // Powers the Settings → Data tab. Keeping all four actions here (rather

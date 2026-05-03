@@ -56,6 +56,7 @@ import {
   importDataJson,
   isTauri,
   wipeUserData,
+  writeTextFile,
 } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
 import type { ImportStats, Session } from "@/types";
@@ -880,10 +881,7 @@ function DataPanel({ onCloseDialog: _onCloseDialog }: { onCloseDialog: () => voi
     }
     setBusy("export");
     try {
-      const [{ save }, { writeTextFile }] = await Promise.all([
-        import("@tauri-apps/plugin-dialog"),
-        import("@tauri-apps/plugin-fs"),
-      ]);
+      const { save } = await import("@tauri-apps/plugin-dialog");
       const stamp = new Date().toISOString().slice(0, 10);
       const path = await save({
         defaultPath: `loach-export-${stamp}.json`,
