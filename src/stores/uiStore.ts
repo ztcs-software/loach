@@ -8,10 +8,11 @@ export type SidebarTab = "chats" | "spaces" | "snippets" | "models";
 /** Deep-link target when opening the Settings dialog. "archive" is the new
  *  home for the chat archive (previously a dedicated full-page view). */
 export type SettingsTab =
+  | "general"
   | "providers"
-  | "prompt"
-  | "mcp"
+  | "tools"
   | "appearance"
+  | "mcp"
   | "archive"
   | "data"
   | "security"
@@ -21,9 +22,8 @@ interface UIState {
   sidebarOpen: boolean;
   paramsOpen: boolean;
   settingsOpen: boolean;
-  /** Which Settings tab to show when the dialog opens. Reset to `providers`
-   *  after the dialog closes so the next cold-open lands back on the
-   *  default. */
+  /** Which Settings tab to show when the dialog opens. Defaults to `general`
+   *  so the cold-open lands on the user-personalisation surface. */
   settingsTab: SettingsTab;
   /** Which icon-rail tab is active on the sidebar. */
   sidebarTab: SidebarTab;
@@ -52,7 +52,7 @@ export const useUIStore = create<UIState>((set) => ({
   sidebarOpen: true,
   paramsOpen: false,
   settingsOpen: false,
-  settingsTab: "providers",
+  settingsTab: "general",
   sidebarTab: "chats",
   composerDraft: "",
   composerAttachments: [],

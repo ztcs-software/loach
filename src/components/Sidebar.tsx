@@ -137,7 +137,7 @@ function CollapsedRail() {
         <RailIcon
           icon={<Settings className="h-4 w-4" />}
           label="Settings"
-          onClick={() => openSettingsTab("providers")}
+          onClick={() => openSettingsTab("general")}
         />
       </div>
     </aside>
@@ -711,7 +711,7 @@ function SidebarFooter() {
     <div className="border-t border-foreground/[0.06] p-2">
       <button
         type="button"
-        onClick={() => openSettingsTab("providers")}
+        onClick={() => openSettingsTab("general")}
         className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-[13px] font-medium text-foreground/75 transition-colors hover:bg-foreground/[0.07] hover:text-foreground"
       >
         <Settings className="h-4 w-4 text-foreground/55" />

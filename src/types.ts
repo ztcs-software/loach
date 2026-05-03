@@ -158,9 +158,25 @@ export interface Settings {
   background_style: BackgroundStyle;
   ollama_base_url: string;
   openai_base_url: string;
+  /** Free-text instructions injected as the system prompt of every new chat.
+   *  Keyed `global_system_prompt` for backwards compat with the on-disk KV
+   *  table; the UI now surfaces it as "Custom instructions". */
   global_system_prompt: string;
+  /** Last-used provider+model. Always tracked so "Use most recent" can resolve
+   *  to a concrete pair. Not surfaced directly in the UI. */
   default_provider: ProviderId;
   default_model: string;
+  /** How `New chat` picks its initial model. Encoded as one of:
+   *   - `"recent"`              — use the last (provider, model) pair (default)
+   *   - `"provider:ollama"`     — same, but pinned to a single provider
+   *   - `"provider:openai"`
+   *   - `"model:<provider>:<model_id>"` — always start in this exact model
+   *  Stored as a single string so it round-trips through the string-keyed KV
+   *  settings table without bespoke serialisation. */
+  default_model_choice: string;
+  /** Optional display name for the user. Substituted into system prompts via
+   *  the `{{USER_NAME}}` template variable. Empty string = no preference. */
+  user_name: string;
   /** When true, the current date / time / weekday / timezone are injected
    *  into the system prompt of every request. Compatible with Open WebUI
    *  temporal template variables (`{{CURRENT_DATE}}`, `{{CURRENT_TIME}}`,
@@ -181,6 +197,8 @@ export const DEFAULT_SETTINGS: Settings = {
   global_system_prompt: "",
   default_provider: "ollama",
   default_model: "",
+  default_model_choice: "recent",
+  user_name: "",
   temporal_awareness: true,
   web_fetch_enabled: false,
 };

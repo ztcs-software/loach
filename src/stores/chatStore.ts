@@ -433,6 +433,60 @@ async function startTask(task: QueueTask, get: Getter, set: Setter) {
   }
 }
 
+/**
+ * Resolve the user's "Default model" preference into a concrete
+ * (provider, model) pair for a brand-new chat.
+ *
+ *   "recent"                 — last (provider, model) the user touched
+ *   "provider:<id>"          — most recent session for that provider, or
+ *                              empty model if there isn't one yet (the
+ *                              chat header dropdown will catch this)
+ *   "model:<provider>:<id>"  — pin to this exact model
+ *
+ * Anything unrecognised falls back to the recent pair so we never block a
+ * "New chat" click on a malformed setting.
+ */
+function resolveDefaultModelChoice(
+  choice: string,
+  recentProvider: ProviderId,
+  recentModel: string,
+  sessions: Session[],
+): { provider: ProviderId; model: string } {
+  if (choice && choice.startsWith("model:")) {
+    const rest = choice.slice("model:".length);
+    const sep = rest.indexOf(":");
+    if (sep > 0) {
+      const p = rest.slice(0, sep);
+      const m = rest.slice(sep + 1);
+      if ((p === "ollama" || p === "openai") && m) {
+        return { provider: p, model: m };
+      }
+    }
+  }
+  if (choice && choice.startsWith("provider:")) {
+    const p = choice.slice("provider:".length);
+    if (p === "ollama" || p === "openai") {
+      // Pick the user's most recent model for that provider so a
+      // provider-only pin still lands in something familiar. Sort defensively
+      // — sessions in memory aren't guaranteed to be recency-ordered after
+      // a model swap.
+      const candidates = sessions
+        .filter((s) => s.provider === p && s.model)
+        .sort((a, b) => b.updated_at - a.updated_at);
+      if (candidates.length > 0) {
+        return { provider: p, model: candidates[0]!.model };
+      }
+      // No history yet — preserve the recent model only if it matches the
+      // pinned provider, otherwise leave the model blank for the header to fill.
+      return {
+        provider: p,
+        model: recentProvider === p ? recentModel : "",
+      };
+    }
+  }
+  return { provider: recentProvider, model: recentModel };
+}
+
 export const useChatStore = create<ChatState>((set, get) => ({
   sessions: [],
   activeSessionId: null,
@@ -538,8 +592,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
       opts?.spaceId !== undefined
         ? opts.spaceId
         : useSpaceStore.getState().activeSpaceId;
-    const p: ProviderId = opts?.provider ?? settings.default_provider;
-    const m = opts?.model ?? settings.default_model ?? "";
+    const resolved = resolveDefaultModelChoice(
+      settings.default_model_choice,
+      settings.default_provider,
+      settings.default_model ?? "",
+      get().sessions,
+    );
+    const p: ProviderId = opts?.provider ?? resolved.provider;
+    const m = opts?.model ?? resolved.model;
     const session = await createSession({
       provider: p,
       model: m,
@@ -818,6 +878,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
       } catch (e) {
         console.warn("Failed to load space context", e);
       }
+    }
+
+    // {{USER_NAME}} → the name from General settings (empty string if the
+    // user hasn't set one). Done before temporal substitution so the temporal
+    // pass doesn't have to know about it.
+    if (effectiveSystemPrompt) {
+      effectiveSystemPrompt = effectiveSystemPrompt.replace(
+        /\{\{\s*USER_NAME\s*\}\}/g,
+        settings.user_name ?? "",
+      );
     }
 
     // Temporal awareness — always substitute {{CURRENT_*}} placeholders, and
