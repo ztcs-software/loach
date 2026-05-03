@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Minus, Square, X, Copy, PanelLeft } from "lucide-react";
+import { Minus, Square, X, Copy, PanelLeft, Search } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { isTauri } from "@/lib/tauri";
 import { Logo } from "@/components/Logo";
@@ -94,10 +94,37 @@ export function TitleBar() {
         </span>
       </div>
 
-      {/* Center spacer — pure drag region now. Search used to live here as a
-          pill but moved to a Cmd-K palette overlay (mounted at App root); the
-          empty stretch keeps the title bar drag-and-double-click-to-maximize
-          working across the full window width. */}
+      {/* Center spacer — pure drag region. The flex-1 here keeps the title
+          bar drag-and-double-click-to-maximize working across the gaps on
+          either side of the centered search pill below. */}
+      <div className="min-w-0 flex-1" />
+
+      {/* Centered search pill — absolutely positioned so it sits in the
+          true horizontal middle of the window regardless of how wide the
+          left (brand) or right (window controls) groups are. The wrapper
+          is pointer-events-none so the underlying drag region still works
+          in the empty space around the pill; the button itself re-enables
+          pointer events. Click dispatches the same `loach:focus-search`
+          event the Cmd/Ctrl+K shortcut uses, so the palette overlay
+          (`SearchBar`) stays the single source of truth for search UI. */}
+      <div className="pointer-events-none absolute inset-y-0 left-1/2 flex -translate-x-1/2 items-center">
+        <button
+          type="button"
+          onClick={() => window.dispatchEvent(new CustomEvent("loach:focus-search"))}
+          aria-label="Search"
+          title="Search"
+          className="pointer-events-auto inline-flex h-7 w-72 items-center gap-2 rounded-md border border-foreground/[0.08] bg-foreground/[0.04] px-2.5 text-foreground/55 transition-colors hover:bg-foreground/[0.08] hover:text-foreground"
+        >
+          <Search className="h-3.5 w-3.5 shrink-0" />
+          <span className="min-w-0 flex-1 truncate text-left text-xs">
+            Search chats, spaces, snippets…
+          </span>
+          <kbd className="rounded border border-foreground/10 bg-foreground/[0.05] px-1 py-px font-mono text-[10px] tracking-wider text-foreground/40">
+            ⌘K
+          </kbd>
+        </button>
+      </div>
+
       <div className="min-w-0 flex-1" />
 
       {/* Right — window controls. */}

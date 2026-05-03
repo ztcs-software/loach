@@ -10,7 +10,6 @@ import {
   Pencil,
   Pin,
   PinOff,
-  Search,
   Settings,
   SquarePen,
   SquareTerminal,
@@ -44,7 +43,6 @@ import type { Session } from "@/types";
  *   Expanded (w-64)              Collapsed rail (w-14)
  *   ┌────────────────────────┐   ┌────┐
  *   │  ✎  New chat           │   │ ✎  │
- *   │  ⌕  Search             │   │ ⌕  │
  *   │  ▢  Spaces             │   │ ▢  │
  *   │  ▤  Snippets           │   │ ▤  │
  *   │  ⌘  Models             │   │ ⌘  │
@@ -104,10 +102,6 @@ function CollapsedRail() {
     void newSession({ spaceId: null });
   };
 
-  const handleSearch = () => {
-    window.dispatchEvent(new CustomEvent("loach:focus-search"));
-  };
-
   return (
     <aside className="glass-subtle relative flex h-full w-14 shrink-0 flex-col items-center border-r">
       <nav className="flex flex-col items-center gap-1 px-1 pt-3">
@@ -115,11 +109,6 @@ function CollapsedRail() {
           icon={<SquarePen className="h-4 w-4" />}
           label="New chat"
           onClick={handleNewChat}
-        />
-        <RailIcon
-          icon={<Search className="h-4 w-4" />}
-          label="Search"
-          onClick={handleSearch}
         />
         <RailIcon
           icon={<Layers className="h-4 w-4" />}
@@ -186,8 +175,8 @@ function RailIcon({
 
 // ---------------------------------------------------------------------------
 // Quicklinks — primary navigation. New chat is first, the three "library"
-// surfaces follow, and Search lives between New chat and the libraries
-// because it's the second-most-common verb.
+// surfaces follow. Search lives in the title bar (centered pill); it is not
+// duplicated here.
 // ---------------------------------------------------------------------------
 
 function Quicklinks() {
@@ -215,13 +204,6 @@ function Quicklinks() {
   const handleNewSpace = () => setSpaceFormOpen(true);
   const handleNewSnippet = () => openSnippetDialog("new");
 
-  const handleSearch = () => {
-    // Focus the global SearchBar that lives in the TitleBar — same UX as
-    // hitting Ctrl/Cmd+K. We dispatch a custom event the SearchBar listens
-    // for, so we don't have to hold a ref across the component tree.
-    window.dispatchEvent(new CustomEvent("loach:focus-search"));
-  };
-
   // A quicklink is "active" when its tab matches the current sidebarTab,
   // EXCEPT for "chats" which we only mark active when the user is actually
   // looking at a chat (an active session id) — otherwise the active row in
@@ -238,12 +220,6 @@ function Quicklinks() {
         onNewChat={handleNewChat}
         onNewSpace={handleNewSpace}
         onNewSnippet={handleNewSnippet}
-      />
-      <Quicklink
-        icon={<Search className="h-4 w-4" />}
-        label="Search"
-        onClick={handleSearch}
-        kbd="⌘K"
       />
       <Quicklink
         icon={<Layers className="h-4 w-4" />}
