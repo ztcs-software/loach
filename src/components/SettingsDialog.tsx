@@ -15,6 +15,7 @@ import {
   Layers,
   Loader2,
   Lock,
+  MemoryStick,
   MoreHorizontal,
   Palette,
   Plug,
@@ -347,6 +348,38 @@ export function SettingsDialog() {
                       <li>{"{{CURRENT_DATETIME}}"} → 2026-04-17 14:32</li>
                       <li>{"{{CURRENT_TIMEZONE}}"} → Europe/Warsaw</li>
                     </ul>
+                  </div>
+                </div>
+
+                <Separator />
+
+                <div>
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="min-w-0">
+                      <Label className="flex items-center gap-1.5">
+                        <MemoryStick className="h-3.5 w-3.5 text-foreground/60" />
+                        Low VRAM mode
+                      </Label>
+                      <p className="mt-1 text-[11px] text-foreground/50">
+                        Force Ollama into low-VRAM mode for every chat —
+                        smaller batches and a leaner KV cache. Overrides the
+                        per-chat Low&nbsp;VRAM toggle in the Parameters
+                        sidebar so you don't have to flip it on each new
+                        session. Off by default. Ignored by OpenAI providers.
+                      </p>
+                    </div>
+                    <Switch
+                      checked={settings.low_vram_global}
+                      onCheckedChange={(next) =>
+                        settings.update("low_vram_global", next)
+                      }
+                      className="shrink-0"
+                      aria-label={
+                        settings.low_vram_global
+                          ? "Disable global Low VRAM mode"
+                          : "Enable global Low VRAM mode"
+                      }
+                    />
                   </div>
                 </div>
               </TabsContent>

@@ -183,6 +183,10 @@ function parseOverrides(json: string | null): Partial<GenerationParams> {
  *   4. Session overrides — whatever the user persisted by touching a slider
  *      (`params_json`). When `params_json` is `null` the session inherits
  *      from layers 1 – 3 only.
+ *   5. Global app overrides — settings that win above every other layer,
+ *      currently just the global Low-VRAM toggle from Settings → General.
+ *      When the user pins it on we want it to apply to every chat with
+ *      every model, even ones whose Modelfile sets `low_vram` differently.
  *
  * Read synchronously so the chat send path doesn't pay an async hop on
  * every message. Cache warming happens up-front in `newSession` /
@@ -198,7 +202,20 @@ function readSessionParams(session: Session | undefined): GenerationParams {
   const thinkPref = modelsState?.modelThinkPrefs[session.model];
   const thinkLayer: Partial<GenerationParams> =
     thinkPref === undefined ? {} : { think: thinkPref };
-  return { ...DEFAULT_PARAMS, ...modelDefaults, ...thinkLayer, ...overrides };
+  const merged: GenerationParams = {
+    ...DEFAULT_PARAMS,
+    ...modelDefaults,
+    ...thinkLayer,
+    ...overrides,
+  };
+  // Global Low-VRAM pin (Settings → General). Ollama-only — OpenAI ignores
+  // the field, so we don't bother stamping it on those requests. Stays out
+  // of `params_json` deliberately: a per-chat record of "user picked this"
+  // shouldn't include settings the user never touched in the panel.
+  if (isOllama && useSettingsStore.getState().low_vram_global) {
+    merged.low_vram = true;
+  }
+  return merged;
 }
 
 function chatHistory(messages: Message[], userText: string, images: string[]): ChatMessageIn[] {

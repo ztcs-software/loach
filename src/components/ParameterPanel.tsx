@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useChatStore } from "@/stores/chatStore";
 import { useModelsStore } from "@/stores/modelsStore";
+import { useSettingsStore } from "@/stores/settingsStore";
 import { useUIStore } from "@/stores/uiStore";
 import { DEFAULT_PARAMS, type GenerationParams, type Session } from "@/types";
 
@@ -48,6 +49,11 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
   );
   const supportsThinking =
     session?.provider === "ollama" && (modelCapabilities?.includes("thinking") ?? false);
+  // Global Low-VRAM pin (Settings → General). When on, every Ollama request
+  // is sent with `low_vram: true` regardless of what's in this panel — so
+  // we visually pin the per-chat toggle on and disable it, with a hint
+  // pointing the user back to the global setting.
+  const lowVramGlobal = useSettingsStore((s) => s.low_vram_global);
 
   const overrides = useMemo(
     () => parseOverrides(session?.params_json ?? null),
@@ -310,11 +316,19 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
                     isOpenAI={isOpenAI}
                   />
                   <LowVramRow
-                    checked={params.low_vram ?? false}
+                    checked={
+                      // Global pin wins above everything — show that state
+                      // honestly so users don't think their per-chat toggle
+                      // is broken when it's actually being overridden.
+                      lowVramGlobal && !isOpenAI
+                        ? true
+                        : (params.low_vram ?? false)
+                    }
                     onChange={(next) =>
                       update({ low_vram: next ? true : undefined })
                     }
                     isOpenAI={isOpenAI}
+                    pinnedByGlobal={lowVramGlobal && !isOpenAI}
                   />
                 </Section>
 
@@ -626,18 +640,26 @@ function GpuLayersRow({
  * default — only flip when you're hitting OOMs and `num_gpu` alone
  * isn't enough. We persist `undefined` instead of `false` so a session
  * that hasn't touched the toggle reads as "no override".
+ *
+ * `pinnedByGlobal` reflects the Settings → General master switch. When
+ * true, the per-chat toggle is forced on and disabled — flipping it
+ * would be a no-op, so we make that obvious instead of silently ignoring
+ * the click.
  */
 function LowVramRow({
   checked,
   onChange,
   isOpenAI,
+  pinnedByGlobal,
 }: {
   checked: boolean;
   onChange: (next: boolean) => void;
   isOpenAI: boolean;
+  pinnedByGlobal: boolean;
 }) {
+  const disabled = isOpenAI || pinnedByGlobal;
   return (
-    <div className={isOpenAI ? "opacity-55" : undefined}>
+    <div className={disabled ? "opacity-55" : undefined}>
       <div className="flex items-center justify-between gap-3">
         <Label className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.1em] text-foreground/70">
           <MemoryStick className="h-3.5 w-3.5 shrink-0 text-foreground/70" />
@@ -645,7 +667,7 @@ function LowVramRow({
         </Label>
         <Switch
           checked={checked}
-          disabled={isOpenAI}
+          disabled={disabled}
           onCheckedChange={onChange}
           aria-label={checked ? "Disable low VRAM mode" : "Enable low VRAM mode"}
         />
@@ -653,7 +675,9 @@ function LowVramRow({
       <p className="mt-1.5 text-[10.5px] leading-snug text-foreground/50">
         {isOpenAI
           ? "Ignored by OpenAI providers."
-          : "Trade speed for memory: smaller batches and KV cache. Helpful when you're up against VRAM limits."}
+          : pinnedByGlobal
+            ? "Pinned on by the global Low VRAM setting (Settings → General). Turn that off to control it per chat."
+            : "Trade speed for memory: smaller batches and KV cache. Helpful when you're up against VRAM limits."}
       </p>
     </div>
   );

@@ -197,6 +197,12 @@ export interface Settings {
    *  network round-trip per URL — default is off so Loach stays offline-first
    *  unless the user opts in. */
   web_fetch_enabled: boolean;
+  /** Global override for Ollama's `low_vram` option. When `true`, every
+   *  Ollama request is sent with `low_vram: true` regardless of per-chat
+   *  params or per-model Modelfile defaults — handy on memory-constrained
+   *  hardware where you'd otherwise have to remember to flip the per-chat
+   *  toggle. Off by default. Ignored by OpenAI providers. */
+  low_vram_global: boolean;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -211,6 +217,7 @@ export const DEFAULT_SETTINGS: Settings = {
   user_name: "",
   temporal_awareness: true,
   web_fetch_enabled: false,
+  low_vram_global: false,
 };
 
 /** Shape returned by the Rust `fetch_url` command. Kept in sync with
