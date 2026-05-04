@@ -1,7 +1,7 @@
 {
   "name": "loach",
   "private": true,
-  "version": "1.0.0-alpha-2",
+  "version": "1.0.0-alpha-3",
   "type": "module",
   "description": "Native local LLM chat client for Windows and Linux (Ollama + OpenAI-compatible).",
   "license": "MIT",
