@@ -20,6 +20,15 @@ export interface Space {
   name: string;
   description: string;
   instructions: string;
+  /** Per-space default provider. Null = inherit the General Settings
+   *  default. Set together with `default_model` to pin a chat to this
+   *  pair on creation. */
+  default_provider: ProviderId | null;
+  default_model: string | null;
+  /** JSON-encoded `GenerationParams` override for chats in this space.
+   *  Null = inherit. Layered between model defaults and per-session
+   *  overrides — see `chatStore::readSessionParams`. */
+  default_params_json: string | null;
   created_at: number;
   updated_at: number;
 }

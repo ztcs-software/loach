@@ -480,6 +480,16 @@ pub struct UpdateSpaceArgs {
     pub name: String,
     pub description: String,
     pub instructions: String,
+    /// Null in any of these three fields means "inherit from General
+    /// Settings" — the frontend treats them as a tri-state. Keeping the
+    /// JSON encoding is the simplest way to round-trip through the
+    /// settings KV table without bespoke serialisation.
+    #[serde(default)]
+    pub default_provider: Option<String>,
+    #[serde(default)]
+    pub default_model: Option<String>,
+    #[serde(default)]
+    pub default_params_json: Option<String>,
 }
 
 #[tauri::command]
@@ -489,7 +499,15 @@ pub async fn update_space(
 ) -> Result<(), String> {
     state
         .db
-        .update_space(&args.id, &args.name, &args.description, &args.instructions)
+        .update_space(
+            &args.id,
+            &args.name,
+            &args.description,
+            &args.instructions,
+            args.default_provider.as_deref(),
+            args.default_model.as_deref(),
+            args.default_params_json.as_deref(),
+        )
         .map_err(err)
 }
 

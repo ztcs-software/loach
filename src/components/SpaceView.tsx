@@ -1,31 +1,65 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
-  ArrowLeft,
+  Archive,
   ChevronDown,
   ChevronRight,
+  CircleAlert,
+  CircleCheck,
   FileText,
+  Folder,
   Image as ImageIcon,
-  Layers,
+  MessageSquare,
+  MoreHorizontal,
+  Pencil,
+  Pin,
+  PinOff,
   Plus,
+  RefreshCw,
   Trash2,
+  Upload,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { useSpaceStore } from "@/stores/spaceStore";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Textarea } from "@/components/ui/textarea";
+import { ChatInput } from "@/components/ChatInput";
 import { useChatStore } from "@/stores/chatStore";
+import { useSettingsStore } from "@/stores/settingsStore";
+import { useSpaceStore } from "@/stores/spaceStore";
 import { useUIStore } from "@/stores/uiStore";
 import { fileToAttachment } from "@/lib/files";
+import {
+  ollamaListModels,
+  ollamaProbe,
+  openaiListModels,
+} from "@/lib/tauri";
 import { cn, relativeDay } from "@/lib/utils";
-import { ChatInput } from "@/components/ChatInput";
-import type { SpaceFile } from "@/types";
+import {
+  type ModelInfo,
+  type ProviderId,
+  type Session,
+  type SpaceFile,
+} from "@/types";
+
+type TabId = "chats" | "instructions" | "files" | "models";
+
+const FILE_CAP = 12;
 
 export function SpaceView() {
   const viewingSpaceId = useSpaceStore((s) => s.viewingSpaceId);
   const spaces = useSpaceStore((s) => s.spaces);
   const setViewingSpace = useSpaceStore((s) => s.setViewingSpace);
   const doUpdate = useSpaceStore((s) => s.updateSpace);
+  const doDeleteSpace = useSpaceStore((s) => s.deleteSpace);
   const loadFiles = useSpaceStore((s) => s.loadSpaceFiles);
   const doAddFile = useSpaceStore((s) => s.addFile);
   const doRemoveFile = useSpaceStore((s) => s.removeFile);
@@ -35,7 +69,10 @@ export function SpaceView() {
 
   const sessions = useChatStore((s) => s.sessions);
   const selectSession = useChatStore((s) => s.selectSession);
-  const newSession = useChatStore((s) => s.newSession);
+  const renameChat = useChatStore((s) => s.rename);
+  const pinChat = useChatStore((s) => s.pin);
+  const archiveChat = useChatStore((s) => s.archive);
+  const removeChat = useChatStore((s) => s.remove);
   const setSidebarTab = useUIStore((s) => s.setSidebarTab);
 
   const space = spaces.find((s) => s.id === viewingSpaceId);
@@ -44,21 +81,20 @@ export function SpaceView() {
   const [nameVal, setNameVal] = useState("");
   const [editingDesc, setEditingDesc] = useState(false);
   const [descVal, setDescVal] = useState("");
-  const [instructions, setInstructions] = useState("");
-  const [instructionsOpen, setInstructionsOpen] = useState(false);
+  const [tab, setTab] = useState<TabId>("chats");
   const [files, setFiles] = useState<SpaceFile[]>([]);
-  const [fileError, setFileError] = useState<string | null>(null);
-  const [chatsExpanded, setChatsExpanded] = useState(true);
-  const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Load space data
+  // Reseed the local edit state when the user navigates between spaces.
+  // Deliberately keyed on `space?.id` only — re-running on every Space
+  // mutation would clobber an in-progress inline edit when the optimistic
+  // update lands.
   useEffect(() => {
     if (space) {
       setNameVal(space.name);
       setDescVal(space.description);
-      setInstructions(space.instructions);
       void loadFiles(space.id);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [space?.id]);
 
   useEffect(() => {
@@ -66,87 +102,97 @@ export function SpaceView() {
   }, [storedFiles]);
 
   const spaceSessions = useMemo(
-    () => sessions.filter((s) => s.space_id === viewingSpaceId),
+    () =>
+      sessions
+        .filter((s) => s.space_id === viewingSpaceId && !s.archived_at)
+        .sort((a, b) => b.updated_at - a.updated_at),
     [sessions, viewingSpaceId],
   );
 
   if (!space) return null;
 
-  const handleBack = () => {
-    // Back out of the space-detail view and drop the user onto the Spaces
-    // tab of the sidebar so they see the list they came from.
+  const handleBackToLibrary = () => {
     setViewingSpace(null);
     setSidebarTab("spaces");
   };
 
   const handleSaveName = async () => {
-    if (nameVal.trim() && nameVal !== space.name) {
-      await doUpdate(space.id, nameVal.trim(), space.description, space.instructions);
+    const trimmed = nameVal.trim();
+    if (trimmed && trimmed !== space.name) {
+      await doUpdate(space.id, {
+        name: trimmed,
+        description: space.description,
+        instructions: space.instructions,
+      });
+    } else {
+      setNameVal(space.name);
     }
     setEditingName(false);
   };
 
   const handleSaveDesc = async () => {
-    if (descVal !== space.description) {
-      await doUpdate(space.id, space.name, descVal.trim(), space.instructions);
+    const next = descVal.trim();
+    if (next !== space.description) {
+      await doUpdate(space.id, {
+        name: space.name,
+        description: next,
+        instructions: space.instructions,
+      });
     }
     setEditingDesc(false);
   };
 
-  const handleSaveInstructions = async () => {
-    if (instructions !== space.instructions) {
-      await doUpdate(space.id, space.name, space.description, instructions.trim());
+  const handleDeleteSpace = () => {
+    if (
+      confirm(
+        `Delete space "${space.name}"? Files and instructions will be removed; chats inside this space stay but lose their space association.`,
+      )
+    ) {
+      void doDeleteSpace(space.id).then(() => {
+        setSidebarTab("spaces");
+      });
     }
   };
 
-  const handleAddFiles = async (fileList: FileList) => {
-    setFileError(null);
-    for (const file of Array.from(fileList)) {
-      if (files.length >= 12) {
-        setFileError("Maximum 12 files per space");
-        break;
-      }
-      try {
-        const att = await fileToAttachment(file);
-        await doAddFile(space.id, att.name, att.mime, att.kind, att.data, file.size);
-      } catch (e) {
-        setFileError(String(e));
-      }
-    }
-  };
-
-  const handleRemoveFile = async (fileId: string) => {
-    await doRemoveFile(fileId, space.id);
-  };
-
-  const handleStartChat = async () => {
-    const session = await newSession();
-    setViewingSpace(null);
-    setSidebarTab("chats");
-    void selectSession(session.id);
-  };
-
-  const handleOpenChat = (sessionId: string) => {
+  const openChat = (sessionId: string) => {
     setViewingSpace(null);
     setSidebarTab("chats");
     void selectSession(sessionId);
   };
 
+  // Meta strip — surfaces glanceable counts so we can keep the tab labels
+  // clean. Each segment hides itself when it would be uninformative (zero
+  // files, no instructions). Chat count and model are always shown so the
+  // user can read the space's posture even when most knobs are at default.
+  const hasInstructions = space.instructions.trim().length > 0;
+  const modelLabel =
+    space.default_model && space.default_provider
+      ? trimModelLabel(space.default_model)
+      : "Default model";
+
   return (
     <div className="flex min-w-0 flex-1 flex-col">
       <ScrollArea className="flex-1">
-        <div className="mx-auto w-full max-w-5xl px-8 py-6">
-          {/* Back button */}
+        {/* Page wrapper carries no horizontal padding — children that need
+            indentation handle their own. This way the title column and the
+            ChatInput's visual prompt bar (which has its own internal
+            padding) end up the exact same width. */}
+        <div className="mx-auto w-full max-w-3xl pb-12 pt-8">
+          {/* Title-area block — inset to match the prompt's internal padding. */}
+          <div className="px-4">
+          {/* Breadcrumb */}
           <button
-            onClick={handleBack}
-            className="mb-6 flex items-center gap-1.5 text-sm text-foreground/50 hover:text-foreground transition-colors"
+            onClick={handleBackToLibrary}
+            className="mb-6 inline-flex items-center gap-1.5 text-xs text-foreground/45 transition-colors hover:text-foreground/75"
           >
-            <ArrowLeft className="h-4 w-4" />
-            All spaces
+            <span>Spaces</span>
+            <ChevronRight className="h-3 w-3" />
+            <span className="text-foreground/55">{space.name}</span>
           </button>
 
-          {/* Space header */}
-          <div className="mb-8">
+          {/* Title row */}
+          <div className="flex items-center gap-3">
+            <Folder className="h-7 w-7 shrink-0 text-foreground/65" strokeWidth={1.75} />
             {editingName ? (
               <Input
                 autoFocus
@@ -160,17 +206,43 @@ export function SpaceView() {
                     setEditingName(false);
                   }
                 }}
-                className="h-auto border-none bg-transparent p-0 text-3xl font-semibold tracking-tight focus-visible:ring-0"
+                className="h-auto flex-1 border-none bg-transparent p-0 text-3xl font-semibold tracking-tight focus-visible:ring-0"
               />
             ) : (
               <h1
-                className="text-3xl font-semibold tracking-tight text-foreground cursor-pointer hover:text-foreground/80 transition-colors"
+                className="flex-1 cursor-pointer truncate text-3xl font-semibold tracking-tight text-foreground transition-colors hover:text-foreground/85"
                 onClick={() => setEditingName(true)}
+                title="Click to rename"
               >
                 {space.name}
               </h1>
             )}
 
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  aria-label="Space actions"
+                  className="rounded-xl text-foreground/55 hover:bg-foreground/10 hover:text-foreground"
+                >
+                  <MoreHorizontal className="h-4 w-4" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="min-w-[180px]">
+                <DropdownMenuItem
+                  onSelect={handleDeleteSpace}
+                  className="text-destructive focus:text-destructive"
+                >
+                  <Trash2 className="mr-2 h-4 w-4" />
+                  Delete space
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
+
+          {/* Description */}
+          <div className="mt-1.5 ml-10">
             {editingDesc ? (
               <Input
                 autoFocus
@@ -184,185 +256,128 @@ export function SpaceView() {
                     setEditingDesc(false);
                   }
                 }}
-                placeholder="Add a description..."
-                className="mt-2 h-auto border-none bg-transparent p-0 text-sm text-foreground/50 focus-visible:ring-0"
+                placeholder="Add a description"
+                className="h-auto border-none bg-transparent p-0 text-sm text-foreground/55 focus-visible:ring-0"
               />
             ) : (
               <p
-                className="mt-2 text-sm text-foreground/50 cursor-pointer hover:text-foreground/70 transition-colors"
+                className={cn(
+                  "cursor-pointer text-sm transition-colors",
+                  space.description
+                    ? "text-foreground/55 hover:text-foreground/75"
+                    : "italic text-foreground/30 hover:text-foreground/50",
+                )}
                 onClick={() => setEditingDesc(true)}
+                title="Click to edit"
               >
-                {space.description || "Add a description..."}
+                {space.description || "Add a description"}
               </p>
             )}
+
+            {/* Meta strip — surfaces the same counts that used to live as
+                tab badges, but as small chips so they sit comfortably under
+                the description and stay readable on the page background.
+                Each chip hides itself when it would be uninformative. The
+                file chip drops the cap (`/12`) — the limit only matters
+                when the user is actively adding files, and the Files tab
+                already shows it. */}
+            <div className="mt-3 flex flex-wrap items-center gap-1.5">
+              <MetaChip>
+                {spaceSessions.length}{" "}
+                {spaceSessions.length === 1 ? "chat" : "chats"}
+              </MetaChip>
+              {files.length > 0 && (
+                <MetaChip>
+                  {files.length} {files.length === 1 ? "file" : "files"}
+                </MetaChip>
+              )}
+              {hasInstructions && <MetaChip>Instructions on</MetaChip>}
+              <MetaChip>{modelLabel}</MetaChip>
+            </div>
+          </div>
+          </div>
+          {/* /title-area */}
+
+          {/* Prompt panel — placed outside the inset wrapper so its visual
+              prompt bar lines up edge-to-edge with the title above. */}
+          <div className="mt-8">
+            <ChatInput centered />
           </div>
 
-          <div className="flex flex-col gap-8 lg:flex-row">
-            {/* Left column — chat input + recent chats */}
-            <div className="min-w-0 flex-1">
-              {/* Composer */}
-              <div className="mb-6">
-                <ChatInput centered={false} />
+          {/* Tabs — re-inset to match the title column. */}
+          <div className="mt-10 px-4">
+            <Tabs value={tab} onValueChange={(v) => setTab(v as TabId)}>
+              {/* Centered, auto-width — TabsList default is `inline-flex`,
+                  so wrapping in a flex container is enough to centre it
+                  without stretching. */}
+              <div className="flex justify-center">
+                <TabsList>
+                  <TabsTrigger value="chats">Chats</TabsTrigger>
+                  <TabsTrigger value="instructions">Instructions</TabsTrigger>
+                  <TabsTrigger value="files">Files</TabsTrigger>
+                  <TabsTrigger value="models">Models</TabsTrigger>
+                </TabsList>
               </div>
 
-              {/* Recent chats */}
-              <div>
-                <button
-                  onClick={() => setChatsExpanded(!chatsExpanded)}
-                  className="mb-2 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-foreground/40 hover:text-foreground/60 transition-colors"
-                >
-                  {chatsExpanded ? (
-                    <ChevronDown className="h-3 w-3" />
-                  ) : (
-                    <ChevronRight className="h-3 w-3" />
-                  )}
-                  Recent chats
-                  {spaceSessions.length > 0 && (
-                    <span className="ml-0.5 text-foreground/25">{spaceSessions.length}</span>
-                  )}
-                </button>
-                {chatsExpanded && (
-                  spaceSessions.length === 0 ? (
-                    <div className="rounded-2xl border border-dashed border-foreground/10 px-6 py-8 text-center">
-                      <p className="text-sm text-foreground/40">
-                        Start a chat to keep conversations organized and re-use project knowledge.
-                      </p>
-                    </div>
-                  ) : (
-                    <ul className="space-y-1">
-                      {spaceSessions.map((s) => (
-                        <li key={s.id}>
-                          <button
-                            onClick={() => handleOpenChat(s.id)}
-                            className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left text-sm text-foreground/70 transition-colors hover:bg-foreground/[0.06] hover:text-foreground"
-                          >
-                            <span className="min-w-0 flex-1 truncate">
-                              {s.title}
-                            </span>
-                            <span className="shrink-0 text-[11px] text-foreground/30">
-                              {relativeDay(s.updated_at)}
-                            </span>
-                          </button>
-                        </li>
-                      ))}
-                    </ul>
-                  )
-                )}
-              </div>
-            </div>
-
-            {/* Right column — instructions + files */}
-            <div className="w-full lg:w-72 shrink-0 space-y-6">
-              {/* Instructions */}
-              <div className="rounded-2xl border border-foreground/10 bg-foreground/[0.02] p-4">
-                <button
-                  className="flex w-full items-center justify-between text-sm font-medium text-foreground/80"
-                  onClick={() => setInstructionsOpen(!instructionsOpen)}
-                >
-                  Instructions
-                  <Plus
-                    className={cn(
-                      "h-4 w-4 text-foreground/40 transition-transform",
-                      instructionsOpen && "rotate-45",
-                    )}
-                  />
-                </button>
-                {!instructionsOpen && !space.instructions && (
-                  <p className="mt-1 text-xs text-foreground/35">
-                    Add instructions to tailor responses
-                  </p>
-                )}
-                {(instructionsOpen || space.instructions) && (
-                  <Textarea
-                    value={instructions}
-                    onChange={(e) => setInstructions(e.target.value)}
-                    onBlur={() => void handleSaveInstructions()}
-                    placeholder="Add custom instructions for all chats in this space..."
-                    className="mt-3 min-h-[120px] rounded-xl border-foreground/10 bg-foreground/[0.03] text-sm"
-                  />
-                )}
-              </div>
-
-              {/* Files */}
-              <div className="rounded-2xl border border-foreground/10 bg-foreground/[0.02] p-4">
-                <div className="flex items-center justify-between">
-                  <span className="text-sm font-medium text-foreground/80">
-                    Files
-                  </span>
-                  <div className="flex items-center gap-2">
-                    <span className="text-[11px] text-foreground/30">
-                      {files.length}/12
-                    </span>
-                    <button
-                      onClick={() => fileInputRef.current?.click()}
-                      disabled={files.length >= 12}
-                      className="text-foreground/40 hover:text-foreground transition-colors disabled:opacity-30"
-                    >
-                      <Plus className="h-4 w-4" />
-                    </button>
-                  </div>
-                </div>
-
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  multiple
-                  className="hidden"
-                  onChange={(e) => {
-                    if (e.target.files) void handleAddFiles(e.target.files);
-                    e.target.value = "";
-                  }}
+              <TabsContent value="chats" className="mt-6">
+                <ChatsTab
+                  sessions={spaceSessions}
+                  onOpen={openChat}
+                  onRename={(id, title) => void renameChat(id, title)}
+                  onPin={(id, pinned) => void pinChat(id, pinned)}
+                  onArchive={(id) => void archiveChat(id, true)}
+                  onDelete={(id) => void removeChat(id)}
                 />
+              </TabsContent>
 
-                {files.length > 0 ? (
-                  <ul className="mt-3 space-y-1">
-                    {files.map((f) => (
-                      <li
-                        key={f.id}
-                        className="group flex items-center gap-2 rounded-lg px-2 py-1.5 text-xs hover:bg-foreground/[0.04] transition-colors"
-                      >
-                        {f.kind === "image" ? (
-                          <ImageIcon className="h-3.5 w-3.5 shrink-0 text-foreground/40" />
-                        ) : (
-                          <FileText className="h-3.5 w-3.5 shrink-0 text-foreground/40" />
-                        )}
-                        <span className="min-w-0 flex-1 truncate text-foreground/70">
-                          {f.name}
-                        </span>
-                        <span className="shrink-0 text-[10px] text-foreground/25">
-                          {formatSize(f.size)}
-                        </span>
-                        <button
-                          onClick={() => void handleRemoveFile(f.id)}
-                          className="shrink-0 opacity-0 group-hover:opacity-100 text-foreground/40 hover:text-destructive transition-all"
-                        >
-                          <Trash2 className="h-3 w-3" />
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
-                ) : (
-                  <div className="mt-3 rounded-xl border border-dashed border-foreground/10 px-4 py-6 text-center">
-                    <p className="text-xs text-foreground/35">
-                      Add PDFs, documents, or other text to reference in this space.
-                    </p>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="mt-2 text-xs"
-                      onClick={() => fileInputRef.current?.click()}
-                    >
-                      <Plus className="h-3 w-3" />
-                      Add file
-                    </Button>
-                  </div>
-                )}
+              <TabsContent value="instructions" className="mt-6">
+                <InstructionsTab
+                  space={space}
+                  onSave={(instructions) =>
+                    doUpdate(space.id, {
+                      name: space.name,
+                      description: space.description,
+                      instructions,
+                    })
+                  }
+                />
+              </TabsContent>
 
-                {fileError && (
-                  <p className="mt-2 text-xs text-destructive">{fileError}</p>
-                )}
-              </div>
-            </div>
+              <TabsContent value="files" className="mt-6">
+                <FilesTab
+                  files={files}
+                  onAdd={async (fileList) => {
+                    for (const f of Array.from(fileList)) {
+                      if (files.length >= FILE_CAP) return;
+                      const att = await fileToAttachment(f);
+                      await doAddFile(
+                        space.id,
+                        att.name,
+                        att.mime,
+                        att.kind,
+                        att.data,
+                        f.size,
+                      );
+                    }
+                  }}
+                  onRemove={(id) => void doRemoveFile(id, space.id)}
+                />
+              </TabsContent>
+
+              <TabsContent value="models" className="mt-6">
+                <ModelsTab
+                  space={space}
+                  onSave={(patch) =>
+                    doUpdate(space.id, {
+                      name: space.name,
+                      description: space.description,
+                      instructions: space.instructions,
+                      ...patch,
+                    })
+                  }
+                />
+              </TabsContent>
+            </Tabs>
           </div>
         </div>
       </ScrollArea>
@@ -370,8 +385,595 @@ export function SpaceView() {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Chats tab
+// ---------------------------------------------------------------------------
+
+interface ChatsTabProps {
+  sessions: Session[];
+  onOpen: (id: string) => void;
+  onRename: (id: string, title: string) => void;
+  onPin: (id: string, pinned: boolean) => void;
+  onArchive: (id: string) => void;
+  onDelete: (id: string) => void;
+}
+
+function ChatsTab({
+  sessions,
+  onOpen,
+  onRename,
+  onPin,
+  onArchive,
+  onDelete,
+}: ChatsTabProps) {
+  // Inline rename — single id at a time so blurring one row to start
+  // editing another doesn't leave a stale draft anywhere.
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+
+  if (sessions.length === 0) {
+    return (
+      <div className="rounded-2xl border border-dashed border-foreground/10 px-6 py-10 text-center">
+        <MessageSquare className="mx-auto mb-3 h-6 w-6 text-foreground/35" />
+        <p className="text-sm text-foreground/55">
+          No chats yet — type above to start the first one in this space.
+        </p>
+      </div>
+    );
+  }
+
+  // Group by relativeDay bucket so we don't lean on absolute timestamps
+  // for casual scanning.
+  const buckets: Record<
+    "today" | "yesterday" | "week" | "older",
+    Session[]
+  > = { today: [], yesterday: [], week: [], older: [] };
+  for (const s of sessions) buckets[relativeDay(s.updated_at)].push(s);
+
+  const groups: { label: string; rows: Session[] }[] = [
+    { label: "Today", rows: buckets.today },
+    { label: "Yesterday", rows: buckets.yesterday },
+    { label: "Earlier this week", rows: buckets.week },
+    { label: "Older", rows: buckets.older },
+  ].filter((g) => g.rows.length > 0);
+
+  return (
+    <div className="space-y-6">
+      {groups.map((g) => (
+        <div key={g.label}>
+          <h3 className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-foreground/40">
+            {g.label}
+          </h3>
+          <ul className="space-y-1">
+            {g.rows.map((s) => (
+              <ChatRow
+                key={s.id}
+                session={s}
+                renaming={renamingId === s.id}
+                onStartRename={() => setRenamingId(s.id)}
+                onCommitRename={(title) => {
+                  setRenamingId(null);
+                  const next = title.trim();
+                  if (next && next !== s.title) onRename(s.id, next);
+                }}
+                onCancelRename={() => setRenamingId(null)}
+                onOpen={() => onOpen(s.id)}
+                onPin={() => onPin(s.id, !s.pinned_at)}
+                onArchive={() => onArchive(s.id)}
+                onDelete={() => {
+                  if (
+                    confirm(
+                      `Delete this chat (${s.title || "Untitled"})? This cannot be undone — all messages and metrics will be removed.`,
+                    )
+                  ) {
+                    onDelete(s.id);
+                  }
+                }}
+              />
+            ))}
+          </ul>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Single chat row — inline rename + right-click context menu
+// ---------------------------------------------------------------------------
+
+interface ChatRowProps {
+  session: Session;
+  renaming: boolean;
+  onStartRename: () => void;
+  onCommitRename: (title: string) => void;
+  onCancelRename: () => void;
+  onOpen: () => void;
+  onPin: () => void;
+  onArchive: () => void;
+  onDelete: () => void;
+}
+
+function ChatRow({
+  session,
+  renaming,
+  onStartRename,
+  onCommitRename,
+  onCancelRename,
+  onOpen,
+  onPin,
+  onArchive,
+  onDelete,
+}: ChatRowProps) {
+  const [draft, setDraft] = useState(session.title);
+  const [menuOpen, setMenuOpen] = useState(false);
+
+  // Reseed the draft when a fresh rename starts so the input opens with the
+  // current title rather than a stale one from a previous edit.
+  useEffect(() => {
+    if (renaming) setDraft(session.title);
+  }, [renaming, session.title]);
+
+  if (renaming) {
+    return (
+      <li>
+        <Input
+          autoFocus
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={() => onCommitRename(draft)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              (e.target as HTMLInputElement).blur();
+            }
+            if (e.key === "Escape") {
+              e.preventDefault();
+              onCancelRename();
+            }
+          }}
+          className="h-9 rounded-xl border-foreground/10 bg-foreground/[0.04] px-3 text-sm"
+        />
+      </li>
+    );
+  }
+
+  return (
+    <li>
+      {/* The row itself doesn't host the DropdownMenu's anchor — we use a
+          hidden trigger button positioned at the row's right edge so the
+          menu pops up in a predictable place regardless of where on the
+          row the user actually right-clicked. Mirrors the Sidebar row's
+          pattern; keeps the row's primary onClick (open chat) intact. */}
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={onOpen}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            onOpen();
+          }
+        }}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          setMenuOpen(true);
+        }}
+        className="group relative flex cursor-pointer items-center gap-3 rounded-xl px-3 py-2.5 text-sm transition-colors hover:bg-foreground/[0.06] focus-visible:bg-foreground/[0.06] focus-visible:outline-none"
+      >
+        <MessageSquare className="h-4 w-4 shrink-0 text-foreground/40 group-hover:text-foreground/65" />
+        <span className="min-w-0 flex-1 truncate text-foreground/80 group-hover:text-foreground">
+          {session.title || "Untitled"}
+        </span>
+        <span className="shrink-0 text-[11px] text-foreground/35">
+          {trimModelLabel(session.model)}
+        </span>
+
+        <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
+          <DropdownMenuTrigger asChild>
+            <button
+              type="button"
+              aria-hidden
+              tabIndex={-1}
+              className="pointer-events-none absolute right-2 top-1/2 h-0 w-0 -translate-y-1/2"
+            />
+          </DropdownMenuTrigger>
+          <DropdownMenuContent
+            align="end"
+            onClick={(e) => e.stopPropagation()}
+            className="min-w-[200px]"
+          >
+            <DropdownMenuItem onSelect={onPin}>
+              {session.pinned_at ? (
+                <>
+                  <PinOff className="mr-2 h-4 w-4" />
+                  Unpin
+                </>
+              ) : (
+                <>
+                  <Pin className="mr-2 h-4 w-4" />
+                  Pin this chat
+                </>
+              )}
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={onStartRename}>
+              <Pencil className="mr-2 h-4 w-4" />
+              Rename
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onSelect={onArchive}>
+              <Archive className="mr-2 h-4 w-4" />
+              Move to archive
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              onSelect={onDelete}
+              className="text-destructive focus:text-destructive"
+            >
+              <Trash2 className="mr-2 h-4 w-4" />
+              Delete
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
+    </li>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Instructions tab
+// ---------------------------------------------------------------------------
+
+function InstructionsTab({
+  space,
+  onSave,
+}: {
+  space: { id: string; instructions: string };
+  onSave: (instructions: string) => Promise<void>;
+}) {
+  const [val, setVal] = useState(space.instructions);
+  useEffect(() => {
+    setVal(space.instructions);
+  }, [space.id, space.instructions]);
+
+  const dirty = val !== space.instructions;
+
+  return (
+    <div className="space-y-3">
+      <p className="text-xs text-foreground/55">
+        Sent as the system prompt for every chat in this space. Replaces your
+        global system prompt while a chat lives here.
+      </p>
+      <Textarea
+        value={val}
+        onChange={(e) => setVal(e.target.value)}
+        onBlur={() => {
+          if (dirty) void onSave(val.trim());
+        }}
+        placeholder="e.g. Reply concisely and in the voice of a senior engineer reviewing a PR."
+        className="min-h-[200px] rounded-xl border-foreground/10 bg-foreground/[0.03] text-sm leading-relaxed"
+      />
+      <div className="flex items-center justify-between text-[11px] text-foreground/40">
+        <span>{val.length.toLocaleString()} characters</span>
+        {dirty && <span className="text-foreground/55">Unsaved — blur to save</span>}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Files tab
+// ---------------------------------------------------------------------------
+
+function FilesTab({
+  files,
+  onAdd,
+  onRemove,
+}: {
+  files: SpaceFile[];
+  onAdd: (files: FileList) => Promise<void>;
+  onRemove: (fileId: string) => void;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const totalBytes = files.reduce((acc, f) => acc + f.size, 0);
+  const remaining = FILE_CAP - files.length;
+  const atCap = remaining <= 0;
+
+  const handlePick = async (list: FileList) => {
+    setError(null);
+    setBusy(true);
+    try {
+      await onAdd(list);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="space-y-3">
+      <p className="text-xs text-foreground/55">
+        Reference files available to every chat in this space. Text files are
+        inlined into the system prompt; images attach to vision-capable
+        models. 15&nbsp;MB per file.
+      </p>
+
+      {/* Upload row */}
+      <div className="flex items-center justify-between gap-3 rounded-xl border border-dashed border-foreground/15 bg-foreground/[0.02] px-4 py-3">
+        <div className="flex items-center gap-2.5 text-sm text-foreground/55">
+          <Upload className="h-4 w-4" />
+          <span>
+            {atCap
+              ? `Reached the ${FILE_CAP}-file limit`
+              : `${files.length} of ${FILE_CAP} files · ${formatSize(totalBytes)}`}
+          </span>
+        </div>
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => inputRef.current?.click()}
+          disabled={atCap || busy}
+          className="rounded-lg"
+        >
+          <Plus className="h-3.5 w-3.5" />
+          Add file
+        </Button>
+      </div>
+
+      <input
+        ref={inputRef}
+        type="file"
+        multiple
+        className="hidden"
+        onChange={(e) => {
+          if (e.target.files) void handlePick(e.target.files);
+          e.target.value = "";
+        }}
+      />
+
+      {error && <p className="text-xs text-destructive">{error}</p>}
+
+      {files.length > 0 && (
+        <ul className="divide-y divide-foreground/[0.06] overflow-hidden rounded-xl border border-foreground/10 bg-foreground/[0.02]">
+          {files.map((f) => (
+            <li
+              key={f.id}
+              className="group flex items-center gap-3 px-4 py-3 text-sm transition-colors hover:bg-foreground/[0.04]"
+            >
+              {f.kind === "image" ? (
+                <ImageIcon className="h-4 w-4 shrink-0 text-foreground/45" />
+              ) : (
+                <FileText className="h-4 w-4 shrink-0 text-foreground/45" />
+              )}
+              <span className="min-w-0 flex-1 truncate text-foreground/80">
+                {f.name}
+              </span>
+              <span className="shrink-0 text-[11px] text-foreground/40">
+                {formatSize(f.size)}
+              </span>
+              <button
+                onClick={() => onRemove(f.id)}
+                aria-label={`Remove ${f.name}`}
+                className="shrink-0 rounded-md p-1 text-foreground/40 opacity-0 transition-all hover:bg-foreground/10 hover:text-destructive group-hover:opacity-100"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Models tab
+// ---------------------------------------------------------------------------
+
+interface ModelsPatch {
+  default_provider?: string | null;
+  default_model?: string | null;
+  default_params_json?: string | null;
+}
+
+function ModelsTab({
+  space,
+  onSave,
+}: {
+  space: {
+    default_provider: ProviderId | null;
+    default_model: string | null;
+    default_params_json: string | null;
+  };
+  onSave: (patch: ModelsPatch) => Promise<void>;
+}) {
+  const settings = useSettingsStore();
+  const [ollamaModels, setOllamaModels] = useState<ModelInfo[]>([]);
+  const [openaiModels, setOpenaiModels] = useState<ModelInfo[]>([]);
+  const [ollamaUp, setOllamaUp] = useState<boolean | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const refresh = useMemo(
+    () => async () => {
+      setLoading(true);
+      try {
+        const probe = await ollamaProbe(settings.ollama_base_url).catch(
+          () => false,
+        );
+        setOllamaUp(probe);
+        if (probe) {
+          const m = await ollamaListModels(settings.ollama_base_url).catch(
+            () => [],
+          );
+          setOllamaModels(m);
+        } else {
+          setOllamaModels([]);
+        }
+        if (settings.openai_key_set) {
+          const m = await openaiListModels(settings.openai_base_url).catch(
+            () => [],
+          );
+          setOpenaiModels(m);
+        }
+      } finally {
+        setLoading(false);
+      }
+    },
+    [
+      settings.ollama_base_url,
+      settings.openai_base_url,
+      settings.openai_key_set,
+    ],
+  );
+
+  useEffect(() => {
+    if (!settings.hydrated) return;
+    refresh();
+  }, [settings.hydrated, refresh]);
+
+  const hasPick = !!(space.default_model && space.default_provider);
+
+  const pickModel = (provider: ProviderId | null, model: string | null) => {
+    void onSave({ default_provider: provider, default_model: model });
+  };
+
+  return (
+    <div className="space-y-3">
+      <p className="text-xs text-foreground/55">
+        Pick a default model for every chat created in this space. Leave
+        blank to inherit your General Settings default; per-chat picks
+        still win once a chat is open.
+      </p>
+
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button
+            variant="outline"
+            className="h-11 w-full justify-between gap-2 rounded-xl border-foreground/10 bg-foreground/[0.02] px-4 text-left font-normal hover:bg-foreground/[0.05]"
+          >
+            {hasPick ? (
+              <span className="flex min-w-0 items-center gap-2">
+                <span className="truncate text-foreground/90">
+                  {space.default_model}
+                </span>
+                <span className="shrink-0 text-[11px] text-foreground/40">
+                  {space.default_provider}
+                </span>
+              </span>
+            ) : (
+              <span className="text-foreground/40">Select a model</span>
+            )}
+            <ChevronDown className="h-4 w-4 opacity-50" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent
+          align="start"
+          className="min-w-[--radix-dropdown-menu-trigger-width]"
+        >
+          <div className="flex items-center justify-between px-2 py-1.5">
+            <DropdownMenuLabel className="p-0">Default model</DropdownMenuLabel>
+            <button
+              onClick={(e) => {
+                e.preventDefault();
+                refresh();
+              }}
+              className="rounded p-1 hover:bg-accent"
+              aria-label="Refresh models"
+            >
+              <RefreshCw className={cn("h-3.5 w-3.5", loading && "animate-spin")} />
+            </button>
+          </div>
+          {hasPick && (
+            <>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem onSelect={() => pickModel(null, null)}>
+                Clear selection
+              </DropdownMenuItem>
+            </>
+          )}
+          <DropdownMenuSeparator />
+          <DropdownMenuLabel className="flex items-center gap-1.5">
+            {ollamaUp ? (
+              <CircleCheck className="h-3 w-3 text-emerald-500" />
+            ) : (
+              <CircleAlert className="h-3 w-3 text-amber-500" />
+            )}
+            Ollama
+          </DropdownMenuLabel>
+          {ollamaModels.length === 0 && (
+            <DropdownMenuItem disabled>
+              {ollamaUp ? "No models installed" : "Not running"}
+            </DropdownMenuItem>
+          )}
+          {ollamaModels.map((m) => (
+            <DropdownMenuItem
+              key={`ollama:${m.id}`}
+              onSelect={() => pickModel("ollama", m.id)}
+              className={cn(
+                space.default_provider === "ollama" &&
+                  space.default_model === m.id &&
+                  "bg-foreground/[0.06]",
+              )}
+            >
+              {m.label}
+            </DropdownMenuItem>
+          ))}
+          <DropdownMenuSeparator />
+          <DropdownMenuLabel>OpenAI</DropdownMenuLabel>
+          {openaiModels.length === 0 && (
+            <DropdownMenuItem disabled>
+              {settings.openai_key_set ? "No models" : "API key not set"}
+            </DropdownMenuItem>
+          )}
+          {openaiModels.slice(0, 30).map((m) => (
+            <DropdownMenuItem
+              key={`openai:${m.id}`}
+              onSelect={() => pickModel("openai", m.id)}
+              className={cn(
+                space.default_provider === "openai" &&
+                  space.default_model === m.id &&
+                  "bg-foreground/[0.06]",
+              )}
+            >
+              {m.label}
+            </DropdownMenuItem>
+          ))}
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Small pill used in the meta strip under the title. Pulled out as its own
+ * component so every chip shares the same surface tokens — bumping the
+ * styling here updates all of them in lockstep.
+ */
+function MetaChip({ children }: { children: ReactNode }) {
+  return (
+    <span className="inline-flex items-center rounded-full bg-foreground/[0.06] px-2.5 py-0.5 text-[11px] font-medium text-foreground/70">
+      {children}
+    </span>
+  );
+}
+
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+// Drop the `:tag` suffix on Ollama model ids (`llama3.1:8b` → `llama3.1`)
+// for compact display in tab badges and chat-row meta. Falls through for
+// OpenAI-style ids (no colon).
+function trimModelLabel(id: string): string {
+  if (!id) return "";
+  const colon = id.indexOf(":");
+  return colon > 0 ? id.slice(0, colon) : id;
 }

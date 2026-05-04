@@ -202,10 +202,28 @@ function readSessionParams(session: Session | undefined): GenerationParams {
   const thinkPref = modelsState?.modelThinkPrefs[session.model];
   const thinkLayer: Partial<GenerationParams> =
     thinkPref === undefined ? {} : { think: thinkPref };
+  // Space-level defaults sit between model defaults and per-session
+  // overrides — that way a per-chat slider edit still wins, but a fresh
+  // chat in a space starts from the space's pinned settings rather than
+  // the global DEFAULT_PARAMS.
+  let spaceLayer: Partial<GenerationParams> = {};
+  if (session.space_id) {
+    const space = useSpaceStore
+      .getState()
+      .spaces.find((s) => s.id === session.space_id);
+    if (space?.default_params_json) {
+      try {
+        spaceLayer = JSON.parse(space.default_params_json) as Partial<GenerationParams>;
+      } catch {
+        /* malformed JSON — ignore the layer */
+      }
+    }
+  }
   const merged: GenerationParams = {
     ...DEFAULT_PARAMS,
     ...modelDefaults,
     ...thinkLayer,
+    ...spaceLayer,
     ...overrides,
   };
   // Global Low-VRAM pin (Settings → General). Ollama-only — OpenAI ignores
@@ -609,12 +627,26 @@ export const useChatStore = create<ChatState>((set, get) => ({
       opts?.spaceId !== undefined
         ? opts.spaceId
         : useSpaceStore.getState().activeSpaceId;
-    const resolved = resolveDefaultModelChoice(
-      settings.default_model_choice,
-      settings.default_provider,
-      settings.default_model ?? "",
-      get().sessions,
-    );
+    // If this chat lands in a space that pins its own default model, that
+    // pin wins over the General Settings default. Both fields must be set —
+    // a half-configured pin (provider but no model, or vice versa) falls
+    // through to the global resolver so the chat doesn't land in a broken
+    // (provider, "") state.
+    const space = spaceId
+      ? useSpaceStore.getState().spaces.find((s) => s.id === spaceId)
+      : null;
+    const fromSpace =
+      space?.default_provider && space?.default_model
+        ? { provider: space.default_provider, model: space.default_model }
+        : null;
+    const resolved =
+      fromSpace ??
+      resolveDefaultModelChoice(
+        settings.default_model_choice,
+        settings.default_provider,
+        settings.default_model ?? "",
+        get().sessions,
+      );
     const p: ProviderId = opts?.provider ?? resolved.provider;
     const m = opts?.model ?? resolved.model;
     const session = await createSession({
@@ -869,29 +901,36 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const trimmed = history.filter((m) => m.id !== userMsg.id);
     const chatMessages = chatHistory(trimmed, inlinedContent, images);
 
-    // Resolve system prompt, injecting space context if applicable.
-    let effectiveSystemPrompt =
+    // Resolve system prompt. When the chat is in a space:
+    //  - Space instructions OVERRIDE the global / per-session prompt entirely
+    //    (the user opted into space-level guidance, so we don't want a stale
+    //    global prompt leaking through underneath).
+    //  - Reference files are additive — they ride along regardless and get
+    //    prepended to whichever prompt won, so the model has the file
+    //    context whether or not the space pinned its own instructions.
+    const fallbackPrompt =
       session.system_prompt && session.system_prompt.length > 0
         ? session.system_prompt
-        : settings.global_system_prompt || null;
+        : settings.global_system_prompt || "";
 
+    let effectiveSystemPrompt: string | null = fallbackPrompt || null;
     if (session.space_id) {
       try {
         const ctx = await getSpaceContext(session.space_id);
-        let spaceBlock = "";
-        if (ctx.space.instructions) {
-          spaceBlock += ctx.space.instructions + "\n\n";
-        }
+        const spaceInstructions = ctx.space.instructions.trim();
+        let filesBlock = "";
         const textFiles = ctx.files.filter((f) => f.kind === "text");
         if (textFiles.length > 0) {
-          spaceBlock += "--- Space reference files ---\n";
+          filesBlock = "--- Space reference files ---\n";
           for (const f of textFiles) {
-            spaceBlock += `\nFile: \`${f.name}\`\n\`\`\`\n${f.data}\n\`\`\`\n`;
+            filesBlock += `\nFile: \`${f.name}\`\n\`\`\`\n${f.data}\n\`\`\`\n`;
           }
         }
-        if (spaceBlock) {
-          effectiveSystemPrompt = spaceBlock + (effectiveSystemPrompt ?? "");
-        }
+        const base = spaceInstructions || fallbackPrompt;
+        const parts: string[] = [];
+        if (base) parts.push(base);
+        if (filesBlock) parts.push(filesBlock);
+        effectiveSystemPrompt = parts.length ? parts.join("\n\n") : null;
       } catch (e) {
         console.warn("Failed to load space context", e);
       }
