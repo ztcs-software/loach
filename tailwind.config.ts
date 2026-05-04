@@ -141,9 +141,9 @@ const config: Config = {
         },
         DEFAULT: {
           css: {
-            "--tw-prose-body": "hsl(var(--foreground) / 0.92)",
+            "--tw-prose-body": "hsl(var(--foreground))",
             "--tw-prose-headings": "hsl(var(--foreground))",
-            "--tw-prose-lead": "hsl(var(--foreground) / 0.85)",
+            "--tw-prose-lead": "hsl(var(--foreground) / 0.95)",
             "--tw-prose-links": "hsl(var(--primary))",
             "--tw-prose-bold": "hsl(var(--foreground))",
             "--tw-prose-counters": "hsl(var(--muted-foreground))",
@@ -160,9 +160,9 @@ const config: Config = {
             // Invert variants pick up the same vars — we apply these to
             // both light and dark; the underlying CSS variables already
             // flip with the theme.
-            "--tw-prose-invert-body": "hsl(var(--foreground) / 0.92)",
+            "--tw-prose-invert-body": "hsl(var(--foreground))",
             "--tw-prose-invert-headings": "hsl(var(--foreground))",
-            "--tw-prose-invert-lead": "hsl(var(--foreground) / 0.85)",
+            "--tw-prose-invert-lead": "hsl(var(--foreground) / 0.95)",
             "--tw-prose-invert-links": "hsl(var(--primary))",
             "--tw-prose-invert-bold": "hsl(var(--foreground))",
             "--tw-prose-invert-counters": "hsl(var(--muted-foreground))",

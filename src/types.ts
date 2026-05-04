@@ -20,6 +20,15 @@ export interface Space {
   name: string;
   description: string;
   instructions: string;
+  /** Per-space default provider. Null = inherit the General Settings
+   *  default. Set together with `default_model` to pin a chat to this
+   *  pair on creation. */
+  default_provider: ProviderId | null;
+  default_model: string | null;
+  /** JSON-encoded `GenerationParams` override for chats in this space.
+   *  Null = inherit. Layered between model defaults and per-session
+   *  overrides — see `chatStore::readSessionParams`. */
+  default_params_json: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -107,6 +116,16 @@ export interface GenerationParams {
    *  the field so the model uses its own default. The UI only surfaces this
    *  toggle for models whose `capabilities` include `"thinking"`. */
   think?: boolean;
+  /** Ollama-only: how many model layers to offload to the GPU. `0` forces
+   *  CPU-only inference, a positive integer offloads that many layers, and
+   *  `undefined` lets Ollama auto-detect. Lets users dial offload down when
+   *  the model OOMs the GPU. Ignored by OpenAI providers. */
+  num_gpu?: number;
+  /** Ollama-only: opt into low-VRAM mode. `true` shrinks batch sizes and
+   *  the KV cache; `undefined` / `false` leaves Ollama's default (off).
+   *  Pairs with `num_gpu` for memory-constrained setups. Ignored by OpenAI
+   *  providers. */
+  low_vram?: boolean;
 }
 
 export const DEFAULT_PARAMS: GenerationParams = {
@@ -152,10 +171,15 @@ export type StreamEvent =
 
 export type ThemeChoice = "light" | "dark" | "system";
 export type BackgroundStyle = "gradient" | "solid";
+export type FontSize = "small" | "normal" | "large";
 
 export interface Settings {
   theme: ThemeChoice;
   background_style: BackgroundStyle;
+  /** Global font-size scale. Applied as a class on `<html>` which the CSS
+   *  in `globals.css` reads to scale both rem-based and absolute pixel
+   *  text sizes via the `--font-scale` variable. */
+  font_size: FontSize;
   ollama_base_url: string;
   openai_base_url: string;
   /** Free-text instructions injected as the system prompt of every new chat.
@@ -187,11 +211,18 @@ export interface Settings {
    *  network round-trip per URL — default is off so Loach stays offline-first
    *  unless the user opts in. */
   web_fetch_enabled: boolean;
+  /** Global override for Ollama's `low_vram` option. When `true`, every
+   *  Ollama request is sent with `low_vram: true` regardless of per-chat
+   *  params or per-model Modelfile defaults — handy on memory-constrained
+   *  hardware where you'd otherwise have to remember to flip the per-chat
+   *  toggle. Off by default. Ignored by OpenAI providers. */
+  low_vram_global: boolean;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
   theme: "dark",
   background_style: "gradient",
+  font_size: "normal",
   ollama_base_url: "http://localhost:11434",
   openai_base_url: "https://api.openai.com/v1",
   global_system_prompt: "",
@@ -201,6 +232,7 @@ export const DEFAULT_SETTINGS: Settings = {
   user_name: "",
   temporal_awareness: true,
   web_fetch_enabled: false,
+  low_vram_global: false,
 };
 
 /** Shape returned by the Rust `fetch_url` command. Kept in sync with

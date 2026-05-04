@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Brain, ChevronRight, ChevronDown, Dice5, Info, RotateCcw, X } from "lucide-react";
+import { Brain, ChevronRight, ChevronDown, Dice5, Info, Layers, MemoryStick, RotateCcw, X } from "lucide-react";
 import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useChatStore } from "@/stores/chatStore";
 import { useModelsStore } from "@/stores/modelsStore";
+import { useSettingsStore } from "@/stores/settingsStore";
 import { useUIStore } from "@/stores/uiStore";
 import { DEFAULT_PARAMS, type GenerationParams, type Session } from "@/types";
 
@@ -48,6 +49,11 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
   );
   const supportsThinking =
     session?.provider === "ollama" && (modelCapabilities?.includes("thinking") ?? false);
+  // Global Low-VRAM pin (Settings → General). When on, every Ollama request
+  // is sent with `low_vram: true` regardless of what's in this panel — so
+  // we visually pin the per-chat toggle on and disable it, with a hint
+  // pointing the user back to the global setting.
+  const lowVramGlobal = useSettingsStore((s) => s.low_vram_global);
 
   const overrides = useMemo(
     () => parseOverrides(session?.params_json ?? null),
@@ -301,6 +307,31 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
                   />
                 </Section>
 
+                <Section title="Performance">
+                  <GpuLayersRow
+                    value={params.num_gpu ?? null}
+                    onChange={(num_gpu) =>
+                      update({ num_gpu: num_gpu ?? undefined })
+                    }
+                    isOpenAI={isOpenAI}
+                  />
+                  <LowVramRow
+                    checked={
+                      // Global pin wins above everything — show that state
+                      // honestly so users don't think their per-chat toggle
+                      // is broken when it's actually being overridden.
+                      lowVramGlobal && !isOpenAI
+                        ? true
+                        : (params.low_vram ?? false)
+                    }
+                    onChange={(next) =>
+                      update({ low_vram: next ? true : undefined })
+                    }
+                    isOpenAI={isOpenAI}
+                    pinnedByGlobal={lowVramGlobal && !isOpenAI}
+                  />
+                </Section>
+
                 <Section title="Reproducibility">
                   <SeedRow
                     value={params.seed ?? null}
@@ -501,6 +532,153 @@ function SliderRow({
           {hint}
         </p>
       )}
+    </div>
+  );
+}
+
+/**
+ * GPU layer offload (`num_gpu`). Three states the user lands in:
+ *
+ *   - **Auto** (`value === null`) — the field is blank, Ollama auto-detects
+ *     based on available VRAM. The default for every chat unless either
+ *     the user overrides it or the model's Modelfile lists `num_gpu`.
+ *   - **CPU only** (`value === 0`) — useful for testing CPU paths or when
+ *     even one layer on GPU OOMs the system.
+ *   - **Custom** (`value > 0`) — user explicitly picks how many layers
+ *     to offload. Useful when a model that *almost* fits has its KV cache
+ *     pushed off the GPU; cutting layers leaves room.
+ *
+ * No upper bound is enforced — the layer count is model-specific (some
+ * have 32, others 80+) and Ollama caps to the actual count anyway.
+ */
+function GpuLayersRow({
+  value,
+  onChange,
+  isOpenAI,
+}: {
+  value: number | null;
+  onChange: (v: number | null) => void;
+  isOpenAI: boolean;
+}) {
+  const [draft, setDraft] = useState(value === null ? "" : String(value));
+
+  useEffect(() => {
+    setDraft(value === null ? "" : String(value));
+  }, [value]);
+
+  const commit = (raw: string) => {
+    const trimmed = raw.trim();
+    if (trimmed === "") {
+      onChange(null);
+      return;
+    }
+    const n = Number(trimmed);
+    if (Number.isFinite(n) && Number.isInteger(n) && n >= 0) onChange(n);
+  };
+
+  const readout =
+    value === null ? "auto" : value === 0 ? "CPU only" : `${value} layers`;
+
+  return (
+    <div className={isOpenAI ? "opacity-55" : undefined}>
+      <div className="mb-1.5 flex items-baseline justify-between">
+        <Label className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.1em] text-foreground/70">
+          <Layers className="h-3.5 w-3.5 shrink-0 text-foreground/70" />
+          GPU Layers
+        </Label>
+        <span className="font-mono text-[10px] text-foreground/45">
+          {readout}
+        </span>
+      </div>
+      <div className="flex items-center gap-1.5">
+        <Input
+          type="text"
+          inputMode="numeric"
+          pattern="[0-9]*"
+          placeholder="Auto"
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={() => commit(draft)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              commit(draft);
+              (e.target as HTMLInputElement).blur();
+            }
+          }}
+          disabled={isOpenAI}
+          className="h-8 border-foreground/10 bg-foreground/[0.04] text-sm tabular-nums focus-visible:border-foreground/25 focus-visible:ring-0"
+        />
+        {value !== null && !isOpenAI && (
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8 shrink-0 rounded-md text-foreground/60 hover:bg-foreground/10 hover:text-foreground"
+            onClick={() => {
+              setDraft("");
+              onChange(null);
+            }}
+            title="Clear (let Ollama auto-detect)"
+          >
+            <X className="h-4 w-4" />
+          </Button>
+        )}
+      </div>
+      <p className="mt-1.5 text-[10.5px] leading-snug text-foreground/50">
+        {isOpenAI
+          ? "Ignored by OpenAI providers — server-side decision."
+          : "How many model layers to offload to the GPU. 0 = CPU only; leave blank for Ollama's auto-detect."}
+      </p>
+    </div>
+  );
+}
+
+/**
+ * Low-VRAM toggle. Sends `low_vram: true` to Ollama, which trades
+ * throughput for footprint (smaller batches, leaner KV cache). Off by
+ * default — only flip when you're hitting OOMs and `num_gpu` alone
+ * isn't enough. We persist `undefined` instead of `false` so a session
+ * that hasn't touched the toggle reads as "no override".
+ *
+ * `pinnedByGlobal` reflects the Settings → General master switch. When
+ * true, the per-chat toggle is forced on and disabled — flipping it
+ * would be a no-op, so we make that obvious instead of silently ignoring
+ * the click.
+ */
+function LowVramRow({
+  checked,
+  onChange,
+  isOpenAI,
+  pinnedByGlobal,
+}: {
+  checked: boolean;
+  onChange: (next: boolean) => void;
+  isOpenAI: boolean;
+  pinnedByGlobal: boolean;
+}) {
+  const disabled = isOpenAI || pinnedByGlobal;
+  return (
+    <div className={disabled ? "opacity-55" : undefined}>
+      <div className="flex items-center justify-between gap-3">
+        <Label className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.1em] text-foreground/70">
+          <MemoryStick className="h-3.5 w-3.5 shrink-0 text-foreground/70" />
+          Low VRAM
+        </Label>
+        <Switch
+          checked={checked}
+          disabled={disabled}
+          onCheckedChange={onChange}
+          aria-label={checked ? "Disable low VRAM mode" : "Enable low VRAM mode"}
+        />
+      </div>
+      <p className="mt-1.5 text-[10.5px] leading-snug text-foreground/50">
+        {isOpenAI
+          ? "Ignored by OpenAI providers."
+          : pinnedByGlobal
+            ? "Pinned on by the global Low VRAM setting (Settings → General). Turn that off to control it per chat."
+            : "Trade speed for memory: smaller batches and KV cache. Helpful when you're up against VRAM limits."}
+      </p>
     </div>
   );
 }

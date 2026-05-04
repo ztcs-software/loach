@@ -362,6 +362,9 @@ export function createSpace(args: {
       name: args.name,
       description: args.description ?? "",
       instructions: args.instructions ?? "",
+      default_provider: null,
+      default_model: null,
+      default_params_json: null,
       created_at: now,
       updated_at: now,
     });
@@ -374,6 +377,9 @@ export function updateSpace(args: {
   name: string;
   description: string;
   instructions: string;
+  default_provider?: string | null;
+  default_model?: string | null;
+  default_params_json?: string | null;
 }): Promise<void> {
   if (!isTauri) return notInTauri(undefined);
   return invoke("update_space", { args });
@@ -423,7 +429,17 @@ export function removeSpaceFile(fileId: string): Promise<void> {
 export function getSpaceContext(spaceId: string): Promise<SpaceContext> {
   if (!isTauri)
     return notInTauri<SpaceContext>({
-      space: { id: "", name: "", description: "", instructions: "", created_at: 0, updated_at: 0 },
+      space: {
+        id: "",
+        name: "",
+        description: "",
+        instructions: "",
+        default_provider: null,
+        default_model: null,
+        default_params_json: null,
+        created_at: 0,
+        updated_at: 0,
+      },
       files: [],
     });
   return invoke("get_space_context", { spaceId });

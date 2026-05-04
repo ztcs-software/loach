@@ -154,15 +154,26 @@ export function CodeCanvas() {
         </div>
       </header>
 
+      {/*
+        The outer container owns BOTH axes of scrolling so the horizontal
+        scrollbar lands at the bottom of the visible viewport. Putting
+        `overflow-x-auto` on the inner code `<pre>` instead pins the
+        scrollbar to the bottom of the snippet itself — invisible whenever
+        the snippet is taller than the canvas, which is the common case.
+
+        `w-max min-w-full` on the inner flex row lets it grow to the
+        widest line so the outer scrollbar actually engages, while still
+        filling the viewport when content is narrower.
+      */}
       <div className="flex-1 overflow-auto">
-        <div className="flex font-mono text-[12.5px] leading-[1.65]">
+        <div className="flex w-max min-w-full font-mono text-[12.5px] leading-[1.65]">
           <pre
             aria-hidden
-            className="select-none px-3 py-3 text-right tabular-nums text-foreground/30"
+            className="sticky left-0 z-10 select-none bg-background px-3 py-3 text-right tabular-nums text-foreground/30"
           >
             {Array.from({ length: lineCount }, (_, i) => i + 1).join("\n")}
           </pre>
-          <pre className="flex-1 overflow-x-auto px-3 py-3 text-foreground/95">
+          <pre className="px-3 py-3 text-foreground/95">
             <code
               className={
                 language ? `hljs language-${language}` : "hljs"

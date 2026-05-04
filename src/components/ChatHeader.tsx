@@ -9,6 +9,7 @@ import {
   ClipboardPaste,
   Copy,
   FileText,
+  MessageSquare,
   MoreHorizontal,
   Pencil,
   Pin,
@@ -38,6 +39,7 @@ import { useChatStore } from "@/stores/chatStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useUIStore } from "@/stores/uiStore";
+import { cn } from "@/lib/utils";
 import {
   exportSession,
   ollamaListModels,
@@ -60,6 +62,8 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
   const archiveSession = useChatStore((s) => s.archive);
   const removeSession = useChatStore((s) => s.remove);
   const toggleParams = useUIStore((s) => s.toggleParams);
+  const setSidebarTab = useUIStore((s) => s.setSidebarTab);
+  const setViewingSpace = useSpaceStore((s) => s.setViewingSpace);
   const settings = useSettingsStore();
 
   const [ollamaModels, setOllamaModels] = useState<ModelInfo[]>([]);
@@ -252,32 +256,60 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
     return s.spaces.find((sp) => sp.id === session.space_id)?.name ?? null;
   });
 
+  const navigateToSpace = () => {
+    if (!session?.space_id) return;
+    setSidebarTab("spaces");
+    setViewingSpace(session.space_id);
+  };
+
   return (
-    <div className="flex h-12 items-center justify-between border-b border-foreground/5 px-4">
-      <div className="flex items-center gap-2 min-w-0">
-        {spaceName && (
-          <span className="flex items-center gap-1 rounded-full bg-foreground/[0.07] px-2.5 py-0.5 text-[11px] font-medium text-foreground/60">
-            <Layers className="h-3 w-3" />
-            {spaceName}
-          </span>
-        )}
+    <div className="flex h-12 items-center justify-between gap-3 border-b border-foreground/5 px-4">
+      <div className="flex min-w-0 flex-1 items-center gap-2">
         {session?.archived_at != null && (
-          <span className="flex items-center gap-1 rounded-full bg-foreground/[0.07] px-2.5 py-0.5 text-[11px] font-medium text-foreground/60">
+          <span className="flex shrink-0 items-center gap-1 rounded-full bg-foreground/[0.07] px-2.5 py-0.5 text-[11px] font-medium text-foreground/60">
             <Archive className="h-3 w-3" />
             Archived
           </span>
         )}
+        {session ? (
+          <div className="flex min-w-0 items-center gap-1.5 text-sm">
+            {spaceName && (
+              <>
+                <button
+                  type="button"
+                  onClick={navigateToSpace}
+                  title={`Open space "${spaceName}"`}
+                  className="flex min-w-0 max-w-[180px] shrink items-center gap-1 rounded-md px-1.5 py-0.5 text-foreground/60 hover:bg-foreground/10 hover:text-foreground"
+                >
+                  <Layers className="h-3.5 w-3.5 shrink-0" />
+                  <span className="truncate">{spaceName}</span>
+                </button>
+                <span className="shrink-0 text-foreground/30">/</span>
+              </>
+            )}
+            <span className="flex min-w-0 items-center gap-1.5 font-medium text-foreground/85">
+              <MessageSquare className="h-3.5 w-3.5 shrink-0 text-foreground/55" />
+              <span className="truncate">{session.title || "Untitled"}</span>
+            </span>
+          </div>
+        ) : (
+          <span className="text-sm text-foreground/60">Select a chat</span>
+        )}
+      </div>
+      <div className="flex shrink-0 items-center gap-1">
         <DropdownMenu>
           <DropdownMenuTrigger asChild disabled={!session}>
             <Button
               variant="ghost"
-              className="max-w-[420px] rounded-full text-foreground/80 hover:bg-foreground/10 hover:text-foreground"
+              className={cn(
+                "h-8 max-w-[280px] rounded-full border border-foreground/15 text-foreground/80 hover:border-foreground/25 hover:bg-foreground/10 hover:text-foreground",
+              )}
             >
               <span className="truncate">{currentLabel}</span>
               <ChevronDown className="h-4 w-4 opacity-60" />
             </Button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="start" className="min-w-[280px]">
+          <DropdownMenuContent align="end" className="min-w-[280px]">
             <div className="flex items-center justify-between px-2 py-1.5">
               <DropdownMenuLabel className="p-0">Models</DropdownMenuLabel>
               <button
@@ -324,8 +356,6 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
             ))}
           </DropdownMenuContent>
         </DropdownMenu>
-      </div>
-      <div className="flex items-center gap-1">
         <DropdownMenu>
           <DropdownMenuTrigger asChild disabled={!session}>
             <Button

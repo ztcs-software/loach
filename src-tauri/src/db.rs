@@ -30,6 +30,16 @@ pub struct Space {
     pub name: String,
     pub description: String,
     pub instructions: String,
+    /// Per-space default provider ("ollama" | "openai"). When set together
+    /// with `default_model`, new chats created inside the space land on
+    /// this pair instead of the user's General Settings default. Null
+    /// means "inherit the General Settings default".
+    pub default_provider: Option<String>,
+    pub default_model: Option<String>,
+    /// JSON-encoded `GenerationParams` override for chats in this space.
+    /// Layered between model defaults and per-session overrides — see
+    /// `chatStore::readSessionParams`. Null means "inherit".
+    pub default_params_json: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -253,6 +263,20 @@ impl Database {
             conn.execute_batch(
                 "ALTER TABLE sessions ADD COLUMN archived_at INTEGER;
                  CREATE INDEX IF NOT EXISTS idx_sessions_archived ON sessions(archived_at);",
+            )?;
+        }
+
+        // Add per-space default model + params columns if missing. Null =
+        // "inherit from General Settings" — see the Space struct for the
+        // full layering story.
+        let has_space_default_model = conn
+            .prepare("SELECT default_model FROM spaces LIMIT 0")
+            .is_ok();
+        if !has_space_default_model {
+            conn.execute_batch(
+                "ALTER TABLE spaces ADD COLUMN default_provider TEXT;
+                 ALTER TABLE spaces ADD COLUMN default_model TEXT;
+                 ALTER TABLE spaces ADD COLUMN default_params_json TEXT;",
             )?;
         }
 
@@ -532,7 +556,9 @@ impl Database {
     pub fn list_spaces(&self) -> Result<Vec<Space>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, name, description, instructions, created_at, updated_at
+            "SELECT id, name, description, instructions,
+                    default_provider, default_model, default_params_json,
+                    created_at, updated_at
              FROM spaces ORDER BY updated_at DESC",
         )?;
         let rows = stmt
@@ -542,8 +568,11 @@ impl Database {
                     name: r.get(1)?,
                     description: r.get(2)?,
                     instructions: r.get(3)?,
-                    created_at: r.get(4)?,
-                    updated_at: r.get(5)?,
+                    default_provider: r.get(4)?,
+                    default_model: r.get(5)?,
+                    default_params_json: r.get(6)?,
+                    created_at: r.get(7)?,
+                    updated_at: r.get(8)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -553,7 +582,9 @@ impl Database {
     pub fn get_space(&self, id: &str) -> Result<Option<Space>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, name, description, instructions, created_at, updated_at
+            "SELECT id, name, description, instructions,
+                    default_provider, default_model, default_params_json,
+                    created_at, updated_at
              FROM spaces WHERE id = ?1",
         )?;
         let mut rows = stmt.query(params![id])?;
@@ -563,8 +594,11 @@ impl Database {
                 name: r.get(1)?,
                 description: r.get(2)?,
                 instructions: r.get(3)?,
-                created_at: r.get(4)?,
-                updated_at: r.get(5)?,
+                default_provider: r.get(4)?,
+                default_model: r.get(5)?,
+                default_params_json: r.get(6)?,
+                created_at: r.get(7)?,
+                updated_at: r.get(8)?,
             }))
         } else {
             Ok(None)
@@ -590,6 +624,9 @@ impl Database {
             name: name.to_string(),
             description: description.to_string(),
             instructions: instructions.to_string(),
+            default_provider: None,
+            default_model: None,
+            default_params_json: None,
             created_at: now,
             updated_at: now,
         })
@@ -601,13 +638,27 @@ impl Database {
         name: &str,
         description: &str,
         instructions: &str,
+        default_provider: Option<&str>,
+        default_model: Option<&str>,
+        default_params_json: Option<&str>,
     ) -> Result<()> {
         let now = Utc::now().timestamp_millis();
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "UPDATE spaces SET name = ?1, description = ?2, instructions = ?3, updated_at = ?4
-             WHERE id = ?5",
-            params![name, description, instructions, now, id],
+            "UPDATE spaces SET name = ?1, description = ?2, instructions = ?3,
+                               default_provider = ?4, default_model = ?5,
+                               default_params_json = ?6, updated_at = ?7
+             WHERE id = ?8",
+            params![
+                name,
+                description,
+                instructions,
+                default_provider,
+                default_model,
+                default_params_json,
+                now,
+                id,
+            ],
         )?;
         Ok(())
     }
@@ -1041,13 +1092,18 @@ impl Database {
 
         for sp in &d.spaces {
             tx.execute(
-                "INSERT INTO spaces (id, name, description, instructions, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT INTO spaces (id, name, description, instructions,
+                                     default_provider, default_model,
+                                     default_params_json, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     sp.id,
                     sp.name,
                     sp.description,
                     sp.instructions,
+                    sp.default_provider,
+                    sp.default_model,
+                    sp.default_params_json,
                     sp.created_at,
                     sp.updated_at,
                 ],

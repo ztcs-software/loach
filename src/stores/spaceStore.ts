@@ -28,9 +28,14 @@ interface SpaceState {
   ) => Promise<Space>;
   updateSpace: (
     id: string,
-    name: string,
-    description: string,
-    instructions: string,
+    fields: {
+      name: string;
+      description: string;
+      instructions: string;
+      default_provider?: string | null;
+      default_model?: string | null;
+      default_params_json?: string | null;
+    },
   ) => Promise<void>;
   deleteSpace: (id: string) => Promise<void>;
   setEditingSpace: (space: Space | null) => void;
@@ -78,12 +83,37 @@ export const useSpaceStore = create<SpaceState>((set, get) => ({
     return space;
   },
 
-  updateSpace: async (id, name, description, instructions) => {
-    await updateSpace({ id, name, description, instructions });
+  updateSpace: async (id, fields) => {
+    // Snapshot the current row so callers can pass a partial set of fields
+    // (e.g. just the name, just the model) without clobbering the rest.
+    const current = get().spaces.find((s) => s.id === id);
+    const next = {
+      name: fields.name,
+      description: fields.description,
+      instructions: fields.instructions,
+      default_provider:
+        fields.default_provider !== undefined
+          ? fields.default_provider
+          : current?.default_provider ?? null,
+      default_model:
+        fields.default_model !== undefined
+          ? fields.default_model
+          : current?.default_model ?? null,
+      default_params_json:
+        fields.default_params_json !== undefined
+          ? fields.default_params_json
+          : current?.default_params_json ?? null,
+    };
+    await updateSpace({ id, ...next });
     set((s) => ({
       spaces: s.spaces.map((sp) =>
         sp.id === id
-          ? { ...sp, name, description, instructions, updated_at: Date.now() }
+          ? {
+              ...sp,
+              ...next,
+              default_provider: (next.default_provider as Space["default_provider"]) ?? null,
+              updated_at: Date.now(),
+            }
           : sp,
       ),
     }));

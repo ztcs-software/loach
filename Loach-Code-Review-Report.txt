@@ -1,0 +1,304 @@
+﻿LOACH CODE REVIEW REPORT
+Generated: 2026-05-03
+Repository: C:\Users\Andrzej\Desktop\Loach
+
+Scope
+- Reviewed first-party source, configuration, scripts, documentation, dependency manifests, and lockfiles in the current working tree.
+- Excluded node_modules, dist, src-tauri/target, src-tauri/gen, binary icons, and other generated build outputs except where those artifacts themselves are findings.
+- No application code changes were made. The only deliverable requested is the PDF report; this text file is an intermediate report artifact used to render it.
+- Line references are 1-based and refer to the current working tree on 2026-05-03.
+
+Executive Summary
+The project is a Tauri 2 desktop application with a Rust backend and a React/Vite/TypeScript frontend. The most important issues are: the frontend TypeScript build currently fails; per-chat model/system prompt/parameter settings are applied in memory but not persisted; privileged Tauri commands can be invoked from renderer JavaScript without backend credential re-checks; database restore/wipe paths can leave foreign-key enforcement disabled on error; and npm audit reports a high-severity XML parser vulnerability in the DOCX parsing path.
+
+Rust cargo check and cargo test passed, but strict Clippy failed. The dependency audit for Rust could not be completed because cargo-audit is not installed. The review found no evidence that Markdown messages render raw user HTML directly, and the normal React lock/hydration path avoids loading chat data before successful unlock; the lock concerns are about backend command enforcement and brute-force policy.
+
+Verification Results
+- npx tsc --noEmit --pretty false: FAILED. Missing declaration for mammoth/mammoth.browser; unused get; two settings casts flagged.
+- cargo check: PASSED WITH WARNINGS. Needed access to configured external target directory; warned on unused default_base_url helpers.
+- cargo clippy --all-targets --all-features -- -D warnings: FAILED. Dead-code warnings became errors; clippy also flags update_space/add_space_file arity.
+- cargo test: PASSED. 4 tests passed in tools::fetch_url; same two dead-code warnings emitted.
+- npm audit --json: FAILED WITH ADVISORIES. 4 vulnerabilities: 1 high (@xmldom/xmldom) and 3 moderate (postcss, vite, esbuild).
+- cargo audit: NOT RUN. cargo-audit is not installed in this environment.
+
+Findings Summary
+- F-001 [High] TypeScript build currently fails.
+- F-002 [High] Per-chat model, system prompt, and parameter changes are not persisted.
+- F-003 [High] Renderer-callable commands include arbitrary file write and destructive database actions.
+- F-004 [High] Database restore and wipe paths can leave SQLite foreign-key checks disabled.
+- F-005 [High] npm audit reports one high and three moderate vulnerabilities.
+- F-006 [Medium] Application lock has no backend rate limiting and can be cleared without credential re-entry.
+- F-007 [Medium] Unicode handling can corrupt fetched text or panic while truncating.
+- F-008 [Medium] Streaming parsers can grow memory without bound on malformed streams.
+- F-009 [Medium] Model admin stream promise can hang if a stream finishes before polling starts.
+- F-010 [Medium] Modelfile generation permits directive injection and malformed quoted blocks.
+- F-011 [Medium] MCP server headers are stored as plaintext JSON and input validation is minimal.
+- F-012 [Medium] Attachment extraction and message persistence are effectively unbounded after the 15 MB file cap.
+- F-013 [Medium] Failed stream startup leaves empty assistant messages behind.
+- F-014 [Medium] Settings writes are optimistic without rollback on persistence failure.
+- F-015 [Medium] CSP and Tauri capability posture is inconsistent and broader than necessary.
+- F-016 [Low] Generated/stale build artifacts are checked into the working tree.
+- F-017 [Low] Rust strict linting fails on dead code and high-arity helpers.
+- F-018 [Low] Local Cargo target configuration points outside the repo.
+- F-019 [Low] Report-generation helper scripts are stale and hard-coded.
+- F-020 [Low] Documentation describes behavior that the code does not fully implement.
+- F-021 [Low] Unused first-party APIs remain in the codebase.
+- F-022 [Low] URL fetch hardening still has a DNS rebinding gap.
+
+Detailed Findings
+
+F-001 [High] TypeScript build currently fails
+Area: Build / frontend
+Evidence: package.json:10; src/lib/files.ts:87; src/stores/settingsStore.ts:25,42,44
+Impact: The production build script runs tsc --noEmit before vite build, and tsc currently exits with errors. A clean frontend build is blocked.
+Recommendation: Add or declare the mammoth/mammoth.browser type, remove the unused Zustand get parameter, and narrow settings casts through unknown or a typed serializable settings shape.
+
+F-002 [High] Per-chat model, system prompt, and parameter changes are not persisted
+Area: Chat state / database contract
+Evidence: src/stores/chatStore.ts:735,762,770; src/components/ChatHeader.tsx:251; src/components/ParameterPanel.tsx:101,379; src-tauri/src/db.rs:355
+Impact: The UI applies per-chat overrides in memory, but the setters do not call a backend persistence command. Restarting or rehydrating loses provider/model/system prompt/parameter changes even though Database::update_session_meta exists.
+Recommendation: Expose a Tauri command around update_session_meta and have the three frontend setters persist changes with rollback or a user-visible failure state.
+
+F-003 [High] Renderer-callable commands include arbitrary file write and destructive database actions
+Area: Tauri command security
+Evidence: src-tauri/src/commands.rs:271,808,837,867,875; src/lib/tauri.ts:621,631; src-tauri/tauri.conf.json:13; src-tauri/capabilities/default.json:23
+Impact: A compromised renderer can invoke privileged commands directly. write_text_file trusts a caller-supplied path, import_data_json reads a caller-supplied path and replaces state, and wipe/reset/security-clear commands do not require a fresh credential at the command boundary.
+Recommendation: Move file selection and write/read work into backend-owned commands, require fresh unlock/credential checks for destructive commands, reduce plugin capabilities, and disable withGlobalTauri unless it is required.
+
+F-004 [High] Database restore and wipe paths can leave SQLite foreign-key checks disabled
+Area: Database integrity
+Evidence: src-tauri/src/db.rs:1037,1187,1210,1223,1232,1246
+Impact: restore_snapshot, wipe_user_data, and wipe_all disable PRAGMA foreign_keys and re-enable it only on the success path. Any early error leaves enforcement disabled on the shared connection. Restore also allows orphaned references without a final foreign_key_check.
+Recommendation: Use a guard/finally-style pattern that always restores PRAGMA foreign_keys = ON, validate the imported graph before commit or run PRAGMA foreign_key_check, and fail restore if referential integrity is broken.
+
+F-005 [High] npm audit reports one high and three moderate vulnerabilities
+Area: Dependencies
+Evidence: package-lock.json; npm audit JSON output; src/lib/files.ts:86
+Impact: The high advisory is in @xmldom/xmldom 0.8.12 via Mammoth, which is relevant because the app parses user-supplied DOCX files. Moderate advisories affect postcss, vite, and esbuild.
+Recommendation: Upgrade or override the XML parser to a fixed version, update postcss to at least 8.5.10, and plan a Vite/esbuild dev-toolchain upgrade with regression testing.
+
+F-006 [Medium] Application lock has no backend rate limiting and can be cleared without credential re-entry
+Area: Security lock
+Evidence: src-tauri/src/security.rs:179,206; src-tauri/src/commands.rs:271; src/stores/securityStore.ts:78; src/components/SecurityPanel.tsx:46
+Impact: Unlock verification has no attempt counter, delay, lockout, or audit trail. security_clear removes the stored lock without requiring the current PIN/password, relying only on UI flow.
+Recommendation: Enforce rate limiting in Rust, require current credential confirmation for clearing or changing the lock, and treat the frontend lock as UX while the backend enforces policy.
+F-007 [Medium] Unicode handling can corrupt fetched text or panic while truncating
+Area: Web fetch / MCP helpers
+Evidence: src-tauri/src/tools/fetch_url.rs:368,389,489; src-tauri/src/mcp/client.rs:195
+Impact: HTML stripping/entity decoding treats UTF-8 bytes as chars, producing mojibake for non-ASCII pages. Two truncation helpers slice strings by byte offsets that may not be UTF-8 character boundaries.
+Recommendation: Iterate over chars or use an HTML/text parser for extraction. Make truncation character-boundary-safe with char_indices and add tests for accented, CJK, emoji, and long non-ASCII input.
+
+F-008 [Medium] Streaming parsers can grow memory without bound on malformed streams
+Area: Provider streaming
+Evidence: src-tauri/src/providers/openai.rs:203,205,290; src-tauri/src/providers/ollama.rs:174,477
+Impact: OpenAI SSE parsing waits for a blank-line delimiter only, ignores CRLF framing, and has no buffer cap. Ollama admin/chat JSONL parsing similarly accumulates until newline. A broken or hostile configured endpoint can cause memory growth or dropped final data.
+Recommendation: Cap stream buffers, support CRLF framing, flush/validate final buffered data on EOF, and abort streams that exceed sane frame limits.
+
+F-009 [Medium] Model admin stream promise can hang if a stream finishes before polling starts
+Area: Models store
+Evidence: src/stores/modelsStore.ts:344,356,384,389
+Impact: runAdminStream starts the backend stream before registering the active handle and polling subscription. A fast done/error event can set finished before the subscription exists, leaving pull/create operations unresolved and leaking the handle until manual cleanup.
+Recommendation: Register the run before starting the stream or check the current finished flag immediately after subscribing. Prefer event-driven promise resolution over polling store state.
+
+F-010 [Medium] Modelfile generation permits directive injection and malformed quoted blocks
+Area: Model administration
+Evidence: src/lib/modelfile.ts:32,35,38; src/components/ModelsView.tsx:132,267
+Impact: The FROM value is interpolated without model-tag validation, so newline characters can inject extra directives. SYSTEM and TEMPLATE triple-quote blocks do not escape embedded triple quotes, allowing malformed or attacker-controlled Modelfiles.
+Recommendation: Validate model names/tags with a conservative allowlist, reject control characters, and escape or encode triple-quoted content according to Ollama Modelfile rules.
+
+F-011 [Medium] MCP server headers are stored as plaintext JSON and input validation is minimal
+Area: MCP configuration
+Evidence: src-tauri/src/commands.rs:688,710; src-tauri/src/db.rs:88,204; src/components/McpPanel.tsx:342
+Impact: The UI supports auth headers, but those secrets are serialized into SQLite and can be included in exports/restores. URL validation only checks non-empty fields and does not enforce scheme, header names, header size, or internal-network policy.
+Recommendation: Store secret header values in the OS keyring or a redacted secret table, redact exports by default, validate URL scheme/host/header syntax, and warn or block internal endpoints where appropriate.
+
+F-012 [Medium] Attachment extraction and message persistence are effectively unbounded after the 15 MB file cap
+Area: Files / chat persistence
+Evidence: src/lib/files.ts:63,86,164; src/stores/chatStore.ts:838
+Impact: PDF/DOCX extraction returns full text, inlineTextAttachments appends it all to prompts, and serialized attachments include rich content. Large documents can bloat SQLite, freeze the UI, and overflow provider context windows.
+Recommendation: Add extracted-text character/token caps, page limits, progressive extraction, attachment summarization, and separate blob storage or pruning for large persisted payloads.
+
+F-013 [Medium] Failed stream startup leaves empty assistant messages behind
+Area: Chat error handling
+Evidence: src/stores/chatStore.ts:360,396,457
+Impact: startTask creates and persists an assistant placeholder before startChatStream. If starting the stream throws, the catch block clears running state but does not remove or mark the placeholder, leaving blank assistant messages in the transcript.
+Recommendation: On startup failure, delete the placeholder or convert it into a visible error message, and keep database/session state consistent with the UI.
+
+F-014 [Medium] Settings writes are optimistic without rollback on persistence failure
+Area: Settings store
+Evidence: src/stores/settingsStore.ts:56,72
+Impact: The store updates local state before backend persistence. If setSetting fails, UI state and the SQLite settings table can diverge, especially in two-step provider-default changes.
+Recommendation: Persist first or roll back on error, surface failures to the user, and batch related settings updates in a single backend command or transaction.
+
+F-015 [Medium] CSP and Tauri capability posture is inconsistent and broader than necessary
+Area: Desktop hardening
+Evidence: index.html:6; src-tauri/tauri.conf.json:13,33; src-tauri/capabilities/default.json:23,24
+Impact: The HTML CSP and Tauri CSP differ, making behavior harder to reason about. Tauri permits global API exposure, broad HTTPS connect-src, fs default permissions, and shell open permission, expanding renderer-bug blast radius.
+Recommendation: Unify CSP in one source of truth, narrow connect-src to required endpoints where practical, remove global Tauri exposure, and replace broad plugin permissions with least-privilege capability entries.
+F-016 [Low] Generated/stale build artifacts are checked into the working tree
+Area: Build hygiene
+Evidence: vite.config.js; vite.config.d.ts; tsconfig.tsbuildinfo; tsconfig.node.tsbuildinfo; node_modules/vite/dist/node/constants.js:33
+Impact: Local Vite checks vite.config.js before vite.config.ts, so a stale compiled JS config can silently shadow the TypeScript config. TypeScript build-info files also add churn and can confuse reviews.
+Recommendation: Keep only the intended source config, ignore generated build-info files, and remove generated JS/DTS config artifacts if the project standard is TypeScript config.
+
+F-017 [Low] Rust strict linting fails on dead code and high-arity helpers
+Area: Rust maintainability
+Evidence: src-tauri/src/providers/ollama.rs:13; src-tauri/src/providers/openai.rs:15; src-tauri/src/db.rs:635,698
+Impact: cargo check succeeds, but cargo clippy with warnings-as-errors fails. This prevents clean CI adoption and highlights stale defaults plus APIs with too many parameters.
+Recommendation: Remove or use the dead default URL helpers, and replace high-arity database helpers with typed request structs or update objects.
+
+F-018 [Low] Local Cargo target configuration points outside the repo
+Area: Developer environment
+Evidence: src-tauri/.cargo/config.toml:2
+Impact: The ignored local config sets an absolute target directory under C:/Users/Andrzej/cargo-target/loach. In sandboxed or multi-user setups this causes permission failures and makes build outputs less predictable.
+Recommendation: Keep this as local-only machine state, document it if intentional, and prefer repo-relative or standard target paths for reproducible automation.
+
+F-019 [Low] Report-generation helper scripts are stale and hard-coded
+Area: Scripts / documentation artifacts
+Evidence: scripts/verify_pdf.py:5; scripts/build_ux_pdf.py:30,548
+Impact: The scripts target a previous Loach-UX-Enhancements.pdf, depend on undeclared Python packages, and contain now-false claims that TypeScript/Vite builds are clean.
+Recommendation: Delete obsolete one-off scripts or move them under documented tooling with parameterized paths and checked dependencies.
+
+F-020 [Low] Documentation describes behavior that the code does not fully implement
+Area: Docs consistency
+Evidence: README.md:33,90,297; CLAUDE.md
+Impact: The README advertises persistent per-chat parameters/system prompts and MCP tool calling mid-chat, but persistence is currently broken and MCP integration appears limited to server CRUD/test/listing. Startup network-call language is also narrower than current hydrated-provider behavior.
+Recommendation: Update docs after fixing persistence, and separate planned MCP tool-calling features from implemented MCP server management.
+
+F-021 [Low] Unused first-party APIs remain in the codebase
+Area: Dead code
+Evidence: src-tauri/src/db.rs:524,842; src-tauri/src/providers/ollama.rs:13; src-tauri/src/providers/openai.rs:15
+Impact: Unused helpers add maintenance cost and can mislead future work. The provider defaults are already caught by Rust dead-code warnings.
+Recommendation: Remove unused helpers or wire them into the command/store paths that need them. Keep intentional forward-compatibility helpers documented where retained.
+
+F-022 [Low] URL fetch hardening still has a DNS rebinding gap
+Area: Network safety
+Evidence: src-tauri/src/tools/fetch_url.rs:120,132
+Impact: The fetch tool resolves and screens host IPs before making a reqwest request, but reqwest may resolve again for the actual connection. The source comment acknowledges this best-effort behavior.
+Recommendation: For stronger SSRF resistance, pin the resolved public IP through a custom connector or disable the feature for sensitive deployments. Keep existing private-IP tests and add DNS-rebinding coverage if feasible.
+
+Dependency Advisories
+These advisories came from npm audit --json against the local lockfile. The Rust dependency audit remains a gap because cargo-audit was not installed.
+- @xmldom/xmldom [High], path mammoth -> @xmldom/xmldom, installed 0.8.12, affected range <0.8.13, advisories GHSA-2v35-w6hq-6mfw, GHSA-f6ww-3ggp-fr8h, GHSA-x6wf-f3px-wcqx, GHSA-j759-j44w-7fr8.
+- postcss [Moderate], direct dependency, installed 8.5.9, affected range <8.5.10, advisory GHSA-qx2v-qp2m-jg93.
+- vite [Moderate], direct dependency, installed 5.4.21, affected range <=6.4.1, advisory GHSA-4w7w-66w2-5vf9.
+- esbuild [Moderate], path vite -> esbuild, installed 0.21.5, affected range <=0.24.2, advisory GHSA-67mh-4wv8-2f99.
+
+Unused and Stale Code Notes
+Unused first-party chunks identified during review include default_base_url helpers in both providers and database helper methods get_setting and get_mcp_server. src/lib/export.ts was specifically checked and is used by src/components/Sidebar.tsx, so it is not included as unused. The old UX PDF scripts are treated as stale artifacts rather than runtime application bugs.
+
+Recommended Prioritization
+1. Restore build confidence: fix F-001, then add frontend build/typecheck to CI or pre-release checks.
+2. Fix data correctness: persist session metadata (F-002) and make foreign-key toggles exception-safe (F-004).
+3. Tighten renderer-to-backend trust boundaries: credential-gate destructive commands, own dialog-selected paths in Rust, narrow CSP/capabilities, and rate-limit unlocks (F-003, F-006, F-015).
+4. Patch vulnerable dependencies, especially XML parsing through DOCX import (F-005).
+5. Harden streaming, Unicode, attachment, and admin-progress edge cases before increasing model/provider surface area (F-007 through F-013).
+6. Clean stale/generated artifacts and documentation drift so future reviews and releases do not chase ghosts (F-016 through F-021).
+
+File-by-File Review Inventory
+Every first-party textual file below was included in the review pass. Files with findings point back to finding IDs above; files without direct findings are listed to document coverage. Line counts are approximate from UTF-8 text decoding and are intended for review inventory, not as a build metric.
+- .gitignore (39 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- components.json (20 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- index.html (13 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- LICENSE (21 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- package.json (57 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- package-lock.json (6099 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- postcss.config.js (6 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- README.md (309 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- scripts/build_ux_pdf.py (578 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- scripts/verify_pdf.py (10 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src/App.tsx (228 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src/assets/loach-logo-black.svg (1 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src/assets/loach-logo-orange.svg (1 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src/components/ChatCanvas.tsx (477 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src/components/ChatHeader.tsx (647 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src/components/ChatInput.tsx (883 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src/components/CodeBlock.tsx (165 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src/components/CodeCanvas.tsx (200 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src/components/FileChip.tsx (31 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src/components/LockScreen.tsx (217 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src/components/Logo.tsx (48 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src/components/Markdown.tsx (230 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src/components/McpPanel.tsx (458 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src/components/Message.tsx (335 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src/components/ModelsLibrary.tsx (497 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src/components/ModelsView.tsx (761 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src/components/ParameterPanel.tsx (772 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src/components/SearchBar.tsx (373 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src/components/SecurityPanel.tsx (474 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src/components/SelectionCopyButton.tsx (137 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src/components/SettingsDialog.tsx (1632 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src/components/Sidebar.tsx (568 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src/components/SnippetDialog.tsx (363 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src/components/SnippetsLibrary.tsx (283 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src/components/SpaceForm.tsx (137 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src/components/SpacesLibrary.tsx (305 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src/components/SpaceView.tsx (931 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src/components/TitleBar.tsx (178 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src/components/ui/button.tsx (66 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src/components/ui/dialog.tsx (92 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src/components/ui/dropdown-menu.tsx (105 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src/components/ui/input.tsx (21 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src/components/ui/label.tsx (19 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src/components/ui/scroll-area.tsx (43 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src/components/ui/separator.tsx (28 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src/components/ui/slider.tsx (25 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src/components/ui/switch.tsx (90 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src/components/ui/tabs.tsx (52 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src/components/ui/textarea.tsx (20 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src/components/ui/tooltip.tsx (25 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src/lib/codeExport.ts (146 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src/lib/export.ts (25 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src/lib/files.ts (208 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src/lib/importContext.ts (156 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src/lib/modelfile.ts (166 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src/lib/modelParams.ts (73 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src/lib/tauri.ts (657 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src/lib/temporal.ts (131 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src/lib/utils.ts (46 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src/lib/webFetch.ts (127 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src/main.tsx (27 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src/stores/canvasStore.ts (39 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src/stores/chatStore.ts (1054 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src/stores/mcpStore.ts (99 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src/stores/modelsStore.ts (410 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src/stores/securityStore.ts (93 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src/stores/settingsStore.ts (106 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src/stores/snippetStore.ts (106 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src/stores/spaceStore.ts (178 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src/stores/uiStore.ts (79 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src/styles/globals.css (354 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src/types.ts (385 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src/types/speech.d.ts (68 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src/vite-env.d.ts (1 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src-tauri/build.rs (3 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src-tauri/capabilities/default.json (26 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src-tauri/Cargo.lock (5896 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src-tauri/Cargo.toml (55 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src-tauri/icons/android/mipmap-anydpi-v26/ic_launcher.xml (5 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src-tauri/icons/android/values/ic_launcher_background.xml (4 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src-tauri/icons/README.md (16 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src-tauri/src/commands.rs (887 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src-tauri/src/db.rs (1284 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src-tauri/src/lib.rs (177 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src-tauri/src/main.rs (6 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src-tauri/src/mcp/client.rs (202 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src-tauri/src/mcp/mod.rs (28 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src-tauri/src/mcp/types.rs (105 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src-tauri/src/providers/mod.rs (78 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src-tauri/src/providers/ollama.rs (555 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src-tauri/src/providers/openai.rs (292 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src-tauri/src/secrets.rs (34 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src-tauri/src/security.rs (212 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src-tauri/src/stream.rs (83 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src-tauri/src/tools/fetch_url.rs (536 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src-tauri/src/tools/mod.rs (9 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- src-tauri/tauri.conf.json (56 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- tailwind.config.ts (356 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- tsconfig.json (30 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- tsconfig.node.json (11 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- tsconfig.node.tsbuildinfo (1 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- tsconfig.tsbuildinfo (1 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- vite.config.d.ts (2 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- vite.config.js (77 lines): reviewed; no additional file-specific finding beyond the detailed findings above.
+- vite.config.ts (40 lines): reviewed; no additional file-specific finding beyond the detailed findings above.

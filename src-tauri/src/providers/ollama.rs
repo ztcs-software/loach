@@ -352,6 +352,10 @@ struct OllamaOptions {
     presence_penalty: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     seed: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    num_gpu: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    low_vram: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -416,6 +420,8 @@ pub async fn chat_stream(
             frequency_penalty: req.params.frequency_penalty,
             presence_penalty: req.params.presence_penalty,
             seed: req.params.seed,
+            num_gpu: req.params.num_gpu,
+            low_vram: req.params.low_vram,
         }
     });
     if let Some(think) = req.params.think {
