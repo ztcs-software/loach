@@ -47,6 +47,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       const hasKey = await getOpenAIKeyStatus().catch(() => false);
       set({ ...merged, openai_key_set: hasKey, hydrated: true });
       applyTheme(merged.theme);
+      applyFontSize(merged.font_size);
     } catch (e) {
       console.error("settings hydrate failed", e);
       set({ hydrated: true });
@@ -57,6 +58,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     set({ [key]: value } as Partial<SettingsState>);
     await setSetting(String(key), String(value));
     if (key === "theme") applyTheme(value as Settings["theme"]);
+    if (key === "font_size") applyFontSize(value as Settings["font_size"]);
   },
 
   setOpenAIKey: async (key: string) => {
@@ -103,4 +105,10 @@ function applyTheme(theme: Settings["theme"]) {
     systemThemeListener = () => resolve();
     mm.addEventListener("change", systemThemeListener);
   }
+}
+
+function applyFontSize(size: Settings["font_size"]) {
+  const root = document.documentElement;
+  root.classList.remove("font-size-small", "font-size-normal", "font-size-large");
+  root.classList.add(`font-size-${size}`);
 }

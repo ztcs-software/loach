@@ -63,7 +63,7 @@ import {
   writeTextFile,
 } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
-import type { ImportStats, ModelInfo, ProviderId, Session } from "@/types";
+import type { FontSize, ImportStats, ModelInfo, ProviderId, Session } from "@/types";
 import pkg from "../../package.json";
 
 const GITHUB_URL = "https://github.com/ztcs-software/loach";
@@ -490,6 +490,20 @@ export function SettingsDialog() {
                     </AppearanceTile>
                   </div>
                 </div>
+
+                <Separator />
+
+                {/* ── Font size: Small / Normal / Large ────────────────── */}
+                <div>
+                  <Label>Font size</Label>
+                  <p className="mt-1 text-[11px] text-foreground/50">
+                    Scales text across the whole app. Normal is the default.
+                  </p>
+                  <FontSizeSwitch
+                    value={settings.font_size}
+                    onChange={(next) => settings.update("font_size", next)}
+                  />
+                </div>
               </TabsContent>
 
               <TabsContent value="archive" className="mt-0 space-y-4 focus-visible:ring-0 focus-visible:ring-offset-0">
@@ -738,6 +752,64 @@ function ChoiceCheck({ active }: { active: boolean }) {
     >
       <Check className="h-3.5 w-3.5" strokeWidth={3} />
     </span>
+  );
+}
+
+/* ───────────────────────── Font-size switch ─────────────────────────
+ *
+ * Three-way segmented control for the global font scale. Each option
+ * previews its own size in the label so users can eyeball the choice
+ * without applying it. Selection writes the value to settings, where
+ * `applyFontSize` flips a class on <html> and the CSS in globals.css
+ * reads `--font-scale`.
+ * ─────────────────────────────────────────────────────────────────── */
+
+const FONT_SIZE_OPTIONS: { value: FontSize; label: string; previewPx: number }[] = [
+  { value: "small",  label: "Small",  previewPx: 12 },
+  { value: "normal", label: "Normal", previewPx: 14 },
+  { value: "large",  label: "Large",  previewPx: 16 },
+];
+
+function FontSizeSwitch({
+  value,
+  onChange,
+}: {
+  value: FontSize;
+  onChange: (next: FontSize) => void;
+}) {
+  return (
+    <div
+      role="radiogroup"
+      aria-label="Font size"
+      className="mt-3 grid grid-cols-3 gap-2 rounded-2xl border border-foreground/10 bg-foreground/[0.03] p-1"
+    >
+      {FONT_SIZE_OPTIONS.map((opt) => {
+        const selected = value === opt.value;
+        return (
+          <button
+            key={opt.value}
+            type="button"
+            role="radio"
+            aria-checked={selected}
+            onClick={() => onChange(opt.value)}
+            className={cn(
+              "flex flex-col items-center justify-center gap-1 rounded-xl px-3 py-2.5 transition-colors",
+              selected
+                ? "bg-primary/10 text-foreground shadow-[0_1px_0_0_rgba(255,255,255,0.06)_inset]"
+                : "text-foreground/70 hover:bg-foreground/[0.05] hover:text-foreground",
+            )}
+          >
+            <span
+              className="font-medium leading-none"
+              style={{ fontSize: `${opt.previewPx}px` }}
+            >
+              Aa
+            </span>
+            <span className="text-[11px] text-foreground/65">{opt.label}</span>
+          </button>
+        );
+      })}
+    </div>
   );
 }
 

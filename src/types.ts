@@ -171,10 +171,15 @@ export type StreamEvent =
 
 export type ThemeChoice = "light" | "dark" | "system";
 export type BackgroundStyle = "gradient" | "solid";
+export type FontSize = "small" | "normal" | "large";
 
 export interface Settings {
   theme: ThemeChoice;
   background_style: BackgroundStyle;
+  /** Global font-size scale. Applied as a class on `<html>` which the CSS
+   *  in `globals.css` reads to scale both rem-based and absolute pixel
+   *  text sizes via the `--font-scale` variable. */
+  font_size: FontSize;
   ollama_base_url: string;
   openai_base_url: string;
   /** Free-text instructions injected as the system prompt of every new chat.
@@ -217,6 +222,7 @@ export interface Settings {
 export const DEFAULT_SETTINGS: Settings = {
   theme: "dark",
   background_style: "gradient",
+  font_size: "normal",
   ollama_base_url: "http://localhost:11434",
   openai_base_url: "https://api.openai.com/v1",
   global_system_prompt: "",

@@ -12,19 +12,19 @@
        way, so users picking either gradient or flat get the same
        light=azure / dark=orange relationship. */
     --background: 30 25% 97%;
-    --foreground: 230 25% 12%;
+    --foreground: 230 30% 7%;
     --card: 0 0% 100%;
-    --card-foreground: 230 25% 12%;
+    --card-foreground: 230 30% 7%;
     --popover: 0 0% 100%;
-    --popover-foreground: 230 25% 12%;
+    --popover-foreground: 230 30% 7%;
     --primary: 210 100% 50%;       /* #007FFF */
     --primary-foreground: 0 0% 100%;
     --secondary: 230 15% 92%;
-    --secondary-foreground: 230 25% 12%;
+    --secondary-foreground: 230 30% 7%;
     --muted: 230 15% 94%;
-    --muted-foreground: 230 12% 42%;
+    --muted-foreground: 230 14% 28%;
     --accent: 230 15% 92%;
-    --accent-foreground: 230 25% 12%;
+    --accent-foreground: 230 30% 7%;
     --destructive: 0 84% 50%;
     --destructive-foreground: 0 0% 98%;
     --border: 230 25% 12% / 0.12;
@@ -54,11 +54,11 @@
 
   .dark {
     --background: 230 30% 6%;
-    --foreground: 0 0% 98%;
+    --foreground: 0 0% 100%;
     --card: 230 25% 10% / 0.55;
-    --card-foreground: 0 0% 98%;
+    --card-foreground: 0 0% 100%;
     --popover: 230 35% 10%;
-    --popover-foreground: 0 0% 98%;
+    --popover-foreground: 0 0% 100%;
     /* Orange accent in dark mode; light mode uses azure (`:root` above).
        The split is purely light/dark — both background variants (Aurora
        gradient and Solid) inherit the same accent for their tone, so the
@@ -66,13 +66,13 @@
     --primary: 22 95% 60%;
     --primary-foreground: 0 0% 100%;
     --secondary: 230 20% 14%;
-    --secondary-foreground: 0 0% 98%;
+    --secondary-foreground: 0 0% 100%;
     --muted: 230 18% 14%;
-    --muted-foreground: 230 12% 72%;
+    --muted-foreground: 230 14% 86%;
     --accent: 230 20% 18%;
-    --accent-foreground: 0 0% 98%;
+    --accent-foreground: 0 0% 100%;
     --destructive: 0 70% 55%;
-    --destructive-foreground: 0 0% 98%;
+    --destructive-foreground: 0 0% 100%;
     --border: 0 0% 100% / 0.10;
     --input: 0 0% 100% / 0.10;
     --ring: 22 95% 60%;
@@ -352,3 +352,70 @@
 .prose :where(p, li) {
   overflow-wrap: anywhere;
 }
+
+/* =========================================================================
+   Global font-size scale
+   -------------------------------------------------------------------------
+   Three settings — Small / Normal / Large — applied as a class on <html>
+   from `settingsStore::applyFontSize`. We scale via a single CSS variable
+   `--font-scale`, which:
+     1. drives the html `font-size` (so all rem-based Tailwind utilities
+        like `text-sm`, `text-xs`, `text-base` scale automatically);
+     2. is multiplied into every absolute `text-[Npx]` utility used in the
+        codebase, since those don't react to rem changes.
+
+   "Normal" intentionally lands a touch below the browser default (16px)
+   so the chrome reads tighter without losing legibility. Small / Large
+   bracket it on either side.
+   ========================================================================= */
+
+html {
+  font-size: calc(16px * var(--font-scale, 0.93));
+}
+html.font-size-small   { --font-scale: 0.85; }
+html.font-size-normal  { --font-scale: 0.93; }
+html.font-size-large   { --font-scale: 1.05; }
+
+/* Override absolute pixel text utilities so they scale with --font-scale.
+   These rules sit after `@tailwind utilities` in the bundle, so source
+   order wins the cascade — no !important needed. */
+.text-\[10px\]    { font-size: calc(10px   * var(--font-scale)); }
+.text-\[10\.5px\] { font-size: calc(10.5px * var(--font-scale)); }
+.text-\[11px\]    { font-size: calc(11px   * var(--font-scale)); }
+.text-\[11\.5px\] { font-size: calc(11.5px * var(--font-scale)); }
+.text-\[12px\]    { font-size: calc(12px   * var(--font-scale)); }
+.text-\[12\.5px\] { font-size: calc(12.5px * var(--font-scale)); }
+.text-\[13px\]    { font-size: calc(13px   * var(--font-scale)); }
+.text-\[13\.5px\] { font-size: calc(13.5px * var(--font-scale)); }
+.text-\[14px\]    { font-size: calc(14px   * var(--font-scale)); }
+.text-\[15px\]    { font-size: calc(15px   * var(--font-scale)); }
+
+/* =========================================================================
+   Contrast lift for `text-foreground/<opacity>` utilities
+   -------------------------------------------------------------------------
+   The shadcn/Tailwind defaults lean on low-opacity foreground for muted
+   copy (sub-labels, hints, helper text). On the glass/gradient backdrop
+   that washes out — particularly in dark mode where 0.55 opacity white
+   on near-black still loses to the surrounding luminance.
+
+   We bump every used opacity tier by ~15–20 percentage points. Source
+   order beats Tailwind's utility output, so no !important is required.
+   Hover / placeholder / etc. variants compile to different selectors and
+   are intentionally NOT touched here — those usually want full opacity
+   on hover anyway.
+   ========================================================================= */
+.text-foreground\/25 { color: hsl(var(--foreground) / 0.42); }
+.text-foreground\/30 { color: hsl(var(--foreground) / 0.48); }
+.text-foreground\/35 { color: hsl(var(--foreground) / 0.55); }
+.text-foreground\/40 { color: hsl(var(--foreground) / 0.60); }
+.text-foreground\/45 { color: hsl(var(--foreground) / 0.65); }
+.text-foreground\/50 { color: hsl(var(--foreground) / 0.70); }
+.text-foreground\/55 { color: hsl(var(--foreground) / 0.75); }
+.text-foreground\/60 { color: hsl(var(--foreground) / 0.80); }
+.text-foreground\/65 { color: hsl(var(--foreground) / 0.85); }
+.text-foreground\/70 { color: hsl(var(--foreground) / 0.88); }
+.text-foreground\/75 { color: hsl(var(--foreground) / 0.92); }
+.text-foreground\/80 { color: hsl(var(--foreground) / 0.94); }
+.text-foreground\/85 { color: hsl(var(--foreground) / 0.96); }
+.text-foreground\/90 { color: hsl(var(--foreground) / 0.98); }
+.text-foreground\/95 { color: hsl(var(--foreground)); }
