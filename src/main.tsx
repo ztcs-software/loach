@@ -20,6 +20,23 @@ import "./styles/globals.css";
 // commands via right-click.
 window.addEventListener("contextmenu", (e) => e.preventDefault());
 
+// Suppress the WebView's built-in find-in-page bar. On Windows (WebView2)
+// Ctrl+F, F3 and Ctrl+G pop a Chrome-style toolbar that doesn't match the
+// app's chrome and isn't wired to any Loach search surface. Loach's own
+// command palette lives on Ctrl/Cmd+K (see `SearchBar`), so killing these
+// shortcuts at the document level just removes the stray UI.
+window.addEventListener(
+  "keydown",
+  (e) => {
+    const k = e.key.toLowerCase();
+    if (((e.ctrlKey || e.metaKey) && (k === "f" || k === "g")) || e.key === "F3") {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+  },
+  { capture: true },
+);
+
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <App />
