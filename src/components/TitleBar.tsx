@@ -57,7 +57,7 @@ export function TitleBar() {
   return (
     <div
       data-tauri-drag-region
-      className="relative z-20 flex h-9 items-center gap-2 border-b border-foreground/8 bg-foreground/[0.03] pl-1.5 pr-0 select-none backdrop-blur-2xl"
+      className="relative z-[70] flex h-9 items-center gap-2 border-b border-foreground/8 bg-foreground/[0.03] pl-1.5 pr-0 select-none backdrop-blur-2xl"
     >
       {/* Sidebar collapse/expand toggle. Lives at the leftmost slot of the
           window's title bar so the user always knows where to find it,
