@@ -794,11 +794,34 @@ const TextareaContextMenu = React.forwardRef<HTMLDivElement, TextareaContextMenu
     { x, y, hasSelection, hasText, onCut, onCopy, onPaste, onSelectAll },
     ref,
   ) {
+    // Render off-screen first, then measure and clamp/flip so the menu
+    // never spills past the viewport edges (most commonly the bottom edge,
+    // since the composer lives near the bottom of the window).
+    const innerRef = useRef<HTMLDivElement>(null);
+    React.useImperativeHandle(ref, () => innerRef.current as HTMLDivElement);
+    const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
+    React.useLayoutEffect(() => {
+      const el = innerRef.current;
+      if (!el) return;
+      const { offsetWidth: w, offsetHeight: h } = el;
+      const margin = 8;
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+      let left = x;
+      let top = y;
+      if (left + w > vw - margin) left = Math.max(margin, vw - margin - w);
+      if (top + h > vh - margin) top = Math.max(margin, y - h);
+      setPos({ left, top });
+    }, [x, y]);
     return (
       <div
-        ref={ref}
+        ref={innerRef}
         role="menu"
-        style={{ left: x, top: y }}
+        style={
+          pos
+            ? { left: pos.left, top: pos.top }
+            : { left: 0, top: 0, visibility: "hidden" }
+        }
         className="fixed z-50 min-w-[200px] overflow-hidden rounded-md border border-foreground/10 bg-popover/95 p-1 text-popover-foreground shadow-lg backdrop-blur-xl"
       >
         <CtxItem
