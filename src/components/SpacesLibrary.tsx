@@ -90,9 +90,9 @@ export function SpacesLibrary() {
                 Spaces
               </h1>
               <p className="mt-2 max-w-xl text-sm text-foreground/55">
-                Group chats around a project. Each space gets its own
-                instructions, reference files, and chat history — perfect for
-                ongoing work that needs context every time.
+                Group chats around a project. Chats inside Spaces share
+                instructions, reference files and memory. Perfect for ongoing
+                work that needs context every time.
               </p>
             </div>
             <Button

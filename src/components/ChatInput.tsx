@@ -493,7 +493,7 @@ export function ChatInput({ centered = false }: ChatInputProps) {
 
   // Placeholder / disabled-title tracks the three states the user can be in:
   // busy-running, busy-waiting, or idle.
-  let placeholder = "Ask anything…";
+  let placeholder = "What's on your mind?";
   let disabledTitle: string | null = null;
   if (streamingThisChat) {
     placeholder = "Replying — press the Stop button to cancel and ask again…";
@@ -647,11 +647,6 @@ export function ChatInput({ centered = false }: ChatInputProps) {
         </div>
         {error && (
           <p className="mt-2 text-xs text-rose-300">{error}</p>
-        )}
-        {!centered && (
-          <p className="mt-2 text-center text-[10px] text-foreground/35">
-            Loach runs locally. Files are kept on your machine.
-          </p>
         )}
       </div>
       {ctxMenu && (

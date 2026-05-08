@@ -273,7 +273,7 @@ export function ChatCanvas() {
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               onKeyDown={onSearchKeyDown}
-              placeholder="Find in chat…"
+              placeholder="Find in this chat…"
               spellCheck={false}
               className="h-7 w-56 min-w-0 bg-transparent px-1 text-[12.5px] text-foreground placeholder:text-foreground/40 focus:outline-none"
             />

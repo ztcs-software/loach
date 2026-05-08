@@ -444,7 +444,7 @@ function ThinkingRow({
       <p className="mt-1.5 text-[10.5px] leading-snug text-foreground/50">
         {disabled
           ? disabledHint
-          : "Let the model reason step-by-step before replying. Adds latency on long answers but often improves quality on complex prompts."}
+          : "Let the model reason step-by-step before replying. Adds latency for long answers but may improve quality on complex prompts."}
       </p>
     </div>
   );

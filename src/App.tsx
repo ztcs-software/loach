@@ -211,7 +211,7 @@ function HeroComposer() {
             How can I help today?
           </h1>
           <p className="mt-3 text-sm text-foreground/55">
-            Ask anything — Loach runs your local models privately.
+            Ask anything. Loach runs your local models privately and securely.
           </p>
         </div>
         <ChatInput centered />
