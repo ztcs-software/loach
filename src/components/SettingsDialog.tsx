@@ -4,6 +4,7 @@ import {
   Archive,
   ArchiveRestore,
   BookOpen,
+  Brain,
   Check,
   ChevronDown,
   Clock,
@@ -341,6 +342,37 @@ export function SettingsDialog() {
                       <li>{"{{CURRENT_DATETIME}}"} → 2026-04-17 14:32</li>
                       <li>{"{{CURRENT_TIMEZONE}}"} → Europe/Warsaw</li>
                     </ul>
+                  </div>
+                </div>
+
+                <Separator />
+
+                <div>
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="min-w-0">
+                      <Label className="flex items-center gap-1.5">
+                        <Brain className="h-3.5 w-3.5 text-foreground/60" />
+                        Thinking
+                      </Label>
+                      <p className="mt-1 text-[11px] text-foreground/50">
+                        Default state of the per-chat Thinking toggle for new
+                        chats. Thinking switch in chat settings overrides this.
+                        Only applies to thinking-capable Ollama models - OpenAI
+                        API providers ignore this field.
+                      </p>
+                    </div>
+                    <Switch
+                      checked={settings.thinking_default}
+                      onCheckedChange={(next) =>
+                        settings.update("thinking_default", next)
+                      }
+                      className="shrink-0"
+                      aria-label={
+                        settings.thinking_default
+                          ? "Disable LLM Thinking by default"
+                          : "Enable LLM Thinking by default"
+                      }
+                    />
                   </div>
                 </div>
 

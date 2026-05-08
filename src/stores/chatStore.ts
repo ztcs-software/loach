@@ -200,6 +200,13 @@ function readSessionParams(session: Session | undefined): GenerationParams {
   const isOllama = session.provider === "ollama";
   const modelsState = isOllama ? useModelsStore.getState() : null;
   const modelDefaults = modelsState?.modelDefaults[session.model] ?? {};
+  const settingsState = useSettingsStore.getState();
+  // Global Thinking default (Settings → General). Sits below model + per-model
+  // prefs and the per-chat override so an explicit per-model or per-chat
+  // setting still wins.
+  const globalThinkLayer: Partial<GenerationParams> = isOllama
+    ? { think: settingsState.thinking_default }
+    : {};
   const thinkPref = modelsState?.modelThinkPrefs[session.model];
   const thinkLayer: Partial<GenerationParams> =
     thinkPref === undefined ? {} : { think: thinkPref };
@@ -222,6 +229,7 @@ function readSessionParams(session: Session | undefined): GenerationParams {
   }
   const merged: GenerationParams = {
     ...DEFAULT_PARAMS,
+    ...globalThinkLayer,
     ...modelDefaults,
     ...thinkLayer,
     ...spaceLayer,
@@ -231,7 +239,7 @@ function readSessionParams(session: Session | undefined): GenerationParams {
   // the field, so we don't bother stamping it on those requests. Stays out
   // of `params_json` deliberately: a per-chat record of "user picked this"
   // shouldn't include settings the user never touched in the panel.
-  if (isOllama && useSettingsStore.getState().low_vram_global) {
+  if (isOllama && settingsState.low_vram_global) {
     merged.low_vram = true;
   }
   return merged;

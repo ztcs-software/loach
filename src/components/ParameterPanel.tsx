@@ -54,6 +54,9 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
   // we visually pin the per-chat toggle on and disable it, with a hint
   // pointing the user back to the global setting.
   const lowVramGlobal = useSettingsStore((s) => s.low_vram_global);
+  // Global Thinking default (Settings → General). Mirrors the chatStore
+  // merge order so the panel shows the same value the request will send.
+  const thinkingDefault = useSettingsStore((s) => s.thinking_default);
 
   const overrides = useMemo(
     () => parseOverrides(session?.params_json ?? null),
@@ -67,11 +70,12 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
   const initial = useMemo<GenerationParams>(
     () => ({
       ...DEFAULT_PARAMS,
+      ...(session?.provider === "ollama" ? { think: thinkingDefault } : {}),
       ...(modelDefaults ?? {}),
       ...(modelThinkPref === undefined ? {} : { think: modelThinkPref }),
       ...overrides,
     }),
-    [overrides, modelDefaults, modelThinkPref],
+    [overrides, modelDefaults, modelThinkPref, thinkingDefault, session?.provider],
   );
 
   const [params, setParams] = useState<GenerationParams>(initial);

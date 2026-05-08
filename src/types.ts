@@ -239,6 +239,12 @@ export interface Settings {
    *  hardware where you'd otherwise have to remember to flip the per-chat
    *  toggle. Off by default. Ignored by OpenAI providers. */
   low_vram_global: boolean;
+  /** Default value for the per-chat Thinking toggle. Applied as a baseline
+   *  in `readSessionParams` so new chats (and chats that haven't touched
+   *  the slider) inherit it. The per-chat Thinking switch in the parameter
+   *  sidebar overrides it. Only meaningful for thinking-capable Ollama
+   *  models — OpenAI providers ignore the field. */
+  thinking_default: boolean;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -255,6 +261,7 @@ export const DEFAULT_SETTINGS: Settings = {
   temporal_awareness: true,
   web_fetch_enabled: false,
   low_vram_global: false,
+  thinking_default: true,
 };
 
 /** Shape returned by the Rust `fetch_url` command. Kept in sync with
