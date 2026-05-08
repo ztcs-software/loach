@@ -12,6 +12,7 @@ import {
   updateSpace,
   updateSpaceMemory,
 } from "@/lib/tauri";
+import { SPACE_BYTES_CAP } from "@/lib/files";
 import type { Space, SpaceFile, SpaceMemory } from "@/types";
 
 interface SpaceState {
@@ -187,7 +188,12 @@ export const useSpaceStore = create<SpaceState>((set, get) => ({
 
   addFile: async (spaceId, name, mime, kind, data, size) => {
     const existing = get().spaceFiles[spaceId] ?? [];
-    if (existing.length >= 12) throw new Error("Maximum 12 files per space");
+    const used = existing.reduce((acc, f) => acc + f.size, 0);
+    if (used + size > SPACE_BYTES_CAP) {
+      throw new Error(
+        `Adding "${name}" would exceed the 200 MB space limit.`,
+      );
+    }
     const file = await addSpaceFile({
       space_id: spaceId,
       name,

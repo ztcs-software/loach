@@ -38,7 +38,7 @@ import { useChatStore } from "@/stores/chatStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useUIStore } from "@/stores/uiStore";
-import { fileToAttachment } from "@/lib/files";
+import { fileToAttachment, SPACE_BYTES_CAP } from "@/lib/files";
 import {
   ollamaListModels,
   ollamaProbe,
@@ -54,8 +54,6 @@ import {
 } from "@/types";
 
 type TabId = "chats" | "instructions" | "files" | "memory" | "models";
-
-const FILE_CAP = 12;
 
 export function SpaceView() {
   const viewingSpaceId = useSpaceStore((s) => s.viewingSpaceId);
@@ -290,13 +288,6 @@ export function SpaceView() {
               </p>
             )}
 
-            {/* Meta strip — surfaces the same counts that used to live as
-                tab badges, but as small chips so they sit comfortably under
-                the description and stay readable on the page background.
-                Each chip hides itself when it would be uninformative. The
-                file chip drops the cap (`/12`) — the limit only matters
-                when the user is actively adding files, and the Files tab
-                already shows it. */}
             <div className="mt-3 flex flex-wrap items-center gap-1.5">
               <MetaChip>
                 {spaceSessions.length}{" "}
@@ -371,7 +362,6 @@ export function SpaceView() {
                   files={files}
                   onAdd={async (fileList) => {
                     for (const f of Array.from(fileList)) {
-                      if (files.length >= FILE_CAP) return;
                       const att = await fileToAttachment(f);
                       await doAddFile(
                         space.id,
@@ -722,8 +712,7 @@ function FilesTab({
   const [busy, setBusy] = useState(false);
 
   const totalBytes = files.reduce((acc, f) => acc + f.size, 0);
-  const remaining = FILE_CAP - files.length;
-  const atCap = remaining <= 0;
+  const atCap = totalBytes >= SPACE_BYTES_CAP;
 
   const handlePick = async (list: FileList) => {
     setError(null);
@@ -742,7 +731,7 @@ function FilesTab({
       <p className="text-xs text-foreground/55">
         Reference files available to every chat in this space. Text files are
         inlined into the system prompt; images attach to vision-capable
-        models. 15&nbsp;MB per file.
+        models. 20&nbsp;MB per file, 200&nbsp;MB total per space.
       </p>
 
       {/* Upload row */}
@@ -751,8 +740,8 @@ function FilesTab({
           <Upload className="h-4 w-4" />
           <span>
             {atCap
-              ? `Reached the ${FILE_CAP}-file limit`
-              : `${files.length} of ${FILE_CAP} files · ${formatSize(totalBytes)}`}
+              ? `Reached the 200 MB space limit`
+              : `${formatSize(totalBytes)} of 200 MB · ${files.length} ${files.length === 1 ? "file" : "files"}`}
           </span>
         </div>
         <Button

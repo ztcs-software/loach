@@ -175,7 +175,7 @@ export function ChatInput({ centered = false }: ChatInputProps) {
         next.push(await fileToAttachment(f));
       } catch (e) {
         if (e instanceof FileTooLargeError) {
-          setError(`${e.name} is larger than 15 MB.`);
+          setError(`${e.name} is larger than 20 MB.`);
         } else {
           setError("Failed to read file");
         }
