@@ -22,7 +22,7 @@ interface SettingsState extends Settings {
   setProviderDefault: (provider: ProviderId, model: string) => Promise<void>;
 }
 
-export const useSettingsStore = create<SettingsState>((set, get) => ({
+export const useSettingsStore = create<SettingsState>((set) => ({
   ...DEFAULT_SETTINGS,
   openai_key_set: false,
   hydrated: false,
@@ -39,9 +39,9 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         if (v === undefined) return;
         const def = DEFAULT_SETTINGS[k];
         if (typeof def === "boolean") {
-          (merged as Record<string, unknown>)[k as string] = v === "true";
+          (merged as unknown as Record<string, unknown>)[k as string] = v === "true";
         } else {
-          (merged as Record<string, unknown>)[k as string] = v;
+          (merged as unknown as Record<string, unknown>)[k as string] = v;
         }
       });
       const hasKey = await getOpenAIKeyStatus().catch(() => false);
