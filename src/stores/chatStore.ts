@@ -608,9 +608,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
 
       // Re-use the surviving empty session, or create a new one.
+      // Exception: while onboarding is still pending, skip the auto-
+      // create. The wizard owns the screen and a freshly-spawned "New
+      // chat" the user can't interact with (a) clutters the sidebar
+      // and (b) races itself in StrictMode-dev / post-factory-reset
+      // reloads, producing multiple phantom rows. `sendUserMessage`
+      // already creates a session lazily on first send, so the user
+      // doesn't lose anything by us holding off here.
+      const onboardingDone =
+        useSettingsStore.getState().onboarding_completed;
       if (emptySessions.length > 0) {
         await get().selectSession(emptySessions[0].id);
-      } else {
+      } else if (onboardingDone) {
         await get().newSession();
       }
     } catch (e) {

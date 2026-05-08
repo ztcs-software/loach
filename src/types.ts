@@ -245,6 +245,11 @@ export interface Settings {
    *  sidebar overrides it. Only meaningful for thinking-capable Ollama
    *  models — OpenAI providers ignore the field. */
   thinking_default: boolean;
+  /** Flips to true after the user finishes (or dismisses) the first-launch
+   *  onboarding flow. Default false; lives in the same KV settings table
+   *  that `factory_reset` truncates, so a reset naturally re-fires the
+   *  onboarding flow on next launch. */
+  onboarding_completed: boolean;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -262,6 +267,7 @@ export const DEFAULT_SETTINGS: Settings = {
   web_fetch_enabled: false,
   low_vram_global: false,
   thinking_default: true,
+  onboarding_completed: false,
 };
 
 /** Shape returned by the Rust `fetch_url` command. Kept in sync with
