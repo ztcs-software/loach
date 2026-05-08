@@ -21,6 +21,13 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
@@ -85,22 +92,13 @@ export function SpaceView() {
 
   const space = spaces.find((s) => s.id === viewingSpaceId);
 
-  const [editingName, setEditingName] = useState(false);
-  const [nameVal, setNameVal] = useState("");
-  const [editingDesc, setEditingDesc] = useState(false);
-  const [descVal, setDescVal] = useState("");
+  const [editDialogOpen, setEditDialogOpen] = useState(false);
   const [tab, setTab] = useState<TabId>("chats");
   const [files, setFiles] = useState<SpaceFile[]>([]);
   const [memories, setMemories] = useState<SpaceMemory[]>([]);
 
-  // Reseed the local edit state when the user navigates between spaces.
-  // Deliberately keyed on `space?.id` only — re-running on every Space
-  // mutation would clobber an in-progress inline edit when the optimistic
-  // update lands.
   useEffect(() => {
     if (space) {
-      setNameVal(space.name);
-      setDescVal(space.description);
       void loadFiles(space.id);
       void loadMemories(space.id);
     }
@@ -130,30 +128,12 @@ export function SpaceView() {
     setSidebarTab("spaces");
   };
 
-  const handleSaveName = async () => {
-    const trimmed = nameVal.trim();
-    if (trimmed && trimmed !== space.name) {
-      await doUpdate(space.id, {
-        name: trimmed,
-        description: space.description,
-        instructions: space.instructions,
-      });
-    } else {
-      setNameVal(space.name);
-    }
-    setEditingName(false);
-  };
-
-  const handleSaveDesc = async () => {
-    const next = descVal.trim();
-    if (next !== space.description) {
-      await doUpdate(space.id, {
-        name: space.name,
-        description: next,
-        instructions: space.instructions,
-      });
-    }
-    setEditingDesc(false);
+  const handleSaveDetails = async (next: { name: string; description: string }) => {
+    await doUpdate(space.id, {
+      name: next.name,
+      description: next.description,
+      instructions: space.instructions,
+    });
   };
 
   const handleDeleteSpace = () => {
@@ -207,30 +187,9 @@ export function SpaceView() {
           {/* Title row */}
           <div className="flex items-center gap-3">
             <Folder className="h-7 w-7 shrink-0 text-foreground/65" strokeWidth={1.75} />
-            {editingName ? (
-              <Input
-                autoFocus
-                value={nameVal}
-                onChange={(e) => setNameVal(e.target.value)}
-                onBlur={() => void handleSaveName()}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") (e.target as HTMLInputElement).blur();
-                  if (e.key === "Escape") {
-                    setNameVal(space.name);
-                    setEditingName(false);
-                  }
-                }}
-                className="h-auto flex-1 border-none bg-transparent p-0 text-3xl font-semibold tracking-tight focus-visible:ring-0"
-              />
-            ) : (
-              <h1
-                className="flex-1 cursor-pointer truncate text-3xl font-semibold tracking-tight text-foreground transition-colors hover:text-foreground/85"
-                onClick={() => setEditingName(true)}
-                title="Click to rename"
-              >
-                {space.name}
-              </h1>
-            )}
+            <h1 className="flex-1 truncate text-3xl font-semibold tracking-tight text-foreground">
+              {space.name}
+            </h1>
 
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
@@ -244,6 +203,11 @@ export function SpaceView() {
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="min-w-[180px]">
+                <DropdownMenuItem onSelect={() => setEditDialogOpen(true)}>
+                  <Pencil className="mr-2 h-4 w-4" />
+                  Edit details
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
                 <DropdownMenuItem
                   onSelect={handleDeleteSpace}
                   className="text-destructive focus:text-destructive"
@@ -257,36 +221,16 @@ export function SpaceView() {
 
           {/* Description */}
           <div className="mt-1.5 ml-10">
-            {editingDesc ? (
-              <Input
-                autoFocus
-                value={descVal}
-                onChange={(e) => setDescVal(e.target.value)}
-                onBlur={() => void handleSaveDesc()}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") (e.target as HTMLInputElement).blur();
-                  if (e.key === "Escape") {
-                    setDescVal(space.description);
-                    setEditingDesc(false);
-                  }
-                }}
-                placeholder="Add a description"
-                className="h-auto border-none bg-transparent p-0 text-sm text-foreground/55 focus-visible:ring-0"
-              />
-            ) : (
-              <p
-                className={cn(
-                  "cursor-pointer text-sm transition-colors",
-                  space.description
-                    ? "text-foreground/55 hover:text-foreground/75"
-                    : "italic text-foreground/30 hover:text-foreground/50",
-                )}
-                onClick={() => setEditingDesc(true)}
-                title="Click to edit"
-              >
-                {space.description || "Add a description"}
-              </p>
-            )}
+            <p
+              className={cn(
+                "text-sm",
+                space.description
+                  ? "text-foreground/55"
+                  : "italic text-foreground/30",
+              )}
+            >
+              {space.description || "No description"}
+            </p>
 
             <div className="mt-3 flex flex-wrap items-center gap-1.5">
               <MetaChip>
@@ -416,7 +360,128 @@ export function SpaceView() {
           </div>
         </div>
       </ScrollArea>
+
+      <EditSpaceDialog
+        open={editDialogOpen}
+        onOpenChange={setEditDialogOpen}
+        initialName={space.name}
+        initialDescription={space.description}
+        onSave={handleSaveDetails}
+      />
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Edit details dialog — mirrors the create-space form so the two affordances
+// feel identical from the user's seat.
+// ---------------------------------------------------------------------------
+
+function EditSpaceDialog({
+  open,
+  onOpenChange,
+  initialName,
+  initialDescription,
+  onSave,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  initialName: string;
+  initialDescription: string;
+  onSave: (next: { name: string; description: string }) => Promise<void>;
+}) {
+  const [name, setName] = useState(initialName);
+  const [description, setDescription] = useState(initialDescription);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Reseed when the dialog opens so a stale draft from a prior open doesn't
+  // leak across edits, and so navigating to a different space picks up its
+  // current values.
+  useEffect(() => {
+    if (open) {
+      setName(initialName);
+      setDescription(initialDescription);
+      setError(null);
+    }
+  }, [open, initialName, initialDescription]);
+
+  const handleSave = async () => {
+    const trimmedName = name.trim();
+    const trimmedDesc = description.trim();
+    if (!trimmedName) {
+      setError("Name is required");
+      return;
+    }
+    if (trimmedName === initialName && trimmedDesc === initialDescription) {
+      onOpenChange(false);
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      await onSave({ name: trimmedName, description: trimmedDesc });
+      onOpenChange(false);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle>Edit Space details</DialogTitle>
+          <DialogDescription>
+            Update the name and description for this space.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="mt-2 space-y-3">
+          <Input
+            id="edit-space-name"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                void handleSave();
+              }
+            }}
+            placeholder="Name your space"
+            maxLength={60}
+            autoFocus
+          />
+          <Textarea
+            id="edit-space-desc"
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            placeholder="Describe your project, goals, subject…"
+            className="min-h-[88px] rounded-2xl border-foreground/10 bg-foreground/[0.05]"
+          />
+          {error && <p className="text-xs text-destructive">{error}</p>}
+        </div>
+
+        <div className="mt-3 flex items-center justify-end gap-2">
+          <Button
+            variant="outline"
+            onClick={() => onOpenChange(false)}
+            className="rounded-lg"
+          >
+            Cancel
+          </Button>
+          <Button
+            onClick={() => void handleSave()}
+            disabled={saving || !name.trim()}
+            className="rounded-lg"
+          >
+            {saving ? "Saving…" : "Save"}
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 
