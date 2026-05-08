@@ -2,8 +2,6 @@ import { useMemo, useState } from "react";
 import {
   Archive,
   Cpu,
-  FileJson,
-  FileText,
   Layers,
   Loader2,
   MoreHorizontal,
@@ -30,7 +28,6 @@ import { useSpaceStore } from "@/stores/spaceStore";
 import { useUIStore } from "@/stores/uiStore";
 import type { SidebarTab } from "@/stores/uiStore";
 import { cn, relativeDay } from "@/lib/utils";
-import { exportSessionToFile } from "@/lib/export";
 import type { Session } from "@/types";
 
 /**
@@ -517,16 +514,6 @@ function SessionRow({
             </DropdownMenuItem>
             <DropdownMenuItem onSelect={() => setEditing(true)}>
               <Pencil className="h-4 w-4" /> Rename
-            </DropdownMenuItem>
-            <DropdownMenuItem
-              onSelect={() => exportSessionToFile(session.id, session.title, "md")}
-            >
-              <FileText className="h-4 w-4" /> Export as Markdown
-            </DropdownMenuItem>
-            <DropdownMenuItem
-              onSelect={() => exportSessionToFile(session.id, session.title, "json")}
-            >
-              <FileJson className="h-4 w-4" /> Export as JSON
             </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem onSelect={() => void archiveChat(session.id, true)}>
