@@ -18,6 +18,7 @@ import {
   imagesFromAttachments,
   inlineTextAttachments,
 } from "@/lib/files";
+import { extractMemories } from "@/lib/memory";
 import { applyTemporalAwareness } from "@/lib/temporal";
 import {
   extractUrls,
@@ -308,6 +309,35 @@ function finishRunning(get: Getter, set: Setter) {
     unreadPatch = { ...get().unread, [finishedId]: true };
   }
 
+  // Snapshot the buffer + task before we null out `runningBuffers` so the
+  // memory extractor (kicked off below) can read the assistant text. The
+  // extractor runs *after* state cleanup so it never blocks the queue
+  // promotion or the UI returning to idle.
+  const memorySnapshot = (() => {
+    if (!running || !buf || !producedContent) return null;
+    if (!finishedId) return null;
+    const session = get().sessions.find((s) => s.id === finishedId);
+    if (!session?.space_id) return null;
+    const space = useSpaceStore.getState().spaces.find((s) => s.id === session.space_id);
+    if (!space || !space.memory_enabled) return null;
+    // Pull the user message that triggered this turn so the extractor sees
+    // both halves of the exchange. `userMsgId` was captured when the task
+    // was enqueued, so it's always one of the persisted messages.
+    const messages = get().messages[finishedId] ?? [];
+    const userMsg = messages.find((m) => m.id === running.userMsgId);
+    if (!userMsg) return null;
+    return {
+      spaceId: session.space_id,
+      sessionId: finishedId,
+      assistantMessageId: buf.assistantMsgId,
+      userText: userMsg.content,
+      assistantText: buf.content,
+      provider: running.request.provider,
+      model: running.request.model,
+      baseUrl: running.request.base_url,
+    };
+  })();
+
   runningBuffers = null;
 
   const stream = get().activeStream;
@@ -326,6 +356,15 @@ function finishRunning(get: Getter, set: Setter) {
     ...(unreadPatch ? { unread: unreadPatch } : {}),
   });
   promoteQueueHead(get, set);
+
+  // Fire-and-forget memory extraction. Runs after the queue head has been
+  // promoted so the user's next message starts streaming without waiting on
+  // us; failures are logged inside the extractor and never bubble up.
+  if (memorySnapshot) {
+    void extractMemories(memorySnapshot).catch((e) => {
+      console.warn("memory extraction failed", e);
+    });
+  }
 }
 
 /** Promotes the head of the waiting queue to be the running task. Deferred
@@ -926,9 +965,30 @@ export const useChatStore = create<ChatState>((set, get) => ({
             filesBlock += `\nFile: \`${f.name}\`\n\`\`\`\n${f.data}\n\`\`\`\n`;
           }
         }
+        // Memory block — bulleted facts auto-extracted from prior chats in
+        // this space. Always rides along when memories exist, regardless of
+        // whether the toggle is currently on: turning the toggle off stops
+        // NEW writes but doesn't strip context the user might still want
+        // models to see (mirrors how disabling a system-prompt setting in
+        // most chat tools doesn't retroactively erase past additions).
+        let memoryBlock = "";
+        if (ctx.memories.length > 0) {
+          memoryBlock = "--- Space memory ---\n";
+          memoryBlock +=
+            "Facts to remember about the user across chats in this space:\n";
+          for (const m of ctx.memories) {
+            memoryBlock += `- ${m.content}\n`;
+          }
+        }
+        // Cache memories on the space store so the post-turn extractor can
+        // dedupe against the same list without a second round-trip.
+        useSpaceStore.setState((s) => ({
+          spaceMemories: { ...s.spaceMemories, [session.space_id!]: ctx.memories },
+        }));
         const base = spaceInstructions || fallbackPrompt;
         const parts: string[] = [];
         if (base) parts.push(base);
+        if (memoryBlock) parts.push(memoryBlock);
         if (filesBlock) parts.push(filesBlock);
         effectiveSystemPrompt = parts.length ? parts.join("\n\n") : null;
       } catch (e) {

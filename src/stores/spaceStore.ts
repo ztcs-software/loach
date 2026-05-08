@@ -1,14 +1,18 @@
 import { create } from "zustand";
 import {
   addSpaceFile,
+  addSpaceMemory,
   createSpace,
   deleteSpace,
   listSpaceFiles,
+  listSpaceMemories,
   listSpaces,
   removeSpaceFile,
+  removeSpaceMemory,
   updateSpace,
+  updateSpaceMemory,
 } from "@/lib/tauri";
-import type { Space, SpaceFile } from "@/types";
+import type { Space, SpaceFile, SpaceMemory } from "@/types";
 
 interface SpaceState {
   spaces: Space[];
@@ -16,6 +20,11 @@ interface SpaceState {
   editingSpace: Space | null;
   viewingSpaceId: string | null;
   spaceFiles: Record<string, SpaceFile[]>;
+  /** Per-space memory cache, keyed by `space_id`. Hydrated lazily — the
+   *  Memory tab and the chat send path each call `loadSpaceMemories` when
+   *  they need it. Mutated directly by the extractor when it auto-saves a
+   *  new row so the Memory tab reflects writes without a re-fetch. */
+  spaceMemories: Record<string, SpaceMemory[]>;
   spacesExpanded: boolean;
   spaceFormOpen: boolean;
 
@@ -35,6 +44,7 @@ interface SpaceState {
       default_provider?: string | null;
       default_model?: string | null;
       default_params_json?: string | null;
+      memory_enabled?: boolean | null;
     },
   ) => Promise<void>;
   deleteSpace: (id: string) => Promise<void>;
@@ -53,6 +63,19 @@ interface SpaceState {
     size: number,
   ) => Promise<SpaceFile>;
   removeFile: (fileId: string, spaceId: string) => Promise<void>;
+
+  loadSpaceMemories: (spaceId: string) => Promise<SpaceMemory[]>;
+  /** Insert a new memory and return the persisted row. Used by both the
+   *  extractor (auto-save) and the Memory tab's "Add manually" affordance.
+   *  Source ids are optional so manual entries leave both NULL. */
+  addMemory: (args: {
+    space_id: string;
+    content: string;
+    source_session_id?: string | null;
+    source_message_id?: string | null;
+  }) => Promise<SpaceMemory>;
+  updateMemory: (id: string, spaceId: string, content: string) => Promise<void>;
+  removeMemory: (id: string, spaceId: string) => Promise<void>;
 }
 
 export const useSpaceStore = create<SpaceState>((set, get) => ({
@@ -61,6 +84,7 @@ export const useSpaceStore = create<SpaceState>((set, get) => ({
   editingSpace: null,
   viewingSpaceId: null,
   spaceFiles: {},
+  spaceMemories: {},
   spacesExpanded: false,
   spaceFormOpen: false,
 
@@ -103,6 +127,11 @@ export const useSpaceStore = create<SpaceState>((set, get) => ({
         fields.default_params_json !== undefined
           ? fields.default_params_json
           : current?.default_params_json ?? null,
+      // memory_enabled is a tri-state on the wire (`undefined` = leave the
+      // existing value alone). Forward `undefined` so the Rust update_space
+      // command's `Option<bool>` correctly skips the column.
+      memory_enabled:
+        fields.memory_enabled !== undefined ? fields.memory_enabled : null,
     };
     await updateSpace({ id, ...next });
     set((s) => ({
@@ -110,8 +139,16 @@ export const useSpaceStore = create<SpaceState>((set, get) => ({
         sp.id === id
           ? {
               ...sp,
-              ...next,
+              name: next.name,
+              description: next.description,
+              instructions: next.instructions,
               default_provider: (next.default_provider as Space["default_provider"]) ?? null,
+              default_model: next.default_model,
+              default_params_json: next.default_params_json,
+              memory_enabled:
+                next.memory_enabled !== null && next.memory_enabled !== undefined
+                  ? next.memory_enabled
+                  : sp.memory_enabled,
               updated_at: Date.now(),
             }
           : sp,
@@ -125,9 +162,12 @@ export const useSpaceStore = create<SpaceState>((set, get) => ({
       const spaces = s.spaces.filter((sp) => sp.id !== id);
       const files = { ...s.spaceFiles };
       delete files[id];
+      const memories = { ...s.spaceMemories };
+      delete memories[id];
       return {
         spaces,
         spaceFiles: files,
+        spaceMemories: memories,
         activeSpaceId: s.activeSpaceId === id ? null : s.activeSpaceId,
       };
     });
@@ -172,6 +212,47 @@ export const useSpaceStore = create<SpaceState>((set, get) => ({
       spaceFiles: {
         ...s.spaceFiles,
         [spaceId]: (s.spaceFiles[spaceId] ?? []).filter((f) => f.id !== fileId),
+      },
+    }));
+  },
+
+  loadSpaceMemories: async (spaceId) => {
+    const memories = await listSpaceMemories(spaceId);
+    set((s) => ({ spaceMemories: { ...s.spaceMemories, [spaceId]: memories } }));
+    return memories;
+  },
+
+  addMemory: async (args) => {
+    const memory = await addSpaceMemory(args);
+    set((s) => ({
+      spaceMemories: {
+        ...s.spaceMemories,
+        [args.space_id]: [...(s.spaceMemories[args.space_id] ?? []), memory],
+      },
+    }));
+    return memory;
+  },
+
+  updateMemory: async (id, spaceId, content) => {
+    const trimmed = content.trim();
+    await updateSpaceMemory({ id, content: trimmed });
+    const now = Date.now();
+    set((s) => ({
+      spaceMemories: {
+        ...s.spaceMemories,
+        [spaceId]: (s.spaceMemories[spaceId] ?? []).map((m) =>
+          m.id === id ? { ...m, content: trimmed, updated_at: now } : m,
+        ),
+      },
+    }));
+  },
+
+  removeMemory: async (id, spaceId) => {
+    await removeSpaceMemory(id);
+    set((s) => ({
+      spaceMemories: {
+        ...s.spaceMemories,
+        [spaceId]: (s.spaceMemories[spaceId] ?? []).filter((m) => m.id !== id),
       },
     }));
   },

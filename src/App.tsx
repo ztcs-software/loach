@@ -18,6 +18,7 @@ import { LockScreen } from "@/components/LockScreen";
 import { CodeCanvas } from "@/components/CodeCanvas";
 import { SearchBar } from "@/components/SearchBar";
 import { SelectionCopyButton } from "@/components/SelectionCopyButton";
+import { ToastHost } from "@/components/ToastHost";
 import { useChatStore } from "@/stores/chatStore";
 import { useModelsStore } from "@/stores/modelsStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -164,6 +165,10 @@ export default function App() {
           or the `loach:focus-search` event the sidebar fires. */}
       {!showLock && <SearchBar />}
       {!showLock && <SelectionCopyButton />}
+      {/* Global toast host. Mounted unconditionally so messages from any
+          surface (including the lock screen path, in the future) land in a
+          predictable spot. Renders nothing when no toasts are queued. */}
+      <ToastHost />
     </TooltipProvider>
   );
 }

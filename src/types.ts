@@ -29,6 +29,27 @@ export interface Space {
    *  Null = inherit. Layered between model defaults and per-session
    *  overrides — see `chatStore::readSessionParams`. */
   default_params_json: string | null;
+  /** Per-space toggle for the silent-auto-write memory extractor. Default
+   *  on at space creation. When false, no new memories are auto-saved and
+   *  the prompt builder skips the memory block — but existing rows stay
+   *  in the DB so flipping it off doesn't strip context the user might
+   *  still want to consult on the Memory tab. */
+  memory_enabled: boolean;
+  created_at: number;
+  updated_at: number;
+}
+
+/** One auto-saved (or hand-edited) fact scoped to a Space. The extractor
+ *  proposes new rows after each assistant turn; the user can edit or delete
+ *  any of them from the Memory tab. `source_session_id` / `source_message_id`
+ *  point at the chat that produced the fact so the UI can link back to
+ *  it; both are null for memories the user authored manually. */
+export interface SpaceMemory {
+  id: string;
+  space_id: string;
+  content: string;
+  source_session_id: string | null;
+  source_message_id: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -48,6 +69,7 @@ export interface SpaceFile {
 export interface SpaceContext {
   space: Space;
   files: SpaceFile[];
+  memories: SpaceMemory[];
 }
 
 export interface Snippet {
@@ -385,6 +407,7 @@ export interface ImportStats {
   messages: number;
   spaces: number;
   space_files: number;
+  space_memories: number;
   snippets: number;
   mcp_servers: number;
   settings: number;

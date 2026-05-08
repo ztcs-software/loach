@@ -17,6 +17,7 @@ import type {
   Space,
   SpaceContext,
   SpaceFile,
+  SpaceMemory,
   StreamEvent,
 } from "@/types";
 
@@ -365,6 +366,7 @@ export function createSpace(args: {
       default_provider: null,
       default_model: null,
       default_params_json: null,
+      memory_enabled: true,
       created_at: now,
       updated_at: now,
     });
@@ -380,6 +382,7 @@ export function updateSpace(args: {
   default_provider?: string | null;
   default_model?: string | null;
   default_params_json?: string | null;
+  memory_enabled?: boolean | null;
 }): Promise<void> {
   if (!isTauri) return notInTauri(undefined);
   return invoke("update_space", { args });
@@ -437,12 +440,55 @@ export function getSpaceContext(spaceId: string): Promise<SpaceContext> {
         default_provider: null,
         default_model: null,
         default_params_json: null,
+        memory_enabled: true,
         created_at: 0,
         updated_at: 0,
       },
       files: [],
+      memories: [],
     });
   return invoke("get_space_context", { spaceId });
+}
+
+// ------------ space memories ------------
+
+export function listSpaceMemories(spaceId: string): Promise<SpaceMemory[]> {
+  if (!isTauri) return notInTauri([]);
+  return invoke("list_space_memories", { spaceId });
+}
+
+export function addSpaceMemory(args: {
+  space_id: string;
+  content: string;
+  source_session_id?: string | null;
+  source_message_id?: string | null;
+}): Promise<SpaceMemory> {
+  if (!isTauri) {
+    const now = Date.now();
+    return notInTauri<SpaceMemory>({
+      id: `mock-mem-${now}`,
+      space_id: args.space_id,
+      content: args.content,
+      source_session_id: args.source_session_id ?? null,
+      source_message_id: args.source_message_id ?? null,
+      created_at: now,
+      updated_at: now,
+    });
+  }
+  return invoke("add_space_memory", { args });
+}
+
+export function updateSpaceMemory(args: {
+  id: string;
+  content: string;
+}): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("update_space_memory", { args });
+}
+
+export function removeSpaceMemory(id: string): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("remove_space_memory", { id });
 }
 
 // ------------ snippets ------------

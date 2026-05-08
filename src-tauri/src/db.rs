@@ -40,6 +40,34 @@ pub struct Space {
     /// Layered between model defaults and per-session overrides — see
     /// `chatStore::readSessionParams`. Null means "inherit".
     pub default_params_json: Option<String>,
+    /// When true, every assistant turn in this space runs through the
+    /// extractor and any new facts are auto-saved as `space_memories`.
+    /// Defaults to true on space creation; users can flip it off per-space
+    /// from the Memory tab. Defaults to true on deserialization too, so
+    /// older Loach exports that predate the field load with memory turned
+    /// on (matching the behaviour an existing user would see post-migration).
+    #[serde(default = "default_true")]
+    pub memory_enabled: bool,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// One free-text fact persisted across chats in a Space. The extractor
+/// proposes new rows after each assistant turn; users can edit, delete, or
+/// pin entries from the Memory tab. `source_session_id` / `source_message_id`
+/// capture the chat that produced the row so the UI can link back; both go
+/// NULL for memories the user authored manually.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SpaceMemory {
+    pub id: String,
+    pub space_id: String,
+    pub content: String,
+    pub source_session_id: Option<String>,
+    pub source_message_id: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -279,6 +307,38 @@ impl Database {
                  ALTER TABLE spaces ADD COLUMN default_params_json TEXT;",
             )?;
         }
+
+        // Add memory_enabled column to spaces if missing. Default ON so
+        // existing spaces start collecting memory once the feature ships;
+        // users can flip it off per-space.
+        let has_memory_enabled = conn
+            .prepare("SELECT memory_enabled FROM spaces LIMIT 0")
+            .is_ok();
+        if !has_memory_enabled {
+            conn.execute_batch(
+                "ALTER TABLE spaces ADD COLUMN memory_enabled INTEGER NOT NULL DEFAULT 1;",
+            )?;
+        }
+
+        // Per-space free-text memory rows. Strict per-Space scope — chats
+        // without a space never write here. Source pointers let the UI link
+        // an auto-saved row back to the chat that produced it; manual entries
+        // leave both NULL.
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS space_memories (
+                id TEXT PRIMARY KEY,
+                space_id TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
+                content TEXT NOT NULL,
+                source_session_id TEXT,
+                source_message_id TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_space_memories_space
+                ON space_memories(space_id, created_at DESC);
+            "#,
+        )?;
 
         Ok(())
     }
@@ -558,7 +618,7 @@ impl Database {
         let mut stmt = conn.prepare(
             "SELECT id, name, description, instructions,
                     default_provider, default_model, default_params_json,
-                    created_at, updated_at
+                    memory_enabled, created_at, updated_at
              FROM spaces ORDER BY updated_at DESC",
         )?;
         let rows = stmt
@@ -571,8 +631,9 @@ impl Database {
                     default_provider: r.get(4)?,
                     default_model: r.get(5)?,
                     default_params_json: r.get(6)?,
-                    created_at: r.get(7)?,
-                    updated_at: r.get(8)?,
+                    memory_enabled: r.get::<_, i64>(7)? != 0,
+                    created_at: r.get(8)?,
+                    updated_at: r.get(9)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -584,7 +645,7 @@ impl Database {
         let mut stmt = conn.prepare(
             "SELECT id, name, description, instructions,
                     default_provider, default_model, default_params_json,
-                    created_at, updated_at
+                    memory_enabled, created_at, updated_at
              FROM spaces WHERE id = ?1",
         )?;
         let mut rows = stmt.query(params![id])?;
@@ -597,8 +658,9 @@ impl Database {
                 default_provider: r.get(4)?,
                 default_model: r.get(5)?,
                 default_params_json: r.get(6)?,
-                created_at: r.get(7)?,
-                updated_at: r.get(8)?,
+                memory_enabled: r.get::<_, i64>(7)? != 0,
+                created_at: r.get(8)?,
+                updated_at: r.get(9)?,
             }))
         } else {
             Ok(None)
@@ -615,8 +677,8 @@ impl Database {
         let now = Utc::now().timestamp_millis();
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO spaces (id, name, description, instructions, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+            "INSERT INTO spaces (id, name, description, instructions, memory_enabled, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, 1, ?5, ?5)",
             params![id, name, description, instructions, now],
         )?;
         Ok(Space {
@@ -627,6 +689,7 @@ impl Database {
             default_provider: None,
             default_model: None,
             default_params_json: None,
+            memory_enabled: true,
             created_at: now,
             updated_at: now,
         })
@@ -641,14 +704,20 @@ impl Database {
         default_provider: Option<&str>,
         default_model: Option<&str>,
         default_params_json: Option<&str>,
+        memory_enabled: Option<bool>,
     ) -> Result<()> {
         let now = Utc::now().timestamp_millis();
         let conn = self.conn.lock().unwrap();
+        // memory_enabled is optional so older callers (and the snippets-style
+        // partial updates from the frontend) don't have to thread it through —
+        // None means "leave the existing value alone".
         conn.execute(
             "UPDATE spaces SET name = ?1, description = ?2, instructions = ?3,
                                default_provider = ?4, default_model = ?5,
-                               default_params_json = ?6, updated_at = ?7
-             WHERE id = ?8",
+                               default_params_json = ?6,
+                               memory_enabled = COALESCE(?7, memory_enabled),
+                               updated_at = ?8
+             WHERE id = ?9",
             params![
                 name,
                 description,
@@ -656,6 +725,7 @@ impl Database {
                 default_provider,
                 default_model,
                 default_params_json,
+                memory_enabled.map(|b| if b { 1_i64 } else { 0_i64 }),
                 now,
                 id,
             ],
@@ -730,6 +800,98 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM space_files WHERE id = ?1", params![file_id])?;
         Ok(())
+    }
+
+    // ------------ space memories ------------
+
+    pub fn list_space_memories(&self, space_id: &str) -> Result<Vec<SpaceMemory>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, space_id, content, source_session_id, source_message_id,
+                    created_at, updated_at
+             FROM space_memories WHERE space_id = ?1 ORDER BY created_at ASC",
+        )?;
+        let rows = stmt
+            .query_map(params![space_id], |r| {
+                Ok(SpaceMemory {
+                    id: r.get(0)?,
+                    space_id: r.get(1)?,
+                    content: r.get(2)?,
+                    source_session_id: r.get(3)?,
+                    source_message_id: r.get(4)?,
+                    created_at: r.get(5)?,
+                    updated_at: r.get(6)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn add_space_memory(
+        &self,
+        space_id: &str,
+        content: &str,
+        source_session_id: Option<&str>,
+        source_message_id: Option<&str>,
+    ) -> Result<SpaceMemory> {
+        let id = Uuid::new_v4().to_string();
+        let now = Utc::now().timestamp_millis();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO space_memories (id, space_id, content, source_session_id,
+                                          source_message_id, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+            params![id, space_id, content, source_session_id, source_message_id, now],
+        )?;
+        Ok(SpaceMemory {
+            id,
+            space_id: space_id.to_string(),
+            content: content.to_string(),
+            source_session_id: source_session_id.map(|s| s.to_string()),
+            source_message_id: source_message_id.map(|s| s.to_string()),
+            created_at: now,
+            updated_at: now,
+        })
+    }
+
+    pub fn update_space_memory(&self, id: &str, content: &str) -> Result<()> {
+        let now = Utc::now().timestamp_millis();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE space_memories SET content = ?1, updated_at = ?2 WHERE id = ?3",
+            params![content, now, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn remove_space_memory(&self, id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM space_memories WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    /// Read every memory across every space — used by the export path.
+    pub fn all_space_memories(&self) -> Result<Vec<SpaceMemory>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, space_id, content, source_session_id, source_message_id,
+                    created_at, updated_at
+             FROM space_memories ORDER BY space_id, created_at",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(SpaceMemory {
+                    id: r.get(0)?,
+                    space_id: r.get(1)?,
+                    content: r.get(2)?,
+                    source_session_id: r.get(3)?,
+                    source_message_id: r.get(4)?,
+                    created_at: r.get(5)?,
+                    updated_at: r.get(6)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     // ------------ snippets ------------
@@ -1017,6 +1179,7 @@ impl Database {
                 messages: self.all_messages()?,
                 spaces: self.list_spaces()?,
                 space_files: self.all_space_files()?,
+                space_memories: self.all_space_memories()?,
                 snippets: self.list_snippets()?,
                 mcp_servers: self.list_mcp_servers()?,
                 settings: self.all_settings()?,
@@ -1041,6 +1204,7 @@ impl Database {
             r#"
             DELETE FROM messages;
             DELETE FROM space_files;
+            DELETE FROM space_memories;
             DELETE FROM sessions;
             DELETE FROM spaces;
             DELETE FROM snippets;
@@ -1094,8 +1258,9 @@ impl Database {
             tx.execute(
                 "INSERT INTO spaces (id, name, description, instructions,
                                      default_provider, default_model,
-                                     default_params_json, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                                     default_params_json, memory_enabled,
+                                     created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 params![
                     sp.id,
                     sp.name,
@@ -1104,8 +1269,26 @@ impl Database {
                     sp.default_provider,
                     sp.default_model,
                     sp.default_params_json,
+                    if sp.memory_enabled { 1_i64 } else { 0_i64 },
                     sp.created_at,
                     sp.updated_at,
+                ],
+            )?;
+        }
+
+        for mem in &d.space_memories {
+            tx.execute(
+                "INSERT INTO space_memories (id, space_id, content, source_session_id,
+                                              source_message_id, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    mem.id,
+                    mem.space_id,
+                    mem.content,
+                    mem.source_session_id,
+                    mem.source_message_id,
+                    mem.created_at,
+                    mem.updated_at,
                 ],
             )?;
         }
@@ -1178,6 +1361,7 @@ impl Database {
             messages: d.messages.len(),
             spaces: d.spaces.len(),
             space_files: d.space_files.len(),
+            space_memories: d.space_memories.len(),
             snippets: d.snippets.len(),
             mcp_servers: d.mcp_servers.len(),
             settings: d.settings.len(),
@@ -1213,6 +1397,7 @@ impl Database {
             r#"
             DELETE FROM messages;
             DELETE FROM space_files;
+            DELETE FROM space_memories;
             DELETE FROM sessions;
             DELETE FROM spaces;
             DELETE FROM snippets;
@@ -1264,6 +1449,10 @@ pub struct SnapshotData {
     pub messages: Vec<Message>,
     pub spaces: Vec<Space>,
     pub space_files: Vec<SpaceFile>,
+    /// Per-space memory rows. Defaults to an empty list on older exports
+    /// that predate the memory feature so loading them stays a no-op.
+    #[serde(default)]
+    pub space_memories: Vec<SpaceMemory>,
     pub snippets: Vec<Snippet>,
     pub mcp_servers: Vec<McpServer>,
     /// Key/value settings as stored in the `settings` table. A plain list
@@ -1278,6 +1467,7 @@ pub struct ImportStats {
     pub messages: usize,
     pub spaces: usize,
     pub space_files: usize,
+    pub space_memories: usize,
     pub snippets: usize,
     pub mcp_servers: usize,
     pub settings: usize,

@@ -6,6 +6,7 @@ use uuid::Uuid;
 
 use crate::db::{
     DatabaseSnapshot, ImportStats, McpServer, Message, Session, Snippet, Space, SpaceFile,
+    SpaceMemory,
 };
 use crate::mcp::{self, McpTestResult};
 use crate::providers::{self, ChatRequest, ModelInfo};
@@ -490,6 +491,12 @@ pub struct UpdateSpaceArgs {
     pub default_model: Option<String>,
     #[serde(default)]
     pub default_params_json: Option<String>,
+    /// `Some(true|false)` writes the new value, `None` leaves the existing
+    /// row alone. Modelled this way so partial updates from the frontend
+    /// (which currently send every other field on every call) don't have to
+    /// know about the memory toggle unless they're touching it.
+    #[serde(default)]
+    pub memory_enabled: Option<bool>,
 }
 
 #[tauri::command]
@@ -507,6 +514,7 @@ pub async fn update_space(
             args.default_provider.as_deref(),
             args.default_model.as_deref(),
             args.default_params_json.as_deref(),
+            args.memory_enabled,
         )
         .map_err(err)
 }
@@ -566,6 +574,12 @@ pub async fn remove_space_file(
 pub struct SpaceContext {
     pub space: Space,
     pub files: Vec<SpaceFile>,
+    /// Saved facts auto-extracted (or hand-edited) for this space. Empty
+    /// when the space's `memory_enabled` flag is false OR no memories have
+    /// accumulated yet — callers don't need to special-case the two: the
+    /// system-prompt builder skips an empty list and a disabled memory
+    /// space won't have any rows to begin with.
+    pub memories: Vec<SpaceMemory>,
 }
 
 #[tauri::command]
@@ -579,7 +593,70 @@ pub async fn get_space_context(
         .map_err(err)?
         .ok_or_else(|| "space not found".to_string())?;
     let files = state.db.list_space_files(&space_id).map_err(err)?;
-    Ok(SpaceContext { space, files })
+    // Disabled memory still loads zero rows — the toggle gates writes, not
+    // reads. Pre-toggle memories stay readable so flipping it off doesn't
+    // silently strip context the user might still want.
+    let memories = state.db.list_space_memories(&space_id).map_err(err)?;
+    Ok(SpaceContext { space, files, memories })
+}
+
+// ---------- space memories ----------
+
+#[tauri::command]
+pub async fn list_space_memories(
+    state: State<'_, AppState>,
+    space_id: String,
+) -> Result<Vec<SpaceMemory>, String> {
+    state.db.list_space_memories(&space_id).map_err(err)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AddSpaceMemoryArgs {
+    pub space_id: String,
+    pub content: String,
+    #[serde(default)]
+    pub source_session_id: Option<String>,
+    #[serde(default)]
+    pub source_message_id: Option<String>,
+}
+
+#[tauri::command]
+pub async fn add_space_memory(
+    state: State<'_, AppState>,
+    args: AddSpaceMemoryArgs,
+) -> Result<SpaceMemory, String> {
+    let trimmed = args.content.trim();
+    if trimmed.is_empty() {
+        return Err("memory content is required".into());
+    }
+    state
+        .db
+        .add_space_memory(
+            &args.space_id,
+            trimmed,
+            args.source_session_id.as_deref(),
+            args.source_message_id.as_deref(),
+        )
+        .map_err(err)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateSpaceMemoryArgs {
+    pub id: String,
+    pub content: String,
+}
+
+#[tauri::command]
+pub async fn update_space_memory(
+    state: State<'_, AppState>,
+    args: UpdateSpaceMemoryArgs,
+) -> Result<(), String> {
+    state.db.update_space_memory(&args.id, args.content.trim()).map_err(err)
+}
+
+#[tauri::command]
+pub async fn remove_space_memory(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    state.db.remove_space_memory(&id).map_err(err)
 }
 
 // ---------- snippets ----------
