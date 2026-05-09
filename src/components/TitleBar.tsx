@@ -4,12 +4,22 @@ import { cn } from "@/lib/utils";
 import { isTauri } from "@/lib/tauri";
 import { Logo } from "@/components/Logo";
 import { useUIStore } from "@/stores/uiStore";
+import { useSettingsStore } from "@/stores/settingsStore";
 import pkg from "../../package.json";
 
 export function TitleBar() {
   const [isMaximized, setIsMaximized] = useState(false);
   const sidebarOpen = useUIStore((s) => s.sidebarOpen);
   const toggleSidebar = useUIStore((s) => s.toggleSidebar);
+  // Mirror App.tsx's onboarding gate so the sidebar-toggle and search
+  // pill are disabled while the wizard is on screen — the wizard owns
+  // the user's attention and lets them dismiss with X. We rely on
+  // settings being unhydrated during the lock-screen probe phase, so
+  // this also stays inactive (false) during lock without an extra
+  // condition.
+  const settingsHydrated = useSettingsStore((s) => s.hydrated);
+  const onboardingCompleted = useSettingsStore((s) => s.onboarding_completed);
+  const onboardingActive = settingsHydrated && !onboardingCompleted;
 
   useEffect(() => {
     if (!isTauri) return;
@@ -57,7 +67,7 @@ export function TitleBar() {
   return (
     <div
       data-tauri-drag-region
-      className="relative z-20 flex h-9 items-center gap-2 border-b border-foreground/8 bg-foreground/[0.03] pl-1.5 pr-0 select-none backdrop-blur-2xl"
+      className="relative z-[70] flex h-9 items-center gap-2 border-b border-foreground/8 bg-foreground/[0.03] pl-1.5 pr-0 select-none backdrop-blur-2xl"
     >
       {/* Sidebar collapse/expand toggle. Lives at the leftmost slot of the
           window's title bar so the user always knows where to find it,
@@ -72,9 +82,10 @@ export function TitleBar() {
       <button
         type="button"
         onClick={toggleSidebar}
+        disabled={onboardingActive}
         aria-label={sidebarOpen ? "Hide sidebar" : "Show sidebar"}
         title={sidebarOpen ? "Hide sidebar" : "Show sidebar"}
-        className="inline-flex h-7 w-7 items-center justify-center rounded-md text-foreground/55 hover:bg-foreground/10 hover:text-foreground transition-colors"
+        className="inline-flex h-7 w-7 items-center justify-center rounded-md text-foreground/55 transition-colors hover:bg-foreground/10 hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
       >
         <PanelLeft className="h-3.5 w-3.5" />
       </button>
@@ -111,9 +122,10 @@ export function TitleBar() {
         <button
           type="button"
           onClick={() => window.dispatchEvent(new CustomEvent("loach:focus-search"))}
+          disabled={onboardingActive}
           aria-label="Search"
           title="Search"
-          className="pointer-events-auto inline-flex h-7 w-72 items-center gap-2 rounded-md border border-foreground/[0.08] bg-foreground/[0.04] px-2.5 text-foreground/55 transition-colors hover:bg-foreground/[0.08] hover:text-foreground"
+          className="pointer-events-auto inline-flex h-7 w-72 items-center gap-2 rounded-md border border-foreground/[0.08] bg-foreground/[0.04] px-2.5 text-foreground/55 transition-colors hover:bg-foreground/[0.08] hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
         >
           <Search className="h-3.5 w-3.5 shrink-0" />
           <span className="min-w-0 flex-1 truncate text-left text-xs">

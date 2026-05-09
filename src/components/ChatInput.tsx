@@ -6,11 +6,22 @@ import {
   FileUp,
   Mic,
   Paperclip,
+  Plus,
   Scissors,
+  Settings2,
   Square,
   TextCursorInput,
+  X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Textarea } from "@/components/ui/textarea";
 import { FileChip } from "./FileChip";
 import {
@@ -20,6 +31,11 @@ import {
 import { useChatStore } from "@/stores/chatStore";
 import { useUIStore } from "@/stores/uiStore";
 import { cn } from "@/lib/utils";
+import {
+  DEFAULT_PERSONA_ID,
+  PERSONAS,
+  getPersona,
+} from "@/lib/personas";
 import type { Attachment } from "@/types";
 
 interface ChatInputProps {
@@ -47,6 +63,26 @@ export function ChatInput({ centered = false }: ChatInputProps) {
   const composerAttachments = useUIStore((s) => s.composerAttachments);
   const composerInsertSeq = useUIStore((s) => s.composerInsertSeq);
   const setComposerDraft = useUIStore((s) => s.setComposerDraft);
+  const personaIdBySession = useUIStore((s) => s.personaIdBySession);
+  const pendingPersonaId = useUIStore((s) => s.pendingPersonaId);
+  const setSessionPersona = useUIStore((s) => s.setSessionPersona);
+  const setPendingPersona = useUIStore((s) => s.setPendingPersona);
+  const paramsOpen = useUIStore((s) => s.paramsOpen);
+  const toggleParams = useUIStore((s) => s.toggleParams);
+
+  // Active persona resolves to whichever scope owns the picker right now:
+  // an open chat reads from `personaIdBySession`; the welcome screen (no
+  // session yet) falls back to `pendingPersonaId`, which chatStore.newSession
+  // consumes when it materialises the session.
+  const activePersonaId = activeSessionId
+    ? personaIdBySession[activeSessionId]
+    : pendingPersonaId;
+  // The chip only renders for a *real* persona — "default" (None) is the
+  // absence of a persona, not a thing to advertise above the composer.
+  const activePersona =
+    activePersonaId && activePersonaId !== DEFAULT_PERSONA_ID
+      ? getPersona(activePersonaId)
+      : null;
 
   const [text, setText] = useState(composerDraft);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -175,7 +211,7 @@ export function ChatInput({ centered = false }: ChatInputProps) {
         next.push(await fileToAttachment(f));
       } catch (e) {
         if (e instanceof FileTooLargeError) {
-          setError(`${e.name} is larger than 15 MB.`);
+          setError(`${e.name} is larger than 20 MB.`);
         } else {
           setError("Failed to read file");
         }
@@ -183,6 +219,23 @@ export function ChatInput({ centered = false }: ChatInputProps) {
     }
     if (next.length) setAttachments((a) => [...a, ...next]);
   };
+
+  // Apply a persona by id. The persona's text is layered into the system
+  // prompt at send time (chatStore), so applying just records the picked id.
+  // The textarea below the pickers stays untouched — it's the user's own
+  // additional instructions, not the persona's. With a session, the id lives
+  // on `personaIdBySession`; on the welcome screen it parks in
+  // `pendingPersonaId` until newSession adopts it.
+  const applyPersona = (personaId: string) => {
+    if (!getPersona(personaId)) return;
+    if (activeSessionId) {
+      setSessionPersona(activeSessionId, personaId);
+    } else {
+      setPendingPersona(personaId === DEFAULT_PERSONA_ID ? null : personaId);
+    }
+  };
+
+  const clearPersona = () => applyPersona(DEFAULT_PERSONA_ID);
 
   const onPick = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!e.target.files) return;
@@ -493,7 +546,7 @@ export function ChatInput({ centered = false }: ChatInputProps) {
 
   // Placeholder / disabled-title tracks the three states the user can be in:
   // busy-running, busy-waiting, or idle.
-  let placeholder = "Ask anything…";
+  let placeholder = "What's on your mind?";
   let disabledTitle: string | null = null;
   if (streamingThisChat) {
     placeholder = "Replying — press the Stop button to cancel and ask again…";
@@ -518,8 +571,11 @@ export function ChatInput({ centered = false }: ChatInputProps) {
       )}
     >
       <div className="mx-auto w-full max-w-3xl">
-        {attachments.length > 0 && (
-          <div className="mb-3 flex flex-wrap gap-2">
+        {(attachments.length > 0 || activePersona) && (
+          <div className="mb-3 flex flex-wrap items-center gap-2">
+            {activePersona && (
+              <PersonaChip persona={activePersona} onRemove={clearPersona} />
+            )}
             {attachments.map((a, i) => (
               <FileChip
                 key={`${a.name}-${i}`}
@@ -547,17 +603,74 @@ export function ChatInput({ centered = false }: ChatInputProps) {
             </div>
           )}
 
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            onClick={() => fileInputRef.current?.click()}
-            aria-label="Attach file"
-            title="Attach file"
-            className="rounded-full text-foreground/65 hover:bg-foreground/10 hover:text-foreground"
-          >
-            <Paperclip className="h-4 w-4" />
-          </Button>
+          {/* Composer "+" menu — fast-path access to file attach and persona
+              switching. The canonical persona editor lives in the parameters
+              sidebar (where you can also tweak the system prompt freely);
+              this menu just gives one-click access to switch between presets
+              without opening the panel. "Customize…" opens the panel for full
+              control. */}
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                aria-label="Add to message"
+                title="Attach files or switch persona"
+                className="rounded-full text-foreground/65 hover:bg-foreground/10 hover:text-foreground"
+              >
+                <Plus className="h-4 w-4" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent
+              align="start"
+              side="top"
+              className="min-w-[14rem]"
+            >
+              <DropdownMenuItem
+                onSelect={() => fileInputRef.current?.click()}
+                className="gap-2.5"
+              >
+                <Paperclip className="h-4 w-4 text-foreground/60" />
+                <span className="flex-1">Attach files</span>
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuLabel>Persona</DropdownMenuLabel>
+              {PERSONAS.map((p) => {
+                const Icon = p.icon;
+                const isActive = activePersonaId
+                  ? activePersonaId === p.id
+                  : p.id === DEFAULT_PERSONA_ID;
+                return (
+                  <DropdownMenuItem
+                    key={p.id}
+                    onSelect={() => applyPersona(p.id)}
+                    className="gap-2.5"
+                  >
+                    <Icon className="h-4 w-4 shrink-0 text-foreground/60" />
+                    <span className="flex-1 font-medium text-foreground/90">
+                      {p.label}
+                    </span>
+                    {isActive && (
+                      <span className="rounded-full bg-orange-500/20 px-1.5 py-px text-[10px] font-semibold uppercase tracking-wider text-orange-300">
+                        Active
+                      </span>
+                    )}
+                  </DropdownMenuItem>
+                );
+              })}
+              <DropdownMenuSeparator />
+              <DropdownMenuItem
+                onSelect={() => {
+                  if (!paramsOpen) toggleParams();
+                }}
+                className="gap-2.5"
+              >
+                <Settings2 className="h-4 w-4 text-foreground/60" />
+                <span className="flex-1">Customize…</span>
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
           <input
             ref={fileInputRef}
             type="file"
@@ -647,11 +760,6 @@ export function ChatInput({ centered = false }: ChatInputProps) {
         </div>
         {error && (
           <p className="mt-2 text-xs text-rose-300">{error}</p>
-        )}
-        {!centered && (
-          <p className="mt-2 text-center text-[10px] text-foreground/35">
-            Loach runs locally. Files are kept on your machine.
-          </p>
         )}
       </div>
       {ctxMenu && (
@@ -772,6 +880,39 @@ function PrimaryButton({
 }
 
 // ---------------------------------------------------------------------------
+// PersonaChip — pill above the textarea showing the active persona, with an
+// `×` to clear. Visually distinct from FileChip (warm orange tint vs. neutral
+// glass) so the two stack types are unambiguous when both render at once.
+// ---------------------------------------------------------------------------
+
+function PersonaChip({
+  persona,
+  onRemove,
+}: {
+  persona: import("@/lib/personas").Persona;
+  onRemove: () => void;
+}) {
+  const Icon = persona.icon;
+  return (
+    <div
+      className="inline-flex items-center gap-1.5 rounded-full border border-orange-400/30 bg-orange-500/10 px-2.5 py-1 text-xs text-orange-200"
+      title={persona.description}
+    >
+      <Icon className="h-3.5 w-3.5" />
+      <span className="font-medium">{persona.label}</span>
+      <button
+        type="button"
+        onClick={onRemove}
+        aria-label={`Remove ${persona.label} persona`}
+        className="ml-0.5 -mr-1 grid h-4 w-4 place-items-center rounded-full text-orange-200/70 hover:bg-orange-500/20 hover:text-orange-100"
+      >
+        <X className="h-3 w-3" />
+      </button>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // TextareaContextMenu — Cut / Copy / Paste / Select All
 //
 // Cursor-positioned menu shown on right-click in the prompt textarea. Cut and
@@ -799,11 +940,34 @@ const TextareaContextMenu = React.forwardRef<HTMLDivElement, TextareaContextMenu
     { x, y, hasSelection, hasText, onCut, onCopy, onPaste, onSelectAll },
     ref,
   ) {
+    // Render off-screen first, then measure and clamp/flip so the menu
+    // never spills past the viewport edges (most commonly the bottom edge,
+    // since the composer lives near the bottom of the window).
+    const innerRef = useRef<HTMLDivElement>(null);
+    React.useImperativeHandle(ref, () => innerRef.current as HTMLDivElement);
+    const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
+    React.useLayoutEffect(() => {
+      const el = innerRef.current;
+      if (!el) return;
+      const { offsetWidth: w, offsetHeight: h } = el;
+      const margin = 8;
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+      let left = x;
+      let top = y;
+      if (left + w > vw - margin) left = Math.max(margin, vw - margin - w);
+      if (top + h > vh - margin) top = Math.max(margin, y - h);
+      setPos({ left, top });
+    }, [x, y]);
     return (
       <div
-        ref={ref}
+        ref={innerRef}
         role="menu"
-        style={{ left: x, top: y }}
+        style={
+          pos
+            ? { left: pos.left, top: pos.top }
+            : { left: 0, top: 0, visibility: "hidden" }
+        }
         className="fixed z-50 min-w-[200px] overflow-hidden rounded-md border border-foreground/10 bg-popover/95 p-1 text-popover-foreground shadow-lg backdrop-blur-xl"
       >
         <CtxItem

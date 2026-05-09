@@ -67,9 +67,8 @@ export function McpPanel() {
             MCP integrations
           </h3>
           <p className="mt-1 text-[13px] text-foreground/60">
-            Model Context Protocol servers expose external tools to the
-            assistant. Add one by URL — Loach speaks the Streamable-HTTP
-            transport.
+            Model Context Protocol (MCP) servers expose external tools to the
+            models.
           </p>
         </div>
         <Button

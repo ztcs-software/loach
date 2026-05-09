@@ -33,6 +33,23 @@ interface UIState {
    *  only need text) don't have to touch attachments. */
   composerAttachments: Attachment[];
   composerInsertSeq: number;
+  /** Persona ID applied to a given chat session. Selected from the composer's
+   *  plus-menu; mirrors the session's `system_prompt` but is tracked separately
+   *  so the UI can show the persona name even after a reload. Not persisted
+   *  across launches by design — the seed prompt lives on the session itself,
+   *  and forgetting which preset produced it is an acceptable cost for v1. */
+  personaIdBySession: Record<string, string>;
+  /** Persona to apply to the next session created (welcome-screen flow, where
+   *  no session exists yet when the user opens the menu). Consumed by
+   *  chatStore.newSession on session creation. */
+  pendingPersonaId: string | null;
+  /** Per-chat tone override. When unset, the chat falls back to
+   *  `settings.default_tone_id`. The tone fragment is composed into the
+   *  effective system prompt at send time (chatStore), not stored on the
+   *  session itself — that way the System-prompt textarea only ever shows the
+   *  persona / user-authored prompt and tones don't compete with manual
+   *  edits. */
+  toneIdBySession: Record<string, string>;
   toggleSidebar: () => void;
   toggleParams: () => void;
   setSettingsOpen: (open: boolean) => void;
@@ -46,9 +63,13 @@ interface UIState {
   /** One-shot: seed both text and attachments into the composer. Used by
    *  Snippets' "Run" action. */
   primeComposer: (text: string, attachments: Attachment[]) => void;
+  setSessionPersona: (sessionId: string, personaId: string) => void;
+  setPendingPersona: (personaId: string | null) => void;
+  consumePendingPersona: () => string | null;
+  setSessionTone: (sessionId: string, toneId: string) => void;
 }
 
-export const useUIStore = create<UIState>((set) => ({
+export const useUIStore = create<UIState>((set, get) => ({
   sidebarOpen: true,
   paramsOpen: false,
   settingsOpen: false,
@@ -57,6 +78,9 @@ export const useUIStore = create<UIState>((set) => ({
   composerDraft: "",
   composerAttachments: [],
   composerInsertSeq: 0,
+  personaIdBySession: {},
+  pendingPersonaId: null,
+  toneIdBySession: {},
   toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
   toggleParams: () => set((s) => ({ paramsOpen: !s.paramsOpen })),
   setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
@@ -75,5 +99,19 @@ export const useUIStore = create<UIState>((set) => ({
       composerDraft: text,
       composerAttachments: attachments,
       composerInsertSeq: s.composerInsertSeq + 1,
+    })),
+  setSessionPersona: (sessionId, personaId) =>
+    set((s) => ({
+      personaIdBySession: { ...s.personaIdBySession, [sessionId]: personaId },
+    })),
+  setPendingPersona: (pendingPersonaId) => set({ pendingPersonaId }),
+  consumePendingPersona: (): string | null => {
+    const id = get().pendingPersonaId;
+    if (id) set({ pendingPersonaId: null });
+    return id;
+  },
+  setSessionTone: (sessionId, toneId) =>
+    set((s) => ({
+      toneIdBySession: { ...s.toneIdBySession, [sessionId]: toneId },
     })),
 }));

@@ -505,9 +505,9 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
           <DialogHeader>
             <DialogTitle>Import context</DialogTitle>
             <DialogDescription>
-              Paste an exported chat (JSON or Markdown) to bring its messages
-              into this conversation, or paste any text to drop it in as a
-              single user message. Imported messages append to the end of
+              Paste an exported chat context (JSON or Markdown) to bring its
+              messages into this conversation, or paste any text to drop it in
+              as a single user prompt. Imported messages append to the end of
               this chat.
             </DialogDescription>
           </DialogHeader>
@@ -566,7 +566,7 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
           <DialogHeader>
             <DialogTitle>Export context</DialogTitle>
             <DialogDescription>
-              The full chat context in Markdown — copy it to share or reuse
+              The full chat context in Markdown. Copy it to share or reuse
               elsewhere.
             </DialogDescription>
           </DialogHeader>

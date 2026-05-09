@@ -29,6 +29,27 @@ export interface Space {
    *  Null = inherit. Layered between model defaults and per-session
    *  overrides — see `chatStore::readSessionParams`. */
   default_params_json: string | null;
+  /** Per-space toggle for the silent-auto-write memory extractor. Default
+   *  on at space creation. When false, no new memories are auto-saved and
+   *  the prompt builder skips the memory block — but existing rows stay
+   *  in the DB so flipping it off doesn't strip context the user might
+   *  still want to consult on the Memory tab. */
+  memory_enabled: boolean;
+  created_at: number;
+  updated_at: number;
+}
+
+/** One auto-saved (or hand-edited) fact scoped to a Space. The extractor
+ *  proposes new rows after each assistant turn; the user can edit or delete
+ *  any of them from the Memory tab. `source_session_id` / `source_message_id`
+ *  point at the chat that produced the fact so the UI can link back to
+ *  it; both are null for memories the user authored manually. */
+export interface SpaceMemory {
+  id: string;
+  space_id: string;
+  content: string;
+  source_session_id: string | null;
+  source_message_id: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -48,6 +69,7 @@ export interface SpaceFile {
 export interface SpaceContext {
   space: Space;
   files: SpaceFile[];
+  memories: SpaceMemory[];
 }
 
 export interface Snippet {
@@ -217,6 +239,22 @@ export interface Settings {
    *  hardware where you'd otherwise have to remember to flip the per-chat
    *  toggle. Off by default. Ignored by OpenAI providers. */
   low_vram_global: boolean;
+  /** Default value for the per-chat Thinking toggle. Applied as a baseline
+   *  in `readSessionParams` so new chats (and chats that haven't touched
+   *  the slider) inherit it. The per-chat Thinking switch in the parameter
+   *  sidebar overrides it. Only meaningful for thinking-capable Ollama
+   *  models — OpenAI providers ignore the field. */
+  thinking_default: boolean;
+  /** Default tone applied to every chat that hasn't picked one of its own.
+   *  Stored as a string id matching `TONES` in `src/lib/tones.ts`; the empty
+   *  / "default" id means "no style override". The per-chat override lives
+   *  in uiStore (`toneIdBySession`) and falls back to this when unset. */
+  default_tone_id: string;
+  /** Flips to true after the user finishes (or dismisses) the first-launch
+   *  onboarding flow. Default false; lives in the same KV settings table
+   *  that `factory_reset` truncates, so a reset naturally re-fires the
+   *  onboarding flow on next launch. */
+  onboarding_completed: boolean;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -233,6 +271,9 @@ export const DEFAULT_SETTINGS: Settings = {
   temporal_awareness: true,
   web_fetch_enabled: false,
   low_vram_global: false,
+  thinking_default: true,
+  default_tone_id: "default",
+  onboarding_completed: false,
 };
 
 /** Shape returned by the Rust `fetch_url` command. Kept in sync with
@@ -385,6 +426,7 @@ export interface ImportStats {
   messages: number;
   spaces: number;
   space_files: number;
+  space_memories: number;
   snippets: number;
   mcp_servers: number;
   settings: number;

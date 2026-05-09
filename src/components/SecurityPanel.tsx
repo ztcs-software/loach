@@ -72,9 +72,8 @@ export function SecurityPanel() {
   return (
     <div className="space-y-5">
       <p className="text-[13px] text-foreground/55">
-        Lock Loach with a PIN, a password, or both. Credentials are hashed
-        with argon2id and stored in your OS credential manager — never in the
-        local database.
+        Lock the access to Loach with a PIN, a password, or both. Credentials
+        are securely stored in your operating system's credentials manager.
       </p>
 
       {status.configured ? (

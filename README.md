@@ -44,7 +44,7 @@ Everything is local: chats, attachments, settings, generation parameters, and sn
 ### Inputs and attachments
 
 - **Drag-and-drop** anywhere in the chat surface. The composer bar gets a drop-zone highlight that respects light / dark themes.
-- **15 MB cap** per file with a clear inline error.
+- **20 MB cap** per file with a clear inline error. Spaces additionally cap total attached files at **200 MB**.
 - **Images** — base64-encoded and routed to vision-capable models (LLaVA, Llama 3.2 Vision, GPT-4o family).
 - **Text & docs** — `.txt`, `.md`, `.csv`, `.json`, `.log`, `.pdf` (via `pdfjs-dist`), `.docx` (via `mammoth`). Extracted text is appended to the user message as a fenced context block with a clear filename header.
 - **Web fetch** — toggle in **Settings → Providers**: when enabled, URLs in your message are auto-fetched, sanitized, and inlined as context. Capped at 3 URLs / message, 5 MB / page, 15 s timeout. Private IPs and localhost are blocked.
@@ -214,7 +214,7 @@ loach/
 │  ├─ styles/globals.css        Tailwind base + theme tokens + glass + drop-zone styling
 │  ├─ lib/
 │  │  ├─ tauri.ts               Single source of truth for invoke()/listen() calls
-│  │  ├─ files.ts               File → attachment, 15 MB cap, text inlining, base64 imaging
+│  │  ├─ files.ts               File → attachment, 20 MB per-file / 200 MB per-space caps, text inlining, base64 imaging
 │  │  ├─ codeExport.ts          Code-block export: language → extension map + save dialog
 │  │  ├─ export.ts              Chat export → JSON / Markdown via Tauri save dialog
 │  │  ├─ importContext.ts       Paste-to-import parser (JSON / Markdown / plain text)

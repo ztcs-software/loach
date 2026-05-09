@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
-import { Brain, ChevronRight, ChevronDown, Dice5, Info, Layers, MemoryStick, RotateCcw, X } from "lucide-react";
+import { Brain, ChevronRight, Dice5, Info, Layers, MemoryStick, RotateCcw, X } from "lucide-react";
 import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
@@ -10,6 +11,14 @@ import { useChatStore } from "@/stores/chatStore";
 import { useModelsStore } from "@/stores/modelsStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useUIStore } from "@/stores/uiStore";
+import {
+  DEFAULT_PERSONA_ID,
+  PERSONAS,
+  getPersona,
+  type Persona,
+} from "@/lib/personas";
+import { DEFAULT_TONE_ID, TONES, type Tone } from "@/lib/tones";
+import { cn } from "@/lib/utils";
 import { DEFAULT_PARAMS, type GenerationParams, type Session } from "@/types";
 
 function parseOverrides(json: string | null): Partial<GenerationParams> {
@@ -27,6 +36,25 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
   const setSessionParams = useChatStore((s) => s.setSessionParams);
   const setSessionSystemPrompt = useChatStore((s) => s.setSessionSystemPrompt);
   const loadModelDefaults = useModelsStore((s) => s.loadModelDefaults);
+  // Persona id for the active chat. The picker writes the seed text into the
+  // session's `system_prompt` AND stamps the id here so the active pill stays
+  // visible on subsequent panel opens. If the user then manually edits the
+  // textarea below, the id clears (handled in the textarea onBlur) so the
+  // pill row never shows a stale "Active" badge for a prompt that no longer
+  // matches.
+  const activePersonaId = useUIStore((s) =>
+    session ? s.personaIdBySession[session.id] : undefined,
+  );
+  const setSessionPersona = useUIStore((s) => s.setSessionPersona);
+  // Tone — per-chat override; falls back to settings.default_tone_id when
+  // the user hasn't picked one for this chat. The pill row reflects the
+  // *effective* tone so the user always sees what the next send will use.
+  const activeToneId = useUIStore((s) =>
+    session ? s.toneIdBySession[session.id] : undefined,
+  );
+  const setSessionTone = useUIStore((s) => s.setSessionTone);
+  const defaultToneId = useSettingsStore((s) => s.default_tone_id);
+  const effectiveToneId = activeToneId ?? defaultToneId ?? DEFAULT_TONE_ID;
 
   // Subscribe to the per-model patch so this component re-renders the moment
   // the lazy fetch lands. The selector returns the raw object reference, so
@@ -54,6 +82,9 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
   // we visually pin the per-chat toggle on and disable it, with a hint
   // pointing the user back to the global setting.
   const lowVramGlobal = useSettingsStore((s) => s.low_vram_global);
+  // Global Thinking default (Settings → General). Mirrors the chatStore
+  // merge order so the panel shows the same value the request will send.
+  const thinkingDefault = useSettingsStore((s) => s.thinking_default);
 
   const overrides = useMemo(
     () => parseOverrides(session?.params_json ?? null),
@@ -67,16 +98,31 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
   const initial = useMemo<GenerationParams>(
     () => ({
       ...DEFAULT_PARAMS,
+      ...(session?.provider === "ollama" ? { think: thinkingDefault } : {}),
       ...(modelDefaults ?? {}),
       ...(modelThinkPref === undefined ? {} : { think: modelThinkPref }),
       ...overrides,
     }),
-    [overrides, modelDefaults, modelThinkPref],
+    [overrides, modelDefaults, modelThinkPref, thinkingDefault, session?.provider],
   );
 
   const [params, setParams] = useState<GenerationParams>(initial);
   const [systemPrompt, setSystemPrompt] = useState(session?.system_prompt ?? "");
-  const [advancedOpen, setAdvancedOpen] = useState(false);
+  // Persisted across sessions — most users settle on one mode and don't
+  // want to reselect it every time the panel opens. Stored in localStorage
+  // directly to avoid bloating the UI store with a single string.
+  const [viewMode, setViewMode] = useState<"simple" | "advanced">(() => {
+    if (typeof window === "undefined") return "simple";
+    return window.localStorage.getItem("parameterPanel.viewMode") === "advanced"
+      ? "advanced"
+      : "simple";
+  });
+  const isAdvanced = viewMode === "advanced";
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem("parameterPanel.viewMode", viewMode);
+  }, [viewMode]);
 
   useEffect(() => {
     setParams(initial);
@@ -99,6 +145,21 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
     // session's overrides — including any model-default values the user
     // hasn't touched, so future model swaps don't silently shift those.
     setSessionParams(session.id, next);
+  };
+
+  // Quick-pick handlers — both just record the picked id. Their text is
+  // layered into the system prompt at send time (chatStore), so the textarea
+  // below stays purely user-authored. Switching personas or tones never
+  // touches the textarea, and editing the textarea never drifts the pickers.
+  const pickTone = (toneId: string) => {
+    if (!session) return;
+    setSessionTone(session.id, toneId);
+  };
+
+  const pickPersona = (personaId: string) => {
+    if (!session) return;
+    if (!getPersona(personaId)) return;
+    setSessionPersona(session.id, personaId);
   };
 
   // Reset clears the override entirely so the session falls back to (model
@@ -128,9 +189,14 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
   // Context-length stops — powers of two are the grid models are trained on
   // and the granularity VRAM allocation cares about. Users shouldn't be able
   // to land on meaningless values like 11_847.
-  const CTX_STOPS = [1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072];
+  const CTX_STOPS = [
+    4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576,
+  ];
   const formatK = (n: number) => {
-    if (n >= 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)}M`;
+    if (n >= 1024 * 1024) {
+      const m = n / 1024 / 1024;
+      return `${m % 1 === 0 ? m : m.toFixed(1)}M`;
+    }
     if (n >= 1024) return `${Math.round(n / 1024)}K`;
     return String(n);
   };
@@ -155,6 +221,26 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
           <p className="text-xs text-muted-foreground">Open a chat to adjust parameters.</p>
         ) : (
           <div className="space-y-6">
+            <Tabs
+              value={viewMode}
+              onValueChange={(v) => setViewMode(v as "simple" | "advanced")}
+            >
+              <TabsList className="grid h-8 w-full grid-cols-2 rounded-xl p-0.5 text-[11px]">
+                <TabsTrigger
+                  value="simple"
+                  className="rounded-lg px-2 py-1 text-[11px] font-medium"
+                >
+                  Simple
+                </TabsTrigger>
+                <TabsTrigger
+                  value="advanced"
+                  className="rounded-lg px-2 py-1 text-[11px] font-medium"
+                >
+                  Advanced
+                </TabsTrigger>
+              </TabsList>
+            </Tabs>
+
             <div className="flex items-start gap-1.5 rounded-lg bg-foreground/[0.04] px-2.5 py-2 text-[11px] text-foreground/65">
               <Info className="mt-0.5 h-3 w-3 shrink-0 text-foreground/45" />
               <span className="leading-snug">{sourceLabel}</span>
@@ -198,51 +284,45 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
                 max={1}
                 step={0.05}
                 onChange={(v) => update({ temperature: v })}
-                hint="Higher values make output more creative and diverse; lower values stay focused and deterministic. Values above 1.0 typically produce incoherent output, so the range is capped at 1."
+                hint="Controls randomness. Lower stays focused and predictable; higher gets more creative and varied. Capped at 1 — beyond that, output usually breaks down."
               />
-              <SliderRow
-                label="Top-P"
-                value={params.top_p ?? 0.95}
-                min={0}
-                max={1}
-                step={0.01}
-                onChange={(v) => update({ top_p: v })}
-                hint="Sample from the smallest set of tokens whose combined probability reaches this value."
-              />
-              <SliderRow
-                label="Top-K"
-                value={params.top_k ?? 40}
-                min={0}
-                max={200}
-                step={1}
-                precision={0}
-                onChange={(v) => update({ top_k: Math.round(v) })}
-                hint={`Only consider the ${params.top_k ?? 40} most likely tokens at each step (0 disables the cutoff)${isOpenAI ? " — ignored by OpenAI providers" : ""}.`}
-                dimmed={isOpenAI}
-              />
-              <SliderRow
-                label="Min-P"
-                value={params.min_p ?? 0.05}
-                min={0}
-                max={0.5}
-                step={0.01}
-                onChange={(v) => update({ min_p: v })}
-                hint={`Drop any token whose probability is below this fraction of the top token's probability${isOpenAI ? " — ignored by OpenAI providers" : ""}.`}
-                dimmed={isOpenAI}
-              />
+              {isAdvanced && (
+                <>
+                  <SliderRow
+                    label="Top-P"
+                    value={params.top_p ?? 0.95}
+                    min={0}
+                    max={1}
+                    step={0.01}
+                    onChange={(v) => update({ top_p: v })}
+                    hint="Nucleus sampling. Pick from the smallest group of tokens whose probabilities add up to this value. Lower stays on-track; higher allows more variety."
+                  />
+                  <SliderRow
+                    label="Top-K"
+                    value={params.top_k ?? 40}
+                    min={0}
+                    max={200}
+                    step={1}
+                    precision={0}
+                    onChange={(v) => update({ top_k: Math.round(v) })}
+                    hint={`Only consider the K most likely tokens at each step. Lower is more focused; 0 disables the cap${isOpenAI ? ". Ignored by OpenAI providers" : ""}.`}
+                    dimmed={isOpenAI}
+                  />
+                  <SliderRow
+                    label="Min-P"
+                    value={params.min_p ?? 0.05}
+                    min={0}
+                    max={0.5}
+                    step={0.01}
+                    onChange={(v) => update({ min_p: v })}
+                    hint={`Drop any token whose probability is below this fraction of the top token's. A robust alternative to tuning Top-P/K${isOpenAI ? ". Ignored by OpenAI providers" : ""}.`}
+                    dimmed={isOpenAI}
+                  />
+                </>
+              )}
             </Section>
 
             <Section title="Length">
-              <SliderRow
-                label="Max Tokens"
-                value={params.max_tokens ?? 4096}
-                min={128}
-                max={32768}
-                step={128}
-                precision={0}
-                onChange={(v) => update({ max_tokens: Math.round(v) })}
-                hint="Upper bound on the number of tokens the model may generate in a single reply."
-              />
               <SliderRow
                 label="Context Length"
                 value={params.num_ctx ?? 8192}
@@ -254,28 +334,27 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
                 format={formatK}
                 hint={
                   isOpenAI
-                    ? "How many tokens of history the model sees — ignored by OpenAI providers (the server decides)."
-                    : "How many tokens of history the model sees. Each step doubles the window; higher values use more VRAM."
+                    ? "How much conversation history the model can see at once. Ignored by OpenAI providers — the server decides."
+                    : "How much conversation history the model can see at once. Larger windows remember more but use more VRAM."
                 }
                 dimmed={isOpenAI}
               />
+              {isAdvanced && (
+                <SliderRow
+                  label="Max Tokens"
+                  value={params.max_tokens ?? 4096}
+                  min={128}
+                  max={32768}
+                  step={128}
+                  precision={0}
+                  onChange={(v) => update({ max_tokens: Math.round(v) })}
+                  hint="Hard cap on the length of a single reply. Generation stops here even if the model isn't finished."
+                />
+              )}
             </Section>
 
-            <button
-              type="button"
-              onClick={() => setAdvancedOpen((v) => !v)}
-              className="flex w-full items-center justify-between rounded-lg px-1 py-1 text-xs font-medium uppercase tracking-[0.12em] text-foreground/55 transition-colors hover:text-foreground/80"
-            >
-              <span>Advanced</span>
-              {advancedOpen ? (
-                <ChevronDown className="h-3.5 w-3.5" />
-              ) : (
-                <ChevronRight className="h-3.5 w-3.5" />
-              )}
-            </button>
-
-            {advancedOpen && (
-              <div className="space-y-6">
+            {isAdvanced && (
+              <>
                 <Section title="Repetition">
                   <SliderRow
                     label="Repeat Penalty"
@@ -284,7 +363,7 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
                     max={2}
                     step={0.05}
                     onChange={(v) => update({ repeat_penalty: v })}
-                    hint={`Penalizes tokens seen in recent context to reduce loops; 1.0 disables it${isOpenAI ? " — ignored by OpenAI providers" : ""}.`}
+                    hint={`Discourages the model from looping by penalizing tokens it's just used. 1.0 is off; much above 1.3 starts to sound robotic${isOpenAI ? ". Ignored by OpenAI providers" : ""}.`}
                     dimmed={isOpenAI}
                   />
                   <SliderRow
@@ -294,7 +373,7 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
                     max={2}
                     step={0.05}
                     onChange={(v) => update({ frequency_penalty: v })}
-                    hint="Scales down tokens proportional to how often they've already appeared in this reply."
+                    hint="Pushes down tokens in proportion to how often they've already appeared in this reply. Negative values do the opposite and encourage repetition."
                   />
                   <SliderRow
                     label="Presence Penalty"
@@ -303,7 +382,7 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
                     max={2}
                     step={0.05}
                     onChange={(v) => update({ presence_penalty: v })}
-                    hint="Flat penalty applied to any token that has already appeared at least once."
+                    hint="A flat one-time penalty for any token that has already appeared. Nudges the model toward fresh vocabulary and new topics."
                   />
                 </Section>
 
@@ -338,24 +417,24 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
                     onChange={(seed) => update({ seed })}
                   />
                 </Section>
-              </div>
+              </>
             )}
 
-            <div className="flex justify-start pt-1">
+            <div className="pt-1">
               <Button
                 type="button"
-                variant="ghost"
+                variant="outline"
                 size="sm"
                 onClick={resetParams}
                 disabled={!hasOverrides}
-                className="h-7 gap-1.5 rounded-md px-2 text-[11px] font-medium text-foreground/55 hover:bg-foreground/[0.06] hover:text-foreground disabled:opacity-40"
+                className="h-8 w-full gap-1.5 rounded-lg border-foreground/20 bg-foreground/[0.04] px-3 text-[11px] font-semibold text-foreground/90 hover:border-foreground/30 hover:bg-foreground/[0.10] hover:text-foreground disabled:opacity-40"
                 title={
                   hasModelDefaults
                     ? "Drop your overrides and follow this model's Modelfile defaults again."
                     : "Drop your overrides and follow the app defaults again."
                 }
               >
-                <RotateCcw className="h-3 w-3" />
+                <RotateCcw className="h-3.5 w-3.5" />
                 {hasModelDefaults ? "Reset to model defaults" : "Reset to defaults"}
               </Button>
             </div>
@@ -363,16 +442,58 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
             <div className="h-px bg-foreground/[0.08]" />
 
             <div>
+              <Label className="text-xs font-semibold uppercase tracking-[0.12em] text-foreground/70">
+                Persona
+              </Label>
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {PERSONAS.map((p) => (
+                  <PersonaPill
+                    key={p.id}
+                    persona={p}
+                    active={
+                      activePersonaId
+                        ? activePersonaId === p.id
+                        : p.id === DEFAULT_PERSONA_ID
+                    }
+                    onClick={() => pickPersona(p.id)}
+                  />
+                ))}
+              </div>
+              <p className="mt-1.5 text-[11px] leading-relaxed text-foreground/50">
+                Defines the assistant's role. Layered into the system prompt at send time.
+              </p>
+            </div>
+
+            <div>
+              <Label className="text-xs font-semibold uppercase tracking-[0.12em] text-foreground/70">
+                Tone
+              </Label>
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {TONES.map((t) => (
+                  <TonePill
+                    key={t.id}
+                    tone={t}
+                    active={effectiveToneId === t.id}
+                    onClick={() => pickTone(t.id)}
+                  />
+                ))}
+              </div>
+              <p className="mt-1.5 text-[11px] leading-relaxed text-foreground/50">
+                Style modifier appended after the system prompt. Falls back to your global default in Settings → General when not set here.
+              </p>
+            </div>
+
+            <div>
               <Label
                 htmlFor="session-system-prompt"
                 className="text-xs font-semibold uppercase tracking-[0.12em] text-foreground/70"
               >
-                System prompt (this chat)
+                Additional instructions (this chat)
               </Label>
               <Textarea
                 id="session-system-prompt"
                 rows={5}
-                placeholder="Override the global system prompt for this chat…"
+                placeholder="Extra instructions for this chat — sit between the persona and the tone…"
                 className="mt-2 resize-none border-foreground/10 bg-foreground/[0.04] text-sm focus-visible:border-foreground/25 focus-visible:ring-0"
                 value={systemPrompt}
                 onChange={(e) => setSystemPrompt(e.target.value)}
@@ -381,13 +502,75 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
                 }
               />
               <p className="mt-1.5 text-[11px] leading-relaxed text-foreground/50">
-                Only applies to this conversation; leave empty to use the global prompt.
+                Free-form per-chat instructions. Layered between persona and tone — leave empty to fall back to the global custom instructions.
               </p>
             </div>
           </div>
         )}
       </div>
     </aside>
+  );
+}
+
+// Compact persona quick-pick pill. Active state uses the same warm orange
+// tint as the composer's PersonaChip so the two surfaces agree visually —
+// a user who picks "Code Reviewer" here and then glances at the composer
+// sees the same color carried into the chip above the textarea.
+function PersonaPill({
+  persona,
+  active,
+  onClick,
+}: {
+  persona: Persona;
+  active: boolean;
+  onClick: () => void;
+}) {
+  const Icon = persona.icon;
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={persona.description}
+      className={cn(
+        "inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[11px] font-medium transition-colors",
+        active
+          ? "border-orange-400/50 bg-orange-500/15 text-orange-100"
+          : "border-foreground/10 bg-foreground/[0.04] text-foreground/75 hover:border-foreground/25 hover:bg-foreground/[0.08] hover:text-foreground",
+      )}
+    >
+      <Icon className="h-3 w-3" />
+      {persona.label}
+    </button>
+  );
+}
+
+// Tone reuses the persona pill shape and accent so the two sections feel
+// part of the same picker family — same shape, same active tint.
+function TonePill({
+  tone,
+  active,
+  onClick,
+}: {
+  tone: Tone;
+  active: boolean;
+  onClick: () => void;
+}) {
+  const Icon = tone.icon;
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={tone.description}
+      className={cn(
+        "inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[11px] font-medium transition-colors",
+        active
+          ? "border-orange-400/50 bg-orange-500/15 text-orange-100"
+          : "border-foreground/10 bg-foreground/[0.04] text-foreground/75 hover:border-foreground/25 hover:bg-foreground/[0.08] hover:text-foreground",
+      )}
+    >
+      <Icon className="h-3 w-3" />
+      {tone.label}
+    </button>
   );
 }
 
@@ -444,7 +627,7 @@ function ThinkingRow({
       <p className="mt-1.5 text-[10.5px] leading-snug text-foreground/50">
         {disabled
           ? disabledHint
-          : "Let the model reason step-by-step before replying. Adds latency on long answers but often improves quality on complex prompts."}
+          : "Let the model reason step-by-step before replying. Adds latency for long answers but may improve quality on complex prompts."}
       </p>
     </div>
   );

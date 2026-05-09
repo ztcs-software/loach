@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   Archive,
+  Brain,
   ChevronDown,
   ChevronRight,
   CircleAlert,
@@ -20,6 +21,13 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
@@ -29,6 +37,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { ChatInput } from "@/components/ChatInput";
@@ -36,7 +45,7 @@ import { useChatStore } from "@/stores/chatStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useUIStore } from "@/stores/uiStore";
-import { fileToAttachment } from "@/lib/files";
+import { fileToAttachment, SPACE_BYTES_CAP } from "@/lib/files";
 import {
   ollamaListModels,
   ollamaProbe,
@@ -48,11 +57,10 @@ import {
   type ProviderId,
   type Session,
   type SpaceFile,
+  type SpaceMemory,
 } from "@/types";
 
-type TabId = "chats" | "instructions" | "files" | "models";
-
-const FILE_CAP = 12;
+type TabId = "chats" | "instructions" | "files" | "memory" | "models";
 
 export function SpaceView() {
   const viewingSpaceId = useSpaceStore((s) => s.viewingSpaceId);
@@ -66,6 +74,13 @@ export function SpaceView() {
   const storedFiles = useSpaceStore((s) =>
     viewingSpaceId ? s.spaceFiles[viewingSpaceId] : undefined,
   );
+  const loadMemories = useSpaceStore((s) => s.loadSpaceMemories);
+  const doAddMemory = useSpaceStore((s) => s.addMemory);
+  const doUpdateMemory = useSpaceStore((s) => s.updateMemory);
+  const doRemoveMemory = useSpaceStore((s) => s.removeMemory);
+  const storedMemories = useSpaceStore((s) =>
+    viewingSpaceId ? s.spaceMemories[viewingSpaceId] : undefined,
+  );
 
   const sessions = useChatStore((s) => s.sessions);
   const selectSession = useChatStore((s) => s.selectSession);
@@ -77,22 +92,15 @@ export function SpaceView() {
 
   const space = spaces.find((s) => s.id === viewingSpaceId);
 
-  const [editingName, setEditingName] = useState(false);
-  const [nameVal, setNameVal] = useState("");
-  const [editingDesc, setEditingDesc] = useState(false);
-  const [descVal, setDescVal] = useState("");
+  const [editDialogOpen, setEditDialogOpen] = useState(false);
   const [tab, setTab] = useState<TabId>("chats");
   const [files, setFiles] = useState<SpaceFile[]>([]);
+  const [memories, setMemories] = useState<SpaceMemory[]>([]);
 
-  // Reseed the local edit state when the user navigates between spaces.
-  // Deliberately keyed on `space?.id` only — re-running on every Space
-  // mutation would clobber an in-progress inline edit when the optimistic
-  // update lands.
   useEffect(() => {
     if (space) {
-      setNameVal(space.name);
-      setDescVal(space.description);
       void loadFiles(space.id);
+      void loadMemories(space.id);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [space?.id]);
@@ -100,6 +108,10 @@ export function SpaceView() {
   useEffect(() => {
     if (storedFiles) setFiles(storedFiles);
   }, [storedFiles]);
+
+  useEffect(() => {
+    if (storedMemories) setMemories(storedMemories);
+  }, [storedMemories]);
 
   const spaceSessions = useMemo(
     () =>
@@ -116,30 +128,12 @@ export function SpaceView() {
     setSidebarTab("spaces");
   };
 
-  const handleSaveName = async () => {
-    const trimmed = nameVal.trim();
-    if (trimmed && trimmed !== space.name) {
-      await doUpdate(space.id, {
-        name: trimmed,
-        description: space.description,
-        instructions: space.instructions,
-      });
-    } else {
-      setNameVal(space.name);
-    }
-    setEditingName(false);
-  };
-
-  const handleSaveDesc = async () => {
-    const next = descVal.trim();
-    if (next !== space.description) {
-      await doUpdate(space.id, {
-        name: space.name,
-        description: next,
-        instructions: space.instructions,
-      });
-    }
-    setEditingDesc(false);
+  const handleSaveDetails = async (next: { name: string; description: string }) => {
+    await doUpdate(space.id, {
+      name: next.name,
+      description: next.description,
+      instructions: space.instructions,
+    });
   };
 
   const handleDeleteSpace = () => {
@@ -193,30 +187,9 @@ export function SpaceView() {
           {/* Title row */}
           <div className="flex items-center gap-3">
             <Folder className="h-7 w-7 shrink-0 text-foreground/65" strokeWidth={1.75} />
-            {editingName ? (
-              <Input
-                autoFocus
-                value={nameVal}
-                onChange={(e) => setNameVal(e.target.value)}
-                onBlur={() => void handleSaveName()}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") (e.target as HTMLInputElement).blur();
-                  if (e.key === "Escape") {
-                    setNameVal(space.name);
-                    setEditingName(false);
-                  }
-                }}
-                className="h-auto flex-1 border-none bg-transparent p-0 text-3xl font-semibold tracking-tight focus-visible:ring-0"
-              />
-            ) : (
-              <h1
-                className="flex-1 cursor-pointer truncate text-3xl font-semibold tracking-tight text-foreground transition-colors hover:text-foreground/85"
-                onClick={() => setEditingName(true)}
-                title="Click to rename"
-              >
-                {space.name}
-              </h1>
-            )}
+            <h1 className="flex-1 truncate text-3xl font-semibold tracking-tight text-foreground">
+              {space.name}
+            </h1>
 
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
@@ -230,6 +203,11 @@ export function SpaceView() {
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="min-w-[180px]">
+                <DropdownMenuItem onSelect={() => setEditDialogOpen(true)}>
+                  <Pencil className="mr-2 h-4 w-4" />
+                  Edit details
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
                 <DropdownMenuItem
                   onSelect={handleDeleteSpace}
                   className="text-destructive focus:text-destructive"
@@ -243,44 +221,17 @@ export function SpaceView() {
 
           {/* Description */}
           <div className="mt-1.5 ml-10">
-            {editingDesc ? (
-              <Input
-                autoFocus
-                value={descVal}
-                onChange={(e) => setDescVal(e.target.value)}
-                onBlur={() => void handleSaveDesc()}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") (e.target as HTMLInputElement).blur();
-                  if (e.key === "Escape") {
-                    setDescVal(space.description);
-                    setEditingDesc(false);
-                  }
-                }}
-                placeholder="Add a description"
-                className="h-auto border-none bg-transparent p-0 text-sm text-foreground/55 focus-visible:ring-0"
-              />
-            ) : (
-              <p
-                className={cn(
-                  "cursor-pointer text-sm transition-colors",
-                  space.description
-                    ? "text-foreground/55 hover:text-foreground/75"
-                    : "italic text-foreground/30 hover:text-foreground/50",
-                )}
-                onClick={() => setEditingDesc(true)}
-                title="Click to edit"
-              >
-                {space.description || "Add a description"}
-              </p>
-            )}
+            <p
+              className={cn(
+                "text-sm",
+                space.description
+                  ? "text-foreground/55"
+                  : "italic text-foreground/30",
+              )}
+            >
+              {space.description || "No description"}
+            </p>
 
-            {/* Meta strip — surfaces the same counts that used to live as
-                tab badges, but as small chips so they sit comfortably under
-                the description and stay readable on the page background.
-                Each chip hides itself when it would be uninformative. The
-                file chip drops the cap (`/12`) — the limit only matters
-                when the user is actively adding files, and the Files tab
-                already shows it. */}
             <div className="mt-3 flex flex-wrap items-center gap-1.5">
               <MetaChip>
                 {spaceSessions.length}{" "}
@@ -292,6 +243,12 @@ export function SpaceView() {
                 </MetaChip>
               )}
               {hasInstructions && <MetaChip>Instructions on</MetaChip>}
+              {memories.length > 0 && (
+                <MetaChip>
+                  {memories.length}{" "}
+                  {memories.length === 1 ? "memory" : "memories"}
+                </MetaChip>
+              )}
               <MetaChip>{modelLabel}</MetaChip>
             </div>
           </div>
@@ -315,6 +272,7 @@ export function SpaceView() {
                   <TabsTrigger value="chats">Chats</TabsTrigger>
                   <TabsTrigger value="instructions">Instructions</TabsTrigger>
                   <TabsTrigger value="files">Files</TabsTrigger>
+                  <TabsTrigger value="memory">Memory</TabsTrigger>
                   <TabsTrigger value="models">Models</TabsTrigger>
                 </TabsList>
               </div>
@@ -348,7 +306,6 @@ export function SpaceView() {
                   files={files}
                   onAdd={async (fileList) => {
                     for (const f of Array.from(fileList)) {
-                      if (files.length >= FILE_CAP) return;
                       const att = await fileToAttachment(f);
                       await doAddFile(
                         space.id,
@@ -361,6 +318,28 @@ export function SpaceView() {
                     }
                   }}
                   onRemove={(id) => void doRemoveFile(id, space.id)}
+                />
+              </TabsContent>
+
+              <TabsContent value="memory" className="mt-6">
+                <MemoryTab
+                  space={space}
+                  memories={memories}
+                  onToggle={(enabled) =>
+                    doUpdate(space.id, {
+                      name: space.name,
+                      description: space.description,
+                      instructions: space.instructions,
+                      memory_enabled: enabled,
+                    })
+                  }
+                  onAdd={(content) =>
+                    doAddMemory({ space_id: space.id, content })
+                  }
+                  onUpdate={(id, content) =>
+                    doUpdateMemory(id, space.id, content)
+                  }
+                  onRemove={(id) => doRemoveMemory(id, space.id)}
                 />
               </TabsContent>
 
@@ -381,7 +360,128 @@ export function SpaceView() {
           </div>
         </div>
       </ScrollArea>
+
+      <EditSpaceDialog
+        open={editDialogOpen}
+        onOpenChange={setEditDialogOpen}
+        initialName={space.name}
+        initialDescription={space.description}
+        onSave={handleSaveDetails}
+      />
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Edit details dialog — mirrors the create-space form so the two affordances
+// feel identical from the user's seat.
+// ---------------------------------------------------------------------------
+
+function EditSpaceDialog({
+  open,
+  onOpenChange,
+  initialName,
+  initialDescription,
+  onSave,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  initialName: string;
+  initialDescription: string;
+  onSave: (next: { name: string; description: string }) => Promise<void>;
+}) {
+  const [name, setName] = useState(initialName);
+  const [description, setDescription] = useState(initialDescription);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Reseed when the dialog opens so a stale draft from a prior open doesn't
+  // leak across edits, and so navigating to a different space picks up its
+  // current values.
+  useEffect(() => {
+    if (open) {
+      setName(initialName);
+      setDescription(initialDescription);
+      setError(null);
+    }
+  }, [open, initialName, initialDescription]);
+
+  const handleSave = async () => {
+    const trimmedName = name.trim();
+    const trimmedDesc = description.trim();
+    if (!trimmedName) {
+      setError("Name is required");
+      return;
+    }
+    if (trimmedName === initialName && trimmedDesc === initialDescription) {
+      onOpenChange(false);
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      await onSave({ name: trimmedName, description: trimmedDesc });
+      onOpenChange(false);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle>Edit Space details</DialogTitle>
+          <DialogDescription>
+            Update the name and description for this space.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="mt-2 space-y-3">
+          <Input
+            id="edit-space-name"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                void handleSave();
+              }
+            }}
+            placeholder="Name your space"
+            maxLength={60}
+            autoFocus
+          />
+          <Textarea
+            id="edit-space-desc"
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            placeholder="Describe your project, goals, subject…"
+            className="min-h-[88px] rounded-2xl border-foreground/10 bg-foreground/[0.05]"
+          />
+          {error && <p className="text-xs text-destructive">{error}</p>}
+        </div>
+
+        <div className="mt-3 flex items-center justify-end gap-2">
+          <Button
+            variant="outline"
+            onClick={() => onOpenChange(false)}
+            className="rounded-lg"
+          >
+            Cancel
+          </Button>
+          <Button
+            onClick={() => void handleSave()}
+            disabled={saving || !name.trim()}
+            className="rounded-lg"
+          >
+            {saving ? "Saving…" : "Save"}
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -677,8 +777,7 @@ function FilesTab({
   const [busy, setBusy] = useState(false);
 
   const totalBytes = files.reduce((acc, f) => acc + f.size, 0);
-  const remaining = FILE_CAP - files.length;
-  const atCap = remaining <= 0;
+  const atCap = totalBytes >= SPACE_BYTES_CAP;
 
   const handlePick = async (list: FileList) => {
     setError(null);
@@ -697,7 +796,7 @@ function FilesTab({
       <p className="text-xs text-foreground/55">
         Reference files available to every chat in this space. Text files are
         inlined into the system prompt; images attach to vision-capable
-        models. 15&nbsp;MB per file.
+        models. 20&nbsp;MB per file, 200&nbsp;MB total per space.
       </p>
 
       {/* Upload row */}
@@ -706,8 +805,8 @@ function FilesTab({
           <Upload className="h-4 w-4" />
           <span>
             {atCap
-              ? `Reached the ${FILE_CAP}-file limit`
-              : `${files.length} of ${FILE_CAP} files · ${formatSize(totalBytes)}`}
+              ? `Reached the 200 MB space limit`
+              : `${formatSize(totalBytes)} of 200 MB · ${files.length} ${files.length === 1 ? "file" : "files"}`}
           </span>
         </div>
         <Button
@@ -942,6 +1041,180 @@ function ModelsTab({
           ))}
         </DropdownMenuContent>
       </DropdownMenu>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Memory tab
+// ---------------------------------------------------------------------------
+//
+// Surfaces the per-space memory the extractor accumulates plus the on/off
+// toggle. Edits are inline and commit on blur (same pattern as the
+// description field above). Manual "Add memory" lets users seed facts the
+// extractor hasn't picked up yet.
+
+function MemoryTab({
+  space,
+  memories,
+  onToggle,
+  onAdd,
+  onUpdate,
+  onRemove,
+}: {
+  space: { id: string; memory_enabled: boolean };
+  memories: SpaceMemory[];
+  onToggle: (enabled: boolean) => Promise<void>;
+  onAdd: (content: string) => Promise<unknown>;
+  onUpdate: (id: string, content: string) => Promise<void>;
+  onRemove: (id: string) => Promise<void>;
+}) {
+  const [draft, setDraft] = useState("");
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editVal, setEditVal] = useState("");
+  const [adding, setAdding] = useState(false);
+
+  const handleAdd = async () => {
+    const trimmed = draft.trim();
+    if (!trimmed) return;
+    setAdding(true);
+    try {
+      await onAdd(trimmed);
+      setDraft("");
+    } finally {
+      setAdding(false);
+    }
+  };
+
+  const startEdit = (m: SpaceMemory) => {
+    setEditingId(m.id);
+    setEditVal(m.content);
+  };
+
+  const commitEdit = async () => {
+    if (!editingId) return;
+    const trimmed = editVal.trim();
+    const original = memories.find((m) => m.id === editingId);
+    if (trimmed && original && trimmed !== original.content) {
+      await onUpdate(editingId, trimmed);
+    }
+    setEditingId(null);
+    setEditVal("");
+  };
+
+  return (
+    <div className="space-y-4">
+      {/* Toggle row — mirrors the on/off chip from the meta strip with a
+          short rationale so users know exactly what flipping it does. */}
+      <div className="flex items-start justify-between gap-4 rounded-2xl border border-foreground/10 bg-foreground/[0.02] px-4 py-3.5">
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2 text-sm font-medium text-foreground/85">
+            <Brain className="h-4 w-4 text-foreground/55" />
+            Memory
+          </div>
+          <p className="mt-1 text-xs text-foreground/55">
+            Auto-saves durable facts from your chats so the assistant remembers
+            them next time. New memories trigger a "Saved to memory" toast.
+            Existing memories stay in the prompt even when this is off.
+          </p>
+        </div>
+        <Switch
+          checked={space.memory_enabled}
+          onCheckedChange={(v) => void onToggle(!!v)}
+        />
+      </div>
+
+      {/* Manual add — gated behind the same toggle so a disabled space
+          doesn't accumulate new rows from any path. */}
+      <div className="space-y-2">
+        <label className="text-xs font-medium text-foreground/65">
+          Add a memory
+        </label>
+        <div className="flex gap-2">
+          <Input
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            placeholder="e.g. Prefers TypeScript over JavaScript."
+            disabled={!space.memory_enabled || adding}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                void handleAdd();
+              }
+            }}
+            className="h-10 flex-1 rounded-xl border-foreground/10 bg-foreground/[0.03]"
+          />
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={!space.memory_enabled || adding || !draft.trim()}
+            onClick={() => void handleAdd()}
+            className="rounded-xl"
+          >
+            <Plus className="h-3.5 w-3.5" />
+            Add
+          </Button>
+        </div>
+      </div>
+
+      {/* List */}
+      {memories.length === 0 ? (
+        <div className="rounded-2xl border border-dashed border-foreground/10 px-6 py-10 text-center">
+          <Brain className="mx-auto mb-3 h-6 w-6 text-foreground/35" />
+          <p className="text-sm text-foreground/55">
+            {space.memory_enabled
+              ? "No memories yet — chat in this space and the extractor will start saving durable facts here."
+              : "Memory is off for this space. Turn it back on to start collecting facts."}
+          </p>
+        </div>
+      ) : (
+        <ul className="divide-y divide-foreground/[0.06] overflow-hidden rounded-xl border border-foreground/10 bg-foreground/[0.02]">
+          {memories.map((m) => (
+            <li
+              key={m.id}
+              className="group flex items-start gap-3 px-4 py-3 text-sm transition-colors hover:bg-foreground/[0.04]"
+            >
+              <Brain className="mt-0.5 h-4 w-4 shrink-0 text-foreground/40" />
+              {editingId === m.id ? (
+                <Textarea
+                  autoFocus
+                  value={editVal}
+                  onChange={(e) => setEditVal(e.target.value)}
+                  onBlur={() => void commitEdit()}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && !e.shiftKey) {
+                      e.preventDefault();
+                      (e.target as HTMLTextAreaElement).blur();
+                    }
+                    if (e.key === "Escape") {
+                      e.preventDefault();
+                      setEditingId(null);
+                      setEditVal("");
+                    }
+                  }}
+                  className="min-h-[40px] flex-1 rounded-md border-foreground/10 bg-foreground/[0.03] text-sm"
+                />
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => startEdit(m)}
+                  className="min-w-0 flex-1 cursor-text text-left text-foreground/85"
+                  title="Click to edit"
+                >
+                  {m.content}
+                </button>
+              )}
+              <button
+                onClick={() => void onRemove(m.id)}
+                aria-label="Delete memory"
+                className="shrink-0 rounded-md p-1 text-foreground/40 opacity-0 transition-all hover:bg-foreground/10 hover:text-destructive group-hover:opacity-100"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }

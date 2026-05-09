@@ -15,9 +15,11 @@ import { SnippetsLibrary } from "@/components/SnippetsLibrary";
 import { ModelsView } from "@/components/ModelsView";
 import { ModelsLibrary } from "@/components/ModelsLibrary";
 import { LockScreen } from "@/components/LockScreen";
+import { Onboarding } from "@/components/Onboarding";
 import { CodeCanvas } from "@/components/CodeCanvas";
 import { SearchBar } from "@/components/SearchBar";
 import { SelectionCopyButton } from "@/components/SelectionCopyButton";
+import { ToastHost } from "@/components/ToastHost";
 import { useChatStore } from "@/stores/chatStore";
 import { useModelsStore } from "@/stores/modelsStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -42,6 +44,10 @@ export default function App() {
   const securityConfigured = useSecurityStore((s) => s.status.configured);
   const unlocked = useSecurityStore((s) => s.unlocked);
   const backgroundStyle = useSettingsStore((s) => s.background_style);
+  const settingsHydrated = useSettingsStore((s) => s.hydrated);
+  const onboardingCompleted = useSettingsStore(
+    (s) => s.onboarding_completed,
+  );
   const viewingSpaceId = useSpaceStore((s) => s.viewingSpaceId);
   const viewingModel = useModelsStore((s) => s.viewingModel);
   const sidebarTab = useUIStore((s) => s.sidebarTab);
@@ -91,6 +97,13 @@ export default function App() {
   // see a brief flash of the unlocked UI before the lock screen mounts.
   const showLock = securityHydrated && securityConfigured && !unlocked;
   const probing = !securityHydrated;
+  // Onboarding gate. Mounts only once the rest of the app has hydrated
+  // (so we don't pop the wizard before settings load and then yank it
+  // away when `onboarding_completed=true` arrives). Sits above the
+  // chat surface but below the TitleBar so window controls keep
+  // working — same pattern as LockScreen.
+  const showOnboarding =
+    !showLock && !probing && settingsHydrated && !onboardingCompleted;
 
   return (
     <TooltipProvider delayDuration={250}>
@@ -155,6 +168,7 @@ export default function App() {
         <SettingsDialog />
         <SpaceForm />
         <SnippetDialog />
+        {showOnboarding && <Onboarding />}
       </div>
       )}
       {/* Global Cmd-K search palette. Lives at the App root so it floats
@@ -162,8 +176,15 @@ export default function App() {
           isn't tied to whichever main view is currently rendered. The
           component renders nothing until the user opens it via Ctrl/Cmd+K
           or the `loach:focus-search` event the sidebar fires. */}
-      {!showLock && <SearchBar />}
-      {!showLock && <SelectionCopyButton />}
+      {/* Suppress search + selection-copy palettes while onboarding owns the
+          screen — the wizard is modal and Cmd+K should stay inert until
+          the user finishes or dismisses. */}
+      {!showLock && !showOnboarding && <SearchBar />}
+      {!showLock && !showOnboarding && <SelectionCopyButton />}
+      {/* Global toast host. Mounted unconditionally so messages from any
+          surface (including the lock screen path, in the future) land in a
+          predictable spot. Renders nothing when no toasts are queued. */}
+      <ToastHost />
     </TooltipProvider>
   );
 }
@@ -206,7 +227,7 @@ function HeroComposer() {
             How can I help today?
           </h1>
           <p className="mt-3 text-sm text-foreground/55">
-            Ask anything — Loach runs your local models privately.
+            Ask anything. Loach runs your local models privately and securely.
           </p>
         </div>
         <ChatInput centered />

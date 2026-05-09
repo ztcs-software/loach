@@ -4,11 +4,17 @@ import {
   CircleAlert,
   CircleCheck,
   RefreshCw,
-  X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -27,11 +33,12 @@ import {
 import type { ModelInfo, ProviderId } from "@/types";
 
 /**
- * Create / edit modal for a Snippet. Layout intentionally matches `SpaceForm`
- * so the "new/edit" surfaces across the app feel like the same dialog.
+ * Create / edit modal for a Snippet. Uses the same compact `Dialog` shell as
+ * the rename-chat surface so creation/edit popups feel consistent across the
+ * app.
  *
- * Attachments are deliberately omitted right now — the DB column is kept for
- * forward compat but the UI surface is removed per product decision.
+ * Attachments are deliberately omitted — the DB column is kept for forward
+ * compat but the UI surface is removed per product decision.
  */
 export function SnippetDialog() {
   const target = useSnippetStore((s) => s.dialogTarget);
@@ -57,7 +64,6 @@ export function SnippetDialog() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Re-seed local state whenever we open the dialog (new or edit).
   useEffect(() => {
     if (!target) return;
     if (target === "new") {
@@ -78,12 +84,6 @@ export function SnippetDialog() {
     }
     setError(null);
   }, [target, isSeed, editing]);
-
-  if (!target) return null;
-
-  const handleCancel = () => {
-    close();
-  };
 
   const handleSave = async () => {
     const t = title.trim();
@@ -113,111 +113,67 @@ export function SnippetDialog() {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center">
-      <div
-        className="absolute inset-0 bg-background/80 backdrop-blur-sm"
-        onClick={handleCancel}
-      />
+    <Dialog open={!!target} onOpenChange={(o) => !o && close()}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle>
+            {isEditMode ? "Edit snippet" : "New snippet"}
+          </DialogTitle>
+          <DialogDescription>
+            Save a prompt you send often. Optionally pin a default model so
+            running the snippet picks it automatically.
+          </DialogDescription>
+        </DialogHeader>
 
-      <div className="relative z-10 w-full max-w-xl px-6">
-        <button
-          onClick={handleCancel}
-          className="mb-6 inline-flex items-center gap-1.5 text-sm text-foreground/50 transition-colors hover:text-foreground"
-          aria-label="Close"
-        >
-          <X className="h-4 w-4" />
-          Close
-        </button>
-
-        <h1 className="text-3xl font-semibold tracking-tight text-foreground">
-          {isEditMode ? "Edit snippet" : "New snippet"}
-        </h1>
-        <p className="mt-2 text-sm text-foreground/50">
-          Save a prompt you send often. Optionally pin a default model so
-          running the snippet picks it automatically.
-        </p>
-
-        <div className="mt-8 space-y-5">
-          <div>
-            <label
-              htmlFor="snippet-title"
-              className="mb-1.5 block text-sm font-medium text-foreground/70"
-            >
-              Title
-            </label>
-            <Input
-              id="snippet-title"
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-              placeholder="e.g. Code review checklist"
-              maxLength={80}
-              autoFocus
-              className="h-12 rounded-xl border-foreground/10 bg-foreground/[0.05] text-base"
-            />
-          </div>
-
-          <div>
-            <label
-              htmlFor="snippet-prompt"
-              className="mb-1.5 block text-sm font-medium text-foreground/70"
-            >
-              Prompt
-            </label>
-            <Textarea
-              id="snippet-prompt"
-              value={prompt}
-              onChange={(e) => setPrompt(e.target.value)}
-              placeholder="Review the following code and flag any bugs, smells, or performance issues…"
-              className="min-h-[140px] rounded-xl border-foreground/10 bg-foreground/[0.05]"
-            />
-          </div>
-
-          <div>
-            <label className="mb-1.5 block text-sm font-medium text-foreground/70">
-              Default model{" "}
-              <span className="font-normal text-foreground/40">(optional)</span>
-            </label>
-            <ModelPicker
-              provider={provider}
-              model={model}
-              onClear={() => {
-                setProvider(null);
-                setModel(null);
-              }}
-              onSelect={(p, m) => {
-                setProvider(p);
-                setModel(m);
-              }}
-            />
-            <p className="mt-1.5 text-[12px] text-foreground/45">
-              When set, running this snippet starts a new chat with this model
-              pre-selected. Leave blank to use the current default.
-            </p>
-          </div>
-
+        <div className="mt-2 space-y-3">
+          <Input
+            id="snippet-title"
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            placeholder="Title — e.g. Code review checklist"
+            maxLength={80}
+            autoFocus
+          />
+          <Textarea
+            id="snippet-prompt"
+            value={prompt}
+            onChange={(e) => setPrompt(e.target.value)}
+            placeholder="Review the following code and flag any bugs, smells, or performance issues…"
+            className="min-h-[120px] rounded-2xl border-foreground/10 bg-foreground/[0.05]"
+          />
+          <ModelPicker
+            provider={provider}
+            model={model}
+            onClear={() => {
+              setProvider(null);
+              setModel(null);
+            }}
+            onSelect={(p, m) => {
+              setProvider(p);
+              setModel(m);
+            }}
+          />
           {error && <p className="text-xs text-destructive">{error}</p>}
-
-          <div className="flex justify-end gap-3 pt-2">
-            <Button variant="ghost" onClick={handleCancel} className="rounded-xl px-5">
-              Cancel
-            </Button>
-            <Button
-              onClick={handleSave}
-              disabled={saving || !title.trim() || !prompt.trim()}
-              className="rounded-xl px-5"
-            >
-              {saving
-                ? isEditMode
-                  ? "Saving…"
-                  : "Creating…"
-                : isEditMode
-                  ? "Save changes"
-                  : "Create snippet"}
-            </Button>
-          </div>
         </div>
-      </div>
-    </div>
+
+        <div className="mt-3 flex items-center justify-end gap-2">
+          <Button variant="outline" onClick={close} className="rounded-lg">
+            Cancel
+          </Button>
+          <Button
+            onClick={handleSave}
+            disabled={saving || !title.trim() || !prompt.trim()}
+            className="rounded-lg"
+          >
+            {saving
+              ? isEditMode
+                ? "Saving…"
+                : "Creating…"
+              : "Save"}
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -286,7 +242,7 @@ function ModelPicker({
         <DropdownMenuTrigger asChild>
           <Button
             variant="ghost"
-            className="h-12 flex-1 justify-between rounded-xl border border-foreground/10 bg-foreground/[0.05] px-3 text-left text-foreground/85 hover:bg-foreground/10 hover:text-foreground"
+            className="h-10 flex-1 justify-between rounded-2xl border border-foreground/10 bg-foreground/[0.05] px-4 text-left text-foreground/85 hover:bg-foreground/10 hover:text-foreground"
           >
             <span className="truncate">{label}</span>
             <ChevronDown className="h-4 w-4 opacity-60" />

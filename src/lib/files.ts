@@ -1,6 +1,7 @@
 import type { Attachment } from "@/types";
 
-export const MAX_FILE_BYTES = 15 * 1024 * 1024; // 15 MB
+export const MAX_FILE_BYTES = 20 * 1024 * 1024; // 20 MB
+export const SPACE_BYTES_CAP = 200 * 1024 * 1024; // 200 MB total per space
 
 const TEXT_EXTENSIONS = new Set([
   "txt", "md", "markdown", "csv", "log", "json", "xml", "yaml", "yml",
@@ -21,7 +22,7 @@ const DOCX_MIME =
 
 export class FileTooLargeError extends Error {
   constructor(public readonly name: string, public readonly size: number) {
-    super(`${name} exceeds the 15 MB limit (${size} bytes)`);
+    super(`${name} exceeds the 20 MB limit (${size} bytes)`);
   }
 }
 

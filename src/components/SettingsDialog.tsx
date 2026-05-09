@@ -4,6 +4,7 @@ import {
   Archive,
   ArchiveRestore,
   BookOpen,
+  Brain,
   Check,
   ChevronDown,
   Clock,
@@ -63,6 +64,7 @@ import {
   writeTextFile,
 } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
+import { DEFAULT_TONE_ID, TONES } from "@/lib/tones";
 import type { FontSize, ImportStats, ModelInfo, ProviderId, Session } from "@/types";
 import pkg from "../../package.json";
 
@@ -263,9 +265,7 @@ export function SettingsDialog() {
                   />
                   <p className="mt-1.5 text-[11px] text-foreground/50">
                     Optional. Available as{" "}
-                    <span className="font-mono">{"{{USER_NAME}}"}</span> in
-                    custom instructions, so you can write things like
-                    "Address me as {"{{USER_NAME}}"}".
+                    <span className="font-mono">{"{{USER_NAME}}"}</span> variable in custom instructions.
                   </p>
                 </div>
 
@@ -296,9 +296,44 @@ export function SettingsDialog() {
                   />
                   <p className="mt-1.5 text-[11px] text-foreground/50">
                     Applied to every new chat. Individual chats can override
-                    this from the parameter panel. Supports the template
-                    variables below.
+                    this from per-chat or per-Space settings.
                   </p>
+                </div>
+
+                <Separator />
+
+                <div>
+                  <Label>Default tone</Label>
+                  <p className="mt-1 mb-2.5 text-[11px] text-foreground/50">
+                    Style modifier appended to the system prompt of every new
+                    chat. Override per chat from the parameters sidebar.
+                  </p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {TONES.map((t) => {
+                      const Icon = t.icon;
+                      const active =
+                        (settings.default_tone_id || DEFAULT_TONE_ID) === t.id;
+                      return (
+                        <button
+                          key={t.id}
+                          type="button"
+                          onClick={() =>
+                            settings.update("default_tone_id", t.id)
+                          }
+                          title={t.description}
+                          className={cn(
+                            "inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[11px] font-medium transition-colors",
+                            active
+                              ? "border-orange-400/50 bg-orange-500/15 text-orange-100"
+                              : "border-foreground/10 bg-foreground/[0.04] text-foreground/75 hover:border-foreground/25 hover:bg-foreground/[0.08] hover:text-foreground",
+                          )}
+                        >
+                          <Icon className="h-3 w-3" />
+                          {t.label}
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
 
                 <Separator />
@@ -311,10 +346,9 @@ export function SettingsDialog() {
                         Temporal awareness
                       </Label>
                       <p className="mt-1 text-[11px] text-foreground/50">
-                        Inject the current date, time, weekday, and timezone
-                        into every system prompt so the model can answer
-                        questions like "what day is it today?". Drawn from
-                        your local clock.
+                        Enable to inject current date, time, weekday and
+                        timezone to every chat so models can answer questions
+                        like "What day is it today?".
                       </p>
                     </div>
                     <Switch
@@ -335,13 +369,10 @@ export function SettingsDialog() {
                       Template variables
                     </p>
                     <p>
-                      Use these inside Custom instructions (or any per-chat
-                      system prompt) to place the values exactly where you
-                      want them. When a temporal variable is used, the
-                      automatic preamble is skipped.
+                      You may use these variables inside general custom
+                      instructions or in Spaces, Snippets and per-chat.
                     </p>
                     <ul className="mt-1.5 space-y-0.5 font-mono text-[11px]">
-                      <li>{"{{USER_NAME}}"} → {settings.user_name || "(unset)"}</li>
                       <li>{"{{CURRENT_DATE}}"} → 2026-04-17</li>
                       <li>{"{{CURRENT_TIME}}"} → 14:32</li>
                       <li>{"{{CURRENT_WEEKDAY}}"} → Friday</li>
@@ -357,15 +388,46 @@ export function SettingsDialog() {
                   <div className="flex items-start justify-between gap-4">
                     <div className="min-w-0">
                       <Label className="flex items-center gap-1.5">
+                        <Brain className="h-3.5 w-3.5 text-foreground/60" />
+                        Thinking
+                      </Label>
+                      <p className="mt-1 text-[11px] text-foreground/50">
+                        Default state of the per-chat Thinking toggle for new
+                        chats. Thinking switch in chat settings overrides this.
+                        Only applies to thinking-capable Ollama models - OpenAI
+                        API providers ignore this field.
+                      </p>
+                    </div>
+                    <Switch
+                      checked={settings.thinking_default}
+                      onCheckedChange={(next) =>
+                        settings.update("thinking_default", next)
+                      }
+                      className="shrink-0"
+                      aria-label={
+                        settings.thinking_default
+                          ? "Disable LLM Thinking by default"
+                          : "Enable LLM Thinking by default"
+                      }
+                    />
+                  </div>
+                </div>
+
+                <Separator />
+
+                <div>
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="min-w-0">
+                      <Label className="flex items-center gap-1.5">
                         <MemoryStick className="h-3.5 w-3.5 text-foreground/60" />
                         Low VRAM mode
                       </Label>
                       <p className="mt-1 text-[11px] text-foreground/50">
-                        Force Ollama into low-VRAM mode for every chat —
-                        smaller batches and a leaner KV cache. Overrides the
-                        per-chat Low&nbsp;VRAM toggle in the Parameters
-                        sidebar so you don't have to flip it on each new
-                        session. Off by default. Ignored by OpenAI providers.
+                        Force Ollama into low-VRAM mode for every chat for
+                        smaller batches and leaner KV cache. This setting
+                        overrides per-chat Low&nbsp;VRAM toggle so you don't
+                        have to flip it on each new session. Ignored by OpenAI
+                        API providers.
                       </p>
                     </div>
                     <Switch
@@ -387,8 +449,7 @@ export function SettingsDialog() {
               <TabsContent value="tools" className="mt-0 space-y-6 focus-visible:ring-0 focus-visible:ring-offset-0">
                 <SectionTitle>Tools</SectionTitle>
                 <p className="text-[13px] text-foreground/55">
-                  Capabilities Loach can offer the model alongside its own
-                  knowledge. Each is opt-in.
+                  Additional capabilities Loach can offer for the models.
                 </p>
 
                 <div>
@@ -437,9 +498,6 @@ export function SettingsDialog() {
                      relabel in the UI ("Aurora" is the glass-mesh look). */}
                 <div>
                   <Label>Theme</Label>
-                  <p className="mt-1 text-[11px] text-foreground/50">
-                    Aurora layers an animated mesh behind the glass surfaces. Solid keeps a single flat background.
-                  </p>
                   <div className="mt-3 grid grid-cols-2 gap-3">
                     <AppearanceTile
                       title="Solid"
@@ -463,9 +521,6 @@ export function SettingsDialog() {
                 {/* ── Color mode: Light / System / Dark ───────────────── */}
                 <div>
                   <Label>Color mode</Label>
-                  <p className="mt-1 text-[11px] text-foreground/50">
-                    "System" follows your OS preference and updates live.
-                  </p>
                   <div className="mt-3 grid grid-cols-3 gap-3">
                     <AppearanceTile
                       title="Light"
@@ -496,9 +551,6 @@ export function SettingsDialog() {
                 {/* ── Font size: Small / Normal / Large ────────────────── */}
                 <div>
                   <Label>Font size</Label>
-                  <p className="mt-1 text-[11px] text-foreground/50">
-                    Scales text across the whole app. Normal is the default.
-                  </p>
                   <FontSizeSwitch
                     value={settings.font_size}
                     onChange={(next) => settings.update("font_size", next)}
@@ -519,9 +571,7 @@ export function SettingsDialog() {
                 <SectionTitle>Data</SectionTitle>
                 <p className="text-[13px] text-foreground/55">
                   Back up, restore, or clear everything Loach has stored on
-                  this machine. Exports include chats, messages, spaces,
-                  snippets, MCP servers, and app settings — never your API
-                  key (that stays in your OS credential manager).
+                  this machine excluding API keys saved in credentials manager.
                 </p>
                 <DataPanel onCloseDialog={() => setOpen(false)} />
               </TabsContent>
@@ -1299,7 +1349,7 @@ function DataPanel({ onCloseDialog: _onCloseDialog }: { onCloseDialog: () => voi
         <DataRow
           icon={<Download className="h-4 w-4" />}
           title="Export data"
-          description="Save a full database dump — chats, spaces, snippets, MCP servers, and settings — to a JSON file."
+          description="Save a full database dump (including chats, spaces, snippets and settings) to a JSON file."
           action={
             <Button
               variant="outline"
@@ -1349,7 +1399,7 @@ function DataPanel({ onCloseDialog: _onCloseDialog }: { onCloseDialog: () => voi
         <DataRow
           icon={<Archive className="h-4 w-4" />}
           title="Archive all chats"
-          description="Move every live chat to the archive. Nothing is deleted — unarchive individually any time."
+          description="Move every live chat to the archive. Chat history isn't deleted as individual chats may be unarchived at any time."
           action={
             <Button
               variant="outline"
@@ -1386,8 +1436,8 @@ function DataPanel({ onCloseDialog: _onCloseDialog }: { onCloseDialog: () => voi
             </h4>
             <p className="mt-1 text-[12px] leading-relaxed text-foreground/60">
               Permanently delete your data, or factory-reset the app to its
-              default state. Neither operation can be undone — consider
-              exporting first.
+              default state. This operation can not be undone. Consider
+              performing an export first.
             </p>
           </div>
           <Button
