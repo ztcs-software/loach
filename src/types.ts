@@ -245,6 +245,11 @@ export interface Settings {
    *  sidebar overrides it. Only meaningful for thinking-capable Ollama
    *  models — OpenAI providers ignore the field. */
   thinking_default: boolean;
+  /** Default tone applied to every chat that hasn't picked one of its own.
+   *  Stored as a string id matching `TONES` in `src/lib/tones.ts`; the empty
+   *  / "default" id means "no style override". The per-chat override lives
+   *  in uiStore (`toneIdBySession`) and falls back to this when unset. */
+  default_tone_id: string;
   /** Flips to true after the user finishes (or dismisses) the first-launch
    *  onboarding flow. Default false; lives in the same KV settings table
    *  that `factory_reset` truncates, so a reset naturally re-fires the
@@ -267,6 +272,7 @@ export const DEFAULT_SETTINGS: Settings = {
   web_fetch_enabled: false,
   low_vram_global: false,
   thinking_default: true,
+  default_tone_id: "default",
   onboarding_completed: false,
 };
 

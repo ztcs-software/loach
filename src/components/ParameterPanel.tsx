@@ -11,6 +11,14 @@ import { useChatStore } from "@/stores/chatStore";
 import { useModelsStore } from "@/stores/modelsStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useUIStore } from "@/stores/uiStore";
+import {
+  DEFAULT_PERSONA_ID,
+  PERSONAS,
+  getPersona,
+  type Persona,
+} from "@/lib/personas";
+import { DEFAULT_TONE_ID, TONES, type Tone } from "@/lib/tones";
+import { cn } from "@/lib/utils";
 import { DEFAULT_PARAMS, type GenerationParams, type Session } from "@/types";
 
 function parseOverrides(json: string | null): Partial<GenerationParams> {
@@ -28,6 +36,25 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
   const setSessionParams = useChatStore((s) => s.setSessionParams);
   const setSessionSystemPrompt = useChatStore((s) => s.setSessionSystemPrompt);
   const loadModelDefaults = useModelsStore((s) => s.loadModelDefaults);
+  // Persona id for the active chat. The picker writes the seed text into the
+  // session's `system_prompt` AND stamps the id here so the active pill stays
+  // visible on subsequent panel opens. If the user then manually edits the
+  // textarea below, the id clears (handled in the textarea onBlur) so the
+  // pill row never shows a stale "Active" badge for a prompt that no longer
+  // matches.
+  const activePersonaId = useUIStore((s) =>
+    session ? s.personaIdBySession[session.id] : undefined,
+  );
+  const setSessionPersona = useUIStore((s) => s.setSessionPersona);
+  // Tone — per-chat override; falls back to settings.default_tone_id when
+  // the user hasn't picked one for this chat. The pill row reflects the
+  // *effective* tone so the user always sees what the next send will use.
+  const activeToneId = useUIStore((s) =>
+    session ? s.toneIdBySession[session.id] : undefined,
+  );
+  const setSessionTone = useUIStore((s) => s.setSessionTone);
+  const defaultToneId = useSettingsStore((s) => s.default_tone_id);
+  const effectiveToneId = activeToneId ?? defaultToneId ?? DEFAULT_TONE_ID;
 
   // Subscribe to the per-model patch so this component re-renders the moment
   // the lazy fetch lands. The selector returns the raw object reference, so
@@ -118,6 +145,21 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
     // session's overrides — including any model-default values the user
     // hasn't touched, so future model swaps don't silently shift those.
     setSessionParams(session.id, next);
+  };
+
+  // Quick-pick handlers — both just record the picked id. Their text is
+  // layered into the system prompt at send time (chatStore), so the textarea
+  // below stays purely user-authored. Switching personas or tones never
+  // touches the textarea, and editing the textarea never drifts the pickers.
+  const pickTone = (toneId: string) => {
+    if (!session) return;
+    setSessionTone(session.id, toneId);
+  };
+
+  const pickPersona = (personaId: string) => {
+    if (!session) return;
+    if (!getPersona(personaId)) return;
+    setSessionPersona(session.id, personaId);
   };
 
   // Reset clears the override entirely so the session falls back to (model
@@ -400,16 +442,58 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
             <div className="h-px bg-foreground/[0.08]" />
 
             <div>
+              <Label className="text-xs font-semibold uppercase tracking-[0.12em] text-foreground/70">
+                Persona
+              </Label>
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {PERSONAS.map((p) => (
+                  <PersonaPill
+                    key={p.id}
+                    persona={p}
+                    active={
+                      activePersonaId
+                        ? activePersonaId === p.id
+                        : p.id === DEFAULT_PERSONA_ID
+                    }
+                    onClick={() => pickPersona(p.id)}
+                  />
+                ))}
+              </div>
+              <p className="mt-1.5 text-[11px] leading-relaxed text-foreground/50">
+                Defines the assistant's role. Layered into the system prompt at send time.
+              </p>
+            </div>
+
+            <div>
+              <Label className="text-xs font-semibold uppercase tracking-[0.12em] text-foreground/70">
+                Tone
+              </Label>
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {TONES.map((t) => (
+                  <TonePill
+                    key={t.id}
+                    tone={t}
+                    active={effectiveToneId === t.id}
+                    onClick={() => pickTone(t.id)}
+                  />
+                ))}
+              </div>
+              <p className="mt-1.5 text-[11px] leading-relaxed text-foreground/50">
+                Style modifier appended after the system prompt. Falls back to your global default in Settings → General when not set here.
+              </p>
+            </div>
+
+            <div>
               <Label
                 htmlFor="session-system-prompt"
                 className="text-xs font-semibold uppercase tracking-[0.12em] text-foreground/70"
               >
-                System prompt (this chat)
+                Additional instructions (this chat)
               </Label>
               <Textarea
                 id="session-system-prompt"
                 rows={5}
-                placeholder="Override the global system prompt for this chat…"
+                placeholder="Extra instructions for this chat — sit between the persona and the tone…"
                 className="mt-2 resize-none border-foreground/10 bg-foreground/[0.04] text-sm focus-visible:border-foreground/25 focus-visible:ring-0"
                 value={systemPrompt}
                 onChange={(e) => setSystemPrompt(e.target.value)}
@@ -418,13 +502,75 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
                 }
               />
               <p className="mt-1.5 text-[11px] leading-relaxed text-foreground/50">
-                Only applies to this conversation; leave empty to use the global prompt.
+                Free-form per-chat instructions. Layered between persona and tone — leave empty to fall back to the global custom instructions.
               </p>
             </div>
           </div>
         )}
       </div>
     </aside>
+  );
+}
+
+// Compact persona quick-pick pill. Active state uses the same warm orange
+// tint as the composer's PersonaChip so the two surfaces agree visually —
+// a user who picks "Code Reviewer" here and then glances at the composer
+// sees the same color carried into the chip above the textarea.
+function PersonaPill({
+  persona,
+  active,
+  onClick,
+}: {
+  persona: Persona;
+  active: boolean;
+  onClick: () => void;
+}) {
+  const Icon = persona.icon;
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={persona.description}
+      className={cn(
+        "inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[11px] font-medium transition-colors",
+        active
+          ? "border-orange-400/50 bg-orange-500/15 text-orange-100"
+          : "border-foreground/10 bg-foreground/[0.04] text-foreground/75 hover:border-foreground/25 hover:bg-foreground/[0.08] hover:text-foreground",
+      )}
+    >
+      <Icon className="h-3 w-3" />
+      {persona.label}
+    </button>
+  );
+}
+
+// Tone reuses the persona pill shape and accent so the two sections feel
+// part of the same picker family — same shape, same active tint.
+function TonePill({
+  tone,
+  active,
+  onClick,
+}: {
+  tone: Tone;
+  active: boolean;
+  onClick: () => void;
+}) {
+  const Icon = tone.icon;
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={tone.description}
+      className={cn(
+        "inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[11px] font-medium transition-colors",
+        active
+          ? "border-orange-400/50 bg-orange-500/15 text-orange-100"
+          : "border-foreground/10 bg-foreground/[0.04] text-foreground/75 hover:border-foreground/25 hover:bg-foreground/[0.08] hover:text-foreground",
+      )}
+    >
+      <Icon className="h-3 w-3" />
+      {tone.label}
+    </button>
   );
 }
 

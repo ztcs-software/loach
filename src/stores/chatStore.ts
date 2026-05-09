@@ -19,6 +19,8 @@ import {
   inlineTextAttachments,
 } from "@/lib/files";
 import { extractMemories } from "@/lib/memory";
+import { getPersona } from "@/lib/personas";
+import { getTone } from "@/lib/tones";
 import { applyTemporalAwareness } from "@/lib/temporal";
 import {
   extractUrls,
@@ -705,6 +707,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
       );
     const p: ProviderId = opts?.provider ?? resolved.provider;
     const m = opts?.model ?? resolved.model;
+    // If the user picked a persona on the welcome screen (where no session
+    // existed yet), `pendingPersonaId` carries the id across — but persona
+    // text is now layered in at send time, not seeded into `system_prompt`.
+    // The session's `system_prompt` stays for free-form per-chat instructions
+    // the user types into the parameters panel.
+    const pendingPersonaId = useUIStore.getState().consumePendingPersona();
     const session = await createSession({
       provider: p,
       model: m,
@@ -716,6 +724,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       activeSessionId: session.id,
       messages: { ...s.messages, [session.id]: [] },
     }));
+    if (pendingPersonaId) {
+      useUIStore.getState().setSessionPersona(session.id, pendingPersonaId);
+    }
     // Warm the model-defaults cache for the session's model so the parameter
     // panel and the first send already see Modelfile values without having
     // to wait on the show_model round-trip. Fire-and-forget — failure here
@@ -1030,6 +1041,33 @@ export const useChatStore = create<ChatState>((set, get) => ({
       effectiveSystemPrompt,
       settings.temporal_awareness,
     );
+
+    // Persona role — prepended so the model reads "you are X" first and the
+    // user's free-form instructions / Space context follow. Layered at send
+    // time rather than baked into `system_prompt` so the textarea below the
+    // pickers stays purely user-authored: switching personas doesn't fight
+    // the user's edits, and editing the textarea doesn't drift the persona.
+    const personaId = useUIStore.getState().personaIdBySession[sessionId];
+    const persona = getPersona(personaId);
+    if (persona && persona.systemPrompt.length > 0) {
+      effectiveSystemPrompt = effectiveSystemPrompt
+        ? `${persona.systemPrompt}\n\n${effectiveSystemPrompt}`
+        : persona.systemPrompt;
+    }
+
+    // Tone modifier — appended last so the model reads role/instructions
+    // first and the style guidance second. Per-chat override wins; otherwise
+    // the global default tone applies. The default tone has an empty
+    // fragment, so a chat that hasn't picked anything sees no change.
+    const toneId =
+      useUIStore.getState().toneIdBySession[sessionId] ??
+      settings.default_tone_id;
+    const tone = getTone(toneId);
+    if (tone && tone.systemPrompt.length > 0) {
+      effectiveSystemPrompt = effectiveSystemPrompt
+        ? `${effectiveSystemPrompt}\n\n${tone.systemPrompt}`
+        : tone.systemPrompt;
+    }
 
     const task: QueueTask = {
       id: `t_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,

@@ -64,6 +64,7 @@ import {
   writeTextFile,
 } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
+import { DEFAULT_TONE_ID, TONES } from "@/lib/tones";
 import type { FontSize, ImportStats, ModelInfo, ProviderId, Session } from "@/types";
 import pkg from "../../package.json";
 
@@ -297,6 +298,42 @@ export function SettingsDialog() {
                     Applied to every new chat. Individual chats can override
                     this from per-chat or per-Space settings.
                   </p>
+                </div>
+
+                <Separator />
+
+                <div>
+                  <Label>Default tone</Label>
+                  <p className="mt-1 mb-2.5 text-[11px] text-foreground/50">
+                    Style modifier appended to the system prompt of every new
+                    chat. Override per chat from the parameters sidebar.
+                  </p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {TONES.map((t) => {
+                      const Icon = t.icon;
+                      const active =
+                        (settings.default_tone_id || DEFAULT_TONE_ID) === t.id;
+                      return (
+                        <button
+                          key={t.id}
+                          type="button"
+                          onClick={() =>
+                            settings.update("default_tone_id", t.id)
+                          }
+                          title={t.description}
+                          className={cn(
+                            "inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[11px] font-medium transition-colors",
+                            active
+                              ? "border-orange-400/50 bg-orange-500/15 text-orange-100"
+                              : "border-foreground/10 bg-foreground/[0.04] text-foreground/75 hover:border-foreground/25 hover:bg-foreground/[0.08] hover:text-foreground",
+                          )}
+                        >
+                          <Icon className="h-3 w-3" />
+                          {t.label}
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
 
                 <Separator />
