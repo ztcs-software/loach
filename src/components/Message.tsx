@@ -194,14 +194,14 @@ export function MessageItem({ message, isStreaming, metrics }: MessageProps) {
             ? "rounded-3xl rounded-tr-lg border border-foreground/10 bg-foreground/[0.08] px-4 py-2.5 text-foreground backdrop-blur-xl"
             : "rounded-3xl rounded-tl-lg text-foreground/95",
         )}
-        onContextMenu={
-          isUser
-            ? (e) => {
-                e.preventDefault();
-                setUserMenuOpen(true);
-              }
-            : undefined
-        }
+        onContextMenu={(e) => {
+          e.preventDefault();
+          if (isUser) {
+            setUserMenuOpen(true);
+          } else if (message.content.length > 0) {
+            setMenuOpen(true);
+          }
+        }}
       >
         {isUser && (
           <DropdownMenu open={userMenuOpen} onOpenChange={setUserMenuOpen}>
