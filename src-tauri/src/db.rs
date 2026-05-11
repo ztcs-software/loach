@@ -143,6 +143,18 @@ impl Database {
         let conn = Connection::open(path).context("open sqlite")?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
+        // Performance pragmas. All are durability-safe in combination with
+        // WAL: `synchronous=NORMAL` keeps crash safety for the database (only
+        // weakens the guarantee about the very last commit on power loss),
+        // and the cache / mmap / temp-store knobs are pure local-process
+        // tuning. None of them change on-disk format.
+        let _ = conn.pragma_update(None, "synchronous", "NORMAL");
+        let _ = conn.pragma_update(None, "temp_store", "MEMORY");
+        // Negative cache_size is interpreted as KiB → ~20 MiB page cache.
+        let _ = conn.pragma_update(None, "cache_size", -20_000);
+        // 256 MiB mmap window. SQLite falls back to regular I/O if the OS
+        // can't map; failure here is harmless.
+        let _ = conn.pragma_update(None, "mmap_size", 268_435_456i64);
         Ok(Self {
             conn: Mutex::new(conn),
         })

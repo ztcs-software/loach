@@ -6,19 +6,24 @@
   :root {
     /* Light palette — used when <html> has no `dark` class.
 
-       Accent is azure (#007FFF). The companion `.dark` block keeps the
-       original orange accent — the swap is purely light↔dark and applies
-       to both background variants (Aurora gradient and Solid) the same
-       way, so users picking either gradient or flat get the same
-       light=azure / dark=orange relationship. */
+       Accent (`--primary`) is set per background variant, not per
+       light/dark. The split is:
+         - Solid (both modes)   → azure (#007FFF)
+         - Aurora gradient (both) → orange (HSL 22 95% 60%)
+       The `:root` defaults below pick the *Aurora* (orange) accent because
+       the app ships with `background_style = "gradient"` by default; the
+       `.bg-solid` block further down swaps it to azure. `--primary-glow`
+       is an rgb-triplet companion used by shadow utilities that can't
+       interpolate hsl. */
     --background: 30 25% 97%;
     --foreground: 230 30% 7%;
     --card: 0 0% 100%;
     --card-foreground: 230 30% 7%;
     --popover: 0 0% 100%;
     --popover-foreground: 230 30% 7%;
-    --primary: 210 100% 50%;       /* #007FFF */
+    --primary: 22 95% 60%;
     --primary-foreground: 0 0% 100%;
+    --primary-glow: 255 110 50;
     --secondary: 230 15% 92%;
     --secondary-foreground: 230 30% 7%;
     --muted: 230 15% 94%;
@@ -29,7 +34,7 @@
     --destructive-foreground: 0 0% 98%;
     --border: 230 25% 12% / 0.12;
     --input: 230 25% 12% / 0.10;
-    --ring: 210 100% 50%;
+    --ring: 22 95% 60%;
     --radius: 1.25rem;
 
     /* Glass tokens flipped per theme */
@@ -59,12 +64,12 @@
     --card-foreground: 0 0% 100%;
     --popover: 230 35% 10%;
     --popover-foreground: 0 0% 100%;
-    /* Orange accent in dark mode; light mode uses azure (`:root` above).
-       The split is purely light/dark — both background variants (Aurora
-       gradient and Solid) inherit the same accent for their tone, so the
-       relationship between accent and theme stays predictable. */
+    /* Accent is variant-driven (see `:root` note above) — the orange
+       defaults below match Aurora Dark; `.bg-solid.dark` overrides them
+       with azure further down. */
     --primary: 22 95% 60%;
     --primary-foreground: 0 0% 100%;
+    --primary-glow: 255 110 50;
     --secondary: 230 20% 14%;
     --secondary-foreground: 0 0% 100%;
     --muted: 230 18% 14%;
@@ -94,6 +99,24 @@
     --drop-ring-strong:   hsl(30 100% 72% / 0.65);
     --drop-glow-soft:     rgba(255, 110, 50, 0.45);
     --drop-glow-strong:   rgba(255, 130, 60, 0.70);
+  }
+
+  /* Solid background → azure accent in both light and dark modes. The
+     classes are applied to `<html>` from `settingsStore::applyBackground`
+     (alongside the bg div's `app-solid`/`app-mesh`). */
+  .bg-solid {
+    --primary: 210 100% 50%;       /* #007FFF — azure */
+    --primary-glow: 0 127 255;
+    --ring: 210 100% 50%;
+    --prompt-glow: 0 10px 40px -8px rgba(0, 127, 255, 0.20);
+  }
+  .bg-solid.dark {
+    /* Slightly brighter azure for dark Solid so the accent stays legible
+       against the near-black background. */
+    --primary: 210 100% 58%;
+    --primary-glow: 36 150 255;
+    --ring: 210 100% 58%;
+    --prompt-glow: 0 10px 40px -8px rgba(36, 150, 255, 0.30);
   }
 
   * {
@@ -266,7 +289,7 @@
     box-shadow:
       0 1px 0 0 rgb(255 255 255 / calc(var(--glass-highlight) + 0.08)) inset,
       var(--glass-shadow),
-      0 12px 48px -8px rgba(255, 110, 50, 0.40);
+      0 12px 48px -8px rgb(var(--primary-glow) / 0.40);
   }
 
   .chip-glass {

@@ -2,9 +2,9 @@ import { useEffect, useState } from "react";
 import { Minus, Square, X, Copy, PanelLeft, Search } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { isTauri } from "@/lib/tauri";
-import { Logo } from "@/components/Logo";
 import { useUIStore } from "@/stores/uiStore";
 import { useSettingsStore } from "@/stores/settingsStore";
+import topBarLogo from "@/assets/loach-icon.png";
 import pkg from "../../package.json";
 
 export function TitleBar() {
@@ -90,15 +90,23 @@ export function TitleBar() {
         <PanelLeft className="h-3.5 w-3.5" />
       </button>
 
-      {/* App identity — Loach mark + wordmark + version. The mark is a
-          theme-aware SVG (black in light mode, orange in dark) rendered by
-          the Logo component, which uses CSS-only swapping to avoid a JS
-          re-render on theme change. The version sits next to the wordmark
-          in a muted monospace tone so it reads as metadata, not branding.
+      {/* App identity — Loach mark + wordmark + version. The mark uses a
+          dedicated top-bar asset (src/assets/loach-icon.png) imported
+          inline; other surfaces (onboarding, settings) keep using the
+          shared Logo component. The version sits next to the wordmark in a
+          muted monospace tone so it reads as metadata, not branding.
           pointer-events-none keeps the drag region underneath intact
           (drag + double-click-to-maximize keep working over the brand). */}
       <div className="flex shrink-0 items-baseline gap-1.5 pointer-events-none pl-1">
-        <Logo size={14} ariaHidden className="self-center" />
+        <img
+          src={topBarLogo}
+          alt=""
+          aria-hidden
+          width={14}
+          height={14}
+          draggable={false}
+          className="inline-block self-center"
+        />
         <span className="text-xs font-medium tracking-wide text-foreground/80">Loach</span>
         <span className="font-mono text-[10px] text-foreground/45" aria-label={`version ${pkg.version}`}>
           v{pkg.version}

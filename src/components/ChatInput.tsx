@@ -827,13 +827,15 @@ function PrimaryButton({
       title={title}
       className={cn(
         "relative h-10 w-10 shrink-0 rounded-full",
-        "bg-gradient-to-br from-orange-500 to-rose-600 text-white",
-        "shadow-[0_6px_24px_-4px_rgba(255,90,40,0.75)]",
+        // Send button picks up the theme accent via `--primary` / `--primary-glow`,
+        // so it flips orange (Aurora) ↔ azure (Solid) automatically.
+        "bg-primary text-primary-foreground",
+        "shadow-[0_6px_24px_-4px_rgb(var(--primary-glow)/0.75)]",
         "transition-all duration-200",
-        "hover:from-orange-400 hover:to-rose-500 hover:shadow-[0_8px_28px_-4px_rgba(255,90,40,0.90)]",
-        "disabled:from-orange-500/70 disabled:to-rose-600/70 disabled:text-white/85",
-        "disabled:shadow-[0_4px_18px_-6px_rgba(255,90,40,0.45)] disabled:cursor-not-allowed",
-        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-400/60 focus-visible:ring-offset-0",
+        "hover:bg-primary/90 hover:shadow-[0_8px_28px_-4px_rgb(var(--primary-glow)/0.90)]",
+        "disabled:bg-primary/70 disabled:text-primary-foreground/85",
+        "disabled:shadow-[0_4px_18px_-6px_rgb(var(--primary-glow)/0.45)] disabled:cursor-not-allowed",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60 focus-visible:ring-offset-0",
       )}
     >
       {/* Crossfading icon stack. Both icons live on top of each other in
@@ -872,7 +874,7 @@ function PrimaryButton({
       {streaming && (
         <span
           aria-hidden
-          className="pointer-events-none absolute inset-0 rounded-full ring-1 ring-rose-200/40 animate-pulse-soft"
+          className="pointer-events-none absolute inset-0 rounded-full ring-1 ring-white/40 animate-pulse-soft"
         />
       )}
     </button>

@@ -301,6 +301,17 @@ pub async fn ollama_unload_model(
         .map_err(err)
 }
 
+#[tauri::command]
+pub async fn ollama_preload_model(
+    state: State<'_, AppState>,
+    base_url: String,
+    model: String,
+) -> Result<(), String> {
+    providers::ollama::preload_model(&state.http, &base_url, &model)
+        .await
+        .map_err(err)
+}
+
 // ------------ ollama model admin ------------
 //
 // Everything below is used by the Models panel: inspect a model, delete it,
@@ -961,4 +972,31 @@ pub async fn factory_reset(state: State<'_, AppState>) -> Result<(), String> {
         tracing::warn!("security::clear during factory_reset failed: {e:?}");
     }
     Ok(())
+}
+
+// ---------- updater support ----------
+//
+// The Tauri updater can replace a Windows NSIS install or a Linux AppImage in
+// place, but it cannot upgrade a `.deb`/`.rpm` install — that has to go
+// through the system package manager. We expose this so the UI can hide the
+// "Check for updates" affordance when running from an unsupported install
+// type, instead of letting the user click and hit a confusing failure.
+#[tauri::command]
+pub fn updater_supported() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        true
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // AppImage runtimes set $APPIMAGE to the absolute path of the running
+        // bundle; nothing else does. Absence of the var means we're running
+        // from a `.deb`, a dev build, or `cargo run` — none of which the
+        // updater plugin can patch.
+        std::env::var("APPIMAGE").is_ok()
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    {
+        false
+    }
 }

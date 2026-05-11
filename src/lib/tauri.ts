@@ -237,6 +237,11 @@ export function ollamaUnloadModel(baseUrl: string, model: string): Promise<void>
   return invoke("ollama_unload_model", { baseUrl, model });
 }
 
+export function ollamaPreloadModel(baseUrl: string, model: string): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("ollama_preload_model", { baseUrl, model });
+}
+
 export function openaiListModels(baseUrl: string): Promise<ModelInfo[]> {
   if (!isTauri) return notInTauri([]);
   return invoke("openai_list_models", { baseUrl });
