@@ -473,7 +473,15 @@ pub async fn chat_stream(
                 match maybe {
                     Some(Ok(chunk)) => {
                         buf.extend_from_slice(&chunk);
-                        // NDJSON: split on newlines
+                        // Coalesce every delta in this network chunk into one
+                        // Token / Thinking event before emitting. Ollama
+                        // frequently hands us several NDJSON lines per read;
+                        // batching collapses N emits + N React state updates
+                        // into one, with no visible difference (the deltas
+                        // would have been concatenated in the bubble anyway).
+                        let mut pending_token = String::new();
+                        let mut pending_think = String::new();
+                        let mut finished = false;
                         while let Some(pos) = buf.iter().position(|b| *b == b'\n') {
                             let line: Vec<u8> = buf.drain(..=pos).collect();
                             let line = &line[..line.len() - 1];
@@ -481,46 +489,56 @@ pub async fn chat_stream(
                             match serde_json::from_slice::<OllamaChunk>(line) {
                                 Ok(parsed) => {
                                     if let Some(msg) = parsed.message {
-                                        if let Some(ref think) = msg.thinking {
+                                        if let Some(think) = msg.thinking {
                                             if !think.is_empty() {
-                                                let _ = app.emit(
-                                                    &channel,
-                                                    StreamEvent::Thinking { delta: think.clone() },
-                                                );
+                                                pending_think.push_str(&think);
                                             }
                                         }
                                         if let Some(delta) = msg.content {
                                             if !delta.is_empty() {
                                                 token_count += 1;
-                                                let _ = app.emit(
-                                                    &channel,
-                                                    StreamEvent::Token { delta },
-                                                );
+                                                pending_token.push_str(&delta);
                                             }
                                         }
                                     }
                                     if parsed.done {
-                                        let elapsed = start.elapsed().as_millis() as u64;
-                                        let tps = if elapsed > 0 {
-                                            (token_count as f64) * 1000.0 / (elapsed as f64)
-                                        } else { 0.0 };
-                                        let _ = app.emit(
-                                            &channel,
-                                            StreamEvent::Metrics {
-                                                tokens: token_count,
-                                                elapsed_ms: elapsed,
-                                                tokens_per_second: tps,
-                                            },
-                                        );
-                                        let _ = app.emit(&channel, StreamEvent::Done);
-                                        registry.finish(&req.stream_id);
-                                        return Ok(());
+                                        finished = true;
+                                        break;
                                     }
                                 }
                                 Err(e) => {
                                     tracing::warn!("ollama parse error: {e}");
                                 }
                             }
+                        }
+                        if !pending_think.is_empty() {
+                            let _ = app.emit(
+                                &channel,
+                                StreamEvent::Thinking { delta: pending_think },
+                            );
+                        }
+                        if !pending_token.is_empty() {
+                            let _ = app.emit(
+                                &channel,
+                                StreamEvent::Token { delta: pending_token },
+                            );
+                        }
+                        if finished {
+                            let elapsed = start.elapsed().as_millis() as u64;
+                            let tps = if elapsed > 0 {
+                                (token_count as f64) * 1000.0 / (elapsed as f64)
+                            } else { 0.0 };
+                            let _ = app.emit(
+                                &channel,
+                                StreamEvent::Metrics {
+                                    tokens: token_count,
+                                    elapsed_ms: elapsed,
+                                    tokens_per_second: tps,
+                                },
+                            );
+                            let _ = app.emit(&channel, StreamEvent::Done);
+                            registry.finish(&req.stream_id);
+                            return Ok(());
                         }
                     }
                     Some(Err(e)) => {

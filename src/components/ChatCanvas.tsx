@@ -115,14 +115,24 @@ export function ChatCanvas() {
   // (streaming, new turn) our marks get wiped from the DOM and we
   // re-apply on the next effect tick. The flicker is brief and only
   // happens during active streaming, which is acceptable.
+  //
+  // Tracks whether we currently have any marks in the DOM. The effect below
+  // runs on every messages change (including every streaming token), so we
+  // gate the unwrap pass on this flag — otherwise we'd run a
+  // querySelectorAll for every message bubble per token even when the finder
+  // is closed and there's nothing to strip.
+  const hasMarksRef = useRef(false);
   useEffect(() => {
-    // Always strip stale highlights first — covers query changes, search
-    // close, message updates, and the case where a previously-matching
-    // message no longer matches.
-    for (const el of messageRefs.current.values()) {
-      el
-        .querySelectorAll<HTMLElement>("[data-loach-match]")
-        .forEach(unwrapMark);
+    if (hasMarksRef.current) {
+      // Strip stale highlights — covers query changes, search close, message
+      // updates, and the case where a previously-matching message no longer
+      // matches.
+      for (const el of messageRefs.current.values()) {
+        el
+          .querySelectorAll<HTMLElement>("[data-loach-match]")
+          .forEach(unwrapMark);
+      }
+      hasMarksRef.current = false;
     }
     if (!searchOpen) return;
     const q = searchQuery.trim();
@@ -134,6 +144,7 @@ export function ChatCanvas() {
       const el = messageRefs.current.get(m.id);
       if (!el) continue;
       highlightTextNodes(el, q, m.id === currentId);
+      hasMarksRef.current = true;
     }
   }, [searchOpen, searchQuery, matchIds, matchCursor, messages]);
 

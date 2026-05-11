@@ -201,6 +201,13 @@ pub async fn chat_stream(
                 match maybe {
                     Some(Ok(chunk)) => {
                         buf.extend_from_slice(&chunk);
+                        // Coalesce all deltas arriving in this network chunk
+                        // into one Token / Thinking event each before
+                        // emitting. See the matching comment in
+                        // providers/ollama.rs for the rationale.
+                        let mut pending_token = String::new();
+                        let mut pending_think = String::new();
+                        let mut finished = false;
                         // SSE frames are separated by double newlines.
                         while let Some(pos) = find_double_newline(&buf) {
                             let frame: Vec<u8> = buf.drain(..pos + 2).collect();
@@ -211,40 +218,21 @@ pub async fn chat_stream(
                                 if !line.starts_with("data:") { continue; }
                                 let data = line[5..].trim_start();
                                 if data == "[DONE]" {
-                                    let elapsed = start.elapsed().as_millis() as u64;
-                                    let tps = if elapsed > 0 {
-                                        (token_count as f64) * 1000.0 / (elapsed as f64)
-                                    } else { 0.0 };
-                                    let _ = app.emit(
-                                        &channel,
-                                        StreamEvent::Metrics {
-                                            tokens: token_count,
-                                            elapsed_ms: elapsed,
-                                            tokens_per_second: tps,
-                                        },
-                                    );
-                                    let _ = app.emit(&channel, StreamEvent::Done);
-                                    registry.finish(&req.stream_id);
-                                    return Ok(());
+                                    finished = true;
+                                    break;
                                 }
                                 if let Ok(parsed) = serde_json::from_str::<SseChunk>(data) {
                                     for c in parsed.choices {
                                         if let Some(d) = c.delta {
-                                            if let Some(ref think) = d.reasoning_content {
+                                            if let Some(think) = d.reasoning_content {
                                                 if !think.is_empty() {
-                                                    let _ = app.emit(
-                                                        &channel,
-                                                        StreamEvent::Thinking { delta: think.clone() },
-                                                    );
+                                                    pending_think.push_str(&think);
                                                 }
                                             }
                                             if let Some(delta) = d.content {
                                                 if !delta.is_empty() {
                                                     token_count += 1;
-                                                    let _ = app.emit(
-                                                        &channel,
-                                                        StreamEvent::Token { delta },
-                                                    );
+                                                    pending_token.push_str(&delta);
                                                 }
                                             }
                                         }
@@ -254,6 +242,36 @@ pub async fn chat_stream(
                                     }
                                 }
                             }
+                            if finished { break; }
+                        }
+                        if !pending_think.is_empty() {
+                            let _ = app.emit(
+                                &channel,
+                                StreamEvent::Thinking { delta: pending_think },
+                            );
+                        }
+                        if !pending_token.is_empty() {
+                            let _ = app.emit(
+                                &channel,
+                                StreamEvent::Token { delta: pending_token },
+                            );
+                        }
+                        if finished {
+                            let elapsed = start.elapsed().as_millis() as u64;
+                            let tps = if elapsed > 0 {
+                                (token_count as f64) * 1000.0 / (elapsed as f64)
+                            } else { 0.0 };
+                            let _ = app.emit(
+                                &channel,
+                                StreamEvent::Metrics {
+                                    tokens: token_count,
+                                    elapsed_ms: elapsed,
+                                    tokens_per_second: tps,
+                                },
+                            );
+                            let _ = app.emit(&channel, StreamEvent::Done);
+                            registry.finish(&req.stream_id);
+                            return Ok(());
                         }
                     }
                     Some(Err(e)) => {

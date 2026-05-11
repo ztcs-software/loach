@@ -591,12 +591,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // Remove all empty sessions (no messages) on startup, keep at most one.
       // Archived sessions are left alone even if empty — the user explicitly
       // moved them to the archive and shouldn't have them silently culled.
+      //
+      // Fan out the per-session message reads in parallel — they're
+      // independent IPC calls and the prior sequential await was the dominant
+      // cost of `hydrate()` for users with many chats.
+      const loaded = await Promise.all(
+        sessions.map((s) => listMessages(s.id).then((msgs) => ({ s, msgs }))),
+      );
+      const messageMap: Record<string, Message[]> = {};
       const emptySessions: Session[] = [];
-      for (const s of sessions) {
-        const msgs = await listMessages(s.id);
-        set((st) => ({ messages: { ...st.messages, [s.id]: msgs } }));
+      for (const { s, msgs } of loaded) {
+        messageMap[s.id] = msgs;
         if (msgs.length === 0 && !s.archived_at) emptySessions.push(s);
       }
+      set((st) => ({ messages: { ...st.messages, ...messageMap } }));
 
       // Delete all empty sessions except the first (most recent)
       for (let i = 1; i < emptySessions.length; i++) {

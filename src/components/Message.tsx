@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState } from "react";
+import { memo, useLayoutEffect, useRef, useState } from "react";
 import {
   Brain,
   Check,
@@ -135,7 +135,7 @@ function ThinkingBlock({ text, isStreaming }: { text: string; isStreaming?: bool
   );
 }
 
-export function MessageItem({ message, isStreaming, metrics }: MessageProps) {
+function MessageItemImpl({ message, isStreaming, metrics }: MessageProps) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -333,3 +333,13 @@ export function MessageItem({ message, isStreaming, metrics }: MessageProps) {
     </div>
   );
 }
+
+// Stable identity for the message prop is guaranteed by chatStore: only the
+// currently-streaming row gets a new object per token; all other rows keep
+// their refs. Shallow ref equality therefore lets every non-streaming bubble
+// skip re-render while tokens stream in.
+export const MessageItem = memo(MessageItemImpl, (prev, next) =>
+  prev.message === next.message &&
+  prev.isStreaming === next.isStreaming &&
+  prev.metrics === next.metrics,
+);
