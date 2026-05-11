@@ -46,7 +46,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
-import { useChatStore } from "@/stores/chatStore";
+import { resolveDefaultModelChoice, useChatStore } from "@/stores/chatStore";
 import { useModelsStore } from "@/stores/modelsStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useSpaceStore } from "@/stores/spaceStore";
@@ -282,6 +282,7 @@ export function SettingsDialog() {
                     left off.
                   </p>
                   <DefaultModelPicker className="mt-2.5" />
+                  <DefaultModelPreloadToggle className="mt-3" />
                 </div>
 
                 <Separator />
@@ -796,6 +797,70 @@ function DefaultModelPicker({ className }: { className?: string }) {
         )}
       </DropdownMenuContent>
     </DropdownMenu>
+  );
+}
+
+/* Toggle that asks the app to warm the resolved default model into VRAM at
+ * startup. Only meaningful for local Ollama models — cloud providers have
+ * no preload step — so the switch is forced off and disabled when the
+ * resolved choice points at OpenAI (or at a not-yet-known model).
+ *
+ * The "is this Ollama?" decision mirrors the resolution in App.tsx and
+ * `chatStore.resolveDefaultModelChoice`. We intentionally don't call the
+ * resolver itself here just for the provider check — the choice encoding
+ * is enough, and we only need the recent-pair fallback when `choice` is
+ * `"recent"` (which `resolveDefaultModelChoice` handles by returning the
+ * recent pair verbatim).
+ */
+function DefaultModelPreloadToggle({ className }: { className?: string }) {
+  const enabled = useSettingsStore((s) => s.default_model_preload);
+  const choice = useSettingsStore((s) => s.default_model_choice);
+  const recentProvider = useSettingsStore((s) => s.default_provider);
+  const recentModel = useSettingsStore((s) => s.default_model);
+  const update = useSettingsStore((s) => s.update);
+  const sessions = useChatStore((s) => s.sessions);
+
+  const resolved = useMemo(
+    () =>
+      resolveDefaultModelChoice(
+        choice,
+        recentProvider,
+        recentModel ?? "",
+        sessions,
+      ),
+    [choice, recentProvider, recentModel, sessions],
+  );
+
+  const isOllama = resolved.provider === "ollama" && !!resolved.model;
+
+  return (
+    <div className={className}>
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0">
+          <Label className={cn(!isOllama && "text-foreground/55")}>
+            Preload on startup
+          </Label>
+          <p className="mt-1 text-[11px] text-foreground/50">
+            {isOllama
+              ? "Preload default model into VRAM on application launch."
+              : "Only applies to local Ollama models. Pin the default to an Ollama model to enable."}
+          </p>
+        </div>
+        <Switch
+          checked={isOllama && enabled}
+          disabled={!isOllama}
+          onCheckedChange={(next) =>
+            void update("default_model_preload", next)
+          }
+          className="shrink-0"
+          aria-label={
+            enabled
+              ? "Disable default model preload"
+              : "Enable default model preload"
+          }
+        />
+      </div>
+    </div>
   );
 }
 

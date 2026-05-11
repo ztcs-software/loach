@@ -530,7 +530,7 @@ async function startTask(task: QueueTask, get: Getter, set: Setter) {
  * Anything unrecognised falls back to the recent pair so we never block a
  * "New chat" click on a malformed setting.
  */
-function resolveDefaultModelChoice(
+export function resolveDefaultModelChoice(
   choice: string,
   recentProvider: ProviderId,
   recentModel: string,

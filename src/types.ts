@@ -220,6 +220,12 @@ export interface Settings {
    *  Stored as a single string so it round-trips through the string-keyed KV
    *  settings table without bespoke serialisation. */
   default_model_choice: string;
+  /** When true, the resolved default model is sent to Ollama with an empty
+   *  chat at app startup so it loads into VRAM ahead of the user's first
+   *  request. Only meaningful when the resolved default is an Ollama model;
+   *  ignored otherwise. Off by default — preloading pins VRAM even if the
+   *  user opens the app just to read past chats. */
+  default_model_preload: boolean;
   /** Optional display name for the user. Substituted into system prompts via
    *  the `{{USER_NAME}}` template variable. Empty string = no preference. */
   user_name: string;
@@ -267,6 +273,7 @@ export const DEFAULT_SETTINGS: Settings = {
   default_provider: "ollama",
   default_model: "",
   default_model_choice: "recent",
+  default_model_preload: false,
   user_name: "",
   temporal_awareness: true,
   web_fetch_enabled: false,

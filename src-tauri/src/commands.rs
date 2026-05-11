@@ -301,6 +301,17 @@ pub async fn ollama_unload_model(
         .map_err(err)
 }
 
+#[tauri::command]
+pub async fn ollama_preload_model(
+    state: State<'_, AppState>,
+    base_url: String,
+    model: String,
+) -> Result<(), String> {
+    providers::ollama::preload_model(&state.http, &base_url, &model)
+        .await
+        .map_err(err)
+}
+
 // ------------ ollama model admin ------------
 //
 // Everything below is used by the Models panel: inspect a model, delete it,

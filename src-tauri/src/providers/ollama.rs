@@ -322,6 +322,22 @@ pub async fn unload_model(http: &Client, base_url: &str, model: &str) -> Result<
     Ok(())
 }
 
+/// Preload a model into VRAM by sending an empty chat. The default Ollama
+/// keep_alive (5m) takes over after the load completes, so the model stays
+/// resident long enough for the user's first real request to skip the cold
+/// load. Errors are swallowed — preload is best-effort and must never block
+/// app startup if Ollama is unreachable or the model is missing.
+pub async fn preload_model(http: &Client, base_url: &str, model: &str) -> Result<()> {
+    let url = format!("{}/api/chat", base_url.trim_end_matches('/'));
+    let body = serde_json::json!({
+        "model": model,
+        "messages": [],
+        "stream": false,
+    });
+    let _ = http.post(url).json(&body).send().await;
+    Ok(())
+}
+
 #[derive(Debug, Serialize)]
 struct OllamaChatMessage<'a> {
     role: &'a str,

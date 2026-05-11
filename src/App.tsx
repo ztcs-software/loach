@@ -20,9 +20,10 @@ import { CodeCanvas } from "@/components/CodeCanvas";
 import { SearchBar } from "@/components/SearchBar";
 import { SelectionCopyButton } from "@/components/SelectionCopyButton";
 import { ToastHost } from "@/components/ToastHost";
-import { useChatStore } from "@/stores/chatStore";
+import { resolveDefaultModelChoice, useChatStore } from "@/stores/chatStore";
 import { useModelsStore } from "@/stores/modelsStore";
 import { useSettingsStore } from "@/stores/settingsStore";
+import { ollamaPreloadModel } from "@/lib/tauri";
 import { useSnippetStore } from "@/stores/snippetStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useSecurityStore, lockUntilHydrated } from "@/stores/securityStore";
@@ -82,6 +83,27 @@ export default function App() {
       // Model list is cheap (one Ollama /api/tags call) but network-bound, so
       // fire it last — failure here shouldn't block the rest of the UI.
       await hydrateModels();
+
+      // Optional default-model preload. Resolves the same encoded choice
+      // that "New chat" would use, then warms the model into VRAM with an
+      // empty Ollama chat so the first real request skips the cold load.
+      // Cloud providers have no local load step, so we only fire for Ollama.
+      // Fully fire-and-forget — Ollama may be unreachable or the model
+      // missing; we never want this to surface as an error.
+      const s = useSettingsStore.getState();
+      if (s.default_model_preload) {
+        const resolved = resolveDefaultModelChoice(
+          s.default_model_choice,
+          s.default_provider,
+          s.default_model ?? "",
+          useChatStore.getState().sessions,
+        );
+        if (resolved.provider === "ollama" && resolved.model) {
+          void ollamaPreloadModel(s.ollama_base_url, resolved.model).catch(
+            () => {},
+          );
+        }
+      }
     })();
   }, [
     unlocked,

@@ -143,6 +143,7 @@ pub fn run() {
             commands::chat_stream,
             commands::chat_cancel,
             commands::ollama_unload_model,
+            commands::ollama_preload_model,
             commands::ollama_show_model,
             commands::ollama_delete_model,
             commands::ollama_copy_model,
