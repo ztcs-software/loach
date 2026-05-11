@@ -37,6 +37,8 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             // Resolve app data dir and open the database there.
             let data_dir = app
@@ -175,6 +177,7 @@ pub fn run() {
             commands::archive_all_sessions,
             commands::wipe_user_data,
             commands::factory_reset,
+            commands::updater_supported,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Loach");

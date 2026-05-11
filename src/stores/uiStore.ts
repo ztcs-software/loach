@@ -16,6 +16,7 @@ export type SettingsTab =
   | "archive"
   | "data"
   | "security"
+  | "updates"
   | "about";
 
 interface UIState {

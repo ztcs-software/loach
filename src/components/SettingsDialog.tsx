@@ -20,6 +20,7 @@ import {
   MoreHorizontal,
   Palette,
   Plug,
+  RefreshCw,
   RotateCcw,
   Server,
   Trash2,
@@ -52,6 +53,7 @@ import { useSpaceStore } from "@/stores/spaceStore";
 import { useUIStore } from "@/stores/uiStore";
 import { McpPanel } from "@/components/McpPanel";
 import { SecurityPanel } from "@/components/SecurityPanel";
+import { UpdatesPanel } from "@/components/UpdatesPanel";
 import { Logo } from "@/components/Logo";
 import { Switch } from "@/components/ui/switch";
 import {
@@ -90,6 +92,7 @@ const NAV = [
   { value: "archive", label: "Archive", icon: Archive },
   { value: "data", label: "Data", icon: Database },
   { value: "security", label: "Security", icon: Lock },
+  { value: "updates", label: "Updates", icon: RefreshCw },
   { value: "about", label: "About", icon: Info },
 ] as const;
 
@@ -581,6 +584,11 @@ export function SettingsDialog() {
                 <div className="mt-5">
                   <SecurityPanel />
                 </div>
+              </TabsContent>
+
+              <TabsContent value="updates" className="mt-0 space-y-5 focus-visible:ring-0 focus-visible:ring-offset-0">
+                <SectionTitle>Updates</SectionTitle>
+                <UpdatesPanel />
               </TabsContent>
 
               <TabsContent value="about" className="mt-0 space-y-5 focus-visible:ring-0 focus-visible:ring-offset-0">
