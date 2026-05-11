@@ -24,6 +24,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useChatStore } from "@/stores/chatStore";
+import { useModelsStore } from "@/stores/modelsStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useUIStore } from "@/stores/uiStore";
 import type { SidebarTab } from "@/stores/uiStore";
@@ -86,14 +87,17 @@ function CollapsedRail() {
   const openSettingsTab = useUIStore((s) => s.openSettingsTab);
   const newSession = useChatStore((s) => s.newSession);
   const setViewingSpace = useSpaceStore((s) => s.setViewingSpace);
+  const setViewingModel = useModelsStore((s) => s.setViewingModel);
 
   const goToTab = (tab: SidebarTab) => {
     setViewingSpace(null);
+    setViewingModel(null);
     setSidebarTab(tab);
   };
 
   const handleNewChat = () => {
     setViewingSpace(null);
+    setViewingModel(null);
     setSidebarTab("chats");
     void newSession({ spaceId: null });
   };
@@ -181,16 +185,19 @@ function Quicklinks() {
   const newSession = useChatStore((s) => s.newSession);
   const activeSessionId = useChatStore((s) => s.activeSessionId);
   const setViewingSpace = useSpaceStore((s) => s.setViewingSpace);
+  const setViewingModel = useModelsStore((s) => s.setViewingModel);
 
   const goToTab = (tab: SidebarTab) => {
     // Clearing override views ensures the new tab's canvas actually renders;
     // App.tsx prioritizes viewingSpaceId and viewingModel over sidebarTab.
     setViewingSpace(null);
+    setViewingModel(null);
     setSidebarTab(tab);
   };
 
   const handleNewChat = () => {
     setViewingSpace(null);
+    setViewingModel(null);
     setSidebarTab("chats");
     void newSession({ spaceId: null });
   };
@@ -283,6 +290,7 @@ function ChatList() {
   const activeId = useChatStore((s) => s.activeSessionId);
   const select = useChatStore((s) => s.selectSession);
   const setViewingSpace = useSpaceStore((s) => s.setViewingSpace);
+  const setViewingModel = useModelsStore((s) => s.setViewingModel);
   const setSidebarTab = useUIStore((s) => s.setSidebarTab);
 
   const visible = useMemo(
@@ -311,6 +319,7 @@ function ChatList() {
 
   const handleSelect = (id: string) => {
     setViewingSpace(null);
+    setViewingModel(null);
     setSidebarTab("chats");
     void select(id);
   };
