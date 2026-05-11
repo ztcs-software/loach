@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import {
   DEFAULT_SETTINGS,
+  type BackgroundStyle,
   type ProviderId,
   type Settings,
 } from "@/types";
@@ -48,6 +49,7 @@ export const useSettingsStore = create<SettingsState>((set) => ({
       set({ ...merged, openai_key_set: hasKey, hydrated: true });
       applyTheme(merged.theme);
       applyFontSize(merged.font_size);
+      applyBackground(merged.background_style);
     } catch (e) {
       console.error("settings hydrate failed", e);
       set({ hydrated: true });
@@ -59,6 +61,7 @@ export const useSettingsStore = create<SettingsState>((set) => ({
     await setSetting(String(key), String(value));
     if (key === "theme") applyTheme(value as Settings["theme"]);
     if (key === "font_size") applyFontSize(value as Settings["font_size"]);
+    if (key === "background_style") applyBackground(value as BackgroundStyle);
   },
 
   setOpenAIKey: async (key: string) => {
@@ -111,4 +114,14 @@ function applyFontSize(size: Settings["font_size"]) {
   const root = document.documentElement;
   root.classList.remove("font-size-small", "font-size-normal", "font-size-large");
   root.classList.add(`font-size-${size}`);
+}
+
+/** Mirror the background variant onto `<html>` so CSS can scope accent
+ *  variables to it. `app-mesh` / `app-solid` already live on a child div for
+ *  the actual backdrop; the html-level class is purely a hook for theming
+ *  (e.g. flipping `--primary` between azure for Solid and orange for Aurora). */
+function applyBackground(style: BackgroundStyle) {
+  const root = document.documentElement;
+  root.classList.toggle("bg-solid", style === "solid");
+  root.classList.toggle("bg-gradient", style === "gradient");
 }

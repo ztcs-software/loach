@@ -327,7 +327,7 @@ export function SettingsDialog() {
                           className={cn(
                             "inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[11px] font-medium transition-colors",
                             active
-                              ? "border-orange-400/50 bg-orange-500/15 text-orange-100"
+                              ? "border-primary/50 bg-primary/15 text-primary"
                               : "border-foreground/10 bg-foreground/[0.04] text-foreground/75 hover:border-foreground/25 hover:bg-foreground/[0.08] hover:text-foreground",
                           )}
                         >

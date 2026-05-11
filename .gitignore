@@ -35,5 +35,43 @@ src-tauri/.cargo/
 .claude/
 CLAUDE.md
 
+# Secrets & env
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.pfx
+*.p12
+*.crt
+*.cer
+id_rsa*
+id_ed25519*
+
+# Tauri signing artifacts (keys live in %USERPROFILE%\.tauri\; guard against accidental copies)
+loach.key
+loach.key.pub
+.tauri/
+
+# Installer / updater outputs not covered above
+*.nsis.zip
+*.app.tar.gz
+*.dmg
+latest.json
+
+# TypeScript incremental cache
+*.tsbuildinfo
+
+# Coverage / test output
+coverage/
+*.lcov
+.nyc_output/
+
+# OS junk
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
 # Other
 *.pdf
