@@ -604,8 +604,7 @@ export function SettingsDialog() {
                   </div>
                 </div>
                 <p className="text-sm leading-relaxed text-foreground/75">
-                  A native desktop chat client for local and OpenAI-compatible LLMs.
-                  Your conversations, keys, and files stay on your machine.
+                  A native AI desktop workspace for local and remote LLMs with Ollama and OpenAI-compatible API support.
                 </p>
                 <Separator />
                 <div className="flex flex-wrap gap-2">
