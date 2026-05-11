@@ -1,7 +1,7 @@
 {
   "name": "loach",
   "private": true,
-  "version": "1.0.0-alpha-3",
+  "version": "1.0.0-alpha-4",
   "type": "module",
   "description": "Native local LLM chat client for Windows and Linux (Ollama + OpenAI-compatible).",
   "license": "MIT",
@@ -26,7 +26,9 @@
     "@tauri-apps/api": "^2.1.1",
     "@tauri-apps/plugin-dialog": "^2.0.1",
     "@tauri-apps/plugin-fs": "^2.0.2",
+    "@tauri-apps/plugin-process": "^2.0.1",
     "@tauri-apps/plugin-shell": "^2.0.1",
+    "@tauri-apps/plugin-updater": "^2.0.1",
     "class-variance-authority": "^0.7.0",
     "clsx": "^2.1.1",
     "highlight.js": "^11.10.0",

@@ -1,6 +1,6 @@
 [package]
 name = "loach"
-version = "1.0.0-alpha-3"
+version = "1.0.0-alpha-4"
 description = "Native local LLM chat client (Ollama + OpenAI-compatible)."
 authors = ["Loach"]
 license = "MIT"
@@ -19,6 +19,8 @@ tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
 tauri-plugin-shell = "2"
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
 
 # Async runtime + HTTP
 tokio = { version = "1", features = ["full"] }
