@@ -1,0 +1,43 @@
+# Keep the build context small. Anything Docker doesn't need to see during
+# `docker build` should be listed here — it speeds up the initial context
+# upload and prevents host-side build junk from invalidating cache layers.
+
+# Node / Vite
+node_modules
+dist
+dist-ssr
+
+# Rust / Tauri build output
+src-tauri/target
+src-tauri/gen
+src-tauri/.cargo
+
+# Docker output volume from previous runs
+dist-linux
+
+# Git + CI metadata (the Rust/Node builds don't read these)
+.git
+.github
+
+# Editor / OS junk
+.vscode
+.idea
+.DS_Store
+Thumbs.db
+
+# Claude Code workspace state
+.claude
+CLAUDE.md
+
+# Secrets — belt-and-braces; these should never be in the repo, but make
+# sure they can't leak into a build context either.
+*.key
+*.pem
+*.pfx
+loach.key
+loach.key.pub
+.tauri
+
+# Logs
+*.log
+npm-debug.log*
