@@ -23,18 +23,44 @@ import type { ModelfileForm, ModelfileParams } from "@/types";
  * directives handle multi-line values without escaping; single-quoted
  * `PARAMETER stop` entries are escaped for embedded double quotes and
  * backslashes.
+ *
+ * Injection hardening:
+ *   - `FROM` is validated against a conservative model-tag allowlist so a
+ *     newline or extra whitespace can't smuggle additional directives in.
+ *   - `SYSTEM` / `TEMPLATE` bodies are rejected if they contain `"""`. The
+ *     Modelfile parser ends triple-quoted blocks on the first literal
+ *     `"""` and has no escape syntax, so an embedded sequence would either
+ *     truncate the block or inject directives. Rather than fabricate an
+ *     escape Ollama doesn't honor, we surface a hard error to the user.
  */
 export function buildModelfile(form: ModelfileForm): string {
   const lines: string[] = [];
-  if (!form.from.trim()) {
+  const from = form.from.trim();
+  if (!from) {
     throw new Error('Base model ("FROM") is required.');
   }
-  lines.push(`FROM ${form.from.trim()}`);
+  if (!isValidModelTag(from)) {
+    throw new Error(
+      `Invalid base model tag: ${JSON.stringify(form.from)}. ` +
+        `Allowed characters: letters, digits, '.', '_', '-', '/', and one optional ':' tag separator.`,
+    );
+  }
+  lines.push(`FROM ${from}`);
 
   if (form.system.trim()) {
+    if (form.system.includes('"""')) {
+      throw new Error(
+        'SYSTEM cannot contain a literal """ sequence — the Modelfile parser would end the block early and treat the rest as new directives.',
+      );
+    }
     lines.push("", `SYSTEM """${form.system}"""`);
   }
   if (form.template.trim()) {
+    if (form.template.includes('"""')) {
+      throw new Error(
+        'TEMPLATE cannot contain a literal """ sequence — the Modelfile parser would end the block early and treat the rest as new directives.',
+      );
+    }
     lines.push("", `TEMPLATE """${form.template}"""`);
   }
 
@@ -45,6 +71,22 @@ export function buildModelfile(form: ModelfileForm): string {
 
   // Trailing newline is the convention in Ollama's docs.
   return lines.join("\n") + "\n";
+}
+
+/**
+ * Conservative allowlist for Ollama model identifiers. Real tags look like
+ * `llama3.1:8b-instruct-q4_K_M` or `library/qwen2.5:7b` or a 64-char digest;
+ * we permit letters, digits, dot/underscore/dash, an optional registry path
+ * with one `/`, and one optional `:tag` suffix.
+ *
+ * Notably forbids whitespace (which would let a newline inject another
+ * directive after `FROM …\n`) and shell metacharacters.
+ */
+function isValidModelTag(value: string): boolean {
+  if (value.length === 0 || value.length > 255) return false;
+  return /^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)?(?::[A-Za-z0-9._-]+)?$/.test(
+    value,
+  );
 }
 
 /** Serialise a ModelfileParams into `PARAMETER <k> <v>` lines. Skips any

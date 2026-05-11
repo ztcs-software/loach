@@ -85,6 +85,65 @@ pub async fn delete_session(state: State<'_, AppState>, id: String) -> Result<()
     state.db.delete_session(&id).map_err(err)
 }
 
+#[derive(Debug, Deserialize)]
+pub struct UpdateSessionModelArgs {
+    pub id: String,
+    pub provider: String,
+    pub model: String,
+}
+
+/// Persist the (provider, model) pair for a session. Used by the chat
+/// header's model dropdown so a swap survives a reload.
+#[tauri::command]
+pub async fn update_session_model(
+    state: State<'_, AppState>,
+    args: UpdateSessionModelArgs,
+) -> Result<(), String> {
+    state
+        .db
+        .update_session_model(&args.id, &args.provider, &args.model)
+        .map_err(err)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateSessionSystemPromptArgs {
+    pub id: String,
+    pub prompt: String,
+}
+
+/// Persist the free-text "Custom instructions" textarea for a session.
+#[tauri::command]
+pub async fn update_session_system_prompt(
+    state: State<'_, AppState>,
+    args: UpdateSessionSystemPromptArgs,
+) -> Result<(), String> {
+    state
+        .db
+        .update_session_system_prompt(&args.id, &args.prompt)
+        .map_err(err)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateSessionParamsArgs {
+    pub id: String,
+    /// `None` clears the per-session override; `Some(json)` pins the
+    /// supplied serialised `GenerationParams` blob.
+    #[serde(default)]
+    pub params_json: Option<String>,
+}
+
+/// Persist the per-session generation-parameter override slider state.
+#[tauri::command]
+pub async fn update_session_params(
+    state: State<'_, AppState>,
+    args: UpdateSessionParamsArgs,
+) -> Result<(), String> {
+    state
+        .db
+        .update_session_params(&args.id, args.params_json.as_deref())
+        .map_err(err)
+}
+
 #[tauri::command]
 pub async fn export_session(
     state: State<'_, AppState>,
@@ -238,6 +297,13 @@ pub struct SecuritySetupArgs {
     pub password: Option<String>,
     pub pin_length: Option<u8>,
     pub hint: Option<String>,
+    /// When a lock is already configured, the renderer MUST supply the
+    /// current credentials so the backend can verify the user before
+    /// overwriting the keyring entry. Ignored when no lock is configured.
+    #[serde(default)]
+    pub current_pin: Option<String>,
+    #[serde(default)]
+    pub current_password: Option<String>,
 }
 
 #[tauri::command]
@@ -248,6 +314,8 @@ pub async fn security_setup(args: SecuritySetupArgs) -> Result<(), String> {
         args.password.as_deref(),
         args.pin_length,
         args.hint,
+        args.current_pin.as_deref(),
+        args.current_password.as_deref(),
     )
     .map_err(err)
 }
@@ -268,9 +336,23 @@ pub async fn security_get_hint() -> Result<Option<String>, String> {
     security::get_hint().map_err(err)
 }
 
+#[derive(Debug, Deserialize, Default)]
+pub struct SecurityClearArgs {
+    #[serde(default)]
+    pub pin: Option<String>,
+    #[serde(default)]
+    pub password: Option<String>,
+}
+
+/// Remove the configured app lock. Renderer must pass the user's current
+/// credentials — otherwise a compromised UI could disable the lock without
+/// any prompt. The internal `factory_reset` path uses `security::clear`
+/// directly because it has its own destructive-action gate.
 #[tauri::command]
-pub async fn security_clear() -> Result<(), String> {
-    security::clear().map_err(err)
+pub async fn security_clear(args: Option<SecurityClearArgs>) -> Result<(), String> {
+    let args = args.unwrap_or_default();
+    security::clear_with_credentials(args.pin.as_deref(), args.password.as_deref())
+        .map_err(err)
 }
 
 // ---------- providers ----------

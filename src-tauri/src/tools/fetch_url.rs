@@ -251,7 +251,11 @@ fn is_public_ip(ip: &IpAddr) -> bool {
 }
 
 fn looks_like_html(body: &str) -> bool {
-    let head = &body[..body.len().min(2048)].to_ascii_lowercase();
+    // Walk by chars rather than bytes so a non-ASCII glyph straddling the
+    // 2048-byte mark doesn't panic with `byte index N is not a char boundary`.
+    // We're only sniffing for ASCII-only HTML tokens anyway, so taking up to
+    // 2048 chars (not bytes) is safe and slightly more permissive.
+    let head: String = body.chars().take(2048).collect::<String>().to_ascii_lowercase();
     head.contains("<html") || head.contains("<!doctype html") || head.contains("<body")
 }
 
@@ -366,22 +370,22 @@ fn extract_between_ci(hay: &str, open: &str, close: &str) -> Option<String> {
 }
 
 fn strip_all_tags(s: &str) -> String {
+    // Iterate by chars, not bytes. The previous version cast each byte to a
+    // `char`, which works for ASCII but corrupts any multi-byte glyph: a 2-byte
+    // UTF-8 sequence like `é` (`C3 A9`) was emitted as two garbage U+00C3 /
+    // U+00A9 chars. Char-iteration preserves the original code points.
     let mut out = String::with_capacity(s.len());
-    let bytes = s.as_bytes();
-    let mut i = 0;
     let mut in_tag = false;
-    while i < bytes.len() {
-        let c = bytes[i];
+    for c in s.chars() {
         if in_tag {
-            if c == b'>' {
+            if c == '>' {
                 in_tag = false;
             }
-        } else if c == b'<' {
+        } else if c == '<' {
             in_tag = true;
         } else {
-            out.push(c as char);
+            out.push(c);
         }
-        i += 1;
     }
     out
 }
@@ -389,28 +393,34 @@ fn strip_all_tags(s: &str) -> String {
 fn decode_entities(s: &str) -> String {
     // Handle the common named entities plus decimal & hex numeric references.
     // Unknown entities are left as-is.
+    //
+    // Walk by `char_indices` instead of byte-indexing so a non-ASCII glyph
+    // before / after an `&...;` entity isn't truncated and the output keeps
+    // multi-byte characters intact.
     let mut out = String::with_capacity(s.len());
-    let bytes = s.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'&' {
-            if let Some(end_rel) = s[i..].find(';') {
-                let end = i + end_rel;
+    let mut iter = s.char_indices().peekable();
+    while let Some((i, c)) = iter.next() {
+        if c == '&' {
+            // Find the matching ';' (if any) starting from this position.
+            // `s[i..]` is a fresh subslice; both `i` and `i + rel` are valid
+            // char boundaries because they came from `char_indices`.
+            if let Some(rel) = s[i + 1..].find(';') {
+                let end = i + 1 + rel; // index of the ';'
                 let name = &s[i + 1..end];
-                let replacement = match name {
-                    "amp" => Some("&".to_string()),
-                    "lt" => Some("<".to_string()),
-                    "gt" => Some(">".to_string()),
-                    "quot" => Some("\"".to_string()),
-                    "apos" | "#39" => Some("'".to_string()),
-                    "nbsp" | "#160" => Some(" ".to_string()),
-                    "mdash" | "#8212" => Some("—".to_string()),
-                    "ndash" | "#8211" => Some("–".to_string()),
-                    "hellip" | "#8230" => Some("…".to_string()),
-                    "lsquo" | "#8216" => Some("‘".to_string()),
-                    "rsquo" | "#8217" => Some("’".to_string()),
-                    "ldquo" | "#8220" => Some("“".to_string()),
-                    "rdquo" | "#8221" => Some("”".to_string()),
+                let replacement: Option<String> = match name {
+                    "amp" => Some("&".into()),
+                    "lt" => Some("<".into()),
+                    "gt" => Some(">".into()),
+                    "quot" => Some("\"".into()),
+                    "apos" | "#39" => Some("'".into()),
+                    "nbsp" | "#160" => Some(" ".into()),
+                    "mdash" | "#8212" => Some("—".into()),
+                    "ndash" | "#8211" => Some("–".into()),
+                    "hellip" | "#8230" => Some("…".into()),
+                    "lsquo" | "#8216" => Some("‘".into()),
+                    "rsquo" | "#8217" => Some("’".into()),
+                    "ldquo" | "#8220" => Some("“".into()),
+                    "rdquo" | "#8221" => Some("”".into()),
                     n if n.starts_with("#x") || n.starts_with("#X") => {
                         u32::from_str_radix(&n[2..], 16)
                             .ok()
@@ -426,13 +436,18 @@ fn decode_entities(s: &str) -> String {
                 };
                 if let Some(r) = replacement {
                     out.push_str(&r);
-                    i = end + 1;
+                    // Advance the iterator past every char up to & including the ';'.
+                    while let Some(&(j, _)) = iter.peek() {
+                        if j > end {
+                            break;
+                        }
+                        iter.next();
+                    }
                     continue;
                 }
             }
         }
-        out.push(bytes[i] as char);
-        i += 1;
+        out.push(c);
     }
     out
 }
@@ -524,6 +539,35 @@ mod tests {
         assert!(!is_public_ip(&"169.254.1.1".parse().unwrap()));
         assert!(!is_public_ip(&"100.64.0.1".parse().unwrap()));
         assert!(is_public_ip(&"8.8.8.8".parse().unwrap()));
+    }
+
+    #[test]
+    fn preserves_non_ascii_when_stripping() {
+        // Regression guard for the old byte-cast bug: every multi-byte glyph
+        // must survive the strip / decode pass unchanged.
+        let html = "<p>Zażółć gęślą jaźń — 日本語テスト — 🦊</p>";
+        let (_, text) = html_to_text(html);
+        assert!(text.contains("Zażółć gęślą jaźń"), "got: {text:?}");
+        assert!(text.contains("日本語テスト"), "got: {text:?}");
+        assert!(text.contains("🦊"), "got: {text:?}");
+    }
+
+    #[test]
+    fn looks_like_html_handles_long_non_ascii_body() {
+        // A long body whose 2048-byte mark lands inside a multi-byte
+        // character used to panic. Repeat a 4-byte glyph past the boundary.
+        let body: String = "🦊".repeat(1000);
+        // Should not panic; with no `<html>` tokens, just returns false.
+        assert!(!looks_like_html(&body));
+    }
+
+    #[test]
+    fn decodes_entities_around_non_ascii() {
+        // Entities surrounded by multi-byte characters must decode without
+        // corrupting the surrounding text.
+        let s = "日本&amp;語";
+        let decoded = decode_entities(s);
+        assert_eq!(decoded, "日本&語");
     }
 
     #[test]

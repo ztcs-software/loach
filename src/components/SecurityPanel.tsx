@@ -16,7 +16,7 @@ import { cn } from "@/lib/utils";
 import type { LockMethod } from "@/lib/tauri";
 
 type PinLength = 4 | 6 | 8;
-type Mode = "idle" | "setup";
+type Mode = "idle" | "setup" | "remove";
 
 /**
  * Security tab body. Two layouts:
@@ -43,26 +43,34 @@ export function SecurityPanel() {
     if (!hydrated) void hydrate();
   }, [hydrated, hydrate]);
 
-  const handleRemove = async () => {
-    if (
-      !confirm(
-        "Remove app lock? Anyone with access to this machine will be able to open Loach without authentication.",
-      )
-    )
-      return;
-    await clearAction();
-    setMode("idle");
-  };
-
   if (mode === "setup") {
     return (
       <SetupWizard
         initialMethod={status.method ?? "pin"}
         initialPinLength={(status.pin_length as PinLength) ?? 4}
         existingHint={status.has_hint}
+        // Whether we're replacing an existing lock — controls whether the
+        // wizard demands the user's CURRENT credentials before overwriting.
+        replacing={status.configured}
+        configuredMethod={status.method}
+        configuredPinLength={(status.pin_length as PinLength) ?? 4}
         onCancel={() => setMode("idle")}
         onSubmit={async (args) => {
           await setupAction(args);
+          setMode("idle");
+        }}
+      />
+    );
+  }
+
+  if (mode === "remove") {
+    return (
+      <RemoveConfirm
+        method={status.method!}
+        pinLength={(status.pin_length as PinLength) ?? 4}
+        onCancel={() => setMode("idle")}
+        onSubmit={async (args) => {
+          await clearAction(args);
           setMode("idle");
         }}
       />
@@ -82,11 +90,126 @@ export function SecurityPanel() {
           pinLength={status.pin_length}
           hasHint={status.has_hint}
           onChange={() => setMode("setup")}
-          onRemove={handleRemove}
+          onRemove={() => setMode("remove")}
         />
       ) : (
         <UnconfiguredCard onSetup={() => setMode("setup")} />
       )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Remove confirmation — collects the current credentials, then hands them to
+// the backend. The backend rejects the call if they don't match the stored
+// hashes, so a compromised UI can't silently disable the lock.
+// ---------------------------------------------------------------------------
+
+function RemoveConfirm({
+  method,
+  pinLength,
+  onCancel,
+  onSubmit,
+}: {
+  method: LockMethod;
+  pinLength: PinLength;
+  onCancel: () => void;
+  onSubmit: (args: { pin?: string; password?: string }) => Promise<void>;
+}) {
+  const [pin, setPin] = useState("");
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const usesPin = method === "pin" || method === "both";
+  const usesPassword = method === "password" || method === "both";
+
+  const handleSubmit = async () => {
+    setError(null);
+    setBusy(true);
+    try {
+      await onSubmit({
+        pin: usesPin ? pin : undefined,
+        password: usesPassword ? password : undefined,
+      });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="space-y-5">
+      <div className="rounded-2xl border border-destructive/30 bg-destructive/[0.05] p-5 space-y-4">
+        <div className="flex items-start gap-3">
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-destructive/15">
+            <Trash2 className="h-5 w-5 text-destructive" />
+          </div>
+          <div>
+            <h3 className="text-sm font-semibold text-foreground/90">
+              Confirm removal
+            </h3>
+            <p className="mt-1 text-[12.5px] leading-relaxed text-foreground/65">
+              Enter your current credentials to remove the app lock. Anyone
+              with access to this machine will then be able to open Loach
+              without authentication.
+            </p>
+          </div>
+        </div>
+
+        {usesPin && (
+          <div>
+            <Label>Current PIN</Label>
+            <Input
+              className="mt-1.5"
+              type="password"
+              inputMode="numeric"
+              autoComplete="current-password"
+              maxLength={pinLength}
+              value={pin}
+              onChange={(e) =>
+                setPin(e.target.value.replace(/\D/g, "").slice(0, pinLength))
+              }
+              placeholder={"•".repeat(pinLength)}
+            />
+          </div>
+        )}
+        {usesPassword && (
+          <div>
+            <Label>Current password</Label>
+            <Input
+              className="mt-1.5"
+              type="password"
+              autoComplete="current-password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+            />
+          </div>
+        )}
+      </div>
+
+      {error && (
+        <div className="flex items-start gap-2 rounded-xl border border-destructive/30 bg-destructive/[0.06] px-3 py-2 text-[12px] text-destructive">
+          <CircleAlert className="mt-0.5 h-4 w-4 shrink-0" />
+          <span>{error}</span>
+        </div>
+      )}
+
+      <div className="flex items-center justify-end gap-2">
+        <Button variant="ghost" onClick={onCancel} disabled={busy}>
+          Cancel
+        </Button>
+        <Button
+          onClick={() => void handleSubmit()}
+          disabled={busy}
+          variant="outline"
+          className="gap-1.5 rounded-lg text-destructive hover:bg-destructive/10 hover:text-destructive"
+        >
+          <Trash2 className="h-4 w-4" />
+          {busy ? "Removing…" : "Remove app lock"}
+        </Button>
+      </div>
     </div>
   );
 }
@@ -196,12 +319,20 @@ function SetupWizard({
   initialMethod,
   initialPinLength,
   existingHint: _existingHint,
+  replacing,
+  configuredMethod,
+  configuredPinLength,
   onCancel,
   onSubmit,
 }: {
   initialMethod: LockMethod;
   initialPinLength: PinLength;
   existingHint: boolean;
+  /** True when a lock is already configured — the wizard is being used to
+   *  replace it. We then demand the user's CURRENT credentials too. */
+  replacing: boolean;
+  configuredMethod?: LockMethod | null;
+  configuredPinLength?: PinLength;
   onCancel: () => void;
   onSubmit: (args: {
     method: LockMethod;
@@ -209,6 +340,8 @@ function SetupWizard({
     password?: string;
     pin_length?: PinLength;
     hint?: string;
+    current_pin?: string;
+    current_password?: string;
   }) => Promise<void>;
 }) {
   const [method, setMethod] = useState<LockMethod>(initialMethod);
@@ -218,11 +351,20 @@ function SetupWizard({
   const [password, setPassword] = useState("");
   const [passwordConfirm, setPasswordConfirm] = useState("");
   const [hint, setHint] = useState("");
+  // Current credentials, only used when `replacing`.
+  const [currentPin, setCurrentPin] = useState("");
+  const [currentPassword, setCurrentPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const usesPin = method === "pin" || method === "both";
   const usesPassword = method === "password" || method === "both";
+  const currentUsesPin =
+    replacing && (configuredMethod === "pin" || configuredMethod === "both");
+  const currentUsesPassword =
+    replacing &&
+    (configuredMethod === "password" || configuredMethod === "both");
+  const currentPinLen = configuredPinLength ?? 4;
 
   // Reset PIN inputs when length changes — otherwise "1234" lingering from a
   // 4-digit choice would show up under a 6-digit selection.
@@ -232,6 +374,12 @@ function SetupWizard({
   }, [pinLength, method]);
 
   const validate = (): string | null => {
+    if (currentUsesPin && currentPin.length !== currentPinLen) {
+      return "Enter your current PIN to change the lock.";
+    }
+    if (currentUsesPassword && currentPassword.length === 0) {
+      return "Enter your current password to change the lock.";
+    }
     if (usesPin) {
       if (pin.length !== pinLength) return `PIN must be ${pinLength} digits.`;
       if (!/^\d+$/.test(pin)) return "PIN must contain digits only.";
@@ -261,6 +409,8 @@ function SetupWizard({
         password: usesPassword ? password : undefined,
         pin_length: usesPin ? pinLength : undefined,
         hint: hint.trim() ? hint.trim() : undefined,
+        current_pin: currentUsesPin ? currentPin : undefined,
+        current_password: currentUsesPassword ? currentPassword : undefined,
       });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -271,6 +421,55 @@ function SetupWizard({
 
   return (
     <div className="space-y-5">
+      {replacing && (currentUsesPin || currentUsesPassword) && (
+        <div className="rounded-2xl border border-amber-500/30 bg-amber-500/[0.04] p-5 space-y-4">
+          <div className="flex items-start gap-3">
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-amber-500/15">
+              <ShieldCheck className="h-5 w-5 text-amber-500" />
+            </div>
+            <div>
+              <h3 className="text-sm font-semibold text-foreground/90">
+                Confirm current credentials
+              </h3>
+              <p className="mt-1 text-[12.5px] leading-relaxed text-foreground/65">
+                Enter your current lock to authorise replacing it.
+              </p>
+            </div>
+          </div>
+          {currentUsesPin && (
+            <div>
+              <Label>Current PIN</Label>
+              <Input
+                className="mt-1.5"
+                type="password"
+                inputMode="numeric"
+                autoComplete="current-password"
+                maxLength={currentPinLen}
+                value={currentPin}
+                onChange={(e) =>
+                  setCurrentPin(
+                    e.target.value.replace(/\D/g, "").slice(0, currentPinLen),
+                  )
+                }
+                placeholder={"•".repeat(currentPinLen)}
+              />
+            </div>
+          )}
+          {currentUsesPassword && (
+            <div>
+              <Label>Current password</Label>
+              <Input
+                className="mt-1.5"
+                type="password"
+                autoComplete="current-password"
+                value={currentPassword}
+                onChange={(e) => setCurrentPassword(e.target.value)}
+              />
+            </div>
+          )}
+        </div>
+      )}
+
       <div className="rounded-2xl border border-foreground/10 bg-foreground/[0.025] p-5 space-y-5">
         {/* Method picker */}
         <div>

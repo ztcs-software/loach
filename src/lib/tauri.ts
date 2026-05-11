@@ -87,6 +87,37 @@ export function deleteSession(id: string): Promise<void> {
   return invoke("delete_session", { id });
 }
 
+/** Persist a session's (provider, model) pair. Used by the chat header's
+ *  model dropdown so a swap survives a reload. */
+export function updateSessionModel(args: {
+  id: string;
+  provider: string;
+  model: string;
+}): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("update_session_model", { args });
+}
+
+/** Persist the per-session "Custom instructions" textarea. Empty string is
+ *  stored as empty (not null) so the textarea's exact contents round-trip. */
+export function updateSessionSystemPrompt(args: {
+  id: string;
+  prompt: string;
+}): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("update_session_system_prompt", { args });
+}
+
+/** Persist the per-session generation-parameter override. Pass `null` to
+ *  clear the override entirely (session falls back to model + app defaults). */
+export function updateSessionParams(args: {
+  id: string;
+  params_json: string | null;
+}): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("update_session_params", { args });
+}
+
 export function exportSession(id: string, format: "json" | "md"): Promise<string> {
   if (!isTauri) return notInTauri("");
   return invoke("export_session", { id, format });
@@ -181,6 +212,11 @@ export interface SecuritySetupArgs {
   /** Required when `method` involves a PIN. */
   pin_length?: 4 | 6 | 8;
   hint?: string;
+  /** When a lock is already configured, the backend demands the user's
+   *  CURRENT credentials before it will overwrite the keyring entry.
+   *  Omit these on initial setup. */
+  current_pin?: string;
+  current_password?: string;
 }
 
 export function securityStatus(): Promise<LockStatus> {
@@ -215,9 +251,14 @@ export function securityGetHint(): Promise<string | null> {
   return invoke("security_get_hint");
 }
 
-export function securityClear(): Promise<void> {
+/** Remove the configured app lock. The backend requires the user's CURRENT
+ *  credentials so a compromised UI can't silently disable the lock. */
+export function securityClear(args?: {
+  pin?: string;
+  password?: string;
+}): Promise<void> {
   if (!isTauri) return notInTauri(undefined);
-  return invoke("security_clear");
+  return invoke("security_clear", { args: args ?? {} });
 }
 
 // ------------ providers ------------

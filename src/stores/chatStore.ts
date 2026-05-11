@@ -13,7 +13,11 @@ import {
   renameSession,
   startChatStream,
   updateMessage,
+  updateSessionModel as persistSessionModel,
+  updateSessionParams as persistSessionParams,
+  updateSessionSystemPrompt as persistSessionSystemPrompt,
 } from "@/lib/tauri";
+import { useToastStore } from "./toastStore";
 import {
   imagesFromAttachments,
   inlineTextAttachments,
@@ -505,12 +509,40 @@ async function startTask(task: QueueTask, get: Getter, set: Setter) {
     set({ activeStream: { stop: handle.stop, unlisten: handle.unlisten } });
   } catch (e) {
     console.error("startChatStream failed", e);
+    // The placeholder assistant row was created above so the bubble could
+    // show "thinking…" while we connected. Now that the connection itself
+    // failed, replace its contents with a visible error message instead of
+    // leaving a blank assistant bubble in the transcript (and the DB row
+    // it backs). Best-effort — if the DB write fails too, the in-memory
+    // patch still keeps the bubble informative until the next reload.
+    const errorMsg = e instanceof Error ? e.message : String(e);
+    const errorContent = `_⚠ ${errorMsg}_`;
+    updateMessage({
+      id: assistantMsg.id,
+      content: errorContent,
+      thinking: null,
+      metrics_json: null,
+    }).catch((upErr) =>
+      console.error("failed to persist startup-error placeholder", upErr),
+    );
+
     runningBuffers = null;
-    set({
-      activeStream: null,
-      isStreaming: false,
-      streamingSessionId: null,
-      runningTask: null,
+    set((s) => {
+      const sbm = { ...s.streamingByMessage };
+      delete sbm[assistantMsg.id];
+      return {
+        activeStream: null,
+        isStreaming: false,
+        streamingSessionId: null,
+        runningTask: null,
+        streamingByMessage: sbm,
+        messages: {
+          ...s.messages,
+          [sessionId]: (s.messages[sessionId] ?? []).map((m) =>
+            m.id === assistantMsg.id ? { ...m, content: errorContent } : m,
+          ),
+        },
+      };
     });
     // Don't stall the queue if this one task failed to start.
     promoteQueueHead(get, set);
@@ -809,6 +841,23 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   setSessionModel: async (id, provider, model) => {
     const prev = get().sessions.find((x) => x.id === id);
+    if (!prev) return;
+
+    // Persist FIRST. A failed write must not flip the dropdown — otherwise
+    // the user thinks the model changed when in fact the next chat send
+    // would still go to the old one (or, worse, to a model whose params
+    // we'd loaded as a side effect).
+    try {
+      await persistSessionModel({ id, provider, model });
+    } catch (e) {
+      useToastStore.getState().push({
+        kind: "error",
+        title: "Couldn't change model",
+        body: e instanceof Error ? e.message : String(e),
+      });
+      return;
+    }
+
     set((s) => ({
       sessions: s.sessions.map((x) =>
         x.id === id ? { ...x, provider, model } : x,
@@ -823,7 +872,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       .catch(() => {});
 
     // Unload the previous Ollama model from VRAM to free resources.
-    if (prev && prev.provider === "ollama" && prev.model && prev.model !== model) {
+    if (prev.provider === "ollama" && prev.model && prev.model !== model) {
       const baseUrl = useSettingsStore.getState().ollama_base_url;
       ollamaUnloadModel(baseUrl, prev.model).catch(() => {});
     }
@@ -835,6 +884,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   setSessionSystemPrompt: async (id, prompt) => {
+    // Persist first (called on textarea blur, so once-per-action — the IPC
+    // round-trip is invisible to the user).
+    try {
+      await persistSessionSystemPrompt({ id, prompt });
+    } catch (e) {
+      useToastStore.getState().push({
+        kind: "error",
+        title: "Couldn't save instructions",
+        body: e instanceof Error ? e.message : String(e),
+      });
+      return;
+    }
     set((s) => ({
       sessions: s.sessions.map((x) =>
         x.id === id ? { ...x, system_prompt: prompt } : x,
@@ -844,11 +905,24 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   setSessionParams: async (id, params) => {
     const next = params === null ? null : JSON.stringify(params);
+    // Sliders fire many events during a drag, so update the UI optimistically
+    // and persist in the background. A failed write surfaces a toast — we
+    // deliberately do NOT revert the slider mid-drag because that would be
+    // jarring; the user can re-drag if the chip tells them the save failed.
     set((s) => ({
       sessions: s.sessions.map((x) =>
         x.id === id ? { ...x, params_json: next } : x,
       ),
     }));
+    try {
+      await persistSessionParams({ id, params_json: next });
+    } catch (e) {
+      useToastStore.getState().push({
+        kind: "error",
+        title: "Couldn't save parameters",
+        body: e instanceof Error ? e.message : String(e),
+      });
+    }
   },
 
   importMessages: async (id, parsed) => {

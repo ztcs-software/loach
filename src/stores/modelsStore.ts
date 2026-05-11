@@ -383,10 +383,21 @@ async function runAdminStream(
   }
   activeRuns.set(streamId, handle);
 
-  // Poll the finished flag — we don't have a promise wired into the
-  // `onEvent` closure in tauri.ts, so use a microtask loop that resolves
-  // when the progress entry reaches a terminal state.
+  // Wait for the run to reach a terminal state. The subscribe + check order
+  // matters: a fast local stream can deliver `done` *before* this code runs
+  // (the listener was attached inside `start()` above, so it can already
+  // have flipped `finished`). If we just subscribed without an initial
+  // snapshot check, we'd never see another store update for this run and
+  // the promise would hang forever.
   await new Promise<void>((resolve) => {
+    // Snapshot check — terminal already? Resolve immediately.
+    if (useModelsStore.getState().runs[streamId]?.finished) {
+      resolve();
+      return;
+    }
+    // Otherwise, subscribe and watch for the transition. The callback also
+    // re-checks the snapshot in case `subscribe` itself runs synchronously
+    // after a pending state update.
     const unsub = useModelsStore.subscribe((s) => {
       const run = s.runs[streamId];
       if (run?.finished) {

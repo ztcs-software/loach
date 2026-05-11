@@ -193,10 +193,18 @@ fn extract_first_sse_data(s: &str) -> Option<&str> {
 }
 
 fn truncate(s: &str) -> String {
+    // Char-boundary safe truncation. The previous version sliced `&s[..MAX]`
+    // by byte index, which panics with "byte index N is not a char boundary"
+    // when a multi-byte UTF-8 sequence straddled the 300-byte mark — which
+    // is reachable any time an MCP server returns a non-ASCII error body.
     const MAX: usize = 300;
-    if s.len() <= MAX {
-        s.to_string()
-    } else {
-        format!("{}…", &s[..MAX])
+    if s.chars().count() <= MAX {
+        return s.to_string();
     }
+    let cut = s
+        .char_indices()
+        .nth(MAX)
+        .map(|(i, _)| i)
+        .unwrap_or(s.len());
+    format!("{}…", &s[..cut])
 }

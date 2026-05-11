@@ -12,6 +12,12 @@ use super::{ChatRequest, ModelInfo};
 use crate::secrets;
 use crate::stream::{event_channel, StreamEvent, StreamRegistry};
 
+/// Per-frame ceiling on the SSE buffer between blank-line delimiters. Mirrors
+/// `providers::ollama::MAX_LINE_BYTES`. A reasonable OpenAI chunk is sub-KB;
+/// 1 MiB is generous while still catching a stream that never delivers a
+/// frame separator (broken proxy, HTML error page mid-stream, etc.).
+const MAX_FRAME_BYTES: usize = 1024 * 1024;
+
 pub fn default_base_url() -> &'static str {
     "https://api.openai.com/v1"
 }
@@ -201,6 +207,24 @@ pub async fn chat_stream(
                 match maybe {
                     Some(Ok(chunk)) => {
                         buf.extend_from_slice(&chunk);
+                        // Bail out if a malicious/broken endpoint never
+                        // delivers a frame separator and the buffer would
+                        // otherwise grow without bound. We accept either
+                        // `\n\n` or `\r\n\r\n` as the frame end, so the
+                        // "no separator yet" check tests both.
+                        if buf.len() > MAX_FRAME_BYTES && find_frame_end(&buf).is_none() {
+                            let _ = app.emit(
+                                &channel,
+                                StreamEvent::Error {
+                                    message: format!(
+                                        "stream exceeded {} bytes without a frame delimiter — aborting",
+                                        MAX_FRAME_BYTES
+                                    ),
+                                },
+                            );
+                            registry.finish(&req.stream_id);
+                            return Err(anyhow!("openai stream frame too large"));
+                        }
                         // Coalesce all deltas arriving in this network chunk
                         // into one Token / Thinking event each before
                         // emitting. See the matching comment in
@@ -208,11 +232,16 @@ pub async fn chat_stream(
                         let mut pending_token = String::new();
                         let mut pending_think = String::new();
                         let mut finished = false;
-                        // SSE frames are separated by double newlines.
-                        while let Some(pos) = find_double_newline(&buf) {
-                            let frame: Vec<u8> = buf.drain(..pos + 2).collect();
-                            // Strip trailing \n\n
-                            let text = String::from_utf8_lossy(&frame[..frame.len() - 2]).to_string();
+                        // SSE frames are separated by a blank line: `\n\n`
+                        // for compliant servers, `\r\n\r\n` for proxies that
+                        // re-frame on CRLF. We accept both.
+                        while let Some((pos, sep_len)) = find_frame_end_with_len(&buf) {
+                            let frame: Vec<u8> = buf.drain(..pos + sep_len).collect();
+                            // Strip the trailing separator
+                            let text = String::from_utf8_lossy(
+                                &frame[..frame.len() - sep_len],
+                            )
+                            .to_string();
                             for line in text.lines() {
                                 let line = line.trim_start();
                                 if !line.starts_with("data:") { continue; }
@@ -305,6 +334,29 @@ pub async fn chat_stream(
     }
 }
 
-fn find_double_newline(buf: &[u8]) -> Option<usize> {
-    buf.windows(2).position(|w| w == b"\n\n")
+/// Locate the start of the next frame-end separator. Returns `(position, len)`
+/// where `len` is 2 for `\n\n` or 4 for `\r\n\r\n`. We prefer whichever sits
+/// earliest in the buffer.
+fn find_frame_end_with_len(buf: &[u8]) -> Option<(usize, usize)> {
+    let lf = buf.windows(2).position(|w| w == b"\n\n");
+    let crlf = buf.windows(4).position(|w| w == b"\r\n\r\n");
+    match (lf, crlf) {
+        (Some(a), Some(b)) => {
+            if a <= b {
+                Some((a, 2))
+            } else {
+                Some((b, 4))
+            }
+        }
+        (Some(a), None) => Some((a, 2)),
+        (None, Some(b)) => Some((b, 4)),
+        (None, None) => None,
+    }
+}
+
+/// Truth-only probe: is there any frame separator anywhere in the buffer?
+/// Used by the buffer-cap guard so we only abort when we genuinely have not
+/// seen *any* delimiter.
+fn find_frame_end(buf: &[u8]) -> Option<usize> {
+    find_frame_end_with_len(buf).map(|(pos, _)| pos)
 }
