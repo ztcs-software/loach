@@ -2,21 +2,28 @@ import { PartyPopper } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Logo } from "@/components/Logo";
 import { useOnboardingStore } from "@/stores/onboardingStore";
+import { useChatStore } from "@/stores/chatStore";
+import { useUIStore } from "@/stores/uiStore";
 import { StepShell } from "./StepShell";
 
 /**
- * Closer screen. Marks `onboarding_completed` true and unmounts the
- * wizard, dropping the user on the empty-state HeroComposer (the chat
- * "new chat" entry). No active session is created — the empty state
- * already handles that lazily on first message.
+ * Closer screen. Marks `onboarding_completed` true, kicks off a fresh
+ * chat session, and arms the ChatHeader to auto-open its model picker
+ * so the user's first action lands on the model selection dropdown.
  */
 
 export function FinalStep({ onClose }: { onClose: () => void }) {
   const complete = useOnboardingStore((s) => s.complete);
   const goBack = useOnboardingStore((s) => s.goBack);
+  const newSession = useChatStore((s) => s.newSession);
+  const setPendingOpenModelPicker = useUIStore(
+    (s) => s.setPendingOpenModelPicker,
+  );
 
   const handleStart = async () => {
     await complete();
+    setPendingOpenModelPicker(true);
+    await newSession({ spaceId: null });
     // No need to call onClose — once `onboarding_completed` flips, the
     // App-level gate unmounts the wizard automatically on the next
     // render.

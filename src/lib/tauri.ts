@@ -87,6 +87,37 @@ export function deleteSession(id: string): Promise<void> {
   return invoke("delete_session", { id });
 }
 
+/** Persist a session's (provider, model) pair. Used by the chat header's
+ *  model dropdown so a swap survives a reload. */
+export function updateSessionModel(args: {
+  id: string;
+  provider: string;
+  model: string;
+}): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("update_session_model", { args });
+}
+
+/** Persist the per-session "Custom instructions" textarea. Empty string is
+ *  stored as empty (not null) so the textarea's exact contents round-trip. */
+export function updateSessionSystemPrompt(args: {
+  id: string;
+  prompt: string;
+}): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("update_session_system_prompt", { args });
+}
+
+/** Persist the per-session generation-parameter override. Pass `null` to
+ *  clear the override entirely (session falls back to model + app defaults). */
+export function updateSessionParams(args: {
+  id: string;
+  params_json: string | null;
+}): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("update_session_params", { args });
+}
+
 export function exportSession(id: string, format: "json" | "md"): Promise<string> {
   if (!isTauri) return notInTauri("");
   return invoke("export_session", { id, format });
@@ -181,6 +212,11 @@ export interface SecuritySetupArgs {
   /** Required when `method` involves a PIN. */
   pin_length?: 4 | 6 | 8;
   hint?: string;
+  /** When a lock is already configured, the backend demands the user's
+   *  CURRENT credentials before it will overwrite the keyring entry.
+   *  Omit these on initial setup. */
+  current_pin?: string;
+  current_password?: string;
 }
 
 export function securityStatus(): Promise<LockStatus> {
@@ -215,9 +251,14 @@ export function securityGetHint(): Promise<string | null> {
   return invoke("security_get_hint");
 }
 
-export function securityClear(): Promise<void> {
+/** Remove the configured app lock. The backend requires the user's CURRENT
+ *  credentials so a compromised UI can't silently disable the lock. */
+export function securityClear(args?: {
+  pin?: string;
+  password?: string;
+}): Promise<void> {
   if (!isTauri) return notInTauri(undefined);
-  return invoke("security_clear");
+  return invoke("security_clear", { args: args ?? {} });
 }
 
 // ------------ providers ------------
@@ -662,29 +703,59 @@ export function mcpTest(input: McpServerInput): Promise<McpTestResult> {
 
 // ------------ data (export / import / wipe) ------------
 
-/** Returns a JSON string representing every table in the DB. The caller
- *  is responsible for `dialog.save` + `writeTextFile` to put it on disk. */
+/** Returns a JSON string representing every table in the DB. Use
+ *  `saveTextToFile` to put the result on disk through a backend-owned
+ *  save dialog. */
 export function exportDataJson(): Promise<string> {
   if (!isTauri) return Promise.reject(new Error("export requires the Tauri runtime"));
   return invoke<string>("export_data_json");
 }
 
-/** Write `contents` to `path` as UTF-8, going through a Rust command rather
- *  than `@tauri-apps/plugin-fs`. The fs plugin's scope only covers a few
- *  known directories, so writing a user-picked path on the Desktop (etc.)
- *  silently fails — we hand the path the dialog returned to Rust and let
- *  it do the write directly. */
-export function writeTextFile(path: string, contents: string): Promise<void> {
-  if (!isTauri) return Promise.reject(new Error("file write requires the Tauri runtime"));
-  return invoke<void>("write_text_file", { path, contents });
+/** Native filter shape for {@link saveTextToFile}. */
+export interface SaveDialogFilter {
+  name: string;
+  extensions: string[];
 }
 
-/** Replace every table with the contents of the JSON file at `path`.
- *  Resolves to a per-table row-count breakdown on success; rejects with
- *  a human-readable message if the file isn't a Loach export. */
-export function importDataJson(path: string): Promise<ImportStats> {
+/** Open a native save dialog and write `content` to whichever path the
+ *  user picks. The dialog and the write both happen in Rust, so the
+ *  renderer cannot bypass the picker and write to an arbitrary path.
+ *
+ *  Resolves to the chosen path (string) on success, or `null` if the
+ *  user cancelled the dialog. */
+export function saveTextToFile(args: {
+  content: string;
+  default_path?: string;
+  filters?: SaveDialogFilter[];
+}): Promise<string | null> {
+  if (!isTauri) {
+    return Promise.reject(new Error("file save requires the Tauri runtime"));
+  }
+  return invoke<string | null>("save_text_to_file", {
+    content: args.content,
+    defaultPath: args.default_path,
+    filters: args.filters,
+  });
+}
+
+/** Optional app-lock credentials for destructive Tauri commands. */
+export interface DestructiveAuth {
+  pin?: string;
+  password?: string;
+}
+
+/** Open a native open-file dialog, read the JSON, and apply it to the DB.
+ *  Resolves to per-table row counts on success, or `null` if the user
+ *  cancelled. Rejects on schema mismatch or read error.
+ *
+ *  When an app lock is configured the backend requires the current
+ *  credentials — pass them via `auth`. The backend rejects the call (and
+ *  never opens the dialog) if the gate doesn't pass. */
+export function importDataWithDialog(
+  auth?: DestructiveAuth,
+): Promise<ImportStats | null> {
   if (!isTauri) return Promise.reject(new Error("import requires the Tauri runtime"));
-  return invoke<ImportStats>("import_data_json", { path });
+  return invoke<ImportStats | null>("import_data_with_dialog", { auth });
 }
 
 /** Archive every non-archived session. Returns how many rows moved. */
@@ -694,15 +765,17 @@ export function archiveAllSessions(): Promise<number> {
 }
 
 /** Drop all user-authored content (chats, spaces, snippets, MCP servers)
- *  while leaving app settings and the stored OpenAI key intact. */
-export function wipeUserData(): Promise<void> {
+ *  while leaving app settings and the stored OpenAI key intact. Gated on
+ *  the app-lock credentials when a lock is configured. */
+export function wipeUserData(auth?: DestructiveAuth): Promise<void> {
   if (!isTauri) return notInTauri(undefined);
-  return invoke<void>("wipe_user_data");
+  return invoke<void>("wipe_user_data", { auth });
 }
 
 /** Factory reset — wipe_user_data + drop all settings + clear the OS
- *  credential-store OpenAI key. Irreversible. */
-export function factoryReset(): Promise<void> {
+ *  credential-store OpenAI key. Irreversible. Gated on the app-lock
+ *  credentials when a lock is configured. */
+export function factoryReset(auth?: DestructiveAuth): Promise<void> {
   if (!isTauri) return notInTauri(undefined);
-  return invoke<void>("factory_reset");
+  return invoke<void>("factory_reset", { auth });
 }

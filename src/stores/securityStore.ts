@@ -26,8 +26,10 @@ interface SecurityState {
   /** Try the supplied credentials. Returns true on success and flips
    *  `unlocked` so the gate in App.tsx falls open. */
   unlock: (args: { pin?: string; password?: string }) => Promise<boolean>;
-  /** Tear down the lock. Used by "Remove app lock" in Settings. */
-  clear: () => Promise<void>;
+  /** Tear down the lock. Used by "Remove app lock" in Settings. Requires
+   *  the user's CURRENT credentials so a compromised renderer can't disable
+   *  the lock without authenticating first. */
+  clear: (args?: { pin?: string; password?: string }) => Promise<void>;
   /** Backend reads the hint out of the (still secured) blob. We don't cache
    *  the hint in JS — that way the only path to it is an explicit click on
    *  "Show hint" on the lock screen. */
@@ -75,8 +77,8 @@ export const useSecurityStore = create<SecurityState>((set, get) => ({
     return ok;
   },
 
-  clear: async () => {
-    await securityClear();
+  clear: async (args) => {
+    await securityClear(args);
     set({ status: EMPTY_STATUS, unlocked: true });
   },
 

@@ -8,7 +8,6 @@ import { NameStep } from "./NameStep";
 import { ProviderStep } from "./ProviderStep";
 import { PromptStep } from "./PromptStep";
 import { FeaturesStep } from "./FeaturesStep";
-import { AppearanceStep } from "./AppearanceStep";
 import { FinalStep } from "./FinalStep";
 
 /**
@@ -89,7 +88,6 @@ export function Onboarding() {
         {step === "provider" && <ProviderStep onClose={handleClose} />}
         {step === "prompt" && <PromptStep onClose={handleClose} />}
         {step === "features" && <FeaturesStep onClose={handleClose} />}
-        {step === "appearance" && <AppearanceStep onClose={handleClose} />}
         {step === "final" && <FinalStep onClose={handleClose} />}
 
         {/* Provider-step dismiss confirm. Renders as an in-card overlay

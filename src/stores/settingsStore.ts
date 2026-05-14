@@ -12,6 +12,7 @@ import {
   clearOpenAIKey as clearOpenAIKeyCmd,
   setSetting,
 } from "@/lib/tauri";
+import { useToastStore } from "./toastStore";
 
 interface SettingsState extends Settings {
   openai_key_set: boolean;
@@ -23,7 +24,7 @@ interface SettingsState extends Settings {
   setProviderDefault: (provider: ProviderId, model: string) => Promise<void>;
 }
 
-export const useSettingsStore = create<SettingsState>((set) => ({
+export const useSettingsStore = create<SettingsState>((set, get) => ({
   ...DEFAULT_SETTINGS,
   openai_key_set: false,
   hydrated: false,
@@ -57,11 +58,32 @@ export const useSettingsStore = create<SettingsState>((set) => ({
   },
 
   update: async (key, value) => {
+    // Optimistic update so toggles / dropdowns feel instant (the SQLite write
+    // is sub-millisecond but the React render shouldn't wait on the IPC
+    // round-trip). If the persistence fails, roll the local state back so
+    // the UI matches what's actually on disk.
+    const prev = (get() as unknown as Record<string, unknown>)[
+      key as string
+    ] as Settings[typeof key];
     set({ [key]: value } as Partial<SettingsState>);
-    await setSetting(String(key), String(value));
     if (key === "theme") applyTheme(value as Settings["theme"]);
     if (key === "font_size") applyFontSize(value as Settings["font_size"]);
     if (key === "background_style") applyBackground(value as BackgroundStyle);
+
+    try {
+      await setSetting(String(key), String(value));
+    } catch (e) {
+      useToastStore.getState().push({
+        kind: "error",
+        title: "Couldn't save setting",
+        body: e instanceof Error ? e.message : String(e),
+      });
+      // Revert both the state and any visual side-effect we applied above.
+      set({ [key]: prev } as Partial<SettingsState>);
+      if (key === "theme") applyTheme(prev as Settings["theme"]);
+      if (key === "font_size") applyFontSize(prev as Settings["font_size"]);
+      if (key === "background_style") applyBackground(prev as BackgroundStyle);
+    }
   },
 
   setOpenAIKey: async (key: string) => {
@@ -75,9 +97,38 @@ export const useSettingsStore = create<SettingsState>((set) => ({
   },
 
   setProviderDefault: async (provider, model) => {
+    // Persist both rows BEFORE updating state. The two writes can't be wrapped
+    // in a single SQLite transaction over the IPC bridge (we'd need a new
+    // command for that), so we sequence them carefully:
+    //   1. Write provider. On failure → toast and bail; nothing changed.
+    //   2. Write model. On failure → revert provider so the DB stays
+    //      internally consistent (a non-matching provider/model pair would
+    //      confuse the model-resolver on next boot).
+    try {
+      await setSetting("default_provider", provider);
+    } catch (e) {
+      useToastStore.getState().push({
+        kind: "error",
+        title: "Couldn't save default provider",
+        body: e instanceof Error ? e.message : String(e),
+      });
+      return;
+    }
+    try {
+      await setSetting("default_model", model);
+    } catch (e) {
+      // Roll back the provider write so the DB doesn't end up with the new
+      // provider paired against the old model.
+      const prevProvider = get().default_provider;
+      await setSetting("default_provider", prevProvider).catch(() => {});
+      useToastStore.getState().push({
+        kind: "error",
+        title: "Couldn't save default model",
+        body: e instanceof Error ? e.message : String(e),
+      });
+      return;
+    }
     set({ default_provider: provider, default_model: model });
-    await setSetting("default_provider", provider);
-    await setSetting("default_model", model);
   },
 }));
 

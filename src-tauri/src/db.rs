@@ -424,25 +424,50 @@ impl Database {
         Ok(())
     }
 
-    pub fn update_session_meta(
+    /// Update only the (provider, model) pair on a session. Leaves
+    /// `system_prompt` and `params_json` untouched so a model swap doesn't
+    /// silently clobber per-chat instructions or generation overrides.
+    pub fn update_session_model(
         &self,
         id: &str,
-        provider: Option<&str>,
-        model: Option<&str>,
-        system_prompt: Option<&str>,
+        provider: &str,
+        model: &str,
+    ) -> Result<()> {
+        let now = Utc::now().timestamp_millis();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE sessions SET provider = ?1, model = ?2, updated_at = ?3 WHERE id = ?4",
+            params![provider, model, now, id],
+        )?;
+        Ok(())
+    }
+
+    /// Update only the `system_prompt` column. Empty string is stored as
+    /// empty (not NULL) so the round-trip back through `get_session` matches
+    /// what the textarea last contained.
+    pub fn update_session_system_prompt(&self, id: &str, prompt: &str) -> Result<()> {
+        let now = Utc::now().timestamp_millis();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE sessions SET system_prompt = ?1, updated_at = ?2 WHERE id = ?3",
+            params![prompt, now, id],
+        )?;
+        Ok(())
+    }
+
+    /// Update only the `params_json` column. `None` clears the override
+    /// (session falls back to model defaults); `Some(json)` pins the supplied
+    /// JSON blob.
+    pub fn update_session_params(
+        &self,
+        id: &str,
         params_json: Option<&str>,
     ) -> Result<()> {
         let now = Utc::now().timestamp_millis();
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "UPDATE sessions SET
-                provider = COALESCE(?1, provider),
-                model = COALESCE(?2, model),
-                system_prompt = ?3,
-                params_json = ?4,
-                updated_at = ?5
-             WHERE id = ?6",
-            params![provider, model, system_prompt, params_json, now, id],
+            "UPDATE sessions SET params_json = ?1, updated_at = ?2 WHERE id = ?3",
+            params![params_json, now, id],
         )?;
         Ok(())
     }
@@ -592,17 +617,6 @@ impl Database {
     }
 
     // ------------ settings ------------
-
-    pub fn get_setting(&self, key: &str) -> Result<Option<String>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare("SELECT value FROM settings WHERE key = ?1")?;
-        let mut rows = stmt.query(params![key])?;
-        if let Some(r) = rows.next()? {
-            Ok(Some(r.get(0)?))
-        } else {
-            Ok(None)
-        }
-    }
 
     pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
@@ -1013,28 +1027,6 @@ impl Database {
         Ok(rows)
     }
 
-    pub fn get_mcp_server(&self, id: &str) -> Result<Option<McpServer>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT id, name, url, headers_json, enabled, created_at, updated_at
-             FROM mcp_servers WHERE id = ?1",
-        )?;
-        let mut rows = stmt.query(params![id])?;
-        if let Some(r) = rows.next()? {
-            Ok(Some(McpServer {
-                id: r.get(0)?,
-                name: r.get(1)?,
-                url: r.get::<_, Option<String>>(2)?.unwrap_or_default(),
-                headers_json: r.get(3)?,
-                enabled: r.get::<_, i64>(4)? != 0,
-                created_at: r.get(5)?,
-                updated_at: r.get(6)?,
-            }))
-        } else {
-            Ok(None)
-        }
-    }
-
     /// Upsert: create a new row if `id` is empty, otherwise update the
     /// existing one. Returns the row as it now stands in the DB.
     pub fn upsert_mcp_server(
@@ -1204,13 +1196,27 @@ impl Database {
     /// messages, …"). FK enforcement is disabled for the duration so a
     /// snapshot that's missing e.g. a referenced space_id for a session
     /// still imports cleanly (the orphan FK becomes NULL at next write).
+    ///
+    /// `PRAGMA foreign_keys = ON` is restored on every exit path — including
+    /// errors mid-import — so a bad snapshot can't leave the shared
+    /// connection with FK enforcement disabled.
     pub fn restore_snapshot(&self, snap: &DatabaseSnapshot) -> Result<ImportStats> {
         let mut conn = self.conn.lock().unwrap();
 
         // PRAGMA foreign_keys cannot be toggled inside a transaction, so
         // flip it before begin and restore after commit.
         conn.pragma_update(None, "foreign_keys", "OFF")?;
+        let result = Self::restore_snapshot_locked(&mut conn, snap);
+        if let Err(e) = conn.pragma_update(None, "foreign_keys", "ON") {
+            tracing::error!("failed to re-enable foreign_keys after restore: {e:?}");
+        }
+        result
+    }
 
+    fn restore_snapshot_locked(
+        conn: &mut Connection,
+        snap: &DatabaseSnapshot,
+    ) -> Result<ImportStats> {
         let tx = conn.transaction()?;
         tx.execute_batch(
             r#"
@@ -1380,7 +1386,6 @@ impl Database {
         };
 
         tx.commit()?;
-        conn.pragma_update(None, "foreign_keys", "ON")?;
         Ok(stats)
     }
 
@@ -1401,9 +1406,21 @@ impl Database {
     /// Delete everything the user created (chats, spaces, snippets,
     /// MCP servers) while leaving app settings intact. `messages` and
     /// `space_files` fall via ON DELETE CASCADE.
+    ///
+    /// `PRAGMA foreign_keys = ON` is restored on every exit path so a mid-
+    /// transaction failure can't leave the shared connection with FK
+    /// enforcement disabled.
     pub fn wipe_user_data(&self) -> Result<()> {
         let mut conn = self.conn.lock().unwrap();
         conn.pragma_update(None, "foreign_keys", "OFF")?;
+        let result = Self::wipe_user_data_locked(&mut conn);
+        if let Err(e) = conn.pragma_update(None, "foreign_keys", "ON") {
+            tracing::error!("failed to re-enable foreign_keys after wipe_user_data: {e:?}");
+        }
+        result
+    }
+
+    fn wipe_user_data_locked(conn: &mut Connection) -> Result<()> {
         let tx = conn.transaction()?;
         tx.execute_batch(
             r#"
@@ -1417,21 +1434,36 @@ impl Database {
             "#,
         )?;
         tx.commit()?;
-        conn.pragma_update(None, "foreign_keys", "ON")?;
         Ok(())
     }
 
     /// Factory reset: everything `wipe_user_data` does, plus a settings
     /// purge. Caller is responsible for clearing the OS-kept OpenAI key
     /// since that lives outside SQLite.
+    ///
+    /// FK enforcement is restored on every exit path (see [`wipe_user_data`]).
     pub fn wipe_all(&self) -> Result<()> {
         let mut conn = self.conn.lock().unwrap();
         conn.pragma_update(None, "foreign_keys", "OFF")?;
+        let result = Self::wipe_all_locked(&mut conn);
+        if let Err(e) = conn.pragma_update(None, "foreign_keys", "ON") {
+            tracing::error!("failed to re-enable foreign_keys after wipe_all: {e:?}");
+        }
+        result
+    }
+
+    fn wipe_all_locked(conn: &mut Connection) -> Result<()> {
         let tx = conn.transaction()?;
+        // `space_memories` is intentionally listed here even though `wipe_all`
+        // used to rely on ON DELETE CASCADE from `spaces`: FK enforcement is
+        // OFF for the duration of this transaction, so the cascade never
+        // fires. Explicitly truncate the table so a factory reset really
+        // does land back at zero rows.
         tx.execute_batch(
             r#"
             DELETE FROM messages;
             DELETE FROM space_files;
+            DELETE FROM space_memories;
             DELETE FROM sessions;
             DELETE FROM spaces;
             DELETE FROM snippets;
@@ -1440,7 +1472,6 @@ impl Database {
             "#,
         )?;
         tx.commit()?;
-        conn.pragma_update(None, "foreign_keys", "ON")?;
         Ok(())
     }
 }

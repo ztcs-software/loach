@@ -10,9 +10,12 @@ use tokio::select;
 use super::{ChatRequest, ModelInfo};
 use crate::stream::{admin_channel, event_channel, AdminEvent, StreamEvent, StreamRegistry};
 
-pub fn default_base_url() -> &'static str {
-    "http://localhost:11434"
-}
+/// Per-line ceiling for the NDJSON / SSE pump. A well-behaved provider sends
+/// frames in the low-kilobytes range; this cap is generous enough to fit any
+/// realistic Ollama progress / chat chunk while still catching a stream that
+/// never delivers a newline (broken proxy, ratelimit page, etc.) before it
+/// fills memory.
+const MAX_LINE_BYTES: usize = 1024 * 1024; // 1 MiB
 
 // ---------------------------------------------------------------------------
 // Model admin: show / delete / copy / pull / create
@@ -171,6 +174,22 @@ async fn drive_progress_stream(
                 match maybe {
                     Some(Ok(chunk)) => {
                         buf.extend_from_slice(&chunk);
+                        // Guard against a stream that never delivers a newline
+                        // (broken proxy, HTML 5xx page, etc.). Cap the buffer
+                        // between newlines so it can't grow without bound.
+                        if buf.len() > MAX_LINE_BYTES && !buf.contains(&b'\n') {
+                            let _ = app.emit(
+                                &channel,
+                                AdminEvent::Error {
+                                    message: format!(
+                                        "stream exceeded {} bytes without a frame delimiter — aborting",
+                                        MAX_LINE_BYTES
+                                    ),
+                                },
+                            );
+                            registry.finish(&stream_id);
+                            return Err(anyhow!("ollama admin stream frame too large"));
+                        }
                         while let Some(pos) = buf.iter().position(|b| *b == b'\n') {
                             let line: Vec<u8> = buf.drain(..=pos).collect();
                             let line = &line[..line.len() - 1];
@@ -489,6 +508,22 @@ pub async fn chat_stream(
                 match maybe {
                     Some(Ok(chunk)) => {
                         buf.extend_from_slice(&chunk);
+                        // Per-frame ceiling — see the matching guard in
+                        // `drive_progress_stream`. A stream that never
+                        // delivers a newline shouldn't be allowed to balloon.
+                        if buf.len() > MAX_LINE_BYTES && !buf.contains(&b'\n') {
+                            let _ = app.emit(
+                                &channel,
+                                StreamEvent::Error {
+                                    message: format!(
+                                        "stream exceeded {} bytes without a frame delimiter — aborting",
+                                        MAX_LINE_BYTES
+                                    ),
+                                },
+                            );
+                            registry.finish(&req.stream_id);
+                            return Err(anyhow!("ollama chat stream frame too large"));
+                        }
                         // Coalesce every delta in this network chunk into one
                         // Token / Thinking event before emitting. Ollama
                         // frequently hands us several NDJSON lines per read;

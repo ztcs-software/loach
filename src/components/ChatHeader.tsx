@@ -71,6 +71,22 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
   const [ollamaUp, setOllamaUp] = useState<boolean | null>(null);
   const [loading, setLoading] = useState(false);
 
+  /** Controlled open state for the model picker. Mostly self-driven, but the
+   *  onboarding-finish path sets a `pendingOpenModelPicker` flag on uiStore so
+   *  the first thing a freshly-onboarded user sees is the model dropdown
+   *  already expanded. */
+  const [modelMenuOpen, setModelMenuOpen] = useState(false);
+  const pendingOpenModelPicker = useUIStore((s) => s.pendingOpenModelPicker);
+  const consumePendingOpenModelPicker = useUIStore(
+    (s) => s.consumePendingOpenModelPicker,
+  );
+  useEffect(() => {
+    if (!pendingOpenModelPicker) return;
+    if (!session) return;
+    consumePendingOpenModelPicker();
+    setModelMenuOpen(true);
+  }, [pendingOpenModelPicker, session, consumePendingOpenModelPicker]);
+
   /** Export-context dialog state. `text` is null while the Markdown is still
    *  being fetched from the Rust side so we can show a "Loading…" placeholder
    *  instead of an empty textarea. `error` surfaces any failure inline. */
@@ -297,7 +313,7 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
         )}
       </div>
       <div className="flex shrink-0 items-center gap-1">
-        <DropdownMenu>
+        <DropdownMenu open={modelMenuOpen} onOpenChange={setModelMenuOpen}>
           <DropdownMenuTrigger asChild disabled={!session}>
             <Button
               variant="ghost"

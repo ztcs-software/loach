@@ -51,6 +51,11 @@ interface UIState {
    *  persona / user-authored prompt and tones don't compete with manual
    *  edits. */
   toneIdBySession: Record<string, string>;
+  /** One-shot flag: when true, the ChatHeader's model dropdown auto-opens on
+   *  its next render with a session available, then clears itself. Used by
+   *  the onboarding finish path so the user lands on a fresh chat with the
+   *  model picker already expanded for selection. */
+  pendingOpenModelPicker: boolean;
   toggleSidebar: () => void;
   toggleParams: () => void;
   setSettingsOpen: (open: boolean) => void;
@@ -68,6 +73,8 @@ interface UIState {
   setPendingPersona: (personaId: string | null) => void;
   consumePendingPersona: () => string | null;
   setSessionTone: (sessionId: string, toneId: string) => void;
+  setPendingOpenModelPicker: (v: boolean) => void;
+  consumePendingOpenModelPicker: () => boolean;
 }
 
 export const useUIStore = create<UIState>((set, get) => ({
@@ -82,6 +89,7 @@ export const useUIStore = create<UIState>((set, get) => ({
   personaIdBySession: {},
   pendingPersonaId: null,
   toneIdBySession: {},
+  pendingOpenModelPicker: false,
   toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
   toggleParams: () => set((s) => ({ paramsOpen: !s.paramsOpen })),
   setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
@@ -115,4 +123,10 @@ export const useUIStore = create<UIState>((set, get) => ({
     set((s) => ({
       toneIdBySession: { ...s.toneIdBySession, [sessionId]: toneId },
     })),
+  setPendingOpenModelPicker: (v) => set({ pendingOpenModelPicker: v }),
+  consumePendingOpenModelPicker: (): boolean => {
+    const v = get().pendingOpenModelPicker;
+    if (v) set({ pendingOpenModelPicker: false });
+    return v;
+  },
 }));

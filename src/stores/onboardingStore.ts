@@ -19,7 +19,6 @@ export type OnboardingStep =
   | "provider"
   | "prompt"
   | "features"
-  | "appearance"
   | "final";
 
 export const ONBOARDING_STEPS: OnboardingStep[] = [
@@ -28,7 +27,6 @@ export const ONBOARDING_STEPS: OnboardingStep[] = [
   "provider",
   "prompt",
   "features",
-  "appearance",
   "final",
 ];
 
