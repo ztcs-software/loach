@@ -93,7 +93,7 @@ export function FeaturesStep({ onClose }: { onClose: () => void }) {
         <FeatureRow
           icon={<Globe className="h-4 w-4" />}
           title="Web fetch"
-          description="When your prompt contains an http(s):// URL, Loach downloads the page and inlines the readable text. Up to 3 URLs per message, 5 MB each, private IPs blocked."
+          description="When your prompt contains an http(s):// URL, Loach downloads the page and inlines the readable text. Up to 5 URLs per message, 5 MB each, private IPs blocked."
           checked={draft.web_fetch_enabled}
           onChange={(v) => set("web_fetch_enabled", v)}
         />

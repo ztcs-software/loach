@@ -21,7 +21,7 @@ import type { FetchedPage } from "@/types";
  *     the fetched content below it (mirrors `inlineTextAttachments`).
  */
 
-export const MAX_URLS_PER_MESSAGE = 3;
+export const MAX_URLS_PER_MESSAGE = 5;
 
 /** Per-URL outcome, useful for both inlining and showing UI chips. */
 export type FetchOutcome =

@@ -11,7 +11,7 @@
 //!   not land on loopback, private RFC1918, link-local, or other special
 //!   ranges. A hostname that *looks* public but DNS-resolves to 127.0.0.1 is
 //!   rejected.
-//! * **Timeout** — 15 s total per fetch.
+//! * **Timeout** — 30 s total per fetch.
 //! * **Body cap** — at most 5 MB is read off the wire; we truncate early
 //!   rather than buffering the whole body.
 //! * **Text cap** — after HTML stripping, the returned text is truncated to
@@ -25,7 +25,7 @@ use reqwest::Url;
 use serde::Serialize;
 use tokio::net::lookup_host;
 
-pub const FETCH_TIMEOUT: Duration = Duration::from_secs(15);
+pub const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 pub const MAX_BODY_BYTES: usize = 5 * 1024 * 1024; // 5 MB
 pub const MAX_TEXT_CHARS: usize = 12_000; // ~3-4k tokens, plenty for inlining
 

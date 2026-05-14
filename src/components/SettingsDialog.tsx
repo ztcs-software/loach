@@ -471,7 +471,7 @@ export function SettingsDialog() {
                         <span className="font-mono">http(s)://</span> URL,
                         Loach downloads the page, extracts the readable text,
                         and appends it to the prompt so the model can read it.
-                        Up to 3 URLs per message, 5&nbsp;MB each, 15&nbsp;s
+                        Up to 5 URLs per message, 5&nbsp;MB each, 30&nbsp;s
                         timeout. Private IPs are blocked.
                       </p>
                     </div>
