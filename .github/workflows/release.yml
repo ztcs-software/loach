@@ -72,7 +72,10 @@ jobs:
           VERSION="${{ steps.gate.outputs.version }}"
           {
             echo 'body<<RELEASE_NOTES_EOF'
-            cat "releases/$VERSION.md"
+            # printf %s\n guarantees a trailing newline even if the notes file
+            # doesn't end with one — otherwise the closing delimiter lands on
+            # the same line as the last content line and the parser can't see it.
+            printf '%s\n' "$(cat "releases/$VERSION.md")"
             echo 'RELEASE_NOTES_EOF'
           } >> "$GITHUB_OUTPUT"
 
