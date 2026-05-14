@@ -12,7 +12,7 @@ use std::sync::Arc;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Manager, WindowEvent,
+    Manager,
 };
 
 use crate::db::Database;
@@ -108,13 +108,6 @@ pub fn run() {
                 .build(app)?;
 
             Ok(())
-        })
-        .on_window_event(|window, event| {
-            // Hide to tray instead of closing when the user clicks the X.
-            if let WindowEvent::CloseRequested { api, .. } = event {
-                let _ = window.hide();
-                api.prevent_close();
-            }
         })
         .invoke_handler(tauri::generate_handler![
             commands::list_sessions,

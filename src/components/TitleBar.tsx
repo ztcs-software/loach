@@ -50,7 +50,7 @@ export function TitleBar() {
     };
   }, []);
 
-  const callWindow = async (method: "minimize" | "toggleMaximize" | "hide") => {
+  const callWindow = async (method: "minimize" | "toggleMaximize" | "close") => {
     if (!isTauri) return;
     try {
       const { getCurrentWindow } = await import("@tauri-apps/api/window");
@@ -62,7 +62,7 @@ export function TitleBar() {
   };
   const minimize = () => callWindow("minimize");
   const toggleMax = () => callWindow("toggleMaximize");
-  const close = () => callWindow("hide");
+  const close = () => callWindow("close");
 
   return (
     <div
