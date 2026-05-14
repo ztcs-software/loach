@@ -501,6 +501,10 @@ async function startTask(task: QueueTask, get: Getter, set: Setter) {
               ),
             },
           }));
+          // Providers emit Error and then stop without a trailing Done, so
+          // the streaming state would otherwise stay set forever and freeze
+          // the input box in "Replying…" mode.
+          finishRunning(get, set);
         } else if (ev.kind === "done") {
           finishRunning(get, set);
         }
