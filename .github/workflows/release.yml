@@ -89,7 +89,7 @@ jobs:
           - platform: windows-latest
             args: '--bundles nsis'
           - platform: ubuntu-22.04
-            args: '--bundles deb,appimage'
+            args: '--bundles deb,appimage,rpm'
 
     runs-on: ${{ matrix.platform }}
     steps:
@@ -103,7 +103,8 @@ jobs:
             libwebkit2gtk-4.1-dev \
             libappindicator3-dev \
             librsvg2-dev \
-            patchelf
+            patchelf \
+            rpm
 
       - uses: actions/setup-node@v4
         with:
