@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { useSettingsStore } from "./settingsStore";
+import { useChatStore } from "./chatStore";
 
 /**
  * Onboarding controller. Holds the step index plus a small bag of "draft"
@@ -68,5 +69,11 @@ export const useOnboardingStore = create<OnboardingState>((set, get) => ({
 
   complete: async () => {
     await useSettingsStore.getState().update("onboarding_completed", true);
+    // chatStore.hydrate() skips creating a "New chat" while onboarding
+    // is pending. Whichever way the wizard ends (finish or cancel),
+    // top it up here so the app always has exactly one empty chat
+    // ready. newSession() collapses any duplicate empties, so this is
+    // safe to call unconditionally.
+    await useChatStore.getState().newSession({ spaceId: null });
   },
 }));

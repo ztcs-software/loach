@@ -2,7 +2,6 @@ import { PartyPopper } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Logo } from "@/components/Logo";
 import { useOnboardingStore } from "@/stores/onboardingStore";
-import { useChatStore } from "@/stores/chatStore";
 import { useUIStore } from "@/stores/uiStore";
 import { StepShell } from "./StepShell";
 
@@ -15,15 +14,16 @@ import { StepShell } from "./StepShell";
 export function FinalStep({ onClose }: { onClose: () => void }) {
   const complete = useOnboardingStore((s) => s.complete);
   const goBack = useOnboardingStore((s) => s.goBack);
-  const newSession = useChatStore((s) => s.newSession);
   const setPendingOpenModelPicker = useUIStore(
     (s) => s.setPendingOpenModelPicker,
   );
 
   const handleStart = async () => {
-    await complete();
+    // Arm the picker before complete() runs — complete() creates the
+    // new chat session, and ChatHeader reads pendingOpenModelPicker
+    // when that session mounts.
     setPendingOpenModelPicker(true);
-    await newSession({ spaceId: null });
+    await complete();
     // No need to call onClose — once `onboarding_completed` flips, the
     // App-level gate unmounts the wizard automatically on the next
     // render.
