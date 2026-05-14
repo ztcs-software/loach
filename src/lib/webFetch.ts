@@ -1,4 +1,5 @@
 import { fetchUrl } from "@/lib/tauri";
+import { MAX_INLINED_CHARS_PER_MESSAGE } from "@/lib/files";
 import type { FetchedPage } from "@/types";
 
 /**
@@ -102,26 +103,60 @@ export async function fetchAll(urls: string[]): Promise<FetchOutcome[]> {
  * Append the outcomes of `fetchAll` to the user's message as fenced blocks.
  * Mirrors the shape used by `inlineTextAttachments` in `lib/files.ts` so the
  * prompt feels consistent to the model regardless of how the context arrived.
+ *
+ * Shares the same {@link MAX_INLINED_CHARS_PER_MESSAGE} budget as
+ * attachments. Callers should run `inlineTextAttachments` first and pass
+ * its result here — the budget is enforced against the running content
+ * length, so anything already inlined naturally narrows the headroom for
+ * fetched-page bodies. URL fetches that don't fit are listed by URL only.
  */
 export function inlineFetchedPages(
   content: string,
   outcomes: FetchOutcome[],
+  maxTotalChars: number = MAX_INLINED_CHARS_PER_MESSAGE,
 ): string {
   if (outcomes.length === 0) return content;
   let out = content;
+  const skippedUrls: string[] = [];
   for (const o of outcomes) {
     if (o.ok) {
       const p = o.page;
-      const header = p.title
+      const titleStr = p.title
         ? `Fetched URL: ${p.final_url} — "${p.title}"`
         : `Fetched URL: ${p.final_url}`;
-      const suffix = p.truncated
-        ? "\n\n[Content was truncated. Ask the user if you need more of it.]"
+      const header = `\n\n---\n${titleStr}\n\`\`\`\n`;
+      const upstreamTruncSuffix = p.truncated
+        ? "\n\n[Content was truncated by the server-side fetcher. Ask the user if you need more.]"
         : "";
-      out += `\n\n---\n${header}\n\`\`\`\n${p.text}${suffix}\n\`\`\``;
+      const footer = "\n```";
+      const wrapCost = header.length + upstreamTruncSuffix.length + footer.length;
+      const remaining = maxTotalChars - out.length - wrapCost;
+
+      if (remaining <= 200) {
+        skippedUrls.push(p.final_url || o.url);
+        continue;
+      }
+
+      let body = p.text;
+      let clippedHere = false;
+      if (body.length > remaining) {
+        body = body.slice(0, remaining);
+        clippedHere = true;
+      }
+      out += header + body + upstreamTruncSuffix;
+      if (clippedHere) {
+        out +=
+          "\n\n[…this page body was clipped here to fit the per-message size budget.]";
+      }
+      out += footer;
     } else {
+      // Failures are short; always append.
       out += `\n\n---\nFailed to fetch ${o.url}: ${o.error}`;
     }
+  }
+  if (skippedUrls.length > 0) {
+    const urls = skippedUrls.map((u) => `\`${u}\``).join(", ");
+    out += `\n\n---\n${skippedUrls.length === 1 ? "This URL was" : `${skippedUrls.length} URLs were`} fetched successfully but couldn't be inlined into this turn (per-message size budget reached): ${urls}.`;
   }
   return out;
 }

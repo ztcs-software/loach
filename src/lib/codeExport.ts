@@ -1,4 +1,4 @@
-import { isTauri, writeTextFile } from "./tauri";
+import { isTauri, saveTextToFile } from "./tauri";
 
 /**
  * Mapping from highlight.js / Prism language ids to the conventional file
@@ -119,18 +119,17 @@ export async function saveCodeToFile(
   const ext = extensionForLanguage(lang);
 
   if (isTauri) {
-    // Dynamic import keeps the dialog plugin out of the browser bundle's
-    // critical path — we only hit it when the user actually exports.
-    // The write itself goes through our Rust command (see writeTextFile in
-    // lib/tauri.ts) because the fs plugin's scope rejects user-picked paths
-    // outside a few known dirs.
-    const { save } = await import("@tauri-apps/plugin-dialog");
+    // Dialog + write both happen in Rust through a single backend command,
+    // so a compromised renderer can't bypass the picker and write to an
+    // arbitrary path. The `txt` case uses an empty filter list so the user
+    // gets the "All files" option.
     const filters =
       ext === "txt" ? undefined : [{ name: lang ?? ext, extensions: [ext] }];
-    const path = await save({ defaultPath, filters });
-    if (!path) return null;
-    await writeTextFile(path, raw);
-    return path;
+    return await saveTextToFile({
+      content: raw,
+      default_path: defaultPath,
+      filters,
+    });
   }
 
   // Browser fallback — Blob download via a transient anchor.

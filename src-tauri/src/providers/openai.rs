@@ -18,10 +18,6 @@ use crate::stream::{event_channel, StreamEvent, StreamRegistry};
 /// frame separator (broken proxy, HTML error page mid-stream, etc.).
 const MAX_FRAME_BYTES: usize = 1024 * 1024;
 
-pub fn default_base_url() -> &'static str {
-    "https://api.openai.com/v1"
-}
-
 #[derive(Debug, Deserialize)]
 struct ModelsResponse {
     data: Vec<OpenAIModel>,

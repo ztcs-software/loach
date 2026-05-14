@@ -855,13 +855,108 @@ impl McpServerInput {
     }
 }
 
+/// Header-name syntax: RFC 7230 token = 1*tchar, with `tchar` being
+/// alphanumerics and a small set of punctuation. We accept the same set so a
+/// pasted header name like `Authorization` or `X-API-Key` rolls through but
+/// embedded CR / LF / spaces (which would let an attacker smuggle additional
+/// headers into the HTTP request) are rejected.
+fn is_valid_header_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.chars().all(|c| {
+            c.is_ascii_alphanumeric()
+                || matches!(
+                    c,
+                    '!' | '#'
+                        | '$'
+                        | '%'
+                        | '&'
+                        | '\''
+                        | '*'
+                        | '+'
+                        | '-'
+                        | '.'
+                        | '^'
+                        | '_'
+                        | '`'
+                        | '|'
+                        | '~'
+                )
+        })
+}
+
+/// Header-value syntax: any visible ASCII / tab / space. Notably no CR or LF
+/// — those would let a value break out of its header and inject a new one.
+fn is_valid_header_value(value: &str) -> bool {
+    value
+        .chars()
+        .all(|c| c == '\t' || (' '..='~').contains(&c))
+        && value.len() <= 4096
+}
+
 fn validate_mcp_input(input: &McpServerInput) -> Result<(), String> {
     if input.name.trim().is_empty() {
         return Err("server name is required".into());
     }
-    if input.url.trim().is_empty() {
+    let raw_url = input.url.trim();
+    if raw_url.is_empty() {
         return Err("server URL is required".into());
     }
+
+    // Scheme + host validation. We refuse anything that isn't http/https and
+    // anything that resolves to a private / loopback / link-local address. A
+    // misconfigured server can still expose secrets, but at least a header
+    // smuggled in by a compromised renderer can't be aimed at an internal
+    // service the user wouldn't otherwise reach (cloud metadata service,
+    // internal admin endpoints, etc.).
+    let parsed = reqwest::Url::parse(raw_url)
+        .map_err(|e| format!("Invalid MCP server URL: {e}"))?;
+    match parsed.scheme() {
+        "http" | "https" => {}
+        other => return Err(format!("MCP server URL must be http or https (got `{other}`)")),
+    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "MCP server URL has no host".to_string())?;
+    if host.eq_ignore_ascii_case("localhost")
+        || host.eq_ignore_ascii_case("ip6-localhost")
+        || host.ends_with(".localhost")
+    {
+        return Err("MCP server URL points at localhost — refusing".into());
+    }
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        if !crate::tools::fetch_url::is_public_ip(&ip) {
+            return Err(format!(
+                "MCP server URL resolves to a non-public address ({ip}) — refusing"
+            ));
+        }
+    }
+
+    // Header k/v validation. We do NOT call out to the network here, so the
+    // only protection we can offer is structural: reject names / values
+    // that would let an attacker smuggle CRLF-injected headers via a
+    // crafted save call.
+    if let Some(headers) = input.headers.as_ref() {
+        const MAX_HEADERS: usize = 16;
+        if headers.len() > MAX_HEADERS {
+            return Err(format!(
+                "Too many MCP server headers ({}); max {MAX_HEADERS}.",
+                headers.len()
+            ));
+        }
+        for (k, v) in headers.iter() {
+            if !is_valid_header_name(k) {
+                return Err(format!(
+                    "Invalid MCP header name `{k}`. Allowed: letters, digits, and `!#$%&'*+-.^_`|~`."
+                ));
+            }
+            if !is_valid_header_value(v) {
+                return Err(format!(
+                    "Invalid value for header `{k}`. Header values must be printable ASCII without CR/LF and ≤4096 bytes."
+                ));
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -969,47 +1064,126 @@ pub async fn fetch_url(
     fetch_url_tool::fetch(&state.http, &url).await
 }
 
-/// Write `contents` to `path` as UTF-8. The path comes from the dialog
-/// plugin's save sheet, so the user has explicitly authorised it — we do
-/// the IO in Rust to sidestep the `fs` plugin's scope, which only covers
-/// a handful of known directories and silently rejects things like the
-/// Desktop. Mirrors the read-side trick in [`import_data_json`].
-#[tauri::command]
-pub async fn write_text_file(path: String, contents: String) -> Result<(), String> {
-    std::fs::write(&path, contents).map_err(|e| format!("couldn't write {path}: {e}"))
-}
-
 // ---------- data (export / import / wipe) ----------
 //
-// Powers the Settings → Data tab. Keeping all four actions here (rather
-// than scattered across files) makes the surface area obvious: the user
-// can dump their entire DB, restore from a dump, bulk-archive, or nuke
-// it back to factory defaults — and nothing else in the Rust layer needs
-// to know these exist.
+// Powers the Settings → Data tab. The Rust side owns every step that the
+// renderer would otherwise have to be trusted with: opening the native
+// dialog, reading / writing the file at the user-chosen path, gating the
+// destructive actions on the app-lock credentials. A compromised renderer
+// can still call these commands directly, but it cannot:
+//   - write to a path the user didn't pick (no raw `write_text_file`),
+//   - read a path the user didn't pick (no raw `import_data_json(path)`),
+//   - drop user data without supplying the current app-lock credentials.
+
+/// Optional file filter for the save / open dialog (`{name: "JSON",
+/// extensions: ["json"]}`). Mirrors the shape `@tauri-apps/plugin-dialog`
+/// uses on the frontend so the renderer can keep its existing call shape.
+#[derive(Debug, Deserialize)]
+pub struct DialogFilter {
+    pub name: String,
+    pub extensions: Vec<String>,
+}
+
+/// Open a native save dialog and write `content` to whichever path the
+/// user picks. Returns the chosen path (string), or `None` if the user
+/// cancelled.
+///
+/// Replaces the previous `write_text_file(path, content)` + frontend
+/// `dialog.save` pair. Moving the dialog INTO the backend closes the gap
+/// where a compromised renderer could skip the dialog entirely and write
+/// to an arbitrary path (e.g. `~/.bashrc`): now the only path the backend
+/// will write to is one the user just clicked through a native picker.
+#[tauri::command]
+pub async fn save_text_to_file(
+    app: AppHandle,
+    content: String,
+    default_path: Option<String>,
+    filters: Option<Vec<DialogFilter>>,
+) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let path_opt = tauri::async_runtime::spawn_blocking(move || {
+        let mut builder = app.dialog().file();
+        if let Some(name) = default_path.as_deref() {
+            builder = builder.set_file_name(name);
+        }
+        if let Some(filters) = filters.as_ref() {
+            for f in filters {
+                let exts: Vec<&str> = f.extensions.iter().map(|s| s.as_str()).collect();
+                builder = builder.add_filter(&f.name, &exts);
+            }
+        }
+        builder.blocking_save_file()
+    })
+    .await
+    .map_err(|e| format!("save dialog task failed: {e}"))?;
+
+    let chosen = match path_opt {
+        Some(fp) => fp,
+        None => return Ok(None),
+    };
+    let path = chosen
+        .into_path()
+        .map_err(|e| format!("invalid path returned from dialog: {e}"))?;
+    std::fs::write(&path, content)
+        .map_err(|e| format!("couldn't write {}: {e}", path.display()))?;
+    Ok(Some(path.to_string_lossy().to_string()))
+}
 
 /// Serialise every table to a JSON string. Pretty-printed so users can
 /// diff or grep an export manually. The schema tag `"loach/v1"` is the
-/// forward-compat knob — `import_data_json` rejects anything else.
+/// forward-compat knob — `import_data_with_dialog` rejects anything else.
 #[tauri::command]
 pub async fn export_data_json(state: State<'_, AppState>) -> Result<String, String> {
     let snap = state.db.snapshot().map_err(err)?;
     serde_json::to_string_pretty(&snap).map_err(err)
 }
 
-/// Read a JSON file from disk and replace every table with its contents.
-/// Returns a per-table row-count breakdown so the UI can show a toast
-/// like "Imported 12 chats · 145 messages · 3 spaces".
+#[derive(Debug, Deserialize, Default)]
+pub struct DestructiveAuthArgs {
+    #[serde(default)]
+    pub pin: Option<String>,
+    #[serde(default)]
+    pub password: Option<String>,
+}
+
+/// Open a native open-file dialog, read the JSON, validate the schema, and
+/// apply it via `restore_snapshot`. Returns `Ok(None)` if the user cancelled
+/// the dialog.
 ///
-/// We take a path (not the raw text) so the frontend doesn't need `fs`
-/// read permission: the dialog plugin hands us a user-blessed path, we
-/// open it ourselves.
+/// Gated on the app-lock credentials whenever a lock is configured —
+/// importing replaces every row in the database, so it gets the same
+/// confirmation a renderer-driven destructive action would.
 #[tauri::command]
-pub async fn import_data_json(
+pub async fn import_data_with_dialog(
+    app: AppHandle,
     state: State<'_, AppState>,
-    path: String,
-) -> Result<ImportStats, String> {
+    auth: Option<DestructiveAuthArgs>,
+) -> Result<Option<ImportStats>, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let auth = auth.unwrap_or_default();
+    security::require_unlocked(auth.pin.as_deref(), auth.password.as_deref())
+        .map_err(err)?;
+
+    let path_opt = tauri::async_runtime::spawn_blocking(move || {
+        app.dialog()
+            .file()
+            .add_filter("Loach export", &["json"])
+            .blocking_pick_file()
+    })
+    .await
+    .map_err(|e| format!("open dialog task failed: {e}"))?;
+
+    let chosen = match path_opt {
+        Some(fp) => fp,
+        None => return Ok(None),
+    };
+    let path = chosen
+        .into_path()
+        .map_err(|e| format!("invalid path returned from dialog: {e}"))?;
     let text = std::fs::read_to_string(&path)
-        .map_err(|e| format!("couldn't read {path}: {e}"))?;
+        .map_err(|e| format!("couldn't read {}: {e}", path.display()))?;
     let snap: DatabaseSnapshot = serde_json::from_str(&text)
         .map_err(|e| format!("file doesn't look like a Loach export: {e}"))?;
     if snap.schema != "loach/v1" {
@@ -1018,7 +1192,8 @@ pub async fn import_data_json(
             snap.schema
         ));
     }
-    state.db.restore_snapshot(&snap).map_err(err)
+    let stats = state.db.restore_snapshot(&snap).map_err(err)?;
+    Ok(Some(stats))
 }
 
 /// Archive every non-archived session in one go. The Rust side returns
@@ -1033,16 +1208,36 @@ pub async fn archive_all_sessions(state: State<'_, AppState>) -> Result<i64, Str
 /// settings (theme, provider URLs, system prompt, etc.) intact. The
 /// OpenAI key — which lives in the OS credential manager, not SQLite —
 /// also survives. Use [`factory_reset`] for the nuclear option.
+///
+/// Gated on the app-lock credentials when a lock is configured.
 #[tauri::command]
-pub async fn wipe_user_data(state: State<'_, AppState>) -> Result<(), String> {
+pub async fn wipe_user_data(
+    state: State<'_, AppState>,
+    auth: Option<DestructiveAuthArgs>,
+) -> Result<(), String> {
+    let auth = auth.unwrap_or_default();
+    security::require_unlocked(auth.pin.as_deref(), auth.password.as_deref())
+        .map_err(err)?;
     state.db.wipe_user_data().map_err(err)
 }
 
 /// Factory reset: wipe_user_data + drop all settings + clear the stored
 /// OpenAI key. After this the app should look exactly like a fresh
 /// install, save for the DB file itself (which is empty but preserved).
+///
+/// Gated on the app-lock credentials when a lock is configured. The
+/// internal `security::clear()` it calls afterwards is the unchecked
+/// path — by this point the user has already authenticated against the
+/// lock once via `require_unlocked`, so the keyring purge that follows
+/// doesn't need a second check.
 #[tauri::command]
-pub async fn factory_reset(state: State<'_, AppState>) -> Result<(), String> {
+pub async fn factory_reset(
+    state: State<'_, AppState>,
+    auth: Option<DestructiveAuthArgs>,
+) -> Result<(), String> {
+    let auth = auth.unwrap_or_default();
+    security::require_unlocked(auth.pin.as_deref(), auth.password.as_deref())
+        .map_err(err)?;
     state.db.wipe_all().map_err(err)?;
     // Best-effort: if the user never had a key we silently ignore the
     // NoEntry branch inside `clear_openai_key`. A hard failure here

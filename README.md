@@ -87,7 +87,7 @@ Everything is local: chats, attachments, settings, generation parameters, and sn
 ### Backend & integrations
 
 - **Two providers out of the box** — Ollama (auto-detected on `http://localhost:11434`) and OpenAI-compatible (configurable base URL, e.g. vLLM, LM Studio, LiteLLM, llama-server, OpenRouter, Groq).
-- **MCP support** — register Model Context Protocol servers (Streamable HTTP transport) and let your local model call their tools mid-chat. Per-server enable toggle, "Test connection" handshake, JSON-RPC client built into the Rust side.
+- **MCP servers** — register Model Context Protocol servers (Streamable HTTP transport): per-server enable toggle, a "Test connection" handshake that lists the advertised tools, and a JSON-RPC client built into the Rust side. **Heads up:** in the current build the integration is server-management only (CRUD + probe + tool listing) — actually invoking those tools mid-chat is the next milestone, not what ships today.
 - **Web fetch tool** — built-in server-side URL fetcher with size, count, and timeout caps; private-IP guard.
 - **Data import / export** — back up everything (chats, messages, spaces, snippets, MCP servers, app settings) to a single JSON file, or restore from one. API keys are deliberately excluded — they stay in keyring across operations.
 - **Model VRAM management** — switching models mid-app sends `keep_alive: 0` for the previous Ollama model to free GPU memory before the next load.
@@ -116,7 +116,7 @@ Everything is local: chats, attachments, settings, generation parameters, and sn
 
 ## Prerequisites
 
-- **Node.js 20+** and **npm**
+- **Node.js 20.19+** (or 22.12+) and **npm** — Vite 7 won't run on older 20.x point releases.
 - **Rust** stable toolchain via [`rustup`](https://rustup.rs)
 - Platform build tooling — install once via the official Tauri prerequisites guide: <https://tauri.app/start/prerequisites/>
   - **Windows**: Microsoft Visual Studio Build Tools, WebView2 runtime (preinstalled on Windows 11)
@@ -294,7 +294,7 @@ For an architectural overview written for AI coding assistants, see [`CLAUDE.md`
 | App data dir on Windows | `%APPDATA%\dev.loach.app\` |
 | App data dir on Linux | `~/.local/share/dev.loach.app/` |
 
-**Loach makes no outbound network calls at startup** other than the Ollama probe to `localhost`. There is no telemetry, no auto-update ping, no analytics. OpenAI calls only happen when you actively send a message to an OpenAI-compatible endpoint.
+**Loach makes no outbound network calls at startup** other than (a) the Ollama probe to `localhost`, and (b) — when an OpenAI key is configured — an `/v1/models` lookup against the OpenAI base URL so the model picker is populated. There is no telemetry, no auto-update ping, no analytics. Once those two probes resolve, all further network activity is driven by you (sending a message, pulling a model, checking for updates from Settings, …).
 
 ---
 

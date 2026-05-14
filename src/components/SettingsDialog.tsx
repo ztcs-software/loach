@@ -60,11 +60,14 @@ import {
   archiveAllSessions,
   exportDataJson,
   factoryReset,
-  importDataJson,
+  importDataWithDialog,
   isTauri,
+  saveTextToFile,
   wipeUserData,
-  writeTextFile,
+  type DestructiveAuth,
+  type LockMethod,
 } from "@/lib/tauri";
+import { useSecurityStore } from "@/stores/securityStore";
 import { cn } from "@/lib/utils";
 import { DEFAULT_TONE_ID, TONES } from "@/lib/tones";
 import type { FontSize, ImportStats, ModelInfo, ProviderId, Session } from "@/types";
@@ -1307,6 +1310,11 @@ function DataPanel({ onCloseDialog: _onCloseDialog }: { onCloseDialog: () => voi
     text: string;
   } | null>(null);
   const [eraseOpen, setEraseOpen] = useState(false);
+  const [importPromptOpen, setImportPromptOpen] = useState(false);
+  // Whether the app lock is configured. The destructive flows only need to
+  // surface a credential prompt when this is true; an unlocked install
+  // doesn't gate the action.
+  const lockStatus = useSecurityStore((s) => s.status);
 
   // A tiny toast-lite: the feedback message auto-clears after 5s so long-
   // running exports don't leave stale success chips behind when the user
@@ -1325,18 +1333,18 @@ function DataPanel({ onCloseDialog: _onCloseDialog }: { onCloseDialog: () => voi
     }
     setBusy("export");
     try {
-      const { save } = await import("@tauri-apps/plugin-dialog");
       const stamp = new Date().toISOString().slice(0, 10);
-      const path = await save({
-        defaultPath: `loach-export-${stamp}.json`,
+      const payload = await exportDataJson();
+      // Backend owns both the dialog and the write — see saveTextToFile.
+      const path = await saveTextToFile({
+        content: payload,
+        default_path: `loach-export-${stamp}.json`,
         filters: [{ name: "Loach export", extensions: ["json"] }],
       });
       if (!path) {
         setBusy(null);
-        return; // user cancelled
+        return; // user cancelled the save dialog
       }
-      const payload = await exportDataJson();
-      await writeTextFile(path, payload);
       flash("info", `Exported to ${path}`);
     } catch (e) {
       flash("error", e instanceof Error ? e.message : String(e));
@@ -1350,30 +1358,22 @@ function DataPanel({ onCloseDialog: _onCloseDialog }: { onCloseDialog: () => voi
       flash("error", "Import requires the desktop app.");
       return;
     }
-    const confirmed = window.confirm(
-      "Importing replaces ALL current chats, spaces, snippets, MCP servers, " +
-        "and settings with the contents of the file. Your stored OpenAI API " +
-        "key is not touched. Continue?",
-    );
-    if (!confirmed) return;
+    setImportPromptOpen(true);
+  };
 
+  // Stage 2 of import: armed by the ImportConfirm dialog, runs after the
+  // user has confirmed AND (when a lock is configured) supplied their
+  // current credentials. The Rust side handles the dialog and the read.
+  const runImport = async (auth?: DestructiveAuth) => {
     setBusy("import");
     try {
-      const { open } = await import("@tauri-apps/plugin-dialog");
-      const selected = await open({
-        multiple: false,
-        filters: [{ name: "Loach export", extensions: ["json"] }],
-      });
-      // The open() API returns a string | null on single-select in Tauri 2.
-      const path = typeof selected === "string" ? selected : null;
-      if (!path) {
+      const stats = await importDataWithDialog(auth);
+      if (stats === null) {
+        // User cancelled the file picker on the backend side.
         setBusy(null);
         return;
       }
-      const stats = await importDataJson(path);
       flash("info", formatImportSummary(stats));
-      // Give the toast a beat, then reload so every store re-hydrates
-      // from the freshly-written DB.
       window.setTimeout(() => {
         window.location.reload();
       }, 900);
@@ -1541,6 +1541,9 @@ function DataPanel({ onCloseDialog: _onCloseDialog }: { onCloseDialog: () => voi
       <EraseDialog
         open={eraseOpen}
         onOpenChange={setEraseOpen}
+        lockConfigured={lockStatus.configured}
+        lockMethod={lockStatus.method}
+        pinLength={lockStatus.pin_length}
         onDone={(text) => {
           flash("info", text);
           // Full reload so every zustand store re-hydrates from the now-
@@ -1548,6 +1551,18 @@ function DataPanel({ onCloseDialog: _onCloseDialog }: { onCloseDialog: () => voi
           window.setTimeout(() => {
             window.location.reload();
           }, 900);
+        }}
+      />
+
+      <ImportConfirm
+        open={importPromptOpen}
+        onOpenChange={setImportPromptOpen}
+        lockConfigured={lockStatus.configured}
+        lockMethod={lockStatus.method}
+        pinLength={lockStatus.pin_length}
+        onConfirm={async (auth) => {
+          setImportPromptOpen(false);
+          await runImport(auth);
         }}
       />
     </>
@@ -1613,16 +1628,32 @@ type EraseMode = "user-data" | "factory-reset";
 function EraseDialog({
   open,
   onOpenChange,
+  lockConfigured,
+  lockMethod,
+  pinLength,
   onDone,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /** When true the backend will reject the call without current credentials,
+   *  so the dialog grows a PIN / password section. */
+  lockConfigured: boolean;
+  lockMethod: LockMethod | null;
+  pinLength: number | null;
   onDone: (successMessage: string) => void;
 }) {
   const [mode, setMode] = useState<EraseMode>("user-data");
   const [confirmText, setConfirmText] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [pin, setPin] = useState("");
+  const [password, setPassword] = useState("");
+
+  const usesPin =
+    lockConfigured && (lockMethod === "pin" || lockMethod === "both");
+  const usesPassword =
+    lockConfigured && (lockMethod === "password" || lockMethod === "both");
+  const requiredPinLen = (pinLength ?? 4) as 4 | 6 | 8;
 
   // Reset the form whenever the dialog is opened — never carry state across
   // mount/unmount cycles for a destructive action.
@@ -1630,23 +1661,34 @@ function EraseDialog({
     if (open) {
       setMode("user-data");
       setConfirmText("");
+      setPin("");
+      setPassword("");
       setBusy(false);
       setError(null);
     }
   }, [open]);
 
-  const armed = confirmText.trim().toUpperCase() === "YES";
+  const credsOk =
+    (!usesPin || pin.length === requiredPinLen) &&
+    (!usesPassword || password.length > 0);
+  const armed = confirmText.trim().toUpperCase() === "YES" && credsOk;
 
   const handleConfirm = async () => {
     if (!armed) return;
+    const auth: DestructiveAuth | undefined = lockConfigured
+      ? {
+          pin: usesPin ? pin : undefined,
+          password: usesPassword ? password : undefined,
+        }
+      : undefined;
     setBusy(true);
     setError(null);
     try {
       if (mode === "user-data") {
-        await wipeUserData();
+        await wipeUserData(auth);
         onDone("All chats, spaces, snippets, and MCP servers deleted. Reloading…");
       } else {
-        await factoryReset();
+        await factoryReset(auth);
         onDone("Loach has been reset to factory defaults. Reloading…");
       }
       onOpenChange(false);
@@ -1716,6 +1758,50 @@ function EraseDialog({
             disabled={busy}
           />
         </div>
+
+        {lockConfigured && (usesPin || usesPassword) && (
+          <div className="space-y-2.5 rounded-xl border border-foreground/10 bg-foreground/[0.025] p-3">
+            <p className="text-[12px] text-foreground/65">
+              The app lock is configured — enter your current credentials to
+              authorise this destructive action.
+            </p>
+            {usesPin && (
+              <div>
+                <Label className="text-[12px]">Current PIN</Label>
+                <Input
+                  className="mt-1.5"
+                  type="password"
+                  inputMode="numeric"
+                  autoComplete="current-password"
+                  maxLength={requiredPinLen}
+                  value={pin}
+                  onChange={(e) =>
+                    setPin(
+                      e.target.value
+                        .replace(/\D/g, "")
+                        .slice(0, requiredPinLen),
+                    )
+                  }
+                  placeholder={"•".repeat(requiredPinLen)}
+                  disabled={busy}
+                />
+              </div>
+            )}
+            {usesPassword && (
+              <div>
+                <Label className="text-[12px]">Current password</Label>
+                <Input
+                  className="mt-1.5"
+                  type="password"
+                  autoComplete="current-password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  disabled={busy}
+                />
+              </div>
+            )}
+          </div>
+        )}
 
         {error && (
           <div className="rounded-xl border border-destructive/40 bg-destructive/10 px-3 py-2 text-[12px] text-destructive">
@@ -1822,5 +1908,157 @@ function EraseOption({
         </p>
       </div>
     </button>
+  );
+}
+
+/* ───────────────── Import confirmation dialog ─────────────────
+ *
+ * Replaces the old `window.confirm("…replaces everything…")` prompt. Two
+ * jobs:
+ *
+ *   1. Explain that import is destructive (replaces every table).
+ *   2. When the app lock is configured, collect the current credentials so
+ *      the backend can verify them BEFORE it even opens the file picker.
+ *      A compromised UI cannot bypass this — the backend rejects the call
+ *      if the credentials don't match the keyring blob.
+ * ─────────────────────────────────────────────────────────────── */
+
+function ImportConfirm({
+  open,
+  onOpenChange,
+  lockConfigured,
+  lockMethod,
+  pinLength,
+  onConfirm,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  lockConfigured: boolean;
+  lockMethod: LockMethod | null;
+  pinLength: number | null;
+  onConfirm: (auth?: DestructiveAuth) => Promise<void>;
+}) {
+  const [pin, setPin] = useState("");
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const usesPin =
+    lockConfigured && (lockMethod === "pin" || lockMethod === "both");
+  const usesPassword =
+    lockConfigured && (lockMethod === "password" || lockMethod === "both");
+  const requiredPinLen = (pinLength ?? 4) as 4 | 6 | 8;
+
+  useEffect(() => {
+    if (open) {
+      setPin("");
+      setPassword("");
+      setBusy(false);
+    }
+  }, [open]);
+
+  const credsOk =
+    (!usesPin || pin.length === requiredPinLen) &&
+    (!usesPassword || password.length > 0);
+
+  const handleConfirm = async () => {
+    if (!credsOk) return;
+    const auth: DestructiveAuth | undefined = lockConfigured
+      ? {
+          pin: usesPin ? pin : undefined,
+          password: usesPassword ? password : undefined,
+        }
+      : undefined;
+    setBusy(true);
+    await onConfirm(auth);
+    // Parent flips `open` to false on success / cancel; we just stop here.
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={busy ? undefined : onOpenChange}>
+      <DialogContent className="max-w-md gap-5">
+        <div>
+          <DialogTitle className="flex items-center gap-2 text-base font-semibold">
+            <Upload className="h-4 w-4 text-foreground/70" />
+            Import data
+          </DialogTitle>
+          <DialogDescription className="mt-1.5 text-[13px] text-foreground/60">
+            Importing will replace ALL chats, spaces, snippets, MCP servers,
+            and settings with the contents of the file you select next. Your
+            stored OpenAI API key is not touched.
+          </DialogDescription>
+        </div>
+
+        {lockConfigured && (usesPin || usesPassword) && (
+          <div className="space-y-2.5 rounded-xl border border-foreground/10 bg-foreground/[0.025] p-3">
+            <p className="text-[12px] text-foreground/65">
+              The app lock is configured — enter your current credentials to
+              continue.
+            </p>
+            {usesPin && (
+              <div>
+                <Label className="text-[12px]">Current PIN</Label>
+                <Input
+                  className="mt-1.5"
+                  type="password"
+                  inputMode="numeric"
+                  autoComplete="current-password"
+                  maxLength={requiredPinLen}
+                  value={pin}
+                  onChange={(e) =>
+                    setPin(
+                      e.target.value
+                        .replace(/\D/g, "")
+                        .slice(0, requiredPinLen),
+                    )
+                  }
+                  placeholder={"•".repeat(requiredPinLen)}
+                  disabled={busy}
+                />
+              </div>
+            )}
+            {usesPassword && (
+              <div>
+                <Label className="text-[12px]">Current password</Label>
+                <Input
+                  className="mt-1.5"
+                  type="password"
+                  autoComplete="current-password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  disabled={busy}
+                />
+              </div>
+            )}
+          </div>
+        )}
+
+        <div className="flex items-center justify-end gap-2">
+          <Button
+            variant="outline"
+            onClick={() => onOpenChange(false)}
+            disabled={busy}
+          >
+            Cancel
+          </Button>
+          <Button
+            variant="default"
+            disabled={!credsOk || busy}
+            onClick={() => void handleConfirm()}
+          >
+            {busy ? (
+              <>
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                Choose file…
+              </>
+            ) : (
+              <>
+                <Upload className="h-3.5 w-3.5" />
+                Choose file…
+              </>
+            )}
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }

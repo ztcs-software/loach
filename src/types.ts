@@ -94,6 +94,11 @@ export interface Attachment {
   mime: string;
   /** base64 (no data: prefix) for images and files, plain text for text files */
   data: string;
+  /** True when the source document was larger than the per-attachment
+   *  extraction cap and only a leading slice survived in `data`. The model
+   *  is told via an inline marker; the UI shows a "truncated" pill on the
+   *  file chip so users know what reached the model isn't the full file. */
+  truncated?: boolean;
 }
 
 export interface MessageMetrics {

@@ -3,7 +3,7 @@ import { Loader2, Sparkles, Upload } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Logo } from "@/components/Logo";
 import { useToastStore } from "@/stores/toastStore";
-import { importDataJson, isTauri } from "@/lib/tauri";
+import { importDataWithDialog, isTauri } from "@/lib/tauri";
 import { StepShell } from "./StepShell";
 import { useOnboardingStore } from "@/stores/onboardingStore";
 
@@ -30,17 +30,15 @@ export function WelcomeStep({ onClose }: { onClose: () => void }) {
     }
     setBusy(true);
     try {
-      const { open } = await import("@tauri-apps/plugin-dialog");
-      const selected = await open({
-        multiple: false,
-        filters: [{ name: "Loach export", extensions: ["json"] }],
-      });
-      const path = typeof selected === "string" ? selected : null;
-      if (!path) {
+      // Onboarding runs only when no prior data exists (or after a factory
+      // reset, which also clears the app lock), so the backend's
+      // require_unlocked gate is a no-op here — no auth needed.
+      const stats = await importDataWithDialog();
+      if (stats === null) {
+        // User cancelled the picker on the backend side.
         setBusy(false);
         return;
       }
-      await importDataJson(path);
       // Full reload — every store re-hydrates against the freshly written
       // DB, including `onboarding_completed` from the import payload.
       window.setTimeout(() => window.location.reload(), 350);

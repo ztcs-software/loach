@@ -1,3 +1,4 @@
+import { invoke } from "@tauri-apps/api/core";
 import { isTauri } from "@/lib/tauri";
 
 export interface UpdateInfo {
@@ -21,7 +22,6 @@ let pendingUpdate: { downloadAndInstall: (cb: (e: unknown) => void) => Promise<v
 export async function isUpdaterSupported(): Promise<boolean> {
   if (!isTauri) return false;
   try {
-    const { invoke } = await import("@tauri-apps/api/core");
     return await invoke<boolean>("updater_supported");
   } catch {
     return false;

@@ -341,3 +341,21 @@ pub fn clear_with_credentials(
     }
     clear()
 }
+
+/// Boundary check used by destructive renderer commands (`factory_reset`,
+/// `wipe_user_data`, `import_data_with_dialog`, …). When a lock is
+/// configured, the renderer must hand us the user's current credentials so
+/// we can prove the action was authorised by a human at the keyboard.
+/// When no lock is configured, the gate is a no-op — the user already opted
+/// out of authenticated access.
+pub fn require_unlocked(
+    current_pin: Option<&str>,
+    current_password: Option<&str>,
+) -> Result<()> {
+    if let Some(cfg) = load()? {
+        if !verify_against_config(&cfg, current_pin, current_password) {
+            bail!("Current app-lock credentials are required for this action.");
+        }
+    }
+    Ok(())
+}

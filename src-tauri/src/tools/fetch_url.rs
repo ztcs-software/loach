@@ -17,7 +17,7 @@
 //! * **Text cap** — after HTML stripping, the returned text is truncated to
 //!   [`MAX_TEXT_CHARS`]. The frontend is free to truncate further.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
 use futures_util::StreamExt;
@@ -49,7 +49,13 @@ pub struct FetchedPage {
 }
 
 /// Top-level fetch + clean pipeline.
-pub async fn fetch(http: &reqwest::Client, raw_url: &str) -> Result<FetchedPage, String> {
+///
+/// `_shared_http` is the long-lived client the rest of the app uses; we
+/// accept it for API symmetry but DO NOT use it here — the SSRF guard
+/// requires a private DNS table per request (see [`build_pinned_client`])
+/// to close the TOCTOU window between "we resolved a public IP" and
+/// "reqwest dials a now-private one".
+pub async fn fetch(_shared_http: &reqwest::Client, raw_url: &str) -> Result<FetchedPage, String> {
     let url =
         Url::parse(raw_url).map_err(|e| format!("Invalid URL `{raw_url}`: {e}"))?;
 
@@ -59,8 +65,12 @@ pub async fn fetch(http: &reqwest::Client, raw_url: &str) -> Result<FetchedPage,
         other => return Err(format!("Unsupported URL scheme: `{other}` (only http/https)")),
     }
 
-    // SSRF guard — check the URL's host, and (for hostnames) the resolved IPs.
-    assert_safe_host(&url).await?;
+    // SSRF guard — resolve, screen, and PIN the resolved IPs into a
+    // per-request client. Reqwest will use this map instead of re-resolving
+    // before it dials, so a hostname can't flip from public → private
+    // between our check and the actual connection.
+    let resolved = resolve_safe_addrs(&url).await?;
+    let http = build_pinned_client(&url, &resolved)?;
 
     let resp = http
         .get(url.clone())
@@ -79,8 +89,19 @@ pub async fn fetch(http: &reqwest::Client, raw_url: &str) -> Result<FetchedPage,
     }
 
     let final_url = resp.url().clone();
-    // The final URL may be different after redirects — re-check it.
-    assert_safe_host(&final_url).await?;
+    // The final URL may be different after redirects — re-check it. We
+    // also rebuild the pinned client if the host changed, so the body
+    // download honours the same SSRF policy.
+    if final_url.host_str() != url.host_str() {
+        // Redirect to a different host — re-resolve and screen. We don't
+        // re-issue the request here (the response body is already
+        // streaming), but we DO drop it if the redirect target failed the
+        // check. Note that reqwest follows redirects internally using the
+        // same pinned client, so the only way we get here with a host
+        // mismatch is via cross-origin redirects — those bypass our
+        // resolver and need re-validation.
+        let _ = resolve_safe_addrs(&final_url).await?;
+    }
 
     let content_type = resp
         .headers()
@@ -127,23 +148,23 @@ pub async fn fetch(http: &reqwest::Client, raw_url: &str) -> Result<FetchedPage,
     })
 }
 
-/// Reject URLs whose host is — or resolves to — a non-routable address.
-///
-/// This does not fully eliminate TOCTOU (reqwest will re-resolve before the
-/// actual connection), but it catches the common cases (`http://127.0.0.1`,
-/// `http://localhost`, `http://10.0.0.1`) and DNS-rebinding attempts where a
-/// hostname *currently* resolves to a private address.
-async fn assert_safe_host(url: &Url) -> Result<(), String> {
+/// Reject URLs whose host is — or resolves to — a non-routable address,
+/// and return the resolved SocketAddrs so the caller can pin them into a
+/// reqwest client's DNS table. Pinning closes the TOCTOU window where a
+/// hostname's DNS record flipped from public to private between our check
+/// and reqwest's pre-connect resolution.
+async fn resolve_safe_addrs(url: &Url) -> Result<Vec<SocketAddr>, String> {
     let host = url
         .host_str()
         .ok_or_else(|| "URL has no host".to_string())?;
+    let port = url.port_or_known_default().unwrap_or(80);
 
-    // Literal IP: validate directly.
+    // Literal IP: skip DNS, just validate the address.
     if let Ok(ip) = host.parse::<IpAddr>() {
         if !is_public_ip(&ip) {
             return Err(format!("Refusing to fetch private/loopback IP: {ip}"));
         }
-        return Ok(());
+        return Ok(vec![SocketAddr::new(ip, port)]);
     }
 
     // Bare "localhost" never gets past the public check anyway, but reject
@@ -156,14 +177,15 @@ async fn assert_safe_host(url: &Url) -> Result<(), String> {
     }
 
     // Hostname: DNS-resolve and check every returned address.
-    let port = url.port_or_known_default().unwrap_or(80);
-    let addrs = lookup_host((host, port))
+    let addrs: Vec<SocketAddr> = lookup_host((host, port))
         .await
-        .map_err(|e| format!("DNS lookup failed for `{host}`: {e}"))?;
+        .map_err(|e| format!("DNS lookup failed for `{host}`: {e}"))?
+        .collect();
 
-    let mut any = false;
-    for addr in addrs {
-        any = true;
+    if addrs.is_empty() {
+        return Err(format!("DNS returned no addresses for `{host}`"));
+    }
+    for addr in &addrs {
         let ip = addr.ip();
         if !is_public_ip(&ip) {
             return Err(format!(
@@ -171,16 +193,45 @@ async fn assert_safe_host(url: &Url) -> Result<(), String> {
             ));
         }
     }
-    if !any {
-        return Err(format!("DNS returned no addresses for `{host}`"));
+    Ok(addrs)
+}
+
+/// Build a one-shot reqwest::Client whose DNS table maps the requested host
+/// to the SocketAddrs we already screened. With this in place, reqwest will
+/// NOT call the system resolver again before dialing — so a DNS-rebinding
+/// attacker can't slip a private address past our check.
+fn build_pinned_client(url: &Url, addrs: &[SocketAddr]) -> Result<reqwest::Client, String> {
+    let host = url
+        .host_str()
+        .ok_or_else(|| "URL has no host".to_string())?;
+    let mut builder = reqwest::Client::builder()
+        .user_agent("Loach/0.1 (fetch_url)")
+        // Redirect handling: reqwest's default Policy::limited(10) is fine,
+        // and the redirect target's host is re-checked in `fetch()` above
+        // via final_url comparison. We can't easily run our screener inside
+        // the redirect callback because the resolver is per-Client.
+        .redirect(reqwest::redirect::Policy::limited(10));
+
+    // `resolve()` plumbs a (host, addr) override into the internal resolver.
+    // We feed in every screened address so a multi-A-record host can still
+    // failover at the connection level.
+    for addr in addrs {
+        builder = builder.resolve(host, *addr);
     }
-    Ok(())
+
+    builder
+        .build()
+        .map_err(|e| format!("could not build pinned http client: {e}"))
 }
 
 /// Returns `false` for loopback, private, link-local, broadcast, multicast,
 /// unspecified, and other special-purpose ranges. Only "globally routable"
 /// unicast addresses pass.
-fn is_public_ip(ip: &IpAddr) -> bool {
+///
+/// Exposed `pub` so the MCP-input validator (`commands::validate_mcp_input`)
+/// can share the same private-range classifier — we want one source of truth
+/// for "this IP isn't safe to send credentials to".
+pub fn is_public_ip(ip: &IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
             if v4.is_loopback()

@@ -18,6 +18,17 @@ export function FileChip({
     <div className="inline-flex items-center gap-1.5 rounded-md border border-border/60 bg-muted/40 px-2 py-1 text-xs">
       <AttachmentIcon kind={attachment.kind} />
       <span className="max-w-[140px] truncate">{attachment.name}</span>
+      {attachment.truncated && (
+        // Subdued amber pill — the document IS attached, the model WILL get
+        // a leading slice of it, but the user should know what they uploaded
+        // is larger than what reaches the model. Tooltip carries the detail.
+        <span
+          title="Document exceeded the per-attachment extraction limit; only a leading slice will be sent to the model."
+          className="rounded-sm border border-amber-500/30 bg-amber-500/10 px-1 text-[10px] font-medium uppercase tracking-wide text-amber-600 dark:text-amber-400"
+        >
+          truncated
+        </span>
+      )}
       <button
         type="button"
         onClick={onRemove}

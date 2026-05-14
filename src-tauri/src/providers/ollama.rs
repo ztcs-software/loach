@@ -17,10 +17,6 @@ use crate::stream::{admin_channel, event_channel, AdminEvent, StreamEvent, Strea
 /// fills memory.
 const MAX_LINE_BYTES: usize = 1024 * 1024; // 1 MiB
 
-pub fn default_base_url() -> &'static str {
-    "http://localhost:11434"
-}
-
 // ---------------------------------------------------------------------------
 // Model admin: show / delete / copy / pull / create
 // ---------------------------------------------------------------------------

@@ -618,17 +618,6 @@ impl Database {
 
     // ------------ settings ------------
 
-    pub fn get_setting(&self, key: &str) -> Result<Option<String>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare("SELECT value FROM settings WHERE key = ?1")?;
-        let mut rows = stmt.query(params![key])?;
-        if let Some(r) = rows.next()? {
-            Ok(Some(r.get(0)?))
-        } else {
-            Ok(None)
-        }
-    }
-
     pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
@@ -1036,28 +1025,6 @@ impl Database {
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
-    }
-
-    pub fn get_mcp_server(&self, id: &str) -> Result<Option<McpServer>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT id, name, url, headers_json, enabled, created_at, updated_at
-             FROM mcp_servers WHERE id = ?1",
-        )?;
-        let mut rows = stmt.query(params![id])?;
-        if let Some(r) = rows.next()? {
-            Ok(Some(McpServer {
-                id: r.get(0)?,
-                name: r.get(1)?,
-                url: r.get::<_, Option<String>>(2)?.unwrap_or_default(),
-                headers_json: r.get(3)?,
-                enabled: r.get::<_, i64>(4)? != 0,
-                created_at: r.get(5)?,
-                updated_at: r.get(6)?,
-            }))
-        } else {
-            Ok(None)
-        }
     }
 
     /// Upsert: create a new row if `id` is empty, otherwise update the
