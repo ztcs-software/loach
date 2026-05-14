@@ -1,15 +1,84 @@
 name: Release
 
+# Cuts a release when main contains a version bump paired with a matching
+# release-notes file. On push to main, the prepare job reads `version` from
+# package.json. If `releases/<version>.md` exists AND the matching v<version>
+# tag doesn't, it kicks off the build matrix. Otherwise it silently no-ops —
+# normal feature merges don't trigger anything.
+#
+# The notes file content becomes both the GitHub release body AND the `notes`
+# field inside `latest.json`, so what the user sees in-app matches what's on
+# the GitHub release page.
+
 on:
   push:
-    tags:
-      - 'v*'
+    branches: [main]
+  workflow_dispatch:  # allow manual re-run if CI flaked
 
 permissions:
   contents: write
 
 jobs:
+  prepare:
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.gate.outputs.version }}
+      should_release: ${{ steps.gate.outputs.should_release }}
+      release_body: ${{ steps.notes.outputs.body }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # need full history to inspect existing tags
+
+      - id: gate
+        name: Decide whether to release
+        run: |
+          set -euo pipefail
+          PKG=$(node -p "require('./package.json').version")
+          TAURI=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          CARGO=$(grep -m1 '^version' src-tauri/Cargo.toml | sed -E 's/version = "(.*)"/\1/')
+
+          # Hard fail on version drift — that's a release-blocker bug, not a
+          # "not a release" signal. The three files must agree before we ship.
+          if [ "$PKG" != "$TAURI" ] || [ "$PKG" != "$CARGO" ]; then
+            echo "::error::Version mismatch — package.json=$PKG, tauri.conf.json=$TAURI, Cargo.toml=$CARGO"
+            exit 1
+          fi
+
+          echo "version=$PKG" >> "$GITHUB_OUTPUT"
+
+          # Soft skip when there's no notes file: the absence is the signal
+          # that this merge wasn't intended as a release.
+          if [ ! -f "releases/$PKG.md" ]; then
+            echo "::notice::releases/$PKG.md not found — skipping release."
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Soft skip when the tag already exists — keeps re-runs idempotent.
+          if git rev-parse "v$PKG" >/dev/null 2>&1; then
+            echo "::notice::Tag v$PKG already exists — skipping."
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "should_release=true" >> "$GITHUB_OUTPUT"
+
+      - id: notes
+        if: steps.gate.outputs.should_release == 'true'
+        name: Read release notes
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.gate.outputs.version }}"
+          {
+            echo 'body<<RELEASE_NOTES_EOF'
+            cat "releases/$VERSION.md"
+            echo 'RELEASE_NOTES_EOF'
+          } >> "$GITHUB_OUTPUT"
+
   build:
+    needs: prepare
+    if: needs.prepare.outputs.should_release == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -52,11 +121,15 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: 'Loach ${{ github.ref_name }}'
-          releaseBody: |
-            See the changelog below. Download the installer for your OS from the assets.
+          # tauri-action will create + push this tag at the commit being built
+          # if it doesn't already exist. First matrix job to finish creates
+          # the release; subsequent jobs upload their assets to the same one.
+          tagName: v${{ needs.prepare.outputs.version }}
+          releaseName: 'Loach v${{ needs.prepare.outputs.version }}'
+          releaseBody: ${{ needs.prepare.outputs.release_body }}
           releaseDraft: true
-          prerelease: true
+          # Anything with a pre-release qualifier (e.g. `-alpha`, `-beta`,
+          # `-rc.1`) is flagged prerelease; bare `1.2.3` ships as stable.
+          prerelease: ${{ contains(needs.prepare.outputs.version, '-') }}
           includeUpdaterJson: true
           args: ${{ matrix.args }}
