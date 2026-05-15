@@ -607,6 +607,32 @@ export function resolveDefaultModelChoice(
   return { provider: recentProvider, model: recentModel };
 }
 
+/**
+ * Top up to one live (non-archived) chat after a destructive op leaves the
+ * sidebar empty. Mirrors the invariant `hydrate()` and `onboardingStore.complete()`
+ * already maintain — if the user nukes their last chat (delete or archive), the
+ * UI shouldn't fall into a no-session state where the model picker / actions
+ * menu / params panel all gray out. A fresh empty chat takes its place,
+ * matching how ChatGPT-style apps behave.
+ *
+ * Skipped during onboarding (the wizard owns the screen and creates its own
+ * session on finish) and when a non-archived session already exists.
+ */
+async function ensureLiveSession(get: Getter) {
+  const { sessions, activeSessionId } = get();
+  const liveExists = sessions.some((s) => !s.archived_at);
+  if (liveExists && activeSessionId) return;
+  if (liveExists && !activeSessionId) {
+    // A non-archived chat exists but nothing is selected — just pick it
+    // instead of spawning yet another empty.
+    const next = sessions.find((s) => !s.archived_at)!;
+    await get().selectSession(next.id);
+    return;
+  }
+  if (!useSettingsStore.getState().onboarding_completed) return;
+  await get().newSession({ spaceId: null });
+}
+
 export const useChatStore = create<ChatState>((set, get) => ({
   sessions: [],
   activeSessionId: null,
@@ -820,11 +846,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
       );
       // If we just archived the currently active session, drop selection so
       // the main view doesn't keep rendering a chat that's no longer in the
-      // normal list.
+      // normal list. ensureLiveSession below will pick a replacement.
       const active =
         archived && s.activeSessionId === id ? null : s.activeSessionId;
       return { sessions, activeSessionId: active };
     });
+    await ensureLiveSession(get);
   },
 
   remove: async (id) => {
@@ -841,6 +868,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         s.activeSessionId === id ? sessions[0]?.id ?? null : s.activeSessionId;
       return { sessions, messages, queue, activeSessionId: active };
     });
+    await ensureLiveSession(get);
   },
 
   setSessionModel: async (id, provider, model) => {
