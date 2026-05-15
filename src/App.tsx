@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { TitleBar } from "@/components/TitleBar";
 import { Sidebar } from "@/components/Sidebar";
 import { ChatHeader } from "@/components/ChatHeader";
@@ -231,9 +231,24 @@ const SUGGESTIONS: { label: string; prompt: string }[] = [
   },
 ];
 
+const HERO_GREETINGS = [
+  "How can I help today?",
+  "Where shall we begin?",
+  "What's on your mind today?",
+  "What can I do for you?",
+  "What are we working on?",
+];
+
 function HeroComposer() {
   const insertDraft = useUIStore((s) => s.insertComposerDraft);
   const bgStyle = useSettingsStore((s) => s.background_style);
+
+  // Pick a greeting once per mount so it stays stable while this hero is
+  // visible but re-rolls on every fresh empty-state visit (new chat etc.).
+  const [headingText] = useState(
+    () => HERO_GREETINGS[Math.floor(Math.random() * HERO_GREETINGS.length)],
+  );
+
   return (
     <div className="flex flex-1 items-center justify-center px-6">
       <div className="w-full max-w-3xl -mt-10">
@@ -246,7 +261,7 @@ function HeroComposer() {
                 : "text-foreground",
             )}
           >
-            How can I help today?
+            {headingText}
           </h1>
           <p className="mt-3 text-sm text-foreground/55">
             Ask anything. Loach runs your local models privately and securely.
