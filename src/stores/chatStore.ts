@@ -1051,7 +1051,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // Drop the just-inserted user message from the ambient history; we'll
     // re-add it as the trailing chat message so `images` is attached.
     const trimmed = history.filter((m) => m.id !== userMsg.id);
-    const chatMessages = chatHistory(trimmed, inlinedContent, images);
 
     // Resolve system prompt. When the chat is in a space:
     //  - Space instructions OVERRIDE the global / per-session prompt entirely
@@ -1066,6 +1065,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         : settings.global_system_prompt || "";
 
     let effectiveSystemPrompt: string | null = fallbackPrompt || null;
+    // Space-level image attachments ride along with the trailing user turn,
+    // same channel as per-message image attachments. Text files go into the
+    // system prompt (above); images can't, so they need this separate path.
+    const spaceImages: string[] = [];
     if (session.space_id) {
       try {
         const ctx = await getSpaceContext(session.space_id);
@@ -1077,6 +1080,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
           for (const f of textFiles) {
             filesBlock += `\nFile: \`${f.name}\`\n\`\`\`\n${f.data}\n\`\`\`\n`;
           }
+        }
+        for (const f of ctx.files) {
+          if (f.kind === "image") spaceImages.push(f.data);
         }
         // Memory block — bulleted facts auto-extracted from prior chats in
         // this space. Always rides along when memories exist, regardless of
@@ -1153,6 +1159,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
         ? `${effectiveSystemPrompt}\n\n${tone.systemPrompt}`
         : tone.systemPrompt;
     }
+
+    const chatMessages = chatHistory(trimmed, inlinedContent, [
+      ...images,
+      ...spaceImages,
+    ]);
 
     const task: QueueTask = {
       id: `t_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
