@@ -607,32 +607,6 @@ export function resolveDefaultModelChoice(
   return { provider: recentProvider, model: recentModel };
 }
 
-/**
- * Top up to one live (non-archived) chat after a destructive op leaves the
- * sidebar empty. Mirrors the invariant `hydrate()` and `onboardingStore.complete()`
- * already maintain — if the user nukes their last chat (delete or archive), the
- * UI shouldn't fall into a no-session state where the model picker / actions
- * menu / params panel all gray out. A fresh empty chat takes its place,
- * matching how ChatGPT-style apps behave.
- *
- * Skipped during onboarding (the wizard owns the screen and creates its own
- * session on finish) and when a non-archived session already exists.
- */
-async function ensureLiveSession(get: Getter) {
-  const { sessions, activeSessionId } = get();
-  const liveExists = sessions.some((s) => !s.archived_at);
-  if (liveExists && activeSessionId) return;
-  if (liveExists && !activeSessionId) {
-    // A non-archived chat exists but nothing is selected — just pick it
-    // instead of spawning yet another empty.
-    const next = sessions.find((s) => !s.archived_at)!;
-    await get().selectSession(next.id);
-    return;
-  }
-  if (!useSettingsStore.getState().onboarding_completed) return;
-  await get().newSession({ spaceId: null });
-}
-
 export const useChatStore = create<ChatState>((set, get) => ({
   sessions: [],
   activeSessionId: null,
@@ -679,20 +653,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
         set({ sessions: remaining });
       }
 
-      // Re-use the surviving empty session, or create a new one.
-      // Exception: while onboarding is still pending, skip the auto-
-      // create. The wizard owns the screen and a freshly-spawned "New
-      // chat" the user can't interact with (a) clutters the sidebar
-      // and (b) races itself in StrictMode-dev / post-factory-reset
-      // reloads, producing multiple phantom rows. `sendUserMessage`
-      // already creates a session lazily on first send, so the user
-      // doesn't lose anything by us holding off here.
-      const onboardingDone =
-        useSettingsStore.getState().onboarding_completed;
+      // Pick a session to land on: prefer the surviving empty chat (so a
+      // half-typed welcome screen is preserved across restarts), otherwise
+      // fall back to the most recent non-archived chat. If neither exists
+      // we leave activeSessionId null and let the NoChatState CTA take
+      // over — the user explicitly emptied their sidebar and we shouldn't
+      // silently re-create a chat behind their back. Onboarding still
+      // creates the very first chat from `onboardingStore.complete()`.
       if (emptySessions.length > 0) {
         await get().selectSession(emptySessions[0].id);
-      } else if (onboardingDone) {
-        await get().newSession();
+      } else {
+        const remaining = get().sessions;
+        const nextLive = remaining.find((s) => !s.archived_at);
+        if (nextLive) await get().selectSession(nextLive.id);
       }
     } catch (e) {
       console.error("chat hydrate failed", e);
@@ -846,12 +819,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
       );
       // If we just archived the currently active session, drop selection so
       // the main view doesn't keep rendering a chat that's no longer in the
-      // normal list. ensureLiveSession below will pick a replacement.
+      // normal list. The chat surface falls back to the empty-state CTA.
       const active =
         archived && s.activeSessionId === id ? null : s.activeSessionId;
       return { sessions, activeSessionId: active };
     });
-    await ensureLiveSession(get);
   },
 
   remove: async (id) => {
@@ -868,7 +840,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
         s.activeSessionId === id ? sessions[0]?.id ?? null : s.activeSessionId;
       return { sessions, messages, queue, activeSessionId: active };
     });
-    await ensureLiveSession(get);
   },
 
   setSessionModel: async (id, provider, model) => {

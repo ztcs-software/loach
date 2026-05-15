@@ -315,7 +315,7 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
       </div>
       <div className="flex shrink-0 items-center gap-1">
         <DropdownMenu open={modelMenuOpen} onOpenChange={setModelMenuOpen}>
-          <DropdownMenuTrigger asChild>
+          <DropdownMenuTrigger asChild disabled={!session}>
             <Button
               variant="ghost"
               className={cn(
@@ -388,7 +388,7 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
           </DropdownMenuContent>
         </DropdownMenu>
         <DropdownMenu>
-          <DropdownMenuTrigger asChild>
+          <DropdownMenuTrigger asChild disabled={!session}>
             <Button
               variant="ghost"
               size="icon"
