@@ -139,6 +139,13 @@ function MessageItemImpl({ message, isStreaming, metrics }: MessageProps) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [copied, setCopied] = useState(false);
+  // Coordinates (relative to the bubble) where the user right-clicked. We pin
+  // a hidden trigger to that point so the dropdown opens next to the cursor
+  // instead of way down at the "..." button — a long assistant reply otherwise
+  // makes the menu appear far from where the user clicked.
+  const [assistantMenuOpen, setAssistantMenuOpen] = useState(false);
+  const [assistantMenuPos, setAssistantMenuPos] = useState<{ x: number; y: number } | null>(null);
+  const [userMenuPos, setUserMenuPos] = useState<{ x: number; y: number } | null>(null);
   const openSnippetDialog = useSnippetStore((s) => s.openDialog);
 
   // Copy the raw assistant content — full markdown, untouched — so pasting
@@ -196,10 +203,14 @@ function MessageItemImpl({ message, isStreaming, metrics }: MessageProps) {
         )}
         onContextMenu={(e) => {
           e.preventDefault();
+          const bubble = e.currentTarget.getBoundingClientRect();
+          const pos = { x: e.clientX - bubble.left, y: e.clientY - bubble.top };
           if (isUser) {
+            setUserMenuPos(pos);
             setUserMenuOpen(true);
           } else if (message.content.length > 0) {
-            setMenuOpen(true);
+            setAssistantMenuPos(pos);
+            setAssistantMenuOpen(true);
           }
         }}
       >
@@ -210,11 +221,15 @@ function MessageItemImpl({ message, isStreaming, metrics }: MessageProps) {
                 type="button"
                 aria-hidden
                 tabIndex={-1}
-                className="pointer-events-none absolute right-3 top-2 h-0 w-0 opacity-0"
+                className="pointer-events-none absolute h-0 w-0 opacity-0"
+                style={{
+                  left: userMenuPos?.x ?? 0,
+                  top: userMenuPos?.y ?? 0,
+                }}
               />
             </DropdownMenuTrigger>
             <DropdownMenuContent
-              align="end"
+              align="start"
               className="!bg-none !bg-foreground/[0.08] border border-foreground/10 backdrop-blur-xl min-w-[180px]"
             >
               <DropdownMenuItem
@@ -232,6 +247,34 @@ function MessageItemImpl({ message, isStreaming, metrics }: MessageProps) {
               >
                 <Bookmark className="h-4 w-4 text-foreground/60" />
                 Save as Snippet
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        )}
+        {!isUser && message.content.length > 0 && (
+          <DropdownMenu open={assistantMenuOpen} onOpenChange={setAssistantMenuOpen}>
+            <DropdownMenuTrigger asChild>
+              <button
+                type="button"
+                aria-hidden
+                tabIndex={-1}
+                className="pointer-events-none absolute h-0 w-0 opacity-0"
+                style={{
+                  left: assistantMenuPos?.x ?? 0,
+                  top: assistantMenuPos?.y ?? 0,
+                }}
+              />
+            </DropdownMenuTrigger>
+            <DropdownMenuContent
+              align="start"
+              className="!bg-none !bg-foreground/[0.08] border border-foreground/10 backdrop-blur-xl min-w-[140px]"
+            >
+              <DropdownMenuItem
+                onSelect={() => void copyContent()}
+                className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
+              >
+                <Copy className="h-4 w-4 text-foreground/60" />
+                Copy
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>

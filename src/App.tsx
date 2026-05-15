@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { TitleBar } from "@/components/TitleBar";
 import { Sidebar } from "@/components/Sidebar";
 import { ChatHeader } from "@/components/ChatHeader";
@@ -20,6 +20,8 @@ import { CodeCanvas } from "@/components/CodeCanvas";
 import { SearchBar } from "@/components/SearchBar";
 import { SelectionCopyButton } from "@/components/SelectionCopyButton";
 import { ToastHost } from "@/components/ToastHost";
+import { Button } from "@/components/ui/button";
+import { SquarePen } from "lucide-react";
 import { resolveDefaultModelChoice, useChatStore } from "@/stores/chatStore";
 import { useModelsStore } from "@/stores/modelsStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -168,7 +170,9 @@ export default function App() {
             <>
               <main className="relative flex min-w-0 flex-1 flex-col">
                 <ChatHeader session={session} />
-                {hasMessages ? (
+                {!session ? (
+                  <NoChatState />
+                ) : hasMessages ? (
                   <>
                     <ChatCanvas />
                     <ChatInput />
@@ -231,9 +235,52 @@ const SUGGESTIONS: { label: string; prompt: string }[] = [
   },
 ];
 
+const HERO_GREETINGS = [
+  "How can I help today?",
+  "Where shall we begin?",
+  "What's on your mind today?",
+  "What can I do for you?",
+  "What are we working on?",
+];
+
+/**
+ * Shown when the user has no active chat — typically because they just
+ * deleted or archived their last one. Unlike HeroComposer (which still has
+ * a working composer because a fresh empty session is already open), there
+ * is no session to send into here, so we surface a single "New chat" CTA
+ * that calls into the same `newSession` the sidebar uses.
+ */
+function NoChatState() {
+  const newSession = useChatStore((s) => s.newSession);
+  const start = () => void newSession({ spaceId: null });
+  return (
+    <div className="flex flex-1 items-center justify-center px-6">
+      <div className="-mt-10 max-w-md text-center">
+        <h2 className="text-xl font-medium text-foreground/85">
+          No chat open
+        </h2>
+        <p className="mt-2 text-sm text-foreground/55">
+          Create a new chat to start a conversation.
+        </p>
+        <Button onClick={start} className="mt-5 gap-2 rounded-full px-5">
+          <SquarePen className="h-4 w-4" />
+          New chat
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 function HeroComposer() {
   const insertDraft = useUIStore((s) => s.insertComposerDraft);
   const bgStyle = useSettingsStore((s) => s.background_style);
+
+  // Pick a greeting once per mount so it stays stable while this hero is
+  // visible but re-rolls on every fresh empty-state visit (new chat etc.).
+  const [headingText] = useState(
+    () => HERO_GREETINGS[Math.floor(Math.random() * HERO_GREETINGS.length)],
+  );
+
   return (
     <div className="flex flex-1 items-center justify-center px-6">
       <div className="w-full max-w-3xl -mt-10">
@@ -246,7 +293,7 @@ function HeroComposer() {
                 : "text-foreground",
             )}
           >
-            How can I help today?
+            {headingText}
           </h1>
           <p className="mt-3 text-sm text-foreground/55">
             Ask anything. Loach runs your local models privately and securely.

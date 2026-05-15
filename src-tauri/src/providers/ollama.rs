@@ -464,7 +464,7 @@ pub async fn chat_stream(
     }
 
     let url = format!("{}/api/chat", req.base_url.trim_end_matches('/'));
-    let resp = match http.post(url).json(&body).send().await {
+    let mut resp = match http.post(&url).json(&body).send().await {
         Ok(r) => r,
         Err(e) => {
             let _ = app.emit(
@@ -477,6 +477,43 @@ pub async fn chat_stream(
             return Err(e.into());
         }
     };
+
+    // Safety net: older Ollama builds don't advertise the "thinking"
+    // capability in /api/show, so we can't always know up front whether the
+    // model supports it. If the server rejects the request specifically
+    // because the model doesn't support thinking, drop the flag and retry
+    // once before giving up.
+    if !resp.status().is_success() && body.get("think").is_some() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if text.contains("does not support thinking") {
+            if let Some(obj) = body.as_object_mut() {
+                obj.remove("think");
+            }
+            resp = match http.post(&url).json(&body).send().await {
+                Ok(r) => r,
+                Err(e) => {
+                    let _ = app.emit(
+                        &channel,
+                        StreamEvent::Error {
+                            message: format!("Ollama request failed: {e}"),
+                        },
+                    );
+                    registry.finish(&req.stream_id);
+                    return Err(e.into());
+                }
+            };
+        } else {
+            let _ = app.emit(
+                &channel,
+                StreamEvent::Error {
+                    message: format!("Ollama HTTP {status}: {text}"),
+                },
+            );
+            registry.finish(&req.stream_id);
+            return Err(anyhow!("ollama http error"));
+        }
+    }
 
     if !resp.status().is_success() {
         let status = resp.status();

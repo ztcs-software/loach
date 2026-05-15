@@ -62,7 +62,8 @@ export function Onboarding() {
     <div
       className={cn(
         "fixed inset-0 z-[55] flex items-center justify-center",
-        "bg-background/60 backdrop-blur-md",
+        // Match the dialog overlay used by Settings (`bg-black/55 backdrop-blur-md`).
+        "bg-black/55 backdrop-blur-md",
         "data-[state=open]:animate-in data-[state=open]:fade-in-0",
       )}
       data-state="open"
@@ -72,23 +73,32 @@ export function Onboarding() {
     >
       <div
         className={cn(
+          "glass-panel",
           "relative flex max-h-[88vh] w-[min(880px,94vw)] flex-col",
-          // Mostly-opaque dark surface with a hint of translucency so
-          // the mesh tint bleeds through; soft backdrop-blur keeps the
-          // edges from feeling flat without going full glass.
-          "rounded-3xl border border-foreground/10",
-          "bg-background/80 backdrop-blur-md",
-          "shadow-[0_24px_64px_-12px_rgba(0,0,0,0.55)]",
+          // Match SettingsDialog's surface: gradient-tinted glass with
+          // backdrop blur + saturation. A darkening underlay (below) gives
+          // it the same deep tone as the Settings reference instead of the
+          // washed-out look pure glass produced over our mesh.
+          "rounded-3xl",
           "overflow-hidden",
           "h-[560px]",
         )}
       >
-        {step === "welcome" && <WelcomeStep onClose={handleClose} />}
-        {step === "name" && <NameStep onClose={handleClose} />}
-        {step === "provider" && <ProviderStep onClose={handleClose} />}
-        {step === "prompt" && <PromptStep onClose={handleClose} />}
-        {step === "features" && <FeaturesStep onClose={handleClose} />}
-        {step === "final" && <FinalStep onClose={handleClose} />}
+        {/* Darken the glass so the panel reads as deep as Settings. Sits
+            inside the glass frame (keeping its border / inner highlight)
+            but behind the step content. */}
+        <div
+          aria-hidden
+          className="pointer-events-none absolute inset-0 bg-background/55"
+        />
+        <div className="relative z-10 flex flex-1 min-h-0 flex-col">
+          {step === "welcome" && <WelcomeStep onClose={handleClose} />}
+          {step === "name" && <NameStep onClose={handleClose} />}
+          {step === "provider" && <ProviderStep onClose={handleClose} />}
+          {step === "prompt" && <PromptStep onClose={handleClose} />}
+          {step === "features" && <FeaturesStep onClose={handleClose} />}
+          {step === "final" && <FinalStep onClose={handleClose} />}
+        </div>
 
         {/* Provider-step dismiss confirm. Renders as an in-card overlay
             so it visually owns the modal's full surface; the underlying

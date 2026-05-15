@@ -501,6 +501,10 @@ async function startTask(task: QueueTask, get: Getter, set: Setter) {
               ),
             },
           }));
+          // Providers emit Error and then stop without a trailing Done, so
+          // the streaming state would otherwise stay set forever and freeze
+          // the input box in "Replying…" mode.
+          finishRunning(get, set);
         } else if (ev.kind === "done") {
           finishRunning(get, set);
         }
@@ -649,20 +653,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
         set({ sessions: remaining });
       }
 
-      // Re-use the surviving empty session, or create a new one.
-      // Exception: while onboarding is still pending, skip the auto-
-      // create. The wizard owns the screen and a freshly-spawned "New
-      // chat" the user can't interact with (a) clutters the sidebar
-      // and (b) races itself in StrictMode-dev / post-factory-reset
-      // reloads, producing multiple phantom rows. `sendUserMessage`
-      // already creates a session lazily on first send, so the user
-      // doesn't lose anything by us holding off here.
-      const onboardingDone =
-        useSettingsStore.getState().onboarding_completed;
+      // Pick a session to land on: prefer the surviving empty chat (so a
+      // half-typed welcome screen is preserved across restarts), otherwise
+      // fall back to the most recent non-archived chat. If neither exists
+      // we leave activeSessionId null and let the NoChatState CTA take
+      // over — the user explicitly emptied their sidebar and we shouldn't
+      // silently re-create a chat behind their back. Onboarding still
+      // creates the very first chat from `onboardingStore.complete()`.
       if (emptySessions.length > 0) {
         await get().selectSession(emptySessions[0].id);
-      } else if (onboardingDone) {
-        await get().newSession();
+      } else {
+        const remaining = get().sessions;
+        const nextLive = remaining.find((s) => !s.archived_at);
+        if (nextLive) await get().selectSession(nextLive.id);
       }
     } catch (e) {
       console.error("chat hydrate failed", e);
@@ -816,7 +819,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       );
       // If we just archived the currently active session, drop selection so
       // the main view doesn't keep rendering a chat that's no longer in the
-      // normal list.
+      // normal list. The chat surface falls back to the empty-state CTA.
       const active =
         archived && s.activeSessionId === id ? null : s.activeSessionId;
       return { sessions, activeSessionId: active };
@@ -1048,7 +1051,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // Drop the just-inserted user message from the ambient history; we'll
     // re-add it as the trailing chat message so `images` is attached.
     const trimmed = history.filter((m) => m.id !== userMsg.id);
-    const chatMessages = chatHistory(trimmed, inlinedContent, images);
 
     // Resolve system prompt. When the chat is in a space:
     //  - Space instructions OVERRIDE the global / per-session prompt entirely
@@ -1063,6 +1065,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         : settings.global_system_prompt || "";
 
     let effectiveSystemPrompt: string | null = fallbackPrompt || null;
+    // Space-level image attachments ride along with the trailing user turn,
+    // same channel as per-message image attachments. Text files go into the
+    // system prompt (above); images can't, so they need this separate path.
+    const spaceImages: string[] = [];
     if (session.space_id) {
       try {
         const ctx = await getSpaceContext(session.space_id);
@@ -1074,6 +1080,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
           for (const f of textFiles) {
             filesBlock += `\nFile: \`${f.name}\`\n\`\`\`\n${f.data}\n\`\`\`\n`;
           }
+        }
+        for (const f of ctx.files) {
+          if (f.kind === "image") spaceImages.push(f.data);
         }
         // Memory block — bulleted facts auto-extracted from prior chats in
         // this space. Always rides along when memories exist, regardless of
@@ -1150,6 +1159,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
         ? `${effectiveSystemPrompt}\n\n${tone.systemPrompt}`
         : tone.systemPrompt;
     }
+
+    const chatMessages = chatHistory(trimmed, inlinedContent, [
+      ...images,
+      ...spaceImages,
+    ]);
 
     const task: QueueTask = {
       id: `t_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,

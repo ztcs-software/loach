@@ -5,23 +5,13 @@ import {
   ClipboardPaste,
   FileUp,
   Mic,
-  Paperclip,
   Plus,
   Scissors,
-  Settings2,
   Square,
   TextCursorInput,
   X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 import { Textarea } from "@/components/ui/textarea";
 import { FileChip } from "./FileChip";
 import {
@@ -33,7 +23,6 @@ import { useUIStore } from "@/stores/uiStore";
 import { cn } from "@/lib/utils";
 import {
   DEFAULT_PERSONA_ID,
-  PERSONAS,
   getPersona,
 } from "@/lib/personas";
 import type { Attachment } from "@/types";
@@ -67,8 +56,6 @@ export function ChatInput({ centered = false }: ChatInputProps) {
   const pendingPersonaId = useUIStore((s) => s.pendingPersonaId);
   const setSessionPersona = useUIStore((s) => s.setSessionPersona);
   const setPendingPersona = useUIStore((s) => s.setPendingPersona);
-  const paramsOpen = useUIStore((s) => s.paramsOpen);
-  const toggleParams = useUIStore((s) => s.toggleParams);
 
   // Active persona resolves to whichever scope owns the picker right now:
   // an open chat reads from `personaIdBySession`; the welcome screen (no
@@ -603,74 +590,18 @@ export function ChatInput({ centered = false }: ChatInputProps) {
             </div>
           )}
 
-          {/* Composer "+" menu — fast-path access to file attach and persona
-              switching. The canonical persona editor lives in the parameters
-              sidebar (where you can also tweak the system prompt freely);
-              this menu just gives one-click access to switch between presets
-              without opening the panel. "Customize…" opens the panel for full
-              control. */}
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                aria-label="Add to message"
-                title="Attach files or switch persona"
-                className="rounded-full text-foreground/65 hover:bg-foreground/10 hover:text-foreground"
-              >
-                <Plus className="h-4 w-4" />
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent
-              align="start"
-              side="top"
-              className="min-w-[14rem]"
-            >
-              <DropdownMenuItem
-                onSelect={() => fileInputRef.current?.click()}
-                className="gap-2.5"
-              >
-                <Paperclip className="h-4 w-4 text-foreground/60" />
-                <span className="flex-1">Attach files</span>
-              </DropdownMenuItem>
-              <DropdownMenuSeparator />
-              <DropdownMenuLabel>Persona</DropdownMenuLabel>
-              {PERSONAS.map((p) => {
-                const Icon = p.icon;
-                const isActive = activePersonaId
-                  ? activePersonaId === p.id
-                  : p.id === DEFAULT_PERSONA_ID;
-                return (
-                  <DropdownMenuItem
-                    key={p.id}
-                    onSelect={() => applyPersona(p.id)}
-                    className="gap-2.5"
-                  >
-                    <Icon className="h-4 w-4 shrink-0 text-foreground/60" />
-                    <span className="flex-1 font-medium text-foreground/90">
-                      {p.label}
-                    </span>
-                    {isActive && (
-                      <span className="rounded-full bg-orange-500/20 px-1.5 py-px text-[10px] font-semibold uppercase tracking-wider text-orange-300">
-                        Active
-                      </span>
-                    )}
-                  </DropdownMenuItem>
-                );
-              })}
-              <DropdownMenuSeparator />
-              <DropdownMenuItem
-                onSelect={() => {
-                  if (!paramsOpen) toggleParams();
-                }}
-                className="gap-2.5"
-              >
-                <Settings2 className="h-4 w-4 text-foreground/60" />
-                <span className="flex-1">Customize…</span>
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
+          {/* Composer "+" button — opens the OS file picker directly. */}
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            onClick={() => fileInputRef.current?.click()}
+            aria-label="Attach files"
+            title="Attach files"
+            className="rounded-full text-foreground/65 hover:bg-foreground/10 hover:text-foreground"
+          >
+            <Plus className="h-4 w-4" />
+          </Button>
           <input
             ref={fileInputRef}
             type="file"

@@ -63,6 +63,7 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
   const removeSession = useChatStore((s) => s.remove);
   const toggleParams = useUIStore((s) => s.toggleParams);
   const setSidebarTab = useUIStore((s) => s.setSidebarTab);
+  const openSettingsTab = useUIStore((s) => s.openSettingsTab);
   const setViewingSpace = useSpaceStore((s) => s.setViewingSpace);
   const settings = useSettingsStore();
 
@@ -370,6 +371,20 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
                 {m.label}
               </DropdownMenuItem>
             ))}
+            {ollamaModels.length === 0 && !settings.openai_key_set && (
+              <>
+                <DropdownMenuSeparator />
+                <div className="px-2 py-1.5 text-[11px] text-foreground/55">
+                  No models available. Configure one to get started:
+                </div>
+                <DropdownMenuItem onSelect={() => setSidebarTab("models")}>
+                  Install local models…
+                </DropdownMenuItem>
+                <DropdownMenuItem onSelect={() => openSettingsTab("providers")}>
+                  Add an API key…
+                </DropdownMenuItem>
+              </>
+            )}
           </DropdownMenuContent>
         </DropdownMenu>
         <DropdownMenu>

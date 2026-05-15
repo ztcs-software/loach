@@ -7,6 +7,16 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import topBarLogo from "@/assets/loach-icon.png";
 import pkg from "../../package.json";
 
+// Detect macOS so we can label the Ctrl/Cmd+K shortcut with the right
+// modifier. The keybinding itself accepts either (see SearchBar) — this
+// is purely visual.
+const isMac =
+  typeof navigator !== "undefined" &&
+  /mac/i.test(
+    (navigator as Navigator & { userAgentData?: { platform?: string } })
+      .userAgentData?.platform || navigator.platform,
+  );
+
 export function TitleBar() {
   const [isMaximized, setIsMaximized] = useState(false);
   const sidebarOpen = useUIStore((s) => s.sidebarOpen);
@@ -50,7 +60,7 @@ export function TitleBar() {
     };
   }, []);
 
-  const callWindow = async (method: "minimize" | "toggleMaximize" | "hide") => {
+  const callWindow = async (method: "minimize" | "toggleMaximize" | "close") => {
     if (!isTauri) return;
     try {
       const { getCurrentWindow } = await import("@tauri-apps/api/window");
@@ -62,7 +72,7 @@ export function TitleBar() {
   };
   const minimize = () => callWindow("minimize");
   const toggleMax = () => callWindow("toggleMaximize");
-  const close = () => callWindow("hide");
+  const close = () => callWindow("close");
 
   return (
     <div
@@ -140,7 +150,7 @@ export function TitleBar() {
             Search chats, spaces, snippets…
           </span>
           <kbd className="rounded border border-foreground/10 bg-foreground/[0.05] px-1 py-px font-mono text-[10px] tracking-wider text-foreground/40">
-            ⌘K
+            {isMac ? "⌘K" : "Ctrl K"}
           </kbd>
         </button>
       </div>

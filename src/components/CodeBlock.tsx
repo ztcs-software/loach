@@ -20,9 +20,9 @@ interface CodeBlockProps {
  * and a `bg-zinc-950` rectangle reads as a foreign panel pasted on top.
  * Instead we layer a subtle white wash (`foreground/[0.05]`) so the
  * block "belongs" to the bubble, then rely on a 1px hairline border
- * for separation. Highlight.js still renders its github-dark palette
- * over the top — most of its colours have enough chroma to remain
- * legible against the warmer backdrop.
+ * for separation. Highlight.js renders github-dark in dark mode and the
+ * github (light) palette in light mode — the flip lives in
+ * `globals.css` and is scoped on `html:not(.dark)`.
  *
  * Layout: a left gutter of line numbers + the highlighted source.
  *
