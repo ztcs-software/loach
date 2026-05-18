@@ -303,12 +303,25 @@ function finishRunning(get: Getter, set: Setter) {
   const running = get().runningTask;
   const buf = runningBuffers;
   if (running && buf) {
+    // Persist the partial assistant reply. If the DB write fails (disk
+    // full, lock contention, file permissions, …) the bubble we just
+    // streamed exists in memory but won't survive a reload — so surface
+    // it via a toast instead of swallowing silently. Includes the error
+    // message so the user has a starting point if they want to debug.
     void updateMessage({
       id: buf.assistantMsgId,
       content: buf.content,
       thinking: buf.thinking || null,
       metrics_json: buf.metrics ? JSON.stringify(buf.metrics) : null,
-    }).catch(() => {});
+    }).catch((e) => {
+      const detail = e instanceof Error ? e.message : String(e);
+      console.error("failed to persist assistant reply", e);
+      useToastStore.getState().push({
+        kind: "error",
+        title: "Couldn't save reply",
+        body: `${detail} — reload will lose this reply.`,
+      });
+    });
   }
 
   // If the chat that just finished streaming isn't the one the user is
@@ -383,7 +396,14 @@ function finishRunning(get: Getter, set: Setter) {
 
 /** Promotes the head of the waiting queue to be the running task. Deferred
  *  via `queueMicrotask` so we don't try to start a new stream inside the
- *  same tick as the previous `done` event handler. */
+ *  same tick as the previous `done` event handler.
+ *
+ *  Re-promote happens inside `.finally` rather than from inside `startTask`
+ *  — if `startTask`'s catch block called `promoteQueueHead` directly, the
+ *  nested microtask would see `dispatching === true` (the outer call's flag
+ *  hadn't been cleared yet because `.finally` runs *after* the catch body)
+ *  and bail. The queue would then sit idle until something else nudged it.
+ *  Releasing the lock first and then re-promoting closes that window. */
 function promoteQueueHead(get: Getter, set: Setter) {
   queueMicrotask(() => {
     if (dispatching) return;
@@ -397,6 +417,12 @@ function promoteQueueHead(get: Getter, set: Setter) {
       .catch((err) => console.error("queued task start failed", err))
       .finally(() => {
         dispatching = false;
+        // Re-check the queue now that the dispatch lock is free. On the
+        // success path `runningTask` will still be set (the stream is
+        // running) and the inner guards bail. On the failure path
+        // `runningTask` was already cleared by `startTask`, so the next
+        // waiter is picked up here.
+        promoteQueueHead(get, set);
       });
   });
 }
@@ -419,9 +445,9 @@ async function startTask(task: QueueTask, get: Getter, set: Setter) {
     });
   } catch (e) {
     // Session might have been deleted while the task waited. Silently drop
-    // and move on to the next.
+    // and move on to the next — the .finally hook in `promoteQueueHead`'s
+    // caller will pick the next waiter once the dispatch lock is released.
     console.error("failed to create assistant placeholder", e);
-    promoteQueueHead(get, set);
     return;
   }
 
@@ -526,9 +552,15 @@ async function startTask(task: QueueTask, get: Getter, set: Setter) {
       content: errorContent,
       thinking: null,
       metrics_json: null,
-    }).catch((upErr) =>
-      console.error("failed to persist startup-error placeholder", upErr),
-    );
+    }).catch((upErr) => {
+      const detail = upErr instanceof Error ? upErr.message : String(upErr);
+      console.error("failed to persist startup-error placeholder", upErr);
+      useToastStore.getState().push({
+        kind: "error",
+        title: "Couldn't save error placeholder",
+        body: `${detail} — the bubble will revert on reload.`,
+      });
+    });
 
     runningBuffers = null;
     set((s) => {
@@ -548,8 +580,10 @@ async function startTask(task: QueueTask, get: Getter, set: Setter) {
         },
       };
     });
-    // Don't stall the queue if this one task failed to start.
-    promoteQueueHead(get, set);
+    // The .finally chain on `promoteQueueHead`'s caller will re-promote
+    // once the dispatch lock is released — calling it from here would
+    // queue a microtask while `dispatching` is still set and the nested
+    // call would silently bail.
   }
 }
 
@@ -1181,9 +1215,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     // 3. Dispatch. If nothing is running globally, start immediately.
     //    Otherwise park in the waiting queue and let the runner pick us
-    //    up when the current task ends.
+    //    up when the current task ends. The trailing `promoteQueueHead`
+    //    on the direct-start branch covers the case where startTask
+    //    failed synchronously: it nulls `runningTask` in its catch but
+    //    won't re-promote on its own (the `.finally` re-promote in
+    //    `promoteQueueHead` only fires when a task was dispatched from
+    //    there). Without this nudge, a synchronous startup failure
+    //    would strand any tasks queued in the meantime.
     if (!get().runningTask) {
       await startTask(task, get, set);
+      promoteQueueHead(get, set);
     } else {
       set((s) => ({ queue: [...s.queue, task] }));
     }
@@ -1226,12 +1267,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
   promoteSession: async (sessionId) => {
     const state = get();
 
-    // Nothing running → treat promote like a direct start.
+    // Nothing running → treat promote like a direct start. Same nudge
+    // pattern as in `submit`: a synchronous startup failure would
+    // otherwise leave the queue stalled.
     if (!state.runningTask) {
       const task = state.queue.find((t) => t.sessionId === sessionId);
       if (!task) return;
       set((s) => ({ queue: s.queue.filter((t) => t.id !== task.id) }));
       await startTask(task, get, set);
+      promoteQueueHead(get, set);
       return;
     }
 

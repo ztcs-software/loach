@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
   Archive,
@@ -1097,20 +1097,32 @@ function MiniUIFrame({ mode, variant }: { mode: Tone; variant: Variant }) {
   );
 }
 
-function ThemePreview({ variant, mode }: { variant: Variant; mode: Tone }) {
+// `memo` because the parent SettingsDialog re-renders on every keystroke
+// in any of its textareas (it subscribes to the whole settings store
+// because nearly every field is rendered somewhere in the dialog). The
+// preview tiles only depend on `variant` + `mode` — primitive strings —
+// so memoising stops them from re-painting their gradients + SVG clip
+// paths every time an unrelated field updates.
+const ThemePreview = memo(function ThemePreview({
+  variant,
+  mode,
+}: {
+  variant: Variant;
+  mode: Tone;
+}) {
   return (
     <>
       <PreviewBackdrop variant={variant} mode={mode} />
       <MiniUIFrame variant={variant} mode={mode} />
     </>
   );
-}
+});
 
 /**
  * Color-mode preview. For "system" we clip a light mockup and a dark mockup
  * along a diagonal so the tile reads as "whichever matches your OS".
  */
-function ColorModePreview({
+const ColorModePreview = memo(function ColorModePreview({
   mode,
   variant,
 }: {
@@ -1147,7 +1159,7 @@ function ColorModePreview({
       />
     </>
   );
-}
+});
 
 /**
  * Embedded Archive browser — same rows the old full-page ArchiveView had,

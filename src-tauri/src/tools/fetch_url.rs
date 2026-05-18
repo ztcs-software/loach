@@ -28,6 +28,7 @@ use tokio::net::lookup_host;
 pub const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 pub const MAX_BODY_BYTES: usize = 5 * 1024 * 1024; // 5 MB
 pub const MAX_TEXT_CHARS: usize = 12_000; // ~3-4k tokens, plenty for inlining
+pub const MAX_REDIRECTS: usize = 10;
 
 /// What we hand back to the frontend for a single URL. `truncated` signals
 /// that either the response body or the extracted text hit a cap — useful
@@ -56,52 +57,77 @@ pub struct FetchedPage {
 /// to close the TOCTOU window between "we resolved a public IP" and
 /// "reqwest dials a now-private one".
 pub async fn fetch(_shared_http: &reqwest::Client, raw_url: &str) -> Result<FetchedPage, String> {
-    let url =
+    let initial_url =
         Url::parse(raw_url).map_err(|e| format!("Invalid URL `{raw_url}`: {e}"))?;
 
-    // Scheme allowlist.
-    match url.scheme() {
-        "http" | "https" => {}
-        other => return Err(format!("Unsupported URL scheme: `{other}` (only http/https)")),
+    // Follow redirects manually so we can re-screen each hop. Reqwest's
+    // built-in redirect follower reuses the original pinned-DNS client, so
+    // a cross-origin redirect would fall back to the system resolver for
+    // the new host — completely bypassing the SSRF guard. We disable auto-
+    // redirect in `build_pinned_client` and walk the chain here, calling
+    // `resolve_safe_addrs` + `build_pinned_client` fresh on every hop.
+    let mut url = initial_url.clone();
+    let mut resp_opt: Option<reqwest::Response> = None;
+    for hop in 0..=MAX_REDIRECTS {
+        // Scheme allowlist (re-checked per hop in case a redirect tries to
+        // jump to `file:` / `ftp:` / etc.).
+        match url.scheme() {
+            "http" | "https" => {}
+            other => {
+                return Err(format!(
+                    "Unsupported URL scheme: `{other}` (only http/https)"
+                ))
+            }
+        }
+
+        // SSRF guard — resolve, screen, and PIN the resolved IPs into a
+        // per-request client. Reqwest will use this map instead of re-
+        // resolving before it dials, so a hostname can't flip from public →
+        // private between our check and the actual connection.
+        let resolved = resolve_safe_addrs(&url).await?;
+        let http = build_pinned_client(&url, &resolved)?;
+
+        let resp = http
+            .get(url.clone())
+            .timeout(FETCH_TIMEOUT)
+            .header(reqwest::header::ACCEPT, "text/html,text/plain,*/*;q=0.8")
+            .send()
+            .await
+            .map_err(|e| format!("Request failed: {e}"))?;
+
+        let status = resp.status();
+        if status.is_redirection() {
+            if hop == MAX_REDIRECTS {
+                return Err(format!("Too many redirects (> {MAX_REDIRECTS})"));
+            }
+            let Some(loc) = resp
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|v| v.to_str().ok())
+            else {
+                return Err(format!(
+                    "HTTP {status} with no Location header for {url}"
+                ));
+            };
+            // Resolve the Location header against the current URL so relative
+            // redirects work the same way reqwest's follower handles them.
+            let next = url
+                .join(loc)
+                .map_err(|e| format!("Invalid redirect target `{loc}`: {e}"))?;
+            url = next;
+            continue;
+        }
+
+        if !status.is_success() {
+            return Err(format!("HTTP {status} for {url}"));
+        }
+
+        resp_opt = Some(resp);
+        break;
     }
 
-    // SSRF guard — resolve, screen, and PIN the resolved IPs into a
-    // per-request client. Reqwest will use this map instead of re-resolving
-    // before it dials, so a hostname can't flip from public → private
-    // between our check and the actual connection.
-    let resolved = resolve_safe_addrs(&url).await?;
-    let http = build_pinned_client(&url, &resolved)?;
-
-    let resp = http
-        .get(url.clone())
-        .timeout(FETCH_TIMEOUT)
-        .header(reqwest::header::ACCEPT, "text/html,text/plain,*/*;q=0.8")
-        .send()
-        .await
-        .map_err(|e| format!("Request failed: {e}"))?;
-
-    if !resp.status().is_success() {
-        return Err(format!(
-            "HTTP {} for {}",
-            resp.status(),
-            url
-        ));
-    }
-
+    let resp = resp_opt.expect("redirect loop exited without a response");
     let final_url = resp.url().clone();
-    // The final URL may be different after redirects — re-check it. We
-    // also rebuild the pinned client if the host changed, so the body
-    // download honours the same SSRF policy.
-    if final_url.host_str() != url.host_str() {
-        // Redirect to a different host — re-resolve and screen. We don't
-        // re-issue the request here (the response body is already
-        // streaming), but we DO drop it if the redirect target failed the
-        // check. Note that reqwest follows redirects internally using the
-        // same pinned client, so the only way we get here with a host
-        // mismatch is via cross-origin redirects — those bypass our
-        // resolver and need re-validation.
-        let _ = resolve_safe_addrs(&final_url).await?;
-    }
 
     let content_type = resp
         .headers()
@@ -153,7 +179,7 @@ pub async fn fetch(_shared_http: &reqwest::Client, raw_url: &str) -> Result<Fetc
 /// reqwest client's DNS table. Pinning closes the TOCTOU window where a
 /// hostname's DNS record flipped from public to private between our check
 /// and reqwest's pre-connect resolution.
-async fn resolve_safe_addrs(url: &Url) -> Result<Vec<SocketAddr>, String> {
+pub(crate) async fn resolve_safe_addrs(url: &Url) -> Result<Vec<SocketAddr>, String> {
     let host = url
         .host_str()
         .ok_or_else(|| "URL has no host".to_string())?;
@@ -200,17 +226,19 @@ async fn resolve_safe_addrs(url: &Url) -> Result<Vec<SocketAddr>, String> {
 /// to the SocketAddrs we already screened. With this in place, reqwest will
 /// NOT call the system resolver again before dialing — so a DNS-rebinding
 /// attacker can't slip a private address past our check.
-fn build_pinned_client(url: &Url, addrs: &[SocketAddr]) -> Result<reqwest::Client, String> {
+pub(crate) fn build_pinned_client(url: &Url, addrs: &[SocketAddr]) -> Result<reqwest::Client, String> {
     let host = url
         .host_str()
         .ok_or_else(|| "URL has no host".to_string())?;
     let mut builder = reqwest::Client::builder()
         .user_agent("Loach/0.1 (fetch_url)")
-        // Redirect handling: reqwest's default Policy::limited(10) is fine,
-        // and the redirect target's host is re-checked in `fetch()` above
-        // via final_url comparison. We can't easily run our screener inside
-        // the redirect callback because the resolver is per-Client.
-        .redirect(reqwest::redirect::Policy::limited(10));
+        // Disable auto-redirect. Reqwest would otherwise follow redirects
+        // using this same pinned-DNS client, which only has the original
+        // host pinned — so a cross-origin redirect's new host would fall
+        // back to the system resolver, bypassing the SSRF guard. `fetch()`
+        // walks the redirect chain manually and rebuilds a pinned client
+        // per hop.
+        .redirect(reqwest::redirect::Policy::none());
 
     // `resolve()` plumbs a (host, addr) override into the internal resolver.
     // We feed in every screened address so a multi-A-record host can still
