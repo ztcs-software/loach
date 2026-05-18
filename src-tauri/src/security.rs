@@ -13,13 +13,16 @@
 //! the frontend, and never written to SQLite. Verification is performed in
 //! Rust against the argon2 hash.
 
-use std::sync::Mutex;
+// `parking_lot::Mutex` — see the matching note in `db.rs`. Skips the
+// `PoisonError` boilerplate that `std::sync::Mutex` requires on every
+// `.lock()` call and panics on first poison.
+use parking_lot::Mutex;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Result};
 use argon2::{
     password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
-    Argon2,
+    Algorithm, Argon2, Params, Version,
 };
 use keyring::Entry;
 use once_cell::sync::Lazy;
@@ -114,10 +117,27 @@ fn save(cfg: &LockConfig) -> Result<()> {
 /// Hash a secret with argon2id + a fresh random salt. Returns a PHC string
 /// that embeds the algorithm parameters, salt, and digest — so future
 /// verifications work even if we tweak parameters.
+///
+/// Parameters are tuned harder than `Argon2::default()` (m=19 MiB, t=2, p=1)
+/// because the threat model for this lock includes offline brute-force: the
+/// hash blob lives in the OS credential store, which any process running as
+/// the same user can read. For a 4-digit PIN (10 000 possibilities) the
+/// default cost is roughly seconds-of-CPU-time total — these parameters push
+/// that to minutes-to-hours. The interactive verify cost on a modern desktop
+/// stays well under 250 ms, which is comfortably under the threshold where
+/// users notice the unlock dialog taking too long.
+fn argon2_instance() -> Argon2<'static> {
+    // m=64 MiB, t=3, p=1. RFC 9106 §4 "moderate" target for interactive
+    // verification, scaled up for memory cost since memory is cheap on
+    // desktop hardware where this app runs.
+    let params = Params::new(64 * 1024, 3, 1, None)
+        .expect("argon2 params are within the library's accepted range");
+    Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
+}
+
 fn hash(secret: &str) -> Result<String> {
     let salt = SaltString::generate(&mut OsRng);
-    let argon2 = Argon2::default();
-    let phc = argon2
+    let phc = argon2_instance()
         .hash_password(secret.as_bytes(), &salt)
         .map_err(|e| anyhow!("argon2 hash failed: {e}"))?
         .to_string();
@@ -125,8 +145,13 @@ fn hash(secret: &str) -> Result<String> {
 }
 
 fn verify(secret: &str, phc: &str) -> bool {
+    // Verification uses the parameters embedded in the PHC string, so the
+    // `Argon2` instance's own params don't actually matter for the
+    // comparison — but we use `argon2_instance()` for consistency. Older
+    // hashes stored with `Argon2::default()` parameters continue to verify
+    // correctly because PHC carries the cost it was made with.
     if let Ok(parsed) = PasswordHash::new(phc) {
-        Argon2::default()
+        argon2_instance()
             .verify_password(secret.as_bytes(), &parsed)
             .is_ok()
     } else {
@@ -160,7 +185,7 @@ pub fn status() -> Result<LockStatus> {
 /// before any argon2 verification so brute-force callers can't even trigger
 /// a hash during the window.
 fn check_lockout() -> Result<()> {
-    let st = UNLOCK_STATE.lock().unwrap();
+    let st = UNLOCK_STATE.lock();
     if let Some(until) = st.locked_until {
         let now = Instant::now();
         if until > now {
@@ -180,7 +205,7 @@ fn check_lockout() -> Result<()> {
 /// is bumped and, once past the threshold, an exponentially-growing cool-
 /// down window is set.
 fn record_attempt(ok: bool) {
-    let mut st = UNLOCK_STATE.lock().unwrap();
+    let mut st = UNLOCK_STATE.lock();
     if ok {
         st.consecutive_failures = 0;
         st.locked_until = None;
@@ -271,8 +296,12 @@ pub fn setup(
     }
     if needs_pw {
         let pw = password.ok_or_else(|| anyhow!("Password is required for this method"))?;
-        if pw.chars().count() < 6 {
-            return Err(anyhow!("Password must be at least 6 characters"));
+        // 8 char minimum aligns with NIST SP 800-63B's baseline (§5.1.1.2).
+        // Lower than 8 leaves the password vulnerable to offline brute-force
+        // even with strong KDF parameters — the lock's hash blob is exposed
+        // to any process running as the same user.
+        if pw.chars().count() < 8 {
+            return Err(anyhow!("Password must be at least 8 characters"));
         }
     }
 
@@ -318,7 +347,7 @@ pub fn unlock(pin: Option<&str>, password: Option<&str>) -> Result<bool> {
 }
 
 fn reset_unlock_state() {
-    let mut st = UNLOCK_STATE.lock().unwrap();
+    let mut st = UNLOCK_STATE.lock();
     st.consecutive_failures = 0;
     st.locked_until = None;
 }

@@ -22,6 +22,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { useConfirm } from "@/components/ConfirmDialog";
 import { useChatStore } from "@/stores/chatStore";
 import { useModelsStore } from "@/stores/modelsStore";
 import type { AdminProgress } from "@/stores/modelsStore";
@@ -41,6 +42,7 @@ import type { ModelInfo, ProviderId } from "@/types";
  * being edited (which would route to ModelsView instead).
  */
 export function ModelsLibrary() {
+  const { confirm, prompt } = useConfirm();
   const models = useModelsStore((s) => s.models);
   const loading = useModelsStore((s) => s.loading);
   const error = useModelsStore((s) => s.error);
@@ -228,23 +230,25 @@ export function ModelsLibrary() {
                   model={m}
                   onCustomize={() => setViewingModel(m.id)}
                   onNewChat={() => newChatWithModel(m)}
-                  onDuplicate={() => {
-                    const dest = prompt(
-                      `Duplicate "${m.id}" as…`,
-                      `${m.id.split(":")[0]}-copy`,
-                    );
+                  onDuplicate={async () => {
+                    const dest = await prompt({
+                      title: `Duplicate “${m.id}”`,
+                      body: "Pick a name for the duplicated model. The new tag is created with the same weights.",
+                      defaultValue: `${m.id.split(":")[0]}-copy`,
+                      confirmLabel: "Duplicate",
+                    });
                     if (dest && dest.trim()) {
                       void copyModel(m.id, dest.trim());
                     }
                   }}
-                  onDelete={() => {
-                    if (
-                      confirm(
-                        `Delete model "${m.id}"? This removes the model files from disk and cannot be undone.`,
-                      )
-                    ) {
-                      void deleteModel(m.id);
-                    }
+                  onDelete={async () => {
+                    const ok = await confirm({
+                      title: `Delete “${m.id}”?`,
+                      body: "This removes the model files from disk and cannot be undone.",
+                      confirmLabel: "Delete model",
+                      destructive: true,
+                    });
+                    if (ok) void deleteModel(m.id);
                   }}
                 />
               ))}

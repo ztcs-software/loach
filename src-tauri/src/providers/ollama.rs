@@ -196,6 +196,15 @@ async fn drive_progress_stream(
         select! {
             biased;
             _ = cancel.notified() => {
+                // Explicitly drop the response stream BEFORE returning so
+                // reqwest closes the underlying TCP connection right away.
+                // If we just `return Ok(())`, the stream is still dropped
+                // by stack unwind, but doing it here makes the intent
+                // obvious and guarantees the connection close happens
+                // before any further work on the calling task — which
+                // gives the server-side pull the earliest possible chance
+                // to notice the client gave up and abort the download.
+                drop(byte_stream);
                 let _ = app.emit(&channel, AdminEvent::Done);
                 registry.finish(&stream_id);
                 return Ok(());
@@ -582,6 +591,13 @@ pub async fn chat_stream(
         select! {
             biased;
             _ = cancel.notified() => {
+                // Drop the byte stream before returning so reqwest closes
+                // the TCP connection right away — same rationale as in
+                // `drive_progress_stream`. Without this the connection
+                // close waits for the calling task to unwind, which can
+                // leave the server processing the request for noticeably
+                // longer than needed.
+                drop(byte_stream);
                 let _ = app.emit(&channel, StreamEvent::Done);
                 registry.finish(&req.stream_id);
                 return Ok(());

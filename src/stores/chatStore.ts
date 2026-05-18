@@ -678,7 +678,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
       set((st) => ({ messages: { ...st.messages, ...messageMap } }));
 
-      // Delete all empty sessions except the first (most recent)
+      // Delete all empty sessions except the first (most recent).
+      // `emptySessions` preserves the iteration order of `loaded`, which
+      // preserves the order of `sessions`, which is what `list_sessions`
+      // returned. The Rust query is
+      //   SELECT … FROM sessions ORDER BY updated_at DESC
+      // (see `db::list_sessions`) so `emptySessions[0]` is the most-
+      // recently-touched empty chat. If that ORDER BY ever changes,
+      // revisit this loop — the "keep most recent" invariant breaks
+      // silently otherwise.
       for (let i = 1; i < emptySessions.length; i++) {
         await deleteSession(emptySessions[i].id);
       }

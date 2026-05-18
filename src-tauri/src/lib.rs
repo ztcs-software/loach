@@ -14,9 +14,34 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Manager,
 };
+use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 
 use crate::db::Database;
 use crate::stream::StreamRegistry;
+
+/// Show a blocking native error dialog and exit. Used during `setup` for
+/// failures we can't reasonably recover from (data dir unresolvable, DB
+/// corrupt, etc.) — much friendlier than the prior `panic!` which left
+/// the user staring at a closed app and no explanation. Falls back to
+/// stderr if the dialog itself can't be shown.
+fn fatal_setup_error(app: &tauri::AppHandle, what: &str, err: impl std::fmt::Display) -> ! {
+    let body = format!(
+        "Loach can't start because {what}.\n\nDetails: {err}\n\n\
+         If this keeps happening, please file an issue with the details above."
+    );
+    eprintln!("[fatal] {what}: {err}");
+    // `blocking_show` returns once the user clicks "OK". On platforms where
+    // the dialog can't be shown (very headless CI, broken display) this
+    // returns immediately — we still exit afterwards so the app doesn't
+    // limp on with broken state.
+    let _ = app
+        .dialog()
+        .message(&body)
+        .title("Loach failed to start")
+        .kind(MessageDialogKind::Error)
+        .blocking_show();
+    std::process::exit(1);
+}
 
 pub struct AppState {
     pub db: Arc<Database>,
@@ -36,26 +61,64 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
-            // Resolve app data dir and open the database there.
-            let data_dir = app
-                .path()
-                .app_data_dir()
-                .expect("failed to resolve app data dir");
-            std::fs::create_dir_all(&data_dir).ok();
+            // Replace the prior `.expect(...)` chain with explicit user-
+            // facing error dialogs. The old behaviour silent-crashed the
+            // app whenever the data dir was unresolvable, the DB file was
+            // corrupt, or a migration tripped over a half-written schema —
+            // the user just saw the window never appear.
+            let handle = app.handle();
+
+            let data_dir = match app.path().app_data_dir() {
+                Ok(d) => d,
+                Err(e) => fatal_setup_error(
+                    handle,
+                    "the app data directory couldn't be resolved",
+                    e,
+                ),
+            };
+            if let Err(e) = std::fs::create_dir_all(&data_dir) {
+                fatal_setup_error(
+                    handle,
+                    &format!(
+                        "the app data directory ({}) couldn't be created",
+                        data_dir.display()
+                    ),
+                    e,
+                );
+            }
+
             let db_path = data_dir.join("loach.db");
-            let db = Database::open(&db_path).expect("failed to open SQLite database");
-            db.migrate().expect("failed to run migrations");
+            let db = match Database::open(&db_path) {
+                Ok(d) => d,
+                Err(e) => fatal_setup_error(
+                    handle,
+                    &format!("the database at {} couldn't be opened", db_path.display()),
+                    e,
+                ),
+            };
+            if let Err(e) = db.migrate() {
+                fatal_setup_error(
+                    handle,
+                    "the database schema migration failed",
+                    e,
+                );
+            }
+
+            let http = match reqwest::Client::builder().user_agent("Loach/0.1").build() {
+                Ok(c) => c,
+                Err(e) => fatal_setup_error(
+                    handle,
+                    "the HTTP client couldn't be initialised (TLS or root certs may be missing)",
+                    e,
+                ),
+            };
 
             let state = AppState {
                 db: Arc::new(db),
-                http: reqwest::Client::builder()
-                    .user_agent("Loach/0.1")
-                    .build()
-                    .expect("reqwest client"),
+                http,
                 streams: StreamRegistry::new(),
             };
             app.manage(state);

@@ -41,6 +41,7 @@ import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { ChatInput } from "@/components/ChatInput";
+import { useConfirm } from "@/components/ConfirmDialog";
 import { useChatStore } from "@/stores/chatStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useSpaceStore } from "@/stores/spaceStore";
@@ -63,6 +64,7 @@ import {
 type TabId = "chats" | "instructions" | "files" | "memory" | "models";
 
 export function SpaceView() {
+  const { confirm } = useConfirm();
   const viewingSpaceId = useSpaceStore((s) => s.viewingSpaceId);
   const spaces = useSpaceStore((s) => s.spaces);
   const setViewingSpace = useSpaceStore((s) => s.setViewingSpace);
@@ -136,12 +138,14 @@ export function SpaceView() {
     });
   };
 
-  const handleDeleteSpace = () => {
-    if (
-      confirm(
-        `Delete space "${space.name}"? Files and instructions will be removed; chats inside this space stay but lose their space association.`,
-      )
-    ) {
+  const handleDeleteSpace = async () => {
+    const ok = await confirm({
+      title: `Delete space “${space.name}”?`,
+      body: "Files and instructions in this space will be removed. Chats inside the space stay, but they lose their space association.",
+      confirmLabel: "Delete space",
+      destructive: true,
+    });
+    if (ok) {
       void doDeleteSpace(space.id).then(() => {
         setSidebarTab("spaces");
       });
@@ -506,6 +510,7 @@ function ChatsTab({
   onArchive,
   onDelete,
 }: ChatsTabProps) {
+  const { confirm } = useConfirm();
   // Inline rename — single id at a time so blurring one row to start
   // editing another doesn't leave a stale draft anywhere.
   const [renamingId, setRenamingId] = useState<string | null>(null);
@@ -559,14 +564,14 @@ function ChatsTab({
                 onOpen={() => onOpen(s.id)}
                 onPin={() => onPin(s.id, !s.pinned_at)}
                 onArchive={() => onArchive(s.id)}
-                onDelete={() => {
-                  if (
-                    confirm(
-                      `Delete this chat (${s.title || "Untitled"})? This cannot be undone — all messages and metrics will be removed.`,
-                    )
-                  ) {
-                    onDelete(s.id);
-                  }
+                onDelete={async () => {
+                  const ok = await confirm({
+                    title: "Delete this chat?",
+                    body: `“${s.title || "Untitled"}” will be removed permanently — all messages and metrics will be gone.`,
+                    confirmLabel: "Delete chat",
+                    destructive: true,
+                  });
+                  if (ok) onDelete(s.id);
                 }}
               />
             ))}

@@ -17,7 +17,14 @@
     "core:app:allow-version",
     "core:event:default",
     "core:path:default",
-    "shell:allow-open",
+    {
+      "identifier": "shell:allow-open",
+      "allow": [
+        { "url": "https://*" },
+        { "url": "http://*" },
+        { "url": "mailto:*" }
+      ]
+    },
     "updater:default",
     "process:default",
     "process:allow-restart"

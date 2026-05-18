@@ -35,6 +35,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { useConfirm } from "@/components/ConfirmDialog";
 import { useChatStore } from "@/stores/chatStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useSpaceStore } from "@/stores/spaceStore";
@@ -51,6 +52,7 @@ import { parseImportContext, type ParsedImport } from "@/lib/importContext";
 import type { ModelInfo, ProviderId, Session } from "@/types";
 
 export function ChatHeader({ session }: { session: Session | undefined }) {
+  const { confirm } = useConfirm();
   const setSessionModel = useChatStore((s) => s.setSessionModel);
   const importMessages = useChatStore((s) => s.importMessages);
   // Single-chat actions piped through chatStore. We deliberately don't keep
@@ -172,15 +174,15 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
     void archiveSession(session.id, session.archived_at == null);
   };
 
-  const handleDelete = () => {
+  const handleDelete = async () => {
     if (!session) return;
-    if (
-      confirm(
-        `Delete this chat (${session.title || "Untitled"})? This cannot be undone — all messages and metrics will be removed.`,
-      )
-    ) {
-      void removeSession(session.id);
-    }
+    const ok = await confirm({
+      title: "Delete this chat?",
+      body: `“${session.title || "Untitled"}” will be removed permanently — all messages and metrics will be gone.`,
+      confirmLabel: "Delete chat",
+      destructive: true,
+    });
+    if (ok) void removeSession(session.id);
   };
 
   const openExport = async () => {

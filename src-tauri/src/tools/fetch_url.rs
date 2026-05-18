@@ -372,22 +372,44 @@ fn html_to_text(html: &str) -> (Option<String>, String) {
         })
         .filter(|s| !s.is_empty());
 
-    let mut s = strip_block_ci(html, "<script", "</script>");
-    s = strip_block_ci(&s, "<style", "</style>");
-    s = strip_block_ci(&s, "<noscript", "</noscript>");
+    // Compute the ASCII-lowercased view of the body exactly ONCE and pass
+    // it through the rest of the pipeline. The previous version called
+    // `strip_block_ci` + `replace_ci` 18 times in sequence, each of
+    // which built a fresh full lowercase copy of its input — for a 5 MB
+    // body that's ~90 MB of throwaway allocation per fetch. `to_ascii_-
+    // lowercase` preserves byte length so we can safely index into either
+    // view interchangeably.
+    let lower = html.to_ascii_lowercase();
+    debug_assert_eq!(lower.len(), html.len());
 
-    // Insert newlines where block-level tags close so paragraphs don't merge.
-    for tag in [
-        "</p>", "</div>", "</li>", "</tr>", "</h1>", "</h2>", "</h3>", "</h4>", "</h5>",
-        "</h6>", "<br>", "<br/>", "<br />", "</pre>", "</blockquote>",
-    ] {
-        s = replace_ci(&s, tag, "\n");
-    }
+    let stripped = strip_blocks_with_lower(
+        html,
+        &lower,
+        &[
+            ("<script", "</script>"),
+            ("<style", "</style>"),
+            ("<noscript", "</noscript>"),
+        ],
+    );
+
+    // Insert newlines where block-level tags close so paragraphs don't
+    // merge. One pass over `stripped`, scanning for any of the closing
+    // tags as we go — beats the original 15-pass `replace_ci` loop both
+    // in allocations and in pure scan time.
+    let s = replace_many_ci(
+        &stripped,
+        &[
+            "</p>", "</div>", "</li>", "</tr>", "</h1>", "</h2>", "</h3>",
+            "</h4>", "</h5>", "</h6>", "<br>", "<br/>", "<br />", "</pre>",
+            "</blockquote>",
+        ],
+        "\n",
+    );
 
     // Strip all remaining tags.
-    s = strip_all_tags(&s);
-    s = decode_entities(&s);
-    s = collapse_whitespace(&s);
+    let s = strip_all_tags(&s);
+    let s = decode_entities(&s);
+    let s = collapse_whitespace(&s);
 
     (title, s)
 }
@@ -397,20 +419,44 @@ fn html_to_text(html: &str) -> (Option<String>, String) {
 // pulling in a regex crate — the alternative is a ~10 MB dep for a half-page
 // of logic.
 
-fn strip_block_ci(hay: &str, open: &str, close: &str) -> String {
+/// Strip every (open, close) range from `hay`, using a pre-computed
+/// `lower` (must equal `hay.to_ascii_lowercase()`) so we don't re-allocate
+/// the lowercase view per call. All ranges are stripped in a single pass
+/// — much cheaper than chaining `strip_block_ci` three times for
+/// `<script>`/`<style>`/`<noscript>`.
+fn strip_blocks_with_lower(
+    hay: &str,
+    lower: &str,
+    blocks: &[(&str, &str)],
+) -> String {
+    // Pre-lowercase the needles once; the haystack lowercase view is
+    // borrowed from the caller.
+    let blocks_l: Vec<(String, String, usize)> = blocks
+        .iter()
+        .map(|(o, c)| (o.to_ascii_lowercase(), c.to_ascii_lowercase(), c.len()))
+        .collect();
+
     let mut out = String::with_capacity(hay.len());
-    let lower = hay.to_ascii_lowercase();
-    let open_l = open.to_ascii_lowercase();
-    let close_l = close.to_ascii_lowercase();
     let mut i = 0usize;
     while i < hay.len() {
-        match lower[i..].find(&open_l) {
-            Some(rel_open) => {
-                let open_at = i + rel_open;
+        // Find the earliest opener (across all blocks) starting at or
+        // after `i`. We pick the closest one so blocks in source order
+        // are stripped in source order.
+        let next_open = blocks_l
+            .iter()
+            .filter_map(|(open_l, close_l, close_byte_len)| {
+                lower[i..].find(open_l.as_str()).map(|rel| {
+                    (i + rel, close_l.as_str(), *close_byte_len)
+                })
+            })
+            .min_by_key(|&(pos, _, _)| pos);
+
+        match next_open {
+            Some((open_at, close_l, close_byte_len)) => {
                 out.push_str(&hay[i..open_at]);
-                match lower[open_at..].find(&close_l) {
+                match lower[open_at..].find(close_l) {
                     Some(rel_close) => {
-                        let close_at = open_at + rel_close + close.len();
+                        let close_at = open_at + rel_close + close_byte_len;
                         i = close_at;
                     }
                     None => {
@@ -428,18 +474,31 @@ fn strip_block_ci(hay: &str, open: &str, close: &str) -> String {
     out
 }
 
-fn replace_ci(hay: &str, needle: &str, repl: &str) -> String {
+/// Replace any occurrence of any needle in `needles` with `repl`. Single
+/// pass over `hay` — beats chaining `replace_ci(hay, needle, repl)` for
+/// each needle, which lowercase-copies `hay` once per call.
+fn replace_many_ci(hay: &str, needles: &[&str], repl: &str) -> String {
     let lower = hay.to_ascii_lowercase();
-    let needle_l = needle.to_ascii_lowercase();
+    let needles_l: Vec<(String, usize)> = needles
+        .iter()
+        .map(|n| (n.to_ascii_lowercase(), n.len()))
+        .collect();
     let mut out = String::with_capacity(hay.len());
-    let mut i = 0;
+    let mut i = 0usize;
     while i < hay.len() {
-        match lower[i..].find(&needle_l) {
-            Some(rel) => {
-                let at = i + rel;
+        // Find the earliest needle hit starting at or after `i`.
+        let next_hit = needles_l
+            .iter()
+            .filter_map(|(needle_l, len)| {
+                lower[i..].find(needle_l.as_str()).map(|rel| (i + rel, *len))
+            })
+            .min_by_key(|&(pos, _)| pos);
+
+        match next_hit {
+            Some((at, len)) => {
                 out.push_str(&hay[i..at]);
                 out.push_str(repl);
-                i = at + needle.len();
+                i = at + len;
             }
             None => {
                 out.push_str(&hay[i..]);

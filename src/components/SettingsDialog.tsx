@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   Archive,
@@ -51,6 +51,7 @@ import { useModelsStore } from "@/stores/modelsStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useUIStore } from "@/stores/uiStore";
+import { useConfirm } from "@/components/ConfirmDialog";
 import { McpPanel } from "@/components/McpPanel";
 import { SecurityPanel } from "@/components/SecurityPanel";
 import { UpdatesPanel } from "@/components/UpdatesPanel";
@@ -1316,6 +1317,7 @@ function ArchivedRow({
 type BusyKind = "export" | "import" | "archive-all" | null;
 
 function DataPanel({ onCloseDialog: _onCloseDialog }: { onCloseDialog: () => void }) {
+  const { confirm } = useConfirm();
   const [busy, setBusy] = useState<BusyKind>(null);
   const [message, setMessage] = useState<{
     tone: "info" | "error";
@@ -1328,12 +1330,44 @@ function DataPanel({ onCloseDialog: _onCloseDialog }: { onCloseDialog: () => voi
   // doesn't gate the action.
   const lockStatus = useSecurityStore((s) => s.status);
 
+  // Track every timeout this panel arms so we can clear them all when the
+  // dialog closes (which unmounts this component). Without this, a 900 ms
+  // reload-timer survives the unmount and fires later, potentially while
+  // the user has moved on to other work. The destructive flows below
+  // schedule both a "flash a toast then reload" and the toast's own
+  // auto-clear; clearing all of them on unmount keeps closure references
+  // from outliving the dialog.
+  const pendingTimers = useRef<Set<number>>(new Set());
+  const scheduleTimer = (cb: () => void, ms: number) => {
+    const id = window.setTimeout(() => {
+      pendingTimers.current.delete(id);
+      cb();
+    }, ms);
+    pendingTimers.current.add(id);
+    return id;
+  };
+  useEffect(
+    () => () => {
+      // On unmount: cancel everything we armed. We deliberately do NOT
+      // cancel the destructive-action reload during normal close — the
+      // reload is the right behaviour after a wipe — but cancelling it
+      // here means a user who somehow tears down the dialog in the
+      // 900 ms window (e.g. via process signal or hot reload) isn't
+      // hit by a stale page reload.
+      for (const id of pendingTimers.current) {
+        window.clearTimeout(id);
+      }
+      pendingTimers.current.clear();
+    },
+    [],
+  );
+
   // A tiny toast-lite: the feedback message auto-clears after 5s so long-
   // running exports don't leave stale success chips behind when the user
   // pokes Export a second time.
   const flash = (tone: "info" | "error", text: string) => {
     setMessage({ tone, text });
-    window.setTimeout(() => {
+    scheduleTimer(() => {
       setMessage((m) => (m && m.text === text ? null : m));
     }, 5000);
   };
@@ -1386,7 +1420,7 @@ function DataPanel({ onCloseDialog: _onCloseDialog }: { onCloseDialog: () => voi
         return;
       }
       flash("info", formatImportSummary(stats));
-      window.setTimeout(() => {
+      scheduleTimer(() => {
         window.location.reload();
       }, 900);
     } catch (e) {
@@ -1407,10 +1441,11 @@ function DataPanel({ onCloseDialog: _onCloseDialog }: { onCloseDialog: () => voi
       flash("info", "No live chats to archive.");
       return;
     }
-    const confirmed = window.confirm(
-      `Move all ${live} live chat${live === 1 ? "" : "s"} to the archive? ` +
-        "You can unarchive any of them later from Settings → Archive.",
-    );
+    const confirmed = await confirm({
+      title: `Archive ${live} live chat${live === 1 ? "" : "s"}?`,
+      body: "You can unarchive any of them later from Settings → Archive.",
+      confirmLabel: "Archive all",
+    });
     if (!confirmed) return;
 
     setBusy("archive-all");
@@ -1560,7 +1595,9 @@ function DataPanel({ onCloseDialog: _onCloseDialog }: { onCloseDialog: () => voi
           flash("info", text);
           // Full reload so every zustand store re-hydrates from the now-
           // empty DB. Small delay so the success state is visible first.
-          window.setTimeout(() => {
+          // Scheduled via `scheduleTimer` so it's cancellable if the
+          // dialog tears down before the 900 ms window elapses.
+          scheduleTimer(() => {
             window.location.reload();
           }, 900);
         }}

@@ -128,11 +128,15 @@ export const useSpaceStore = create<SpaceState>((set, get) => ({
         fields.default_params_json !== undefined
           ? fields.default_params_json
           : current?.default_params_json ?? null,
-      // memory_enabled is a tri-state on the wire (`undefined` = leave the
-      // existing value alone). Forward `undefined` so the Rust update_space
-      // command's `Option<bool>` correctly skips the column.
+      // memory_enabled is a tri-state at the *call* layer (`undefined` =
+      // "don't touch the existing value"). On the wire, Rust's
+      // `Option<bool>` collapses `null` and missing key both to `None`,
+      // so passing `undefined` and `null` are functionally equivalent
+      // for skipping the column. We pass `undefined` to make the intent
+      // explicit and to avoid the earlier "passes null but the comment
+      // says undefined" mismatch that existed here.
       memory_enabled:
-        fields.memory_enabled !== undefined ? fields.memory_enabled : null,
+        fields.memory_enabled !== undefined ? fields.memory_enabled : undefined,
     };
     await updateSpace({ id, ...next });
     set((s) => ({
@@ -146,6 +150,11 @@ export const useSpaceStore = create<SpaceState>((set, get) => ({
               default_provider: (next.default_provider as Space["default_provider"]) ?? null,
               default_model: next.default_model,
               default_params_json: next.default_params_json,
+              // Mirror only when the caller actually supplied a value.
+              // `fields.memory_enabled?: boolean | null`, so we have to
+              // treat both `null` and `undefined` as "no change" to keep
+              // the Space.memory_enabled invariant of `boolean` (never
+              // null in the local mirror).
               memory_enabled:
                 next.memory_enabled !== null && next.memory_enabled !== undefined
                   ? next.memory_enabled

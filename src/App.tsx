@@ -20,6 +20,7 @@ import { CodeCanvas } from "@/components/CodeCanvas";
 import { SearchBar } from "@/components/SearchBar";
 import { SelectionCopyButton } from "@/components/SelectionCopyButton";
 import { ToastHost } from "@/components/ToastHost";
+import { ConfirmDialogHost } from "@/components/ConfirmDialog";
 import { Button } from "@/components/ui/button";
 import { SquarePen } from "lucide-react";
 import { resolveDefaultModelChoice, useChatStore } from "@/stores/chatStore";
@@ -131,6 +132,11 @@ export default function App() {
 
   return (
     <TooltipProvider delayDuration={250}>
+      {/* ConfirmDialogHost wraps everything below so any descendant can
+          call `useConfirm()` to surface a styled confirm/prompt dialog.
+          Replaces the native `window.confirm()` / `window.prompt()`
+          modals, which look like browser chrome inside our Tauri shell. */}
+      <ConfirmDialogHost>
       {/* Background layer — gradient mesh or solid, per settings */}
       <div
         className={cn(
@@ -211,6 +217,7 @@ export default function App() {
           surface (including the lock screen path, in the future) land in a
           predictable spot. Renders nothing when no toasts are queued. */}
       <ToastHost />
+      </ConfirmDialogHost>
     </TooltipProvider>
   );
 }

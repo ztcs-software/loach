@@ -1200,9 +1200,18 @@ pub async fn save_text_to_file(
     let path = chosen
         .into_path()
         .map_err(|e| format!("invalid path returned from dialog: {e}"))?;
-    std::fs::write(&path, content)
-        .map_err(|e| format!("couldn't write {}: {e}", path.display()))?;
-    Ok(Some(path.to_string_lossy().to_string()))
+
+    // The actual write needs to be on the blocking pool too. The previous
+    // version only put the dialog in `spawn_blocking`, then called
+    // `std::fs::write` back on the async runtime — a multi-MB export
+    // would park the runtime worker on synchronous I/O.
+    let returned_path = path.clone();
+    tokio::task::spawn_blocking(move || std::fs::write(&path, content))
+        .await
+        .map_err(|e| format!("save task panicked: {e}"))?
+        .map_err(|e| format!("couldn't write {}: {e}", returned_path.display()))?;
+
+    Ok(Some(returned_path.to_string_lossy().to_string()))
 }
 
 /// Serialise every table to a JSON string. Pretty-printed so users can

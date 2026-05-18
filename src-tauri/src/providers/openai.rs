@@ -196,11 +196,26 @@ pub async fn chat_stream(
     let mut token_count: u32 = 0;
     let mut byte_stream = resp.bytes_stream();
     let mut buf: Vec<u8> = Vec::new();
+    // Byte offset into `buf` from which the next frame-separator search
+    // should start. Without this we rescan the entire buffer on every
+    // chunk arrival — O(n²) across a stream where a single ~1 MiB frame
+    // arrives as many small chunks. Reset to 0 after every drain (the
+    // bytes shift down); after a no-hit scan, advance past everything
+    // we already checked, minus 3 bytes of overlap so a `\r\n\r\n`
+    // straddling the chunk boundary is still caught.
+    let mut scan_offset: usize = 0;
 
     loop {
         select! {
             biased;
             _ = cancel.notified() => {
+                // Drop the byte stream first so reqwest closes the TCP
+                // connection right away. With OpenAI-compatible endpoints
+                // this is a cheap signal to the server that we no longer
+                // want tokens — important because billing-by-token meters
+                // keep ticking until the server-side generator stops, and
+                // we don't want to pay for output we're about to discard.
+                drop(byte_stream);
                 let _ = app.emit(&channel, StreamEvent::Done);
                 registry.finish(&req.stream_id);
                 return Ok(());
@@ -236,9 +251,17 @@ pub async fn chat_stream(
                         let mut finished = false;
                         // SSE frames are separated by a blank line: `\n\n`
                         // for compliant servers, `\r\n\r\n` for proxies that
-                        // re-frame on CRLF. We accept both.
-                        while let Some((pos, sep_len)) = find_frame_end_with_len(&buf) {
+                        // re-frame on CRLF. We accept both. We scan from
+                        // `scan_offset` rather than 0 so previously-checked
+                        // bytes aren't re-walked on each chunk arrival.
+                        while let Some((rel_pos, sep_len)) =
+                            find_frame_end_with_len(&buf[scan_offset..])
+                        {
+                            let pos = scan_offset + rel_pos;
                             let frame: Vec<u8> = buf.drain(..pos + sep_len).collect();
+                            // Draining shifts everything down — reset the
+                            // scan cursor to the new start of the buffer.
+                            scan_offset = 0;
                             // Strip the trailing separator
                             let text = String::from_utf8_lossy(
                                 &frame[..frame.len() - sep_len],
@@ -275,6 +298,12 @@ pub async fn chat_stream(
                             }
                             if finished { break; }
                         }
+                        // Bump scan_offset past the bytes we just walked
+                        // without finding a separator. Leave a 3-byte
+                        // overlap so a `\r\n\r\n` straddling the next
+                        // chunk's arrival still gets caught (longest
+                        // separator is 4 bytes, so 3 of overlap suffices).
+                        scan_offset = buf.len().saturating_sub(3);
                         if !pending_think.is_empty() {
                             let _ = app.emit(
                                 &channel,

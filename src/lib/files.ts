@@ -55,17 +55,35 @@ function extOf(name: string): string {
   return i >= 0 ? name.slice(i + 1).toLowerCase() : "";
 }
 
-function arrayBufferToBase64(buf: ArrayBuffer): string {
-  const bytes = new Uint8Array(buf);
-  let binary = "";
-  const chunk = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunk) {
-    binary += String.fromCharCode.apply(
-      null,
-      bytes.subarray(i, i + chunk) as unknown as number[],
-    );
-  }
-  return btoa(binary);
+/**
+ * Read a Blob's contents as a base64 string. Uses `FileReader.readAsData-
+ * URL` because it runs the base64 encoding off the main thread (the
+ * browser worker handles it), unlike the previous `String.fromCharCode.-
+ * apply` chunking which encodes on the UI thread and made dragging a 20
+ * MB attachment freeze the renderer for hundreds of milliseconds. The
+ * returned string is the body of `data:<mime>;base64,<body>` — we strip
+ * the prefix because callers want just the base64 payload.
+ */
+function blobToBase64(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () =>
+      reject(reader.error ?? new Error("FileReader failed"));
+    reader.onload = () => {
+      const result = reader.result;
+      if (typeof result !== "string") {
+        reject(new Error("FileReader returned non-string result"));
+        return;
+      }
+      // `result` is `data:<mime>;base64,<body>`. Strip everything up to
+      // and including the first comma. If the prefix is missing for any
+      // reason (shouldn't happen with `readAsDataURL`) we fall back to
+      // returning the whole string so callers at least get something.
+      const comma = result.indexOf(",");
+      resolve(comma >= 0 ? result.slice(comma + 1) : result);
+    };
+    reader.readAsDataURL(blob);
+  });
 }
 
 /** Lazy-loaded to keep the initial bundle small. */
@@ -106,19 +124,28 @@ async function extractPdfText(buf: ArrayBuffer): Promise<ExtractionResult> {
   for (let i = 1; i <= totalPages; i++) {
     if (charsAccum >= MAX_EXTRACTED_CHARS) break;
     const page = await doc.getPage(i);
-    const textContent = await page.getTextContent();
-    // Each item either exposes a `str` (TextItem) or is a marker (TextMarkedContent).
-    const pageText = textContent.items
-      .map((it) => ("str" in it ? it.str : ""))
-      .join(" ")
-      .replace(/\s+\n/g, "\n")
-      .replace(/[ \t]{2,}/g, " ")
-      .trim();
-    if (pageText) {
-      pages.push(`# Page ${i}\n${pageText}`);
-      charsAccum += pageText.length + 16; // +overhead for the "# Page N\n" header
+    try {
+      const textContent = await page.getTextContent();
+      // Each item either exposes a `str` (TextItem) or is a marker (TextMarkedContent).
+      const pageText = textContent.items
+        .map((it) => ("str" in it ? it.str : ""))
+        .join(" ")
+        .replace(/\s+\n/g, "\n")
+        .replace(/[ \t]{2,}/g, " ")
+        .trim();
+      if (pageText) {
+        pages.push(`# Page ${i}\n${pageText}`);
+        charsAccum += pageText.length + 16; // +overhead for the "# Page N\n" header
+      }
+      pagesExtracted = i;
+    } finally {
+      // Release the per-page render cache before moving on. Without this
+      // `doc.cleanup()` at the end is the only opportunity to free per-
+      // page state, so a 1 000-page PDF can spike memory linearly until
+      // the loop finishes. `page.cleanup()` doesn't invalidate the
+      // already-extracted text since we copied it into `pageText` above.
+      page.cleanup();
     }
-    pagesExtracted = i;
   }
   await doc.cleanup();
   await doc.destroy();
@@ -163,12 +190,11 @@ export async function fileToAttachment(file: File): Promise<Attachment> {
 
   // Images
   if (IMAGE_MIMES.has(mime) || ["png", "jpg", "jpeg", "webp", "gif"].includes(ext)) {
-    const buf = await file.arrayBuffer();
     return {
       kind: "image",
       name: file.name,
       mime: mime || `image/${ext === "jpg" ? "jpeg" : ext}`,
-      data: arrayBufferToBase64(buf),
+      data: await blobToBase64(file),
     };
   }
 
@@ -222,12 +248,11 @@ export async function fileToAttachment(file: File): Promise<Attachment> {
   // Everything else (legacy .doc, binary blobs, archives, etc.) — store as
   // base64 so the file is preserved and visible in the transcript, but flag
   // it so we can mention it to the model as "attached but unreadable".
-  const buf = await file.arrayBuffer();
   return {
     kind: "file",
     name: file.name,
     mime: mime || "application/octet-stream",
-    data: arrayBufferToBase64(buf),
+    data: await blobToBase64(file),
   };
 }
 
