@@ -624,8 +624,6 @@ export function SettingsDialog() {
                     variant="outline"
                     onClick={() => void openExternal(DOCS_URL)}
                     className="gap-2"
-                    disabled={DOCS_URL === "#"}
-                    title={DOCS_URL === "#" ? "Coming soon" : undefined}
                   >
                     <BookOpen className="h-4 w-4" />
                     Docs
