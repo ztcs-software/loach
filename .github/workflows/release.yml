@@ -122,9 +122,10 @@ jobs:
       # opaque failure that costs hours to diagnose. Bump this manually
       # when intentionally adopting a new toolchain.
       #
-      # 1.85.0 is the minimum that stabilizes `edition2024`, which transitive
-      # deps (toml 0.9 / serde_spanned 1.1) now require.
-      - uses: dtolnay/rust-toolchain@1.85.0
+      # 1.88.0 is the floor imposed by current transitive deps: `toml 0.9` /
+      # `serde_spanned 1.1` need edition2024 (1.85+), `icu_*` need 1.86+,
+      # and `darling`, `image`, `serde_with`, `time` need 1.88+.
+      - uses: dtolnay/rust-toolchain@1.88.0
 
       - uses: Swatinem/rust-cache@v2
         with:
