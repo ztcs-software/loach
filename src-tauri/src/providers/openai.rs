@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
 use futures_util::StreamExt;
@@ -18,6 +18,12 @@ use crate::stream::{event_channel, StreamEvent, StreamRegistry};
 /// frame separator (broken proxy, HTML error page mid-stream, etc.).
 const MAX_FRAME_BYTES: usize = 1024 * 1024;
 
+/// Wall-clock ceiling for `list_models`. The shared `reqwest::Client` has
+/// no default timeout (the chat-stream path needs unbounded time for long
+/// generations), so admin calls supply their own. 30 s is well above any
+/// healthy /models response.
+const ADMIN_TIMEOUT: Duration = Duration::from_secs(30);
+
 #[derive(Debug, Deserialize)]
 struct ModelsResponse {
     data: Vec<OpenAIModel>,
@@ -30,7 +36,7 @@ struct OpenAIModel {
 
 pub async fn list_models(http: &Client, base_url: &str) -> Result<Vec<ModelInfo>> {
     let url = format!("{}/models", base_url.trim_end_matches('/'));
-    let mut req = http.get(url);
+    let mut req = http.get(url).timeout(ADMIN_TIMEOUT);
     if let Some(key) = secrets::get_openai_key()? {
         if !key.is_empty() {
             req = req.bearer_auth(key);

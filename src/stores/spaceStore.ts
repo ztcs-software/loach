@@ -241,7 +241,7 @@ export const useSpaceStore = create<SpaceState>((set, get) => ({
 
   updateMemory: async (id, spaceId, content) => {
     const trimmed = content.trim();
-    await updateSpaceMemory({ id, content: trimmed });
+    await updateSpaceMemory({ id, space_id: spaceId, content: trimmed });
     const now = Date.now();
     set((s) => ({
       spaceMemories: {
@@ -254,7 +254,7 @@ export const useSpaceStore = create<SpaceState>((set, get) => ({
   },
 
   removeMemory: async (id, spaceId) => {
-    await removeSpaceMemory(id);
+    await removeSpaceMemory({ id, space_id: spaceId });
     set((s) => ({
       spaceMemories: {
         ...s.spaceMemories,

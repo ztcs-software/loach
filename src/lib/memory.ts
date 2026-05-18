@@ -162,14 +162,28 @@ async function runOneShotStream(args: {
   return new Promise<string>((resolve, reject) => {
     let buffer = "";
     let unlistenFn: (() => void) | null = null;
-    // Hard ceiling on extractor wall-clock. If a model goes off the rails
-    // and never emits `done`, we'd otherwise leak a listener.
-    const timeoutId = window.setTimeout(() => {
+    // `timedOut` covers the race where `startChatStream`'s setup takes
+    // longer than the wall-clock budget: the timer fires first, but
+    // `unlistenFn` is still null because the `.then` hasn't run. Without
+    // this flag we'd silently leak the listener once the .then finally
+    // installs it. We also use it to short-circuit the .then so we don't
+    // hand a now-useless handle back into the world.
+    let timedOut = false;
+
+    const cleanup = () => {
       try {
         unlistenFn?.();
       } catch {
-        /* ignore */
+        /* already unlistened — harmless */
       }
+      unlistenFn = null;
+    };
+
+    // Hard ceiling on extractor wall-clock. If a model goes off the rails
+    // and never emits `done`, we'd otherwise leak a listener.
+    const timeoutId = window.setTimeout(() => {
+      timedOut = true;
+      cleanup();
       reject(new Error("memory extraction timed out"));
     }, 60_000);
 
@@ -200,24 +214,28 @@ async function runOneShotStream(args: {
           buffer += ev.delta;
         } else if (ev.kind === "done") {
           window.clearTimeout(timeoutId);
-          try {
-            unlistenFn?.();
-          } catch {
-            /* ignore */
-          }
+          cleanup();
           resolve(buffer);
         } else if (ev.kind === "error") {
           window.clearTimeout(timeoutId);
-          try {
-            unlistenFn?.();
-          } catch {
-            /* ignore */
-          }
+          cleanup();
           reject(new Error(ev.message));
         }
       },
     )
       .then((handle) => {
+        // The timer may have already fired and rejected the promise. If
+        // it has, the handle's unlisten is the only thing keeping the
+        // Rust-side event listener alive — call it immediately rather
+        // than stashing it.
+        if (timedOut) {
+          try {
+            handle.unlisten();
+          } catch {
+            /* ignore */
+          }
+          return;
+        }
         unlistenFn = handle.unlisten;
       })
       .catch((e) => {

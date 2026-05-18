@@ -155,6 +155,48 @@ pub fn status() -> Result<LockStatus> {
     })
 }
 
+/// Check whether we're currently inside the rate-limit cool-down. Returns
+/// an error with the remaining time when locked; `Ok(())` otherwise. Used
+/// before any argon2 verification so brute-force callers can't even trigger
+/// a hash during the window.
+fn check_lockout() -> Result<()> {
+    let st = UNLOCK_STATE.lock().unwrap();
+    if let Some(until) = st.locked_until {
+        let now = Instant::now();
+        if until > now {
+            let remaining = (until - now).as_secs().max(1);
+            bail!(
+                "Too many failed attempts. Try again in {} second{}.",
+                remaining,
+                if remaining == 1 { "" } else { "s" }
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Record the outcome of a credential-verification attempt and update the
+/// lockout state. On success, the counter is reset. On failure, the counter
+/// is bumped and, once past the threshold, an exponentially-growing cool-
+/// down window is set.
+fn record_attempt(ok: bool) {
+    let mut st = UNLOCK_STATE.lock().unwrap();
+    if ok {
+        st.consecutive_failures = 0;
+        st.locked_until = None;
+    } else {
+        st.consecutive_failures = st.consecutive_failures.saturating_add(1);
+        if st.consecutive_failures >= LOCKOUT_THRESHOLD {
+            let over = st.consecutive_failures - LOCKOUT_THRESHOLD;
+            let shift = over.min(12);
+            let secs = BASE_LOCKOUT_SECS
+                .saturating_mul(1u64 << shift)
+                .min(MAX_LOCKOUT_SECS);
+            st.locked_until = Some(Instant::now() + Duration::from_secs(secs));
+        }
+    }
+}
+
 /// Verify pin + password against a loaded config. Returns true only when
 /// every factor the method requires checks out.
 fn verify_against_config(
@@ -196,9 +238,17 @@ pub fn setup(
     current_password: Option<&str>,
 ) -> Result<()> {
     // Replace-vs-init gate. If there's a current config, demand the current
-    // credentials before we wipe the row.
+    // credentials before we wipe the row. Funnel the verification through
+    // the same rate-limit counter `unlock` uses so an attacker that can
+    // call `setup` directly (compromised renderer, IPC handle reuse, etc.)
+    // can't brute-force the current credentials without paying the same
+    // exponential cool-down. The initial-setup case (no existing config)
+    // skips both checks because there's nothing to brute-force.
     if let Some(existing) = load()? {
-        if !verify_against_config(&existing, current_pin, current_password) {
+        check_lockout()?;
+        let ok = verify_against_config(&existing, current_pin, current_password);
+        record_attempt(ok);
+        if !ok {
             bail!("Current credentials are required to change the app lock.");
         }
     }
@@ -255,24 +305,7 @@ pub fn setup(
 /// rejects further attempts (without even hashing) for an exponentially
 /// growing window. A successful unlock resets the counter.
 pub fn unlock(pin: Option<&str>, password: Option<&str>) -> Result<bool> {
-    // Lockout check first — if we're inside the cool-down window, fail
-    // immediately with a remaining-time hint. Doing this *before* loading
-    // the keyring blob means brute-force attempts can't even trigger an
-    // argon2 hash during the cool-down.
-    {
-        let st = UNLOCK_STATE.lock().unwrap();
-        if let Some(until) = st.locked_until {
-            let now = Instant::now();
-            if until > now {
-                let remaining = (until - now).as_secs().max(1);
-                bail!(
-                    "Too many failed attempts. Try again in {} second{}.",
-                    remaining,
-                    if remaining == 1 { "" } else { "s" }
-                );
-            }
-        }
-    }
+    check_lockout()?;
 
     let cfg = match load()? {
         Some(c) => c,
@@ -280,26 +313,7 @@ pub fn unlock(pin: Option<&str>, password: Option<&str>) -> Result<bool> {
     };
 
     let ok = verify_against_config(&cfg, pin, password);
-
-    {
-        let mut st = UNLOCK_STATE.lock().unwrap();
-        if ok {
-            st.consecutive_failures = 0;
-            st.locked_until = None;
-        } else {
-            st.consecutive_failures = st.consecutive_failures.saturating_add(1);
-            if st.consecutive_failures >= LOCKOUT_THRESHOLD {
-                // Exponential backoff capped at MAX_LOCKOUT_SECS.
-                let over = st.consecutive_failures - LOCKOUT_THRESHOLD;
-                let shift = over.min(12); // 2^12 = 4096× — plenty of headroom; we cap below anyway
-                let secs = BASE_LOCKOUT_SECS
-                    .saturating_mul(1u64 << shift)
-                    .min(MAX_LOCKOUT_SECS);
-                st.locked_until = Some(Instant::now() + Duration::from_secs(secs));
-            }
-        }
-    }
-
+    record_attempt(ok);
     Ok(ok)
 }
 
@@ -330,12 +344,17 @@ pub fn clear() -> Result<()> {
 
 /// Renderer-facing clear that demands the current credentials before
 /// deleting the keyring entry. Idempotent when no lock is configured.
+/// Rate-limited via the shared counter so a renderer-driven brute-force
+/// can't bypass the cool-down by switching from `unlock` to `clear`.
 pub fn clear_with_credentials(
     current_pin: Option<&str>,
     current_password: Option<&str>,
 ) -> Result<()> {
     if let Some(cfg) = load()? {
-        if !verify_against_config(&cfg, current_pin, current_password) {
+        check_lockout()?;
+        let ok = verify_against_config(&cfg, current_pin, current_password);
+        record_attempt(ok);
+        if !ok {
             bail!("Current credentials are required to remove the app lock.");
         }
     }
@@ -348,12 +367,20 @@ pub fn clear_with_credentials(
 /// we can prove the action was authorised by a human at the keyboard.
 /// When no lock is configured, the gate is a no-op — the user already opted
 /// out of authenticated access.
+///
+/// Same rate-limit gate as `unlock` — destructive commands are exactly the
+/// surface an attacker would prefer to brute-force credentials against
+/// (one successful guess wipes the user's data), so they get the same
+/// exponential cool-down on failure.
 pub fn require_unlocked(
     current_pin: Option<&str>,
     current_password: Option<&str>,
 ) -> Result<()> {
     if let Some(cfg) = load()? {
-        if !verify_against_config(&cfg, current_pin, current_password) {
+        check_lockout()?;
+        let ok = verify_against_config(&cfg, current_pin, current_password);
+        record_attempt(ok);
+        if !ok {
             bail!("Current app-lock credentials are required for this action.");
         }
     }

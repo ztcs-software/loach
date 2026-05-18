@@ -230,6 +230,10 @@ pub async fn append_message(
 #[derive(Debug, Deserialize)]
 pub struct UpdateMessageArgs {
     pub id: String,
+    /// The session this message is expected to belong to. The DB layer
+    /// rejects the update if the row's `session_id` doesn't match — see
+    /// the defense-in-depth note on `Database::update_message`.
+    pub session_id: String,
     pub content: String,
     pub thinking: Option<String>,
     pub metrics_json: Option<String>,
@@ -244,6 +248,7 @@ pub async fn update_message(
         .db
         .update_message(
             &args.id,
+            &args.session_id,
             &args.content,
             args.thinking.as_deref(),
             args.metrics_json.as_deref(),
@@ -270,17 +275,30 @@ pub async fn set_setting(
 
 #[tauri::command]
 pub async fn set_openai_key(key: String) -> Result<(), String> {
-    secrets::set_openai_key(&key).map_err(err)
+    // Keyring calls block on the OS credential store — on Linux that's
+    // a DBus round-trip to the Secret Service which can stall for
+    // hundreds of ms if `gnome-keyring-daemon` is unlocking a profile or
+    // the user is on a slow Polkit prompt. Don't run that on the tokio
+    // runtime; offload to the blocking pool.
+    tokio::task::spawn_blocking(move || secrets::set_openai_key(&key))
+        .await
+        .map_err(|e| format!("set_openai_key task panicked: {e}"))?
+        .map_err(err)
 }
 
 #[tauri::command]
 pub async fn get_openai_key_status() -> Result<bool, String> {
-    Ok(secrets::has_openai_key())
+    tokio::task::spawn_blocking(secrets::has_openai_key)
+        .await
+        .map_err(|e| format!("get_openai_key_status task panicked: {e}"))
 }
 
 #[tauri::command]
 pub async fn clear_openai_key() -> Result<(), String> {
-    secrets::clear_openai_key().map_err(err)
+    tokio::task::spawn_blocking(secrets::clear_openai_key)
+        .await
+        .map_err(|e| format!("clear_openai_key task panicked: {e}"))?
+        .map_err(err)
 }
 
 // ---------- security (app lock) ----------
@@ -761,6 +779,8 @@ pub async fn add_space_memory(
 #[derive(Debug, Deserialize)]
 pub struct UpdateSpaceMemoryArgs {
     pub id: String,
+    /// Scope check — see the note on `Database::update_space_memory`.
+    pub space_id: String,
     pub content: String,
 }
 
@@ -769,12 +789,27 @@ pub async fn update_space_memory(
     state: State<'_, AppState>,
     args: UpdateSpaceMemoryArgs,
 ) -> Result<(), String> {
-    state.db.update_space_memory(&args.id, args.content.trim()).map_err(err)
+    state
+        .db
+        .update_space_memory(&args.id, &args.space_id, args.content.trim())
+        .map_err(err)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RemoveSpaceMemoryArgs {
+    pub id: String,
+    pub space_id: String,
 }
 
 #[tauri::command]
-pub async fn remove_space_memory(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    state.db.remove_space_memory(&id).map_err(err)
+pub async fn remove_space_memory(
+    state: State<'_, AppState>,
+    args: RemoveSpaceMemoryArgs,
+) -> Result<(), String> {
+    state
+        .db
+        .remove_space_memory(&args.id, &args.space_id)
+        .map_err(err)
 }
 
 // ---------- snippets ----------
@@ -1223,28 +1258,71 @@ pub async fn import_data_with_dialog(
         .into_path()
         .map_err(|e| format!("invalid path returned from dialog: {e}"))?;
 
-    // File read, JSON parse, and `restore_snapshot` (which serially inserts
-    // every row inside a single transaction while holding the global DB
-    // mutex) all need to happen off the tokio runtime — otherwise a large
-    // export ties up a runtime worker for the full duration and starves
-    // every other in-flight command. Run the whole pipeline on the
-    // blocking pool with a cloned `Arc<Database>`.
+    // Stage 1 — file read + JSON parse on the blocking pool. The IO + serde
+    // pass blocks for as long as the file is large, so we don't want it on
+    // the tokio runtime.
+    let snap: DatabaseSnapshot =
+        tokio::task::spawn_blocking(move || -> Result<DatabaseSnapshot, String> {
+            let text = std::fs::read_to_string(&path)
+                .map_err(|e| format!("couldn't read {}: {e}", path.display()))?;
+            let snap: DatabaseSnapshot = serde_json::from_str(&text)
+                .map_err(|e| format!("file doesn't look like a Loach export: {e}"))?;
+            if snap.schema != "loach/v1" {
+                return Err(format!(
+                    "unsupported export schema '{}' — this build expects 'loach/v1'",
+                    snap.schema
+                ));
+            }
+            Ok(snap)
+        })
+        .await
+        .map_err(|e| format!("import parse task panicked: {e}"))??;
+
+    // Stage 2 — re-validate every MCP server row before letting it back
+    // into the DB. The `mcp_save` path runs through `validate_mcp_input`,
+    // but the snapshot bypasses that — a hand-edited or maliciously
+    // crafted export could otherwise smuggle in rows pointing at
+    // localhost, RFC1918 ranges, or hosts that resolve to internal IPs.
+    // We re-screen each here using the same async validator (DNS lookup
+    // + headers structural check) so the user can't shoot themselves in
+    // the foot by importing a tampered file.
+    for (idx, row) in snap.data.mcp_servers.iter().enumerate() {
+        let parsed_headers: Option<std::collections::HashMap<String, String>> =
+            match row.headers_json.as_deref() {
+                Some(s) if !s.trim().is_empty() => serde_json::from_str(s).map_err(|e| {
+                    format!(
+                        "import rejected: MCP server #{} ({}) has malformed headers_json: {e}",
+                        idx + 1,
+                        row.name
+                    )
+                })?,
+                _ => None,
+            };
+        let synthetic = McpServerInput {
+            id: Some(row.id.clone()),
+            name: row.name.clone(),
+            url: row.url.clone(),
+            headers: parsed_headers,
+            enabled: Some(row.enabled),
+        };
+        validate_mcp_input(&synthetic).await.map_err(|e| {
+            format!(
+                "import rejected: MCP server #{} ({}): {e}",
+                idx + 1,
+                row.name
+            )
+        })?;
+    }
+
+    // Stage 3 — apply. `restore_snapshot` holds the single DB mutex for
+    // the duration of the transaction and inserts every row serially, so
+    // it has to run on the blocking pool too.
     let db = state.db.clone();
     let stats = tokio::task::spawn_blocking(move || -> Result<ImportStats, String> {
-        let text = std::fs::read_to_string(&path)
-            .map_err(|e| format!("couldn't read {}: {e}", path.display()))?;
-        let snap: DatabaseSnapshot = serde_json::from_str(&text)
-            .map_err(|e| format!("file doesn't look like a Loach export: {e}"))?;
-        if snap.schema != "loach/v1" {
-            return Err(format!(
-                "unsupported export schema '{}' — this build expects 'loach/v1'",
-                snap.schema
-            ));
-        }
         db.restore_snapshot(&snap).map_err(|e| format!("{e:#}"))
     })
     .await
-    .map_err(|e| format!("import task panicked: {e}"))??;
+    .map_err(|e| format!("import restore task panicked: {e}"))??;
 
     Ok(Some(stats))
 }

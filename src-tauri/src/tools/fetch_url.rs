@@ -29,6 +29,13 @@ pub const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 pub const MAX_BODY_BYTES: usize = 5 * 1024 * 1024; // 5 MB
 pub const MAX_TEXT_CHARS: usize = 12_000; // ~3-4k tokens, plenty for inlining
 pub const MAX_REDIRECTS: usize = 10;
+/// Wall-clock for the TCP connect phase. The whole-request `FETCH_TIMEOUT`
+/// only fires once the response starts arriving — a SYN sent to a black-
+/// holed address waits for the OS TCP retransmit budget (~75 s on Linux,
+/// ~21 s on Windows by default). 10 s is well above any healthy connect
+/// on a public host and stops a single dead link from hanging the fetch
+/// for the better part of a minute.
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// What we hand back to the frontend for a single URL. `truncated` signals
 /// that either the response body or the extracted text hit a cap — useful
@@ -232,6 +239,12 @@ pub(crate) fn build_pinned_client(url: &Url, addrs: &[SocketAddr]) -> Result<req
         .ok_or_else(|| "URL has no host".to_string())?;
     let mut builder = reqwest::Client::builder()
         .user_agent("Loach/0.1 (fetch_url)")
+        // Bound the TCP connect phase. The per-request `.timeout()` only
+        // covers the response, so without this a SYN to a black-holed
+        // address waits for the OS retransmit budget — minutes on some
+        // platforms. `CONNECT_TIMEOUT` keeps a single dead host from
+        // hanging the fetch.
+        .connect_timeout(CONNECT_TIMEOUT)
         // Disable auto-redirect. Reqwest would otherwise follow redirects
         // using this same pinned-DNS client, which only has the original
         // host pinned — so a cross-origin redirect's new host would fall

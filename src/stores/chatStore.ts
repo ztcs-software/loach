@@ -310,6 +310,7 @@ function finishRunning(get: Getter, set: Setter) {
     // message so the user has a starting point if they want to debug.
     void updateMessage({
       id: buf.assistantMsgId,
+      session_id: running.sessionId,
       content: buf.content,
       thinking: buf.thinking || null,
       metrics_json: buf.metrics ? JSON.stringify(buf.metrics) : null,
@@ -549,6 +550,7 @@ async function startTask(task: QueueTask, get: Getter, set: Setter) {
     const errorContent = `_⚠ ${errorMsg}_`;
     updateMessage({
       id: assistantMsg.id,
+      session_id: sessionId,
       content: errorContent,
       thinking: null,
       metrics_json: null,

@@ -1,5 +1,5 @@
-import type { ReactNode } from "react";
-import ReactMarkdown from "react-markdown";
+import { memo, useMemo, type ReactNode } from "react";
+import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import "highlight.js/styles/github-dark.css";
@@ -173,8 +173,53 @@ function extractRaw(node: ReactNode): string {
   return "";
 }
 
-export function Markdown({ content, className }: MarkdownProps) {
-  const prepared = preprocessTex(content);
+// Hoisted out of the render so react-markdown sees a stable `components`
+// reference. Inline `{}` literals create a fresh object every render,
+// which forces react-markdown to re-mount its component map even when
+// nothing else changed — measurable per-token cost on the streaming
+// bubble where this component re-renders thousands of times.
+const MARKDOWN_PLUGINS_REMARK = [remarkGfm];
+const MARKDOWN_PLUGINS_REHYPE = [rehypeHighlight];
+
+const MARKDOWN_COMPONENTS: Components = {
+  pre({ children }) {
+    // Pull language from the inner <code class="language-xyz">
+    const child = Array.isArray(children) ? children[0] : children;
+    let language = "";
+    if (hasProps(child)) {
+      const cls = child.props?.className ?? "";
+      const m = /language-(\w+)/.exec(cls);
+      if (m) language = m[1];
+    }
+    const raw = extractRaw(children);
+    return (
+      <CodeBlock raw={raw} language={language}>
+        {children}
+      </CodeBlock>
+    );
+  },
+  a({ children, href, ...props }) {
+    return (
+      <a href={href} target="_blank" rel="noreferrer noopener" {...props}>
+        {children}
+      </a>
+    );
+  },
+};
+
+// `memo` so non-streaming messages skip the entire react-markdown
+// re-parse when their parent re-renders for unrelated reasons. The
+// streaming bubble still re-renders per token (content does change),
+// but at least the `preprocessTex` walk and the components-object
+// allocation no longer happen each tick.
+export const Markdown = memo(function Markdown({
+  content,
+  className,
+}: MarkdownProps) {
+  // `preprocessTex` walks `content` twice with regexes — small on a
+  // sentence, meaningful on a 4 KB streamed reply at 60 tokens/s. Cache
+  // on content so we only re-run when the upstream string changes.
+  const prepared = useMemo(() => preprocessTex(content), [content]);
   return (
     <div
       className={cn(
@@ -190,41 +235,12 @@ export function Markdown({ content, className }: MarkdownProps) {
       )}
     >
       <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        rehypePlugins={[rehypeHighlight]}
-        components={{
-          pre({ children }) {
-            // Pull language from the inner <code class="language-xyz">
-            const child = Array.isArray(children) ? children[0] : children;
-            let language = "";
-            if (hasProps(child)) {
-              const cls = child.props?.className ?? "";
-              const m = /language-(\w+)/.exec(cls);
-              if (m) language = m[1];
-            }
-            const raw = extractRaw(children);
-            return (
-              <CodeBlock raw={raw} language={language}>
-                {children}
-              </CodeBlock>
-            );
-          },
-          a({ children, href, ...props }) {
-            return (
-              <a
-                href={href}
-                target="_blank"
-                rel="noreferrer noopener"
-                {...props}
-              >
-                {children}
-              </a>
-            );
-          },
-        }}
+        remarkPlugins={MARKDOWN_PLUGINS_REMARK}
+        rehypePlugins={MARKDOWN_PLUGINS_REHYPE}
+        components={MARKDOWN_COMPONENTS}
       >
         {prepared}
       </ReactMarkdown>
     </div>
   );
-}
+});

@@ -604,14 +604,25 @@ impl Database {
     pub fn update_message(
         &self,
         id: &str,
+        session_id: &str,
         content: &str,
         thinking: Option<&str>,
         metrics_json: Option<&str>,
     ) -> Result<()> {
+        // Scope by session_id so a renderer that ever gets confused — or a
+        // compromised one calling commands directly with a leaked message id
+        // — can't reach across sessions to mutate arbitrary messages. The
+        // 0-row case is silently accepted because callers should treat a
+        // miss as benign (the row may legitimately have been deleted under
+        // them while the update was in flight).
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "UPDATE messages SET content = ?1, thinking = ?2, metrics_json = COALESCE(?3, metrics_json) WHERE id = ?4",
-            params![content, thinking, metrics_json, id],
+            "UPDATE messages
+             SET content = ?1,
+                 thinking = ?2,
+                 metrics_json = COALESCE(?3, metrics_json)
+             WHERE id = ?4 AND session_id = ?5",
+            params![content, thinking, metrics_json, id, session_id],
         )?;
         Ok(())
     }
@@ -880,19 +891,26 @@ impl Database {
         })
     }
 
-    pub fn update_space_memory(&self, id: &str, content: &str) -> Result<()> {
+    pub fn update_space_memory(&self, id: &str, space_id: &str, content: &str) -> Result<()> {
+        // Scope by space_id — see the comment on `update_message` for the
+        // same defense-in-depth rationale.
         let now = Utc::now().timestamp_millis();
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "UPDATE space_memories SET content = ?1, updated_at = ?2 WHERE id = ?3",
-            params![content, now, id],
+            "UPDATE space_memories
+             SET content = ?1, updated_at = ?2
+             WHERE id = ?3 AND space_id = ?4",
+            params![content, now, id, space_id],
         )?;
         Ok(())
     }
 
-    pub fn remove_space_memory(&self, id: &str) -> Result<()> {
+    pub fn remove_space_memory(&self, id: &str, space_id: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        conn.execute("DELETE FROM space_memories WHERE id = ?1", params![id])?;
+        conn.execute(
+            "DELETE FROM space_memories WHERE id = ?1 AND space_id = ?2",
+            params![id, space_id],
+        )?;
         Ok(())
     }
 
