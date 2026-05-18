@@ -167,6 +167,82 @@ let runningBuffers: {
   metrics: MessageMetrics | null;
 } | null = null;
 
+/** rAF-batched render flush state for streaming events. Rather than calling
+ *  `set()` on every token / thinking / metrics delta (which used to fire
+ *  100+ times a second on fast providers and re-render every chat-canvas
+ *  subscriber), we accumulate into `runningBuffers` and write to the store
+ *  at most once per animation frame. `MessageItem` is memoised on
+ *  reference equality, so only the streaming bubble re-renders per flush.
+ *
+ *  Invariants:
+ *   - Terminal events (done / error / cancelled) MUST call
+ *     `flushPendingFrame` synchronously before tearing down, so the user
+ *     sees the last few tokens before the stream's stop side-effects fire.
+ *   - The flush is a no-op when `runningBuffers` is null — guards against
+ *     a stale rAF firing after a cancellation cleared the buffer. */
+let pendingFrame: number | null = null;
+const pendingDirty = {
+  content: false,
+  thinking: false,
+  metrics: false,
+};
+
+function scheduleFlush(get: Getter, set: Setter) {
+  if (pendingFrame !== null) return;
+  pendingFrame = requestAnimationFrame(() => {
+    pendingFrame = null;
+    flushPendingFrame(get, set);
+  });
+}
+
+function flushPendingFrame(get: Getter, set: Setter) {
+  if (pendingFrame !== null) {
+    cancelAnimationFrame(pendingFrame);
+    pendingFrame = null;
+  }
+  const dContent = pendingDirty.content;
+  const dThinking = pendingDirty.thinking;
+  const dMetrics = pendingDirty.metrics;
+  if (!dContent && !dThinking && !dMetrics) return;
+  pendingDirty.content = false;
+  pendingDirty.thinking = false;
+  pendingDirty.metrics = false;
+  const buf = runningBuffers;
+  if (!buf) return;
+  const task = get().runningTask;
+  if (!task) return;
+  const sessionId = task.sessionId;
+  const msgId = buf.assistantMsgId;
+  const newContent = buf.content;
+  const newThinking = buf.thinking;
+  const newMetrics = buf.metrics;
+  set((s) => {
+    const next: Partial<ChatState> = {};
+    if (dContent || dThinking) {
+      const list = s.messages[sessionId] ?? [];
+      next.messages = {
+        ...s.messages,
+        [sessionId]: list.map((m) =>
+          m.id === msgId
+            ? {
+                ...m,
+                ...(dContent ? { content: newContent } : {}),
+                ...(dThinking ? { thinking: newThinking } : {}),
+              }
+            : m,
+        ),
+      };
+    }
+    if (dMetrics) {
+      next.streamingByMessage = {
+        ...s.streamingByMessage,
+        [msgId]: newMetrics,
+      };
+    }
+    return next;
+  });
+}
+
 /** Whitelist of params we accept from a stored override blob, paired
  *  with their runtime guard. Anything not in this list — or with the
  *  wrong type — is silently dropped so a corrupted DB row (or a
@@ -361,6 +437,13 @@ type FinishReason = "done" | "cancelled" | "error";
  *  we can skip the memory-extraction + unread-dot side-effects that
  *  would otherwise lie about an interrupted turn. */
 function finishRunning(get: Getter, set: Setter, reason: FinishReason = "done") {
+  // Sync-flush any pending rAF before teardown so the final tokens are
+  // visible in the UI before we null out `runningBuffers` / clear the
+  // streaming state. Persistence reads from `runningBuffers` directly
+  // (not from store state), so this is purely for the UI bubble — but a
+  // missing flush would leave the last frame of tokens invisible until
+  // the next reload of the chat.
+  flushPendingFrame(get, set);
   const running = get().runningTask;
   const buf = runningBuffers;
   if (running && buf) {
@@ -563,46 +646,25 @@ async function startTask(task: QueueTask, get: Getter, set: Setter) {
         if (!buf) return; // cancelled between events
         if (ev.kind === "thinking") {
           buf.thinking += ev.delta;
-          set((s) => ({
-            messages: {
-              ...s.messages,
-              [sessionId]: (s.messages[sessionId] ?? []).map((m) =>
-                m.id === assistantMsg.id ? { ...m, thinking: buf.thinking } : m,
-              ),
-            },
-          }));
+          pendingDirty.thinking = true;
+          scheduleFlush(get, set);
         } else if (ev.kind === "token") {
           buf.content += ev.delta;
-          set((s) => ({
-            messages: {
-              ...s.messages,
-              [sessionId]: (s.messages[sessionId] ?? []).map((m) =>
-                m.id === assistantMsg.id ? { ...m, content: buf.content } : m,
-              ),
-            },
-          }));
+          pendingDirty.content = true;
+          scheduleFlush(get, set);
         } else if (ev.kind === "metrics") {
           buf.metrics = {
             tokens: ev.tokens,
             elapsed_ms: ev.elapsed_ms,
             tokens_per_second: ev.tokens_per_second,
           };
-          set((s) => ({
-            streamingByMessage: {
-              ...s.streamingByMessage,
-              [assistantMsg.id]: buf.metrics,
-            },
-          }));
+          pendingDirty.metrics = true;
+          scheduleFlush(get, set);
         } else if (ev.kind === "error") {
           buf.content += `\n\n_⚠ ${ev.message}_`;
-          set((s) => ({
-            messages: {
-              ...s.messages,
-              [sessionId]: (s.messages[sessionId] ?? []).map((m) =>
-                m.id === assistantMsg.id ? { ...m, content: buf.content } : m,
-              ),
-            },
-          }));
+          pendingDirty.content = true;
+          // Sync-flush so the error tail is visible before teardown.
+          flushPendingFrame(get, set);
           // Providers emit Error and then stop without a trailing Done, so
           // the streaming state would otherwise stay set forever and freeze
           // the input box in "Replying…" mode.

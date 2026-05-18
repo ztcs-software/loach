@@ -107,7 +107,29 @@ pub fn run() {
                 );
             }
 
-            let http = match reqwest::Client::builder().user_agent("Loach/0.1").build() {
+            // Notes on the builder config:
+            //   - We DON'T call `.http2_prior_knowledge()`. HTTP/2 negotiates
+            //     via TLS ALPN with rustls-tls — every hosted provider we
+            //     talk to (OpenAI, Anthropic, OpenRouter, Groq, Together, …)
+            //     supports it and gets multiplexing for free; cleartext
+            //     endpoints (local Ollama on http://127.0.0.1) stay on
+            //     HTTP/1.1, which is what they want.
+            //   - `gzip` / `brotli` only decompress when the server actually
+            //     sets `Content-Encoding`. SSE chat streams typically don't
+            //     compress, so this is a no-op for the hot streaming path;
+            //     non-streamed admin responses (model lists etc.) shrink.
+            //   - `connect_timeout` applies to the TCP+TLS handshake only,
+            //     not the response body — long generations still work
+            //     because the chat stream's body has no client-side cap.
+            //   - `tcp_keepalive` keeps idle pooled connections alive so a
+            //     burst of admin calls reuses the same socket.
+            let http = match reqwest::Client::builder()
+                .user_agent("Loach/0.1")
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .tcp_keepalive(Some(std::time::Duration::from_secs(30)))
+                .pool_max_idle_per_host(8)
+                .build()
+            {
                 Ok(c) => c,
                 Err(e) => fatal_setup_error(
                     handle,
