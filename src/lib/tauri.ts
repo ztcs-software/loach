@@ -153,6 +153,10 @@ export function appendMessage(args: {
 
 export function updateMessage(args: {
   id: string;
+  /** Required — Rust rejects updates whose row doesn't belong to this
+   *  session. Callers always know which session the message belongs to
+   *  (it's how they got the id) so this is a free defense-in-depth. */
+  session_id: string;
   content: string;
   thinking?: string | null;
   metrics_json?: string | null;
@@ -526,15 +530,21 @@ export function addSpaceMemory(args: {
 
 export function updateSpaceMemory(args: {
   id: string;
+  /** Required — Rust rejects updates whose row doesn't belong to this
+   *  space. Same defense-in-depth shape as `updateMessage`. */
+  space_id: string;
   content: string;
 }): Promise<void> {
   if (!isTauri) return notInTauri(undefined);
   return invoke("update_space_memory", { args });
 }
 
-export function removeSpaceMemory(id: string): Promise<void> {
+export function removeSpaceMemory(args: {
+  id: string;
+  space_id: string;
+}): Promise<void> {
   if (!isTauri) return notInTauri(undefined);
-  return invoke("remove_space_memory", { id });
+  return invoke("remove_space_memory", { args });
 }
 
 // ------------ snippets ------------
@@ -778,4 +788,17 @@ export function wipeUserData(auth?: DestructiveAuth): Promise<void> {
 export function factoryReset(auth?: DestructiveAuth): Promise<void> {
   if (!isTauri) return notInTauri(undefined);
   return invoke<void>("factory_reset", { auth });
+}
+
+// ------------ updater ------------
+
+/** Whether the running binary's bundle format supports in-app updates.
+ *  Returns true on Windows (NSIS), and on Linux only when running inside
+ *  an AppImage (`.deb` / `.rpm` installs are stuck with whatever the
+ *  system package manager last installed). Wrapped here so callers don't
+ *  have to construct a raw `invoke("updater_supported")` and stay
+ *  consistent with the rest of the IPC layer. */
+export function updaterSupported(): Promise<boolean> {
+  if (!isTauri) return notInTauri(false);
+  return invoke<boolean>("updater_supported");
 }

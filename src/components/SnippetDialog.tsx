@@ -193,7 +193,14 @@ function ModelPicker({
   onSelect: (provider: ProviderId, model: string) => void;
   onClear: () => void;
 }) {
-  const settings = useSettingsStore();
+  // Slice the store: this picker only needs the four fields that gate
+  // model loading. Subscribing to the whole settings object would
+  // re-render the dialog on every keystroke in the global SettingsDialog
+  // textareas.
+  const ollamaBaseUrl = useSettingsStore((s) => s.ollama_base_url);
+  const openaiBaseUrl = useSettingsStore((s) => s.openai_base_url);
+  const openaiKeySet = useSettingsStore((s) => s.openai_key_set);
+  const settingsHydrated = useSettingsStore((s) => s.hydrated);
   const [ollamaModels, setOllamaModels] = useState<ModelInfo[]>([]);
   const [openaiModels, setOpenaiModels] = useState<ModelInfo[]>([]);
   const [ollamaUp, setOllamaUp] = useState<boolean | null>(null);
@@ -203,35 +210,29 @@ function ModelPicker({
     () => async () => {
       setLoading(true);
       try {
-        const probe = await ollamaProbe(settings.ollama_base_url).catch(
-          () => false,
-        );
+        const probe = await ollamaProbe(ollamaBaseUrl).catch(() => false);
         setOllamaUp(probe);
         if (probe) {
-          const m = await ollamaListModels(settings.ollama_base_url).catch(
-            () => [],
-          );
+          const m = await ollamaListModels(ollamaBaseUrl).catch(() => []);
           setOllamaModels(m);
         } else {
           setOllamaModels([]);
         }
-        if (settings.openai_key_set) {
-          const m = await openaiListModels(settings.openai_base_url).catch(
-            () => [],
-          );
+        if (openaiKeySet) {
+          const m = await openaiListModels(openaiBaseUrl).catch(() => []);
           setOpenaiModels(m);
         }
       } finally {
         setLoading(false);
       }
     },
-    [settings.ollama_base_url, settings.openai_base_url, settings.openai_key_set],
+    [ollamaBaseUrl, openaiBaseUrl, openaiKeySet],
   );
 
   useEffect(() => {
-    if (!settings.hydrated) return;
+    if (!settingsHydrated) return;
     refresh();
-  }, [settings.hydrated, refresh]);
+  }, [settingsHydrated, refresh]);
 
   const label =
     provider && model ? `${model} · ${provider}` : "No default model";
@@ -290,7 +291,7 @@ function ModelPicker({
           <DropdownMenuLabel>OpenAI</DropdownMenuLabel>
           {openaiModels.length === 0 && (
             <DropdownMenuItem disabled>
-              {settings.openai_key_set ? "No models" : "API key not set"}
+              {openaiKeySet ? "No models" : "API key not set"}
             </DropdownMenuItem>
           )}
           {openaiModels.slice(0, 30).map((m) => (

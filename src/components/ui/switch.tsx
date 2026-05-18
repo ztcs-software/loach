@@ -1,7 +1,25 @@
 import * as React from "react";
 import * as SwitchPrimitive from "@radix-ui/react-switch";
-import { useSettingsStore } from "@/stores/settingsStore";
 import { cn } from "@/lib/utils";
+
+/* ───── Switch variant context ─────
+ *
+ * The Switch primitive needs to know which visual variant ("flat" vs
+ * "glassy") to render by default — that decision tracks the app's
+ * `background_style` setting. Previously this file pulled the value
+ * directly from `useSettingsStore`, which broke the "components/ui is
+ * portable, store-agnostic" shadcn convention and made the primitive
+ * harder to drop into Storybook / tests / future spaces.
+ *
+ * Instead we read the variant from a tiny React context. Anyone who
+ * wants the theme default wraps their tree in `<SwitchVariantProvider
+ * value={…}>` (`App.tsx` does this once); anyone who needs a fixed
+ * style can still pass `variant="flat" | "glassy"` directly on the
+ * call site. Defaults to "flat" so an unwrapped use still renders
+ * sensibly. */
+type SwitchVariant = "flat" | "glassy";
+const SwitchVariantContext = React.createContext<SwitchVariant>("flat");
+export const SwitchVariantProvider = SwitchVariantContext.Provider;
 
 /**
  * Pill-style toggle switch — green track when on, neutral when off, white
@@ -28,21 +46,21 @@ import { cn } from "@/lib/utils";
  */
 export interface SwitchProps
   extends React.ComponentPropsWithoutRef<typeof SwitchPrimitive.Root> {
-  /** Explicit visual style. When omitted, the variant is derived from the
-   *  current `background_style` setting (`solid` → flat, `gradient` →
-   *  glassy) so callers don't have to repeat the wiring. */
-  variant?: "flat" | "glassy";
+  /** Explicit visual style. When omitted, the variant comes from the
+   *  nearest `SwitchVariantProvider` (App.tsx wires this to the
+   *  `background_style` setting) so most call sites stay tidy. */
+  variant?: SwitchVariant;
 }
 
 const Switch = React.forwardRef<
   React.ElementRef<typeof SwitchPrimitive.Root>,
   SwitchProps
 >(({ className, variant, ...props }, ref) => {
-  // Read the theme-derived default at the primitive level so call sites stay
-  // tidy. Callers can still override with `variant="flat"` / `"glassy"`.
-  const backgroundStyle = useSettingsStore((s) => s.background_style);
-  const resolved =
-    variant ?? (backgroundStyle === "gradient" ? "glassy" : "flat");
+  // Pull the theme-derived default from context rather than the settings
+  // store, so this primitive stays portable. Callers can still override
+  // with `variant="flat"` / `"glassy"` per-instance.
+  const contextVariant = React.useContext(SwitchVariantContext);
+  const resolved = variant ?? contextVariant;
   return (
   <SwitchPrimitive.Root
     ref={ref}

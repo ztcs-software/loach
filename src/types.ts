@@ -187,7 +187,13 @@ export interface ChatRequest {
 export type StreamEvent =
   | { kind: "token"; delta: string }
   | { kind: "thinking"; delta: string }
+  /** Stream ended naturally — provider emitted its EOF / `[DONE]` marker. */
   | { kind: "done" }
+  /** Stream was cancelled mid-flight. Distinct from `done` so callers
+   *  can avoid the "real completion" side-effects (memory extraction,
+   *  unread dot) on an interrupted reply. Mirrors
+   *  `src-tauri/src/stream.rs::StreamEvent::Cancelled`. */
+  | { kind: "cancelled" }
   | { kind: "error"; message: string }
   | {
       kind: "metrics";
@@ -378,6 +384,11 @@ export type AdminEvent =
       completed?: number;
     }
   | { kind: "done" }
+  /** User cancelled the admin op mid-flight. The pull/create may have
+   *  left partial state on the Ollama server side; the UI surfaces this
+   *  as "Cancelled" rather than "Done" so the user doesn't think the
+   *  partial work succeeded. */
+  | { kind: "cancelled" }
   | { kind: "error"; message: string };
 
 // ---------------------------------------------------------------------------

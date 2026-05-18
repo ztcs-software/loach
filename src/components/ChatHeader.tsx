@@ -35,6 +35,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { useConfirm } from "@/components/ConfirmDialog";
 import { useChatStore } from "@/stores/chatStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useSpaceStore } from "@/stores/spaceStore";
@@ -51,6 +52,7 @@ import { parseImportContext, type ParsedImport } from "@/lib/importContext";
 import type { ModelInfo, ProviderId, Session } from "@/types";
 
 export function ChatHeader({ session }: { session: Session | undefined }) {
+  const { confirm } = useConfirm();
   const setSessionModel = useChatStore((s) => s.setSessionModel);
   const importMessages = useChatStore((s) => s.importMessages);
   // Single-chat actions piped through chatStore. We deliberately don't keep
@@ -65,7 +67,14 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
   const setSidebarTab = useUIStore((s) => s.setSidebarTab);
   const openSettingsTab = useUIStore((s) => s.openSettingsTab);
   const setViewingSpace = useSpaceStore((s) => s.setViewingSpace);
-  const settings = useSettingsStore();
+  // Subscribe only to the four fields actually used here. Pulling the
+  // whole store (`useSettingsStore()`) makes this component re-render on
+  // every settings change anywhere in the app — including every keystroke
+  // in the SettingsDialog textareas — for no visible benefit.
+  const ollamaBaseUrl = useSettingsStore((s) => s.ollama_base_url);
+  const openaiBaseUrl = useSettingsStore((s) => s.openai_base_url);
+  const openaiKeySet = useSettingsStore((s) => s.openai_key_set);
+  const settingsHydrated = useSettingsStore((s) => s.hydrated);
 
   const [ollamaModels, setOllamaModels] = useState<ModelInfo[]>([]);
   const [openaiModels, setOpenaiModels] = useState<ModelInfo[]>([]);
@@ -165,15 +174,15 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
     void archiveSession(session.id, session.archived_at == null);
   };
 
-  const handleDelete = () => {
+  const handleDelete = async () => {
     if (!session) return;
-    if (
-      confirm(
-        `Delete this chat (${session.title || "Untitled"})? This cannot be undone — all messages and metrics will be removed.`,
-      )
-    ) {
-      void removeSession(session.id);
-    }
+    const ok = await confirm({
+      title: "Delete this chat?",
+      body: `“${session.title || "Untitled"}” will be removed permanently — all messages and metrics will be gone.`,
+      confirmLabel: "Delete chat",
+      destructive: true,
+    });
+    if (ok) void removeSession(session.id);
   };
 
   const openExport = async () => {
@@ -235,29 +244,29 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
     () => async () => {
       setLoading(true);
       try {
-        const probe = await ollamaProbe(settings.ollama_base_url).catch(() => false);
+        const probe = await ollamaProbe(ollamaBaseUrl).catch(() => false);
         setOllamaUp(probe);
         if (probe) {
-          const m = await ollamaListModels(settings.ollama_base_url).catch(() => []);
+          const m = await ollamaListModels(ollamaBaseUrl).catch(() => []);
           setOllamaModels(m);
         } else {
           setOllamaModels([]);
         }
-        if (settings.openai_key_set) {
-          const m = await openaiListModels(settings.openai_base_url).catch(() => []);
+        if (openaiKeySet) {
+          const m = await openaiListModels(openaiBaseUrl).catch(() => []);
           setOpenaiModels(m);
         }
       } finally {
         setLoading(false);
       }
     },
-    [settings.ollama_base_url, settings.openai_base_url, settings.openai_key_set],
+    [ollamaBaseUrl, openaiBaseUrl, openaiKeySet],
   );
 
   useEffect(() => {
-    if (!settings.hydrated) return;
+    if (!settingsHydrated) return;
     refresh();
-  }, [settings.hydrated, refresh]);
+  }, [settingsHydrated, refresh]);
 
   const currentLabel = session
     ? `${session.model || "(no model)"} · ${session.provider}`
@@ -363,7 +372,7 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
             <DropdownMenuLabel>OpenAI</DropdownMenuLabel>
             {openaiModels.length === 0 && (
               <DropdownMenuItem disabled>
-                {settings.openai_key_set ? "No models" : "API key not set"}
+                {openaiKeySet ? "No models" : "API key not set"}
               </DropdownMenuItem>
             )}
             {openaiModels.slice(0, 30).map((m) => (
@@ -371,7 +380,7 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
                 {m.label}
               </DropdownMenuItem>
             ))}
-            {ollamaModels.length === 0 && !settings.openai_key_set && (
+            {ollamaModels.length === 0 && !openaiKeySet && (
               <>
                 <DropdownMenuSeparator />
                 <div className="px-2 py-1.5 text-[11px] text-foreground/55">

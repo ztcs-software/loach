@@ -94,6 +94,10 @@ jobs:
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Tauri-action needs full history to compute the right tag base
+          # for the auto-created tag. Matches `prepare`'s checkout.
+          fetch-depth: 0
 
       - name: Install Linux build deps
         if: matrix.platform == 'ubuntu-22.04'
@@ -111,7 +115,13 @@ jobs:
           node-version: 20
           cache: npm
 
-      - uses: dtolnay/rust-toolchain@stable
+      # Pin to a specific stable release rather than tracking `@stable`. A
+      # surprise rustc release between merges can otherwise break a release
+      # build with no recourse — and a green release build on Monday with
+      # a red one on Tuesday from no source change is exactly the kind of
+      # opaque failure that costs hours to diagnose. Bump this manually
+      # when intentionally adopting a new toolchain.
+      - uses: dtolnay/rust-toolchain@1.83.0
 
       - uses: Swatinem/rust-cache@v2
         with:

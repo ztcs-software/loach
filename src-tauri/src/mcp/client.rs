@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
+use futures_util::StreamExt;
 use serde_json::{json, Value};
 
 use crate::db::McpServer;
@@ -15,6 +16,15 @@ use super::types::{
 /// start (especially gateway-backed ones), so we give each JSON-RPC call
 /// 30 s before giving up.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Cap on the response body we'll buffer per JSON-RPC call. MCP responses
+/// in practice are kilobytes (an initialize handshake or a tools/list of
+/// a few dozen tools); 4 MiB leaves a generous safety margin while still
+/// catching a malicious or misconfigured server that streams arbitrary
+/// data at us (e.g. accidentally pointing the URL at a static-file host
+/// that returns a multi-GB asset). Without the cap, `resp.text().await`
+/// allocates linearly with the response and would OOM the app.
+const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 
 const CLIENT_NAME: &str = "loach";
 const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -164,7 +174,9 @@ async fn post_rpc_raw(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string();
-    let text = resp.text().await.context("read MCP server response")?;
+    let text = read_capped_text(resp)
+        .await
+        .context("read MCP server response")?;
 
     if !status.is_success() {
         bail!("server responded with HTTP {}: {}", status, truncate(&text));
@@ -181,6 +193,26 @@ async fn post_rpc_raw(
     };
 
     Ok((payload, sid))
+}
+
+/// Read a reqwest response body as text with a hard `MAX_RESPONSE_BYTES`
+/// cap. Streams chunks rather than calling `resp.text().await` so a
+/// pathological multi-GB body can't allocate before we get a chance to
+/// stop reading. Errors with a clear message when the cap is exceeded so
+/// users see "MCP server response too large" instead of a generic OOM.
+async fn read_capped_text(resp: reqwest::Response) -> Result<String> {
+    let mut buf: Vec<u8> = Vec::new();
+    let mut stream = resp.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.context("reading MCP server response body")?;
+        if buf.len() + chunk.len() > MAX_RESPONSE_BYTES {
+            bail!(
+                "MCP server response exceeded {MAX_RESPONSE_BYTES} bytes — refusing to buffer further"
+            );
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    String::from_utf8(buf).context("MCP server response was not valid UTF-8")
 }
 
 fn extract_first_sse_data(s: &str) -> Option<&str> {

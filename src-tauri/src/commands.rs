@@ -230,6 +230,10 @@ pub async fn append_message(
 #[derive(Debug, Deserialize)]
 pub struct UpdateMessageArgs {
     pub id: String,
+    /// The session this message is expected to belong to. The DB layer
+    /// rejects the update if the row's `session_id` doesn't match — see
+    /// the defense-in-depth note on `Database::update_message`.
+    pub session_id: String,
     pub content: String,
     pub thinking: Option<String>,
     pub metrics_json: Option<String>,
@@ -244,6 +248,7 @@ pub async fn update_message(
         .db
         .update_message(
             &args.id,
+            &args.session_id,
             &args.content,
             args.thinking.as_deref(),
             args.metrics_json.as_deref(),
@@ -270,24 +275,46 @@ pub async fn set_setting(
 
 #[tauri::command]
 pub async fn set_openai_key(key: String) -> Result<(), String> {
-    secrets::set_openai_key(&key).map_err(err)
+    // Keyring calls block on the OS credential store — on Linux that's
+    // a DBus round-trip to the Secret Service which can stall for
+    // hundreds of ms if `gnome-keyring-daemon` is unlocking a profile or
+    // the user is on a slow Polkit prompt. Don't run that on the tokio
+    // runtime; offload to the blocking pool.
+    tokio::task::spawn_blocking(move || secrets::set_openai_key(&key))
+        .await
+        .map_err(|e| format!("set_openai_key task panicked: {e}"))?
+        .map_err(err)
 }
 
 #[tauri::command]
 pub async fn get_openai_key_status() -> Result<bool, String> {
-    Ok(secrets::has_openai_key())
+    tokio::task::spawn_blocking(secrets::has_openai_key)
+        .await
+        .map_err(|e| format!("get_openai_key_status task panicked: {e}"))
 }
 
 #[tauri::command]
 pub async fn clear_openai_key() -> Result<(), String> {
-    secrets::clear_openai_key().map_err(err)
+    tokio::task::spawn_blocking(secrets::clear_openai_key)
+        .await
+        .map_err(|e| format!("clear_openai_key task panicked: {e}"))?
+        .map_err(err)
 }
 
 // ---------- security (app lock) ----------
 
 #[tauri::command]
 pub async fn security_status() -> Result<LockStatus, String> {
-    security::status().map_err(err)
+    // `security::status` itself is cheap, but every other security command
+    // calls argon2 which is intentionally CPU-expensive (~50–100 ms at the
+    // default params). Run them on the blocking pool so the tokio runtime
+    // worker that picked up the IPC call isn't parked for the duration —
+    // otherwise a slow unlock attempt can stall every other in-flight
+    // command, including the UI's own event listeners.
+    tokio::task::spawn_blocking(security::status)
+        .await
+        .map_err(|e| format!("security_status task panicked: {e}"))?
+        .map_err(err)
 }
 
 #[derive(Debug, Deserialize)]
@@ -308,15 +335,19 @@ pub struct SecuritySetupArgs {
 
 #[tauri::command]
 pub async fn security_setup(args: SecuritySetupArgs) -> Result<(), String> {
-    security::setup(
-        args.method,
-        args.pin.as_deref(),
-        args.password.as_deref(),
-        args.pin_length,
-        args.hint,
-        args.current_pin.as_deref(),
-        args.current_password.as_deref(),
-    )
+    tokio::task::spawn_blocking(move || {
+        security::setup(
+            args.method,
+            args.pin.as_deref(),
+            args.password.as_deref(),
+            args.pin_length,
+            args.hint,
+            args.current_pin.as_deref(),
+            args.current_password.as_deref(),
+        )
+    })
+    .await
+    .map_err(|e| format!("security_setup task panicked: {e}"))?
     .map_err(err)
 }
 
@@ -328,12 +359,20 @@ pub struct SecurityUnlockArgs {
 
 #[tauri::command]
 pub async fn security_unlock(args: SecurityUnlockArgs) -> Result<bool, String> {
-    security::unlock(args.pin.as_deref(), args.password.as_deref()).map_err(err)
+    tokio::task::spawn_blocking(move || {
+        security::unlock(args.pin.as_deref(), args.password.as_deref())
+    })
+    .await
+    .map_err(|e| format!("security_unlock task panicked: {e}"))?
+    .map_err(err)
 }
 
 #[tauri::command]
 pub async fn security_get_hint() -> Result<Option<String>, String> {
-    security::get_hint().map_err(err)
+    tokio::task::spawn_blocking(security::get_hint)
+        .await
+        .map_err(|e| format!("security_get_hint task panicked: {e}"))?
+        .map_err(err)
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -351,8 +390,12 @@ pub struct SecurityClearArgs {
 #[tauri::command]
 pub async fn security_clear(args: Option<SecurityClearArgs>) -> Result<(), String> {
     let args = args.unwrap_or_default();
-    security::clear_with_credentials(args.pin.as_deref(), args.password.as_deref())
-        .map_err(err)
+    tokio::task::spawn_blocking(move || {
+        security::clear_with_credentials(args.pin.as_deref(), args.password.as_deref())
+    })
+    .await
+    .map_err(|e| format!("security_clear task panicked: {e}"))?
+    .map_err(err)
 }
 
 // ---------- providers ----------
@@ -736,6 +779,8 @@ pub async fn add_space_memory(
 #[derive(Debug, Deserialize)]
 pub struct UpdateSpaceMemoryArgs {
     pub id: String,
+    /// Scope check — see the note on `Database::update_space_memory`.
+    pub space_id: String,
     pub content: String,
 }
 
@@ -744,12 +789,27 @@ pub async fn update_space_memory(
     state: State<'_, AppState>,
     args: UpdateSpaceMemoryArgs,
 ) -> Result<(), String> {
-    state.db.update_space_memory(&args.id, args.content.trim()).map_err(err)
+    state
+        .db
+        .update_space_memory(&args.id, &args.space_id, args.content.trim())
+        .map_err(err)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RemoveSpaceMemoryArgs {
+    pub id: String,
+    pub space_id: String,
 }
 
 #[tauri::command]
-pub async fn remove_space_memory(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    state.db.remove_space_memory(&id).map_err(err)
+pub async fn remove_space_memory(
+    state: State<'_, AppState>,
+    args: RemoveSpaceMemoryArgs,
+) -> Result<(), String> {
+    state
+        .db
+        .remove_space_memory(&args.id, &args.space_id)
+        .map_err(err)
 }
 
 // ---------- snippets ----------
@@ -893,7 +953,18 @@ fn is_valid_header_value(value: &str) -> bool {
         && value.len() <= 4096
 }
 
-fn validate_mcp_input(input: &McpServerInput) -> Result<(), String> {
+/// Validate an MCP server input and return the resolved, SSRF-screened
+/// SocketAddrs for its host. The addresses are used by `mcp_test` to build
+/// a DNS-pinned reqwest client so the connect-time resolver can't bypass
+/// the screen with DNS rebinding. `mcp_save` discards them.
+///
+/// Async because hostnames have to be DNS-resolved before screening — the
+/// previous version only checked literal IPs, so `evil.example.com` →
+/// `10.0.0.1` slipped through and the request was sent against the
+/// internal address with whatever auth headers the user configured.
+async fn validate_mcp_input(
+    input: &McpServerInput,
+) -> Result<Vec<std::net::SocketAddr>, String> {
     if input.name.trim().is_empty() {
         return Err("server name is required".into());
     }
@@ -914,22 +985,15 @@ fn validate_mcp_input(input: &McpServerInput) -> Result<(), String> {
         "http" | "https" => {}
         other => return Err(format!("MCP server URL must be http or https (got `{other}`)")),
     }
-    let host = parsed
-        .host_str()
-        .ok_or_else(|| "MCP server URL has no host".to_string())?;
-    if host.eq_ignore_ascii_case("localhost")
-        || host.eq_ignore_ascii_case("ip6-localhost")
-        || host.ends_with(".localhost")
-    {
-        return Err("MCP server URL points at localhost — refusing".into());
-    }
-    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-        if !crate::tools::fetch_url::is_public_ip(&ip) {
-            return Err(format!(
-                "MCP server URL resolves to a non-public address ({ip}) — refusing"
-            ));
-        }
-    }
+
+    // Defer to the same resolver `fetch_url` uses: literal IPs are
+    // rejected if non-public, hostnames are DNS-resolved and every
+    // returned address screened. Returning the addresses lets the caller
+    // pin them into a per-request client at connect time so a malicious
+    // DNS server can't flip the answer between validate and dial.
+    let resolved = crate::tools::fetch_url::resolve_safe_addrs(&parsed)
+        .await
+        .map_err(|e| format!("MCP server URL rejected: {e}"))?;
 
     // Header k/v validation. We do NOT call out to the network here, so the
     // only protection we can offer is structural: reject names / values
@@ -957,7 +1021,7 @@ fn validate_mcp_input(input: &McpServerInput) -> Result<(), String> {
         }
     }
 
-    Ok(())
+    Ok(resolved)
 }
 
 #[tauri::command]
@@ -970,7 +1034,10 @@ pub async fn mcp_save(
     state: State<'_, AppState>,
     input: McpServerInput,
 ) -> Result<McpServer, String> {
-    validate_mcp_input(&input)?;
+    // We don't pin DNS on save (no network call), but we do still resolve
+    // and screen so a save can't smuggle a private-IP-backed hostname into
+    // the DB for a later, weaker code path to pick up.
+    validate_mcp_input(&input).await?;
 
     let headers_json = input
         .headers
@@ -999,12 +1066,20 @@ pub async fn mcp_delete(state: State<'_, AppState>, id: String) -> Result<(), St
 /// *input* rather than an id so the user can try a config before saving it.
 #[tauri::command]
 pub async fn mcp_test(
-    state: State<'_, AppState>,
+    _state: State<'_, AppState>,
     input: McpServerInput,
 ) -> Result<McpTestResult, String> {
-    validate_mcp_input(&input)?;
+    let addrs = validate_mcp_input(&input).await?;
     let draft = input.to_draft();
-    Ok(mcp::test_server(&draft, &state.http).await)
+    // Build a one-shot DNS-pinned client for the test. Using the shared
+    // `state.http` would let the connect-time system resolver answer
+    // independently of our pre-flight screen — a window a DNS-rebinding
+    // attacker can drive a private address through. Pinning closes it.
+    let parsed = reqwest::Url::parse(draft.url.trim())
+        .map_err(|e| format!("Invalid MCP server URL: {e}"))?;
+    let pinned = crate::tools::fetch_url::build_pinned_client(&parsed, &addrs)
+        .map_err(|e| format!("could not build pinned client for MCP test: {e}"))?;
+    Ok(mcp::test_server(&draft, &pinned).await)
 }
 
 // ---------- chat streaming ----------
@@ -1093,6 +1168,13 @@ pub struct DialogFilter {
 /// where a compromised renderer could skip the dialog entirely and write
 /// to an arbitrary path (e.g. `~/.bashrc`): now the only path the backend
 /// will write to is one the user just clicked through a native picker.
+/// Hard ceiling on what the renderer can ask us to save. Real exports
+/// (full DB snapshots) are in the low MBs; this cap is generous enough
+/// for any realistic dump while rejecting a compromised renderer that
+/// sends multi-gigabyte payloads in an attempt to OOM the process or
+/// fill the user's disk.
+const MAX_SAVE_BYTES: usize = 256 * 1024 * 1024; // 256 MB
+
 #[tauri::command]
 pub async fn save_text_to_file(
     app: AppHandle,
@@ -1101,6 +1183,14 @@ pub async fn save_text_to_file(
     filters: Option<Vec<DialogFilter>>,
 ) -> Result<Option<String>, String> {
     use tauri_plugin_dialog::DialogExt;
+
+    if content.len() > MAX_SAVE_BYTES {
+        return Err(format!(
+            "save_text_to_file refused: content is {} bytes (cap {} bytes)",
+            content.len(),
+            MAX_SAVE_BYTES
+        ));
+    }
 
     let path_opt = tauri::async_runtime::spawn_blocking(move || {
         let mut builder = app.dialog().file();
@@ -1125,9 +1215,18 @@ pub async fn save_text_to_file(
     let path = chosen
         .into_path()
         .map_err(|e| format!("invalid path returned from dialog: {e}"))?;
-    std::fs::write(&path, content)
-        .map_err(|e| format!("couldn't write {}: {e}", path.display()))?;
-    Ok(Some(path.to_string_lossy().to_string()))
+
+    // The actual write needs to be on the blocking pool too. The previous
+    // version only put the dialog in `spawn_blocking`, then called
+    // `std::fs::write` back on the async runtime — a multi-MB export
+    // would park the runtime worker on synchronous I/O.
+    let returned_path = path.clone();
+    tokio::task::spawn_blocking(move || std::fs::write(&path, content))
+        .await
+        .map_err(|e| format!("save task panicked: {e}"))?
+        .map_err(|e| format!("couldn't write {}: {e}", returned_path.display()))?;
+
+    Ok(Some(returned_path.to_string_lossy().to_string()))
 }
 
 /// Serialise every table to a JSON string. Pretty-printed so users can
@@ -1182,17 +1281,73 @@ pub async fn import_data_with_dialog(
     let path = chosen
         .into_path()
         .map_err(|e| format!("invalid path returned from dialog: {e}"))?;
-    let text = std::fs::read_to_string(&path)
-        .map_err(|e| format!("couldn't read {}: {e}", path.display()))?;
-    let snap: DatabaseSnapshot = serde_json::from_str(&text)
-        .map_err(|e| format!("file doesn't look like a Loach export: {e}"))?;
-    if snap.schema != "loach/v1" {
-        return Err(format!(
-            "unsupported export schema '{}' — this build expects 'loach/v1'",
-            snap.schema
-        ));
+
+    // Stage 1 — file read + JSON parse on the blocking pool. The IO + serde
+    // pass blocks for as long as the file is large, so we don't want it on
+    // the tokio runtime.
+    let snap: DatabaseSnapshot =
+        tokio::task::spawn_blocking(move || -> Result<DatabaseSnapshot, String> {
+            let text = std::fs::read_to_string(&path)
+                .map_err(|e| format!("couldn't read {}: {e}", path.display()))?;
+            let snap: DatabaseSnapshot = serde_json::from_str(&text)
+                .map_err(|e| format!("file doesn't look like a Loach export: {e}"))?;
+            if snap.schema != "loach/v1" {
+                return Err(format!(
+                    "unsupported export schema '{}' — this build expects 'loach/v1'",
+                    snap.schema
+                ));
+            }
+            Ok(snap)
+        })
+        .await
+        .map_err(|e| format!("import parse task panicked: {e}"))??;
+
+    // Stage 2 — re-validate every MCP server row before letting it back
+    // into the DB. The `mcp_save` path runs through `validate_mcp_input`,
+    // but the snapshot bypasses that — a hand-edited or maliciously
+    // crafted export could otherwise smuggle in rows pointing at
+    // localhost, RFC1918 ranges, or hosts that resolve to internal IPs.
+    // We re-screen each here using the same async validator (DNS lookup
+    // + headers structural check) so the user can't shoot themselves in
+    // the foot by importing a tampered file.
+    for (idx, row) in snap.data.mcp_servers.iter().enumerate() {
+        let parsed_headers: Option<std::collections::HashMap<String, String>> =
+            match row.headers_json.as_deref() {
+                Some(s) if !s.trim().is_empty() => serde_json::from_str(s).map_err(|e| {
+                    format!(
+                        "import rejected: MCP server #{} ({}) has malformed headers_json: {e}",
+                        idx + 1,
+                        row.name
+                    )
+                })?,
+                _ => None,
+            };
+        let synthetic = McpServerInput {
+            id: Some(row.id.clone()),
+            name: row.name.clone(),
+            url: row.url.clone(),
+            headers: parsed_headers,
+            enabled: Some(row.enabled),
+        };
+        validate_mcp_input(&synthetic).await.map_err(|e| {
+            format!(
+                "import rejected: MCP server #{} ({}): {e}",
+                idx + 1,
+                row.name
+            )
+        })?;
     }
-    let stats = state.db.restore_snapshot(&snap).map_err(err)?;
+
+    // Stage 3 — apply. `restore_snapshot` holds the single DB mutex for
+    // the duration of the transaction and inserts every row serially, so
+    // it has to run on the blocking pool too.
+    let db = state.db.clone();
+    let stats = tokio::task::spawn_blocking(move || -> Result<ImportStats, String> {
+        db.restore_snapshot(&snap).map_err(|e| format!("{e:#}"))
+    })
+    .await
+    .map_err(|e| format!("import restore task panicked: {e}"))??;
+
     Ok(Some(stats))
 }
 

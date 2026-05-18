@@ -1,11 +1,38 @@
 use std::path::Path;
-use std::sync::Mutex;
+// `parking_lot::Mutex` instead of `std::sync::Mutex` for two reasons:
+//   1. No `PoisonError` to ignore on every lock — a panic inside one
+//      command (e.g. an OOM during a query) shouldn't make every
+//      subsequent DB call panic with "mutex poisoned".
+//   2. Smaller, faster locks. Not a hot-path concern at the scale we
+//      run, but free.
+// The writer still uses a single Mutex<Connection>; reads on the hottest
+// paths (list_sessions / list_messages / list_space_* / get_*) go
+// through a small r2d2_sqlite pool instead so they don't queue behind
+// every unrelated write. WAL mode lets readers + 1 writer run
+// concurrently at the SQLite level — the mutex was the bottleneck, not
+// SQLite itself.
+use parking_lot::Mutex;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
+use r2d2::Pool;
+use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+/// Pragmas applied to BOTH the writer connection and every pooled reader.
+/// Skipped: `journal_mode = WAL` (persisted in the file header — only the
+/// writer needs to set it, readers inherit) and `foreign_keys` (only
+/// affects writes). Everything here is per-connection process-local tuning
+/// — if a future pool connection forgets to run it, queries still return
+/// correct results, just slower.
+fn apply_perf_pragmas(conn: &Connection) {
+    let _ = conn.pragma_update(None, "synchronous", "NORMAL");
+    let _ = conn.pragma_update(None, "temp_store", "MEMORY");
+    let _ = conn.pragma_update(None, "cache_size", -20_000);
+    let _ = conn.pragma_update(None, "mmap_size", 268_435_456i64);
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Session {
@@ -136,11 +163,22 @@ pub struct Message {
 
 pub struct Database {
     conn: Mutex<Connection>,
+    /// Read-only connection pool used by the hot SELECT paths. WAL mode
+    /// already allows readers to run concurrently with the writer at the
+    /// SQLite level — the bottleneck was the single Mutex serialising
+    /// everything in-process. Pool is small on purpose: 4 readers is
+    /// plenty for a desktop app and keeps the file-descriptor / mmap
+    /// footprint modest.
+    read_pool: Pool<SqliteConnectionManager>,
 }
 
 impl Database {
     pub fn open(path: &Path) -> Result<Self> {
         let conn = Connection::open(path).context("open sqlite")?;
+        // WAL is persisted in the file header; only the writer needs to
+        // set it, pooled readers inherit. Setting it here also ensures
+        // the -wal / -shm sidecar files exist by the time the pool
+        // opens its first connection.
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         // Performance pragmas. All are durability-safe in combination with
@@ -148,20 +186,45 @@ impl Database {
         // weakens the guarantee about the very last commit on power loss),
         // and the cache / mmap / temp-store knobs are pure local-process
         // tuning. None of them change on-disk format.
-        let _ = conn.pragma_update(None, "synchronous", "NORMAL");
-        let _ = conn.pragma_update(None, "temp_store", "MEMORY");
-        // Negative cache_size is interpreted as KiB → ~20 MiB page cache.
-        let _ = conn.pragma_update(None, "cache_size", -20_000);
-        // 256 MiB mmap window. SQLite falls back to regular I/O if the OS
-        // can't map; failure here is harmless.
-        let _ = conn.pragma_update(None, "mmap_size", 268_435_456i64);
+        apply_perf_pragmas(&conn);
+
+        // Build the read pool. `with_init` reapplies the per-connection
+        // performance pragmas to every checkout so a fresh reader gets
+        // the same cache_size / mmap_size / synchronous as the writer.
+        // We deliberately keep `max_size` small (4) — a desktop app has
+        // a handful of concurrent UI panels, not server-grade
+        // concurrency, and each connection holds its own mmap window.
+        let manager = SqliteConnectionManager::file(path).with_init(|c| {
+            apply_perf_pragmas(c);
+            Ok(())
+        });
+        let read_pool = Pool::builder()
+            .max_size(4)
+            .build(manager)
+            .context("build read pool")?;
+
         Ok(Self {
             conn: Mutex::new(conn),
+            read_pool,
         })
     }
 
+    /// Run a read-only closure against a pooled connection. Use this for
+    /// SELECT queries that don't need to coordinate with a write. The
+    /// closure must not mutate the database — pool connections share the
+    /// same file as the writer, and WAL gives them a consistent snapshot
+    /// at the start of each statement. Mutations would race with the
+    /// writer; use `self.conn.lock()` for writes.
+    fn with_read<F, R>(&self, f: F) -> Result<R>
+    where
+        F: FnOnce(&Connection) -> Result<R>,
+    {
+        let conn = self.read_pool.get().context("acquire read connection")?;
+        f(&conn)
+    }
+
     pub fn migrate(&self) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS sessions (
@@ -251,32 +314,27 @@ impl Database {
             "#,
         )?;
 
-        // Add space_id column to sessions if missing (migration from v1).
-        let has_space_id = conn
-            .prepare("SELECT space_id FROM sessions LIMIT 0")
-            .is_ok();
-        if !has_space_id {
+        // Column-existence probes go through `PRAGMA table_info(...)` rather
+        // than the older `SELECT col FROM tbl LIMIT 0` + `.is_ok()` trick.
+        // That trick conflates "column missing" with "any other prepare-
+        // time error" (transient lock, schema-changed mid-transaction, …)
+        // and on a false negative triggers a duplicate `ADD COLUMN` that
+        // hard-fails the whole migrate. `table_info` returns rows we can
+        // search authoritatively.
+        if !has_column(&conn, "sessions", "space_id")? {
             conn.execute_batch(
                 "ALTER TABLE sessions ADD COLUMN space_id TEXT REFERENCES spaces(id) ON DELETE SET NULL;
                  CREATE INDEX IF NOT EXISTS idx_sessions_space ON sessions(space_id);",
             )?;
         }
 
-        // Add pinned_at column to sessions if missing.
-        let has_pinned_at = conn
-            .prepare("SELECT pinned_at FROM sessions LIMIT 0")
-            .is_ok();
-        if !has_pinned_at {
+        if !has_column(&conn, "sessions", "pinned_at")? {
             conn.execute_batch(
                 "ALTER TABLE sessions ADD COLUMN pinned_at INTEGER;",
             )?;
         }
 
-        // Add thinking column to messages if missing.
-        let has_thinking = conn
-            .prepare("SELECT thinking FROM messages LIMIT 0")
-            .is_ok();
-        if !has_thinking {
+        if !has_column(&conn, "messages", "thinking")? {
             conn.execute_batch(
                 "ALTER TABLE messages ADD COLUMN thinking TEXT;",
             )?;
@@ -284,10 +342,7 @@ impl Database {
 
         // Add provider + model columns to snippets if missing (for pinning a
         // default model to a snippet).
-        let has_snippet_provider = conn
-            .prepare("SELECT provider FROM snippets LIMIT 0")
-            .is_ok();
-        if !has_snippet_provider {
+        if !has_column(&conn, "snippets", "provider")? {
             conn.execute_batch(
                 "ALTER TABLE snippets ADD COLUMN provider TEXT;
                  ALTER TABLE snippets ADD COLUMN model TEXT;",
@@ -296,10 +351,7 @@ impl Database {
 
         // Add archived_at column to sessions if missing. Null = live chat;
         // otherwise the ms-timestamp the session was archived.
-        let has_archived_at = conn
-            .prepare("SELECT archived_at FROM sessions LIMIT 0")
-            .is_ok();
-        if !has_archived_at {
+        if !has_column(&conn, "sessions", "archived_at")? {
             conn.execute_batch(
                 "ALTER TABLE sessions ADD COLUMN archived_at INTEGER;
                  CREATE INDEX IF NOT EXISTS idx_sessions_archived ON sessions(archived_at);",
@@ -309,10 +361,7 @@ impl Database {
         // Add per-space default model + params columns if missing. Null =
         // "inherit from General Settings" — see the Space struct for the
         // full layering story.
-        let has_space_default_model = conn
-            .prepare("SELECT default_model FROM spaces LIMIT 0")
-            .is_ok();
-        if !has_space_default_model {
+        if !has_column(&conn, "spaces", "default_model")? {
             conn.execute_batch(
                 "ALTER TABLE spaces ADD COLUMN default_provider TEXT;
                  ALTER TABLE spaces ADD COLUMN default_model TEXT;
@@ -323,10 +372,7 @@ impl Database {
         // Add memory_enabled column to spaces if missing. Default ON so
         // existing spaces start collecting memory once the feature ships;
         // users can flip it off per-space.
-        let has_memory_enabled = conn
-            .prepare("SELECT memory_enabled FROM spaces LIMIT 0")
-            .is_ok();
-        if !has_memory_enabled {
+        if !has_column(&conn, "spaces", "memory_enabled")? {
             conn.execute_batch(
                 "ALTER TABLE spaces ADD COLUMN memory_enabled INTEGER NOT NULL DEFAULT 1;",
             )?;
@@ -358,29 +404,30 @@ impl Database {
     // ------------ sessions ------------
 
     pub fn list_sessions(&self) -> Result<Vec<Session>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT id, title, provider, model, system_prompt, params_json, space_id, pinned_at, archived_at, created_at, updated_at
-             FROM sessions ORDER BY updated_at DESC",
-        )?;
-        let rows = stmt
-            .query_map([], |r| {
-                Ok(Session {
-                    id: r.get(0)?,
-                    title: r.get(1)?,
-                    provider: r.get(2)?,
-                    model: r.get(3)?,
-                    system_prompt: r.get(4)?,
-                    params_json: r.get(5)?,
-                    space_id: r.get(6)?,
-                    pinned_at: r.get(7)?,
-                    archived_at: r.get(8)?,
-                    created_at: r.get(9)?,
-                    updated_at: r.get(10)?,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(rows)
+        self.with_read(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, title, provider, model, system_prompt, params_json, space_id, pinned_at, archived_at, created_at, updated_at
+                 FROM sessions ORDER BY updated_at DESC",
+            )?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok(Session {
+                        id: r.get(0)?,
+                        title: r.get(1)?,
+                        provider: r.get(2)?,
+                        model: r.get(3)?,
+                        system_prompt: r.get(4)?,
+                        params_json: r.get(5)?,
+                        space_id: r.get(6)?,
+                        pinned_at: r.get(7)?,
+                        archived_at: r.get(8)?,
+                        created_at: r.get(9)?,
+                        updated_at: r.get(10)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
     }
 
     pub fn create_session(
@@ -393,7 +440,7 @@ impl Database {
     ) -> Result<Session> {
         let id = Uuid::new_v4().to_string();
         let now = Utc::now().timestamp_millis();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         conn.execute(
             "INSERT INTO sessions (id, title, provider, model, system_prompt, params_json, space_id, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, ?7, ?7)",
@@ -416,7 +463,7 @@ impl Database {
 
     pub fn rename_session(&self, id: &str, title: &str) -> Result<()> {
         let now = Utc::now().timestamp_millis();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         conn.execute(
             "UPDATE sessions SET title = ?1, updated_at = ?2 WHERE id = ?3",
             params![title, now, id],
@@ -434,7 +481,7 @@ impl Database {
         model: &str,
     ) -> Result<()> {
         let now = Utc::now().timestamp_millis();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         conn.execute(
             "UPDATE sessions SET provider = ?1, model = ?2, updated_at = ?3 WHERE id = ?4",
             params![provider, model, now, id],
@@ -447,7 +494,7 @@ impl Database {
     /// what the textarea last contained.
     pub fn update_session_system_prompt(&self, id: &str, prompt: &str) -> Result<()> {
         let now = Utc::now().timestamp_millis();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         conn.execute(
             "UPDATE sessions SET system_prompt = ?1, updated_at = ?2 WHERE id = ?3",
             params![prompt, now, id],
@@ -464,7 +511,7 @@ impl Database {
         params_json: Option<&str>,
     ) -> Result<()> {
         let now = Utc::now().timestamp_millis();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         conn.execute(
             "UPDATE sessions SET params_json = ?1, updated_at = ?2 WHERE id = ?3",
             params![params_json, now, id],
@@ -474,7 +521,7 @@ impl Database {
 
     pub fn touch_session(&self, id: &str) -> Result<()> {
         let now = Utc::now().timestamp_millis();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         conn.execute(
             "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
             params![now, id],
@@ -483,92 +530,95 @@ impl Database {
     }
 
     pub fn pin_session(&self, id: &str, pinned: bool) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
-        let pinned_at: Option<i64> = if pinned {
-            Some(Utc::now().timestamp_millis())
-        } else {
-            None
-        };
+        let conn = self.conn.lock();
+        let now = Utc::now().timestamp_millis();
+        let pinned_at: Option<i64> = if pinned { Some(now) } else { None };
+        // Bump `updated_at` too so the sidebar's `ORDER BY updated_at DESC`
+        // surfaces the just-pinned chat to the top. Without this, pinning
+        // a buried chat leaves it visually unchanged even though the
+        // pinned-icon flipped on.
         conn.execute(
-            "UPDATE sessions SET pinned_at = ?1 WHERE id = ?2",
-            params![pinned_at, id],
+            "UPDATE sessions SET pinned_at = ?1, updated_at = ?2 WHERE id = ?3",
+            params![pinned_at, now, id],
         )?;
         Ok(())
     }
 
     pub fn archive_session(&self, id: &str, archived: bool) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
-        let archived_at: Option<i64> = if archived {
-            Some(Utc::now().timestamp_millis())
-        } else {
-            None
-        };
+        let conn = self.conn.lock();
+        let now = Utc::now().timestamp_millis();
+        let archived_at: Option<i64> = if archived { Some(now) } else { None };
         // Archiving also clears the pinned flag so an unarchived chat doesn't
-        // silently re-appear as a pinned item.
+        // silently re-appear as a pinned item. Bump `updated_at` so the
+        // archive list is ordered by archive time and the active list
+        // re-surfaces a just-restored chat.
         conn.execute(
             "UPDATE sessions SET archived_at = ?1,
-                                 pinned_at = CASE WHEN ?1 IS NULL THEN pinned_at ELSE NULL END
-             WHERE id = ?2",
-            params![archived_at, id],
+                                 pinned_at = CASE WHEN ?1 IS NULL THEN pinned_at ELSE NULL END,
+                                 updated_at = ?2
+             WHERE id = ?3",
+            params![archived_at, now, id],
         )?;
         Ok(())
     }
 
     pub fn delete_session(&self, id: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         conn.execute("DELETE FROM sessions WHERE id = ?1", params![id])?;
         Ok(())
     }
 
     pub fn get_session(&self, id: &str) -> Result<Option<Session>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT id, title, provider, model, system_prompt, params_json, space_id, pinned_at, archived_at, created_at, updated_at
-             FROM sessions WHERE id = ?1",
-        )?;
-        let mut rows = stmt.query(params![id])?;
-        if let Some(r) = rows.next()? {
-            Ok(Some(Session {
-                id: r.get(0)?,
-                title: r.get(1)?,
-                provider: r.get(2)?,
-                model: r.get(3)?,
-                system_prompt: r.get(4)?,
-                params_json: r.get(5)?,
-                space_id: r.get(6)?,
-                pinned_at: r.get(7)?,
-                archived_at: r.get(8)?,
-                created_at: r.get(9)?,
-                updated_at: r.get(10)?,
-            }))
-        } else {
-            Ok(None)
-        }
+        self.with_read(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, title, provider, model, system_prompt, params_json, space_id, pinned_at, archived_at, created_at, updated_at
+                 FROM sessions WHERE id = ?1",
+            )?;
+            let mut rows = stmt.query(params![id])?;
+            if let Some(r) = rows.next()? {
+                Ok(Some(Session {
+                    id: r.get(0)?,
+                    title: r.get(1)?,
+                    provider: r.get(2)?,
+                    model: r.get(3)?,
+                    system_prompt: r.get(4)?,
+                    params_json: r.get(5)?,
+                    space_id: r.get(6)?,
+                    pinned_at: r.get(7)?,
+                    archived_at: r.get(8)?,
+                    created_at: r.get(9)?,
+                    updated_at: r.get(10)?,
+                }))
+            } else {
+                Ok(None)
+            }
+        })
     }
 
     // ------------ messages ------------
 
     pub fn list_messages(&self, session_id: &str) -> Result<Vec<Message>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT id, session_id, role, content, thinking, attachments_json, metrics_json, created_at
-             FROM messages WHERE session_id = ?1 ORDER BY created_at ASC",
-        )?;
-        let rows = stmt
-            .query_map(params![session_id], |r| {
-                Ok(Message {
-                    id: r.get(0)?,
-                    session_id: r.get(1)?,
-                    role: r.get(2)?,
-                    content: r.get(3)?,
-                    thinking: r.get(4)?,
-                    attachments_json: r.get(5)?,
-                    metrics_json: r.get(6)?,
-                    created_at: r.get(7)?,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(rows)
+        self.with_read(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, session_id, role, content, thinking, attachments_json, metrics_json, created_at
+                 FROM messages WHERE session_id = ?1 ORDER BY created_at ASC",
+            )?;
+            let rows = stmt
+                .query_map(params![session_id], |r| {
+                    Ok(Message {
+                        id: r.get(0)?,
+                        session_id: r.get(1)?,
+                        role: r.get(2)?,
+                        content: r.get(3)?,
+                        thinking: r.get(4)?,
+                        attachments_json: r.get(5)?,
+                        metrics_json: r.get(6)?,
+                        created_at: r.get(7)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
     }
 
     pub fn append_message(
@@ -581,7 +631,7 @@ impl Database {
         let id = Uuid::new_v4().to_string();
         let now = Utc::now().timestamp_millis();
         {
-            let conn = self.conn.lock().unwrap();
+            let conn = self.conn.lock();
             conn.execute(
                 "INSERT INTO messages (id, session_id, role, content, thinking, attachments_json, metrics_json, created_at)
                  VALUES (?1, ?2, ?3, ?4, NULL, ?5, NULL, ?6)",
@@ -604,14 +654,25 @@ impl Database {
     pub fn update_message(
         &self,
         id: &str,
+        session_id: &str,
         content: &str,
         thinking: Option<&str>,
         metrics_json: Option<&str>,
     ) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        // Scope by session_id so a renderer that ever gets confused — or a
+        // compromised one calling commands directly with a leaked message id
+        // — can't reach across sessions to mutate arbitrary messages. The
+        // 0-row case is silently accepted because callers should treat a
+        // miss as benign (the row may legitimately have been deleted under
+        // them while the update was in flight).
+        let conn = self.conn.lock();
         conn.execute(
-            "UPDATE messages SET content = ?1, thinking = ?2, metrics_json = COALESCE(?3, metrics_json) WHERE id = ?4",
-            params![content, thinking, metrics_json, id],
+            "UPDATE messages
+             SET content = ?1,
+                 thinking = ?2,
+                 metrics_json = COALESCE(?3, metrics_json)
+             WHERE id = ?4 AND session_id = ?5",
+            params![content, thinking, metrics_json, id, session_id],
         )?;
         Ok(())
     }
@@ -619,7 +680,7 @@ impl Database {
     // ------------ settings ------------
 
     pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         conn.execute(
             "INSERT INTO settings (key, value) VALUES (?1, ?2)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -629,7 +690,7 @@ impl Database {
     }
 
     pub fn all_settings(&self) -> Result<Vec<(String, String)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         let mut stmt = conn.prepare("SELECT key, value FROM settings")?;
         let rows = stmt
             .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
@@ -640,16 +701,44 @@ impl Database {
     // ------------ spaces ------------
 
     pub fn list_spaces(&self) -> Result<Vec<Space>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT id, name, description, instructions,
-                    default_provider, default_model, default_params_json,
-                    memory_enabled, created_at, updated_at
-             FROM spaces ORDER BY updated_at DESC",
-        )?;
-        let rows = stmt
-            .query_map([], |r| {
-                Ok(Space {
+        self.with_read(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, name, description, instructions,
+                        default_provider, default_model, default_params_json,
+                        memory_enabled, created_at, updated_at
+                 FROM spaces ORDER BY updated_at DESC",
+            )?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok(Space {
+                        id: r.get(0)?,
+                        name: r.get(1)?,
+                        description: r.get(2)?,
+                        instructions: r.get(3)?,
+                        default_provider: r.get(4)?,
+                        default_model: r.get(5)?,
+                        default_params_json: r.get(6)?,
+                        memory_enabled: r.get::<_, i64>(7)? != 0,
+                        created_at: r.get(8)?,
+                        updated_at: r.get(9)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+    }
+
+    pub fn get_space(&self, id: &str) -> Result<Option<Space>> {
+        self.with_read(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, name, description, instructions,
+                        default_provider, default_model, default_params_json,
+                        memory_enabled, created_at, updated_at
+                 FROM spaces WHERE id = ?1",
+            )?;
+            let mut rows = stmt.query(params![id])?;
+            if let Some(r) = rows.next()? {
+                Ok(Some(Space {
                     id: r.get(0)?,
                     name: r.get(1)?,
                     description: r.get(2)?,
@@ -660,37 +749,11 @@ impl Database {
                     memory_enabled: r.get::<_, i64>(7)? != 0,
                     created_at: r.get(8)?,
                     updated_at: r.get(9)?,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(rows)
-    }
-
-    pub fn get_space(&self, id: &str) -> Result<Option<Space>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT id, name, description, instructions,
-                    default_provider, default_model, default_params_json,
-                    memory_enabled, created_at, updated_at
-             FROM spaces WHERE id = ?1",
-        )?;
-        let mut rows = stmt.query(params![id])?;
-        if let Some(r) = rows.next()? {
-            Ok(Some(Space {
-                id: r.get(0)?,
-                name: r.get(1)?,
-                description: r.get(2)?,
-                instructions: r.get(3)?,
-                default_provider: r.get(4)?,
-                default_model: r.get(5)?,
-                default_params_json: r.get(6)?,
-                memory_enabled: r.get::<_, i64>(7)? != 0,
-                created_at: r.get(8)?,
-                updated_at: r.get(9)?,
-            }))
-        } else {
-            Ok(None)
-        }
+                }))
+            } else {
+                Ok(None)
+            }
+        })
     }
 
     pub fn create_space(
@@ -701,7 +764,7 @@ impl Database {
     ) -> Result<Space> {
         let id = Uuid::new_v4().to_string();
         let now = Utc::now().timestamp_millis();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         conn.execute(
             "INSERT INTO spaces (id, name, description, instructions, memory_enabled, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, 1, ?5, ?5)",
@@ -733,7 +796,7 @@ impl Database {
         memory_enabled: Option<bool>,
     ) -> Result<()> {
         let now = Utc::now().timestamp_millis();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         // memory_enabled is optional so older callers (and the snippets-style
         // partial updates from the frontend) don't have to thread it through —
         // None means "leave the existing value alone".
@@ -760,7 +823,7 @@ impl Database {
     }
 
     pub fn delete_space(&self, id: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         conn.execute("DELETE FROM spaces WHERE id = ?1", params![id])?;
         Ok(())
     }
@@ -768,27 +831,28 @@ impl Database {
     // ------------ space files ------------
 
     pub fn list_space_files(&self, space_id: &str) -> Result<Vec<SpaceFile>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT id, space_id, name, mime, kind, data, size, position, created_at
-             FROM space_files WHERE space_id = ?1 ORDER BY position ASC",
-        )?;
-        let rows = stmt
-            .query_map(params![space_id], |r| {
-                Ok(SpaceFile {
-                    id: r.get(0)?,
-                    space_id: r.get(1)?,
-                    name: r.get(2)?,
-                    mime: r.get(3)?,
-                    kind: r.get(4)?,
-                    data: r.get(5)?,
-                    size: r.get(6)?,
-                    position: r.get(7)?,
-                    created_at: r.get(8)?,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(rows)
+        self.with_read(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, space_id, name, mime, kind, data, size, position, created_at
+                 FROM space_files WHERE space_id = ?1 ORDER BY position ASC",
+            )?;
+            let rows = stmt
+                .query_map(params![space_id], |r| {
+                    Ok(SpaceFile {
+                        id: r.get(0)?,
+                        space_id: r.get(1)?,
+                        name: r.get(2)?,
+                        mime: r.get(3)?,
+                        kind: r.get(4)?,
+                        data: r.get(5)?,
+                        size: r.get(6)?,
+                        position: r.get(7)?,
+                        created_at: r.get(8)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
     }
 
     pub fn add_space_file(
@@ -803,7 +867,7 @@ impl Database {
     ) -> Result<SpaceFile> {
         let id = Uuid::new_v4().to_string();
         let now = Utc::now().timestamp_millis();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         conn.execute(
             "INSERT INTO space_files (id, space_id, name, mime, kind, data, size, position, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
@@ -823,7 +887,7 @@ impl Database {
     }
 
     pub fn remove_space_file(&self, file_id: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         conn.execute("DELETE FROM space_files WHERE id = ?1", params![file_id])?;
         Ok(())
     }
@@ -831,26 +895,27 @@ impl Database {
     // ------------ space memories ------------
 
     pub fn list_space_memories(&self, space_id: &str) -> Result<Vec<SpaceMemory>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT id, space_id, content, source_session_id, source_message_id,
-                    created_at, updated_at
-             FROM space_memories WHERE space_id = ?1 ORDER BY created_at ASC",
-        )?;
-        let rows = stmt
-            .query_map(params![space_id], |r| {
-                Ok(SpaceMemory {
-                    id: r.get(0)?,
-                    space_id: r.get(1)?,
-                    content: r.get(2)?,
-                    source_session_id: r.get(3)?,
-                    source_message_id: r.get(4)?,
-                    created_at: r.get(5)?,
-                    updated_at: r.get(6)?,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(rows)
+        self.with_read(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, space_id, content, source_session_id, source_message_id,
+                        created_at, updated_at
+                 FROM space_memories WHERE space_id = ?1 ORDER BY created_at ASC",
+            )?;
+            let rows = stmt
+                .query_map(params![space_id], |r| {
+                    Ok(SpaceMemory {
+                        id: r.get(0)?,
+                        space_id: r.get(1)?,
+                        content: r.get(2)?,
+                        source_session_id: r.get(3)?,
+                        source_message_id: r.get(4)?,
+                        created_at: r.get(5)?,
+                        updated_at: r.get(6)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
     }
 
     pub fn add_space_memory(
@@ -862,7 +927,7 @@ impl Database {
     ) -> Result<SpaceMemory> {
         let id = Uuid::new_v4().to_string();
         let now = Utc::now().timestamp_millis();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         conn.execute(
             "INSERT INTO space_memories (id, space_id, content, source_session_id,
                                           source_message_id, created_at, updated_at)
@@ -880,25 +945,32 @@ impl Database {
         })
     }
 
-    pub fn update_space_memory(&self, id: &str, content: &str) -> Result<()> {
+    pub fn update_space_memory(&self, id: &str, space_id: &str, content: &str) -> Result<()> {
+        // Scope by space_id — see the comment on `update_message` for the
+        // same defense-in-depth rationale.
         let now = Utc::now().timestamp_millis();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         conn.execute(
-            "UPDATE space_memories SET content = ?1, updated_at = ?2 WHERE id = ?3",
-            params![content, now, id],
+            "UPDATE space_memories
+             SET content = ?1, updated_at = ?2
+             WHERE id = ?3 AND space_id = ?4",
+            params![content, now, id, space_id],
         )?;
         Ok(())
     }
 
-    pub fn remove_space_memory(&self, id: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute("DELETE FROM space_memories WHERE id = ?1", params![id])?;
+    pub fn remove_space_memory(&self, id: &str, space_id: &str) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "DELETE FROM space_memories WHERE id = ?1 AND space_id = ?2",
+            params![id, space_id],
+        )?;
         Ok(())
     }
 
     /// Read every memory across every space — used by the export path.
     pub fn all_space_memories(&self) -> Result<Vec<SpaceMemory>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         let mut stmt = conn.prepare(
             "SELECT id, space_id, content, source_session_id, source_message_id,
                     created_at, updated_at
@@ -923,7 +995,7 @@ impl Database {
     // ------------ snippets ------------
 
     pub fn list_snippets(&self) -> Result<Vec<Snippet>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         let mut stmt = conn.prepare(
             "SELECT id, title, prompt, attachments_json, provider, model,
                     created_at, updated_at
@@ -956,7 +1028,7 @@ impl Database {
     ) -> Result<Snippet> {
         let id = Uuid::new_v4().to_string();
         let now = Utc::now().timestamp_millis();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         conn.execute(
             "INSERT INTO snippets (id, title, prompt, attachments_json, provider, model, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
@@ -984,7 +1056,7 @@ impl Database {
         model: Option<&str>,
     ) -> Result<()> {
         let now = Utc::now().timestamp_millis();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         conn.execute(
             "UPDATE snippets SET title = ?1, prompt = ?2, attachments_json = ?3,
                                  provider = ?4, model = ?5, updated_at = ?6
@@ -995,7 +1067,7 @@ impl Database {
     }
 
     pub fn delete_snippet(&self, id: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         conn.execute("DELETE FROM snippets WHERE id = ?1", params![id])?;
         Ok(())
     }
@@ -1006,7 +1078,7 @@ impl Database {
     // legacy stdio-flavoured columns stay NULL.
 
     pub fn list_mcp_servers(&self) -> Result<Vec<McpServer>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         let mut stmt = conn.prepare(
             "SELECT id, name, url, headers_json, enabled, created_at, updated_at
              FROM mcp_servers ORDER BY name ASC",
@@ -1038,7 +1110,7 @@ impl Database {
         enabled: bool,
     ) -> Result<McpServer> {
         let now = Utc::now().timestamp_millis();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
 
         match id {
             Some(id) if !id.is_empty() => {
@@ -1100,7 +1172,7 @@ impl Database {
     }
 
     pub fn delete_mcp_server(&self, id: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         conn.execute("DELETE FROM mcp_servers WHERE id = ?1", params![id])?;
         Ok(())
     }
@@ -1122,7 +1194,7 @@ impl Database {
     /// Read every message across every session. Used by the export path —
     /// callers normally fetch messages per-session.
     pub fn all_messages(&self) -> Result<Vec<Message>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         let mut stmt = conn.prepare(
             "SELECT id, session_id, role, content, thinking, attachments_json, metrics_json, created_at
              FROM messages ORDER BY session_id, created_at",
@@ -1146,7 +1218,7 @@ impl Database {
 
     /// Read every space file across every space.
     pub fn all_space_files(&self) -> Result<Vec<SpaceFile>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         let mut stmt = conn.prepare(
             "SELECT id, space_id, name, mime, kind, data, size, position, created_at
              FROM space_files ORDER BY space_id, position",
@@ -1201,7 +1273,7 @@ impl Database {
     /// errors mid-import — so a bad snapshot can't leave the shared
     /// connection with FK enforcement disabled.
     pub fn restore_snapshot(&self, snap: &DatabaseSnapshot) -> Result<ImportStats> {
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.conn.lock();
 
         // PRAGMA foreign_keys cannot be toggled inside a transaction, so
         // flip it before begin and restore after commit.
@@ -1393,7 +1465,7 @@ impl Database {
     /// cleared for parity with `archive_session`. Returns the number of
     /// rows that were newly archived so the UI can show a toast.
     pub fn archive_all_sessions(&self) -> Result<i64> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         let now = Utc::now().timestamp_millis();
         let affected = conn.execute(
             "UPDATE sessions SET archived_at = ?1, pinned_at = NULL
@@ -1411,7 +1483,7 @@ impl Database {
     /// transaction failure can't leave the shared connection with FK
     /// enforcement disabled.
     pub fn wipe_user_data(&self) -> Result<()> {
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.conn.lock();
         conn.pragma_update(None, "foreign_keys", "OFF")?;
         let result = Self::wipe_user_data_locked(&mut conn);
         if let Err(e) = conn.pragma_update(None, "foreign_keys", "ON") {
@@ -1443,7 +1515,7 @@ impl Database {
     ///
     /// FK enforcement is restored on every exit path (see [`wipe_user_data`]).
     pub fn wipe_all(&self) -> Result<()> {
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.conn.lock();
         conn.pragma_update(None, "foreign_keys", "OFF")?;
         let result = Self::wipe_all_locked(&mut conn);
         if let Err(e) = conn.pragma_update(None, "foreign_keys", "ON") {
@@ -1514,4 +1586,37 @@ pub struct ImportStats {
     pub snippets: usize,
     pub mcp_servers: usize,
     pub settings: usize,
+}
+
+/// Authoritative "does this column exist?" check via `PRAGMA table_info`.
+/// Used by `migrate()` to decide whether to run an `ALTER TABLE ADD COLUMN`.
+/// Returns an `Err` only on genuine query failures (bad table name,
+/// connection problem) — a missing column returns `Ok(false)`, which the
+/// older `SELECT col FROM tbl LIMIT 0` + `.is_ok()` pattern couldn't
+/// distinguish from transient lock errors.
+fn has_column(conn: &rusqlite::Connection, table: &str, column: &str) -> Result<bool> {
+    // PRAGMA table_info doesn't accept bound parameters, so we substitute
+    // the table name into the SQL. Validate it as a SQL identifier first
+    // so we can't be tricked into emitting arbitrary SQL via a future
+    // caller's user-supplied table name. Migrations only ever pass
+    // hard-coded table names, but the guard makes the function safe to
+    // re-use.
+    if !table
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        || table.is_empty()
+    {
+        return Err(anyhow::anyhow!("invalid table name: {table}"));
+    }
+    let sql = format!("PRAGMA table_info({table})");
+    let mut stmt = conn.prepare(&sql)?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        // PRAGMA table_info layout: (cid, name, type, notnull, dflt_value, pk).
+        let name: String = row.get(1)?;
+        if name == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }

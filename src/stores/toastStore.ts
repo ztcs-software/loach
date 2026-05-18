@@ -24,6 +24,11 @@ interface ToastState {
   clear: () => void;
 }
 
+// Module-scoped map from toast id to its auto-dismiss timer id. Lets
+// `dismiss()` cancel the pending sweep — otherwise the timer fires later
+// against a now-empty toast list, leaking a closure per dismissed toast.
+const dismissTimers = new Map<string, number>();
+
 export const useToastStore = create<ToastState>((set) => ({
   toasts: [],
   push: (toast) => {
@@ -31,12 +36,27 @@ export const useToastStore = create<ToastState>((set) => ({
     set((s) => ({ toasts: [...s.toasts, { id, ...toast }] }));
     // Auto-dismiss after 4s — long enough for a glance, short enough to
     // not pile up if the extractor saves a stack of memories at once.
-    window.setTimeout(() => {
+    const timerId = window.setTimeout(() => {
+      dismissTimers.delete(id);
       set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) }));
     }, 4000);
+    dismissTimers.set(id, timerId);
     return id;
   },
-  dismiss: (id) =>
-    set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })),
-  clear: () => set({ toasts: [] }),
+  dismiss: (id) => {
+    const timer = dismissTimers.get(id);
+    if (timer !== undefined) {
+      window.clearTimeout(timer);
+      dismissTimers.delete(id);
+    }
+    set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) }));
+  },
+  clear: () => {
+    // Pull all pending timers so a `clear()` doesn't leave them firing
+    // against a freshly-pushed toast that happens to reuse an id (very
+    // unlikely with the time-plus-random format, but cheap to be safe).
+    for (const timer of dismissTimers.values()) window.clearTimeout(timer);
+    dismissTimers.clear();
+    set({ toasts: [] });
+  },
 }));

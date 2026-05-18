@@ -33,6 +33,15 @@ export interface ParsedImport {
 
 const EMPTY: ParsedImport = { format: "empty", messages: [] };
 
+/**
+ * Hard ceiling on JSON we'll attempt to parse. `JSON.parse` is synchronous
+ * and runs on the UI thread; a multi-megabyte paste can freeze the app
+ * for seconds. 4 MiB is comfortably above any realistic exported chat
+ * transcript (a 10 000-message session JSON sits in low hundreds of KB)
+ * while small enough that the parse stays sub-100 ms on a modern machine.
+ */
+const MAX_JSON_BYTES = 4 * 1024 * 1024;
+
 export function parseImportContext(text: string): ParsedImport {
   const trimmed = text.trim();
   if (!trimmed) return EMPTY;
@@ -40,18 +49,30 @@ export function parseImportContext(text: string): ParsedImport {
   // ---- JSON branch ------------------------------------------------------
 
   if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
-    try {
-      const parsed = JSON.parse(trimmed) as unknown;
-      const candidate = extractMessagesArray(parsed);
-      const messages = candidate
-        .map(normalizeMessage)
-        .filter((m): m is ImportedMessage => !!m);
-      if (messages.length > 0) {
-        return { format: "json", messages };
+    // Guard the synchronous `JSON.parse` against pathological inputs.
+    // Pasting a 100 MB JSON file would otherwise freeze the renderer.
+    // Fall through to the markdown/plain detectors on oversized input
+    // so the user still gets *some* import behaviour — they'll most
+    // likely end up in the plain-text branch, which keeps the app
+    // responsive even if it's not exactly what they wanted.
+    if (trimmed.length > MAX_JSON_BYTES) {
+      console.warn(
+        `parseImportContext: skipping JSON branch — input ${trimmed.length} bytes exceeds ${MAX_JSON_BYTES}-byte cap`,
+      );
+    } else {
+      try {
+        const parsed = JSON.parse(trimmed) as unknown;
+        const candidate = extractMessagesArray(parsed);
+        const messages = candidate
+          .map(normalizeMessage)
+          .filter((m): m is ImportedMessage => !!m);
+        if (messages.length > 0) {
+          return { format: "json", messages };
+        }
+      } catch {
+        // Malformed JSON — fall through; the user probably pasted
+        // something that just happens to start with `{`.
       }
-    } catch {
-      // Malformed JSON — fall through; the user probably pasted something
-      // that just happens to start with `{`.
     }
   }
 

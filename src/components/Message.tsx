@@ -138,6 +138,14 @@ function ThinkingBlock({ text, isStreaming }: { text: string; isStreaming?: bool
 function MessageItemImpl({ message, isStreaming, metrics }: MessageProps) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
+  // Separate state for the keyboard-accessible kebab below the user
+  // bubble. Two menus (right-click + visible kebab) share the same
+  // items but use distinct triggers so the right-click can still
+  // anchor to the cursor while keyboard users get a discoverable
+  // button. Without this second path, tabbing through messages
+  // skipped right past the user's own Copy / Save-as-snippet
+  // actions — a real a11y gap.
+  const [userKebabOpen, setUserKebabOpen] = useState(false);
   const [copied, setCopied] = useState(false);
   // Coordinates (relative to the bubble) where the user right-clicked. We pin
   // a hidden trigger to that point so the dropdown opens next to the cursor
@@ -286,6 +294,16 @@ function MessageItemImpl({ message, isStreaming, metrics }: MessageProps) {
                 key={i}
                 src={`data:${img.mime};base64,${img.data}`}
                 alt={img.name}
+                // Fixed intrinsic size matches the rendered CSS box so the
+                // browser doesn't have to wait on the decode to know the
+                // layout. `loading="lazy"` + `decoding="async"` let chats
+                // with lots of historical images defer their decode until
+                // they scroll near the viewport — keeps the initial mount
+                // snappy even on long transcripts.
+                width={80}
+                height={80}
+                loading="lazy"
+                decoding="async"
                 className="h-20 w-20 rounded-lg object-cover"
               />
             ))}
@@ -329,6 +347,53 @@ function MessageItemImpl({ message, isStreaming, metrics }: MessageProps) {
         ) : (
           <div data-message-content>
             <Markdown content={message.content} />
+          </div>
+        )}
+        {/* Keyboard-accessible action menu for user messages. Mirrors the
+            assistant kebab below — same shape, same actions as the
+            right-click menu above. Hidden until hover/focus to keep the
+            outgoing-message look clean, but tab-reachable for keyboard
+            users who couldn't otherwise open the hidden right-click
+            trigger. */}
+        {isUser && displayContent.length > 0 && (
+          <div className="absolute -bottom-1 right-2 translate-y-full">
+            <DropdownMenu open={userKebabOpen} onOpenChange={setUserKebabOpen}>
+              <DropdownMenuTrigger asChild>
+                <button
+                  type="button"
+                  aria-label="Message actions"
+                  className={cn(
+                    "inline-flex h-7 w-7 items-center justify-center rounded-full text-foreground/55 transition-opacity hover:bg-foreground/10 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
+                    userKebabOpen
+                      ? "opacity-100"
+                      : "opacity-0 group-hover:opacity-100 focus-visible:opacity-100",
+                  )}
+                >
+                  <MoreHorizontal className="h-4 w-4" />
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent
+                align="end"
+                className="!bg-none !bg-foreground/[0.08] border border-foreground/10 backdrop-blur-xl min-w-[180px]"
+              >
+                <DropdownMenuItem
+                  onSelect={() => void copyUserContent(displayContent)}
+                  className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
+                >
+                  <Copy className="h-4 w-4 text-foreground/60" />
+                  Copy
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  onSelect={() =>
+                    openSnippetDialog({ seedPrompt: displayContent })
+                  }
+                  className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
+                >
+                  <Bookmark className="h-4 w-4 text-foreground/60" />
+                  Save as Snippet
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
           </div>
         )}
         {!isUser && message.content.length > 0 && (

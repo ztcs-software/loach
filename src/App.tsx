@@ -7,6 +7,7 @@ import { ChatInput } from "@/components/ChatInput";
 import { ParameterPanel } from "@/components/ParameterPanel";
 import { SettingsDialog } from "@/components/SettingsDialog";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { SwitchVariantProvider } from "@/components/ui/switch";
 import { SpaceForm } from "@/components/SpaceForm";
 import { SpaceView } from "@/components/SpaceView";
 import { SpacesLibrary } from "@/components/SpacesLibrary";
@@ -20,6 +21,7 @@ import { CodeCanvas } from "@/components/CodeCanvas";
 import { SearchBar } from "@/components/SearchBar";
 import { SelectionCopyButton } from "@/components/SelectionCopyButton";
 import { ToastHost } from "@/components/ToastHost";
+import { ConfirmDialogHost } from "@/components/ConfirmDialog";
 import { Button } from "@/components/ui/button";
 import { SquarePen } from "lucide-react";
 import { resolveDefaultModelChoice, useChatStore } from "@/stores/chatStore";
@@ -131,6 +133,19 @@ export default function App() {
 
   return (
     <TooltipProvider delayDuration={250}>
+      {/* SwitchVariantProvider tells the Switch primitive which visual
+          style to use by default ("glassy" on the Aurora gradient,
+          "flat" on the Solid background). Keeps the primitive
+          store-agnostic — only this single read of `background_style`
+          here is coupled to the settings store. */}
+      <SwitchVariantProvider
+        value={backgroundStyle === "gradient" ? "glassy" : "flat"}
+      >
+      {/* ConfirmDialogHost wraps everything below so any descendant can
+          call `useConfirm()` to surface a styled confirm/prompt dialog.
+          Replaces the native `window.confirm()` / `window.prompt()`
+          modals, which look like browser chrome inside our Tauri shell. */}
+      <ConfirmDialogHost>
       {/* Background layer — gradient mesh or solid, per settings */}
       <div
         className={cn(
@@ -211,6 +226,8 @@ export default function App() {
           surface (including the lock screen path, in the future) land in a
           predictable spot. Renders nothing when no toasts are queued. */}
       <ToastHost />
+      </ConfirmDialogHost>
+      </SwitchVariantProvider>
     </TooltipProvider>
   );
 }

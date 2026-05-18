@@ -30,7 +30,18 @@ export default defineConfig(async () => ({
       ignored: ["**/src-tauri/**"],
     },
   },
-  envPrefix: ["VITE_", "TAURI_ENV_*"],
+  // List the specific Tauri env vars we want exposed instead of using the
+  // wildcard `TAURI_ENV_*`. A wildcard would scoop up any future variable
+  // a developer accidentally sets locally (e.g. `TAURI_ENV_SECRET=…`) into
+  // the bundle. Tauri only sets the four below in its dev/build env, so an
+  // explicit list is both safer and more obviously a known surface.
+  envPrefix: [
+    "VITE_",
+    "TAURI_ENV_PLATFORM",
+    "TAURI_ENV_ARCH",
+    "TAURI_ENV_FAMILY",
+    "TAURI_ENV_DEBUG",
+  ],
   build: {
     target:
       process.env.TAURI_ENV_PLATFORM === "windows" ? "chrome105" : "safari13",

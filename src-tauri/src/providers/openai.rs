@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
 use futures_util::StreamExt;
@@ -18,6 +18,12 @@ use crate::stream::{event_channel, StreamEvent, StreamRegistry};
 /// frame separator (broken proxy, HTML error page mid-stream, etc.).
 const MAX_FRAME_BYTES: usize = 1024 * 1024;
 
+/// Wall-clock ceiling for `list_models`. The shared `reqwest::Client` has
+/// no default timeout (the chat-stream path needs unbounded time for long
+/// generations), so admin calls supply their own. 30 s is well above any
+/// healthy /models response.
+const ADMIN_TIMEOUT: Duration = Duration::from_secs(30);
+
 #[derive(Debug, Deserialize)]
 struct ModelsResponse {
     data: Vec<OpenAIModel>,
@@ -30,7 +36,7 @@ struct OpenAIModel {
 
 pub async fn list_models(http: &Client, base_url: &str) -> Result<Vec<ModelInfo>> {
     let url = format!("{}/models", base_url.trim_end_matches('/'));
-    let mut req = http.get(url);
+    let mut req = http.get(url).timeout(ADMIN_TIMEOUT);
     if let Some(key) = secrets::get_openai_key()? {
         if !key.is_empty() {
             req = req.bearer_auth(key);
@@ -103,10 +109,16 @@ fn build_messages(req: &ChatRequest) -> Vec<OaMsg> {
                 parts.push(json!({ "type": "text", "text": m.content }));
             }
             for img in &m.images {
-                // Assume PNG unless caller provides otherwise; GPT-4o accepts either.
+                // Sniff the image format from the base64 prefix so the
+                // data URL carries the right MIME. GPT-4o tolerates a
+                // mislabel; some stricter endpoints (and image-only
+                // models behind compatible proxies) don't. Falls back to
+                // `image/png` for unknown signatures — the most common
+                // upload format and the previously-hard-coded default.
+                let mime = sniff_image_mime(img);
                 parts.push(json!({
                     "type": "image_url",
-                    "image_url": { "url": format!("data:image/png;base64,{img}") }
+                    "image_url": { "url": format!("data:{mime};base64,{img}") }
                 }));
             }
             Value::Array(parts)
@@ -152,10 +164,25 @@ pub async fn chat_stream(
     }
 
     let url = format!("{}/chat/completions", req.base_url.trim_end_matches('/'));
-    let mut http_req = http.post(url).json(&body);
+    let mut http_req = http.post(&url).json(&body);
     if let Some(key) = secrets::get_openai_key().ok().flatten() {
         if !key.is_empty() {
-            http_req = http_req.bearer_auth(key);
+            // Refuse to send the bearer token over cleartext HTTP unless
+            // the user is hitting their own machine (LocalAI / Ollama-
+            // OpenAI-compat on 127.0.0.1, etc.). A cleartext bearer
+            // header on a remote endpoint is a key-exfiltration vector —
+            // any process on the network path can snoop it. We still
+            // send the request (without auth) so users get a meaningful
+            // 401 from the server instead of a silent failure.
+            if is_safe_for_bearer(&req.base_url) {
+                http_req = http_req.bearer_auth(key);
+            } else {
+                tracing::warn!(
+                    "Refusing to send OpenAI bearer token over cleartext to {} — \
+                     change the base URL to https:// or accept that requests will be unauthenticated.",
+                    req.base_url
+                );
+            }
         }
     }
 
@@ -190,12 +217,27 @@ pub async fn chat_stream(
     let mut token_count: u32 = 0;
     let mut byte_stream = resp.bytes_stream();
     let mut buf: Vec<u8> = Vec::new();
+    // Byte offset into `buf` from which the next frame-separator search
+    // should start. Without this we rescan the entire buffer on every
+    // chunk arrival — O(n²) across a stream where a single ~1 MiB frame
+    // arrives as many small chunks. Reset to 0 after every drain (the
+    // bytes shift down); after a no-hit scan, advance past everything
+    // we already checked, minus 3 bytes of overlap so a `\r\n\r\n`
+    // straddling the chunk boundary is still caught.
+    let mut scan_offset: usize = 0;
 
     loop {
         select! {
             biased;
             _ = cancel.notified() => {
-                let _ = app.emit(&channel, StreamEvent::Done);
+                // Drop the byte stream first so reqwest closes the TCP
+                // connection right away. With OpenAI-compatible endpoints
+                // this is a cheap signal to the server that we no longer
+                // want tokens — important because billing-by-token meters
+                // keep ticking until the server-side generator stops, and
+                // we don't want to pay for output we're about to discard.
+                drop(byte_stream);
+                let _ = app.emit(&channel, StreamEvent::Cancelled);
                 registry.finish(&req.stream_id);
                 return Ok(());
             }
@@ -230,9 +272,17 @@ pub async fn chat_stream(
                         let mut finished = false;
                         // SSE frames are separated by a blank line: `\n\n`
                         // for compliant servers, `\r\n\r\n` for proxies that
-                        // re-frame on CRLF. We accept both.
-                        while let Some((pos, sep_len)) = find_frame_end_with_len(&buf) {
+                        // re-frame on CRLF. We accept both. We scan from
+                        // `scan_offset` rather than 0 so previously-checked
+                        // bytes aren't re-walked on each chunk arrival.
+                        while let Some((rel_pos, sep_len)) =
+                            find_frame_end_with_len(&buf[scan_offset..])
+                        {
+                            let pos = scan_offset + rel_pos;
                             let frame: Vec<u8> = buf.drain(..pos + sep_len).collect();
+                            // Draining shifts everything down — reset the
+                            // scan cursor to the new start of the buffer.
+                            scan_offset = 0;
                             // Strip the trailing separator
                             let text = String::from_utf8_lossy(
                                 &frame[..frame.len() - sep_len],
@@ -269,6 +319,12 @@ pub async fn chat_stream(
                             }
                             if finished { break; }
                         }
+                        // Bump scan_offset past the bytes we just walked
+                        // without finding a separator. Leave a 3-byte
+                        // overlap so a `\r\n\r\n` straddling the next
+                        // chunk's arrival still gets caught (longest
+                        // separator is 4 bytes, so 3 of overlap suffices).
+                        scan_offset = buf.len().saturating_sub(3);
                         if !pending_think.is_empty() {
                             let _ = app.emit(
                                 &channel,
@@ -327,6 +383,78 @@ pub async fn chat_stream(
                 }
             }
         }
+    }
+}
+
+/// Decide whether it's safe to attach a bearer token to a request going
+/// to `base_url`. Safe iff:
+///   - the URL is https://, OR
+///   - the URL is http:// and the host is a loopback address (local
+///     OpenAI-compat servers like LocalAI typically listen on
+///     127.0.0.1:8080 with no TLS).
+/// Anything else — http:// to an external host — is treated as
+/// untrusted transport and we drop the auth header to avoid leaking the
+/// user's API key over cleartext.
+fn is_safe_for_bearer(base_url: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(base_url) else {
+        // If we can't parse, err on the side of caution — better a
+        // visible 401 than a leaked key.
+        return false;
+    };
+    match url.scheme() {
+        "https" => true,
+        "http" => {
+            let Some(host) = url.host_str() else {
+                return false;
+            };
+            if host.eq_ignore_ascii_case("localhost")
+                || host.eq_ignore_ascii_case("ip6-localhost")
+            {
+                return true;
+            }
+            // Literal IP: allow only loopback ranges.
+            if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+                return ip.is_loopback();
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
+/// Guess an image MIME type from the leading characters of its base64
+/// payload. The first byte of a JPEG / PNG / GIF / WebP file is fixed,
+/// so its base64 prefix is also fixed — we can sniff without decoding.
+/// Returns `"image/png"` as a safe default for anything we don't
+/// recognise (the most common upload format and the historical default
+/// before this helper existed).
+fn sniff_image_mime(b64: &str) -> &'static str {
+    // PNG  89 50 4E 47 …      → "iVBO…"
+    // JPEG FF D8 FF …          → "/9j/…"
+    // GIF  47 49 46 38 …       → "R0lG…"
+    // WebP 52 49 46 46 . . . . 57 45 42 50 …
+    //   That's "RIFF" then "WEBP" at byte 8 — base64 "UklGRg==" prefix
+    //   for RIFF, but only WebP variants reuse that container. We sniff
+    //   the longer 16-char prefix to disambiguate.
+    let trimmed = b64.trim_start();
+    if trimmed.starts_with("iVBORw") {
+        "image/png"
+    } else if trimmed.starts_with("/9j/") {
+        "image/jpeg"
+    } else if trimmed.starts_with("R0lGOD") {
+        "image/gif"
+    } else if trimmed.starts_with("UklGR") && trimmed.len() >= 24 {
+        // RIFF container — check for "WEBP" sub-tag at bytes 8-11 (which
+        // sits at base64 offset 14 with the "WEBP" four-cc encoding to
+        // "V0VC" / "V0VCUA" depending on padding). The simplest check is
+        // for the literal "V0VC" substring near the start.
+        if trimmed[12..24].contains("V0VC") {
+            "image/webp"
+        } else {
+            "image/png"
+        }
+    } else {
+        "image/png"
     }
 }
 

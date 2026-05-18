@@ -386,8 +386,11 @@ function SetupWizard({
       if (pin !== pinConfirm) return "PIN and confirmation do not match.";
     }
     if (usesPassword) {
-      if (password.length < 6)
-        return "Password must be at least 6 characters.";
+      // Mirror the Rust-side minimum in `security::setup`. Rust is the
+      // source of truth — frontend check is a UX nicety so users see the
+      // problem before the round-trip.
+      if (password.length < 8)
+        return "Password must be at least 8 characters.";
       if (password !== passwordConfirm)
         return "Password and confirmation do not match.";
     }

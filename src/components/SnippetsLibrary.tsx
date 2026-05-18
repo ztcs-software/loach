@@ -16,6 +16,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { useConfirm } from "@/components/ConfirmDialog";
 import { useChatStore } from "@/stores/chatStore";
 import { useSnippetStore } from "@/stores/snippetStore";
 import { useSpaceStore } from "@/stores/spaceStore";
@@ -34,6 +35,7 @@ import type { Snippet } from "@/types";
  * canvas. See `App.tsx` for the routing.
  */
 export function SnippetsLibrary() {
+  const { confirm } = useConfirm();
   const snippets = useSnippetStore((s) => s.snippets);
   const openDialog = useSnippetStore((s) => s.openDialog);
   const remove = useSnippetStore((s) => s.remove);
@@ -61,14 +63,14 @@ export function SnippetsLibrary() {
     primeComposer(snippet.prompt, []);
   };
 
-  const handleDelete = (snippet: Snippet) => {
-    if (
-      confirm(
-        `Delete snippet "${snippet.title}"? This cannot be undone.`,
-      )
-    ) {
-      void remove(snippet.id);
-    }
+  const handleDelete = async (snippet: Snippet) => {
+    const ok = await confirm({
+      title: `Delete “${snippet.title}”?`,
+      body: "This snippet will be removed permanently.",
+      confirmLabel: "Delete snippet",
+      destructive: true,
+    });
+    if (ok) void remove(snippet.id);
   };
 
   return (
@@ -154,6 +156,7 @@ function SnippetCard({
     <article
       role="button"
       tabIndex={0}
+      aria-label={`Edit snippet: ${snippet.title}`}
       onClick={onEdit}
       onKeyDown={(e) => {
         if (e.key === "Enter" || e.key === " ") {

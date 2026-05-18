@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
 use futures_util::StreamExt;
@@ -16,6 +16,20 @@ use crate::stream::{admin_channel, event_channel, AdminEvent, StreamEvent, Strea
 /// never delivers a newline (broken proxy, ratelimit page, etc.) before it
 /// fills memory.
 const MAX_LINE_BYTES: usize = 1024 * 1024; // 1 MiB
+
+/// Per-request ceiling for admin calls (show / delete / copy / probe /
+/// list_models / unload / preload). The shared `reqwest::Client` in
+/// `AppState` is built without a default timeout because the chat-stream
+/// path needs unbounded wall-clock for long generations — so admin calls
+/// have to apply their own. 30 s is well above any healthy local Ollama
+/// response and short enough that the UI doesn't appear hung if the
+/// server is wedged. Pull / create are streamed and skip this cap; their
+/// progress events keep the user informed.
+const ADMIN_TIMEOUT: Duration = Duration::from_secs(30);
+/// Shorter wall-clock for the "is Ollama up?" health check. A real Ollama
+/// answers `/api/tags` in single-digit ms; if we have to wait 5 s the
+/// answer for UX purposes is "no, treat it as down".
+const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 // ---------------------------------------------------------------------------
 // Model admin: show / delete / copy / pull / create
@@ -64,7 +78,13 @@ pub async fn show_model(
 ) -> Result<OllamaShowResponse> {
     let url = format!("{}/api/show", base_url.trim_end_matches('/'));
     let body = serde_json::json!({ "name": name });
-    let resp = http.post(url).json(&body).send().await?.error_for_status()?;
+    let resp = http
+        .post(url)
+        .json(&body)
+        .timeout(ADMIN_TIMEOUT)
+        .send()
+        .await?
+        .error_for_status()?;
     let parsed: OllamaShowResponse = resp.json().await?;
     Ok(parsed)
 }
@@ -72,7 +92,12 @@ pub async fn show_model(
 pub async fn delete_model(http: &Client, base_url: &str, name: &str) -> Result<()> {
     let url = format!("{}/api/delete", base_url.trim_end_matches('/'));
     let body = serde_json::json!({ "name": name });
-    let resp = http.delete(url).json(&body).send().await?;
+    let resp = http
+        .delete(url)
+        .json(&body)
+        .timeout(ADMIN_TIMEOUT)
+        .send()
+        .await?;
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
@@ -92,7 +117,12 @@ pub async fn copy_model(
         "source": source,
         "destination": destination,
     });
-    let resp = http.post(url).json(&body).send().await?;
+    let resp = http
+        .post(url)
+        .json(&body)
+        .timeout(ADMIN_TIMEOUT)
+        .send()
+        .await?;
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
@@ -166,7 +196,16 @@ async fn drive_progress_stream(
         select! {
             biased;
             _ = cancel.notified() => {
-                let _ = app.emit(&channel, AdminEvent::Done);
+                // Explicitly drop the response stream BEFORE returning so
+                // reqwest closes the underlying TCP connection right away.
+                // If we just `return Ok(())`, the stream is still dropped
+                // by stack unwind, but doing it here makes the intent
+                // obvious and guarantees the connection close happens
+                // before any further work on the calling task — which
+                // gives the server-side pull the earliest possible chance
+                // to notice the client gave up and abort the download.
+                drop(byte_stream);
+                let _ = app.emit(&channel, AdminEvent::Cancelled);
                 registry.finish(&stream_id);
                 return Ok(());
             }
@@ -305,6 +344,7 @@ struct TagDetails {
 
 pub async fn probe(http: &Client, base_url: &str) -> bool {
     http.get(format!("{}/api/tags", base_url.trim_end_matches('/')))
+        .timeout(PROBE_TIMEOUT)
         .send()
         .await
         .map(|r| r.status().is_success())
@@ -313,7 +353,12 @@ pub async fn probe(http: &Client, base_url: &str) -> bool {
 
 pub async fn list_models(http: &Client, base_url: &str) -> Result<Vec<ModelInfo>> {
     let url = format!("{}/api/tags", base_url.trim_end_matches('/'));
-    let resp = http.get(url).send().await?.error_for_status()?;
+    let resp = http
+        .get(url)
+        .timeout(ADMIN_TIMEOUT)
+        .send()
+        .await?
+        .error_for_status()?;
     let body: TagsResponse = resp.json().await?;
     Ok(body
         .models
@@ -337,7 +382,7 @@ pub async fn unload_model(http: &Client, base_url: &str, model: &str) -> Result<
         "stream": false,
         "keep_alive": 0,
     });
-    let _ = http.post(url).json(&body).send().await;
+    let _ = http.post(url).json(&body).timeout(ADMIN_TIMEOUT).send().await;
     Ok(())
 }
 
@@ -353,7 +398,16 @@ pub async fn preload_model(http: &Client, base_url: &str, model: &str) -> Result
         "messages": [],
         "stream": false,
     });
-    let _ = http.post(url).json(&body).send().await;
+    // Preload can legitimately take longer than ADMIN_TIMEOUT for large
+    // models (a 70 B model cold-loading from disk easily exceeds 30 s),
+    // so give it a more generous ceiling. Still bounded so a wedged
+    // Ollama can't hang the loader forever.
+    let _ = http
+        .post(url)
+        .json(&body)
+        .timeout(Duration::from_secs(120))
+        .send()
+        .await;
     Ok(())
 }
 
@@ -537,7 +591,14 @@ pub async fn chat_stream(
         select! {
             biased;
             _ = cancel.notified() => {
-                let _ = app.emit(&channel, StreamEvent::Done);
+                // Drop the byte stream before returning so reqwest closes
+                // the TCP connection right away — same rationale as in
+                // `drive_progress_stream`. Without this the connection
+                // close waits for the calling task to unwind, which can
+                // leave the server processing the request for noticeably
+                // longer than needed.
+                drop(byte_stream);
+                let _ = app.emit(&channel, StreamEvent::Cancelled);
                 registry.finish(&req.stream_id);
                 return Ok(());
             }

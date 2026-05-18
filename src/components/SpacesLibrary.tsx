@@ -16,6 +16,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { useConfirm } from "@/components/ConfirmDialog";
 import { useChatStore } from "@/stores/chatStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useUIStore } from "@/stores/uiStore";
@@ -33,6 +34,7 @@ import type { Space } from "@/types";
  * the user's attention. See `App.tsx` for the routing decision.
  */
 export function SpacesLibrary() {
+  const { confirm } = useConfirm();
   const spaces = useSpaceStore((s) => s.spaces);
   const setViewingSpace = useSpaceStore((s) => s.setViewingSpace);
   const setFormOpen = useSpaceStore((s) => s.setSpaceFormOpen);
@@ -59,14 +61,14 @@ export function SpacesLibrary() {
     [spaces],
   );
 
-  const handleDelete = (space: Space) => {
-    if (
-      confirm(
-        `Delete space "${space.name}"? Files and instructions will be removed; chats inside this space stay but lose their space association.`,
-      )
-    ) {
-      void removeSpace(space.id);
-    }
+  const handleDelete = async (space: Space) => {
+    const ok = await confirm({
+      title: `Delete space “${space.name}”?`,
+      body: "Files and instructions in this space will be removed. Chats inside the space stay, but they lose their space association.",
+      confirmLabel: "Delete space",
+      destructive: true,
+    });
+    if (ok) void removeSpace(space.id);
   };
 
   // Land on the chats canvas first so the new session's composer has a place
@@ -162,10 +164,20 @@ function SpaceCard({
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const hasInstructions = space.instructions.trim().length > 0;
+  // "Clickable card with nested menu" is a WAI-flagged pattern (interactive
+  // descendants inside an interactive parent). We accept the trade-off
+  // here because the alternative — a stretched-link overlay button — adds
+  // a separate tab stop per tile that does nothing useful. To keep screen
+  // readers from getting confused, the parent uses `role="button"` with an
+  // explicit aria-label naming the space, the kebab button below uses
+  // `aria-label="Space actions"` and `e.stopPropagation()` so it doesn't
+  // double-fire `onOpen`, and the menu items announce themselves
+  // individually via their own labels.
   return (
     <article
       role="button"
       tabIndex={0}
+      aria-label={`Open space: ${space.name}`}
       onClick={onOpen}
       onKeyDown={(e) => {
         if (e.key === "Enter" || e.key === " ") {

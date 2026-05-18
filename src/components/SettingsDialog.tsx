@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   Archive,
@@ -51,6 +51,7 @@ import { useModelsStore } from "@/stores/modelsStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useUIStore } from "@/stores/uiStore";
+import { useConfirm } from "@/components/ConfirmDialog";
 import { McpPanel } from "@/components/McpPanel";
 import { SecurityPanel } from "@/components/SecurityPanel";
 import { UpdatesPanel } from "@/components/UpdatesPanel";
@@ -74,7 +75,7 @@ import type { FontSize, ImportStats, ModelInfo, ProviderId, Session } from "@/ty
 import pkg from "../../package.json";
 
 const GITHUB_URL = "https://github.com/ztcs-software/loach";
-const DOCS_URL = "#";
+const DOCS_URL = "https://docs.loach.dev";
 
 async function openExternal(url: string) {
   if (url === "#" || !url) return;
@@ -1097,20 +1098,32 @@ function MiniUIFrame({ mode, variant }: { mode: Tone; variant: Variant }) {
   );
 }
 
-function ThemePreview({ variant, mode }: { variant: Variant; mode: Tone }) {
+// `memo` because the parent SettingsDialog re-renders on every keystroke
+// in any of its textareas (it subscribes to the whole settings store
+// because nearly every field is rendered somewhere in the dialog). The
+// preview tiles only depend on `variant` + `mode` — primitive strings —
+// so memoising stops them from re-painting their gradients + SVG clip
+// paths every time an unrelated field updates.
+const ThemePreview = memo(function ThemePreview({
+  variant,
+  mode,
+}: {
+  variant: Variant;
+  mode: Tone;
+}) {
   return (
     <>
       <PreviewBackdrop variant={variant} mode={mode} />
       <MiniUIFrame variant={variant} mode={mode} />
     </>
   );
-}
+});
 
 /**
  * Color-mode preview. For "system" we clip a light mockup and a dark mockup
  * along a diagonal so the tile reads as "whichever matches your OS".
  */
-function ColorModePreview({
+const ColorModePreview = memo(function ColorModePreview({
   mode,
   variant,
 }: {
@@ -1147,7 +1160,7 @@ function ColorModePreview({
       />
     </>
   );
-}
+});
 
 /**
  * Embedded Archive browser — same rows the old full-page ArchiveView had,
@@ -1304,6 +1317,7 @@ function ArchivedRow({
 type BusyKind = "export" | "import" | "archive-all" | null;
 
 function DataPanel({ onCloseDialog: _onCloseDialog }: { onCloseDialog: () => void }) {
+  const { confirm } = useConfirm();
   const [busy, setBusy] = useState<BusyKind>(null);
   const [message, setMessage] = useState<{
     tone: "info" | "error";
@@ -1316,12 +1330,44 @@ function DataPanel({ onCloseDialog: _onCloseDialog }: { onCloseDialog: () => voi
   // doesn't gate the action.
   const lockStatus = useSecurityStore((s) => s.status);
 
+  // Track every timeout this panel arms so we can clear them all when the
+  // dialog closes (which unmounts this component). Without this, a 900 ms
+  // reload-timer survives the unmount and fires later, potentially while
+  // the user has moved on to other work. The destructive flows below
+  // schedule both a "flash a toast then reload" and the toast's own
+  // auto-clear; clearing all of them on unmount keeps closure references
+  // from outliving the dialog.
+  const pendingTimers = useRef<Set<number>>(new Set());
+  const scheduleTimer = (cb: () => void, ms: number) => {
+    const id = window.setTimeout(() => {
+      pendingTimers.current.delete(id);
+      cb();
+    }, ms);
+    pendingTimers.current.add(id);
+    return id;
+  };
+  useEffect(
+    () => () => {
+      // On unmount: cancel everything we armed. We deliberately do NOT
+      // cancel the destructive-action reload during normal close — the
+      // reload is the right behaviour after a wipe — but cancelling it
+      // here means a user who somehow tears down the dialog in the
+      // 900 ms window (e.g. via process signal or hot reload) isn't
+      // hit by a stale page reload.
+      for (const id of pendingTimers.current) {
+        window.clearTimeout(id);
+      }
+      pendingTimers.current.clear();
+    },
+    [],
+  );
+
   // A tiny toast-lite: the feedback message auto-clears after 5s so long-
   // running exports don't leave stale success chips behind when the user
   // pokes Export a second time.
   const flash = (tone: "info" | "error", text: string) => {
     setMessage({ tone, text });
-    window.setTimeout(() => {
+    scheduleTimer(() => {
       setMessage((m) => (m && m.text === text ? null : m));
     }, 5000);
   };
@@ -1374,7 +1420,7 @@ function DataPanel({ onCloseDialog: _onCloseDialog }: { onCloseDialog: () => voi
         return;
       }
       flash("info", formatImportSummary(stats));
-      window.setTimeout(() => {
+      scheduleTimer(() => {
         window.location.reload();
       }, 900);
     } catch (e) {
@@ -1395,10 +1441,11 @@ function DataPanel({ onCloseDialog: _onCloseDialog }: { onCloseDialog: () => voi
       flash("info", "No live chats to archive.");
       return;
     }
-    const confirmed = window.confirm(
-      `Move all ${live} live chat${live === 1 ? "" : "s"} to the archive? ` +
-        "You can unarchive any of them later from Settings → Archive.",
-    );
+    const confirmed = await confirm({
+      title: `Archive ${live} live chat${live === 1 ? "" : "s"}?`,
+      body: "You can unarchive any of them later from Settings → Archive.",
+      confirmLabel: "Archive all",
+    });
     if (!confirmed) return;
 
     setBusy("archive-all");
@@ -1548,7 +1595,9 @@ function DataPanel({ onCloseDialog: _onCloseDialog }: { onCloseDialog: () => voi
           flash("info", text);
           // Full reload so every zustand store re-hydrates from the now-
           // empty DB. Small delay so the success state is visible first.
-          window.setTimeout(() => {
+          // Scheduled via `scheduleTimer` so it's cancellable if the
+          // dialog tears down before the 900 ms window elapses.
+          scheduleTimer(() => {
             window.location.reload();
           }, 900);
         }}

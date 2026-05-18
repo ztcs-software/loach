@@ -22,6 +22,7 @@ import { Separator } from "@/components/ui/separator";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
+import { useConfirm } from "@/components/ConfirmDialog";
 import { useChatStore } from "@/stores/chatStore";
 import { useModelsStore } from "@/stores/modelsStore";
 import { useSpaceStore } from "@/stores/spaceStore";
@@ -50,6 +51,7 @@ import type {
  * those defaults from its base.
  */
 export function ModelsView() {
+  const { confirm } = useConfirm();
   const viewingModel = useModelsStore((s) => s.viewingModel);
   const setViewingModel = useModelsStore((s) => s.setViewingModel);
   const showModel = useModelsStore((s) => s.showModel);
@@ -111,12 +113,13 @@ export function ModelsView() {
   };
 
   const handleDelete = async () => {
-    if (
-      !confirm(
-        `Delete model "${viewingModel}"? This removes the model files from disk and cannot be undone.`,
-      )
-    )
-      return;
+    const ok = await confirm({
+      title: `Delete “${viewingModel}”?`,
+      body: "This removes the model files from disk and cannot be undone.",
+      confirmLabel: "Delete model",
+      destructive: true,
+    });
+    if (!ok) return;
     await deleteModel(viewingModel);
   };
 

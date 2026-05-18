@@ -167,13 +167,138 @@ let runningBuffers: {
   metrics: MessageMetrics | null;
 } | null = null;
 
+/** rAF-batched render flush state for streaming events. Rather than calling
+ *  `set()` on every token / thinking / metrics delta (which used to fire
+ *  100+ times a second on fast providers and re-render every chat-canvas
+ *  subscriber), we accumulate into `runningBuffers` and write to the store
+ *  at most once per animation frame. `MessageItem` is memoised on
+ *  reference equality, so only the streaming bubble re-renders per flush.
+ *
+ *  Invariants:
+ *   - Terminal events (done / error / cancelled) MUST call
+ *     `flushPendingFrame` synchronously before tearing down, so the user
+ *     sees the last few tokens before the stream's stop side-effects fire.
+ *   - The flush is a no-op when `runningBuffers` is null — guards against
+ *     a stale rAF firing after a cancellation cleared the buffer. */
+let pendingFrame: number | null = null;
+const pendingDirty = {
+  content: false,
+  thinking: false,
+  metrics: false,
+};
+
+function scheduleFlush(get: Getter, set: Setter) {
+  if (pendingFrame !== null) return;
+  pendingFrame = requestAnimationFrame(() => {
+    pendingFrame = null;
+    flushPendingFrame(get, set);
+  });
+}
+
+function flushPendingFrame(get: Getter, set: Setter) {
+  if (pendingFrame !== null) {
+    cancelAnimationFrame(pendingFrame);
+    pendingFrame = null;
+  }
+  const dContent = pendingDirty.content;
+  const dThinking = pendingDirty.thinking;
+  const dMetrics = pendingDirty.metrics;
+  if (!dContent && !dThinking && !dMetrics) return;
+  pendingDirty.content = false;
+  pendingDirty.thinking = false;
+  pendingDirty.metrics = false;
+  const buf = runningBuffers;
+  if (!buf) return;
+  const task = get().runningTask;
+  if (!task) return;
+  const sessionId = task.sessionId;
+  const msgId = buf.assistantMsgId;
+  const newContent = buf.content;
+  const newThinking = buf.thinking;
+  const newMetrics = buf.metrics;
+  set((s) => {
+    const next: Partial<ChatState> = {};
+    if (dContent || dThinking) {
+      const list = s.messages[sessionId] ?? [];
+      next.messages = {
+        ...s.messages,
+        [sessionId]: list.map((m) =>
+          m.id === msgId
+            ? {
+                ...m,
+                ...(dContent ? { content: newContent } : {}),
+                ...(dThinking ? { thinking: newThinking } : {}),
+              }
+            : m,
+        ),
+      };
+    }
+    if (dMetrics) {
+      next.streamingByMessage = {
+        ...s.streamingByMessage,
+        [msgId]: newMetrics,
+      };
+    }
+    return next;
+  });
+}
+
+/** Whitelist of params we accept from a stored override blob, paired
+ *  with their runtime guard. Anything not in this list — or with the
+ *  wrong type — is silently dropped so a corrupted DB row (or a
+ *  pre-RTM blob written by an older format) can't push e.g.
+ *  `temperature: "high"` through to the provider. Booleans for
+ *  `think` / `low_vram` are coerced strictly: any non-boolean value is
+ *  ignored. `seed` is the only field where `null` is a meaningful
+ *  payload value ("random each run"). */
+const PARAM_GUARDS: {
+  [K in keyof GenerationParams]: (v: unknown) => GenerationParams[K] | undefined;
+} = {
+  temperature: (v) => (typeof v === "number" && Number.isFinite(v) ? v : undefined),
+  top_p: (v) => (typeof v === "number" && Number.isFinite(v) ? v : undefined),
+  top_k: (v) => (typeof v === "number" && Number.isFinite(v) ? v : undefined),
+  min_p: (v) => (typeof v === "number" && Number.isFinite(v) ? v : undefined),
+  max_tokens: (v) => (typeof v === "number" && Number.isFinite(v) ? v : undefined),
+  num_ctx: (v) => (typeof v === "number" && Number.isFinite(v) ? v : undefined),
+  repeat_penalty: (v) =>
+    typeof v === "number" && Number.isFinite(v) ? v : undefined,
+  frequency_penalty: (v) =>
+    typeof v === "number" && Number.isFinite(v) ? v : undefined,
+  presence_penalty: (v) =>
+    typeof v === "number" && Number.isFinite(v) ? v : undefined,
+  seed: (v) => {
+    if (v === null) return null;
+    return typeof v === "number" && Number.isFinite(v) ? v : undefined;
+  },
+  think: (v) => (typeof v === "boolean" ? v : undefined),
+  num_gpu: (v) => (typeof v === "number" && Number.isFinite(v) ? v : undefined),
+  low_vram: (v) => (typeof v === "boolean" ? v : undefined),
+};
+
 function parseOverrides(json: string | null): Partial<GenerationParams> {
   if (!json) return {};
+  let raw: unknown;
   try {
-    return JSON.parse(json) as Partial<GenerationParams>;
+    raw = JSON.parse(json);
   } catch {
     return {};
   }
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return {};
+  }
+  const source = raw as Record<string, unknown>;
+  const out: Partial<GenerationParams> = {};
+  for (const key of Object.keys(PARAM_GUARDS) as (keyof GenerationParams)[]) {
+    if (!(key in source)) continue;
+    const guard = PARAM_GUARDS[key];
+    const checked = guard?.(source[key]);
+    if (checked !== undefined || key === "seed") {
+      // `seed: null` is intentional; every other field treats `undefined`
+      // as "drop", so we don't set the key at all in that branch.
+      (out as Record<string, unknown>)[key] = checked;
+    }
+  }
+  return out;
 }
 
 /**
@@ -294,32 +419,73 @@ type Setter = (
     | ((s: ChatState) => Partial<ChatState>),
 ) => void;
 
-/** Called when a stream ends (done event, manual cancel, or startup error).
- *  Persists the partial assistant reply, tears down the active stream
- *  handle, clears running state, and kicks the next waiting task. Safe to
- *  call more than once — subsequent calls are no-ops because `runningTask`
- *  is null. */
-function finishRunning(get: Getter, set: Setter) {
+/** How the stream ended. Used to gate "real completion" side-effects
+ *  (memory extraction, the unread sidebar dot) so a user-initiated cancel
+ *  doesn't act like a natural reply and pollute long-term state with a
+ *  half-written turn. */
+type FinishReason = "done" | "cancelled" | "error";
+
+/** Called when a stream ends (done event, manual cancel, error, or
+ *  startup error). Persists the partial assistant reply, tears down the
+ *  active stream handle, clears running state, and kicks the next
+ *  waiting task. Safe to call more than once — subsequent calls are
+ *  no-ops because `runningTask` is null.
+ *
+ *  `reason` defaults to `"done"` for backwards compatibility with the
+ *  startup-error path (which always emitted Done in the old shape).
+ *  Callers that know they're handling a cancel pass `"cancelled"` so
+ *  we can skip the memory-extraction + unread-dot side-effects that
+ *  would otherwise lie about an interrupted turn. */
+function finishRunning(get: Getter, set: Setter, reason: FinishReason = "done") {
+  // Sync-flush any pending rAF before teardown so the final tokens are
+  // visible in the UI before we null out `runningBuffers` / clear the
+  // streaming state. Persistence reads from `runningBuffers` directly
+  // (not from store state), so this is purely for the UI bubble — but a
+  // missing flush would leave the last frame of tokens invisible until
+  // the next reload of the chat.
+  flushPendingFrame(get, set);
   const running = get().runningTask;
   const buf = runningBuffers;
   if (running && buf) {
+    // Persist the partial assistant reply. If the DB write fails (disk
+    // full, lock contention, file permissions, …) the bubble we just
+    // streamed exists in memory but won't survive a reload — so surface
+    // it via a toast instead of swallowing silently. Includes the error
+    // message so the user has a starting point if they want to debug.
     void updateMessage({
       id: buf.assistantMsgId,
+      session_id: running.sessionId,
       content: buf.content,
       thinking: buf.thinking || null,
       metrics_json: buf.metrics ? JSON.stringify(buf.metrics) : null,
-    }).catch(() => {});
+    }).catch((e) => {
+      const detail = e instanceof Error ? e.message : String(e);
+      console.error("failed to persist assistant reply", e);
+      useToastStore.getState().push({
+        kind: "error",
+        title: "Couldn't save reply",
+        body: `${detail} — reload will lose this reply.`,
+      });
+    });
   }
 
   // If the chat that just finished streaming isn't the one the user is
   // currently viewing, mark it unread so the sidebar shows the accent dot.
   // We also require some content — a cancelled-on-user-message task that
   // produced no assistant output shouldn't pretend to be a "new reply".
+  // And we explicitly gate on `reason === "done"`: a user-initiated cancel
+  // shouldn't pop the unread dot, because the user just told us they were
+  // done with this turn.
   const activeId = get().activeSessionId;
   const finishedId = running?.sessionId;
   const producedContent = !!buf && buf.content.trim().length > 0;
   let unreadPatch: Record<string, boolean> | null = null;
-  if (finishedId && producedContent && finishedId !== activeId) {
+  if (
+    reason === "done" &&
+    finishedId &&
+    producedContent &&
+    finishedId !== activeId
+  ) {
     unreadPatch = { ...get().unread, [finishedId]: true };
   }
 
@@ -327,7 +493,13 @@ function finishRunning(get: Getter, set: Setter) {
   // memory extractor (kicked off below) can read the assistant text. The
   // extractor runs *after* state cleanup so it never blocks the queue
   // promotion or the UI returning to idle.
+  //
+  // Skip extraction entirely on cancel / error: the turn is incomplete
+  // and the assistant text is, by definition, not what the model meant
+  // to say. Saving facts from a half-stream would poison long-term
+  // memory with nonsense the user explicitly opted out of.
   const memorySnapshot = (() => {
+    if (reason !== "done") return null;
     if (!running || !buf || !producedContent) return null;
     if (!finishedId) return null;
     const session = get().sessions.find((s) => s.id === finishedId);
@@ -383,7 +555,14 @@ function finishRunning(get: Getter, set: Setter) {
 
 /** Promotes the head of the waiting queue to be the running task. Deferred
  *  via `queueMicrotask` so we don't try to start a new stream inside the
- *  same tick as the previous `done` event handler. */
+ *  same tick as the previous `done` event handler.
+ *
+ *  Re-promote happens inside `.finally` rather than from inside `startTask`
+ *  — if `startTask`'s catch block called `promoteQueueHead` directly, the
+ *  nested microtask would see `dispatching === true` (the outer call's flag
+ *  hadn't been cleared yet because `.finally` runs *after* the catch body)
+ *  and bail. The queue would then sit idle until something else nudged it.
+ *  Releasing the lock first and then re-promoting closes that window. */
 function promoteQueueHead(get: Getter, set: Setter) {
   queueMicrotask(() => {
     if (dispatching) return;
@@ -397,6 +576,12 @@ function promoteQueueHead(get: Getter, set: Setter) {
       .catch((err) => console.error("queued task start failed", err))
       .finally(() => {
         dispatching = false;
+        // Re-check the queue now that the dispatch lock is free. On the
+        // success path `runningTask` will still be set (the stream is
+        // running) and the inner guards bail. On the failure path
+        // `runningTask` was already cleared by `startTask`, so the next
+        // waiter is picked up here.
+        promoteQueueHead(get, set);
       });
   });
 }
@@ -419,9 +604,9 @@ async function startTask(task: QueueTask, get: Getter, set: Setter) {
     });
   } catch (e) {
     // Session might have been deleted while the task waited. Silently drop
-    // and move on to the next.
+    // and move on to the next — the .finally hook in `promoteQueueHead`'s
+    // caller will pick the next waiter once the dispatch lock is released.
     console.error("failed to create assistant placeholder", e);
-    promoteQueueHead(get, set);
     return;
   }
 
@@ -461,52 +646,35 @@ async function startTask(task: QueueTask, get: Getter, set: Setter) {
         if (!buf) return; // cancelled between events
         if (ev.kind === "thinking") {
           buf.thinking += ev.delta;
-          set((s) => ({
-            messages: {
-              ...s.messages,
-              [sessionId]: (s.messages[sessionId] ?? []).map((m) =>
-                m.id === assistantMsg.id ? { ...m, thinking: buf.thinking } : m,
-              ),
-            },
-          }));
+          pendingDirty.thinking = true;
+          scheduleFlush(get, set);
         } else if (ev.kind === "token") {
           buf.content += ev.delta;
-          set((s) => ({
-            messages: {
-              ...s.messages,
-              [sessionId]: (s.messages[sessionId] ?? []).map((m) =>
-                m.id === assistantMsg.id ? { ...m, content: buf.content } : m,
-              ),
-            },
-          }));
+          pendingDirty.content = true;
+          scheduleFlush(get, set);
         } else if (ev.kind === "metrics") {
           buf.metrics = {
             tokens: ev.tokens,
             elapsed_ms: ev.elapsed_ms,
             tokens_per_second: ev.tokens_per_second,
           };
-          set((s) => ({
-            streamingByMessage: {
-              ...s.streamingByMessage,
-              [assistantMsg.id]: buf.metrics,
-            },
-          }));
+          pendingDirty.metrics = true;
+          scheduleFlush(get, set);
         } else if (ev.kind === "error") {
           buf.content += `\n\n_⚠ ${ev.message}_`;
-          set((s) => ({
-            messages: {
-              ...s.messages,
-              [sessionId]: (s.messages[sessionId] ?? []).map((m) =>
-                m.id === assistantMsg.id ? { ...m, content: buf.content } : m,
-              ),
-            },
-          }));
+          pendingDirty.content = true;
+          // Sync-flush so the error tail is visible before teardown.
+          flushPendingFrame(get, set);
           // Providers emit Error and then stop without a trailing Done, so
           // the streaming state would otherwise stay set forever and freeze
           // the input box in "Replying…" mode.
-          finishRunning(get, set);
+          finishRunning(get, set, "error");
+        } else if (ev.kind === "cancelled") {
+          // User-initiated stop. Same teardown as done, but flagged so
+          // `finishRunning` skips the memory + unread side-effects.
+          finishRunning(get, set, "cancelled");
         } else if (ev.kind === "done") {
-          finishRunning(get, set);
+          finishRunning(get, set, "done");
         }
       },
     );
@@ -523,12 +691,19 @@ async function startTask(task: QueueTask, get: Getter, set: Setter) {
     const errorContent = `_⚠ ${errorMsg}_`;
     updateMessage({
       id: assistantMsg.id,
+      session_id: sessionId,
       content: errorContent,
       thinking: null,
       metrics_json: null,
-    }).catch((upErr) =>
-      console.error("failed to persist startup-error placeholder", upErr),
-    );
+    }).catch((upErr) => {
+      const detail = upErr instanceof Error ? upErr.message : String(upErr);
+      console.error("failed to persist startup-error placeholder", upErr);
+      useToastStore.getState().push({
+        kind: "error",
+        title: "Couldn't save error placeholder",
+        body: `${detail} — the bubble will revert on reload.`,
+      });
+    });
 
     runningBuffers = null;
     set((s) => {
@@ -548,8 +723,10 @@ async function startTask(task: QueueTask, get: Getter, set: Setter) {
         },
       };
     });
-    // Don't stall the queue if this one task failed to start.
-    promoteQueueHead(get, set);
+    // The .finally chain on `promoteQueueHead`'s caller will re-promote
+    // once the dispatch lock is released — calling it from here would
+    // queue a microtask while `dispatching` is still set and the nested
+    // call would silently bail.
   }
 }
 
@@ -642,7 +819,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
       set((st) => ({ messages: { ...st.messages, ...messageMap } }));
 
-      // Delete all empty sessions except the first (most recent)
+      // Delete all empty sessions except the first (most recent).
+      // `emptySessions` preserves the iteration order of `loaded`, which
+      // preserves the order of `sessions`, which is what `list_sessions`
+      // returned. The Rust query is
+      //   SELECT … FROM sessions ORDER BY updated_at DESC
+      // (see `db::list_sessions`) so `emptySessions[0]` is the most-
+      // recently-touched empty chat. If that ORDER BY ever changes,
+      // revisit this loop — the "keep most recent" invariant breaks
+      // silently otherwise.
       for (let i = 1; i < emptySessions.length; i++) {
         await deleteSession(emptySessions[i].id);
       }
@@ -1181,9 +1366,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     // 3. Dispatch. If nothing is running globally, start immediately.
     //    Otherwise park in the waiting queue and let the runner pick us
-    //    up when the current task ends.
+    //    up when the current task ends. The trailing `promoteQueueHead`
+    //    on the direct-start branch covers the case where startTask
+    //    failed synchronously: it nulls `runningTask` in its catch but
+    //    won't re-promote on its own (the `.finally` re-promote in
+    //    `promoteQueueHead` only fires when a task was dispatched from
+    //    there). Without this nudge, a synchronous startup failure
+    //    would strand any tasks queued in the meantime.
     if (!get().runningTask) {
       await startTask(task, get, set);
+      promoteQueueHead(get, set);
     } else {
       set((s) => ({ queue: [...s.queue, task] }));
     }
@@ -1211,7 +1403,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           console.error("stream stop failed", e);
         }
       }
-      finishRunning(get, set);
+      finishRunning(get, set, "cancelled");
       return;
     }
 
@@ -1226,12 +1418,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
   promoteSession: async (sessionId) => {
     const state = get();
 
-    // Nothing running → treat promote like a direct start.
+    // Nothing running → treat promote like a direct start. Same nudge
+    // pattern as in `submit`: a synchronous startup failure would
+    // otherwise leave the queue stalled.
     if (!state.runningTask) {
       const task = state.queue.find((t) => t.sessionId === sessionId);
       if (!task) return;
       set((s) => ({ queue: s.queue.filter((t) => t.id !== task.id) }));
       await startTask(task, get, set);
+      promoteQueueHead(get, set);
       return;
     }
 
@@ -1260,6 +1455,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
         console.error("stream stop failed", e);
       }
     }
-    finishRunning(get, set);
+    finishRunning(get, set, "cancelled");
   },
 }));

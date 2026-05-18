@@ -123,6 +123,15 @@ export function ChatCanvas() {
   // is closed and there's nothing to strip.
   const hasMarksRef = useRef(false);
   useEffect(() => {
+    // Fast path for the common case during streaming: search panel is
+    // closed AND no marks were left in the DOM. Bail before doing any
+    // DOM work so the effect's per-token re-runs are essentially free.
+    // The slower path below still strips stale marks (e.g. search was
+    // open then closed and we haven't run since) — gated behind
+    // hasMarksRef so we never querySelectorAll across every message
+    // bubble per token when there's nothing to find.
+    if (!searchOpen && !hasMarksRef.current) return;
+
     if (hasMarksRef.current) {
       // Strip stale highlights — covers query changes, search close, message
       // updates, and the case where a previously-matching message no longer
