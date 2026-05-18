@@ -75,7 +75,7 @@ import type { FontSize, ImportStats, ModelInfo, ProviderId, Session } from "@/ty
 import pkg from "../../package.json";
 
 const GITHUB_URL = "https://github.com/ztcs-software/loach";
-const DOCS_URL = "#";
+const DOCS_URL = "https://docs.loach.dev";
 
 async function openExternal(url: string) {
   if (url === "#" || !url) return;
