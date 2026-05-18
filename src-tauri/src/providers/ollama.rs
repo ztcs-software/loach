@@ -205,7 +205,7 @@ async fn drive_progress_stream(
                 // gives the server-side pull the earliest possible chance
                 // to notice the client gave up and abort the download.
                 drop(byte_stream);
-                let _ = app.emit(&channel, AdminEvent::Done);
+                let _ = app.emit(&channel, AdminEvent::Cancelled);
                 registry.finish(&stream_id);
                 return Ok(());
             }
@@ -598,7 +598,7 @@ pub async fn chat_stream(
                 // leave the server processing the request for noticeably
                 // longer than needed.
                 drop(byte_stream);
-                let _ = app.emit(&channel, StreamEvent::Done);
+                let _ = app.emit(&channel, StreamEvent::Cancelled);
                 registry.finish(&req.stream_id);
                 return Ok(());
             }

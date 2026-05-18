@@ -1168,6 +1168,13 @@ pub struct DialogFilter {
 /// where a compromised renderer could skip the dialog entirely and write
 /// to an arbitrary path (e.g. `~/.bashrc`): now the only path the backend
 /// will write to is one the user just clicked through a native picker.
+/// Hard ceiling on what the renderer can ask us to save. Real exports
+/// (full DB snapshots) are in the low MBs; this cap is generous enough
+/// for any realistic dump while rejecting a compromised renderer that
+/// sends multi-gigabyte payloads in an attempt to OOM the process or
+/// fill the user's disk.
+const MAX_SAVE_BYTES: usize = 256 * 1024 * 1024; // 256 MB
+
 #[tauri::command]
 pub async fn save_text_to_file(
     app: AppHandle,
@@ -1176,6 +1183,14 @@ pub async fn save_text_to_file(
     filters: Option<Vec<DialogFilter>>,
 ) -> Result<Option<String>, String> {
     use tauri_plugin_dialog::DialogExt;
+
+    if content.len() > MAX_SAVE_BYTES {
+        return Err(format!(
+            "save_text_to_file refused: content is {} bytes (cap {} bytes)",
+            content.len(),
+            MAX_SAVE_BYTES
+        ));
+    }
 
     let path_opt = tauri::async_runtime::spawn_blocking(move || {
         let mut builder = app.dialog().file();

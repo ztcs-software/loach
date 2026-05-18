@@ -29,8 +29,11 @@ export interface AdminProgress {
   total: number;
   completed: number;
   /** Terminal state — progress is kept around briefly so the chip can show
-   *  "done" / error instead of silently vanishing. */
-  finished: "ok" | "error" | null;
+   *  "done" / "cancelled" / "error" instead of silently vanishing.
+   *  `"cancelled"` is distinct from `"ok"` so the UI can render a neutral
+   *  "Cancelled" badge rather than a misleading green checkmark when a
+   *  partial pull was interrupted. */
+  finished: "ok" | "cancelled" | "error" | null;
   error: string | null;
 }
 
@@ -308,7 +311,7 @@ export const useModelsStore = create<ModelsState>((set, get) => ({
       runs: {
         ...s.runs,
         [streamId]: s.runs[streamId]
-          ? { ...s.runs[streamId], finished: "ok", status: "cancelled" }
+          ? { ...s.runs[streamId], finished: "cancelled", status: "cancelled" }
           : s.runs[streamId],
       },
     }));
@@ -342,6 +345,11 @@ function handleAdminEvent(
       };
     } else if (ev.kind === "done") {
       next = { ...prev, finished: "ok", status: "done" };
+    } else if (ev.kind === "cancelled") {
+      // Distinct from `done` so the UI can label this run "Cancelled"
+      // instead of showing a green checkmark. Pull/create may have left
+      // partial state on the Ollama side — treat as a soft failure.
+      next = { ...prev, finished: "cancelled", status: "cancelled" };
     } else {
       next = { ...prev, finished: "error", error: ev.message, status: "error" };
     }
@@ -395,12 +403,18 @@ async function runAdminStream(
       resolve();
       return;
     }
-    // Otherwise, subscribe and watch for the transition. The callback also
-    // re-checks the snapshot in case `subscribe` itself runs synchronously
-    // after a pending state update.
+    // Otherwise, subscribe and watch for the transition. We track the
+    // previous `finished` value ourselves so the callback only fires
+    // real work when our run's terminal state actually changes — the
+    // default `useModelsStore.subscribe(...)` fires on EVERY state
+    // change (model list refreshes, viewing-model swaps, …) which adds
+    // up over a long pull. Cheap, but trivially avoidable.
+    let prevFinished = useModelsStore.getState().runs[streamId]?.finished ?? null;
     const unsub = useModelsStore.subscribe((s) => {
-      const run = s.runs[streamId];
-      if (run?.finished) {
+      const finished = s.runs[streamId]?.finished ?? null;
+      if (finished === prevFinished) return;
+      prevFinished = finished;
+      if (finished) {
         unsub();
         resolve();
       }

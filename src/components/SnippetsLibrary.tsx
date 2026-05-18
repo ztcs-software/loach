@@ -156,6 +156,7 @@ function SnippetCard({
     <article
       role="button"
       tabIndex={0}
+      aria-label={`Edit snippet: ${snippet.title}`}
       onClick={onEdit}
       onKeyDown={(e) => {
         if (e.key === "Enter" || e.key === " ") {

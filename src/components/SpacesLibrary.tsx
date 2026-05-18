@@ -164,10 +164,20 @@ function SpaceCard({
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const hasInstructions = space.instructions.trim().length > 0;
+  // "Clickable card with nested menu" is a WAI-flagged pattern (interactive
+  // descendants inside an interactive parent). We accept the trade-off
+  // here because the alternative — a stretched-link overlay button — adds
+  // a separate tab stop per tile that does nothing useful. To keep screen
+  // readers from getting confused, the parent uses `role="button"` with an
+  // explicit aria-label naming the space, the kebab button below uses
+  // `aria-label="Space actions"` and `e.stopPropagation()` so it doesn't
+  // double-fire `onOpen`, and the menu items announce themselves
+  // individually via their own labels.
   return (
     <article
       role="button"
       tabIndex={0}
+      aria-label={`Open space: ${space.name}`}
       onClick={onOpen}
       onKeyDown={(e) => {
         if (e.key === "Enter" || e.key === " ") {

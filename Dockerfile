@@ -49,12 +49,19 @@ WORKDIR /src
 COPY package.json package-lock.json ./
 RUN npm ci
 
-# Same trick for cargo: copy just the manifests and a stub main.rs so
-# `cargo fetch` can resolve and download the dependency graph into a
-# cacheable layer.
-COPY src-tauri/Cargo.toml src-tauri/Cargo.lock ./src-tauri/
+# Same trick for cargo: copy just the manifests + capabilities + build.rs
+# and stub out both `lib.rs` and `main.rs` so `cargo fetch` can resolve
+# the dependency graph into a cacheable layer. The Cargo.toml declares
+# both a `[lib]` target (`loach_lib`) and an auto-detected binary
+# (`src/main.rs` calls into it), so we need stubs for both — otherwise
+# `cargo fetch` errors with "can't find `loach_lib`" or "no targets
+# specified". `tauri-build` runs as a build script and needs the
+# capability JSON files present too, even at fetch time.
+COPY src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/build.rs ./src-tauri/
+COPY src-tauri/capabilities ./src-tauri/capabilities
 RUN mkdir -p src-tauri/src \
- && echo "fn main() {}" > src-tauri/src/main.rs \
+ && echo "pub fn run() {}" > src-tauri/src/lib.rs \
+ && echo "fn main() { loach_lib::run(); }" > src-tauri/src/main.rs \
  && (cd src-tauri && cargo fetch) \
  && rm -rf src-tauri/src
 

@@ -167,13 +167,62 @@ let runningBuffers: {
   metrics: MessageMetrics | null;
 } | null = null;
 
+/** Whitelist of params we accept from a stored override blob, paired
+ *  with their runtime guard. Anything not in this list — or with the
+ *  wrong type — is silently dropped so a corrupted DB row (or a
+ *  pre-RTM blob written by an older format) can't push e.g.
+ *  `temperature: "high"` through to the provider. Booleans for
+ *  `think` / `low_vram` are coerced strictly: any non-boolean value is
+ *  ignored. `seed` is the only field where `null` is a meaningful
+ *  payload value ("random each run"). */
+const PARAM_GUARDS: {
+  [K in keyof GenerationParams]: (v: unknown) => GenerationParams[K] | undefined;
+} = {
+  temperature: (v) => (typeof v === "number" && Number.isFinite(v) ? v : undefined),
+  top_p: (v) => (typeof v === "number" && Number.isFinite(v) ? v : undefined),
+  top_k: (v) => (typeof v === "number" && Number.isFinite(v) ? v : undefined),
+  min_p: (v) => (typeof v === "number" && Number.isFinite(v) ? v : undefined),
+  max_tokens: (v) => (typeof v === "number" && Number.isFinite(v) ? v : undefined),
+  num_ctx: (v) => (typeof v === "number" && Number.isFinite(v) ? v : undefined),
+  repeat_penalty: (v) =>
+    typeof v === "number" && Number.isFinite(v) ? v : undefined,
+  frequency_penalty: (v) =>
+    typeof v === "number" && Number.isFinite(v) ? v : undefined,
+  presence_penalty: (v) =>
+    typeof v === "number" && Number.isFinite(v) ? v : undefined,
+  seed: (v) => {
+    if (v === null) return null;
+    return typeof v === "number" && Number.isFinite(v) ? v : undefined;
+  },
+  think: (v) => (typeof v === "boolean" ? v : undefined),
+  num_gpu: (v) => (typeof v === "number" && Number.isFinite(v) ? v : undefined),
+  low_vram: (v) => (typeof v === "boolean" ? v : undefined),
+};
+
 function parseOverrides(json: string | null): Partial<GenerationParams> {
   if (!json) return {};
+  let raw: unknown;
   try {
-    return JSON.parse(json) as Partial<GenerationParams>;
+    raw = JSON.parse(json);
   } catch {
     return {};
   }
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return {};
+  }
+  const source = raw as Record<string, unknown>;
+  const out: Partial<GenerationParams> = {};
+  for (const key of Object.keys(PARAM_GUARDS) as (keyof GenerationParams)[]) {
+    if (!(key in source)) continue;
+    const guard = PARAM_GUARDS[key];
+    const checked = guard?.(source[key]);
+    if (checked !== undefined || key === "seed") {
+      // `seed: null` is intentional; every other field treats `undefined`
+      // as "drop", so we don't set the key at all in that branch.
+      (out as Record<string, unknown>)[key] = checked;
+    }
+  }
+  return out;
 }
 
 /**
@@ -294,12 +343,24 @@ type Setter = (
     | ((s: ChatState) => Partial<ChatState>),
 ) => void;
 
-/** Called when a stream ends (done event, manual cancel, or startup error).
- *  Persists the partial assistant reply, tears down the active stream
- *  handle, clears running state, and kicks the next waiting task. Safe to
- *  call more than once — subsequent calls are no-ops because `runningTask`
- *  is null. */
-function finishRunning(get: Getter, set: Setter) {
+/** How the stream ended. Used to gate "real completion" side-effects
+ *  (memory extraction, the unread sidebar dot) so a user-initiated cancel
+ *  doesn't act like a natural reply and pollute long-term state with a
+ *  half-written turn. */
+type FinishReason = "done" | "cancelled" | "error";
+
+/** Called when a stream ends (done event, manual cancel, error, or
+ *  startup error). Persists the partial assistant reply, tears down the
+ *  active stream handle, clears running state, and kicks the next
+ *  waiting task. Safe to call more than once — subsequent calls are
+ *  no-ops because `runningTask` is null.
+ *
+ *  `reason` defaults to `"done"` for backwards compatibility with the
+ *  startup-error path (which always emitted Done in the old shape).
+ *  Callers that know they're handling a cancel pass `"cancelled"` so
+ *  we can skip the memory-extraction + unread-dot side-effects that
+ *  would otherwise lie about an interrupted turn. */
+function finishRunning(get: Getter, set: Setter, reason: FinishReason = "done") {
   const running = get().runningTask;
   const buf = runningBuffers;
   if (running && buf) {
@@ -329,11 +390,19 @@ function finishRunning(get: Getter, set: Setter) {
   // currently viewing, mark it unread so the sidebar shows the accent dot.
   // We also require some content — a cancelled-on-user-message task that
   // produced no assistant output shouldn't pretend to be a "new reply".
+  // And we explicitly gate on `reason === "done"`: a user-initiated cancel
+  // shouldn't pop the unread dot, because the user just told us they were
+  // done with this turn.
   const activeId = get().activeSessionId;
   const finishedId = running?.sessionId;
   const producedContent = !!buf && buf.content.trim().length > 0;
   let unreadPatch: Record<string, boolean> | null = null;
-  if (finishedId && producedContent && finishedId !== activeId) {
+  if (
+    reason === "done" &&
+    finishedId &&
+    producedContent &&
+    finishedId !== activeId
+  ) {
     unreadPatch = { ...get().unread, [finishedId]: true };
   }
 
@@ -341,7 +410,13 @@ function finishRunning(get: Getter, set: Setter) {
   // memory extractor (kicked off below) can read the assistant text. The
   // extractor runs *after* state cleanup so it never blocks the queue
   // promotion or the UI returning to idle.
+  //
+  // Skip extraction entirely on cancel / error: the turn is incomplete
+  // and the assistant text is, by definition, not what the model meant
+  // to say. Saving facts from a half-stream would poison long-term
+  // memory with nonsense the user explicitly opted out of.
   const memorySnapshot = (() => {
+    if (reason !== "done") return null;
     if (!running || !buf || !producedContent) return null;
     if (!finishedId) return null;
     const session = get().sessions.find((s) => s.id === finishedId);
@@ -531,9 +606,13 @@ async function startTask(task: QueueTask, get: Getter, set: Setter) {
           // Providers emit Error and then stop without a trailing Done, so
           // the streaming state would otherwise stay set forever and freeze
           // the input box in "Replying…" mode.
-          finishRunning(get, set);
+          finishRunning(get, set, "error");
+        } else if (ev.kind === "cancelled") {
+          // User-initiated stop. Same teardown as done, but flagged so
+          // `finishRunning` skips the memory + unread side-effects.
+          finishRunning(get, set, "cancelled");
         } else if (ev.kind === "done") {
-          finishRunning(get, set);
+          finishRunning(get, set, "done");
         }
       },
     );
@@ -1262,7 +1341,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           console.error("stream stop failed", e);
         }
       }
-      finishRunning(get, set);
+      finishRunning(get, set, "cancelled");
       return;
     }
 
@@ -1314,6 +1393,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
         console.error("stream stop failed", e);
       }
     }
-    finishRunning(get, set);
+    finishRunning(get, set, "cancelled");
   },
 }));

@@ -1,5 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
-import { isTauri } from "@/lib/tauri";
+import { isTauri, updaterSupported } from "@/lib/tauri";
 
 export interface UpdateInfo {
   version: string;
@@ -21,8 +20,12 @@ let pendingUpdate: { downloadAndInstall: (cb: (e: unknown) => void) => Promise<v
 
 export async function isUpdaterSupported(): Promise<boolean> {
   if (!isTauri) return false;
+  // Delegates to the typed wrapper in `lib/tauri.ts` so we stay
+  // consistent with every other IPC call. A bad command name there
+  // throws at runtime, not silently — which the old raw `invoke()`
+  // + `catch { return false }` here would have hidden indefinitely.
   try {
-    return await invoke<boolean>("updater_supported");
+    return await updaterSupported();
   } catch {
     return false;
   }

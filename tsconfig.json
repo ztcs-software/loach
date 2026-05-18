@@ -17,6 +17,13 @@
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true,
+    "noImplicitOverride": true,
+    // `noUncheckedIndexedAccess` and `exactOptionalPropertyTypes` are
+    // intentionally NOT on. Both would surface real but mostly-cosmetic
+    // bugs across ~50 sites (every `array[i]` becomes `T | undefined`,
+    // every optional-vs-undefined distinction tightens). Tracked as a
+    // v1.1 follow-up — flipping them on requires touching enough call
+    // sites that doing it pre-RTM is more risk than win.
     "allowSyntheticDefaultImports": true,
     "esModuleInterop": true,
 

@@ -17,15 +17,30 @@ impl StreamRegistry {
         }
     }
 
+    /// Insert a Notify for `id` and return a handle. If `id` is already
+    /// registered (which would mean a stream-id collision — astronomically
+    /// unlikely with UUIDs but possible if the frontend ever recycles a
+    /// known id), the old waiter is cancelled before being replaced so it
+    /// can't keep running orphaned without a cancel handle.
     pub fn register(&self, id: String) -> Arc<Notify> {
         let n = Arc::new(Notify::new());
-        self.inner.insert(id, n.clone());
+        if let Some(old) = self.inner.insert(id.clone(), n.clone()) {
+            tracing::warn!(
+                "stream registry: overwriting existing handle for `{id}` — cancelling the previous waiter"
+            );
+            old.notify_waiters();
+        }
         n
     }
 
     pub fn cancel(&self, id: &str) {
         if let Some((_, n)) = self.inner.remove(id) {
-            n.notify_waiters();
+            // `notify_one` stores a permit if no waiter is registered yet,
+            // so a cancel issued in the tiny window between `register()`
+            // returning the Arc and the provider task awaiting
+            // `cancel.notified()` is consumed by the first poll instead
+            // of being lost (which is what `notify_waiters` would do).
+            n.notify_one();
         }
     }
 
@@ -39,7 +54,15 @@ impl StreamRegistry {
 pub enum StreamEvent {
     Token { delta: String },
     Thinking { delta: String },
+    /// Stream ended normally (provider emitted EOF / `[DONE]`). Carries
+    /// the same closing semantics as the prior version of this enum.
     Done,
+    /// Stream was cancelled by the user (or by another command stopping
+    /// the runner). Distinct from `Done` so the frontend can avoid
+    /// pretending an interrupted generation finished naturally — useful
+    /// for skipping the "Saved to memory" pulse and for the unread-dot
+    /// gate, which both only make sense on real completions.
+    Cancelled,
     Error { message: String },
     Metrics {
         tokens: u32,
@@ -77,6 +100,10 @@ pub enum AdminEvent {
         completed: Option<u64>,
     },
     Done,
+    /// User cancelled the admin operation mid-flight. The frontend
+    /// surfaces this as "Cancelled" instead of a green check so the user
+    /// doesn't think a partial pull finished successfully.
+    Cancelled,
     Error {
         message: String,
     },

@@ -789,3 +789,16 @@ export function factoryReset(auth?: DestructiveAuth): Promise<void> {
   if (!isTauri) return notInTauri(undefined);
   return invoke<void>("factory_reset", { auth });
 }
+
+// ------------ updater ------------
+
+/** Whether the running binary's bundle format supports in-app updates.
+ *  Returns true on Windows (NSIS), and on Linux only when running inside
+ *  an AppImage (`.deb` / `.rpm` installs are stuck with whatever the
+ *  system package manager last installed). Wrapped here so callers don't
+ *  have to construct a raw `invoke("updater_supported")` and stay
+ *  consistent with the rest of the IPC layer. */
+export function updaterSupported(): Promise<boolean> {
+  if (!isTauri) return notInTauri(false);
+  return invoke<boolean>("updater_supported");
+}

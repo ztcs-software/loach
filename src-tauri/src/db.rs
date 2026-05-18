@@ -481,32 +481,33 @@ impl Database {
 
     pub fn pin_session(&self, id: &str, pinned: bool) -> Result<()> {
         let conn = self.conn.lock();
-        let pinned_at: Option<i64> = if pinned {
-            Some(Utc::now().timestamp_millis())
-        } else {
-            None
-        };
+        let now = Utc::now().timestamp_millis();
+        let pinned_at: Option<i64> = if pinned { Some(now) } else { None };
+        // Bump `updated_at` too so the sidebar's `ORDER BY updated_at DESC`
+        // surfaces the just-pinned chat to the top. Without this, pinning
+        // a buried chat leaves it visually unchanged even though the
+        // pinned-icon flipped on.
         conn.execute(
-            "UPDATE sessions SET pinned_at = ?1 WHERE id = ?2",
-            params![pinned_at, id],
+            "UPDATE sessions SET pinned_at = ?1, updated_at = ?2 WHERE id = ?3",
+            params![pinned_at, now, id],
         )?;
         Ok(())
     }
 
     pub fn archive_session(&self, id: &str, archived: bool) -> Result<()> {
         let conn = self.conn.lock();
-        let archived_at: Option<i64> = if archived {
-            Some(Utc::now().timestamp_millis())
-        } else {
-            None
-        };
+        let now = Utc::now().timestamp_millis();
+        let archived_at: Option<i64> = if archived { Some(now) } else { None };
         // Archiving also clears the pinned flag so an unarchived chat doesn't
-        // silently re-appear as a pinned item.
+        // silently re-appear as a pinned item. Bump `updated_at` so the
+        // archive list is ordered by archive time and the active list
+        // re-surfaces a just-restored chat.
         conn.execute(
             "UPDATE sessions SET archived_at = ?1,
-                                 pinned_at = CASE WHEN ?1 IS NULL THEN pinned_at ELSE NULL END
-             WHERE id = ?2",
-            params![archived_at, id],
+                                 pinned_at = CASE WHEN ?1 IS NULL THEN pinned_at ELSE NULL END,
+                                 updated_at = ?2
+             WHERE id = ?3",
+            params![archived_at, now, id],
         )?;
         Ok(())
     }

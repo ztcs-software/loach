@@ -341,6 +341,7 @@ function ModelTile({
     <article
       role="button"
       tabIndex={0}
+      aria-label={`Customize model: ${model.id}`}
       onClick={onCustomize}
       onKeyDown={(e) => {
         if (e.key === "Enter" || e.key === " ") {

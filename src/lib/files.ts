@@ -45,7 +45,15 @@ const DOCX_MIME =
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 
 export class FileTooLargeError extends Error {
-  constructor(public readonly name: string, public readonly size: number) {
+  // `override` on the inherited `name` so `noImplicitOverride` is happy
+  // — Error.name already exists on the prototype, so this is a real
+  // override (the constructor param defaults to the user-supplied file
+  // name rather than the class name). `size` doesn't exist on Error,
+  // so no marker needed there.
+  constructor(
+    public override readonly name: string,
+    public readonly size: number,
+  ) {
     super(`${name} exceeds the 20 MB limit (${size} bytes)`);
   }
 }
