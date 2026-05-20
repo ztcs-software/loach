@@ -1,5 +1,6 @@
 import { memo, useLayoutEffect, useRef, useState } from "react";
 import {
+  AlertTriangle,
   Brain,
   Check,
   ChevronDown,
@@ -7,7 +8,9 @@ import {
   Copy,
   File,
   FileText,
+  Loader2,
   MoreHorizontal,
+  Wrench,
 } from "lucide-react";
 import { Markdown } from "./Markdown";
 import {
@@ -16,7 +19,12 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import type { Attachment, Message as ChatMessage, MessageMetrics } from "@/types";
+import type {
+  Attachment,
+  Message as ChatMessage,
+  MessageMetrics,
+  ToolCallRecord,
+} from "@/types";
 import { cn } from "@/lib/utils";
 import { stripInlinedAttachments } from "@/lib/files";
 import { Bookmark } from "lucide-react";
@@ -44,6 +52,120 @@ function parseAttachments(json: string | null): Attachment[] {
   } catch {
     return [];
   }
+}
+
+function parseToolCalls(json: string | null): ToolCallRecord[] {
+  if (!json) return [];
+  try {
+    const v = JSON.parse(json);
+    return Array.isArray(v) ? (v as ToolCallRecord[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function ToolCallItem({ call }: { call: ToolCallRecord }) {
+  const [open, setOpen] = useState(false);
+  const pending = call.result === null;
+  const failed = !pending && call.is_error;
+  // Pretty-print arguments. The model sometimes ships a string instead of
+  // an object — try to parse it for nicer display, fall back to raw.
+  let argsText: string;
+  if (typeof call.arguments === "string") {
+    try {
+      argsText = JSON.stringify(JSON.parse(call.arguments), null, 2);
+    } catch {
+      argsText = call.arguments;
+    }
+  } else {
+    try {
+      argsText = JSON.stringify(call.arguments, null, 2);
+    } catch {
+      argsText = String(call.arguments);
+    }
+  }
+  // The qualified tool name comes through as `<serverSlug>__<toolName>` —
+  // show the raw piece in the chip and the server in the header.
+  const rawTool = call.tool.includes("__")
+    ? call.tool.slice(call.tool.indexOf("__") + 2)
+    : call.tool;
+  return (
+    <div
+      className={cn(
+        "rounded-lg border px-2.5 py-1.5 text-xs",
+        failed
+          ? "border-red-500/30 bg-red-500/5"
+          : "border-foreground/10 bg-foreground/[0.03]",
+      )}
+    >
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center gap-1.5 text-left text-foreground/70 transition-colors hover:text-foreground"
+      >
+        {open ? (
+          <ChevronDown className="h-3.5 w-3.5 shrink-0" />
+        ) : (
+          <ChevronRight className="h-3.5 w-3.5 shrink-0" />
+        )}
+        {pending ? (
+          <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-foreground/55" />
+        ) : failed ? (
+          <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-red-400" />
+        ) : (
+          <Wrench className="h-3.5 w-3.5 shrink-0 text-foreground/55" />
+        )}
+        <span className="min-w-0 truncate font-mono">
+          <span className="text-foreground/45">{call.server_name || "tool"} · </span>
+          <span className="text-foreground/80">{rawTool}</span>
+        </span>
+      </button>
+      {open && (
+        <div className="mt-2 space-y-2 pl-5">
+          <div>
+            <div className="mb-0.5 text-[10.5px] uppercase tracking-wider text-foreground/40">
+              Arguments
+            </div>
+            <pre className="max-h-40 overflow-auto rounded border border-foreground/10 bg-foreground/[0.04] px-2 py-1.5 font-mono text-[11px] leading-snug text-foreground/80 whitespace-pre-wrap break-words">
+              {argsText || "{}"}
+            </pre>
+          </div>
+          {!pending && (
+            <div>
+              <div className="mb-0.5 text-[10.5px] uppercase tracking-wider text-foreground/40">
+                {failed ? "Error" : "Result"}
+              </div>
+              <pre
+                className={cn(
+                  "max-h-64 overflow-auto rounded border px-2 py-1.5 font-mono text-[11px] leading-snug whitespace-pre-wrap break-words",
+                  failed
+                    ? "border-red-500/30 bg-red-500/[0.06] text-red-200"
+                    : "border-foreground/10 bg-foreground/[0.04] text-foreground/80",
+                )}
+              >
+                {call.result ?? ""}
+              </pre>
+            </div>
+          )}
+          {pending && (
+            <div className="text-[11px] italic text-foreground/50">
+              Running…
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ToolCallsBlock({ calls }: { calls: ToolCallRecord[] }) {
+  return (
+    <div className="mb-2 space-y-1.5">
+      {calls.map((c) => (
+        <ToolCallItem key={c.id} call={c} />
+      ))}
+    </div>
+  );
 }
 
 /**
@@ -188,6 +310,7 @@ function MessageItemImpl({ message, isStreaming, metrics }: MessageProps) {
   const isUser = message.role === "user";
   const persistedMetrics = parseMetrics(message.metrics_json);
   const showMetrics = metrics ?? persistedMetrics;
+  const toolCalls = !isUser ? parseToolCalls(message.tool_calls_json) : [];
   const attachments = isUser ? parseAttachments(message.attachments_json) : [];
   const images = attachments.filter((a) => a.kind === "image");
   const files = attachments.filter((a) => a.kind === "text" || a.kind === "file");
@@ -332,7 +455,10 @@ function MessageItemImpl({ message, isStreaming, metrics }: MessageProps) {
             isStreaming={isStreaming && message.content.length === 0}
           />
         )}
-        {message.content.length === 0 && isStreaming && !message.thinking ? (
+        {!isUser && toolCalls.length > 0 && (
+          <ToolCallsBlock calls={toolCalls} />
+        )}
+        {message.content.length === 0 && isStreaming && !message.thinking && toolCalls.length === 0 ? (
           <div className="flex items-center gap-1.5 py-1 text-muted-foreground">
             <span className="inline-block h-1.5 w-1.5 animate-blink rounded-full bg-current" />
             <span className="inline-block h-1.5 w-1.5 animate-blink rounded-full bg-current [animation-delay:200ms]" />

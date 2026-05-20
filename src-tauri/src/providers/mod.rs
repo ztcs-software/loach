@@ -3,6 +3,8 @@ pub mod openai;
 
 use serde::{Deserialize, Serialize};
 
+use crate::mcp::McpToolDef;
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ModelInfo {
     pub id: String,
@@ -75,4 +77,10 @@ pub struct ChatRequest {
     pub system_prompt: Option<String>,
     pub messages: Vec<ChatMessageIn>,
     pub params: GenerationParams,
+    /// MCP tools exposed to the model for this turn. Populated server-side
+    /// by [`crate::commands::chat_stream`] from the enabled MCP servers;
+    /// the frontend never has to construct this list. Empty when no MCP
+    /// servers are configured or none are reachable.
+    #[serde(default, skip_deserializing)]
+    pub tools: Vec<McpToolDef>,
 }

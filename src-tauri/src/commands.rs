@@ -237,6 +237,12 @@ pub struct UpdateMessageArgs {
     pub content: String,
     pub thinking: Option<String>,
     pub metrics_json: Option<String>,
+    /// JSON-encoded `ToolCallRecord[]` — the MCP tool calls + results made
+    /// during this assistant turn. None preserves whatever's already on the
+    /// row (so a content-only flush during streaming doesn't clobber
+    /// tool calls that landed in a separate write).
+    #[serde(default)]
+    pub tool_calls_json: Option<String>,
 }
 
 #[tauri::command]
@@ -252,6 +258,7 @@ pub async fn update_message(
             &args.content,
             args.thinking.as_deref(),
             args.metrics_json.as_deref(),
+            args.tool_calls_json.as_deref(),
         )
         .map_err(err)
 }
@@ -1102,11 +1109,34 @@ pub async fn chat_stream(
     let http = state.http.clone();
     let registry = state.streams.clone();
     let provider = request.provider.clone();
+    let db = state.db.clone();
 
+    // Aggregate MCP tools BEFORE spawning so a slow tools/list doesn't block
+    // the user's first token — actually wait: the user does want this to
+    // happen before the model sees their prompt, because the model decides
+    // up front whether to use a tool. Run it on the spawned task instead so
+    // chat_stream returns the handle immediately and the UI can swap to
+    // "streaming" mode. The aggregation timeout (per-server 30 s, parallel
+    // would be better but we keep it sequential for now) bounds the wait.
     tauri::async_runtime::spawn(async move {
+        let (tools, errors) = crate::mcp::aggregate_tools(&db).await;
+        if !errors.is_empty() {
+            let summary = errors
+                .iter()
+                .map(|(name, e)| format!("{name}: {e}"))
+                .collect::<Vec<_>>()
+                .join("; ");
+            tracing::warn!("MCP aggregate errors — {summary}");
+        }
+        request.tools = tools;
+
         let res = match provider.as_str() {
-            "ollama" => providers::ollama::chat_stream(app, http, registry, request).await,
-            "openai" => providers::openai::chat_stream(app, http, registry, request).await,
+            "ollama" => {
+                providers::ollama::chat_stream(app, http, registry, db, request).await
+            }
+            "openai" => {
+                providers::openai::chat_stream(app, http, registry, db, request).await
+            }
             other => {
                 tracing::warn!("unknown provider {other}");
                 Ok(())

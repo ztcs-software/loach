@@ -8,8 +8,8 @@ use serde_json::{json, Value};
 use crate::db::McpServer;
 
 use super::types::{
-    JsonRpcError, JsonRpcResponse, ListToolsResult, InitializeResult, McpTestResult, McpTool,
-    PROTOCOL_VERSION,
+    CallToolContent, CallToolResult, InitializeResult, JsonRpcError, JsonRpcResponse,
+    ListToolsResult, McpCallResult, McpTestResult, McpTool, McpToolRaw, PROTOCOL_VERSION,
 };
 
 /// Per-request ceiling. Remote MCP servers can take a few seconds to cold
@@ -29,6 +29,185 @@ const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 const CLIENT_NAME: &str = "loach";
 const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// A live MCP session bound to one server. Holds the URL, headers, and the
+/// session id returned by the initial handshake so subsequent calls
+/// (`tools/list`, `tools/call`) reuse the same conversation rather than
+/// re-initialising each round-trip. Cheap to construct — no network until
+/// the first `initialize()` call.
+pub struct McpSession {
+    http: reqwest::Client,
+    url: String,
+    headers: HashMap<String, String>,
+    session_id: Option<String>,
+    /// Monotonic JSON-RPC `id` counter. Streamable HTTP is one-POST-one-
+    /// reply so we don't pair replies to pending requests, but a fresh id
+    /// per call keeps the logs and any server-side telemetry sane.
+    next_id: i64,
+}
+
+impl McpSession {
+    pub fn new(http: reqwest::Client, server: &McpServer) -> Result<Self> {
+        let url = server.url.trim();
+        if url.is_empty() {
+            bail!("MCP server URL is empty");
+        }
+        let headers: HashMap<String, String> = match server.headers_json.as_deref() {
+            Some(s) if !s.trim().is_empty() => serde_json::from_str(s)
+                .context("headers_json is not a JSON object of strings")?,
+            _ => HashMap::new(),
+        };
+        Ok(Self {
+            http,
+            url: url.to_string(),
+            headers,
+            session_id: None,
+            next_id: 1,
+        })
+    }
+
+    fn fresh_id(&mut self) -> i64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        id
+    }
+
+    /// Run the `initialize` + `notifications/initialized` handshake. Must
+    /// be the first call on a fresh session.
+    pub async fn initialize(&mut self) -> Result<InitializeResult> {
+        let init = json!({
+            "jsonrpc": "2.0",
+            "id": self.fresh_id(),
+            "method": "initialize",
+            "params": {
+                "protocolVersion": PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": { "name": CLIENT_NAME, "version": CLIENT_VERSION },
+            },
+        });
+        let (resp, sid) = post_rpc(
+            &self.http,
+            &self.url,
+            &self.headers,
+            &init,
+            self.session_id.as_deref(),
+        )
+        .await?;
+        if let Some(s) = sid {
+            self.session_id = Some(s);
+        }
+        let parsed: InitializeResult = unwrap_response(resp)?;
+
+        // Best-effort initialized notification. Some servers (notably the
+        // GitHub gateway) require this before they'll honour tools/* calls.
+        let note = json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+        });
+        let _ = post_rpc_raw(
+            &self.http,
+            &self.url,
+            &self.headers,
+            &note,
+            self.session_id.as_deref(),
+        )
+        .await;
+
+        Ok(parsed)
+    }
+
+    /// Fetch the full tool catalog. Returns the raw shape (includes the
+    /// JSON-Schema for each tool's arguments) so callers that need to
+    /// forward schemas to an LLM don't lose them.
+    pub async fn list_tools_raw(&mut self) -> Result<Vec<McpToolRaw>> {
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": self.fresh_id(),
+            "method": "tools/list",
+        });
+        let (resp, sid) = post_rpc(
+            &self.http,
+            &self.url,
+            &self.headers,
+            &body,
+            self.session_id.as_deref(),
+        )
+        .await?;
+        if let Some(s) = sid {
+            self.session_id = Some(s);
+        }
+        let parsed: ListToolsResult = unwrap_response(resp)?;
+        Ok(parsed.tools)
+    }
+
+    /// Invoke a single tool. Returns the concatenated text content + the
+    /// server's `isError` flag. `arguments` is a JSON object the model
+    /// constructed against the tool's input schema; we forward it verbatim
+    /// without validating against the schema (the server will reject
+    /// invalid shapes itself and the model will react to the error).
+    pub async fn call_tool(&mut self, name: &str, arguments: &Value) -> Result<McpCallResult> {
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": self.fresh_id(),
+            "method": "tools/call",
+            "params": {
+                "name": name,
+                "arguments": arguments,
+            },
+        });
+        let (resp, sid) = post_rpc(
+            &self.http,
+            &self.url,
+            &self.headers,
+            &body,
+            self.session_id.as_deref(),
+        )
+        .await?;
+        if let Some(s) = sid {
+            self.session_id = Some(s);
+        }
+        let parsed: CallToolResult = unwrap_response(resp)?;
+        let mut text = String::new();
+        for piece in parsed.content {
+            match piece {
+                CallToolContent::Text { text: t } => {
+                    if !text.is_empty() {
+                        text.push('\n');
+                    }
+                    text.push_str(&t);
+                }
+                CallToolContent::Image { .. } => {
+                    if !text.is_empty() {
+                        text.push('\n');
+                    }
+                    text.push_str("[image content omitted]");
+                }
+                CallToolContent::Resource { resource } => {
+                    if !text.is_empty() {
+                        text.push('\n');
+                    }
+                    if let Some(r) = resource {
+                        text.push_str(&r.to_string());
+                    } else {
+                        text.push_str("[resource]");
+                    }
+                }
+                CallToolContent::Unknown => {
+                    // Drop unknown variants rather than fabricate text —
+                    // the model can still react to the rest of the
+                    // content array.
+                }
+            }
+        }
+        if text.is_empty() && parsed.is_error {
+            text.push_str("tool returned no content");
+        }
+        Ok(McpCallResult {
+            content_text: text,
+            is_error: parsed.is_error,
+        })
+    }
+}
+
 /// Probe an MCP server: handshake + list tools. Never panics; any failure
 /// is packaged into `McpTestResult::failure`.
 pub async fn test_server(server: &McpServer, http: &reqwest::Client) -> McpTestResult {
@@ -38,68 +217,20 @@ pub async fn test_server(server: &McpServer, http: &reqwest::Client) -> McpTestR
     }
 }
 
-// ---------- HTTP (streamable) ----------
-
 async fn test_http(server: &McpServer, http: &reqwest::Client) -> Result<McpTestResult> {
-    let url = server.url.trim();
-    if url.is_empty() {
-        bail!("MCP server URL is empty");
-    }
-    let headers: HashMap<String, String> = match server.headers_json.as_deref() {
-        Some(s) if !s.trim().is_empty() => {
-            serde_json::from_str(s).context("headers_json is not a JSON object of strings")?
-        }
-        _ => HashMap::new(),
-    };
-
-    // Streamable HTTP can return a session id on initialize which subsequent
-    // requests need to echo back. Track it so we stay "logged in" for the
-    // tools/list call.
-    let mut session_id: Option<String> = None;
-
-    // ---- initialize ----
-    let init = json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "initialize",
-        "params": {
-            "protocolVersion": PROTOCOL_VERSION,
-            "capabilities": {},
-            "clientInfo": { "name": CLIENT_NAME, "version": CLIENT_VERSION },
-        },
-    });
-    let (init_resp, sid) = post_rpc(http, url, &headers, &init, session_id.as_deref()).await?;
-    session_id = sid;
-    let init_val: InitializeResult = unwrap_response(init_resp)?;
-
-    // ---- initialized notification ----
-    let note = json!({
-        "jsonrpc": "2.0",
-        "method": "notifications/initialized",
-    });
-    // Notifications carry no id; the server may reply 202 with no body, so
-    // ignore parse errors here.
-    let _ = post_rpc_raw(http, url, &headers, &note, session_id.as_deref()).await;
-
-    // ---- tools/list ----
-    let list = json!({
-        "jsonrpc": "2.0",
-        "id": 2,
-        "method": "tools/list",
-    });
-    let (list_resp, _) = post_rpc(http, url, &headers, &list, session_id.as_deref()).await?;
-    let tools: ListToolsResult = unwrap_response(list_resp)?;
+    let mut session = McpSession::new(http.clone(), server)?;
+    let init = session.initialize().await?;
+    let tools = session.list_tools_raw().await?;
 
     Ok(McpTestResult {
         ok: true,
-        server_name: init_val.server_info.as_ref().and_then(|s| s.name.clone()),
-        server_version: init_val
+        server_name: init.server_info.as_ref().and_then(|s| s.name.clone()),
+        server_version: init
             .server_info
             .as_ref()
             .and_then(|s| s.version.clone()),
-        protocol_version: init_val.protocol_version,
+        protocol_version: init.protocol_version,
         tools: tools
-            .tools
             .into_iter()
             .map(|t| McpTool {
                 name: t.name,

@@ -115,7 +115,31 @@ export interface Message {
   thinking: string | null;
   attachments_json: string | null;
   metrics_json: string | null;
+  /** JSON-encoded `ToolCallRecord[]` — MCP tool calls + their results made
+   *  during this assistant turn. Null for user / system messages and for
+   *  pre-MCP assistant rows. */
+  tool_calls_json: string | null;
   created_at: number;
+}
+
+/** One MCP tool invocation surfaced in the transcript. The renderer pairs
+ *  call + result and shows a single collapsible block per id. While the
+ *  tool is still running, `result` is null and the UI shows a spinner. */
+export interface ToolCallRecord {
+  id: string;
+  server_id: string;
+  server_name: string;
+  /** The qualified name the model picked (`<serverSlug>__<rawToolName>`). */
+  tool: string;
+  /** Arguments the model produced. Stored as a value so the UI can render
+   *  with `JSON.stringify(…, null, 2)` for readability. */
+  arguments: unknown;
+  /** Plain text the MCP server returned. Null while the call is still
+   *  in flight (the `tool_call` event fired but `tool_result` hasn't). */
+  result: string | null;
+  /** Mirrors MCP's `isError`. True for either a tool-reported failure
+   *  (the tool ran but said "no") or a transport/dispatch error. */
+  is_error: boolean;
 }
 
 export interface ModelInfo {
@@ -200,6 +224,23 @@ export type StreamEvent =
       tokens: number;
       elapsed_ms: number;
       tokens_per_second: number;
+    }
+  /** Model asked to invoke an MCP tool. Emitted BEFORE the dispatcher
+   *  runs the tool — the UI uses this to render a "calling X…" block. */
+  | {
+      kind: "tool_call";
+      id: string;
+      server_id: string;
+      server_name: string;
+      tool: string;
+      arguments: unknown;
+    }
+  /** Outcome of a tool call. `id` pairs with the matching `tool_call`. */
+  | {
+      kind: "tool_result";
+      id: string;
+      content: string;
+      is_error: boolean;
     };
 
 export type ThemeChoice = "light" | "dark" | "system";

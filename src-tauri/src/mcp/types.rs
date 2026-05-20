@@ -68,6 +68,12 @@ pub struct McpToolRaw {
     pub name: String,
     #[serde(default)]
     pub description: Option<String>,
+    /// JSON-Schema describing the tool's expected arguments. Forwarded to
+    /// the LLM verbatim — the model uses it to construct valid tool calls.
+    /// Optional because a few servers omit it; we default to an empty
+    /// object schema in that case.
+    #[serde(default, rename = "inputSchema")]
+    pub input_schema: Option<Value>,
 }
 
 // ---------- Public result shape (serialized to the frontend) ----------
@@ -102,4 +108,66 @@ impl McpTestResult {
             error: Some(msg.into()),
         }
     }
+}
+
+// ---------- Tools used inside chat ----------
+
+/// One tool exposed to the model during a chat turn. Aggregated across every
+/// enabled MCP server before the chat request is built. `qualified_name` is
+/// the name the model sees — server name + a separator + the raw tool name
+/// — so two servers can both expose a `search` tool without colliding. The
+/// `server_id` lets the dispatcher route a tool call back to the right
+/// server without re-parsing the qualified name.
+#[derive(Debug, Clone, Serialize)]
+pub struct McpToolDef {
+    pub server_id: String,
+    pub server_name: String,
+    pub name: String,
+    pub qualified_name: String,
+    pub description: Option<String>,
+    pub input_schema: Value,
+}
+
+/// Outcome of a single `tools/call`. `content_text` is the human/model-
+/// readable string concatenated from every text block in the MCP response —
+/// stringified JSON for any non-text content (image, resource link) so the
+/// model always gets *something* to read. `is_error` mirrors the MCP
+/// `isError` field; we still return Ok at the Rust layer because a tool
+/// failure isn't a transport failure — the model is supposed to see the
+/// error message and react.
+#[derive(Debug, Clone, Serialize)]
+pub struct McpCallResult {
+    pub content_text: String,
+    pub is_error: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CallToolResult {
+    #[serde(default)]
+    pub content: Vec<CallToolContent>,
+    #[serde(default, rename = "isError")]
+    pub is_error: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CallToolContent {
+    Text {
+        text: String,
+    },
+    Image {
+        #[allow(dead_code)]
+        data: String,
+        #[serde(default, rename = "mimeType")]
+        #[allow(dead_code)]
+        mime_type: Option<String>,
+    },
+    Resource {
+        #[serde(default)]
+        resource: Option<Value>,
+    },
+    /// Anything we don't recognise — keep the payload so we can stringify
+    /// it for the model rather than dropping the result silently.
+    #[serde(other)]
+    Unknown,
 }
