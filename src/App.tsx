@@ -22,6 +22,7 @@ import { SearchBar } from "@/components/SearchBar";
 import { SelectionCopyButton } from "@/components/SelectionCopyButton";
 import { ToastHost } from "@/components/ToastHost";
 import { ConfirmDialogHost } from "@/components/ConfirmDialog";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { Button } from "@/components/ui/button";
 import { SquarePen } from "lucide-react";
 import { resolveDefaultModelChoice, useChatStore } from "@/stores/chatStore";
@@ -64,6 +65,10 @@ export default function App() {
     s.activeSessionId ? s.messages[s.activeSessionId] ?? EMPTY_MESSAGES : EMPTY_MESSAGES,
   );
   const hasMessages = messages.length > 0;
+  // True only during the post-unlock hydrate window. Lets us swap the
+  // "No chat open" CTA for a loading skeleton so users with chats on disk
+  // don't briefly see an empty-state message that tells them to create one.
+  const chatsHydrated = useChatStore((s) => s.hydrated);
 
   // Phase 1 — security probe. Pessimistically lock (so the chat UI never
   // flashes) and ask the backend whether a lock is configured. The store's
@@ -164,7 +169,12 @@ export default function App() {
       {probing ? null : showLock ? (
         <div className="relative flex h-full flex-col overflow-hidden text-foreground">
           <TitleBar />
-          <LockScreen />
+          {/* `scope="app"` on the lock screen specifically — if the unlock UI
+              crashes, "Try again" would leave the user stuck staring at a
+              broken lock with no way through. Reload is the only safe out. */}
+          <ErrorBoundary name="Lock screen" scope="app">
+            <LockScreen />
+          </ErrorBoundary>
         </div>
       ) : (
       <div className="relative flex h-full flex-col overflow-hidden text-foreground">
@@ -172,44 +182,79 @@ export default function App() {
         <div className="flex min-h-0 flex-1">
           <Sidebar />
           {viewingSpaceId ? (
-            <SpaceView />
+            <ErrorBoundary name="Space">
+              <SpaceView />
+            </ErrorBoundary>
           ) : viewingModel ? (
-            <ModelsView />
+            <ErrorBoundary name="Model details">
+              <ModelsView />
+            </ErrorBoundary>
           ) : sidebarTab === "spaces" ? (
-            <SpacesLibrary />
+            <ErrorBoundary name="Spaces library">
+              <SpacesLibrary />
+            </ErrorBoundary>
           ) : sidebarTab === "snippets" ? (
-            <SnippetsLibrary />
+            <ErrorBoundary name="Snippets library">
+              <SnippetsLibrary />
+            </ErrorBoundary>
           ) : sidebarTab === "models" ? (
-            <ModelsLibrary />
+            <ErrorBoundary name="Models library">
+              <ModelsLibrary />
+            </ErrorBoundary>
           ) : (
             <>
-              <main className="relative flex min-w-0 flex-1 flex-col">
-                <ChatHeader session={session} />
-                {!session ? (
-                  <NoChatState />
-                ) : hasMessages ? (
-                  <>
-                    <ChatCanvas />
-                    <ChatInput />
-                  </>
-                ) : (
-                  <HeroComposer />
-                )}
-              </main>
+              {/* Chat surface and right slot get their own boundaries so a
+                  crash in markdown rendering or a parameter widget doesn't
+                  take the whole pair down — the user still has the other
+                  half to work with. */}
+              <ErrorBoundary name="Chat">
+                <main className="relative flex min-w-0 flex-1 flex-col">
+                  <ChatHeader session={session} />
+                  {!session ? (
+                    // During the brief hydrate window we don't yet know
+                    // whether the user has zero chats or just chats that
+                    // haven't loaded yet. The skeleton avoids telling them
+                    // they have no chats when they actually do.
+                    chatsHydrated ? <NoChatState /> : <ChatLoadingSkeleton />
+                  ) : hasMessages ? (
+                    <>
+                      <ChatCanvas />
+                      <ChatInput />
+                    </>
+                  ) : (
+                    <HeroComposer />
+                  )}
+                </main>
+              </ErrorBoundary>
               {/* Right slot: code canvas wins over parameters when both are
                   open. Stacking them would need a tab UI we haven't designed
                   yet; mutually exclusive matches ChatGPT's behaviour and
                   keeps the layout legible. The canvas store survives across
                   this swap, so the user's snippet is still there if they
                   toggle params back. */}
-              {canvasOpen ? <CodeCanvas /> : <ParameterPanel session={session} />}
+              <ErrorBoundary name={canvasOpen ? "Code canvas" : "Parameters"}>
+                {canvasOpen ? <CodeCanvas /> : <ParameterPanel session={session} />}
+              </ErrorBoundary>
             </>
           )}
         </div>
-        <SettingsDialog />
-        <SpaceForm />
-        <SnippetDialog />
-        {showOnboarding && <Onboarding />}
+        {/* Dialogs each get their own boundary. They're mounted unconditionally
+            (Radix decides visibility internally) so a render crash in any one
+            would otherwise blank the whole app. */}
+        <ErrorBoundary name="Settings">
+          <SettingsDialog />
+        </ErrorBoundary>
+        <ErrorBoundary name="Space form">
+          <SpaceForm />
+        </ErrorBoundary>
+        <ErrorBoundary name="Snippet editor">
+          <SnippetDialog />
+        </ErrorBoundary>
+        {showOnboarding && (
+          <ErrorBoundary name="Onboarding">
+            <Onboarding />
+          </ErrorBoundary>
+        )}
       </div>
       )}
       {/* Global Cmd-K search palette. Lives at the App root so it floats
@@ -267,6 +312,28 @@ const HERO_GREETINGS = [
  * is no session to send into here, so we surface a single "New chat" CTA
  * that calls into the same `newSession` the sidebar uses.
  */
+/**
+ * Centered, low-contrast "still loading" placeholder for the chat surface.
+ * Shown for the ~100–300 ms window between unlock and `chatStore.hydrate()`
+ * completing. We intentionally don't use a spinner — most loads are too fast
+ * for one to register as anything other than a flash, and the soft pulsing
+ * card matches the rest of the app's quiet visual language.
+ */
+function ChatLoadingSkeleton() {
+  return (
+    <div
+      className="flex flex-1 items-center justify-center px-6"
+      aria-busy
+      aria-label="Loading chats"
+    >
+      <div className="w-full max-w-md animate-pulse text-center">
+        <div className="mx-auto h-4 w-32 rounded-full bg-foreground/[0.06]" />
+        <div className="mx-auto mt-3 h-3 w-48 rounded-full bg-foreground/[0.04]" />
+      </div>
+    </div>
+  );
+}
+
 function NoChatState() {
   const newSession = useChatStore((s) => s.newSession);
   const start = () => void newSession({ spaceId: null });

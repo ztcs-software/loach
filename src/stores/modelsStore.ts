@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { logger } from "@/lib/logger";
 import {
   ollamaCopyModel,
   ollamaCreateModel,
@@ -304,7 +305,7 @@ export const useModelsStore = create<ModelsState>((set, get) => ({
     try {
       await run.stop();
     } catch (e) {
-      console.warn("admin cancel failed", e);
+      logger.warn("admin cancel failed", e);
     }
     activeRuns.delete(streamId);
     set((s) => ({
@@ -430,6 +431,6 @@ async function runAdminStream(
   try {
     await onFinish();
   } catch (e) {
-    console.warn("admin onFinish hook failed", e);
+    logger.warn("admin onFinish hook failed", e);
   }
 }
