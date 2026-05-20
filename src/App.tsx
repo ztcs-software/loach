@@ -82,38 +82,51 @@ export default function App() {
   // Doing this after unlock keeps the lock surface snappy and avoids
   // shipping any chat data into memory while the user is still proving
   // they're allowed to see it.
+  //
+  // The five hydrates are independent — none of their `hydrate()` methods
+  // reads from another store — so we fan them out in parallel. The prior
+  // sequential await chain was the dominant chunk of post-unlock latency,
+  // since IPC round-trips stack additively. Parallelising collapses them
+  // to the slowest single call (typically `hydrateModels`, which is
+  // network-bound to Ollama).
+  //
+  // The Ollama preload only needs `settings` + `sessions` to resolve the
+  // default model choice, so we kick it off as soon as those two land
+  // rather than waiting for spaces/snippets/models. That shaves the
+  // model's cold-load into VRAM (often the single biggest chunk of
+  // time-to-first-token) off the path the user actually waits on.
   useEffect(() => {
     if (!unlocked) return;
-    (async () => {
-      await hydrateSettings();
-      await hydrateSpaces();
-      await hydrateSnippets();
-      await hydrateChats();
-      // Model list is cheap (one Ollama /api/tags call) but network-bound, so
-      // fire it last — failure here shouldn't block the rest of the UI.
-      await hydrateModels();
 
-      // Optional default-model preload. Resolves the same encoded choice
-      // that "New chat" would use, then warms the model into VRAM with an
-      // empty Ollama chat so the first real request skips the cold load.
-      // Cloud providers have no local load step, so we only fire for Ollama.
-      // Fully fire-and-forget — Ollama may be unreachable or the model
-      // missing; we never want this to surface as an error.
+    const settingsP = hydrateSettings();
+    const chatsP = hydrateChats();
+    void hydrateSpaces();
+    void hydrateSnippets();
+    // `hydrateModels` is network-bound (Ollama /api/tags) — fire-and-forget
+    // so its latency never blocks anything the user sees.
+    void hydrateModels();
+
+    // Optional default-model preload. Resolves the same encoded choice
+    // that "New chat" would use, then warms the model into VRAM with an
+    // empty Ollama chat so the first real request skips the cold load.
+    // Cloud providers have no local load step, so we only fire for Ollama.
+    // Fully fire-and-forget — Ollama may be unreachable or the model
+    // missing; we never want this to surface as an error.
+    void Promise.all([settingsP, chatsP]).then(() => {
       const s = useSettingsStore.getState();
-      if (s.default_model_preload) {
-        const resolved = resolveDefaultModelChoice(
-          s.default_model_choice,
-          s.default_provider,
-          s.default_model ?? "",
-          useChatStore.getState().sessions,
+      if (!s.default_model_preload) return;
+      const resolved = resolveDefaultModelChoice(
+        s.default_model_choice,
+        s.default_provider,
+        s.default_model ?? "",
+        useChatStore.getState().sessions,
+      );
+      if (resolved.provider === "ollama" && resolved.model) {
+        void ollamaPreloadModel(s.ollama_base_url, resolved.model).catch(
+          () => {},
         );
-        if (resolved.provider === "ollama" && resolved.model) {
-          void ollamaPreloadModel(s.ollama_base_url, resolved.model).catch(
-            () => {},
-          );
-        }
       }
-    })();
+    });
   }, [
     unlocked,
     hydrateSettings,
