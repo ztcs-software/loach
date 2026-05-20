@@ -1,6 +1,7 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import "./styles/globals.css";
 
 // Suppress the WebView's native context menu globally, EXCEPT inside form
@@ -51,6 +52,12 @@ window.addEventListener(
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
-    <App />
+    {/* Outermost safety net. Catches anything that escapes the per-panel
+        boundaries inside App.tsx (or that fails before App's own boundaries
+        mount — e.g., a crash in a top-level provider, store hydrate, etc.).
+        `scope="app"` means the only escape is a full Reload Loach button. */}
+    <ErrorBoundary name="Loach" scope="app">
+      <App />
+    </ErrorBoundary>
   </React.StrictMode>,
 );

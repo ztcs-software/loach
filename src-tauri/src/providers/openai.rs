@@ -392,6 +392,7 @@ pub async fn chat_stream(
 ///   - the URL is http:// and the host is a loopback address (local
 ///     OpenAI-compat servers like LocalAI typically listen on
 ///     127.0.0.1:8080 with no TLS).
+///
 /// Anything else — http:// to an external host — is treated as
 /// untrusted transport and we drop the auth header to avoid leaking the
 /// user's API key over cleartext.

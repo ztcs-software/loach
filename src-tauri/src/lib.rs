@@ -51,10 +51,22 @@ pub struct AppState {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Tracing defaults differ by build mode. Release builds default to `warn`
+    // so a packaged app's stderr (which a sysadmin can capture via console
+    // redirect on Windows or `journalctl` on Linux) is signal-rich and noise-
+    // free; debug builds default to chatty `info,loach_lib=debug` so a dev
+    // running `npm run tauri:dev` sees everything. `RUST_LOG=…` always wins
+    // when set, so support can still ask a user to "run with RUST_LOG=debug"
+    // to capture full traces for a bug report.
+    let default_filter = if cfg!(debug_assertions) {
+        "info,loach_lib=debug"
+    } else {
+        "warn,loach_lib=warn"
+    };
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,loach_lib=debug".into()),
+                .unwrap_or_else(|_| default_filter.into()),
         )
         .init();
 

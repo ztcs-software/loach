@@ -2107,7 +2107,7 @@ checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 
 [[package]]
 name = "loach"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "anyhow",
  "argon2",
@@ -2132,6 +2132,7 @@ dependencies = [
  "tauri-plugin-process",
  "tauri-plugin-shell",
  "tauri-plugin-updater",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tracing",

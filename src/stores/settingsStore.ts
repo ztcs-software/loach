@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { logger } from "@/lib/logger";
 import {
   DEFAULT_SETTINGS,
   type BackgroundStyle,
@@ -52,7 +53,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       applyFontSize(merged.font_size);
       applyBackground(merged.background_style);
     } catch (e) {
-      console.error("settings hydrate failed", e);
+      logger.error("settings hydrate failed", e);
       set({ hydrated: true });
     }
   },

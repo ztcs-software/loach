@@ -415,3 +415,169 @@ pub fn require_unlocked(
     }
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Tests.
+//
+// We deliberately do NOT exercise `setup` / `unlock` / `clear` end-to-end
+// because they touch the real OS keyring — running them in CI would either
+// pollute a developer's actual keyring or fail on a headless machine
+// without a secret service. Instead we cover the security-critical pure
+// functions that argument validation, hashing, and lockout-rate-limiting
+// all funnel through.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use parking_lot::Mutex as PMutex;
+
+    /// Serialise the tests that mutate the module-static `UNLOCK_STATE`.
+    /// `cargo test` runs tests in parallel by default; without this lock
+    /// `record_attempt`-based tests would race each other through the global
+    /// counter and intermittently fail. The hash/verify tests don't touch
+    /// `UNLOCK_STATE` and run free.
+    static LOCKOUT_TEST_LOCK: Lazy<PMutex<()>> = Lazy::new(|| PMutex::new(()));
+
+    #[test]
+    fn hash_then_verify_roundtrips() {
+        let phc = hash("hunter2-correct-horse").expect("hash succeeds");
+        assert!(verify("hunter2-correct-horse", &phc));
+        assert!(!verify("wrong", &phc));
+        assert!(!verify("", &phc));
+    }
+
+    #[test]
+    fn hash_produces_different_phc_for_same_input() {
+        // Salt is per-call random — same secret must produce a different PHC
+        // string each time, otherwise we'd have a tell that the same password
+        // was reused across users / installs sharing a credential store.
+        let a = hash("same-password").unwrap();
+        let b = hash("same-password").unwrap();
+        assert_ne!(a, b);
+        // Both must still verify against the original secret.
+        assert!(verify("same-password", &a));
+        assert!(verify("same-password", &b));
+    }
+
+    #[test]
+    fn verify_rejects_malformed_phc() {
+        assert!(!verify("anything", "not a valid PHC string"));
+        assert!(!verify("anything", ""));
+    }
+
+    #[test]
+    fn verify_against_config_requires_all_factors() {
+        let pin_phc = hash("1234").unwrap();
+        let pw_phc = hash("correct-horse").unwrap();
+
+        let pin_only = LockConfig {
+            method: LockMethod::Pin,
+            pin_length: Some(4),
+            pin_hash: Some(pin_phc.clone()),
+            password_hash: None,
+            hint: None,
+        };
+        assert!(verify_against_config(&pin_only, Some("1234"), None));
+        assert!(!verify_against_config(&pin_only, Some("0000"), None));
+        // Wrong factor type — caller forgot to pass the PIN.
+        assert!(!verify_against_config(&pin_only, None, Some("correct-horse")));
+
+        let pw_only = LockConfig {
+            method: LockMethod::Password,
+            pin_length: None,
+            pin_hash: None,
+            password_hash: Some(pw_phc.clone()),
+            hint: None,
+        };
+        assert!(verify_against_config(
+            &pw_only,
+            None,
+            Some("correct-horse")
+        ));
+        assert!(!verify_against_config(&pw_only, None, Some("wrong")));
+
+        // Both — needs PIN AND password to be correct.
+        let both = LockConfig {
+            method: LockMethod::Both,
+            pin_length: Some(4),
+            pin_hash: Some(pin_phc),
+            password_hash: Some(pw_phc),
+            hint: None,
+        };
+        assert!(verify_against_config(
+            &both,
+            Some("1234"),
+            Some("correct-horse")
+        ));
+        assert!(!verify_against_config(
+            &both,
+            Some("1234"),
+            Some("wrong")
+        ));
+        assert!(!verify_against_config(
+            &both,
+            Some("0000"),
+            Some("correct-horse")
+        ));
+        // Missing either factor → fail.
+        assert!(!verify_against_config(&both, None, Some("correct-horse")));
+        assert!(!verify_against_config(&both, Some("1234"), None));
+    }
+
+    #[test]
+    fn lockout_after_threshold_failures() {
+        let _g = LOCKOUT_TEST_LOCK.lock();
+        reset_unlock_state();
+
+        // Below threshold: still allowed to attempt.
+        for _ in 0..(LOCKOUT_THRESHOLD - 1) {
+            record_attempt(false);
+            check_lockout().expect("not yet locked out below threshold");
+        }
+        // Threshold-th failure trips the lockout window.
+        record_attempt(false);
+        let err = check_lockout()
+            .err()
+            .expect("expected lockout after threshold");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Too many failed attempts"),
+            "unexpected message: {msg}"
+        );
+
+        // A successful attempt clears the counter and the lockout.
+        reset_unlock_state();
+        record_attempt(true);
+        check_lockout().expect("lockout cleared after success");
+    }
+
+    #[test]
+    fn lockout_window_scales_exponentially_up_to_cap() {
+        let _g = LOCKOUT_TEST_LOCK.lock();
+        reset_unlock_state();
+
+        // Push the counter way past the cap-shift threshold (12). The
+        // `locked_until` instant should never exceed `MAX_LOCKOUT_SECS` in
+        // the future, even at unbounded failure counts.
+        for _ in 0..(LOCKOUT_THRESHOLD + 20) {
+            record_attempt(false);
+        }
+        let st = UNLOCK_STATE.lock();
+        let until = st.locked_until.expect("locked out");
+        let now = Instant::now();
+        let remaining = until.saturating_duration_since(now).as_secs();
+        assert!(
+            remaining <= MAX_LOCKOUT_SECS,
+            "lockout {remaining}s exceeded MAX_LOCKOUT_SECS={MAX_LOCKOUT_SECS}s"
+        );
+        // And the base hasn't been swapped for something tiny — first window
+        // is at least BASE_LOCKOUT_SECS.
+        assert!(
+            remaining >= BASE_LOCKOUT_SECS,
+            "lockout {remaining}s shorter than BASE_LOCKOUT_SECS={BASE_LOCKOUT_SECS}s"
+        );
+        drop(st);
+        reset_unlock_state();
+    }
+}

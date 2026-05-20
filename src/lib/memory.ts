@@ -1,4 +1,5 @@
 import { makeRequestId, startChatStream } from "@/lib/tauri";
+import { logger } from "@/lib/logger";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useToastStore } from "@/stores/toastStore";
 import type { ProviderId, SpaceMemory } from "@/types";
@@ -100,7 +101,7 @@ export async function extractMemories(args: {
       userMessage: turnPrompt,
     });
   } catch (e) {
-    console.warn("memory extraction stream failed", e);
+    logger.warn("memory extraction stream failed", e);
     return;
   }
 
@@ -133,7 +134,7 @@ export async function extractMemories(args: {
       existingNormalized.push(norm);
       announceSaved(saved);
     } catch (e) {
-      console.warn("failed to persist memory", e);
+      logger.warn("failed to persist memory", e);
     }
   }
 }

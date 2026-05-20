@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { logger } from "@/lib/logger";
 import {
   addSpaceFile,
   addSpaceMemory,
@@ -94,7 +95,7 @@ export const useSpaceStore = create<SpaceState>((set, get) => ({
       const spaces = await listSpaces();
       set({ spaces });
     } catch (e) {
-      console.error("space hydrate failed", e);
+      logger.error("space hydrate failed", e);
     }
   },
 

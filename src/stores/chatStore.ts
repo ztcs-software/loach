@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { logger } from "@/lib/logger";
 import {
   appendMessage,
   archiveSession,
@@ -23,6 +24,7 @@ import {
   inlineTextAttachments,
 } from "@/lib/files";
 import { extractMemories } from "@/lib/memory";
+import { formatProviderError } from "@/lib/providerErrors";
 import { getPersona } from "@/lib/personas";
 import { getTone } from "@/lib/tones";
 import { applyTemporalAwareness } from "@/lib/temporal";
@@ -77,6 +79,11 @@ interface QueueTask {
 interface ChatState {
   sessions: Session[];
   activeSessionId: string | null;
+  /** True after `hydrate()` finishes (whether it succeeded or fell into the
+   *  catch). Used by `App.tsx` to render a skeleton while chats are loading
+   *  from SQLite — without it the user briefly sees the "No chat open" CTA
+   *  even when they have chats waiting on disk. */
+  hydrated: boolean;
   messages: Record<string, Message[]>;
   streamingByMessage: Record<string, MessageMetrics | null>;
   activeStream: ActiveStream | null;
@@ -460,7 +467,7 @@ function finishRunning(get: Getter, set: Setter, reason: FinishReason = "done") 
       metrics_json: buf.metrics ? JSON.stringify(buf.metrics) : null,
     }).catch((e) => {
       const detail = e instanceof Error ? e.message : String(e);
-      console.error("failed to persist assistant reply", e);
+      logger.error("failed to persist assistant reply", e);
       useToastStore.getState().push({
         kind: "error",
         title: "Couldn't save reply",
@@ -548,7 +555,7 @@ function finishRunning(get: Getter, set: Setter, reason: FinishReason = "done") 
   // us; failures are logged inside the extractor and never bubble up.
   if (memorySnapshot) {
     void extractMemories(memorySnapshot).catch((e) => {
-      console.warn("memory extraction failed", e);
+      logger.warn("memory extraction failed", e);
     });
   }
 }
@@ -573,7 +580,7 @@ function promoteQueueHead(get: Getter, set: Setter) {
     set({ queue: rest });
     dispatching = true;
     void startTask(next, get, set)
-      .catch((err) => console.error("queued task start failed", err))
+      .catch((err) => logger.error("queued task start failed", err))
       .finally(() => {
         dispatching = false;
         // Re-check the queue now that the dispatch lock is free. On the
@@ -606,7 +613,7 @@ async function startTask(task: QueueTask, get: Getter, set: Setter) {
     // Session might have been deleted while the task waited. Silently drop
     // and move on to the next — the .finally hook in `promoteQueueHead`'s
     // caller will pick the next waiter once the dispatch lock is released.
-    console.error("failed to create assistant placeholder", e);
+    logger.error("failed to create assistant placeholder", e);
     return;
   }
 
@@ -661,7 +668,15 @@ async function startTask(task: QueueTask, get: Getter, set: Setter) {
           pendingDirty.metrics = true;
           scheduleFlush(get, set);
         } else if (ev.kind === "error") {
-          buf.content += `\n\n_⚠ ${ev.message}_`;
+          // Wrap raw provider error in a sentence the user can act on. We
+          // know the provider + URL here from `task.request`, so the result
+          // tells the user which endpoint failed and (often) how to fix it.
+          const friendly = formatProviderError({
+            provider: task.request.provider,
+            baseUrl: task.request.base_url,
+            raw: ev.message,
+          });
+          buf.content += `\n\n_⚠ ${friendly}_`;
           pendingDirty.content = true;
           // Sync-flush so the error tail is visible before teardown.
           flushPendingFrame(get, set);
@@ -680,7 +695,7 @@ async function startTask(task: QueueTask, get: Getter, set: Setter) {
     );
     set({ activeStream: { stop: handle.stop, unlisten: handle.unlisten } });
   } catch (e) {
-    console.error("startChatStream failed", e);
+    logger.error("startChatStream failed", e);
     // The placeholder assistant row was created above so the bubble could
     // show "thinking…" while we connected. Now that the connection itself
     // failed, replace its contents with a visible error message instead of
@@ -688,7 +703,15 @@ async function startTask(task: QueueTask, get: Getter, set: Setter) {
     // it backs). Best-effort — if the DB write fails too, the in-memory
     // patch still keeps the bubble informative until the next reload.
     const errorMsg = e instanceof Error ? e.message : String(e);
-    const errorContent = `_⚠ ${errorMsg}_`;
+    // Same provider-context formatting as in-stream errors. Most "connect
+    // refused" / TLS failures land here rather than in the `kind: error`
+    // branch because reqwest fails before the SSE handshake completes.
+    const friendly = formatProviderError({
+      provider: task.request.provider,
+      baseUrl: task.request.base_url,
+      raw: errorMsg,
+    });
+    const errorContent = `_⚠ ${friendly}_`;
     updateMessage({
       id: assistantMsg.id,
       session_id: sessionId,
@@ -697,7 +720,7 @@ async function startTask(task: QueueTask, get: Getter, set: Setter) {
       metrics_json: null,
     }).catch((upErr) => {
       const detail = upErr instanceof Error ? upErr.message : String(upErr);
-      console.error("failed to persist startup-error placeholder", upErr);
+      logger.error("failed to persist startup-error placeholder", upErr);
       useToastStore.getState().push({
         kind: "error",
         title: "Couldn't save error placeholder",
@@ -787,6 +810,7 @@ export function resolveDefaultModelChoice(
 export const useChatStore = create<ChatState>((set, get) => ({
   sessions: [],
   activeSessionId: null,
+  hydrated: false,
   messages: {},
   streamingByMessage: {},
   activeStream: null,
@@ -853,7 +877,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (nextLive) await get().selectSession(nextLive.id);
       }
     } catch (e) {
-      console.error("chat hydrate failed", e);
+      logger.error("chat hydrate failed", e);
+    } finally {
+      // Flip the flag regardless of success — if hydrate threw, the user
+      // sees the "No chat open" CTA, which is the correct empty state.
+      // Leaving `hydrated=false` here would keep the skeleton up forever.
+      set({ hydrated: true });
     }
   },
 
@@ -1199,7 +1228,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             // fetchAll itself never throws, but be defensive — a thrown
             // exception here would eat the whole submit, and we'd rather
             // send the prompt without the fetched context than not at all.
-            console.warn("web fetch step failed", e);
+            logger.warn("web fetch step failed", e);
           }
         }
       }
@@ -1296,7 +1325,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (filesBlock) parts.push(filesBlock);
         effectiveSystemPrompt = parts.length ? parts.join("\n\n") : null;
       } catch (e) {
-        console.warn("Failed to load space context", e);
+        logger.warn("Failed to load space context", e);
       }
     }
 
@@ -1400,7 +1429,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         try {
           await stream.stop();
         } catch (e) {
-          console.error("stream stop failed", e);
+          logger.error("stream stop failed", e);
         }
       }
       finishRunning(get, set, "cancelled");
@@ -1452,7 +1481,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       try {
         await stream.stop();
       } catch (e) {
-        console.error("stream stop failed", e);
+        logger.error("stream stop failed", e);
       }
     }
     finishRunning(get, set, "cancelled");
