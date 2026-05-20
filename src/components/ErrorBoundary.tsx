@@ -1,6 +1,7 @@
 import { Component, type ErrorInfo, type ReactNode } from "react";
 import { AlertTriangle, Check, Copy, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { logger } from "@/lib/logger";
 import { cn } from "@/lib/utils";
 
 // Class component because React Error Boundaries require `componentDidCatch` /
@@ -55,8 +56,10 @@ export class ErrorBoundary extends Component<Props, State> {
     // hands it to us via this lifecycle, not via `getDerivedStateFromError`.
     this.setState({ info });
     const tag = this.props.name ? `[ErrorBoundary:${this.props.name}]` : "[ErrorBoundary]";
-    // eslint-disable-next-line no-console
-    console.error(tag, error, info.componentStack);
+    // Routed through `logger.error` so it compiles out in production along
+    // with the rest of the dev console calls. The fallback's "Copy details"
+    // button is the user-facing path; this log is just dev convenience.
+    logger.error(tag, error, info.componentStack);
   }
 
   private handleReset = () => {
@@ -91,8 +94,8 @@ export class ErrorBoundary extends Component<Props, State> {
       window.setTimeout(() => this.setState({ copied: false }), 2000);
     } catch {
       /* clipboard unavailable (Tauri sometimes restricts it on Linux) — silent.
-         The console.error log above still has the same details for the user
-         to retrieve via DevTools. */
+         The logger.error log above still has the same details for the user
+         to retrieve via DevTools in dev builds. */
     }
   };
 

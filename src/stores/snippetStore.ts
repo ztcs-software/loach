@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { logger } from "@/lib/logger";
 import {
   createSnippet,
   deleteSnippet,
@@ -47,7 +48,7 @@ export const useSnippetStore = create<SnippetState>((set) => ({
       const snippets = await listSnippets();
       set({ snippets });
     } catch (e) {
-      console.error("snippet hydrate failed", e);
+      logger.error("snippet hydrate failed", e);
     }
   },
 

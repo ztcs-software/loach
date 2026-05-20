@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { logger } from "@/lib/logger";
 import {
   Archive,
   ArchiveRestore,
@@ -236,7 +237,7 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
       // can copy again if needed without reopening the dialog.
       window.setTimeout(() => setCopied(false), 1500);
     } catch (e) {
-      console.warn("clipboard write failed", e);
+      logger.warn("clipboard write failed", e);
     }
   };
 

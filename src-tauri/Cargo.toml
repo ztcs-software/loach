@@ -58,6 +58,12 @@ once_cell = "1"
 dashmap = "6"
 parking_lot = "0.12"
 
+[dev-dependencies]
+# Only used by the db.rs test suite, which opens a fresh database in a
+# tempdir per test so we don't trample the user's real `loach.db` and so
+# tests can run in parallel without sharing state.
+tempfile = "3"
+
 [features]
 # this feature is used for production builds or when a dev server is not specified
 # DO NOT REMOVE!!

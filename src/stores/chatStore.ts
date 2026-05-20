@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { logger } from "@/lib/logger";
 import {
   appendMessage,
   archiveSession,
@@ -460,7 +461,7 @@ function finishRunning(get: Getter, set: Setter, reason: FinishReason = "done") 
       metrics_json: buf.metrics ? JSON.stringify(buf.metrics) : null,
     }).catch((e) => {
       const detail = e instanceof Error ? e.message : String(e);
-      console.error("failed to persist assistant reply", e);
+      logger.error("failed to persist assistant reply", e);
       useToastStore.getState().push({
         kind: "error",
         title: "Couldn't save reply",
@@ -548,7 +549,7 @@ function finishRunning(get: Getter, set: Setter, reason: FinishReason = "done") 
   // us; failures are logged inside the extractor and never bubble up.
   if (memorySnapshot) {
     void extractMemories(memorySnapshot).catch((e) => {
-      console.warn("memory extraction failed", e);
+      logger.warn("memory extraction failed", e);
     });
   }
 }
@@ -573,7 +574,7 @@ function promoteQueueHead(get: Getter, set: Setter) {
     set({ queue: rest });
     dispatching = true;
     void startTask(next, get, set)
-      .catch((err) => console.error("queued task start failed", err))
+      .catch((err) => logger.error("queued task start failed", err))
       .finally(() => {
         dispatching = false;
         // Re-check the queue now that the dispatch lock is free. On the
@@ -606,7 +607,7 @@ async function startTask(task: QueueTask, get: Getter, set: Setter) {
     // Session might have been deleted while the task waited. Silently drop
     // and move on to the next — the .finally hook in `promoteQueueHead`'s
     // caller will pick the next waiter once the dispatch lock is released.
-    console.error("failed to create assistant placeholder", e);
+    logger.error("failed to create assistant placeholder", e);
     return;
   }
 
@@ -680,7 +681,7 @@ async function startTask(task: QueueTask, get: Getter, set: Setter) {
     );
     set({ activeStream: { stop: handle.stop, unlisten: handle.unlisten } });
   } catch (e) {
-    console.error("startChatStream failed", e);
+    logger.error("startChatStream failed", e);
     // The placeholder assistant row was created above so the bubble could
     // show "thinking…" while we connected. Now that the connection itself
     // failed, replace its contents with a visible error message instead of
@@ -697,7 +698,7 @@ async function startTask(task: QueueTask, get: Getter, set: Setter) {
       metrics_json: null,
     }).catch((upErr) => {
       const detail = upErr instanceof Error ? upErr.message : String(upErr);
-      console.error("failed to persist startup-error placeholder", upErr);
+      logger.error("failed to persist startup-error placeholder", upErr);
       useToastStore.getState().push({
         kind: "error",
         title: "Couldn't save error placeholder",
@@ -853,7 +854,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (nextLive) await get().selectSession(nextLive.id);
       }
     } catch (e) {
-      console.error("chat hydrate failed", e);
+      logger.error("chat hydrate failed", e);
     }
   },
 
@@ -1199,7 +1200,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             // fetchAll itself never throws, but be defensive — a thrown
             // exception here would eat the whole submit, and we'd rather
             // send the prompt without the fetched context than not at all.
-            console.warn("web fetch step failed", e);
+            logger.warn("web fetch step failed", e);
           }
         }
       }
@@ -1296,7 +1297,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (filesBlock) parts.push(filesBlock);
         effectiveSystemPrompt = parts.length ? parts.join("\n\n") : null;
       } catch (e) {
-        console.warn("Failed to load space context", e);
+        logger.warn("Failed to load space context", e);
       }
     }
 
@@ -1400,7 +1401,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         try {
           await stream.stop();
         } catch (e) {
-          console.error("stream stop failed", e);
+          logger.error("stream stop failed", e);
         }
       }
       finishRunning(get, set, "cancelled");
@@ -1452,7 +1453,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       try {
         await stream.stop();
       } catch (e) {
-        console.error("stream stop failed", e);
+        logger.error("stream stop failed", e);
       }
     }
     finishRunning(get, set, "cancelled");

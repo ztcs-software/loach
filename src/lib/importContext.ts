@@ -17,6 +17,8 @@
  *      summary, or article into the model without manually formatting it.
  */
 
+import { logger } from "@/lib/logger";
+
 export type ImportRole = "user" | "assistant" | "system";
 
 export interface ImportedMessage {
@@ -56,7 +58,7 @@ export function parseImportContext(text: string): ParsedImport {
     // likely end up in the plain-text branch, which keeps the app
     // responsive even if it's not exactly what they wanted.
     if (trimmed.length > MAX_JSON_BYTES) {
-      console.warn(
+      logger.warn(
         `parseImportContext: skipping JSON branch — input ${trimmed.length} bytes exceeds ${MAX_JSON_BYTES}-byte cap`,
       );
     } else {

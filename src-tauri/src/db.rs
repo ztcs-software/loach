@@ -191,11 +191,22 @@ impl Database {
         // Build the read pool. `with_init` reapplies the per-connection
         // performance pragmas to every checkout so a fresh reader gets
         // the same cache_size / mmap_size / synchronous as the writer.
+        // `query_only=ON` makes the read-only contract enforceable: any
+        // attempt to INSERT/UPDATE/DELETE/CREATE/DROP through a pooled
+        // connection now errors at SQLite level instead of silently
+        // succeeding and racing the writer. Connection-local PRAGMAs
+        // (cache_size, mmap_size, …) are not "writes" and still apply,
+        // and SELECTs against sqlite_master / sqlite_schema work fine.
         // We deliberately keep `max_size` small (4) — a desktop app has
         // a handful of concurrent UI panels, not server-grade
         // concurrency, and each connection holds its own mmap window.
         let manager = SqliteConnectionManager::file(path).with_init(|c| {
             apply_perf_pragmas(c);
+            // Must run AFTER the perf pragmas. Pragmas like cache_size /
+            // mmap_size aren't "writes" so query_only doesn't reject them,
+            // but applying them first keeps the call order obvious if a
+            // future SQLite tightens that classification.
+            let _ = c.pragma_update(None, "query_only", "ON");
             Ok(())
         });
         let read_pool = Pool::builder()
@@ -784,6 +795,11 @@ impl Database {
         })
     }
 
+    // 9 args matches the shape of the `spaces` table's editable columns
+    // 1:1; refactoring to an args struct would only shift the noise to
+    // the call site (commands.rs already deserialises into `UpdateSpaceArgs`
+    // and then explodes it here). Suppressed rather than restructured.
+    #[allow(clippy::too_many_arguments)]
     pub fn update_space(
         &self,
         id: &str,
@@ -855,6 +871,10 @@ impl Database {
         })
     }
 
+    // Same rationale as `update_space`: column-shaped, single caller
+    // (`commands::add_space_file`) that already has an `AddSpaceFileArgs`
+    // struct on the other side of the IPC boundary.
+    #[allow(clippy::too_many_arguments)]
     pub fn add_space_file(
         &self,
         space_id: &str,
@@ -1619,4 +1639,154 @@ fn has_column(conn: &rusqlite::Connection, table: &str, column: &str) -> Result<
         }
     }
     Ok(false)
+}
+
+// ---------------------------------------------------------------------------
+// Tests.
+//
+// Each test opens its own `Database` in a per-test tempdir (via `tempfile`),
+// so there's no shared state to coordinate and `cargo test` can run them in
+// parallel. Tests cover the migration boot, basic CRUD round-trips, FK
+// cascades, and the `query_only` enforcement added in v1.0.1.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    /// Open a fresh database in an ephemeral tempdir and run migrations.
+    /// The `TempDir` handle must outlive the `Database`; we return both so
+    /// the caller can drop them together at the end of the test.
+    fn fresh_db() -> (Database, TempDir) {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("loach.db");
+        let db = Database::open(&path).expect("open");
+        db.migrate().expect("migrate");
+        (db, dir)
+    }
+
+    #[test]
+    fn open_migrate_is_idempotent() {
+        // Running migrate twice on the same file must succeed — the suite
+        // uses `CREATE TABLE IF NOT EXISTS` + has_column-gated ALTERs.
+        let (db, _dir) = fresh_db();
+        db.migrate().expect("second migrate");
+        db.migrate().expect("third migrate");
+    }
+
+    #[test]
+    fn session_crud_roundtrip() {
+        let (db, _dir) = fresh_db();
+        let s = db
+            .create_session("My chat", "ollama", "llama3", Some("be helpful"), None)
+            .expect("create");
+        let listed = db.list_sessions().expect("list");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, s.id);
+        assert_eq!(listed[0].title, "My chat");
+        assert_eq!(listed[0].provider, "ollama");
+        assert_eq!(listed[0].model, "llama3");
+        assert_eq!(listed[0].system_prompt.as_deref(), Some("be helpful"));
+
+        db.delete_session(&s.id).expect("delete");
+        assert!(db.list_sessions().unwrap().is_empty());
+    }
+
+    #[test]
+    fn deleting_session_cascades_to_messages() {
+        let (db, _dir) = fresh_db();
+        let s = db
+            .create_session("t", "ollama", "llama3", None, None)
+            .unwrap();
+        db.append_message(&s.id, "user", "hello", None).unwrap();
+        db.append_message(&s.id, "assistant", "hi", None).unwrap();
+        assert_eq!(db.list_messages(&s.id).unwrap().len(), 2);
+
+        db.delete_session(&s.id).unwrap();
+        // ON DELETE CASCADE on `messages.session_id` should have nuked the
+        // child rows. A regression here would silently retain orphan messages
+        // pinned to nothing — visible only in DB inspection.
+        assert!(db.list_messages(&s.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn space_crud_and_session_link() {
+        let (db, _dir) = fresh_db();
+        let sp = db.create_space("Work", "stuff", "be concise").unwrap();
+        assert_eq!(db.list_spaces().unwrap().len(), 1);
+
+        // A session attached to the space should round-trip the space_id.
+        let s = db
+            .create_session("t", "ollama", "llama3", None, Some(&sp.id))
+            .unwrap();
+        let listed = db.list_sessions().unwrap();
+        assert_eq!(listed[0].space_id.as_deref(), Some(sp.id.as_str()));
+
+        // Deleting the space sets `sessions.space_id = NULL` (ON DELETE
+        // SET NULL); the chat itself survives but is orphaned.
+        db.delete_space(&sp.id).unwrap();
+        let after = db.list_sessions().unwrap();
+        assert_eq!(after.len(), 1, "session must outlive its space");
+        assert_eq!(after[0].id, s.id);
+        assert!(after[0].space_id.is_none(), "space_id must be cleared");
+    }
+
+    #[test]
+    fn pool_connection_is_query_only() {
+        // The new `PRAGMA query_only=ON` in `with_init` (v1.0.1) means any
+        // attempted write through a pooled connection errors at SQLite level.
+        // This locks in the safety invariant the comment in `Database` now
+        // actually advertises.
+        let (db, _dir) = fresh_db();
+        // Seed a row through the writer so the table isn't empty when we
+        // try the forbidden write.
+        db.create_session("t", "ollama", "llama3", None, None)
+            .unwrap();
+
+        let err = db
+            .with_read(|conn| {
+                conn.execute(
+                    "UPDATE sessions SET title = 'pwned'",
+                    rusqlite::params![],
+                )?;
+                Ok(())
+            })
+            .expect_err("write through read pool must fail under query_only=ON");
+
+        let msg = err.to_string().to_lowercase();
+        assert!(
+            msg.contains("read") || msg.contains("readonly") || msg.contains("read-only"),
+            "expected read-only/readonly error, got: {msg}"
+        );
+
+        // Reads through the same pool still work.
+        let listed = db
+            .with_read(|conn| {
+                let mut stmt = conn.prepare("SELECT COUNT(*) FROM sessions")?;
+                let n: i64 = stmt.query_row([], |r| r.get(0))?;
+                Ok(n)
+            })
+            .unwrap();
+        assert_eq!(listed, 1);
+    }
+
+    #[test]
+    fn snippet_crud_roundtrip() {
+        let (db, _dir) = fresh_db();
+        let sn = db
+            .create_snippet(
+                "Greet",
+                "Hi {name}",
+                None,
+                Some("ollama"),
+                Some("llama3"),
+            )
+            .unwrap();
+        let all = db.list_snippets().unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].id, sn.id);
+        assert_eq!(all[0].title, "Greet");
+        assert_eq!(all[0].provider.as_deref(), Some("ollama"));
+    }
 }
