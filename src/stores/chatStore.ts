@@ -24,6 +24,7 @@ import {
   inlineTextAttachments,
 } from "@/lib/files";
 import { extractMemories } from "@/lib/memory";
+import { formatProviderError } from "@/lib/providerErrors";
 import { getPersona } from "@/lib/personas";
 import { getTone } from "@/lib/tones";
 import { applyTemporalAwareness } from "@/lib/temporal";
@@ -78,6 +79,11 @@ interface QueueTask {
 interface ChatState {
   sessions: Session[];
   activeSessionId: string | null;
+  /** True after `hydrate()` finishes (whether it succeeded or fell into the
+   *  catch). Used by `App.tsx` to render a skeleton while chats are loading
+   *  from SQLite — without it the user briefly sees the "No chat open" CTA
+   *  even when they have chats waiting on disk. */
+  hydrated: boolean;
   messages: Record<string, Message[]>;
   streamingByMessage: Record<string, MessageMetrics | null>;
   activeStream: ActiveStream | null;
@@ -662,7 +668,15 @@ async function startTask(task: QueueTask, get: Getter, set: Setter) {
           pendingDirty.metrics = true;
           scheduleFlush(get, set);
         } else if (ev.kind === "error") {
-          buf.content += `\n\n_⚠ ${ev.message}_`;
+          // Wrap raw provider error in a sentence the user can act on. We
+          // know the provider + URL here from `task.request`, so the result
+          // tells the user which endpoint failed and (often) how to fix it.
+          const friendly = formatProviderError({
+            provider: task.request.provider,
+            baseUrl: task.request.base_url,
+            raw: ev.message,
+          });
+          buf.content += `\n\n_⚠ ${friendly}_`;
           pendingDirty.content = true;
           // Sync-flush so the error tail is visible before teardown.
           flushPendingFrame(get, set);
@@ -689,7 +703,15 @@ async function startTask(task: QueueTask, get: Getter, set: Setter) {
     // it backs). Best-effort — if the DB write fails too, the in-memory
     // patch still keeps the bubble informative until the next reload.
     const errorMsg = e instanceof Error ? e.message : String(e);
-    const errorContent = `_⚠ ${errorMsg}_`;
+    // Same provider-context formatting as in-stream errors. Most "connect
+    // refused" / TLS failures land here rather than in the `kind: error`
+    // branch because reqwest fails before the SSE handshake completes.
+    const friendly = formatProviderError({
+      provider: task.request.provider,
+      baseUrl: task.request.base_url,
+      raw: errorMsg,
+    });
+    const errorContent = `_⚠ ${friendly}_`;
     updateMessage({
       id: assistantMsg.id,
       session_id: sessionId,
@@ -788,6 +810,7 @@ export function resolveDefaultModelChoice(
 export const useChatStore = create<ChatState>((set, get) => ({
   sessions: [],
   activeSessionId: null,
+  hydrated: false,
   messages: {},
   streamingByMessage: {},
   activeStream: null,
@@ -855,6 +878,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
     } catch (e) {
       logger.error("chat hydrate failed", e);
+    } finally {
+      // Flip the flag regardless of success — if hydrate threw, the user
+      // sees the "No chat open" CTA, which is the correct empty state.
+      // Leaving `hydrated=false` here would keep the skeleton up forever.
+      set({ hydrated: true });
     }
   },
 

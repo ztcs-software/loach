@@ -65,6 +65,10 @@ export default function App() {
     s.activeSessionId ? s.messages[s.activeSessionId] ?? EMPTY_MESSAGES : EMPTY_MESSAGES,
   );
   const hasMessages = messages.length > 0;
+  // True only during the post-unlock hydrate window. Lets us swap the
+  // "No chat open" CTA for a loading skeleton so users with chats on disk
+  // don't briefly see an empty-state message that tells them to create one.
+  const chatsHydrated = useChatStore((s) => s.hydrated);
 
   // Phase 1 — security probe. Pessimistically lock (so the chat UI never
   // flashes) and ask the backend whether a lock is configured. The store's
@@ -207,7 +211,11 @@ export default function App() {
                 <main className="relative flex min-w-0 flex-1 flex-col">
                   <ChatHeader session={session} />
                   {!session ? (
-                    <NoChatState />
+                    // During the brief hydrate window we don't yet know
+                    // whether the user has zero chats or just chats that
+                    // haven't loaded yet. The skeleton avoids telling them
+                    // they have no chats when they actually do.
+                    chatsHydrated ? <NoChatState /> : <ChatLoadingSkeleton />
                   ) : hasMessages ? (
                     <>
                       <ChatCanvas />
@@ -304,6 +312,28 @@ const HERO_GREETINGS = [
  * is no session to send into here, so we surface a single "New chat" CTA
  * that calls into the same `newSession` the sidebar uses.
  */
+/**
+ * Centered, low-contrast "still loading" placeholder for the chat surface.
+ * Shown for the ~100–300 ms window between unlock and `chatStore.hydrate()`
+ * completing. We intentionally don't use a spinner — most loads are too fast
+ * for one to register as anything other than a flash, and the soft pulsing
+ * card matches the rest of the app's quiet visual language.
+ */
+function ChatLoadingSkeleton() {
+  return (
+    <div
+      className="flex flex-1 items-center justify-center px-6"
+      aria-busy
+      aria-label="Loading chats"
+    >
+      <div className="w-full max-w-md animate-pulse text-center">
+        <div className="mx-auto h-4 w-32 rounded-full bg-foreground/[0.06]" />
+        <div className="mx-auto mt-3 h-3 w-48 rounded-full bg-foreground/[0.04]" />
+      </div>
+    </div>
+  );
+}
+
 function NoChatState() {
   const newSession = useChatStore((s) => s.newSession);
   const start = () => void newSession({ spaceId: null });
