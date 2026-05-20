@@ -22,6 +22,7 @@ import { SearchBar } from "@/components/SearchBar";
 import { SelectionCopyButton } from "@/components/SelectionCopyButton";
 import { ToastHost } from "@/components/ToastHost";
 import { ConfirmDialogHost } from "@/components/ConfirmDialog";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { Button } from "@/components/ui/button";
 import { SquarePen } from "lucide-react";
 import { resolveDefaultModelChoice, useChatStore } from "@/stores/chatStore";
@@ -164,7 +165,12 @@ export default function App() {
       {probing ? null : showLock ? (
         <div className="relative flex h-full flex-col overflow-hidden text-foreground">
           <TitleBar />
-          <LockScreen />
+          {/* `scope="app"` on the lock screen specifically — if the unlock UI
+              crashes, "Try again" would leave the user stuck staring at a
+              broken lock with no way through. Reload is the only safe out. */}
+          <ErrorBoundary name="Lock screen" scope="app">
+            <LockScreen />
+          </ErrorBoundary>
         </div>
       ) : (
       <div className="relative flex h-full flex-col overflow-hidden text-foreground">
@@ -172,44 +178,75 @@ export default function App() {
         <div className="flex min-h-0 flex-1">
           <Sidebar />
           {viewingSpaceId ? (
-            <SpaceView />
+            <ErrorBoundary name="Space">
+              <SpaceView />
+            </ErrorBoundary>
           ) : viewingModel ? (
-            <ModelsView />
+            <ErrorBoundary name="Model details">
+              <ModelsView />
+            </ErrorBoundary>
           ) : sidebarTab === "spaces" ? (
-            <SpacesLibrary />
+            <ErrorBoundary name="Spaces library">
+              <SpacesLibrary />
+            </ErrorBoundary>
           ) : sidebarTab === "snippets" ? (
-            <SnippetsLibrary />
+            <ErrorBoundary name="Snippets library">
+              <SnippetsLibrary />
+            </ErrorBoundary>
           ) : sidebarTab === "models" ? (
-            <ModelsLibrary />
+            <ErrorBoundary name="Models library">
+              <ModelsLibrary />
+            </ErrorBoundary>
           ) : (
             <>
-              <main className="relative flex min-w-0 flex-1 flex-col">
-                <ChatHeader session={session} />
-                {!session ? (
-                  <NoChatState />
-                ) : hasMessages ? (
-                  <>
-                    <ChatCanvas />
-                    <ChatInput />
-                  </>
-                ) : (
-                  <HeroComposer />
-                )}
-              </main>
+              {/* Chat surface and right slot get their own boundaries so a
+                  crash in markdown rendering or a parameter widget doesn't
+                  take the whole pair down — the user still has the other
+                  half to work with. */}
+              <ErrorBoundary name="Chat">
+                <main className="relative flex min-w-0 flex-1 flex-col">
+                  <ChatHeader session={session} />
+                  {!session ? (
+                    <NoChatState />
+                  ) : hasMessages ? (
+                    <>
+                      <ChatCanvas />
+                      <ChatInput />
+                    </>
+                  ) : (
+                    <HeroComposer />
+                  )}
+                </main>
+              </ErrorBoundary>
               {/* Right slot: code canvas wins over parameters when both are
                   open. Stacking them would need a tab UI we haven't designed
                   yet; mutually exclusive matches ChatGPT's behaviour and
                   keeps the layout legible. The canvas store survives across
                   this swap, so the user's snippet is still there if they
                   toggle params back. */}
-              {canvasOpen ? <CodeCanvas /> : <ParameterPanel session={session} />}
+              <ErrorBoundary name={canvasOpen ? "Code canvas" : "Parameters"}>
+                {canvasOpen ? <CodeCanvas /> : <ParameterPanel session={session} />}
+              </ErrorBoundary>
             </>
           )}
         </div>
-        <SettingsDialog />
-        <SpaceForm />
-        <SnippetDialog />
-        {showOnboarding && <Onboarding />}
+        {/* Dialogs each get their own boundary. They're mounted unconditionally
+            (Radix decides visibility internally) so a render crash in any one
+            would otherwise blank the whole app. */}
+        <ErrorBoundary name="Settings">
+          <SettingsDialog />
+        </ErrorBoundary>
+        <ErrorBoundary name="Space form">
+          <SpaceForm />
+        </ErrorBoundary>
+        <ErrorBoundary name="Snippet editor">
+          <SnippetDialog />
+        </ErrorBoundary>
+        {showOnboarding && (
+          <ErrorBoundary name="Onboarding">
+            <Onboarding />
+          </ErrorBoundary>
+        )}
       </div>
       )}
       {/* Global Cmd-K search palette. Lives at the App root so it floats
