@@ -133,6 +133,7 @@ export function SettingsDialog() {
   const [ollamaTest, setOllamaTest] = useState<ConnTestState>({ kind: "idle" });
   const [openaiTest, setOpenaiTest] = useState<ConnTestState>({ kind: "idle" });
   const [templateVarsOpen, setTemplateVarsOpen] = useState(false);
+  const [tonesInfoOpen, setTonesInfoOpen] = useState(false);
 
   const runOllamaTest = async () => {
     setOllamaTest({ kind: "testing" });
@@ -478,6 +479,42 @@ export function SettingsDialog() {
                         </button>
                       );
                     })}
+                  </div>
+                  <div className="mt-3 rounded-xl border border-foreground/10 bg-foreground/[0.03] p-3 text-[11px] leading-relaxed text-foreground/60">
+                    <button
+                      type="button"
+                      onClick={() => setTonesInfoOpen((v) => !v)}
+                      aria-expanded={tonesInfoOpen}
+                      className="flex w-full items-center gap-1.5 text-left font-medium text-foreground/75 transition-colors hover:text-foreground"
+                    >
+                      {tonesInfoOpen ? (
+                        <ChevronDown className="h-3.5 w-3.5 shrink-0" />
+                      ) : (
+                        <ChevronRight className="h-3.5 w-3.5 shrink-0" />
+                      )}
+                      What each tone does
+                    </button>
+                    {tonesInfoOpen && (
+                      <ul className="mt-1.5 space-y-1 pl-5">
+                        {TONES.map((t) => {
+                          const Icon = t.icon;
+                          return (
+                            <li
+                              key={t.id}
+                              className="flex items-center gap-1.5"
+                            >
+                              <Icon className="h-3 w-3 shrink-0 text-foreground/55" />
+                              <span className="font-medium text-foreground/75">
+                                {t.label}
+                              </span>
+                              <span className="text-foreground/55">
+                                — {t.shortDescription}
+                              </span>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    )}
                   </div>
                 </div>
 
