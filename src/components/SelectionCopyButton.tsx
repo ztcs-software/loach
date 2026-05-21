@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Check, Copy } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { getCleanSelectionText } from "@/lib/selection";
 
 /**
  * Floating "Copy" pill that appears next to the user's text selection when the
@@ -8,9 +9,9 @@ import { cn } from "@/lib/utils";
  * the app root and driven by the document `selectionchange` event so it
  * doesn't matter which message the selection came from.
  *
- * Activation rule: the selection's anchor and focus must both be inside an
- * element marked with `data-message-content`. That keeps the button from
- * hijacking selections in the input box, sidebar, etc.
+ * Text extraction goes through `getCleanSelectionText` so user-prompt copies
+ * come out as the exact typed slice (no block-boundary blank lines) while
+ * assistant copies keep their markdown structure.
  */
 export function SelectionCopyButton() {
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
@@ -25,32 +26,18 @@ export function SelectionCopyButton() {
         setPos(null);
         return;
       }
+      const result = getCleanSelectionText();
+      // Only surface the pill for in-message selections — sidebar / composer
+      // selections fall through to "other" and shouldn't trigger it.
+      if (
+        !result ||
+        (result.source !== "user-prompt" && result.source !== "assistant") ||
+        !result.text.trim()
+      ) {
+        setPos(null);
+        return;
+      }
       const range = sel.getRangeAt(0);
-      const anchor = sel.anchorNode;
-      const focus = sel.focusNode;
-      if (!anchor || !focus) {
-        setPos(null);
-        return;
-      }
-      const inMessage = (n: Node | null): boolean => {
-        let el = n instanceof Element ? n : n?.parentElement ?? null;
-        while (el) {
-          if (el.hasAttribute && el.hasAttribute("data-message-content")) {
-            return true;
-          }
-          el = el.parentElement;
-        }
-        return false;
-      };
-      if (!inMessage(anchor) || !inMessage(focus)) {
-        setPos(null);
-        return;
-      }
-      const selected = sel.toString();
-      if (!selected.trim()) {
-        setPos(null);
-        return;
-      }
       const rects = range.getClientRects();
       const last = rects[rects.length - 1];
       if (!last) {
@@ -72,7 +59,7 @@ export function SelectionCopyButton() {
       if (top + btnH > window.innerHeight - margin) {
         top = last.top - btnH - 6;
       }
-      setText(selected);
+      setText(result.text);
       setPos({ left, top });
     };
 

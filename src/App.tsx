@@ -29,6 +29,7 @@ import { resolveDefaultModelChoice, useChatStore } from "@/stores/chatStore";
 import { useModelsStore } from "@/stores/modelsStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { ollamaPreloadModel } from "@/lib/tauri";
+import { getCleanSelectionText } from "@/lib/selection";
 import { useSnippetStore } from "@/stores/snippetStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useSecurityStore, lockUntilHydrated } from "@/stores/securityStore";
@@ -77,6 +78,25 @@ export default function App() {
     lockUntilHydrated();
     void hydrateSecurity();
   }, [hydrateSecurity]);
+
+  // Document-level copy interceptor for user-prompt selections. Native copy
+  // events for non-editable text selections target `document.body`, which is
+  // outside React's delegation root — a React `onCopy` on the bubble itself
+  // never fires. Listening on `document` catches every copy regardless of
+  // target. We only override the clipboard payload when the selection is
+  // entirely inside a user prompt; assistant markdown and selections that
+  // cross bubbles fall through to the browser's default behaviour.
+  useEffect(() => {
+    const onCopy = (e: ClipboardEvent) => {
+      const result = getCleanSelectionText();
+      if (!result || result.source !== "user-prompt") return;
+      if (!result.text) return;
+      e.preventDefault();
+      e.clipboardData?.setData("text/plain", result.text);
+    };
+    document.addEventListener("copy", onCopy);
+    return () => document.removeEventListener("copy", onCopy);
+  }, []);
 
   // Phase 2 — once we're past the lock screen, hydrate the rest of the app.
   // Doing this after unlock keeps the lock surface snappy and avoids

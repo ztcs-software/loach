@@ -300,41 +300,12 @@ function MessageItemImpl({ message, isStreaming, metrics }: MessageProps) {
     }
   };
 
-  // Ctrl+C / Cmd+C copies the current selection, and the browser's serializer
-  // adds a newline at every block boundary it crosses. The user bubble nests
-  // the prompt inside several wrapper divs and sits next to a hidden
-  // right-click trigger and an absolutely-positioned kebab, so a full-bubble
-  // selection ends up with blank lines bracketing the actual text.
-  //
-  // Intercept the copy event for the user bubble and write exactly the
-  // selected slice of the prompt — backed by the original string in the DOM,
-  // not the browser's selection serialization. Falls through to the default
-  // behaviour when the selection crosses into adjacent messages so multi-
-  // message copies still work normally.
-  const handleUserCopy = (e: React.ClipboardEvent<HTMLDivElement>) => {
-    const sel = window.getSelection();
-    if (!sel || sel.isCollapsed) return;
-    const range = sel.getRangeAt(0);
-    const bubble = e.currentTarget;
-    if (
-      !bubble.contains(range.startContainer) ||
-      !bubble.contains(range.endContainer)
-    )
-      return;
-    const p = bubble.querySelector<HTMLParagraphElement>("[data-prompt-text]");
-    if (!p || !range.intersectsNode(p)) return;
-    const textNode = p.firstChild;
-    if (!textNode || textNode.nodeType !== Node.TEXT_NODE) return;
-    const fullText = textNode.nodeValue ?? "";
-    const start =
-      range.startContainer === textNode ? range.startOffset : 0;
-    const end =
-      range.endContainer === textNode ? range.endOffset : fullText.length;
-    const text = fullText.slice(start, end);
-    if (!text) return;
-    e.preventDefault();
-    e.clipboardData.setData("text/plain", text);
-  };
+  // Clipboard cleanup for user prompts (Ctrl+C, the floating "Copy" pill,
+  // the right-click "Copy" item) is handled centrally via the
+  // `getCleanSelectionText` helper + the document-level copy listener
+  // installed in App. Per-bubble React onCopy doesn't fire reliably because
+  // the native copy event targets `document.body` for non-editable text,
+  // which is outside React's delegation root.
 
   if (message.role === "system") {
     return (
@@ -381,7 +352,6 @@ function MessageItemImpl({ message, isStreaming, metrics }: MessageProps) {
             setAssistantMenuOpen(true);
           }
         }}
-        onCopy={isUser ? handleUserCopy : undefined}
       >
         {isUser && (
           <DropdownMenu open={userMenuOpen} onOpenChange={setUserMenuOpen}>
