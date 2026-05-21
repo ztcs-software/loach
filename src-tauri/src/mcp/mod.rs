@@ -108,8 +108,12 @@ pub async fn aggregate_tools(
         match result {
             Ok(mut these) => defs.append(&mut these),
             Err(e) => {
+                // Keep the debug-shape error in logs (operator-facing) but
+                // hand the UI a Display-formatted string so internal span
+                // paths / source locations don't leak into the chat
+                // surface or the MCP status panel.
                 tracing::warn!("MCP aggregate: `{name}` failed: {e:#}");
-                errors.push((name, format!("{e:#}")));
+                errors.push((name, format!("{e}")));
             }
         }
     }

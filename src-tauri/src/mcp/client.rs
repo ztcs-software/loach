@@ -26,8 +26,35 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// allocates linearly with the response and would OOM the app.
 const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 
+/// Hard limit on the `Mcp-Session-Id` we'll accept from a server and echo
+/// back on subsequent requests. A real session ID is a short opaque token
+/// (UUID-ish, ≤64 chars in the reference implementation). Refusing
+/// anything longer prevents a hostile or misconfigured server from
+/// burning client memory + bandwidth by returning a multi-megabyte ID
+/// that we then forward on every call for the rest of the session.
+const MAX_SESSION_ID_BYTES: usize = 1024;
+
 const CLIENT_NAME: &str = "loach";
 const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Accept a server-returned session ID iff it's within the size budget.
+/// Logs a warning and returns `None` for oversized IDs so the rest of
+/// the session proceeds as if the server hadn't advertised one (the
+/// reference MCP HTTP transport tolerates this — the next request just
+/// looks like a fresh session, which is the safer failure mode).
+fn accept_session_id(sid: Option<String>) -> Option<String> {
+    match sid {
+        Some(s) if s.len() > MAX_SESSION_ID_BYTES => {
+            tracing::warn!(
+                "MCP: server returned a {}-byte session id (limit {}); dropping it",
+                s.len(),
+                MAX_SESSION_ID_BYTES
+            );
+            None
+        }
+        other => other,
+    }
+}
 
 /// A live MCP session bound to one server. Holds the URL, headers, and the
 /// session id returned by the initial handshake so subsequent calls
@@ -92,7 +119,7 @@ impl McpSession {
             self.session_id.as_deref(),
         )
         .await?;
-        if let Some(s) = sid {
+        if let Some(s) = accept_session_id(sid) {
             self.session_id = Some(s);
         }
         let parsed: InitializeResult = unwrap_response(resp)?;
@@ -132,7 +159,7 @@ impl McpSession {
             self.session_id.as_deref(),
         )
         .await?;
-        if let Some(s) = sid {
+        if let Some(s) = accept_session_id(sid) {
             self.session_id = Some(s);
         }
         let parsed: ListToolsResult = unwrap_response(resp)?;
@@ -162,7 +189,7 @@ impl McpSession {
             self.session_id.as_deref(),
         )
         .await?;
-        if let Some(s) = sid {
+        if let Some(s) = accept_session_id(sid) {
             self.session_id = Some(s);
         }
         let parsed: CallToolResult = unwrap_response(resp)?;

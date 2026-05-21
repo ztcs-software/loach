@@ -98,11 +98,15 @@ pub fn try_warm_default_model(db: Arc<Database>, http: reqwest::Client) {
 
         // The session list is only consulted by `provider:` choices; skip
         // the read otherwise. `list_sessions` returns rows ordered by
-        // `updated_at DESC`, which is the recency assumption baked into
-        // `resolveDefaultModelChoice` on the frontend — keep these in
-        // sync if that ORDER BY ever changes.
+        // `updated_at DESC` today, but the resolver baked an implicit
+        // dependency on that ORDER BY which would silently rot if the
+        // query ever changed. Re-sort defensively here — matches what
+        // `resolveDefaultModelChoice` does in `chatStore.ts` and removes
+        // the hidden coupling between the two files.
         let sessions: Vec<Session> = if choice.starts_with("provider:") {
-            db.list_sessions().unwrap_or_default()
+            let mut s = db.list_sessions().unwrap_or_default();
+            s.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+            s
         } else {
             Vec::new()
         };

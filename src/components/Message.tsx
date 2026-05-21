@@ -30,6 +30,7 @@ import { cn } from "@/lib/utils";
 import { stripInlinedAttachments } from "@/lib/files";
 import { Bookmark } from "lucide-react";
 import { useSnippetStore } from "@/stores/snippetStore";
+import { useToastStore } from "@/stores/toastStore";
 
 interface MessageProps {
   message: ChatMessage;
@@ -302,25 +303,38 @@ function MessageItemImpl({ message, isStreaming, metrics }: MessageProps) {
   const bodyRef = useRef<HTMLDivElement>(null);
   const openSnippetDialog = useSnippetStore((s) => s.openDialog);
 
-  // Copy the raw assistant content — full markdown, untouched — so pasting
-  // into a code editor keeps fences / tables / headings intact.
-  const copyContent = async () => {
+  // Single funnel for every clipboard write the message component does.
+  // The Tauri webview can refuse `navigator.clipboard.writeText` in narrow
+  // cases (focus loss mid-action, permission-policy edge cases on Linux,
+  // remote-debugger contexts), and previously every caller swallowed the
+  // failure silently — the user pressed Copy, nothing happened, no
+  // feedback. Surface a one-shot error toast instead so the failure is at
+  // least visible. Returns whether the write actually succeeded so callers
+  // that toggle a "Copied" tick can skip the affirmative state on failure.
+  const writeClipboard = async (text: string): Promise<boolean> => {
     try {
-      await navigator.clipboard.writeText(message.content);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1200);
+      await navigator.clipboard.writeText(text);
+      return true;
     } catch {
-      // Clipboard may be unavailable in some sandboxed WebView contexts;
-      // fail silently rather than surface a fatal error for a secondary action.
+      useToastStore.getState().push({
+        kind: "error",
+        title: "Couldn't copy",
+        body: "Clipboard isn't available in this window.",
+      });
+      return false;
     }
   };
 
+  // Copy the raw assistant content — full markdown, untouched — so pasting
+  // into a code editor keeps fences / tables / headings intact.
+  const copyContent = async () => {
+    if (!(await writeClipboard(message.content))) return;
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1200);
+  };
+
   const copyUserContent = async (text: string) => {
-    try {
-      await navigator.clipboard.writeText(text);
-    } catch {
-      // see copyContent above
-    }
+    await writeClipboard(text);
   };
 
   // Right-click "Copy" handler. Copies the bubble-scoped selection captured
@@ -334,11 +348,7 @@ function MessageItemImpl({ message, isStreaming, metrics }: MessageProps) {
         : message.content;
     const text = contextSelection || fullText;
     if (!text) return;
-    try {
-      await navigator.clipboard.writeText(text);
-    } catch {
-      // see copyContent above
-    }
+    await writeClipboard(text);
   };
 
   // Ctrl+C / Cmd+C copies the current selection, and the browser's serializer
