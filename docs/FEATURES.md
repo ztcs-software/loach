@@ -72,10 +72,13 @@ transcript of messages.
   and language-aware syntax highlighting work out of the box.
 - **Long-prompt clamp** — user bubbles that paste in dozens of lines clamp
   to ten lines with a **Show more** toggle so the answer stays visible.
-- **Right-click menu on assistant messages** — copy raw, copy as markdown,
-  bookmark to snippets.
-- **Selection copy button** — highlight any range of assistant text and a
-  small "Copy selection" pill appears at the cursor.
+- **Right-click menu** — right-click any bubble for a contextual menu with
+  **Copy** (the current selection inside that bubble, or the full message
+  when nothing is selected) and **Select all** (highlights just the body
+  text — metrics and toggles stay outside the selection).
+- **Per-message action menu** — a `…` button below each bubble exposes the
+  deliberate full-message actions: **Copy message** on every bubble, plus
+  **Save as Snippet** on user prompts.
 
 ### 2.2 Composer
 

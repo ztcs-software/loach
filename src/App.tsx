@@ -19,7 +19,6 @@ import { LockScreen } from "@/components/LockScreen";
 import { Onboarding } from "@/components/Onboarding";
 import { CodeCanvas } from "@/components/CodeCanvas";
 import { SearchBar } from "@/components/SearchBar";
-import { SelectionCopyButton } from "@/components/SelectionCopyButton";
 import { ToastHost } from "@/components/ToastHost";
 import { ConfirmDialogHost } from "@/components/ConfirmDialog";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
@@ -82,38 +81,51 @@ export default function App() {
   // Doing this after unlock keeps the lock surface snappy and avoids
   // shipping any chat data into memory while the user is still proving
   // they're allowed to see it.
+  //
+  // The five hydrates are independent — none of their `hydrate()` methods
+  // reads from another store — so we fan them out in parallel. The prior
+  // sequential await chain was the dominant chunk of post-unlock latency,
+  // since IPC round-trips stack additively. Parallelising collapses them
+  // to the slowest single call (typically `hydrateModels`, which is
+  // network-bound to Ollama).
+  //
+  // The Ollama preload only needs `settings` + `sessions` to resolve the
+  // default model choice, so we kick it off as soon as those two land
+  // rather than waiting for spaces/snippets/models. That shaves the
+  // model's cold-load into VRAM (often the single biggest chunk of
+  // time-to-first-token) off the path the user actually waits on.
   useEffect(() => {
     if (!unlocked) return;
-    (async () => {
-      await hydrateSettings();
-      await hydrateSpaces();
-      await hydrateSnippets();
-      await hydrateChats();
-      // Model list is cheap (one Ollama /api/tags call) but network-bound, so
-      // fire it last — failure here shouldn't block the rest of the UI.
-      await hydrateModels();
 
-      // Optional default-model preload. Resolves the same encoded choice
-      // that "New chat" would use, then warms the model into VRAM with an
-      // empty Ollama chat so the first real request skips the cold load.
-      // Cloud providers have no local load step, so we only fire for Ollama.
-      // Fully fire-and-forget — Ollama may be unreachable or the model
-      // missing; we never want this to surface as an error.
+    const settingsP = hydrateSettings();
+    const chatsP = hydrateChats();
+    void hydrateSpaces();
+    void hydrateSnippets();
+    // `hydrateModels` is network-bound (Ollama /api/tags) — fire-and-forget
+    // so its latency never blocks anything the user sees.
+    void hydrateModels();
+
+    // Optional default-model preload. Resolves the same encoded choice
+    // that "New chat" would use, then warms the model into VRAM with an
+    // empty Ollama chat so the first real request skips the cold load.
+    // Cloud providers have no local load step, so we only fire for Ollama.
+    // Fully fire-and-forget — Ollama may be unreachable or the model
+    // missing; we never want this to surface as an error.
+    void Promise.all([settingsP, chatsP]).then(() => {
       const s = useSettingsStore.getState();
-      if (s.default_model_preload) {
-        const resolved = resolveDefaultModelChoice(
-          s.default_model_choice,
-          s.default_provider,
-          s.default_model ?? "",
-          useChatStore.getState().sessions,
+      if (!s.default_model_preload) return;
+      const resolved = resolveDefaultModelChoice(
+        s.default_model_choice,
+        s.default_provider,
+        s.default_model ?? "",
+        useChatStore.getState().sessions,
+      );
+      if (resolved.provider === "ollama" && resolved.model) {
+        void ollamaPreloadModel(s.ollama_base_url, resolved.model).catch(
+          () => {},
         );
-        if (resolved.provider === "ollama" && resolved.model) {
-          void ollamaPreloadModel(s.ollama_base_url, resolved.model).catch(
-            () => {},
-          );
-        }
       }
-    })();
+    });
   }, [
     unlocked,
     hydrateSettings,
@@ -262,11 +274,10 @@ export default function App() {
           isn't tied to whichever main view is currently rendered. The
           component renders nothing until the user opens it via Ctrl/Cmd+K
           or the `loach:focus-search` event the sidebar fires. */}
-      {/* Suppress search + selection-copy palettes while onboarding owns the
-          screen — the wizard is modal and Cmd+K should stay inert until
-          the user finishes or dismisses. */}
+      {/* Suppress the search palette while onboarding owns the screen — the
+          wizard is modal and Cmd+K should stay inert until the user finishes
+          or dismisses. */}
       {!showLock && !showOnboarding && <SearchBar />}
-      {!showLock && !showOnboarding && <SelectionCopyButton />}
       {/* Global toast host. Mounted unconditionally so messages from any
           surface (including the lock screen path, in the future) land in a
           predictable spot. Renders nothing when no toasts are queued. */}

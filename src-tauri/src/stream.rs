@@ -69,6 +69,29 @@ pub enum StreamEvent {
         elapsed_ms: u64,
         tokens_per_second: f64,
     },
+    /// The model asked to invoke an MCP tool. Emitted once per call, BEFORE
+    /// the dispatcher actually runs the tool, so the UI can render a "calling
+    /// `<tool>`…" placeholder before the result lands. `id` is the
+    /// provider's call id (OpenAI provides one; for Ollama we synthesise
+    /// `call_<turn>_<index>`), used by the frontend to pair the call with
+    /// its matching `ToolResult`.
+    ToolCall {
+        id: String,
+        server_id: String,
+        server_name: String,
+        tool: String,
+        arguments: serde_json::Value,
+    },
+    /// Outcome of a `ToolCall`. `is_error` mirrors the MCP `isError` flag;
+    /// `content` is the concatenated text content (or a stringified
+    /// resource for non-text content). On a transport failure we still
+    /// emit ToolResult with `is_error: true` and the error message in
+    /// `content` so the model can see the failure and react.
+    ToolResult {
+        id: String,
+        content: String,
+        is_error: bool,
+    },
 }
 
 pub fn event_channel(stream_id: &str) -> String {

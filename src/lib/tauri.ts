@@ -145,6 +145,7 @@ export function appendMessage(args: {
       thinking: null,
       attachments_json: args.attachments_json ?? null,
       metrics_json: null,
+      tool_calls_json: null,
       created_at: Date.now(),
     });
   }
@@ -160,6 +161,11 @@ export function updateMessage(args: {
   content: string;
   thinking?: string | null;
   metrics_json?: string | null;
+  /** JSON-encoded `ToolCallRecord[]` — see `ToolCallRecord` in
+   *  `types.ts`. Pass undefined / null on writes that don't touch tool
+   *  calls; the backend `COALESCE`'s on the column so streaming flushes
+   *  don't clobber tool-call records saved on a separate write. */
+  tool_calls_json?: string | null;
 }): Promise<void> {
   if (!isTauri) return notInTauri(undefined);
   return invoke("update_message", { args });

@@ -138,6 +138,17 @@
     -webkit-font-smoothing: antialiased;
   }
 
+  /* Theme-aware text selection. The browser-default OS blue clashes with
+     the gradient background; a translucent foreground tint reads as a
+     quiet highlight, auto-adapts between light and dark (since
+     `--foreground` flips with the theme), and intentionally omits a
+     `color` override so syntax-highlighted code keeps its colours when
+     selected. */
+  ::selection {
+    background: hsl(var(--foreground) / 0.2);
+    text-shadow: none;
+  }
+
   /* =========================================================================
      Background variants
      ========================================================================= */
