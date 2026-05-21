@@ -396,4 +396,11 @@ pub struct ChatRequest {
     /// servers are configured or none are reachable.
     #[serde(default, skip_deserializing)]
     pub tools: Vec<McpToolDef>,
+    /// Private Chat marker. When `true`, `chat_stream` skips MCP tool
+    /// aggregation entirely so the model can't autonomously fan prompt
+    /// content out to a user-configured MCP server. The flag is the sole
+    /// gate — `tools` stays `skip_deserializing`, so a compromised renderer
+    /// can't smuggle in a tool definition the backend would honour.
+    #[serde(default)]
+    pub private: bool,
 }

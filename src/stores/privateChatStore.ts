@@ -227,6 +227,12 @@ export const usePrivateChatStore = create<PrivateChatState>((set, get) => ({
           system_prompt: systemPrompt,
           messages: history,
           params: state.params,
+          // Tell the backend to skip MCP tool aggregation. Without this
+          // the model could autonomously call any enabled MCP server and
+          // hand over prompt content as tool arguments — silently
+          // breaking the "nothing leaves this box" promise the overlay
+          // makes. See `commands::chat_stream`.
+          private: true,
         },
         (ev) => {
           if (ev.kind === "token") {

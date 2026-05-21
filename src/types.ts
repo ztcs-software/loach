@@ -206,6 +206,11 @@ export interface ChatRequest {
   system_prompt: string | null;
   messages: ChatMessageIn[];
   params: GenerationParams;
+  /** Private Chat marker. When `true`, the backend skips MCP tool
+   *  aggregation so the model can't autonomously forward prompt content
+   *  to a user-configured MCP server. Omit (or pass `false`) for regular
+   *  chats — defaults on the Rust side via `#[serde(default)]`. */
+  private?: boolean;
 }
 
 export type StreamEvent =

@@ -1135,15 +1135,25 @@ pub async fn chat_stream(
         // Cancel-aware MCP aggregation. A slow / wedged server can keep
         // tools/list busy for the full 30 s timeout; the user must be
         // able to stop us during that wait.
-        let agg_fut = crate::mcp::aggregate_tools(&db);
-        let (tools, errors) = tokio::select! {
-            biased;
-            _ = cancel.notified() => {
-                let _ = app.emit(&channel, crate::stream::StreamEvent::Cancelled);
-                registry.finish(&request.stream_id);
-                return;
+        //
+        // Private Chat skips this entirely: tool calls would let the model
+        // autonomously forward prompt content to a user-configured MCP
+        // server, which contradicts the "nothing leaves this box" promise
+        // the overlay makes. Empty `tools` short-circuits the catalogue so
+        // the model never sees a function it could call.
+        let (tools, errors) = if request.private {
+            (Vec::new(), Vec::new())
+        } else {
+            let agg_fut = crate::mcp::aggregate_tools(&db);
+            tokio::select! {
+                biased;
+                _ = cancel.notified() => {
+                    let _ = app.emit(&channel, crate::stream::StreamEvent::Cancelled);
+                    registry.finish(&request.stream_id);
+                    return;
+                }
+                r = agg_fut => r,
             }
-            r = agg_fut => r,
         };
         if !errors.is_empty() {
             let summary = errors
