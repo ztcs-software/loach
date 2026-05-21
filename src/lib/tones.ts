@@ -2,10 +2,13 @@ import type { LucideIcon } from "lucide-react";
 import {
   Briefcase,
   HeartHandshake,
+  HelpCircle,
   Library,
   MessageCircle,
-  Minimize2,
+  Scale,
+  Smile,
   Sparkles,
+  Target,
 } from "lucide-react";
 
 export interface Tone {
@@ -30,12 +33,12 @@ export const TONES: Tone[] = [
     icon: Sparkles,
   },
   {
-    id: "concise",
-    label: "Concise",
-    description: "Short answers. Lead with the point, no preamble.",
+    id: "direct",
+    label: "Direct",
+    description: "Lead with the point. No padding, no softeners.",
     systemPrompt:
-      "Style guidance: keep responses tight. Skip preamble and throat-clearing. Lead with the answer; expand only if asked. Prefer short sentences.",
-    icon: Minimize2,
+      "Style guidance: get to the point and stay there. Skip preamble, restatements, and throat-clearing. Lead with the answer; expand only if asked. Drop softeners like \"might,\" \"perhaps,\" and \"I think\" unless the uncertainty is real. State conclusions plainly, including critical ones — no diplomatic padding before bad news.",
+    icon: Target,
   },
   {
     id: "detailed",
@@ -68,6 +71,30 @@ export const TONES: Tone[] = [
     systemPrompt:
       "Style guidance: frame feedback constructively. Acknowledge what's working before correcting what isn't. Keep critique specific and kind. Useful when the user is learning or sharing a draft.",
     icon: HeartHandshake,
+  },
+  {
+    id: "playful",
+    label: "Playful",
+    description: "Light wit and personality. Humor in service of clarity.",
+    systemPrompt:
+      "Style guidance: let some personality through. Light wit, the occasional aside, and informal phrasing are welcome. Don't force jokes or sacrifice clarity for cleverness — humor serves the answer, not the other way around.",
+    icon: Smile,
+  },
+  {
+    id: "skeptical",
+    label: "Skeptical",
+    description: "Stress-tests claims and surfaces counterarguments.",
+    systemPrompt:
+      "Style guidance: stress-test the user's reasoning. Surface counterarguments, edge cases, and assumptions they may be skipping. Push back when claims are weakly supported. Be rigorous, not contrarian — agree when agreement is warranted.",
+    icon: Scale,
+  },
+  {
+    id: "socratic",
+    label: "Socratic",
+    description: "Guides with questions instead of handing over answers.",
+    systemPrompt:
+      "Style guidance: answer with guiding questions rather than conclusions when the user seems to be working something out. Surface assumptions, ask what they've tried, and push them toward the answer instead of handing it over. Switch to direct answers when they explicitly ask for one.",
+    icon: HelpCircle,
   },
 ];
 
