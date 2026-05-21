@@ -278,12 +278,10 @@ function MessageItemImpl({ message, isStreaming, metrics }: MessageProps) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   // Separate state for the keyboard-accessible kebab below the user
-  // bubble. Two menus (right-click + visible kebab) share the same
-  // items but use distinct triggers so the right-click can still
-  // anchor to the cursor while keyboard users get a discoverable
-  // button. Without this second path, tabbing through messages
-  // skipped right past the user's own Copy / Save-as-snippet
-  // actions — a real a11y gap.
+  // bubble. The kebab carries the full-content actions (Copy message,
+  // Save as Snippet) that the right-click menu omits, so keyboard users
+  // who can't open the cursor-anchored right-click menu still have a
+  // discoverable, tab-reachable path to them.
   const [userKebabOpen, setUserKebabOpen] = useState(false);
   const [copied, setCopied] = useState(false);
   // Coordinates (relative to the bubble) where the user right-clicked. We pin
@@ -541,12 +539,11 @@ function MessageItemImpl({ message, isStreaming, metrics }: MessageProps) {
             <Markdown content={message.content} />
           </div>
         )}
-        {/* Keyboard-accessible action menu for user messages. Mirrors the
-            assistant kebab below — same shape, same actions as the
-            right-click menu above. Hidden until hover/focus to keep the
-            outgoing-message look clean, but tab-reachable for keyboard
-            users who couldn't otherwise open the hidden right-click
-            trigger. */}
+        {/* Keyboard-accessible action menu for user messages — the
+            full-content actions (Copy message, Save as Snippet) that the
+            right-click menu intentionally omits. Hidden until hover/focus
+            to keep the outgoing-message look clean, but tab-reachable so
+            keyboard users have a discoverable path to these actions. */}
         {isUser && displayContent.length > 0 && (
           <div className="absolute -bottom-1 right-2 translate-y-full">
             <DropdownMenu open={userKebabOpen} onOpenChange={setUserKebabOpen}>
