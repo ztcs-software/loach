@@ -309,7 +309,7 @@ export function SettingsDialog() {
                     </DropdownMenu>
                   </div>
                   <p className="mt-1.5 text-[11px] text-foreground/50">
-                    Override to use vLLM, LM Studio, LiteLLM or any OpenAI-compatible proxy.
+                    Set an OpenAI-compatible API endpoint.
                   </p>
                 </div>
 
@@ -356,8 +356,8 @@ export function SettingsDialog() {
                     )}
                   </div>
                   <p className="mt-1.5 text-[11px] text-foreground/50">
-                    Stored in your OS credential manager (Windows Credential Manager / Linux Secret Service).
-                    Never written to disk in plain text.
+                    Leave blank for local servers (llama.cpp, LM Studio, vLLM).
+                    Only required for hosted providers like OpenAI.
                   </p>
                   <div className="mt-3 flex items-center gap-2">
                     <Button
