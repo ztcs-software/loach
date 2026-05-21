@@ -6,7 +6,9 @@ import {
   BookOpen,
   Brain,
   Check,
+  CheckCircle2,
   ChevronDown,
+  CircleAlert,
   Clock,
   Database,
   Download,
@@ -63,6 +65,8 @@ import {
   factoryReset,
   importDataWithDialog,
   isTauri,
+  ollamaListModels,
+  openaiListModels,
   saveTextToFile,
   wipeUserData,
   type DestructiveAuth,
@@ -73,6 +77,12 @@ import { cn } from "@/lib/utils";
 import { DEFAULT_TONE_ID, TONES } from "@/lib/tones";
 import type { FontSize, ImportStats, ModelInfo, ProviderId, Session } from "@/types";
 import pkg from "../../package.json";
+
+type ConnTestState =
+  | { kind: "idle" }
+  | { kind: "testing" }
+  | { kind: "ok"; modelCount: number }
+  | { kind: "error"; error: string };
 
 const GITHUB_URL = "https://github.com/ztcs-software/loach";
 const DOCS_URL = "https://docs.loach.dev";
@@ -109,6 +119,34 @@ export function SettingsDialog() {
 
   const [pendingKey, setPendingKey] = useState("");
   const [busy, setBusy] = useState(false);
+  const [ollamaTest, setOllamaTest] = useState<ConnTestState>({ kind: "idle" });
+  const [openaiTest, setOpenaiTest] = useState<ConnTestState>({ kind: "idle" });
+
+  const runOllamaTest = async () => {
+    setOllamaTest({ kind: "testing" });
+    try {
+      const models = await ollamaListModels(settings.ollama_base_url);
+      setOllamaTest({ kind: "ok", modelCount: models.length });
+    } catch (e) {
+      setOllamaTest({
+        kind: "error",
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
+  };
+
+  const runOpenAITest = async () => {
+    setOpenaiTest({ kind: "testing" });
+    try {
+      const models = await openaiListModels(settings.openai_base_url);
+      setOpenaiTest({ kind: "ok", modelCount: models.length });
+    } catch (e) {
+      setOpenaiTest({
+        kind: "error",
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
+  };
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
@@ -188,22 +226,47 @@ export function SettingsDialog() {
                   <Input
                     className="mt-1.5"
                     value={settings.ollama_base_url}
-                    onChange={(e) => settings.update("ollama_base_url", e.target.value)}
+                    onChange={(e) => {
+                      settings.update("ollama_base_url", e.target.value);
+                      if (ollamaTest.kind !== "idle") setOllamaTest({ kind: "idle" });
+                    }}
                     placeholder="http://localhost:11434"
                   />
                   <p className="mt-1.5 text-[11px] text-foreground/50">
                     Auto-detected on app launch. Leave default unless you run Ollama remotely.
                   </p>
+                  <div className="mt-3 flex items-center gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => void runOllamaTest()}
+                      disabled={ollamaTest.kind === "testing"}
+                      className="gap-1.5"
+                    >
+                      {ollamaTest.kind === "testing" ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <Plug className="h-3.5 w-3.5" />
+                      )}
+                      Test connection
+                    </Button>
+                  </div>
+                  {ollamaTest.kind !== "idle" && ollamaTest.kind !== "testing" && (
+                    <ConnTestResult className="mt-2.5" result={ollamaTest} providerLabel="Ollama" />
+                  )}
                 </div>
 
                 <Separator />
 
                 <div>
-                  <Label>OpenAI base URL</Label>
+                  <Label>API base URL</Label>
                   <Input
                     className="mt-1.5"
                     value={settings.openai_base_url}
-                    onChange={(e) => settings.update("openai_base_url", e.target.value)}
+                    onChange={(e) => {
+                      settings.update("openai_base_url", e.target.value);
+                      if (openaiTest.kind !== "idle") setOpenaiTest({ kind: "idle" });
+                    }}
                     placeholder="https://api.openai.com/v1"
                   />
                   <p className="mt-1.5 text-[11px] text-foreground/50">
@@ -227,6 +290,7 @@ export function SettingsDialog() {
                         try {
                           await settings.setOpenAIKey(pendingKey);
                           setPendingKey("");
+                          if (openaiTest.kind !== "idle") setOpenaiTest({ kind: "idle" });
                         } finally {
                           setBusy(false);
                         }
@@ -242,6 +306,7 @@ export function SettingsDialog() {
                           setBusy(true);
                           try {
                             await settings.clearOpenAIKey();
+                            if (openaiTest.kind !== "idle") setOpenaiTest({ kind: "idle" });
                           } finally {
                             setBusy(false);
                           }
@@ -255,6 +320,35 @@ export function SettingsDialog() {
                     Stored in your OS credential manager (Windows Credential Manager / Linux Secret Service).
                     Never written to disk in plain text.
                   </p>
+                  <div className="mt-3 flex items-center gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => void runOpenAITest()}
+                      disabled={openaiTest.kind === "testing" || pendingKey.length > 0}
+                      className="gap-1.5"
+                      title={
+                        pendingKey.length > 0
+                          ? "Save the key first, then test."
+                          : undefined
+                      }
+                    >
+                      {openaiTest.kind === "testing" ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <Plug className="h-3.5 w-3.5" />
+                      )}
+                      Test connection
+                    </Button>
+                    {pendingKey.length > 0 && (
+                      <span className="text-[11px] text-foreground/55">
+                        Save the key first, then test.
+                      </span>
+                    )}
+                  </div>
+                  {openaiTest.kind !== "idle" && openaiTest.kind !== "testing" && (
+                    <ConnTestResult className="mt-2.5" result={openaiTest} providerLabel="OpenAI" />
+                  )}
                 </div>
 
               </TabsContent>
@@ -641,6 +735,57 @@ export function SettingsDialog() {
 function SectionTitle({ children }: { children: React.ReactNode }) {
   return (
     <h3 className="text-lg font-semibold tracking-tight">{children}</h3>
+  );
+}
+
+/** Inline success / failure card for the Providers "Test connection"
+ *  buttons. Mirrors `McpPanel`'s TestResultCard styling so users see the
+ *  same visual language no matter which connection they're checking. */
+function ConnTestResult({
+  result,
+  providerLabel,
+  className,
+}: {
+  result:
+    | { kind: "ok"; modelCount: number }
+    | { kind: "error"; error: string };
+  providerLabel: string;
+  className?: string;
+}) {
+  if (result.kind === "error") {
+    return (
+      <div
+        className={cn(
+          "rounded-xl border border-destructive/40 bg-destructive/10 p-3 text-[13px] text-destructive",
+          className,
+        )}
+      >
+        <div className="flex items-center gap-1.5 font-medium">
+          <CircleAlert className="h-4 w-4" />
+          Connection failed
+        </div>
+        <p className="mt-1 text-[12px] text-destructive/90 break-words">
+          {result.error || "Unknown error"}
+        </p>
+      </div>
+    );
+  }
+  return (
+    <div
+      className={cn(
+        "rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-3 text-[13px]",
+        className,
+      )}
+    >
+      <div className="flex items-center gap-1.5 font-medium text-emerald-500">
+        <CheckCircle2 className="h-4 w-4" />
+        Connected
+      </div>
+      <p className="mt-1 text-[12px] text-foreground/75">
+        {providerLabel} reachable · {result.modelCount}{" "}
+        {result.modelCount === 1 ? "model" : "models"} available.
+      </p>
+    </div>
   );
 }
 
