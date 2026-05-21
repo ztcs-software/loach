@@ -216,6 +216,7 @@ function ExpandableUserText({ content }: { content: string }) {
     <div>
       <p
         ref={ref}
+        data-prompt-text
         className={cn(
           "whitespace-pre-wrap text-sm leading-relaxed",
           // `line-clamp-[10]` falls back gracefully when the content is
@@ -340,6 +341,45 @@ function MessageItemImpl({ message, isStreaming, metrics }: MessageProps) {
     }
   };
 
+  // Ctrl+C / Cmd+C copies the current selection, and the browser's serializer
+  // adds a newline at every block boundary it crosses. The user bubble nests
+  // the prompt inside several wrapper divs and sits next to a hidden
+  // right-click trigger plus an absolutely-positioned kebab, so a full-bubble
+  // selection ends up with blank lines bracketing the actual text.
+  //
+  // Intercept the copy event for the user bubble and write exactly the
+  // selected slice of the prompt — backed by the original string in the DOM,
+  // not the browser's selection serialization. The kebab's "Copy message"
+  // and the right-click "Copy" already go through navigator.clipboard
+  // directly and aren't affected by this handler; only the Ctrl+C / Cmd+C
+  // path needs the interception. Falls through to the default behaviour when
+  // the selection doesn't intersect the prompt or when the structure is
+  // unexpected (multi-text-node) so we never make copy *worse* than today.
+  const handleUserCopy = (e: React.ClipboardEvent<HTMLDivElement>) => {
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed) return;
+    const range = sel.getRangeAt(0);
+    const bubble = e.currentTarget;
+    if (
+      !bubble.contains(range.startContainer) ||
+      !bubble.contains(range.endContainer)
+    )
+      return;
+    const p = bubble.querySelector<HTMLParagraphElement>("[data-prompt-text]");
+    if (!p || !range.intersectsNode(p)) return;
+    const textNode = p.firstChild;
+    if (!textNode || textNode.nodeType !== Node.TEXT_NODE) return;
+    const fullText = textNode.nodeValue ?? "";
+    const start =
+      range.startContainer === textNode ? range.startOffset : 0;
+    const end =
+      range.endContainer === textNode ? range.endOffset : fullText.length;
+    const text = fullText.slice(start, end);
+    if (!text) return;
+    e.preventDefault();
+    e.clipboardData.setData("text/plain", text);
+  };
+
   // Programmatically highlight the entire message body. Deferred to the next
   // frame because Radix's dropdown close-on-select would otherwise collapse
   // the new selection a beat after we set it.
@@ -389,6 +429,7 @@ function MessageItemImpl({ message, isStreaming, metrics }: MessageProps) {
             ? "rounded-3xl rounded-tr-lg border border-foreground/10 bg-foreground/[0.08] px-4 py-2.5 text-foreground backdrop-blur-xl"
             : "rounded-3xl rounded-tl-lg text-foreground/95",
         )}
+        onCopy={isUser ? handleUserCopy : undefined}
         onContextMenu={(e) => {
           e.preventDefault();
           const bubbleEl = e.currentTarget;
@@ -405,7 +446,16 @@ function MessageItemImpl({ message, isStreaming, metrics }: MessageProps) {
         }}
       >
         {isUser && (
-          <DropdownMenu open={userMenuOpen} onOpenChange={setUserMenuOpen}>
+          <DropdownMenu
+            open={userMenuOpen}
+            onOpenChange={(open) => {
+              setUserMenuOpen(open);
+              // Clear the snapshotted selection when the menu closes so a
+              // later right-click that lands on the bubble without an
+              // active selection doesn't copy the previous one.
+              if (!open) setContextSelection("");
+            }}
+          >
             <DropdownMenuTrigger asChild>
               <button
                 type="button"
@@ -440,7 +490,13 @@ function MessageItemImpl({ message, isStreaming, metrics }: MessageProps) {
           </DropdownMenu>
         )}
         {!isUser && message.content.length > 0 && (
-          <DropdownMenu open={assistantMenuOpen} onOpenChange={setAssistantMenuOpen}>
+          <DropdownMenu
+            open={assistantMenuOpen}
+            onOpenChange={(open) => {
+              setAssistantMenuOpen(open);
+              if (!open) setContextSelection("");
+            }}
+          >
             <DropdownMenuTrigger asChild>
               <button
                 type="button"

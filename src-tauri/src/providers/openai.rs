@@ -339,7 +339,7 @@ pub async fn chat_stream(
 
                     // UI sees the full result; model only sees the cap.
                     let for_ui = content.clone();
-                    let for_model = cap_tool_text(&content, MAX_TOOL_RESULT_BYTES);
+                    let for_model = super::cap_tool_text(&content, MAX_TOOL_RESULT_BYTES);
 
                     let _ = app.emit(
                         &channel,
@@ -389,11 +389,20 @@ async fn run_one_turn(
 ) -> Result<Option<TurnOutcome>> {
     let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
     let mut http_req = http.post(&url).json(&body);
+    // Track whether we had a key but chose not to send it over cleartext
+    // so we can fold that hint into a 401/403 response — without it, the
+    // user sees "OpenAI HTTP 401: Unauthorized" and has no idea their key
+    // was withheld for transport-safety reasons. Open OpenAI-compatible
+    // servers (LM Studio, llama-server, vLLM) typically don't require auth,
+    // so we keep firing the request unauthenticated; only the
+    // genuinely-auth-required path benefits from the augmented message.
+    let mut bearer_withheld = false;
     if let Some(key) = secrets::get_openai_key().ok().flatten() {
         if !key.is_empty() {
             if is_safe_for_bearer(base_url) {
                 http_req = http_req.bearer_auth(key);
             } else {
+                bearer_withheld = true;
                 tracing::warn!(
                     "Refusing to send OpenAI bearer token over cleartext to {} — \
                      change the base URL to https:// or accept that requests will be unauthenticated.",
@@ -420,10 +429,24 @@ async fn run_one_turn(
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
+        // If the server rejected the request for auth reasons AND we
+        // deliberately withheld the bearer because the base URL is cleartext
+        // to a non-loopback host, surface the *why* — a bare "401" against
+        // an OpenAI-compatible endpoint is otherwise indistinguishable from
+        // a wrong key.
+        let suffix = if bearer_withheld
+            && (status == reqwest::StatusCode::UNAUTHORIZED
+                || status == reqwest::StatusCode::FORBIDDEN)
+        {
+            " (API key withheld because the base URL is http:// to a non-loopback host — \
+              switch to https:// to authenticate)"
+        } else {
+            ""
+        };
         let _ = app.emit(
             channel,
             StreamEvent::Error {
-                message: format!("OpenAI HTTP {status}: {text}"),
+                message: format!("OpenAI HTTP {status}: {text}{suffix}"),
             },
         );
         registry.finish(stream_id);
@@ -605,30 +628,6 @@ fn emit_metrics(app: &AppHandle, channel: &str, tokens: u32, start: Instant) {
             tokens_per_second: tps,
         },
     );
-}
-
-/// Truncate a tool result on a UTF-8 boundary, with a trailing note for
-/// the model. Mirrors `providers::ollama::cap_tool_text`. Kept duplicated
-/// rather than hoisted into `providers/mod.rs` because the file structure
-/// already has each provider self-contained and a single one-call helper
-/// isn't worth the cross-module import noise.
-fn cap_tool_text(s: &str, max_bytes: usize) -> String {
-    if s.len() <= max_bytes {
-        return s.to_string();
-    }
-    let cut = s
-        .char_indices()
-        .take_while(|(i, _)| *i <= max_bytes)
-        .last()
-        .map(|(i, _)| i)
-        .unwrap_or(0);
-    format!(
-        "{}\n\n[... result truncated by Loach at {} bytes; original was {} bytes. \
-         Ask the tool again with narrower arguments if you need more.]",
-        &s[..cut],
-        max_bytes,
-        s.len()
-    )
 }
 
 fn openai_tool_def(def: &McpToolDef) -> Value {

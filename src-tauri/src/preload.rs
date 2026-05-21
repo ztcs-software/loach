@@ -126,12 +126,102 @@ pub fn try_warm_default_model(db: Arc<Database>, http: reqwest::Client) {
             return;
         }
 
+        // Refuse to fire the speculative warm at anything other than a
+        // loopback or private-LAN host. Preload runs before the app-lock
+        // screen and reads the URL straight out of the settings table — a
+        // corrupted settings row or an imported snapshot pointing at an
+        // attacker-controlled host would otherwise leak a model-name probe
+        // on every cold launch. Real chat traffic isn't gated by this
+        // check; it still goes through the regular request path with the
+        // user's full intent. Worst case here: a user running Ollama on a
+        // public IP gets a slightly slower first request (preload skipped),
+        // not a broken app.
+        if !is_safe_preload_host(&base_url) {
+            tracing::debug!(
+                "preload: skipped, {base_url} is not a loopback or private-LAN host"
+            );
+            return;
+        }
+
         tracing::info!("preload: warming {model} via {base_url}");
         // `preload_model` swallows its own transport errors (timeout,
         // connection refused, 4xx model-not-found) and returns Ok(()).
         // The `let _ =` is belt-and-braces for any future signature change.
         let _ = crate::providers::ollama::preload_model(&http, &base_url, &model).await;
     });
+}
+
+/// Whether `base_url`'s host is safe to fire a speculative warm at before
+/// the user has had a chance to intervene (lock screen, settings UI). Accepts
+/// loopback (127.0.0.0/8, ::1), `localhost`, RFC 1918 LAN ranges (10/8,
+/// 172.16/12, 192.168/16), the IPv4 link-local range (169.254/16) and
+/// Tailscale's CGNAT-overlay range (100.64.0.0/10).
+///
+/// A hostname that doesn't parse as an IP is rejected because we can't tell
+/// during startup whether the DNS resolution will end up at a private or a
+/// public address — preload is best-effort, so erring on the side of "skip"
+/// is the right call here.
+fn is_safe_preload_host(base_url: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(base_url) else {
+        return false;
+    };
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    if host.eq_ignore_ascii_case("localhost") || host.eq_ignore_ascii_case("ip6-localhost") {
+        return true;
+    }
+    // `url::Url::host_str` returns IPv6 hosts with the surrounding `[ ]`
+    // brackets (e.g. `[::1]`). Strip them before letting `IpAddr::parse`
+    // see the address — `"::1".parse()` works, `"[::1]".parse()` doesn't.
+    let host_for_ip = host
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(host);
+    let Ok(ip) = host_for_ip.parse::<std::net::IpAddr>() else {
+        // Hostnames (e.g. `ollama.lan`, `gpu-box.tailnet.ts.net`) can't be
+        // statically classified without a DNS lookup. Preload is best-effort
+        // so we err on the side of "skip" — the JS-side preload that runs
+        // post-unlock can pick it up with the real chat client.
+        return false;
+    };
+    if ip.is_loopback() || ip.is_unspecified() {
+        // `is_unspecified` covers 0.0.0.0 / ::, which both resolve to
+        // loopback on a request from the local host. Including them keeps
+        // configurations like `ollama serve --host 0.0.0.0` working.
+        return true;
+    }
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let o = v4.octets();
+            // RFC 1918 private ranges
+            if o[0] == 10 {
+                return true;
+            }
+            if o[0] == 172 && (16..=31).contains(&o[1]) {
+                return true;
+            }
+            if o[0] == 192 && o[1] == 168 {
+                return true;
+            }
+            // IPv4 link-local (RFC 3927)
+            if o[0] == 169 && o[1] == 254 {
+                return true;
+            }
+            // Tailscale CGNAT-overlay range (100.64.0.0/10)
+            if o[0] == 100 && (64..=127).contains(&o[1]) {
+                return true;
+            }
+            false
+        }
+        std::net::IpAddr::V6(v6) => {
+            // IPv6 unique-local (fc00::/7) and link-local (fe80::/10).
+            // `Ipv6Addr::is_unique_local` / `is_unicast_link_local` are
+            // currently unstable, so check the high bits directly.
+            let first = v6.segments()[0];
+            (first & 0xfe00) == 0xfc00 || (first & 0xffc0) == 0xfe80
+        }
+    }
 }
 
 /// Rust port of `resolveDefaultModelChoice` in `src/stores/chatStore.ts`.
@@ -280,5 +370,41 @@ mod tests {
             &[],
         );
         assert_eq!(got, Some(("ollama".into(), "phi".into())));
+    }
+
+    #[test]
+    fn preload_host_allowlist_accepts_local_and_lan() {
+        // Loopback + the `localhost` aliases that callers commonly type.
+        assert!(is_safe_preload_host("http://localhost:11434"));
+        assert!(is_safe_preload_host("http://127.0.0.1:11434"));
+        assert!(is_safe_preload_host("http://[::1]:11434"));
+        assert!(is_safe_preload_host("http://0.0.0.0:11434"));
+        // RFC 1918 ranges — LAN GPU box is a first-class deployment.
+        assert!(is_safe_preload_host("http://10.0.1.5:11434"));
+        assert!(is_safe_preload_host("http://172.16.0.1:11434"));
+        assert!(is_safe_preload_host("http://172.31.255.255:11434"));
+        assert!(is_safe_preload_host("http://192.168.1.10:11434"));
+        // Tailscale CGNAT-overlay range (100.64.0.0/10).
+        assert!(is_safe_preload_host("http://100.64.0.1:11434"));
+        assert!(is_safe_preload_host("http://100.127.255.254:11434"));
+        // IPv6 unique-local and link-local.
+        assert!(is_safe_preload_host("http://[fc00::1]:11434"));
+        assert!(is_safe_preload_host("http://[fe80::1]:11434"));
+    }
+
+    #[test]
+    fn preload_host_allowlist_rejects_public_and_ambiguous() {
+        // Public IPv4 — exactly the case we're defending against.
+        assert!(!is_safe_preload_host("http://8.8.8.8:11434"));
+        assert!(!is_safe_preload_host("http://203.0.113.10:11434"));
+        // 172.32/12 sits just outside the RFC 1918 172.16/12 block.
+        assert!(!is_safe_preload_host("http://172.32.0.1:11434"));
+        // 100.128/9 sits just outside the Tailscale CGNAT range.
+        assert!(!is_safe_preload_host("http://100.128.0.1:11434"));
+        // Hostnames can't be classified without DNS — err on the side of
+        // skipping so a `gpu-box.example.com` snapshot can't auto-fire.
+        assert!(!is_safe_preload_host("http://ollama.example.com:11434"));
+        // Malformed URLs short-circuit to false.
+        assert!(!is_safe_preload_host("not a url"));
     }
 }

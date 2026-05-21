@@ -659,7 +659,7 @@ pub async fn chat_stream(
                     // inspect the full result; only the message turn that
                     // re-enters the model is truncated.
                     let for_ui = content.clone();
-                    let for_model = cap_tool_text(&content, MAX_TOOL_RESULT_BYTES);
+                    let for_model = super::cap_tool_text(&content, MAX_TOOL_RESULT_BYTES);
 
                     let _ = app.emit(
                         &channel,
@@ -949,29 +949,6 @@ fn build_options(req: &ChatRequest) -> Value {
         o.insert("low_vram".into(), json!(v));
     }
     Value::Object(o)
-}
-
-/// Truncate a tool result to `max_bytes` on a UTF-8 boundary and append a
-/// trailing note so the model knows it was clipped. Naive byte-index
-/// truncation would panic on multi-byte sequences (a single emoji at
-/// the boundary trips it). We walk char_indices to land on a valid edge.
-fn cap_tool_text(s: &str, max_bytes: usize) -> String {
-    if s.len() <= max_bytes {
-        return s.to_string();
-    }
-    let cut = s
-        .char_indices()
-        .take_while(|(i, _)| *i <= max_bytes)
-        .last()
-        .map(|(i, _)| i)
-        .unwrap_or(0);
-    format!(
-        "{}\n\n[... result truncated by Loach at {} bytes; original was {} bytes. \
-         Ask the tool again with narrower arguments if you need more.]",
-        &s[..cut],
-        max_bytes,
-        s.len()
-    )
 }
 
 fn ollama_tool_def(def: &McpToolDef) -> Value {
