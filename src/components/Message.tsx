@@ -10,6 +10,7 @@ import {
   FileText,
   Loader2,
   MoreHorizontal,
+  TextSelect,
   Wrench,
 } from "lucide-react";
 import { Markdown } from "./Markdown";
@@ -34,6 +35,22 @@ interface MessageProps {
   message: ChatMessage;
   isStreaming?: boolean;
   metrics?: MessageMetrics | null;
+}
+
+/**
+ * Return the current selection's text if it is entirely contained inside
+ * `el`, otherwise empty. Used by the right-click handler to decide whether
+ * to surface a "Copy selection" item — a selection that starts in another
+ * bubble or in the sidebar shouldn't trigger this bubble's menu item.
+ */
+function getSelectionWithin(el: Element): string {
+  const sel = window.getSelection();
+  if (!sel || sel.isCollapsed || sel.rangeCount === 0) return "";
+  const range = sel.getRangeAt(0);
+  if (!el.contains(range.startContainer) || !el.contains(range.endContainer)) {
+    return "";
+  }
+  return sel.toString();
 }
 
 function parseMetrics(json: string | null): MessageMetrics | null {
@@ -199,7 +216,6 @@ function ExpandableUserText({ content }: { content: string }) {
     <div>
       <p
         ref={ref}
-        data-prompt-text
         className={cn(
           "whitespace-pre-wrap text-sm leading-relaxed",
           // `line-clamp-[10]` falls back gracefully when the content is
@@ -277,6 +293,14 @@ function MessageItemImpl({ message, isStreaming, metrics }: MessageProps) {
   const [assistantMenuOpen, setAssistantMenuOpen] = useState(false);
   const [assistantMenuPos, setAssistantMenuPos] = useState<{ x: number; y: number } | null>(null);
   const [userMenuPos, setUserMenuPos] = useState<{ x: number; y: number } | null>(null);
+  // Selection text captured at the moment of right-click, scoped to this
+  // bubble. Captured eagerly because opening the dropdown shifts focus and
+  // can collapse the live selection before the menu item's handler runs.
+  const [contextSelection, setContextSelection] = useState("");
+  // Ref to the message body wrapper. Used by the right-click "Select all"
+  // item to programmatically select the body text — and only the body, so
+  // metrics and the "Show more" toggle stay outside the highlight.
+  const bodyRef = useRef<HTMLDivElement>(null);
   const openSnippetDialog = useSnippetStore((s) => s.openDialog);
 
   // Copy the raw assistant content — full markdown, untouched — so pasting
@@ -300,12 +324,39 @@ function MessageItemImpl({ message, isStreaming, metrics }: MessageProps) {
     }
   };
 
-  // Clipboard cleanup for user prompts (Ctrl+C, the floating "Copy" pill,
-  // the right-click "Copy" item) is handled centrally via the
-  // `getCleanSelectionText` helper + the document-level copy listener
-  // installed in App. Per-bubble React onCopy doesn't fire reliably because
-  // the native copy event targets `document.body` for non-editable text,
-  // which is outside React's delegation root.
+  // Right-click "Copy" handler. Copies the bubble-scoped selection captured
+  // at right-click time, or the full message body when nothing was selected.
+  // Kept separate from `copyContent` so the kebab's "Copied" tick state isn't
+  // affected by right-click copies.
+  const copyFromContextMenu = async () => {
+    const fullText =
+      message.role === "user"
+        ? stripInlinedAttachments(message.content)
+        : message.content;
+    const text = contextSelection || fullText;
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      // see copyContent above
+    }
+  };
+
+  // Programmatically highlight the entire message body. Deferred to the next
+  // frame because Radix's dropdown close-on-select would otherwise collapse
+  // the new selection a beat after we set it.
+  const selectAllBody = () => {
+    requestAnimationFrame(() => {
+      const el = bodyRef.current;
+      if (!el) return;
+      const sel = window.getSelection();
+      if (!sel) return;
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      sel.removeAllRanges();
+      sel.addRange(range);
+    });
+  };
 
   if (message.role === "system") {
     return (
@@ -342,8 +393,10 @@ function MessageItemImpl({ message, isStreaming, metrics }: MessageProps) {
         )}
         onContextMenu={(e) => {
           e.preventDefault();
-          const bubble = e.currentTarget.getBoundingClientRect();
-          const pos = { x: e.clientX - bubble.left, y: e.clientY - bubble.top };
+          const bubbleEl = e.currentTarget;
+          const rect = bubbleEl.getBoundingClientRect();
+          const pos = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+          setContextSelection(getSelectionWithin(bubbleEl));
           if (isUser) {
             setUserMenuPos(pos);
             setUserMenuOpen(true);
@@ -369,23 +422,21 @@ function MessageItemImpl({ message, isStreaming, metrics }: MessageProps) {
             </DropdownMenuTrigger>
             <DropdownMenuContent
               align="start"
-              className="!bg-none !bg-foreground/[0.08] border border-foreground/10 backdrop-blur-xl min-w-[180px]"
+              className="!bg-none !bg-foreground/[0.08] border border-foreground/10 backdrop-blur-xl min-w-[160px]"
             >
               <DropdownMenuItem
-                onSelect={() => void copyUserContent(displayContent)}
+                onSelect={() => void copyFromContextMenu()}
                 className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
               >
                 <Copy className="h-4 w-4 text-foreground/60" />
                 Copy
               </DropdownMenuItem>
               <DropdownMenuItem
-                onSelect={() =>
-                  openSnippetDialog({ seedPrompt: displayContent })
-                }
+                onSelect={selectAllBody}
                 className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
               >
-                <Bookmark className="h-4 w-4 text-foreground/60" />
-                Save as Snippet
+                <TextSelect className="h-4 w-4 text-foreground/60" />
+                Select all
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
@@ -406,14 +457,21 @@ function MessageItemImpl({ message, isStreaming, metrics }: MessageProps) {
             </DropdownMenuTrigger>
             <DropdownMenuContent
               align="start"
-              className="!bg-none !bg-foreground/[0.08] border border-foreground/10 backdrop-blur-xl min-w-[140px]"
+              className="!bg-none !bg-foreground/[0.08] border border-foreground/10 backdrop-blur-xl min-w-[160px]"
             >
               <DropdownMenuItem
-                onSelect={() => void copyContent()}
+                onSelect={() => void copyFromContextMenu()}
                 className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
               >
                 <Copy className="h-4 w-4 text-foreground/60" />
                 Copy
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                onSelect={selectAllBody}
+                className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
+              >
+                <TextSelect className="h-4 w-4 text-foreground/60" />
+                Select all
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
@@ -474,12 +532,12 @@ function MessageItemImpl({ message, isStreaming, metrics }: MessageProps) {
           </div>
         ) : isUser ? (
           displayContent.length > 0 && (
-            <div data-message-content>
+            <div ref={bodyRef}>
               <ExpandableUserText content={displayContent} />
             </div>
           )
         ) : (
-          <div data-message-content>
+          <div ref={bodyRef}>
             <Markdown content={message.content} />
           </div>
         )}
@@ -515,7 +573,7 @@ function MessageItemImpl({ message, isStreaming, metrics }: MessageProps) {
                   className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
                 >
                   <Copy className="h-4 w-4 text-foreground/60" />
-                  Copy
+                  Copy message
                 </DropdownMenuItem>
                 <DropdownMenuItem
                   onSelect={() =>
@@ -565,7 +623,7 @@ function MessageItemImpl({ message, isStreaming, metrics }: MessageProps) {
                   className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
                 >
                   <Copy className="h-4 w-4 text-foreground/60" />
-                  Copy
+                  Copy message
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
