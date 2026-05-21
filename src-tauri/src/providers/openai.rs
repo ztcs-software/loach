@@ -46,6 +46,14 @@ struct OpenAIModel {
 }
 
 pub async fn list_models(http: &Client, base_url: &str) -> Result<Vec<ModelInfo>> {
+    // Same defense-in-depth SSRF gate the chat-stream path uses. The
+    // listing endpoint auto-fires from `modelsStore.refresh()` whenever
+    // `openai_base_url` is moved off the public default — without this
+    // guard, a corrupted settings row or a malicious snapshot import
+    // could land a request on a cloud-metadata service on every refresh.
+    super::refuse_link_local_host(base_url)
+        .await
+        .map_err(|e| anyhow!(e))?;
     let url = format!("{}/models", base_url.trim_end_matches('/'));
     let mut req = http.get(url).timeout(ADMIN_TIMEOUT);
     if let Some(key) = secrets::get_openai_key()? {
@@ -116,6 +124,20 @@ struct DeltaToolFn {
 struct SseChunk {
     #[serde(default)]
     choices: Vec<Choice>,
+    /// Some servers emit a final, choices-empty chunk that carries
+    /// `usage: { completion_tokens, prompt_tokens, total_tokens }`. When
+    /// it shows up we use it for the metrics footer instead of the
+    /// per-chunk fallback counter — that one increments once per
+    /// non-empty delta, which biases TPS low for servers that batch
+    /// multiple tokens per chunk.
+    #[serde(default)]
+    usage: Option<Usage>,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy)]
+struct Usage {
+    #[serde(default)]
+    completion_tokens: Option<u32>,
 }
 
 /// Accumulated tool call across a single turn — `name` and `arguments` may
@@ -179,6 +201,19 @@ pub async fn chat_stream(
     // See the matching note in providers/ollama.rs::chat_stream.
     let channel = event_channel(&req.stream_id);
 
+    // Defense-in-depth SSRF guard. The shared HTTP client is intentionally
+    // *not* DNS-pinned the way MCP's per-server clients are — hosted
+    // providers and LAN llama-servers are both legitimate destinations.
+    // The narrow thing we reject is link-local, because that range hosts
+    // cloud-metadata services (AWS / GCP / Azure / DigitalOcean / Oracle
+    // all live at 169.254.169.254) and no realistic LLM endpoint is
+    // there.
+    if let Err(e) = super::refuse_link_local_host(&req.base_url).await {
+        let _ = app.emit(&channel, StreamEvent::Error { message: e });
+        registry.finish(&req.stream_id);
+        return Ok(());
+    }
+
     let mut messages = build_messages(&req);
 
     let tools_json: Option<Value> = if req.tools.is_empty() {
@@ -193,12 +228,28 @@ pub async fn chat_stream(
 
     let start = Instant::now();
     let mut total_tokens: u32 = 0;
+    // Authoritative token count from `usage.completion_tokens` if the
+    // server volunteered it. Kept across turns so the final metrics
+    // emit sees the last reported number (the chunk-counter is the
+    // fallback when usage never arrives — e.g. older Ollama compat
+    // shims that ignore `stream_options.include_usage`).
+    let mut reported_tokens: Option<u32> = None;
 
     for turn in 0..MAX_TOOL_TURNS {
+        // Keep the running history under the soft cap. The first turn is
+        // typically a single user message and short; later turns
+        // accumulate assistant + tool-result frames that grow fast.
+        super::bound_messages_payload(&mut messages);
+
         let mut body = json!({
             "model": req.model,
             "messages": messages,
             "stream": true,
+            // Opt into the `usage` frame in streaming responses. Servers
+            // that don't recognise this option (most pre-2024 compat
+            // shims) silently ignore it; the ones that do return a
+            // trailing choices-empty chunk with completion_tokens.
+            "stream_options": { "include_usage": true },
         });
         if let Some(v) = req.params.temperature {
             body["temperature"] = json!(v);
@@ -230,6 +281,7 @@ pub async fn chat_stream(
             &cancel,
             body,
             &mut total_tokens,
+            &mut reported_tokens,
             &req.stream_id,
             &registry,
         )
@@ -241,7 +293,11 @@ pub async fn chat_stream(
 
         match outcome {
             TurnOutcome::Done => {
-                emit_metrics(&app, &channel, total_tokens, start);
+                // Prefer the provider's authoritative count when it
+                // sent one; fall back to our chunk-counter approximation
+                // for compat shims that don't honour `include_usage`.
+                let tokens_for_metrics = reported_tokens.unwrap_or(total_tokens);
+                emit_metrics(&app, &channel, tokens_for_metrics, start);
                 let _ = app.emit(&channel, StreamEvent::Done);
                 registry.finish(&req.stream_id);
                 return Ok(());
@@ -384,6 +440,7 @@ async fn run_one_turn(
     cancel: &Arc<tokio::sync::Notify>,
     body: Value,
     total_tokens: &mut u32,
+    reported_tokens: &mut Option<u32>,
     stream_id: &str,
     registry: &StreamRegistry,
 ) -> Result<Option<TurnOutcome>> {
@@ -507,6 +564,27 @@ async fn run_one_turn(
                                     break;
                                 }
                                 if let Ok(parsed) = serde_json::from_str::<SseChunk>(data) {
+                                    // OpenAI (and most compat servers)
+                                    // emit a final choices-empty frame
+                                    // carrying `usage`. When we see it,
+                                    // remember the authoritative
+                                    // completion-tokens number — emitted
+                                    // alongside metrics on Done so the
+                                    // footer TPS isn't biased by our
+                                    // per-chunk approximation.
+                                    if let Some(u) = parsed.usage {
+                                        if let Some(n) = u.completion_tokens {
+                                            // Accumulate, don't overwrite —
+                                            // each /chat/completions call
+                                            // reports its own turn's
+                                            // completion_tokens, and the
+                                            // metrics footer wants the
+                                            // session total across all
+                                            // tool turns.
+                                            *reported_tokens =
+                                                Some(reported_tokens.unwrap_or(0).saturating_add(n));
+                                        }
+                                    }
                                     for c in parsed.choices {
                                         if let Some(d) = c.delta {
                                             if let Some(think) = d.reasoning_content {
@@ -521,7 +599,25 @@ async fn run_one_turn(
                                                 }
                                             }
                                             for tc in d.tool_calls {
-                                                let idx = tc.index.unwrap_or(0) as usize;
+                                                // OpenAI's wire protocol
+                                                // always includes the
+                                                // index. A compat server
+                                                // that omits it confuses
+                                                // multi-call assembly
+                                                // (without `index` we
+                                                // can't tell which slot
+                                                // a delta belongs to) —
+                                                // log and skip rather
+                                                // than silently collapse
+                                                // every call into slot 0.
+                                                let Some(idx_raw) = tc.index else {
+                                                    tracing::warn!(
+                                                        "openai stream: tool_call delta has no `index`; \
+                                                         skipping frame to avoid collapsing into slot 0"
+                                                    );
+                                                    continue;
+                                                };
+                                                let idx = idx_raw as usize;
                                                 if accum.len() <= idx {
                                                     accum.resize_with(idx + 1, || AccumTool {
                                                         id: None,
@@ -645,11 +741,29 @@ fn openai_tool_def(def: &McpToolDef) -> Value {
     json!({ "type": "function", "function": function })
 }
 
+/// Parse a model-emitted tool-call argument string. The protocol promises
+/// JSON, but models occasionally emit unquoted keys, trailing commas, or
+/// Python-style `None` — when that happens we fall through to handing
+/// the raw text to the dispatcher as a string, which keeps the call
+/// alive (the tool will see a malformed input and can complain in its
+/// error reply, which the model then has a chance to react to).
+///
+/// We log the parse failure so a user looking at `RUST_LOG=debug` traces
+/// for "why does this tool always seem to fail" gets a clear signal
+/// without us turning the silent fallback into a hard error.
 fn parse_args(s: &str) -> Value {
     if s.trim().is_empty() {
         return json!({});
     }
-    serde_json::from_str(s).unwrap_or_else(|_| Value::String(s.to_string()))
+    match serde_json::from_str(s) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(
+                "openai tool call: arguments are not valid JSON ({e}); forwarding raw text"
+            );
+            Value::String(s.to_string())
+        }
+    }
 }
 
 fn resolve_qualified<'a>(

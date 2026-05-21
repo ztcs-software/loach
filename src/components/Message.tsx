@@ -480,6 +480,12 @@ function MessageItemImpl({ message, isStreaming, metrics }: MessageProps) {
             </DropdownMenuTrigger>
             <DropdownMenuContent
               align="start"
+              // Radix flips / shifts the menu automatically (`avoidCollisions`
+              // is on by default) but only respects this padding when we
+              // give it room — without `collisionPadding` a right-click
+              // near the viewport edge can land the menu right against
+              // the window chrome and clip the action icons.
+              collisionPadding={8}
               className="!bg-none !bg-foreground/[0.08] border border-foreground/10 backdrop-blur-xl min-w-[160px]"
             >
               <DropdownMenuItem
@@ -521,6 +527,7 @@ function MessageItemImpl({ message, isStreaming, metrics }: MessageProps) {
             </DropdownMenuTrigger>
             <DropdownMenuContent
               align="start"
+              collisionPadding={8}
               className="!bg-none !bg-foreground/[0.08] border border-foreground/10 backdrop-blur-xl min-w-[160px]"
             >
               <DropdownMenuItem
@@ -616,7 +623,12 @@ function MessageItemImpl({ message, isStreaming, metrics }: MessageProps) {
               <DropdownMenuTrigger asChild>
                 <button
                   type="button"
-                  aria-label="Message actions"
+                  // Tell screen-reader users what's behind the kebab —
+                  // a generic "Message actions" reads the same for the
+                  // user and assistant menus despite their action sets
+                  // differing. This one carries Copy + Save as Snippet,
+                  // which only make sense for the user's own message.
+                  aria-label="Copy or save this message"
                   className={cn(
                     "inline-flex h-7 w-7 items-center justify-center rounded-full text-foreground/55 transition-opacity hover:bg-foreground/10 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
                     userKebabOpen
@@ -664,7 +676,12 @@ function MessageItemImpl({ message, isStreaming, metrics }: MessageProps) {
               <DropdownMenuTrigger asChild>
                 <button
                   type="button"
-                  aria-label="Message actions"
+                  // Distinct label from the user kebab so screen-reader
+                  // users know whose message is being acted on. Verb-led
+                  // ("Copy assistant message") rather than noun-led
+                  // ("Assistant message actions") because the menu here
+                  // is single-purpose.
+                  aria-label="Copy assistant message"
                   className={cn(
                     "inline-flex h-7 w-7 items-center justify-center rounded-full text-foreground/60 transition-colors hover:bg-foreground/10 hover:text-foreground",
                     menuOpen && "bg-foreground/10 text-foreground",

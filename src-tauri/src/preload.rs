@@ -158,8 +158,10 @@ pub fn try_warm_default_model(db: Arc<Database>, http: reqwest::Client) {
 /// Whether `base_url`'s host is safe to fire a speculative warm at before
 /// the user has had a chance to intervene (lock screen, settings UI). Accepts
 /// loopback (127.0.0.0/8, ::1), `localhost`, RFC 1918 LAN ranges (10/8,
-/// 172.16/12, 192.168/16), the IPv4 link-local range (169.254/16) and
-/// Tailscale's CGNAT-overlay range (100.64.0.0/10).
+/// 172.16/12, 192.168/16), and Tailscale's CGNAT-overlay range
+/// (100.64.0.0/10). Link-local (169.254/16) is *rejected* even though it's
+/// technically private — that range hosts cloud-metadata services, which
+/// are exactly the SSRF target a corrupted-settings preload would aim at.
 ///
 /// A hostname that doesn't parse as an IP is rejected because we can't tell
 /// during startup whether the DNS resolution will end up at a private or a
@@ -208,10 +210,12 @@ fn is_safe_preload_host(base_url: &str) -> bool {
             if o[0] == 192 && o[1] == 168 {
                 return true;
             }
-            // IPv4 link-local (RFC 3927)
-            if o[0] == 169 && o[1] == 254 {
-                return true;
-            }
+            // IPv4 link-local (169.254/16): *rejected*. Even though it's
+            // technically a private range, it's where cloud-metadata
+            // services live (AWS / GCP / Azure all use 169.254.169.254),
+            // so warming a model at one of those addresses would defeat
+            // the SSRF guard the chat-stream path applies. Fall through
+            // to the `false` return at the bottom.
             // Tailscale CGNAT-overlay range (100.64.0.0/10)
             if o[0] == 100 && (64..=127).contains(&o[1]) {
                 return true;
@@ -219,11 +223,15 @@ fn is_safe_preload_host(base_url: &str) -> bool {
             false
         }
         std::net::IpAddr::V6(v6) => {
-            // IPv6 unique-local (fc00::/7) and link-local (fe80::/10).
-            // `Ipv6Addr::is_unique_local` / `is_unicast_link_local` are
-            // currently unstable, so check the high bits directly.
+            // IPv6 unique-local (fc00::/7) is fine — that's the v6
+            // equivalent of RFC 1918. Link-local (fe80::/10) is
+            // *rejected* for the same reason as IPv4 169.254/16 above:
+            // it's where cloud-metadata services live, not where a
+            // legitimate model server runs. `Ipv6Addr::is_unique_local`
+            // is currently unstable, so we check the high bits
+            // directly.
             let first = v6.segments()[0];
-            (first & 0xfe00) == 0xfc00 || (first & 0xffc0) == 0xfe80
+            (first & 0xfe00) == 0xfc00
         }
     }
 }
@@ -391,9 +399,8 @@ mod tests {
         // Tailscale CGNAT-overlay range (100.64.0.0/10).
         assert!(is_safe_preload_host("http://100.64.0.1:11434"));
         assert!(is_safe_preload_host("http://100.127.255.254:11434"));
-        // IPv6 unique-local and link-local.
+        // IPv6 unique-local.
         assert!(is_safe_preload_host("http://[fc00::1]:11434"));
-        assert!(is_safe_preload_host("http://[fe80::1]:11434"));
     }
 
     #[test]
@@ -410,5 +417,16 @@ mod tests {
         assert!(!is_safe_preload_host("http://ollama.example.com:11434"));
         // Malformed URLs short-circuit to false.
         assert!(!is_safe_preload_host("not a url"));
+    }
+
+    #[test]
+    fn preload_host_allowlist_rejects_link_local() {
+        // Link-local is the SSRF target the guard exists for — cloud
+        // metadata services live at 169.254.169.254. Even though it's
+        // technically "private", we must NOT preload at it.
+        assert!(!is_safe_preload_host("http://169.254.169.254:80"));
+        assert!(!is_safe_preload_host("http://169.254.1.1:11434"));
+        // IPv6 link-local: same threat model (fe80::a9fe:a9fe style).
+        assert!(!is_safe_preload_host("http://[fe80::1]:11434"));
     }
 }
