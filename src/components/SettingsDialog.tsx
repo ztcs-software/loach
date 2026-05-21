@@ -89,7 +89,7 @@ const API_BASE_URL_PRESETS: ReadonlyArray<{ label: string; url: string }> = [
   { label: "llama.cpp (llama-server)", url: "http://localhost:8080/v1" },
   { label: "LM Studio", url: "http://localhost:1234/v1" },
   { label: "vLLM", url: "http://localhost:8000/v1" },
-  { label: "LiteLLM", url: "http://localhost:4000/v1" },
+  { label: "LiteLLM", url: "http://localhost:4000" },
 ];
 
 const GITHUB_URL = "https://github.com/ztcs-software/loach";
