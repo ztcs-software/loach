@@ -10,6 +10,7 @@ import {
   FileText,
   Loader2,
   MoreHorizontal,
+  RefreshCw,
   TextSelect,
   Wrench,
 } from "lucide-react";
@@ -29,6 +30,7 @@ import type {
 import { cn } from "@/lib/utils";
 import { stripInlinedAttachments } from "@/lib/files";
 import { Bookmark } from "lucide-react";
+import { useChatStore } from "@/stores/chatStore";
 import { useSnippetStore } from "@/stores/snippetStore";
 import { useToastStore } from "@/stores/toastStore";
 
@@ -36,6 +38,11 @@ interface MessageProps {
   message: ChatMessage;
   isStreaming?: boolean;
   metrics?: MessageMetrics | null;
+  /** True when this assistant message is eligible for one-click
+   *  regeneration — it's the last message in the chat and the chat
+   *  isn't currently busy. Drives whether the kebab menu surfaces
+   *  the Regenerate item. */
+  canRegenerate?: boolean;
 }
 
 /**
@@ -276,7 +283,8 @@ function ThinkingBlock({ text, isStreaming }: { text: string; isStreaming?: bool
   );
 }
 
-function MessageItemImpl({ message, isStreaming, metrics }: MessageProps) {
+function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: MessageProps) {
+  const regenerateLast = useChatStore((s) => s.regenerateLast);
   const [menuOpen, setMenuOpen] = useState(false);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   // Separate state for the keyboard-accessible kebab below the user
@@ -677,11 +685,10 @@ function MessageItemImpl({ message, isStreaming, metrics }: MessageProps) {
                 <button
                   type="button"
                   // Distinct label from the user kebab so screen-reader
-                  // users know whose message is being acted on. Verb-led
-                  // ("Copy assistant message") rather than noun-led
-                  // ("Assistant message actions") because the menu here
-                  // is single-purpose.
-                  aria-label="Copy assistant message"
+                  // users know whose message is being acted on. Noun-led
+                  // because the menu carries multiple actions (Copy,
+                  // Regenerate when eligible).
+                  aria-label="Assistant message actions"
                   className={cn(
                     "inline-flex h-7 w-7 items-center justify-center rounded-full text-foreground/60 transition-colors hover:bg-foreground/10 hover:text-foreground",
                     menuOpen && "bg-foreground/10 text-foreground",
@@ -705,6 +712,15 @@ function MessageItemImpl({ message, isStreaming, metrics }: MessageProps) {
                   <Copy className="h-4 w-4 text-foreground/60" />
                   Copy message
                 </DropdownMenuItem>
+                {canRegenerate && (
+                  <DropdownMenuItem
+                    onSelect={() => void regenerateLast(message.session_id)}
+                    className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
+                  >
+                    <RefreshCw className="h-4 w-4 text-foreground/60" />
+                    Regenerate
+                  </DropdownMenuItem>
+                )}
               </DropdownMenuContent>
             </DropdownMenu>
           </div>
@@ -721,5 +737,6 @@ function MessageItemImpl({ message, isStreaming, metrics }: MessageProps) {
 export const MessageItem = memo(MessageItemImpl, (prev, next) =>
   prev.message === next.message &&
   prev.isStreaming === next.isStreaming &&
-  prev.metrics === next.metrics,
+  prev.metrics === next.metrics &&
+  prev.canRegenerate === next.canRegenerate,
 );

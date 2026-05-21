@@ -171,6 +171,13 @@ export function updateMessage(args: {
   return invoke("update_message", { args });
 }
 
+/** Delete a single message. Scoped by `session_id` — the backend
+ *  rejects calls whose row doesn't belong to the given session. */
+export function deleteMessage(id: string, sessionId: string): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("delete_message", { id, sessionId });
+}
+
 // ------------ settings ------------
 
 export function getSettings(): Promise<Record<string, string>> {

@@ -263,6 +263,15 @@ pub async fn update_message(
         .map_err(err)
 }
 
+#[tauri::command]
+pub async fn delete_message(
+    state: State<'_, AppState>,
+    id: String,
+    session_id: String,
+) -> Result<(), String> {
+    state.db.delete_message(&id, &session_id).map_err(err)
+}
+
 // ---------- settings ----------
 
 #[tauri::command]

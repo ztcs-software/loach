@@ -702,6 +702,20 @@ impl Database {
         })
     }
 
+    /// Delete a single message. Scoped by `session_id` for the same
+    /// defense-in-depth reason `update_message` is: a leaked or
+    /// confused message id can't reach across sessions to delete an
+    /// arbitrary row. The 0-row case is silently accepted — callers
+    /// treat a miss as benign (the row may already be gone).
+    pub fn delete_message(&self, id: &str, session_id: &str) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "DELETE FROM messages WHERE id = ?1 AND session_id = ?2",
+            params![id, session_id],
+        )?;
+        Ok(())
+    }
+
     pub fn update_message(
         &self,
         id: &str,
