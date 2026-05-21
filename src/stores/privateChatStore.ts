@@ -40,13 +40,15 @@ interface PrivateChatState {
   open: boolean;
   messages: PrivateMessage[];
   isStreaming: boolean;
-  /** Ollama model id picked for this private session. Persists in memory
-   *  for the lifetime of the overlay only — closing the overlay wipes it. */
+  /** Ollama model id picked for this private session. Lives in memory only
+   *  for the lifetime of the overlay — closing the overlay wipes it along
+   *  with everything else. Reopens start blank and re-pick a default in
+   *  `ModelPicker.refresh`. */
   model: string;
   params: Partial<GenerationParams>;
-  /** Whether the right-side parameters sidebar is visible. Persists across
-   *  opens but resets on wipe — same lifetime as `model`, treated as a UI
-   *  preference rather than chat content. */
+  /** Whether the right-side parameters sidebar is visible. Wiped on close
+   *  along with the rest of the state — reopening starts with the sidebar
+   *  collapsed regardless of what the user had last time. */
   paramsOpen: boolean;
   /** Selected persona id, or `null` to skip the persona layer. */
   personaId: string | null;
@@ -300,19 +302,24 @@ export const usePrivateChatStore = create<PrivateChatState>((set, get) => ({
       // instant. The Rust side cleans up its registry entry regardless.
       void stream.stop().catch(() => {});
     }
+    // Hydrogen-bomb wipe: every field listed in `PrivateChatState` resets
+    // to its initial value. No "UI prefs survive" carve-outs — even the
+    // picked model and the sidebar-open flag are erased so a reopen
+    // betrays nothing about the prior session (not even which model the
+    // user was talking to). `ModelPicker` re-derives a default the next
+    // time the overlay opens.
     set({
       open: false,
       messages: [],
       isStreaming: false,
       activeStream: null,
       streamingMessageId: null,
+      model: "",
       params: {},
+      paramsOpen: false,
       personaId: null,
       toneId: null,
       additionalSystemPrompt: "",
-      // model + paramsOpen are preserved across opens — pure UI prefs, not
-      // chat content. Everything else (transcript, attachments, params,
-      // persona/tone/prompt the user picked) is dropped.
     });
   },
 }));
