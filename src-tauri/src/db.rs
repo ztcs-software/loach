@@ -40,12 +40,17 @@ pub struct Session {
     pub title: String,
     pub provider: String,
     pub model: String,
+    #[serde(default)]
     pub system_prompt: Option<String>,
+    #[serde(default)]
     pub params_json: Option<String>,
+    #[serde(default)]
     pub space_id: Option<String>,
+    #[serde(default)]
     pub pinned_at: Option<i64>,
     /// When non-null, the session is archived and hidden from the main chat
     /// list. The value is the ms-timestamp of when it was archived.
+    #[serde(default)]
     pub archived_at: Option<i64>,
     pub created_at: i64,
     pub updated_at: i64,
@@ -61,11 +66,14 @@ pub struct Space {
     /// with `default_model`, new chats created inside the space land on
     /// this pair instead of the user's General Settings default. Null
     /// means "inherit the General Settings default".
+    #[serde(default)]
     pub default_provider: Option<String>,
+    #[serde(default)]
     pub default_model: Option<String>,
     /// JSON-encoded `GenerationParams` override for chats in this space.
     /// Layered between model defaults and per-session overrides — see
     /// `chatStore::readSessionParams`. Null means "inherit".
+    #[serde(default)]
     pub default_params_json: Option<String>,
     /// When true, every assistant turn in this space runs through the
     /// extractor and any new facts are auto-saved as `space_memories`.
@@ -93,7 +101,9 @@ pub struct SpaceMemory {
     pub id: String,
     pub space_id: String,
     pub content: String,
+    #[serde(default)]
     pub source_session_id: Option<String>,
+    #[serde(default)]
     pub source_message_id: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
@@ -117,10 +127,13 @@ pub struct Snippet {
     pub id: String,
     pub title: String,
     pub prompt: String,
+    #[serde(default)]
     pub attachments_json: Option<String>,
     /// Optional default provider ("ollama" | "openai") — when set, running the
     /// snippet creates a new chat pre-selected to this provider/model pair.
+    #[serde(default)]
     pub provider: Option<String>,
+    #[serde(default)]
     pub model: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
@@ -140,6 +153,7 @@ pub struct McpServer {
     pub url: String,
     /// JSON-encoded `{k: v}` map of request headers (typically
     /// `Authorization`, `X-API-Key`, etc.). Null means no headers.
+    #[serde(default)]
     pub headers_json: Option<String>,
     /// When `false` the server is kept in the config but not surfaced to the
     /// model — lets users disable a flaky integration without losing its
@@ -155,13 +169,21 @@ pub struct Message {
     pub session_id: String,
     pub role: String, // "user" | "assistant" | "system"
     pub content: String,
+    #[serde(default)]
     pub thinking: Option<String>,
+    #[serde(default)]
     pub attachments_json: Option<String>,
+    #[serde(default)]
     pub metrics_json: Option<String>,
     /// JSON-encoded array of `ToolCallRecord` (see frontend `types.ts`):
     /// the MCP tool calls and their results threaded through this message
     /// during a multi-turn tool-use turn. Null on messages that didn't use
     /// any tools so old rows stay compact.
+    ///
+    /// `#[serde(default)]` is required so importing a snapshot exported by
+    /// a pre-MCP build of Loach (where this field didn't exist) doesn't
+    /// fail with "missing field" — the absent value rehydrates to None.
+    #[serde(default)]
     pub tool_calls_json: Option<String>,
     pub created_at: i64,
 }

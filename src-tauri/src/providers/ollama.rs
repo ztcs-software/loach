@@ -43,6 +43,16 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 /// forever calling the same tool.
 const MAX_TOOL_TURNS: u32 = 10;
 
+/// Per-tool-result ceiling fed back into the next chat turn. MCP responses
+/// can legitimately be tens of kilobytes (a `list_issues` page, a file
+/// read, …) but the client-side cap on the raw HTTP body is 4 MiB. Push
+/// a 4 MiB blob into `messages` and the next round-trip blows the model's
+/// context window — across 10 turns the conversation could carry 40 MiB
+/// of in-flight strings before anyone sees the bill. Truncate per call,
+/// tell the model it was truncated so it can decide whether to ask for
+/// a different slice.
+const MAX_TOOL_RESULT_BYTES: usize = 32 * 1024;
+
 // ---------------------------------------------------------------------------
 // Model admin: show / delete / copy / pull / create
 // ---------------------------------------------------------------------------
@@ -473,9 +483,13 @@ pub async fn chat_stream(
     http: Client,
     registry: StreamRegistry,
     db: Arc<Database>,
+    cancel: Arc<tokio::sync::Notify>,
     req: ChatRequest,
 ) -> Result<()> {
-    let cancel = registry.register(req.stream_id.clone());
+    // The cancel Notify is already registered upstream in
+    // `commands::chat_stream` — we receive the handle directly rather
+    // than re-registering, so cancels arriving during the pre-stream
+    // MCP aggregation phase aren't lost.
     let channel = event_channel(&req.stream_id);
 
     // Seed the running conversation with system prompt + the messages the
@@ -554,13 +568,14 @@ pub async fn chat_stream(
                 return Ok(());
             }
             TurnOutcome::Tools(calls) => {
-                // Append the assistant turn (content may be empty when the
-                // model immediately reached for a tool) including the
-                // tool_calls block, so subsequent /api/chat calls see the
-                // full conversation.
+                // Append the assistant turn including the tool_calls block,
+                // so subsequent /api/chat calls see the full conversation.
+                // We use `Value::Null` for content (rather than "") because
+                // strict OpenAI-compat gateways reject empty strings here;
+                // recent Ollama accepts both, so Null is the safer choice.
                 messages.push(json!({
                     "role": "assistant",
-                    "content": "",
+                    "content": Value::Null,
                     "tool_calls": calls
                         .iter()
                         .map(serialise_tool_call)
@@ -589,6 +604,13 @@ pub async fn chat_stream(
                             );
                             messages.push(json!({
                                 "role": "tool",
+                                // Ollama's documented field is `name`;
+                                // `tool_name` is accepted by recent builds
+                                // but older deploys ignore it (and then
+                                // mis-thread the tool reply). Send `name`
+                                // and include `tool_name` as a belt-and-
+                                // braces alias.
+                                "name": func.name,
                                 "tool_name": func.name,
                                 "content": msg,
                             }));
@@ -632,19 +654,27 @@ pub async fn chat_stream(
                         },
                     };
 
+                    // Cap what we feed back to the model. The UI gets the
+                    // original (cap-free) string so users can still
+                    // inspect the full result; only the message turn that
+                    // re-enters the model is truncated.
+                    let for_ui = content.clone();
+                    let for_model = cap_tool_text(&content, MAX_TOOL_RESULT_BYTES);
+
                     let _ = app.emit(
                         &channel,
                         StreamEvent::ToolResult {
                             id: call_id.clone(),
-                            content: content.clone(),
+                            content: for_ui,
                             is_error,
                         },
                     );
 
                     messages.push(json!({
                         "role": "tool",
+                        "name": func.name,
                         "tool_name": func.name,
-                        "content": content,
+                        "content": for_model,
                     }));
                 }
                 // Fall through — loop again to give the model the tool
@@ -653,20 +683,18 @@ pub async fn chat_stream(
         }
     }
 
-    // Hit the turn cap. Send a final reply marker so the UI doesn't sit on
-    // "Replying…" forever. Inject a visible note so the user understands
-    // why generation stopped.
+    // Hit the turn cap. Emit Error rather than Token+Done so the frontend's
+    // `finishRunning` is called with `reason: "error"` — that skips the
+    // memory-extractor pass we'd otherwise run on a half-finished turn.
     let _ = app.emit(
         &channel,
-        StreamEvent::Token {
-            delta: format!(
-                "\n\n_⚠ Stopped after {MAX_TOOL_TURNS} tool-use turns. The model kept asking for tools — \
-                 either it's stuck in a loop or the task genuinely needs more turns than Loach permits._"
+        StreamEvent::Error {
+            message: format!(
+                "Stopped after {MAX_TOOL_TURNS} tool-use turns — the model kept asking \
+                 for tools. Either it's stuck or the task needs more turns than Loach permits."
             ),
         },
     );
-    emit_metrics(&app, &channel, total_tokens, start);
-    let _ = app.emit(&channel, StreamEvent::Done);
     registry.finish(&req.stream_id);
     Ok(())
 }
@@ -921,6 +949,29 @@ fn build_options(req: &ChatRequest) -> Value {
         o.insert("low_vram".into(), json!(v));
     }
     Value::Object(o)
+}
+
+/// Truncate a tool result to `max_bytes` on a UTF-8 boundary and append a
+/// trailing note so the model knows it was clipped. Naive byte-index
+/// truncation would panic on multi-byte sequences (a single emoji at
+/// the boundary trips it). We walk char_indices to land on a valid edge.
+fn cap_tool_text(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s.to_string();
+    }
+    let cut = s
+        .char_indices()
+        .take_while(|(i, _)| *i <= max_bytes)
+        .last()
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+    format!(
+        "{}\n\n[... result truncated by Loach at {} bytes; original was {} bytes. \
+         Ask the tool again with narrower arguments if you need more.]",
+        &s[..cut],
+        max_bytes,
+        s.len()
+    )
 }
 
 fn ollama_tool_def(def: &McpToolDef) -> Value {

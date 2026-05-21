@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
 
 use crate::db::{
@@ -1111,15 +1111,31 @@ pub async fn chat_stream(
     let provider = request.provider.clone();
     let db = state.db.clone();
 
-    // Aggregate MCP tools BEFORE spawning so a slow tools/list doesn't block
-    // the user's first token — actually wait: the user does want this to
-    // happen before the model sees their prompt, because the model decides
-    // up front whether to use a tool. Run it on the spawned task instead so
-    // chat_stream returns the handle immediately and the UI can swap to
-    // "streaming" mode. The aggregation timeout (per-server 30 s, parallel
-    // would be better but we keep it sequential for now) bounds the wait.
+    // Register the cancel Notify SYNCHRONOUSLY here — before we spawn the
+    // worker — so a `chat_cancel(stream_id)` arriving while we're still
+    // probing MCP servers actually takes effect. The previous shape
+    // registered inside the provider's `chat_stream`, which meant any
+    // cancel issued during the aggregate phase (up to 30 s per server)
+    // hit an empty registry and was silently lost — the chat then ran to
+    // completion anyway. Registering here closes that window.
+    let cancel = registry.register(stream_id.clone());
+
     tauri::async_runtime::spawn(async move {
-        let (tools, errors) = crate::mcp::aggregate_tools(&db).await;
+        let channel = crate::stream::event_channel(&request.stream_id);
+
+        // Cancel-aware MCP aggregation. A slow / wedged server can keep
+        // tools/list busy for the full 30 s timeout; the user must be
+        // able to stop us during that wait.
+        let agg_fut = crate::mcp::aggregate_tools(&db);
+        let (tools, errors) = tokio::select! {
+            biased;
+            _ = cancel.notified() => {
+                let _ = app.emit(&channel, crate::stream::StreamEvent::Cancelled);
+                registry.finish(&request.stream_id);
+                return;
+            }
+            r = agg_fut => r,
+        };
         if !errors.is_empty() {
             let summary = errors
                 .iter()
@@ -1127,15 +1143,27 @@ pub async fn chat_stream(
                 .collect::<Vec<_>>()
                 .join("; ");
             tracing::warn!("MCP aggregate errors — {summary}");
+            // Surface to the user so a totally-broken MCP config isn't
+            // silently invisible. We prepend ONE notice (not a sequence of
+            // Error events — those trigger teardown in the frontend) as a
+            // Token, so it lands at the head of the assistant bubble and
+            // the chat continues normally with whatever tools survived.
+            let notice = format!(
+                "_⚠ Some MCP servers couldn't be reached: {summary}. Continuing with the rest._\n\n"
+            );
+            let _ = app.emit(
+                &channel,
+                crate::stream::StreamEvent::Token { delta: notice },
+            );
         }
         request.tools = tools;
 
         let res = match provider.as_str() {
             "ollama" => {
-                providers::ollama::chat_stream(app, http, registry, db, request).await
+                providers::ollama::chat_stream(app, http, registry, db, cancel, request).await
             }
             "openai" => {
-                providers::openai::chat_stream(app, http, registry, db, request).await
+                providers::openai::chat_stream(app, http, registry, db, cancel, request).await
             }
             other => {
                 tracing::warn!("unknown provider {other}");

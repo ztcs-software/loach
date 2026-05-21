@@ -31,6 +31,10 @@ const ADMIN_TIMEOUT: Duration = Duration::from_secs(30);
 /// tool use so a confused model can't pin the chat in an infinite loop.
 const MAX_TOOL_TURNS: u32 = 10;
 
+/// Per-tool-result ceiling fed back into the model. See the matching
+/// constant in `providers::ollama` for the full rationale.
+const MAX_TOOL_RESULT_BYTES: usize = 32 * 1024;
+
 #[derive(Debug, Deserialize)]
 struct ModelsResponse {
     data: Vec<OpenAIModel>,
@@ -68,6 +72,10 @@ pub async fn list_models(http: &Client, base_url: &str) -> Result<Vec<ModelInfo>
 struct Choice {
     #[serde(default)]
     delta: Option<DeltaMsg>,
+    /// Present on the terminator frame for compat servers that omit the
+    /// trailing `data: [DONE]` marker (Azure, some Ollama-OpenAI proxies).
+    /// We treat any non-null `finish_reason` as an EOS so the chat doesn't
+    /// hang waiting for a [DONE] that never arrives.
     #[serde(default)]
     finish_reason: Option<String>,
 }
@@ -164,9 +172,11 @@ pub async fn chat_stream(
     http: Client,
     registry: StreamRegistry,
     db: Arc<Database>,
+    cancel: Arc<tokio::sync::Notify>,
     req: ChatRequest,
 ) -> Result<()> {
-    let cancel = registry.register(req.stream_id.clone());
+    // Cancel Notify is registered upstream in `commands::chat_stream`.
+    // See the matching note in providers/ollama.rs::chat_stream.
     let channel = event_channel(&req.stream_id);
 
     let mut messages = build_messages(&req);
@@ -258,7 +268,11 @@ pub async fn chat_stream(
                     .collect();
                 messages.push(json!({
                     "role": "assistant",
-                    "content": "",
+                    // Spec says `content` may be null when the assistant
+                    // turn is purely tool calls. Strict gateways (Azure,
+                    // some local OpenAI-compat proxies) 400 on empty
+                    // strings here, so we use Null explicitly.
+                    "content": Value::Null,
                     "tool_calls": oa_calls,
                 }));
 
@@ -323,11 +337,15 @@ pub async fn chat_stream(
                         },
                     };
 
+                    // UI sees the full result; model only sees the cap.
+                    let for_ui = content.clone();
+                    let for_model = cap_tool_text(&content, MAX_TOOL_RESULT_BYTES);
+
                     let _ = app.emit(
                         &channel,
                         StreamEvent::ToolResult {
                             id: call_id.clone(),
-                            content: content.clone(),
+                            content: for_ui,
                             is_error,
                         },
                     );
@@ -335,7 +353,7 @@ pub async fn chat_stream(
                     messages.push(json!({
                         "role": "tool",
                         "tool_call_id": call_id,
-                        "content": content,
+                        "content": for_model,
                     }));
                 }
                 // Loop — give the model the tool results and let it
@@ -346,15 +364,13 @@ pub async fn chat_stream(
 
     let _ = app.emit(
         &channel,
-        StreamEvent::Token {
-            delta: format!(
-                "\n\n_⚠ Stopped after {MAX_TOOL_TURNS} tool-use turns. The model kept asking for tools — \
-                 either it's stuck in a loop or the task genuinely needs more turns than Loach permits._"
+        StreamEvent::Error {
+            message: format!(
+                "Stopped after {MAX_TOOL_TURNS} tool-use turns — the model kept asking \
+                 for tools. Either it's stuck or the task needs more turns than Loach permits."
             ),
         },
     );
-    emit_metrics(&app, &channel, total_tokens, start);
-    let _ = app.emit(&channel, StreamEvent::Done);
     registry.finish(&req.stream_id);
     Ok(())
 }
@@ -504,19 +520,28 @@ async fn run_one_turn(
                                                 }
                                             }
                                         }
+                                        // Treat any non-null finish_reason
+                                        // as EOS for compat servers that
+                                        // skip the trailing [DONE] frame.
+                                        // We still let the current chunk's
+                                        // deltas accumulate (they may carry
+                                        // the last tokens or tool-call
+                                        // pieces) — the `finished` flag
+                                        // only takes effect once the
+                                        // outer frame loop finishes.
                                         if c.finish_reason.is_some() {
-                                            // Some servers omit [DONE]; treat
-                                            // a finish_reason as terminator
-                                            // too, but only on the next loop
-                                            // turn — the same chunk may still
-                                            // carry deltas we want to flush.
+                                            finished = true;
                                         }
                                     }
                                 }
                             }
                             if finished { break; }
                         }
-                        scan_offset = buf.len().saturating_sub(3);
+                        // The longest SSE frame separator is `\r\n\r\n`
+                        // (4 bytes), so keep that many bytes of overlap
+                        // for the next scan to catch a separator that
+                        // straddles the chunk boundary.
+                        scan_offset = buf.len().saturating_sub(4);
                         if !pending_think.is_empty() {
                             let _ = app.emit(
                                 channel,
@@ -580,6 +605,30 @@ fn emit_metrics(app: &AppHandle, channel: &str, tokens: u32, start: Instant) {
             tokens_per_second: tps,
         },
     );
+}
+
+/// Truncate a tool result on a UTF-8 boundary, with a trailing note for
+/// the model. Mirrors `providers::ollama::cap_tool_text`. Kept duplicated
+/// rather than hoisted into `providers/mod.rs` because the file structure
+/// already has each provider self-contained and a single one-call helper
+/// isn't worth the cross-module import noise.
+fn cap_tool_text(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s.to_string();
+    }
+    let cut = s
+        .char_indices()
+        .take_while(|(i, _)| *i <= max_bytes)
+        .last()
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+    format!(
+        "{}\n\n[... result truncated by Loach at {} bytes; original was {} bytes. \
+         Ask the tool again with narrower arguments if you need more.]",
+        &s[..cut],
+        max_bytes,
+        s.len()
+    )
 }
 
 fn openai_tool_def(def: &McpToolDef) -> Value {
