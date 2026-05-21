@@ -8,6 +8,7 @@ import {
   Check,
   CheckCircle2,
   ChevronDown,
+  ChevronRight,
   CircleAlert,
   Clock,
   Database,
@@ -25,6 +26,7 @@ import {
   RefreshCw,
   RotateCcw,
   Server,
+  Sparkles,
   Trash2,
   Upload,
   User,
@@ -108,6 +110,7 @@ async function openExternal(url: string) {
 const NAV = [
   { value: "general", label: "General", icon: User },
   { value: "providers", label: "Providers", icon: Server },
+  { value: "features", label: "Features", icon: Sparkles },
   { value: "tools", label: "Tools", icon: Wrench },
   { value: "appearance", label: "Appearance", icon: Palette },
   { value: "mcp", label: "MCP", icon: Plug },
@@ -129,6 +132,7 @@ export function SettingsDialog() {
   const [busy, setBusy] = useState(false);
   const [ollamaTest, setOllamaTest] = useState<ConnTestState>({ kind: "idle" });
   const [openaiTest, setOpenaiTest] = useState<ConnTestState>({ kind: "idle" });
+  const [templateVarsOpen, setTemplateVarsOpen] = useState(false);
 
   const runOllamaTest = async () => {
     setOllamaTest({ kind: "testing" });
@@ -223,7 +227,7 @@ export function SettingsDialog() {
 
           {/* ─────────── Right column: scrolling content ─────────── */}
           <div className="flex min-w-0 flex-1 flex-col">
-            <div className="flex-1 overflow-y-auto px-8 pb-8 pt-6 pr-14">
+            <div className="flex-1 overflow-y-auto px-8 pb-8 pt-6 pr-14 [scrollbar-gutter:stable]">
               {/* pr-14 keeps the scrolling content clear of the dialog's absolute close X */}
 
               <TabsContent value="providers" className="mt-0 space-y-6 focus-visible:ring-0 focus-visible:ring-offset-0">
@@ -477,6 +481,40 @@ export function SettingsDialog() {
                   </div>
                 </div>
 
+              </TabsContent>
+
+              <TabsContent value="features" className="mt-0 space-y-6 focus-visible:ring-0 focus-visible:ring-offset-0">
+                <SectionTitle>Features</SectionTitle>
+
+                <div>
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="min-w-0">
+                      <Label className="flex items-center gap-1.5">
+                        <Brain className="h-3.5 w-3.5 text-foreground/60" />
+                        Thinking
+                      </Label>
+                      <p className="mt-1 text-[11px] text-foreground/50">
+                        Default state of the per-chat Thinking toggle for new
+                        chats. Thinking switch in chat settings overrides this.
+                        Only applies to thinking-capable Ollama models - OpenAI
+                        API providers ignore this field.
+                      </p>
+                    </div>
+                    <Switch
+                      checked={settings.thinking_default}
+                      onCheckedChange={(next) =>
+                        settings.update("thinking_default", next)
+                      }
+                      className="shrink-0"
+                      aria-label={
+                        settings.thinking_default
+                          ? "Disable LLM Thinking by default"
+                          : "Enable LLM Thinking by default"
+                      }
+                    />
+                  </div>
+                </div>
+
                 <Separator />
 
                 <div>
@@ -506,51 +544,34 @@ export function SettingsDialog() {
                     />
                   </div>
                   <div className="mt-3 rounded-xl border border-foreground/10 bg-foreground/[0.03] p-3 text-[11px] leading-relaxed text-foreground/60">
-                    <p className="mb-1 font-medium text-foreground/75">
+                    <button
+                      type="button"
+                      onClick={() => setTemplateVarsOpen((v) => !v)}
+                      aria-expanded={templateVarsOpen}
+                      className="flex w-full items-center gap-1.5 text-left font-medium text-foreground/75 transition-colors hover:text-foreground"
+                    >
+                      {templateVarsOpen ? (
+                        <ChevronDown className="h-3.5 w-3.5 shrink-0" />
+                      ) : (
+                        <ChevronRight className="h-3.5 w-3.5 shrink-0" />
+                      )}
                       Template variables
-                    </p>
-                    <p>
-                      You may use these variables inside general custom
-                      instructions or in Spaces, Snippets and per-chat.
-                    </p>
-                    <ul className="mt-1.5 space-y-0.5 font-mono text-[11px]">
-                      <li>{"{{CURRENT_DATE}}"} → 2026-04-17</li>
-                      <li>{"{{CURRENT_TIME}}"} → 14:32</li>
-                      <li>{"{{CURRENT_WEEKDAY}}"} → Friday</li>
-                      <li>{"{{CURRENT_DATETIME}}"} → 2026-04-17 14:32</li>
-                      <li>{"{{CURRENT_TIMEZONE}}"} → Europe/Warsaw</li>
-                    </ul>
-                  </div>
-                </div>
-
-                <Separator />
-
-                <div>
-                  <div className="flex items-start justify-between gap-4">
-                    <div className="min-w-0">
-                      <Label className="flex items-center gap-1.5">
-                        <Brain className="h-3.5 w-3.5 text-foreground/60" />
-                        Thinking
-                      </Label>
-                      <p className="mt-1 text-[11px] text-foreground/50">
-                        Default state of the per-chat Thinking toggle for new
-                        chats. Thinking switch in chat settings overrides this.
-                        Only applies to thinking-capable Ollama models - OpenAI
-                        API providers ignore this field.
-                      </p>
-                    </div>
-                    <Switch
-                      checked={settings.thinking_default}
-                      onCheckedChange={(next) =>
-                        settings.update("thinking_default", next)
-                      }
-                      className="shrink-0"
-                      aria-label={
-                        settings.thinking_default
-                          ? "Disable LLM Thinking by default"
-                          : "Enable LLM Thinking by default"
-                      }
-                    />
+                    </button>
+                    {templateVarsOpen && (
+                      <div className="mt-1.5 pl-5">
+                        <p>
+                          You may use these variables inside general custom
+                          instructions or in Spaces, Snippets and per-chat.
+                        </p>
+                        <ul className="mt-1.5 space-y-0.5 font-mono text-[11px]">
+                          <li>{"{{CURRENT_DATE}}"} → 2026-04-17</li>
+                          <li>{"{{CURRENT_TIME}}"} → 14:32</li>
+                          <li>{"{{CURRENT_WEEKDAY}}"} → Friday</li>
+                          <li>{"{{CURRENT_DATETIME}}"} → 2026-04-17 14:32</li>
+                          <li>{"{{CURRENT_TIMEZONE}}"} → Europe/Warsaw</li>
+                        </ul>
+                      </div>
+                    )}
                   </div>
                 </div>
 
