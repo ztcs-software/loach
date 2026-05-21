@@ -1,13 +1,17 @@
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
 use futures_util::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
 use tokio::select;
 
 use super::{ChatRequest, ModelInfo};
+use crate::db::Database;
+use crate::mcp::McpToolDef;
 use crate::stream::{admin_channel, event_channel, AdminEvent, StreamEvent, StreamRegistry};
 
 /// Per-line ceiling for the NDJSON / SSE pump. A well-behaved provider sends
@@ -30,6 +34,24 @@ const ADMIN_TIMEOUT: Duration = Duration::from_secs(30);
 /// answers `/api/tags` in single-digit ms; if we have to wait 5 s the
 /// answer for UX purposes is "no, treat it as down".
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Hard ceiling on tool-use turns in a single chat request. The first turn
+/// is the user's prompt → model reply; each subsequent turn is one
+/// "model called tools → we executed → model continues" round trip. 10
+/// is enough for any plausible chain (browse-then-summarise, multi-step
+/// repo investigation) and short enough that a confused model can't loop
+/// forever calling the same tool.
+const MAX_TOOL_TURNS: u32 = 10;
+
+/// Per-tool-result ceiling fed back into the next chat turn. MCP responses
+/// can legitimately be tens of kilobytes (a `list_issues` page, a file
+/// read, …) but the client-side cap on the raw HTTP body is 4 MiB. Push
+/// a 4 MiB blob into `messages` and the next round-trip blows the model's
+/// context window — across 10 turns the conversation could carry 40 MiB
+/// of in-flight strings before anyone sees the bill. Truncate per call,
+/// tell the model it was truncated so it can decide whether to ask for
+/// a different slice.
+const MAX_TOOL_RESULT_BYTES: usize = 32 * 1024;
 
 // ---------------------------------------------------------------------------
 // Model admin: show / delete / copy / pull / create
@@ -411,42 +433,6 @@ pub async fn preload_model(http: &Client, base_url: &str, model: &str) -> Result
     Ok(())
 }
 
-#[derive(Debug, Serialize)]
-struct OllamaChatMessage<'a> {
-    role: &'a str,
-    content: &'a str,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    images: Vec<String>,
-}
-
-#[derive(Debug, Serialize)]
-struct OllamaOptions {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    temperature: Option<f32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    top_p: Option<f32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    top_k: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    min_p: Option<f32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    num_predict: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    num_ctx: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    repeat_penalty: Option<f32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    frequency_penalty: Option<f32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    presence_penalty: Option<f32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    seed: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    num_gpu: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    low_vram: Option<bool>,
-}
-
 #[derive(Debug, Deserialize)]
 struct OllamaChunk {
     #[serde(default)]
@@ -461,81 +447,295 @@ struct OllamaChunkMsg {
     content: Option<String>,
     #[serde(default)]
     thinking: Option<String>,
+    /// Tool calls a tool-capable model emits. Ollama places them on the
+    /// final chunk (where `done: true`), not interleaved with content
+    /// tokens, so we only need to inspect them once per turn.
+    #[serde(default)]
+    tool_calls: Vec<OllamaToolCall>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct OllamaToolCall {
+    #[serde(default)]
+    function: Option<OllamaToolFn>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct OllamaToolFn {
+    name: String,
+    /// Ollama returns this as a parsed JSON object; some forks return a
+    /// stringified JSON. `Value` covers both shapes — we re-stringify if
+    /// needed before forwarding to the MCP server.
+    #[serde(default)]
+    arguments: Value,
+}
+
+/// Outcome of one provider round-trip. `Done` means the model returned a
+/// terminal reply (no more tool calls); `Tools` means the model wants us
+/// to run tools and call back with the results.
+enum TurnOutcome {
+    Done,
+    Tools(Vec<OllamaToolCall>),
 }
 
 pub async fn chat_stream(
     app: AppHandle,
     http: Client,
     registry: StreamRegistry,
+    db: Arc<Database>,
+    cancel: Arc<tokio::sync::Notify>,
     req: ChatRequest,
 ) -> Result<()> {
-    let cancel = registry.register(req.stream_id.clone());
+    // The cancel Notify is already registered upstream in
+    // `commands::chat_stream` — we receive the handle directly rather
+    // than re-registering, so cancels arriving during the pre-stream
+    // MCP aggregation phase aren't lost.
     let channel = event_channel(&req.stream_id);
 
-    let mut messages: Vec<OllamaChatMessage> = Vec::new();
+    // Seed the running conversation with system prompt + the messages the
+    // frontend handed us. We mutate this list as the multi-turn tool loop
+    // runs — each turn appends an assistant message (possibly with
+    // tool_calls) and any tool reply messages — so the next /api/chat call
+    // sees the full history.
+    let mut messages: Vec<Value> = Vec::new();
     if let Some(sys) = req.system_prompt.as_deref() {
         if !sys.is_empty() {
-            messages.push(OllamaChatMessage {
-                role: "system",
-                content: sys,
-                images: vec![],
-            });
+            messages.push(json!({ "role": "system", "content": sys }));
         }
     }
     for m in &req.messages {
-        messages.push(OllamaChatMessage {
-            role: &m.role,
-            content: &m.content,
-            images: m.images.clone(),
-        });
-    }
-
-    // Build the body as a mut Map so we can conditionally include `think`
-    // only when the user (or model default) has explicitly set it. Sending
-    // `think: null` to Ollama is fine but verbose; omitting the field
-    // entirely is the cleanest way to express "use the model default".
-    let mut body = serde_json::json!({
-        "model": req.model,
-        "messages": messages,
-        "stream": true,
-        "options": OllamaOptions {
-            temperature: req.params.temperature,
-            top_p: req.params.top_p,
-            top_k: req.params.top_k,
-            min_p: req.params.min_p,
-            num_predict: req.params.max_tokens,
-            num_ctx: req.params.num_ctx,
-            repeat_penalty: req.params.repeat_penalty,
-            frequency_penalty: req.params.frequency_penalty,
-            presence_penalty: req.params.presence_penalty,
-            seed: req.params.seed,
-            num_gpu: req.params.num_gpu,
-            low_vram: req.params.low_vram,
+        let mut msg = json!({ "role": m.role, "content": m.content });
+        if !m.images.is_empty() {
+            msg["images"] = json!(m.images);
         }
-    });
-    if let Some(think) = req.params.think {
-        body["think"] = serde_json::Value::Bool(think);
+        messages.push(msg);
     }
 
-    let url = format!("{}/api/chat", req.base_url.trim_end_matches('/'));
-    let mut resp = match http.post(&url).json(&body).send().await {
+    let tools_json: Option<Value> = if req.tools.is_empty() {
+        None
+    } else {
+        Some(json!(req
+            .tools
+            .iter()
+            .map(ollama_tool_def)
+            .collect::<Vec<_>>()))
+    };
+
+    let start = Instant::now();
+    let mut total_tokens: u32 = 0;
+    let mut think_already_drop: bool = false; // sticky retry guard across turns
+
+    for turn in 0..MAX_TOOL_TURNS {
+        let mut body = json!({
+            "model": req.model,
+            "messages": messages,
+            "stream": true,
+            "options": build_options(&req),
+        });
+        if let Some(t) = req.params.think {
+            if !think_already_drop {
+                body["think"] = json!(t);
+            }
+        }
+        if let Some(tools) = tools_json.as_ref() {
+            body["tools"] = tools.clone();
+        }
+
+        let outcome = match run_one_turn(
+            &app,
+            &http,
+            &req.base_url,
+            &channel,
+            &cancel,
+            &mut body,
+            &mut total_tokens,
+            &mut think_already_drop,
+            &req.stream_id,
+            &registry,
+        )
+        .await?
+        {
+            Some(o) => o,
+            // Cancellation already drained — nothing more to do.
+            None => return Ok(()),
+        };
+
+        match outcome {
+            TurnOutcome::Done => {
+                emit_metrics(&app, &channel, total_tokens, start);
+                let _ = app.emit(&channel, StreamEvent::Done);
+                registry.finish(&req.stream_id);
+                return Ok(());
+            }
+            TurnOutcome::Tools(calls) => {
+                // Append the assistant turn including the tool_calls block,
+                // so subsequent /api/chat calls see the full conversation.
+                // We use `Value::Null` for content (rather than "") because
+                // strict OpenAI-compat gateways reject empty strings here;
+                // recent Ollama accepts both, so Null is the safer choice.
+                messages.push(json!({
+                    "role": "assistant",
+                    "content": Value::Null,
+                    "tool_calls": calls
+                        .iter()
+                        .map(serialise_tool_call)
+                        .collect::<Vec<_>>(),
+                }));
+
+                for (idx, call) in calls.iter().enumerate() {
+                    let Some(func) = call.function.as_ref() else {
+                        continue;
+                    };
+                    let call_id = format!("call_{turn}_{idx}");
+                    let (tool_def, tool_name) = match resolve_qualified(&req.tools, &func.name) {
+                        Some(pair) => pair,
+                        None => {
+                            let msg = format!(
+                                "unknown tool `{}` — server may have been disabled",
+                                func.name
+                            );
+                            let _ = app.emit(
+                                &channel,
+                                StreamEvent::ToolResult {
+                                    id: call_id.clone(),
+                                    content: msg.clone(),
+                                    is_error: true,
+                                },
+                            );
+                            messages.push(json!({
+                                "role": "tool",
+                                // Ollama's documented field is `name`;
+                                // `tool_name` is accepted by recent builds
+                                // but older deploys ignore it (and then
+                                // mis-thread the tool reply). Send `name`
+                                // and include `tool_name` as a belt-and-
+                                // braces alias.
+                                "name": func.name,
+                                "tool_name": func.name,
+                                "content": msg,
+                            }));
+                            continue;
+                        }
+                    };
+
+                    let args = normalise_args(&func.arguments);
+
+                    let _ = app.emit(
+                        &channel,
+                        StreamEvent::ToolCall {
+                            id: call_id.clone(),
+                            server_id: tool_def.server_id.clone(),
+                            server_name: tool_def.server_name.clone(),
+                            tool: tool_def.qualified_name.clone(),
+                            arguments: args.clone(),
+                        },
+                    );
+
+                    // Honour cancellation while the tool runs — a slow
+                    // MCP server (e.g. GitHub at peak hours, or a tool
+                    // that does its own long fetch) shouldn't lock the
+                    // user into waiting once they hit Stop.
+                    let dispatch = crate::mcp::dispatch_tool_call(
+                        &db,
+                        &tool_def.server_id,
+                        &tool_name,
+                        &args,
+                    );
+                    let (content, is_error) = select! {
+                        biased;
+                        _ = cancel.notified() => {
+                            let _ = app.emit(&channel, StreamEvent::Cancelled);
+                            registry.finish(&req.stream_id);
+                            return Ok(());
+                        }
+                        r = dispatch => match r {
+                            Ok(r) => (r.content_text, r.is_error),
+                            Err(e) => (format!("tool call failed: {e:#}"), true),
+                        },
+                    };
+
+                    // Cap what we feed back to the model. The UI gets the
+                    // original (cap-free) string so users can still
+                    // inspect the full result; only the message turn that
+                    // re-enters the model is truncated.
+                    let for_ui = content.clone();
+                    let for_model = super::cap_tool_text(&content, MAX_TOOL_RESULT_BYTES);
+
+                    let _ = app.emit(
+                        &channel,
+                        StreamEvent::ToolResult {
+                            id: call_id.clone(),
+                            content: for_ui,
+                            is_error,
+                        },
+                    );
+
+                    messages.push(json!({
+                        "role": "tool",
+                        "name": func.name,
+                        "tool_name": func.name,
+                        "content": for_model,
+                    }));
+                }
+                // Fall through — loop again to give the model the tool
+                // results and let it continue.
+            }
+        }
+    }
+
+    // Hit the turn cap. Emit Error rather than Token+Done so the frontend's
+    // `finishRunning` is called with `reason: "error"` — that skips the
+    // memory-extractor pass we'd otherwise run on a half-finished turn.
+    let _ = app.emit(
+        &channel,
+        StreamEvent::Error {
+            message: format!(
+                "Stopped after {MAX_TOOL_TURNS} tool-use turns — the model kept asking \
+                 for tools. Either it's stuck or the task needs more turns than Loach permits."
+            ),
+        },
+    );
+    registry.finish(&req.stream_id);
+    Ok(())
+}
+
+/// Run a single /api/chat round-trip. Streams tokens + thinking deltas, and
+/// returns whether the model wants more tool calls (`Tools`) or has reached
+/// a terminal answer (`Done`). `None` means we exited via cancellation and
+/// the caller should stop immediately.
+#[allow(clippy::too_many_arguments)]
+async fn run_one_turn(
+    app: &AppHandle,
+    http: &Client,
+    base_url: &str,
+    channel: &str,
+    cancel: &Arc<tokio::sync::Notify>,
+    body: &mut Value,
+    total_tokens: &mut u32,
+    think_already_drop: &mut bool,
+    stream_id: &str,
+    registry: &StreamRegistry,
+) -> Result<Option<TurnOutcome>> {
+    let url = format!("{}/api/chat", base_url.trim_end_matches('/'));
+    let mut resp = match http.post(&url).json(body).send().await {
         Ok(r) => r,
         Err(e) => {
             let _ = app.emit(
-                &channel,
+                channel,
                 StreamEvent::Error {
                     message: format!("Ollama request failed: {e}"),
                 },
             );
-            registry.finish(&req.stream_id);
+            registry.finish(stream_id);
             return Err(e.into());
         }
     };
 
     // Safety net: older Ollama builds don't advertise the "thinking"
-    // capability in /api/show, so we can't always know up front whether the
-    // model supports it. If the server rejects the request specifically
-    // because the model doesn't support thinking, drop the flag and retry
+    // capability in /api/show, so we can't always know up front whether
+    // the model supports it. If the server rejects the request
+    // specifically because the model doesn't support thinking, drop the
+    // flag (and remember not to re-add it on the next turn) and retry
     // once before giving up.
     if !resp.status().is_success() && body.get("think").is_some() {
         let status = resp.status();
@@ -544,27 +744,28 @@ pub async fn chat_stream(
             if let Some(obj) = body.as_object_mut() {
                 obj.remove("think");
             }
-            resp = match http.post(&url).json(&body).send().await {
+            *think_already_drop = true;
+            resp = match http.post(&url).json(body).send().await {
                 Ok(r) => r,
                 Err(e) => {
                     let _ = app.emit(
-                        &channel,
+                        channel,
                         StreamEvent::Error {
                             message: format!("Ollama request failed: {e}"),
                         },
                     );
-                    registry.finish(&req.stream_id);
+                    registry.finish(stream_id);
                     return Err(e.into());
                 }
             };
         } else {
             let _ = app.emit(
-                &channel,
+                channel,
                 StreamEvent::Error {
                     message: format!("Ollama HTTP {status}: {text}"),
                 },
             );
-            registry.finish(&req.stream_id);
+            registry.finish(stream_id);
             return Err(anyhow!("ollama http error"));
         }
     }
@@ -573,45 +774,35 @@ pub async fn chat_stream(
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
         let _ = app.emit(
-            &channel,
+            channel,
             StreamEvent::Error {
                 message: format!("Ollama HTTP {status}: {text}"),
             },
         );
-        registry.finish(&req.stream_id);
+        registry.finish(stream_id);
         return Err(anyhow!("ollama http error"));
     }
 
-    let start = Instant::now();
-    let mut token_count: u32 = 0;
     let mut byte_stream = resp.bytes_stream();
     let mut buf: Vec<u8> = Vec::new();
+    let mut pending_tool_calls: Vec<OllamaToolCall> = Vec::new();
 
     loop {
         select! {
             biased;
             _ = cancel.notified() => {
-                // Drop the byte stream before returning so reqwest closes
-                // the TCP connection right away — same rationale as in
-                // `drive_progress_stream`. Without this the connection
-                // close waits for the calling task to unwind, which can
-                // leave the server processing the request for noticeably
-                // longer than needed.
                 drop(byte_stream);
-                let _ = app.emit(&channel, StreamEvent::Cancelled);
-                registry.finish(&req.stream_id);
-                return Ok(());
+                let _ = app.emit(channel, StreamEvent::Cancelled);
+                registry.finish(stream_id);
+                return Ok(None);
             }
             maybe = byte_stream.next() => {
                 match maybe {
                     Some(Ok(chunk)) => {
                         buf.extend_from_slice(&chunk);
-                        // Per-frame ceiling — see the matching guard in
-                        // `drive_progress_stream`. A stream that never
-                        // delivers a newline shouldn't be allowed to balloon.
                         if buf.len() > MAX_LINE_BYTES && !buf.contains(&b'\n') {
                             let _ = app.emit(
-                                &channel,
+                                channel,
                                 StreamEvent::Error {
                                     message: format!(
                                         "stream exceeded {} bytes without a frame delimiter — aborting",
@@ -619,15 +810,10 @@ pub async fn chat_stream(
                                     ),
                                 },
                             );
-                            registry.finish(&req.stream_id);
+                            registry.finish(stream_id);
                             return Err(anyhow!("ollama chat stream frame too large"));
                         }
-                        // Coalesce every delta in this network chunk into one
-                        // Token / Thinking event before emitting. Ollama
-                        // frequently hands us several NDJSON lines per read;
-                        // batching collapses N emits + N React state updates
-                        // into one, with no visible difference (the deltas
-                        // would have been concatenated in the bubble anyway).
+
                         let mut pending_token = String::new();
                         let mut pending_think = String::new();
                         let mut finished = false;
@@ -645,9 +831,12 @@ pub async fn chat_stream(
                                         }
                                         if let Some(delta) = msg.content {
                                             if !delta.is_empty() {
-                                                token_count += 1;
+                                                *total_tokens += 1;
                                                 pending_token.push_str(&delta);
                                             }
+                                        }
+                                        if !msg.tool_calls.is_empty() {
+                                            pending_tool_calls.extend(msg.tool_calls);
                                         }
                                     }
                                     if parsed.done {
@@ -662,61 +851,157 @@ pub async fn chat_stream(
                         }
                         if !pending_think.is_empty() {
                             let _ = app.emit(
-                                &channel,
+                                channel,
                                 StreamEvent::Thinking { delta: pending_think },
                             );
                         }
                         if !pending_token.is_empty() {
                             let _ = app.emit(
-                                &channel,
+                                channel,
                                 StreamEvent::Token { delta: pending_token },
                             );
                         }
                         if finished {
-                            let elapsed = start.elapsed().as_millis() as u64;
-                            let tps = if elapsed > 0 {
-                                (token_count as f64) * 1000.0 / (elapsed as f64)
-                            } else { 0.0 };
-                            let _ = app.emit(
-                                &channel,
-                                StreamEvent::Metrics {
-                                    tokens: token_count,
-                                    elapsed_ms: elapsed,
-                                    tokens_per_second: tps,
-                                },
-                            );
-                            let _ = app.emit(&channel, StreamEvent::Done);
-                            registry.finish(&req.stream_id);
-                            return Ok(());
+                            return Ok(Some(decide_outcome(pending_tool_calls)));
                         }
                     }
                     Some(Err(e)) => {
                         let _ = app.emit(
-                            &channel,
+                            channel,
                             StreamEvent::Error { message: format!("stream error: {e}") },
                         );
-                        registry.finish(&req.stream_id);
+                        registry.finish(stream_id);
                         return Err(e.into());
                     }
                     None => {
-                        let elapsed = start.elapsed().as_millis() as u64;
-                        let tps = if elapsed > 0 {
-                            (token_count as f64) * 1000.0 / (elapsed as f64)
-                        } else { 0.0 };
-                        let _ = app.emit(
-                            &channel,
-                            StreamEvent::Metrics {
-                                tokens: token_count,
-                                elapsed_ms: elapsed,
-                                tokens_per_second: tps,
-                            },
-                        );
-                        let _ = app.emit(&channel, StreamEvent::Done);
-                        registry.finish(&req.stream_id);
-                        return Ok(());
+                        // EOF without an explicit `done: true` — treat as a
+                        // natural terminator and let the caller emit Done.
+                        return Ok(Some(decide_outcome(pending_tool_calls)));
                     }
                 }
             }
         }
     }
 }
+
+fn decide_outcome(calls: Vec<OllamaToolCall>) -> TurnOutcome {
+    if calls.is_empty() {
+        TurnOutcome::Done
+    } else {
+        TurnOutcome::Tools(calls)
+    }
+}
+
+fn emit_metrics(app: &AppHandle, channel: &str, tokens: u32, start: Instant) {
+    let elapsed = start.elapsed().as_millis() as u64;
+    let tps = if elapsed > 0 {
+        (tokens as f64) * 1000.0 / (elapsed as f64)
+    } else {
+        0.0
+    };
+    let _ = app.emit(
+        channel,
+        StreamEvent::Metrics {
+            tokens,
+            elapsed_ms: elapsed,
+            tokens_per_second: tps,
+        },
+    );
+}
+
+fn build_options(req: &ChatRequest) -> Value {
+    let mut o = serde_json::Map::new();
+    let p = &req.params;
+    if let Some(v) = p.temperature {
+        o.insert("temperature".into(), json!(v));
+    }
+    if let Some(v) = p.top_p {
+        o.insert("top_p".into(), json!(v));
+    }
+    if let Some(v) = p.top_k {
+        o.insert("top_k".into(), json!(v));
+    }
+    if let Some(v) = p.min_p {
+        o.insert("min_p".into(), json!(v));
+    }
+    if let Some(v) = p.max_tokens {
+        o.insert("num_predict".into(), json!(v));
+    }
+    if let Some(v) = p.num_ctx {
+        o.insert("num_ctx".into(), json!(v));
+    }
+    if let Some(v) = p.repeat_penalty {
+        o.insert("repeat_penalty".into(), json!(v));
+    }
+    if let Some(v) = p.frequency_penalty {
+        o.insert("frequency_penalty".into(), json!(v));
+    }
+    if let Some(v) = p.presence_penalty {
+        o.insert("presence_penalty".into(), json!(v));
+    }
+    if let Some(v) = p.seed {
+        o.insert("seed".into(), json!(v));
+    }
+    if let Some(v) = p.num_gpu {
+        o.insert("num_gpu".into(), json!(v));
+    }
+    if let Some(v) = p.low_vram {
+        o.insert("low_vram".into(), json!(v));
+    }
+    Value::Object(o)
+}
+
+fn ollama_tool_def(def: &McpToolDef) -> Value {
+    // Ollama follows the OpenAI tools schema:
+    //   {"type":"function","function":{"name","description","parameters"}}
+    let mut function = serde_json::Map::new();
+    function.insert("name".into(), json!(def.qualified_name));
+    if let Some(desc) = def.description.as_deref() {
+        function.insert(
+            "description".into(),
+            json!(format!("[{}] {desc}", def.server_name)),
+        );
+    } else {
+        function.insert("description".into(), json!(format!("[{}]", def.server_name)));
+    }
+    function.insert("parameters".into(), def.input_schema.clone());
+    json!({ "type": "function", "function": function })
+}
+
+fn serialise_tool_call(call: &OllamaToolCall) -> Value {
+    let name = call
+        .function
+        .as_ref()
+        .map(|f| f.name.clone())
+        .unwrap_or_default();
+    let args = call
+        .function
+        .as_ref()
+        .map(|f| normalise_args(&f.arguments))
+        .unwrap_or_else(|| json!({}));
+    json!({
+        "function": { "name": name, "arguments": args }
+    })
+}
+
+/// Some Ollama builds (and the OpenAI compat passes) hand `arguments` as a
+/// stringified JSON instead of a parsed object. Normalise both shapes to a
+/// JSON value so the dispatcher always gets the same input.
+fn normalise_args(v: &Value) -> Value {
+    match v {
+        Value::String(s) => {
+            serde_json::from_str(s).unwrap_or_else(|_| Value::String(s.clone()))
+        }
+        Value::Null => json!({}),
+        other => other.clone(),
+    }
+}
+
+fn resolve_qualified<'a>(
+    tools: &'a [McpToolDef],
+    qualified: &str,
+) -> Option<(&'a McpToolDef, String)> {
+    let def = tools.iter().find(|t| t.qualified_name == qualified)?;
+    Some((def, def.name.clone()))
+}
+

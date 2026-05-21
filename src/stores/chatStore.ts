@@ -42,6 +42,7 @@ import {
   type MessageMetrics,
   type ProviderId,
   type Session,
+  type ToolCallRecord,
 } from "@/types";
 import { useSettingsStore } from "./settingsStore";
 import { useSpaceStore } from "./spaceStore";
@@ -172,6 +173,12 @@ let runningBuffers: {
   content: string;
   thinking: string;
   metrics: MessageMetrics | null;
+  /** Ordered list of tool calls + results made during this turn. Appended
+   *  on `tool_call`; the matching entry's `result` / `is_error` are
+   *  filled in on `tool_result`. Persisted as JSON on the assistant
+   *  message at `finishRunning` (or in real time on each tool_result
+   *  event so a cancel mid-loop doesn't lose partial work). */
+  toolCalls: ToolCallRecord[];
 } | null = null;
 
 /** rAF-batched render flush state for streaming events. Rather than calling
@@ -192,6 +199,7 @@ const pendingDirty = {
   content: false,
   thinking: false,
   metrics: false,
+  toolCalls: false,
 };
 
 function scheduleFlush(get: Getter, set: Setter) {
@@ -210,10 +218,12 @@ function flushPendingFrame(get: Getter, set: Setter) {
   const dContent = pendingDirty.content;
   const dThinking = pendingDirty.thinking;
   const dMetrics = pendingDirty.metrics;
-  if (!dContent && !dThinking && !dMetrics) return;
+  const dTools = pendingDirty.toolCalls;
+  if (!dContent && !dThinking && !dMetrics && !dTools) return;
   pendingDirty.content = false;
   pendingDirty.thinking = false;
   pendingDirty.metrics = false;
+  pendingDirty.toolCalls = false;
   const buf = runningBuffers;
   if (!buf) return;
   const task = get().runningTask;
@@ -223,9 +233,13 @@ function flushPendingFrame(get: Getter, set: Setter) {
   const newContent = buf.content;
   const newThinking = buf.thinking;
   const newMetrics = buf.metrics;
+  // Snapshot tool calls now — `runningBuffers.toolCalls` is mutated in
+  // place by the stream handlers, so we serialize at flush time to give
+  // every subscriber a stable reference.
+  const newToolsJson = dTools ? JSON.stringify(buf.toolCalls) : null;
   set((s) => {
     const next: Partial<ChatState> = {};
-    if (dContent || dThinking) {
+    if (dContent || dThinking || dTools) {
       const list = s.messages[sessionId] ?? [];
       next.messages = {
         ...s.messages,
@@ -235,6 +249,7 @@ function flushPendingFrame(get: Getter, set: Setter) {
                 ...m,
                 ...(dContent ? { content: newContent } : {}),
                 ...(dThinking ? { thinking: newThinking } : {}),
+                ...(dTools ? { tool_calls_json: newToolsJson } : {}),
               }
             : m,
         ),
@@ -465,6 +480,8 @@ function finishRunning(get: Getter, set: Setter, reason: FinishReason = "done") 
       content: buf.content,
       thinking: buf.thinking || null,
       metrics_json: buf.metrics ? JSON.stringify(buf.metrics) : null,
+      tool_calls_json:
+        buf.toolCalls.length > 0 ? JSON.stringify(buf.toolCalls) : null,
     }).catch((e) => {
       const detail = e instanceof Error ? e.message : String(e);
       logger.error("failed to persist assistant reply", e);
@@ -633,6 +650,7 @@ async function startTask(task: QueueTask, get: Getter, set: Setter) {
     content: "",
     thinking: "",
     metrics: null,
+    toolCalls: [],
   };
 
   const streamId = makeRequestId();
@@ -666,6 +684,39 @@ async function startTask(task: QueueTask, get: Getter, set: Setter) {
             tokens_per_second: ev.tokens_per_second,
           };
           pendingDirty.metrics = true;
+          scheduleFlush(get, set);
+        } else if (ev.kind === "tool_call") {
+          buf.toolCalls.push({
+            id: ev.id,
+            server_id: ev.server_id,
+            server_name: ev.server_name,
+            tool: ev.tool,
+            arguments: ev.arguments,
+            result: null,
+            is_error: false,
+          });
+          pendingDirty.toolCalls = true;
+          scheduleFlush(get, set);
+        } else if (ev.kind === "tool_result") {
+          const existing = buf.toolCalls.find((c) => c.id === ev.id);
+          if (existing) {
+            existing.result = ev.content;
+            existing.is_error = ev.is_error;
+          } else {
+            // Defensive: a tool_result without a matching tool_call should
+            // never happen (Rust emits the pair), but if it does, surface
+            // the result as a standalone block rather than dropping it.
+            buf.toolCalls.push({
+              id: ev.id,
+              server_id: "",
+              server_name: "",
+              tool: "(unknown)",
+              arguments: {},
+              result: ev.content,
+              is_error: ev.is_error,
+            });
+          }
+          pendingDirty.toolCalls = true;
           scheduleFlush(get, set);
         } else if (ev.kind === "error") {
           // Wrap raw provider error in a sentence the user can act on. We

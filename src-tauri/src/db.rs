@@ -40,12 +40,17 @@ pub struct Session {
     pub title: String,
     pub provider: String,
     pub model: String,
+    #[serde(default)]
     pub system_prompt: Option<String>,
+    #[serde(default)]
     pub params_json: Option<String>,
+    #[serde(default)]
     pub space_id: Option<String>,
+    #[serde(default)]
     pub pinned_at: Option<i64>,
     /// When non-null, the session is archived and hidden from the main chat
     /// list. The value is the ms-timestamp of when it was archived.
+    #[serde(default)]
     pub archived_at: Option<i64>,
     pub created_at: i64,
     pub updated_at: i64,
@@ -61,11 +66,14 @@ pub struct Space {
     /// with `default_model`, new chats created inside the space land on
     /// this pair instead of the user's General Settings default. Null
     /// means "inherit the General Settings default".
+    #[serde(default)]
     pub default_provider: Option<String>,
+    #[serde(default)]
     pub default_model: Option<String>,
     /// JSON-encoded `GenerationParams` override for chats in this space.
     /// Layered between model defaults and per-session overrides — see
     /// `chatStore::readSessionParams`. Null means "inherit".
+    #[serde(default)]
     pub default_params_json: Option<String>,
     /// When true, every assistant turn in this space runs through the
     /// extractor and any new facts are auto-saved as `space_memories`.
@@ -93,7 +101,9 @@ pub struct SpaceMemory {
     pub id: String,
     pub space_id: String,
     pub content: String,
+    #[serde(default)]
     pub source_session_id: Option<String>,
+    #[serde(default)]
     pub source_message_id: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
@@ -117,10 +127,13 @@ pub struct Snippet {
     pub id: String,
     pub title: String,
     pub prompt: String,
+    #[serde(default)]
     pub attachments_json: Option<String>,
     /// Optional default provider ("ollama" | "openai") — when set, running the
     /// snippet creates a new chat pre-selected to this provider/model pair.
+    #[serde(default)]
     pub provider: Option<String>,
+    #[serde(default)]
     pub model: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
@@ -140,6 +153,7 @@ pub struct McpServer {
     pub url: String,
     /// JSON-encoded `{k: v}` map of request headers (typically
     /// `Authorization`, `X-API-Key`, etc.). Null means no headers.
+    #[serde(default)]
     pub headers_json: Option<String>,
     /// When `false` the server is kept in the config but not surfaced to the
     /// model — lets users disable a flaky integration without losing its
@@ -155,9 +169,22 @@ pub struct Message {
     pub session_id: String,
     pub role: String, // "user" | "assistant" | "system"
     pub content: String,
+    #[serde(default)]
     pub thinking: Option<String>,
+    #[serde(default)]
     pub attachments_json: Option<String>,
+    #[serde(default)]
     pub metrics_json: Option<String>,
+    /// JSON-encoded array of `ToolCallRecord` (see frontend `types.ts`):
+    /// the MCP tool calls and their results threaded through this message
+    /// during a multi-turn tool-use turn. Null on messages that didn't use
+    /// any tools so old rows stay compact.
+    ///
+    /// `#[serde(default)]` is required so importing a snapshot exported by
+    /// a pre-MCP build of Loach (where this field didn't exist) doesn't
+    /// fail with "missing field" — the absent value rehydrates to None.
+    #[serde(default)]
+    pub tool_calls_json: Option<String>,
     pub created_at: i64,
 }
 
@@ -348,6 +375,17 @@ impl Database {
         if !has_column(&conn, "messages", "thinking")? {
             conn.execute_batch(
                 "ALTER TABLE messages ADD COLUMN thinking TEXT;",
+            )?;
+        }
+
+        // Tool calls + results made during an MCP-enabled assistant turn.
+        // Stored as JSON on the assistant message so the transcript can be
+        // re-rendered without re-running tools. Null for messages from
+        // pre-MCP turns (and for user / system messages, which never have
+        // tool calls).
+        if !has_column(&conn, "messages", "tool_calls_json")? {
+            conn.execute_batch(
+                "ALTER TABLE messages ADD COLUMN tool_calls_json TEXT;",
             )?;
         }
 
@@ -611,7 +649,7 @@ impl Database {
     pub fn list_messages(&self, session_id: &str) -> Result<Vec<Message>> {
         self.with_read(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, session_id, role, content, thinking, attachments_json, metrics_json, created_at
+                "SELECT id, session_id, role, content, thinking, attachments_json, metrics_json, tool_calls_json, created_at
                  FROM messages WHERE session_id = ?1 ORDER BY created_at ASC",
             )?;
             let rows = stmt
@@ -624,7 +662,8 @@ impl Database {
                         thinking: r.get(4)?,
                         attachments_json: r.get(5)?,
                         metrics_json: r.get(6)?,
-                        created_at: r.get(7)?,
+                        tool_calls_json: r.get(7)?,
+                        created_at: r.get(8)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -644,8 +683,8 @@ impl Database {
         {
             let conn = self.conn.lock();
             conn.execute(
-                "INSERT INTO messages (id, session_id, role, content, thinking, attachments_json, metrics_json, created_at)
-                 VALUES (?1, ?2, ?3, ?4, NULL, ?5, NULL, ?6)",
+                "INSERT INTO messages (id, session_id, role, content, thinking, attachments_json, metrics_json, tool_calls_json, created_at)
+                 VALUES (?1, ?2, ?3, ?4, NULL, ?5, NULL, NULL, ?6)",
                 params![id, session_id, role, content, attachments_json, now],
             )?;
         }
@@ -658,6 +697,7 @@ impl Database {
             thinking: None,
             attachments_json: attachments_json.map(|s| s.to_string()),
             metrics_json: None,
+            tool_calls_json: None,
             created_at: now,
         })
     }
@@ -669,6 +709,7 @@ impl Database {
         content: &str,
         thinking: Option<&str>,
         metrics_json: Option<&str>,
+        tool_calls_json: Option<&str>,
     ) -> Result<()> {
         // Scope by session_id so a renderer that ever gets confused — or a
         // compromised one calling commands directly with a leaked message id
@@ -676,14 +717,21 @@ impl Database {
         // 0-row case is silently accepted because callers should treat a
         // miss as benign (the row may legitimately have been deleted under
         // them while the update was in flight).
+        //
+        // `tool_calls_json` is `COALESCE`'d the same way `metrics_json` is —
+        // passing `None` preserves whatever's already on the row, so the
+        // chat path can update content+thinking on the streaming flush
+        // without clobbering tool-call records that were saved on a
+        // separate write.
         let conn = self.conn.lock();
         conn.execute(
             "UPDATE messages
              SET content = ?1,
                  thinking = ?2,
-                 metrics_json = COALESCE(?3, metrics_json)
-             WHERE id = ?4 AND session_id = ?5",
-            params![content, thinking, metrics_json, id, session_id],
+                 metrics_json = COALESCE(?3, metrics_json),
+                 tool_calls_json = COALESCE(?4, tool_calls_json)
+             WHERE id = ?5 AND session_id = ?6",
+            params![content, thinking, metrics_json, tool_calls_json, id, session_id],
         )?;
         Ok(())
     }
@@ -1216,7 +1264,7 @@ impl Database {
     pub fn all_messages(&self) -> Result<Vec<Message>> {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(
-            "SELECT id, session_id, role, content, thinking, attachments_json, metrics_json, created_at
+            "SELECT id, session_id, role, content, thinking, attachments_json, metrics_json, tool_calls_json, created_at
              FROM messages ORDER BY session_id, created_at",
         )?;
         let rows = stmt
@@ -1229,7 +1277,8 @@ impl Database {
                     thinking: r.get(4)?,
                     attachments_json: r.get(5)?,
                     metrics_json: r.get(6)?,
-                    created_at: r.get(7)?,
+                    tool_calls_json: r.get(7)?,
+                    created_at: r.get(8)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -1349,8 +1398,8 @@ impl Database {
         for m in &d.messages {
             tx.execute(
                 "INSERT INTO messages (id, session_id, role, content, thinking,
-                                       attachments_json, metrics_json, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                                       attachments_json, metrics_json, tool_calls_json, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     m.id,
                     m.session_id,
@@ -1359,6 +1408,7 @@ impl Database {
                     m.thinking,
                     m.attachments_json,
                     m.metrics_json,
+                    m.tool_calls_json,
                     m.created_at,
                 ],
             )?;

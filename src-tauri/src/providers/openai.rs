@@ -1,14 +1,17 @@
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
 use futures_util::StreamExt;
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
 use tokio::select;
 
 use super::{ChatRequest, ModelInfo};
+use crate::db::Database;
+use crate::mcp::McpToolDef;
 use crate::secrets;
 use crate::stream::{event_channel, StreamEvent, StreamRegistry};
 
@@ -23,6 +26,14 @@ const MAX_FRAME_BYTES: usize = 1024 * 1024;
 /// generations), so admin calls supply their own. 30 s is well above any
 /// healthy /models response.
 const ADMIN_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Same rationale as `providers::ollama::MAX_TOOL_TURNS` — cap multi-turn
+/// tool use so a confused model can't pin the chat in an infinite loop.
+const MAX_TOOL_TURNS: u32 = 10;
+
+/// Per-tool-result ceiling fed back into the model. See the matching
+/// constant in `providers::ollama` for the full rationale.
+const MAX_TOOL_RESULT_BYTES: usize = 32 * 1024;
 
 #[derive(Debug, Deserialize)]
 struct ModelsResponse {
@@ -61,6 +72,10 @@ pub async fn list_models(http: &Client, base_url: &str) -> Result<Vec<ModelInfo>
 struct Choice {
     #[serde(default)]
     delta: Option<DeltaMsg>,
+    /// Present on the terminator frame for compat servers that omit the
+    /// trailing `data: [DONE]` marker (Azure, some Ollama-OpenAI proxies).
+    /// We treat any non-null `finish_reason` as an EOS so the chat doesn't
+    /// hang waiting for a [DONE] that never arrives.
     #[serde(default)]
     finish_reason: Option<String>,
 }
@@ -71,6 +86,30 @@ struct DeltaMsg {
     content: Option<String>,
     #[serde(default)]
     reasoning_content: Option<String>,
+    #[serde(default)]
+    tool_calls: Vec<DeltaToolCall>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeltaToolCall {
+    /// SSE deltas carry a stable index for the tool call slot so multi-tool
+    /// turns assemble correctly even when their fields stream out of order.
+    #[serde(default)]
+    index: Option<u32>,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    function: Option<DeltaToolFn>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeltaToolFn {
+    #[serde(default)]
+    name: Option<String>,
+    /// OpenAI streams the JSON arguments string in deltas — we concatenate
+    /// before parsing.
+    #[serde(default)]
+    arguments: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -79,29 +118,30 @@ struct SseChunk {
     choices: Vec<Choice>,
 }
 
-#[derive(Debug, Serialize)]
-struct OaMsg {
-    role: &'static str,
-    content: Value,
+/// Accumulated tool call across a single turn — `name` and `arguments` may
+/// arrive in pieces over many SSE frames. We close over them with the
+/// `index` from the delta.
+#[derive(Debug, Clone)]
+struct AccumTool {
+    id: Option<String>,
+    name: String,
+    arguments: String,
 }
 
-fn build_messages(req: &ChatRequest) -> Vec<OaMsg> {
-    let mut out: Vec<OaMsg> = Vec::new();
+fn build_messages(req: &ChatRequest) -> Vec<Value> {
+    let mut out: Vec<Value> = Vec::new();
     if let Some(sys) = req.system_prompt.as_deref() {
         if !sys.is_empty() {
-            out.push(OaMsg {
-                role: "system",
-                content: Value::String(sys.to_string()),
-            });
+            out.push(json!({ "role": "system", "content": sys }));
         }
     }
     for m in &req.messages {
-        let role: &'static str = match m.role.as_str() {
+        let role = match m.role.as_str() {
             "assistant" => "assistant",
             "system" => "system",
             _ => "user",
         };
-        let content = if m.images.is_empty() {
+        let content: Value = if m.images.is_empty() {
             Value::String(m.content.clone())
         } else {
             let mut parts: Vec<Value> = Vec::new();
@@ -109,12 +149,6 @@ fn build_messages(req: &ChatRequest) -> Vec<OaMsg> {
                 parts.push(json!({ "type": "text", "text": m.content }));
             }
             for img in &m.images {
-                // Sniff the image format from the base64 prefix so the
-                // data URL carries the right MIME. GPT-4o tolerates a
-                // mislabel; some stricter endpoints (and image-only
-                // models behind compatible proxies) don't. Falls back to
-                // `image/png` for unknown signatures — the most common
-                // upload format and the previously-hard-coded default.
                 let mime = sniff_image_mime(img);
                 parts.push(json!({
                     "type": "image_url",
@@ -123,64 +157,256 @@ fn build_messages(req: &ChatRequest) -> Vec<OaMsg> {
             }
             Value::Array(parts)
         };
-        out.push(OaMsg { role, content });
+        out.push(json!({ "role": role, "content": content }));
     }
     out
+}
+
+enum TurnOutcome {
+    Done,
+    Tools(Vec<AccumTool>),
 }
 
 pub async fn chat_stream(
     app: AppHandle,
     http: Client,
     registry: StreamRegistry,
+    db: Arc<Database>,
+    cancel: Arc<tokio::sync::Notify>,
     req: ChatRequest,
 ) -> Result<()> {
-    let cancel = registry.register(req.stream_id.clone());
+    // Cancel Notify is registered upstream in `commands::chat_stream`.
+    // See the matching note in providers/ollama.rs::chat_stream.
     let channel = event_channel(&req.stream_id);
 
-    let messages = build_messages(&req);
+    let mut messages = build_messages(&req);
 
-    let mut body = json!({
-        "model": req.model,
-        "messages": messages,
-        "stream": true,
-    });
-    if let Some(v) = req.params.temperature {
-        body["temperature"] = json!(v);
-    }
-    if let Some(v) = req.params.top_p {
-        body["top_p"] = json!(v);
-    }
-    if let Some(v) = req.params.max_tokens {
-        body["max_tokens"] = json!(v);
-    }
-    if let Some(v) = req.params.frequency_penalty {
-        body["frequency_penalty"] = json!(v);
-    }
-    if let Some(v) = req.params.presence_penalty {
-        body["presence_penalty"] = json!(v);
-    }
-    if let Some(v) = req.params.seed {
-        body["seed"] = json!(v);
+    let tools_json: Option<Value> = if req.tools.is_empty() {
+        None
+    } else {
+        Some(json!(req
+            .tools
+            .iter()
+            .map(openai_tool_def)
+            .collect::<Vec<_>>()))
+    };
+
+    let start = Instant::now();
+    let mut total_tokens: u32 = 0;
+
+    for turn in 0..MAX_TOOL_TURNS {
+        let mut body = json!({
+            "model": req.model,
+            "messages": messages,
+            "stream": true,
+        });
+        if let Some(v) = req.params.temperature {
+            body["temperature"] = json!(v);
+        }
+        if let Some(v) = req.params.top_p {
+            body["top_p"] = json!(v);
+        }
+        if let Some(v) = req.params.max_tokens {
+            body["max_tokens"] = json!(v);
+        }
+        if let Some(v) = req.params.frequency_penalty {
+            body["frequency_penalty"] = json!(v);
+        }
+        if let Some(v) = req.params.presence_penalty {
+            body["presence_penalty"] = json!(v);
+        }
+        if let Some(v) = req.params.seed {
+            body["seed"] = json!(v);
+        }
+        if let Some(tools) = tools_json.as_ref() {
+            body["tools"] = tools.clone();
+        }
+
+        let outcome = match run_one_turn(
+            &app,
+            &http,
+            &req.base_url,
+            &channel,
+            &cancel,
+            body,
+            &mut total_tokens,
+            &req.stream_id,
+            &registry,
+        )
+        .await?
+        {
+            Some(o) => o,
+            None => return Ok(()),
+        };
+
+        match outcome {
+            TurnOutcome::Done => {
+                emit_metrics(&app, &channel, total_tokens, start);
+                let _ = app.emit(&channel, StreamEvent::Done);
+                registry.finish(&req.stream_id);
+                return Ok(());
+            }
+            TurnOutcome::Tools(calls) => {
+                // Assistant turn carrying the tool calls. OpenAI requires
+                // the tool_calls array (with `id` and the `function` object)
+                // and a `content` field that may be empty when the model
+                // immediately reached for a tool.
+                let oa_calls: Vec<Value> = calls
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, c)| {
+                        let id = c.id.clone().unwrap_or_else(|| format!("call_{turn}_{idx}"));
+                        json!({
+                            "id": id,
+                            "type": "function",
+                            "function": {
+                                "name": c.name,
+                                "arguments": c.arguments,
+                            }
+                        })
+                    })
+                    .collect();
+                messages.push(json!({
+                    "role": "assistant",
+                    // Spec says `content` may be null when the assistant
+                    // turn is purely tool calls. Strict gateways (Azure,
+                    // some local OpenAI-compat proxies) 400 on empty
+                    // strings here, so we use Null explicitly.
+                    "content": Value::Null,
+                    "tool_calls": oa_calls,
+                }));
+
+                for (idx, call) in calls.iter().enumerate() {
+                    let call_id = call
+                        .id
+                        .clone()
+                        .unwrap_or_else(|| format!("call_{turn}_{idx}"));
+                    let (tool_def, tool_name) = match resolve_qualified(&req.tools, &call.name) {
+                        Some(pair) => pair,
+                        None => {
+                            let msg = format!(
+                                "unknown tool `{}` — server may have been disabled",
+                                call.name
+                            );
+                            let _ = app.emit(
+                                &channel,
+                                StreamEvent::ToolResult {
+                                    id: call_id.clone(),
+                                    content: msg.clone(),
+                                    is_error: true,
+                                },
+                            );
+                            messages.push(json!({
+                                "role": "tool",
+                                "tool_call_id": call_id,
+                                "content": msg,
+                            }));
+                            continue;
+                        }
+                    };
+
+                    let args = parse_args(&call.arguments);
+
+                    let _ = app.emit(
+                        &channel,
+                        StreamEvent::ToolCall {
+                            id: call_id.clone(),
+                            server_id: tool_def.server_id.clone(),
+                            server_name: tool_def.server_name.clone(),
+                            tool: tool_def.qualified_name.clone(),
+                            arguments: args.clone(),
+                        },
+                    );
+
+                    let dispatch = crate::mcp::dispatch_tool_call(
+                        &db,
+                        &tool_def.server_id,
+                        &tool_name,
+                        &args,
+                    );
+                    let (content, is_error) = select! {
+                        biased;
+                        _ = cancel.notified() => {
+                            let _ = app.emit(&channel, StreamEvent::Cancelled);
+                            registry.finish(&req.stream_id);
+                            return Ok(());
+                        }
+                        r = dispatch => match r {
+                            Ok(r) => (r.content_text, r.is_error),
+                            Err(e) => (format!("tool call failed: {e:#}"), true),
+                        },
+                    };
+
+                    // UI sees the full result; model only sees the cap.
+                    let for_ui = content.clone();
+                    let for_model = super::cap_tool_text(&content, MAX_TOOL_RESULT_BYTES);
+
+                    let _ = app.emit(
+                        &channel,
+                        StreamEvent::ToolResult {
+                            id: call_id.clone(),
+                            content: for_ui,
+                            is_error,
+                        },
+                    );
+
+                    messages.push(json!({
+                        "role": "tool",
+                        "tool_call_id": call_id,
+                        "content": for_model,
+                    }));
+                }
+                // Loop — give the model the tool results and let it
+                // continue.
+            }
+        }
     }
 
-    let url = format!("{}/chat/completions", req.base_url.trim_end_matches('/'));
+    let _ = app.emit(
+        &channel,
+        StreamEvent::Error {
+            message: format!(
+                "Stopped after {MAX_TOOL_TURNS} tool-use turns — the model kept asking \
+                 for tools. Either it's stuck or the task needs more turns than Loach permits."
+            ),
+        },
+    );
+    registry.finish(&req.stream_id);
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_one_turn(
+    app: &AppHandle,
+    http: &Client,
+    base_url: &str,
+    channel: &str,
+    cancel: &Arc<tokio::sync::Notify>,
+    body: Value,
+    total_tokens: &mut u32,
+    stream_id: &str,
+    registry: &StreamRegistry,
+) -> Result<Option<TurnOutcome>> {
+    let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
     let mut http_req = http.post(&url).json(&body);
+    // Track whether we had a key but chose not to send it over cleartext
+    // so we can fold that hint into a 401/403 response — without it, the
+    // user sees "OpenAI HTTP 401: Unauthorized" and has no idea their key
+    // was withheld for transport-safety reasons. Open OpenAI-compatible
+    // servers (LM Studio, llama-server, vLLM) typically don't require auth,
+    // so we keep firing the request unauthenticated; only the
+    // genuinely-auth-required path benefits from the augmented message.
+    let mut bearer_withheld = false;
     if let Some(key) = secrets::get_openai_key().ok().flatten() {
         if !key.is_empty() {
-            // Refuse to send the bearer token over cleartext HTTP unless
-            // the user is hitting their own machine (LocalAI / Ollama-
-            // OpenAI-compat on 127.0.0.1, etc.). A cleartext bearer
-            // header on a remote endpoint is a key-exfiltration vector —
-            // any process on the network path can snoop it. We still
-            // send the request (without auth) so users get a meaningful
-            // 401 from the server instead of a silent failure.
-            if is_safe_for_bearer(&req.base_url) {
+            if is_safe_for_bearer(base_url) {
                 http_req = http_req.bearer_auth(key);
             } else {
+                bearer_withheld = true;
                 tracing::warn!(
                     "Refusing to send OpenAI bearer token over cleartext to {} — \
                      change the base URL to https:// or accept that requests will be unauthenticated.",
-                    req.base_url
+                    base_url
                 );
             }
         }
@@ -190,12 +416,12 @@ pub async fn chat_stream(
         Ok(r) => r,
         Err(e) => {
             let _ = app.emit(
-                &channel,
+                channel,
                 StreamEvent::Error {
                     message: format!("OpenAI request failed: {e}"),
                 },
             );
-            registry.finish(&req.stream_id);
+            registry.finish(stream_id);
             return Err(e.into());
         }
     };
@@ -203,56 +429,51 @@ pub async fn chat_stream(
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
+        // If the server rejected the request for auth reasons AND we
+        // deliberately withheld the bearer because the base URL is cleartext
+        // to a non-loopback host, surface the *why* — a bare "401" against
+        // an OpenAI-compatible endpoint is otherwise indistinguishable from
+        // a wrong key.
+        let suffix = if bearer_withheld
+            && (status == reqwest::StatusCode::UNAUTHORIZED
+                || status == reqwest::StatusCode::FORBIDDEN)
+        {
+            " (API key withheld because the base URL is http:// to a non-loopback host — \
+              switch to https:// to authenticate)"
+        } else {
+            ""
+        };
         let _ = app.emit(
-            &channel,
+            channel,
             StreamEvent::Error {
-                message: format!("OpenAI HTTP {status}: {text}"),
+                message: format!("OpenAI HTTP {status}: {text}{suffix}"),
             },
         );
-        registry.finish(&req.stream_id);
+        registry.finish(stream_id);
         return Err(anyhow!("openai http error"));
     }
 
-    let start = Instant::now();
-    let mut token_count: u32 = 0;
     let mut byte_stream = resp.bytes_stream();
     let mut buf: Vec<u8> = Vec::new();
-    // Byte offset into `buf` from which the next frame-separator search
-    // should start. Without this we rescan the entire buffer on every
-    // chunk arrival — O(n²) across a stream where a single ~1 MiB frame
-    // arrives as many small chunks. Reset to 0 after every drain (the
-    // bytes shift down); after a no-hit scan, advance past everything
-    // we already checked, minus 3 bytes of overlap so a `\r\n\r\n`
-    // straddling the chunk boundary is still caught.
     let mut scan_offset: usize = 0;
+    let mut accum: Vec<AccumTool> = Vec::new();
 
     loop {
         select! {
             biased;
             _ = cancel.notified() => {
-                // Drop the byte stream first so reqwest closes the TCP
-                // connection right away. With OpenAI-compatible endpoints
-                // this is a cheap signal to the server that we no longer
-                // want tokens — important because billing-by-token meters
-                // keep ticking until the server-side generator stops, and
-                // we don't want to pay for output we're about to discard.
                 drop(byte_stream);
-                let _ = app.emit(&channel, StreamEvent::Cancelled);
-                registry.finish(&req.stream_id);
-                return Ok(());
+                let _ = app.emit(channel, StreamEvent::Cancelled);
+                registry.finish(stream_id);
+                return Ok(None);
             }
             maybe = byte_stream.next() => {
                 match maybe {
                     Some(Ok(chunk)) => {
                         buf.extend_from_slice(&chunk);
-                        // Bail out if a malicious/broken endpoint never
-                        // delivers a frame separator and the buffer would
-                        // otherwise grow without bound. We accept either
-                        // `\n\n` or `\r\n\r\n` as the frame end, so the
-                        // "no separator yet" check tests both.
                         if buf.len() > MAX_FRAME_BYTES && find_frame_end(&buf).is_none() {
                             let _ = app.emit(
-                                &channel,
+                                channel,
                                 StreamEvent::Error {
                                     message: format!(
                                         "stream exceeded {} bytes without a frame delimiter — aborting",
@@ -260,30 +481,19 @@ pub async fn chat_stream(
                                     ),
                                 },
                             );
-                            registry.finish(&req.stream_id);
+                            registry.finish(stream_id);
                             return Err(anyhow!("openai stream frame too large"));
                         }
-                        // Coalesce all deltas arriving in this network chunk
-                        // into one Token / Thinking event each before
-                        // emitting. See the matching comment in
-                        // providers/ollama.rs for the rationale.
+
                         let mut pending_token = String::new();
                         let mut pending_think = String::new();
                         let mut finished = false;
-                        // SSE frames are separated by a blank line: `\n\n`
-                        // for compliant servers, `\r\n\r\n` for proxies that
-                        // re-frame on CRLF. We accept both. We scan from
-                        // `scan_offset` rather than 0 so previously-checked
-                        // bytes aren't re-walked on each chunk arrival.
                         while let Some((rel_pos, sep_len)) =
                             find_frame_end_with_len(&buf[scan_offset..])
                         {
                             let pos = scan_offset + rel_pos;
                             let frame: Vec<u8> = buf.drain(..pos + sep_len).collect();
-                            // Draining shifts everything down — reset the
-                            // scan cursor to the new start of the buffer.
                             scan_offset = 0;
-                            // Strip the trailing separator
                             let text = String::from_utf8_lossy(
                                 &frame[..frame.len() - sep_len],
                             )
@@ -306,84 +516,148 @@ pub async fn chat_stream(
                                             }
                                             if let Some(delta) = d.content {
                                                 if !delta.is_empty() {
-                                                    token_count += 1;
+                                                    *total_tokens += 1;
                                                     pending_token.push_str(&delta);
                                                 }
                                             }
+                                            for tc in d.tool_calls {
+                                                let idx = tc.index.unwrap_or(0) as usize;
+                                                if accum.len() <= idx {
+                                                    accum.resize_with(idx + 1, || AccumTool {
+                                                        id: None,
+                                                        name: String::new(),
+                                                        arguments: String::new(),
+                                                    });
+                                                }
+                                                let slot = &mut accum[idx];
+                                                if let Some(id) = tc.id {
+                                                    slot.id = Some(id);
+                                                }
+                                                if let Some(f) = tc.function {
+                                                    if let Some(n) = f.name {
+                                                        slot.name.push_str(&n);
+                                                    }
+                                                    if let Some(a) = f.arguments {
+                                                        slot.arguments.push_str(&a);
+                                                    }
+                                                }
+                                            }
                                         }
+                                        // Treat any non-null finish_reason
+                                        // as EOS for compat servers that
+                                        // skip the trailing [DONE] frame.
+                                        // We still let the current chunk's
+                                        // deltas accumulate (they may carry
+                                        // the last tokens or tool-call
+                                        // pieces) — the `finished` flag
+                                        // only takes effect once the
+                                        // outer frame loop finishes.
                                         if c.finish_reason.is_some() {
-                                            // Wait for [DONE] marker; some proxies omit it, so also close on finish.
+                                            finished = true;
                                         }
                                     }
                                 }
                             }
                             if finished { break; }
                         }
-                        // Bump scan_offset past the bytes we just walked
-                        // without finding a separator. Leave a 3-byte
-                        // overlap so a `\r\n\r\n` straddling the next
-                        // chunk's arrival still gets caught (longest
-                        // separator is 4 bytes, so 3 of overlap suffices).
-                        scan_offset = buf.len().saturating_sub(3);
+                        // The longest SSE frame separator is `\r\n\r\n`
+                        // (4 bytes), so keep that many bytes of overlap
+                        // for the next scan to catch a separator that
+                        // straddles the chunk boundary.
+                        scan_offset = buf.len().saturating_sub(4);
                         if !pending_think.is_empty() {
                             let _ = app.emit(
-                                &channel,
+                                channel,
                                 StreamEvent::Thinking { delta: pending_think },
                             );
                         }
                         if !pending_token.is_empty() {
                             let _ = app.emit(
-                                &channel,
+                                channel,
                                 StreamEvent::Token { delta: pending_token },
                             );
                         }
                         if finished {
-                            let elapsed = start.elapsed().as_millis() as u64;
-                            let tps = if elapsed > 0 {
-                                (token_count as f64) * 1000.0 / (elapsed as f64)
-                            } else { 0.0 };
-                            let _ = app.emit(
-                                &channel,
-                                StreamEvent::Metrics {
-                                    tokens: token_count,
-                                    elapsed_ms: elapsed,
-                                    tokens_per_second: tps,
-                                },
-                            );
-                            let _ = app.emit(&channel, StreamEvent::Done);
-                            registry.finish(&req.stream_id);
-                            return Ok(());
+                            return Ok(Some(decide_outcome(accum)));
                         }
                     }
                     Some(Err(e)) => {
                         let _ = app.emit(
-                            &channel,
+                            channel,
                             StreamEvent::Error { message: format!("stream error: {e}") },
                         );
-                        registry.finish(&req.stream_id);
+                        registry.finish(stream_id);
                         return Err(e.into());
                     }
                     None => {
-                        let elapsed = start.elapsed().as_millis() as u64;
-                        let tps = if elapsed > 0 {
-                            (token_count as f64) * 1000.0 / (elapsed as f64)
-                        } else { 0.0 };
-                        let _ = app.emit(
-                            &channel,
-                            StreamEvent::Metrics {
-                                tokens: token_count,
-                                elapsed_ms: elapsed,
-                                tokens_per_second: tps,
-                            },
-                        );
-                        let _ = app.emit(&channel, StreamEvent::Done);
-                        registry.finish(&req.stream_id);
-                        return Ok(());
+                        return Ok(Some(decide_outcome(accum)));
                     }
                 }
             }
         }
     }
+}
+
+fn decide_outcome(accum: Vec<AccumTool>) -> TurnOutcome {
+    // Filter out half-formed entries — a streamed delta with index N may
+    // have left empty slots in earlier indexes that the model never
+    // populated. Those are debris and would error on dispatch.
+    let valid: Vec<AccumTool> = accum
+        .into_iter()
+        .filter(|t| !t.name.is_empty())
+        .collect();
+    if valid.is_empty() {
+        TurnOutcome::Done
+    } else {
+        TurnOutcome::Tools(valid)
+    }
+}
+
+fn emit_metrics(app: &AppHandle, channel: &str, tokens: u32, start: Instant) {
+    let elapsed = start.elapsed().as_millis() as u64;
+    let tps = if elapsed > 0 {
+        (tokens as f64) * 1000.0 / (elapsed as f64)
+    } else {
+        0.0
+    };
+    let _ = app.emit(
+        channel,
+        StreamEvent::Metrics {
+            tokens,
+            elapsed_ms: elapsed,
+            tokens_per_second: tps,
+        },
+    );
+}
+
+fn openai_tool_def(def: &McpToolDef) -> Value {
+    let mut function = serde_json::Map::new();
+    function.insert("name".into(), json!(def.qualified_name));
+    if let Some(desc) = def.description.as_deref() {
+        function.insert(
+            "description".into(),
+            json!(format!("[{}] {desc}", def.server_name)),
+        );
+    } else {
+        function.insert("description".into(), json!(format!("[{}]", def.server_name)));
+    }
+    function.insert("parameters".into(), def.input_schema.clone());
+    json!({ "type": "function", "function": function })
+}
+
+fn parse_args(s: &str) -> Value {
+    if s.trim().is_empty() {
+        return json!({});
+    }
+    serde_json::from_str(s).unwrap_or_else(|_| Value::String(s.to_string()))
+}
+
+fn resolve_qualified<'a>(
+    tools: &'a [McpToolDef],
+    qualified: &str,
+) -> Option<(&'a McpToolDef, String)> {
+    let def = tools.iter().find(|t| t.qualified_name == qualified)?;
+    Some((def, def.name.clone()))
 }
 
 /// Decide whether it's safe to attach a bearer token to a request going
@@ -398,8 +672,6 @@ pub async fn chat_stream(
 /// user's API key over cleartext.
 fn is_safe_for_bearer(base_url: &str) -> bool {
     let Ok(url) = reqwest::Url::parse(base_url) else {
-        // If we can't parse, err on the side of caution — better a
-        // visible 401 than a leaked key.
         return false;
     };
     match url.scheme() {
@@ -413,7 +685,6 @@ fn is_safe_for_bearer(base_url: &str) -> bool {
             {
                 return true;
             }
-            // Literal IP: allow only loopback ranges.
             if let Ok(ip) = host.parse::<std::net::IpAddr>() {
                 return ip.is_loopback();
             }
@@ -423,20 +694,7 @@ fn is_safe_for_bearer(base_url: &str) -> bool {
     }
 }
 
-/// Guess an image MIME type from the leading characters of its base64
-/// payload. The first byte of a JPEG / PNG / GIF / WebP file is fixed,
-/// so its base64 prefix is also fixed — we can sniff without decoding.
-/// Returns `"image/png"` as a safe default for anything we don't
-/// recognise (the most common upload format and the historical default
-/// before this helper existed).
 fn sniff_image_mime(b64: &str) -> &'static str {
-    // PNG  89 50 4E 47 …      → "iVBO…"
-    // JPEG FF D8 FF …          → "/9j/…"
-    // GIF  47 49 46 38 …       → "R0lG…"
-    // WebP 52 49 46 46 . . . . 57 45 42 50 …
-    //   That's "RIFF" then "WEBP" at byte 8 — base64 "UklGRg==" prefix
-    //   for RIFF, but only WebP variants reuse that container. We sniff
-    //   the longer 16-char prefix to disambiguate.
     let trimmed = b64.trim_start();
     if trimmed.starts_with("iVBORw") {
         "image/png"
@@ -445,10 +703,6 @@ fn sniff_image_mime(b64: &str) -> &'static str {
     } else if trimmed.starts_with("R0lGOD") {
         "image/gif"
     } else if trimmed.starts_with("UklGR") && trimmed.len() >= 24 {
-        // RIFF container — check for "WEBP" sub-tag at bytes 8-11 (which
-        // sits at base64 offset 14 with the "WEBP" four-cc encoding to
-        // "V0VC" / "V0VCUA" depending on padding). The simplest check is
-        // for the literal "V0VC" substring near the start.
         if trimmed[12..24].contains("V0VC") {
             "image/webp"
         } else {
@@ -459,9 +713,6 @@ fn sniff_image_mime(b64: &str) -> &'static str {
     }
 }
 
-/// Locate the start of the next frame-end separator. Returns `(position, len)`
-/// where `len` is 2 for `\n\n` or 4 for `\r\n\r\n`. We prefer whichever sits
-/// earliest in the buffer.
 fn find_frame_end_with_len(buf: &[u8]) -> Option<(usize, usize)> {
     let lf = buf.windows(2).position(|w| w == b"\n\n");
     let crlf = buf.windows(4).position(|w| w == b"\r\n\r\n");
@@ -479,9 +730,6 @@ fn find_frame_end_with_len(buf: &[u8]) -> Option<(usize, usize)> {
     }
 }
 
-/// Truth-only probe: is there any frame separator anywhere in the buffer?
-/// Used by the buffer-cap guard so we only abort when we genuinely have not
-/// seen *any* delimiter.
 fn find_frame_end(buf: &[u8]) -> Option<usize> {
     find_frame_end_with_len(buf).map(|(pos, _)| pos)
 }

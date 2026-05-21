@@ -1,6 +1,7 @@
 mod commands;
 mod db;
 mod mcp;
+mod preload;
 mod providers;
 mod secrets;
 mod security;
@@ -150,12 +151,30 @@ pub fn run() {
                 ),
             };
 
+            // Hold on to clones of the DB handle and HTTP client BEFORE
+            // moving them into `AppState` so the speculative-preload task
+            // below doesn't need to fish them back out of managed state.
+            // Both types are cheap to clone — `Arc` bumps a refcount, and
+            // `reqwest::Client` is internally `Arc`-shared too.
+            let db = Arc::new(db);
+            let preload_db = db.clone();
+            let preload_http = http.clone();
+
             let state = AppState {
-                db: Arc::new(db),
+                db,
                 http,
                 streams: StreamRegistry::new(),
             };
             app.manage(state);
+
+            // Speculative VRAM warming. Fires only when the user opted in
+            // via "preload default model" AND no app-lock is configured;
+            // otherwise the post-unlock JS preload in `App.tsx` covers it.
+            // This call returns immediately — the actual `/api/chat` to
+            // Ollama runs on a background task, so a slow / unreachable
+            // Ollama can never extend startup time. See `preload.rs` for
+            // the full rationale and the JS/Rust handoff story.
+            preload::try_warm_default_model(preload_db, preload_http);
 
             // System tray
             let show_i = MenuItem::with_id(app, "show", "Show Loach", true, None::<&str>)?;

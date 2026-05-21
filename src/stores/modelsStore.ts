@@ -12,11 +12,12 @@ import {
 } from "@/lib/tauri";
 import { useSettingsStore } from "./settingsStore";
 import { parseModelParameters } from "@/lib/modelParams";
-import type {
-  AdminEvent,
-  GenerationParams,
-  ModelInfo,
-  OllamaShowResponse,
+import {
+  DEFAULT_SETTINGS,
+  type AdminEvent,
+  type GenerationParams,
+  type ModelInfo,
+  type OllamaShowResponse,
 } from "@/types";
 
 /** Progress snapshot for an in-flight pull / create. Either field can be
@@ -152,9 +153,12 @@ export const useModelsStore = create<ModelsState>((set, get) => ({
       err = e instanceof Error ? e.message : String(e);
     }
 
-    // OpenAI listing requires a key; skip silently if it's not set so we
-    // don't spam 401s on every refresh.
-    if (s.openai_key_set) {
+    // Try the OpenAI-compatible listing if either a key is stored or the base
+    // URL has been pointed away from the public default — local/proxy servers
+    // (llama-server, LM Studio, vLLM, LiteLLM) don't require auth, so gating
+    // purely on `openai_key_set` would hide their models from the picker.
+    const baseChanged = s.openai_base_url !== DEFAULT_SETTINGS.openai_base_url;
+    if (s.openai_key_set || baseChanged) {
       try {
         const openai = await openaiListModels(s.openai_base_url);
         out.push(...openai);

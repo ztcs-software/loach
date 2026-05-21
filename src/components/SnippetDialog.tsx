@@ -288,10 +288,10 @@ function ModelPicker({
             </DropdownMenuItem>
           ))}
           <DropdownMenuSeparator />
-          <DropdownMenuLabel>OpenAI</DropdownMenuLabel>
+          <DropdownMenuLabel>API</DropdownMenuLabel>
           {openaiModels.length === 0 && (
             <DropdownMenuItem disabled>
-              {openaiKeySet ? "No models" : "API key not set"}
+              {openaiKeySet ? "No models" : "Not connected"}
             </DropdownMenuItem>
           )}
           {openaiModels.slice(0, 30).map((m) => (

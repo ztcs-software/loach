@@ -352,8 +352,14 @@ export function stripInlinedAttachments(content: string): string {
   // `inlineFetchedPages` — same idea, same treatment: hide the bulky context
   // from the user's own bubble while keeping it in the stored content so the
   // model sees it on replay.
+  //
+  // Always `trimEnd` the result: prompts stored before the composer started
+  // trimming whitespace, or inliners that left trailing newlines, would
+  // otherwise show as blank lines at the bottom of the bubble (and survive
+  // through copy). The display path is read-only — trimming here doesn't
+  // mutate what the model sees on replay.
   const marker =
     /\n\n---\n(?:Attached |The user also attached |Fetched URL: |Failed to fetch )/;
   const m = marker.exec(content);
-  return m ? content.slice(0, m.index).trimEnd() : content;
+  return (m ? content.slice(0, m.index) : content).trimEnd();
 }

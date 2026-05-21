@@ -1,5 +1,6 @@
 import { memo, useLayoutEffect, useRef, useState } from "react";
 import {
+  AlertTriangle,
   Brain,
   Check,
   ChevronDown,
@@ -7,7 +8,10 @@ import {
   Copy,
   File,
   FileText,
+  Loader2,
   MoreHorizontal,
+  TextSelect,
+  Wrench,
 } from "lucide-react";
 import { Markdown } from "./Markdown";
 import {
@@ -16,16 +20,38 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import type { Attachment, Message as ChatMessage, MessageMetrics } from "@/types";
+import type {
+  Attachment,
+  Message as ChatMessage,
+  MessageMetrics,
+  ToolCallRecord,
+} from "@/types";
 import { cn } from "@/lib/utils";
 import { stripInlinedAttachments } from "@/lib/files";
 import { Bookmark } from "lucide-react";
 import { useSnippetStore } from "@/stores/snippetStore";
+import { useToastStore } from "@/stores/toastStore";
 
 interface MessageProps {
   message: ChatMessage;
   isStreaming?: boolean;
   metrics?: MessageMetrics | null;
+}
+
+/**
+ * Return the current selection's text if it is entirely contained inside
+ * `el`, otherwise empty. Used by the right-click handler to decide whether
+ * to surface a "Copy selection" item — a selection that starts in another
+ * bubble or in the sidebar shouldn't trigger this bubble's menu item.
+ */
+function getSelectionWithin(el: Element): string {
+  const sel = window.getSelection();
+  if (!sel || sel.isCollapsed || sel.rangeCount === 0) return "";
+  const range = sel.getRangeAt(0);
+  if (!el.contains(range.startContainer) || !el.contains(range.endContainer)) {
+    return "";
+  }
+  return sel.toString();
 }
 
 function parseMetrics(json: string | null): MessageMetrics | null {
@@ -44,6 +70,120 @@ function parseAttachments(json: string | null): Attachment[] {
   } catch {
     return [];
   }
+}
+
+function parseToolCalls(json: string | null): ToolCallRecord[] {
+  if (!json) return [];
+  try {
+    const v = JSON.parse(json);
+    return Array.isArray(v) ? (v as ToolCallRecord[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function ToolCallItem({ call }: { call: ToolCallRecord }) {
+  const [open, setOpen] = useState(false);
+  const pending = call.result === null;
+  const failed = !pending && call.is_error;
+  // Pretty-print arguments. The model sometimes ships a string instead of
+  // an object — try to parse it for nicer display, fall back to raw.
+  let argsText: string;
+  if (typeof call.arguments === "string") {
+    try {
+      argsText = JSON.stringify(JSON.parse(call.arguments), null, 2);
+    } catch {
+      argsText = call.arguments;
+    }
+  } else {
+    try {
+      argsText = JSON.stringify(call.arguments, null, 2);
+    } catch {
+      argsText = String(call.arguments);
+    }
+  }
+  // The qualified tool name comes through as `<serverSlug>__<toolName>` —
+  // show the raw piece in the chip and the server in the header.
+  const rawTool = call.tool.includes("__")
+    ? call.tool.slice(call.tool.indexOf("__") + 2)
+    : call.tool;
+  return (
+    <div
+      className={cn(
+        "rounded-lg border px-2.5 py-1.5 text-xs",
+        failed
+          ? "border-red-500/30 bg-red-500/5"
+          : "border-foreground/10 bg-foreground/[0.03]",
+      )}
+    >
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center gap-1.5 text-left text-foreground/70 transition-colors hover:text-foreground"
+      >
+        {open ? (
+          <ChevronDown className="h-3.5 w-3.5 shrink-0" />
+        ) : (
+          <ChevronRight className="h-3.5 w-3.5 shrink-0" />
+        )}
+        {pending ? (
+          <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-foreground/55" />
+        ) : failed ? (
+          <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-red-400" />
+        ) : (
+          <Wrench className="h-3.5 w-3.5 shrink-0 text-foreground/55" />
+        )}
+        <span className="min-w-0 truncate font-mono">
+          <span className="text-foreground/45">{call.server_name || "tool"} · </span>
+          <span className="text-foreground/80">{rawTool}</span>
+        </span>
+      </button>
+      {open && (
+        <div className="mt-2 space-y-2 pl-5">
+          <div>
+            <div className="mb-0.5 text-[10.5px] uppercase tracking-wider text-foreground/40">
+              Arguments
+            </div>
+            <pre className="max-h-40 overflow-auto rounded border border-foreground/10 bg-foreground/[0.04] px-2 py-1.5 font-mono text-[11px] leading-snug text-foreground/80 whitespace-pre-wrap break-words">
+              {argsText || "{}"}
+            </pre>
+          </div>
+          {!pending && (
+            <div>
+              <div className="mb-0.5 text-[10.5px] uppercase tracking-wider text-foreground/40">
+                {failed ? "Error" : "Result"}
+              </div>
+              <pre
+                className={cn(
+                  "max-h-64 overflow-auto rounded border px-2 py-1.5 font-mono text-[11px] leading-snug whitespace-pre-wrap break-words",
+                  failed
+                    ? "border-red-500/30 bg-red-500/[0.06] text-red-200"
+                    : "border-foreground/10 bg-foreground/[0.04] text-foreground/80",
+                )}
+              >
+                {call.result ?? ""}
+              </pre>
+            </div>
+          )}
+          {pending && (
+            <div className="text-[11px] italic text-foreground/50">
+              Running…
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ToolCallsBlock({ calls }: { calls: ToolCallRecord[] }) {
+  return (
+    <div className="mb-2 space-y-1.5">
+      {calls.map((c) => (
+        <ToolCallItem key={c.id} call={c} />
+      ))}
+    </div>
+  );
 }
 
 /**
@@ -77,6 +217,7 @@ function ExpandableUserText({ content }: { content: string }) {
     <div>
       <p
         ref={ref}
+        data-prompt-text
         className={cn(
           "whitespace-pre-wrap text-sm leading-relaxed",
           // `line-clamp-[10]` falls back gracefully when the content is
@@ -139,12 +280,10 @@ function MessageItemImpl({ message, isStreaming, metrics }: MessageProps) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   // Separate state for the keyboard-accessible kebab below the user
-  // bubble. Two menus (right-click + visible kebab) share the same
-  // items but use distinct triggers so the right-click can still
-  // anchor to the cursor while keyboard users get a discoverable
-  // button. Without this second path, tabbing through messages
-  // skipped right past the user's own Copy / Save-as-snippet
-  // actions — a real a11y gap.
+  // bubble. The kebab carries the full-content actions (Copy message,
+  // Save as Snippet) that the right-click menu omits, so keyboard users
+  // who can't open the cursor-anchored right-click menu still have a
+  // discoverable, tab-reachable path to them.
   const [userKebabOpen, setUserKebabOpen] = useState(false);
   const [copied, setCopied] = useState(false);
   // Coordinates (relative to the bubble) where the user right-clicked. We pin
@@ -154,27 +293,117 @@ function MessageItemImpl({ message, isStreaming, metrics }: MessageProps) {
   const [assistantMenuOpen, setAssistantMenuOpen] = useState(false);
   const [assistantMenuPos, setAssistantMenuPos] = useState<{ x: number; y: number } | null>(null);
   const [userMenuPos, setUserMenuPos] = useState<{ x: number; y: number } | null>(null);
+  // Selection text captured at the moment of right-click, scoped to this
+  // bubble. Captured eagerly because opening the dropdown shifts focus and
+  // can collapse the live selection before the menu item's handler runs.
+  const [contextSelection, setContextSelection] = useState("");
+  // Ref to the message body wrapper. Used by the right-click "Select all"
+  // item to programmatically select the body text — and only the body, so
+  // metrics and the "Show more" toggle stay outside the highlight.
+  const bodyRef = useRef<HTMLDivElement>(null);
   const openSnippetDialog = useSnippetStore((s) => s.openDialog);
+
+  // Single funnel for every clipboard write the message component does.
+  // The Tauri webview can refuse `navigator.clipboard.writeText` in narrow
+  // cases (focus loss mid-action, permission-policy edge cases on Linux,
+  // remote-debugger contexts), and previously every caller swallowed the
+  // failure silently — the user pressed Copy, nothing happened, no
+  // feedback. Surface a one-shot error toast instead so the failure is at
+  // least visible. Returns whether the write actually succeeded so callers
+  // that toggle a "Copied" tick can skip the affirmative state on failure.
+  const writeClipboard = async (text: string): Promise<boolean> => {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      useToastStore.getState().push({
+        kind: "error",
+        title: "Couldn't copy",
+        body: "Clipboard isn't available in this window.",
+      });
+      return false;
+    }
+  };
 
   // Copy the raw assistant content — full markdown, untouched — so pasting
   // into a code editor keeps fences / tables / headings intact.
   const copyContent = async () => {
-    try {
-      await navigator.clipboard.writeText(message.content);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1200);
-    } catch {
-      // Clipboard may be unavailable in some sandboxed WebView contexts;
-      // fail silently rather than surface a fatal error for a secondary action.
-    }
+    if (!(await writeClipboard(message.content))) return;
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1200);
   };
 
   const copyUserContent = async (text: string) => {
-    try {
-      await navigator.clipboard.writeText(text);
-    } catch {
-      // see copyContent above
-    }
+    await writeClipboard(text);
+  };
+
+  // Right-click "Copy" handler. Copies the bubble-scoped selection captured
+  // at right-click time, or the full message body when nothing was selected.
+  // Kept separate from `copyContent` so the kebab's "Copied" tick state isn't
+  // affected by right-click copies.
+  const copyFromContextMenu = async () => {
+    const fullText =
+      message.role === "user"
+        ? stripInlinedAttachments(message.content)
+        : message.content;
+    const text = contextSelection || fullText;
+    if (!text) return;
+    await writeClipboard(text);
+  };
+
+  // Ctrl+C / Cmd+C copies the current selection, and the browser's serializer
+  // adds a newline at every block boundary it crosses. The user bubble nests
+  // the prompt inside several wrapper divs and sits next to a hidden
+  // right-click trigger plus an absolutely-positioned kebab, so a full-bubble
+  // selection ends up with blank lines bracketing the actual text.
+  //
+  // Intercept the copy event for the user bubble and write exactly the
+  // selected slice of the prompt — backed by the original string in the DOM,
+  // not the browser's selection serialization. The kebab's "Copy message"
+  // and the right-click "Copy" already go through navigator.clipboard
+  // directly and aren't affected by this handler; only the Ctrl+C / Cmd+C
+  // path needs the interception. Falls through to the default behaviour when
+  // the selection doesn't intersect the prompt or when the structure is
+  // unexpected (multi-text-node) so we never make copy *worse* than today.
+  const handleUserCopy = (e: React.ClipboardEvent<HTMLDivElement>) => {
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed) return;
+    const range = sel.getRangeAt(0);
+    const bubble = e.currentTarget;
+    if (
+      !bubble.contains(range.startContainer) ||
+      !bubble.contains(range.endContainer)
+    )
+      return;
+    const p = bubble.querySelector<HTMLParagraphElement>("[data-prompt-text]");
+    if (!p || !range.intersectsNode(p)) return;
+    const textNode = p.firstChild;
+    if (!textNode || textNode.nodeType !== Node.TEXT_NODE) return;
+    const fullText = textNode.nodeValue ?? "";
+    const start =
+      range.startContainer === textNode ? range.startOffset : 0;
+    const end =
+      range.endContainer === textNode ? range.endOffset : fullText.length;
+    const text = fullText.slice(start, end);
+    if (!text) return;
+    e.preventDefault();
+    e.clipboardData.setData("text/plain", text);
+  };
+
+  // Programmatically highlight the entire message body. Deferred to the next
+  // frame because Radix's dropdown close-on-select would otherwise collapse
+  // the new selection a beat after we set it.
+  const selectAllBody = () => {
+    requestAnimationFrame(() => {
+      const el = bodyRef.current;
+      if (!el) return;
+      const sel = window.getSelection();
+      if (!sel) return;
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      sel.removeAllRanges();
+      sel.addRange(range);
+    });
   };
 
   if (message.role === "system") {
@@ -188,6 +417,7 @@ function MessageItemImpl({ message, isStreaming, metrics }: MessageProps) {
   const isUser = message.role === "user";
   const persistedMetrics = parseMetrics(message.metrics_json);
   const showMetrics = metrics ?? persistedMetrics;
+  const toolCalls = !isUser ? parseToolCalls(message.tool_calls_json) : [];
   const attachments = isUser ? parseAttachments(message.attachments_json) : [];
   const images = attachments.filter((a) => a.kind === "image");
   const files = attachments.filter((a) => a.kind === "text" || a.kind === "file");
@@ -209,10 +439,13 @@ function MessageItemImpl({ message, isStreaming, metrics }: MessageProps) {
             ? "rounded-3xl rounded-tr-lg border border-foreground/10 bg-foreground/[0.08] px-4 py-2.5 text-foreground backdrop-blur-xl"
             : "rounded-3xl rounded-tl-lg text-foreground/95",
         )}
+        onCopy={isUser ? handleUserCopy : undefined}
         onContextMenu={(e) => {
           e.preventDefault();
-          const bubble = e.currentTarget.getBoundingClientRect();
-          const pos = { x: e.clientX - bubble.left, y: e.clientY - bubble.top };
+          const bubbleEl = e.currentTarget;
+          const rect = bubbleEl.getBoundingClientRect();
+          const pos = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+          setContextSelection(getSelectionWithin(bubbleEl));
           if (isUser) {
             setUserMenuPos(pos);
             setUserMenuOpen(true);
@@ -223,7 +456,16 @@ function MessageItemImpl({ message, isStreaming, metrics }: MessageProps) {
         }}
       >
         {isUser && (
-          <DropdownMenu open={userMenuOpen} onOpenChange={setUserMenuOpen}>
+          <DropdownMenu
+            open={userMenuOpen}
+            onOpenChange={(open) => {
+              setUserMenuOpen(open);
+              // Clear the snapshotted selection when the menu closes so a
+              // later right-click that lands on the bubble without an
+              // active selection doesn't copy the previous one.
+              if (!open) setContextSelection("");
+            }}
+          >
             <DropdownMenuTrigger asChild>
               <button
                 type="button"
@@ -238,29 +480,33 @@ function MessageItemImpl({ message, isStreaming, metrics }: MessageProps) {
             </DropdownMenuTrigger>
             <DropdownMenuContent
               align="start"
-              className="!bg-none !bg-foreground/[0.08] border border-foreground/10 backdrop-blur-xl min-w-[180px]"
+              className="!bg-none !bg-foreground/[0.08] border border-foreground/10 backdrop-blur-xl min-w-[160px]"
             >
               <DropdownMenuItem
-                onSelect={() => void copyUserContent(displayContent)}
+                onSelect={() => void copyFromContextMenu()}
                 className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
               >
                 <Copy className="h-4 w-4 text-foreground/60" />
                 Copy
               </DropdownMenuItem>
               <DropdownMenuItem
-                onSelect={() =>
-                  openSnippetDialog({ seedPrompt: displayContent })
-                }
+                onSelect={selectAllBody}
                 className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
               >
-                <Bookmark className="h-4 w-4 text-foreground/60" />
-                Save as Snippet
+                <TextSelect className="h-4 w-4 text-foreground/60" />
+                Select all
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
         )}
         {!isUser && message.content.length > 0 && (
-          <DropdownMenu open={assistantMenuOpen} onOpenChange={setAssistantMenuOpen}>
+          <DropdownMenu
+            open={assistantMenuOpen}
+            onOpenChange={(open) => {
+              setAssistantMenuOpen(open);
+              if (!open) setContextSelection("");
+            }}
+          >
             <DropdownMenuTrigger asChild>
               <button
                 type="button"
@@ -275,14 +521,21 @@ function MessageItemImpl({ message, isStreaming, metrics }: MessageProps) {
             </DropdownMenuTrigger>
             <DropdownMenuContent
               align="start"
-              className="!bg-none !bg-foreground/[0.08] border border-foreground/10 backdrop-blur-xl min-w-[140px]"
+              className="!bg-none !bg-foreground/[0.08] border border-foreground/10 backdrop-blur-xl min-w-[160px]"
             >
               <DropdownMenuItem
-                onSelect={() => void copyContent()}
+                onSelect={() => void copyFromContextMenu()}
                 className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
               >
                 <Copy className="h-4 w-4 text-foreground/60" />
                 Copy
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                onSelect={selectAllBody}
+                className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
+              >
+                <TextSelect className="h-4 w-4 text-foreground/60" />
+                Select all
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
@@ -332,7 +585,10 @@ function MessageItemImpl({ message, isStreaming, metrics }: MessageProps) {
             isStreaming={isStreaming && message.content.length === 0}
           />
         )}
-        {message.content.length === 0 && isStreaming && !message.thinking ? (
+        {!isUser && toolCalls.length > 0 && (
+          <ToolCallsBlock calls={toolCalls} />
+        )}
+        {message.content.length === 0 && isStreaming && !message.thinking && toolCalls.length === 0 ? (
           <div className="flex items-center gap-1.5 py-1 text-muted-foreground">
             <span className="inline-block h-1.5 w-1.5 animate-blink rounded-full bg-current" />
             <span className="inline-block h-1.5 w-1.5 animate-blink rounded-full bg-current [animation-delay:200ms]" />
@@ -340,21 +596,20 @@ function MessageItemImpl({ message, isStreaming, metrics }: MessageProps) {
           </div>
         ) : isUser ? (
           displayContent.length > 0 && (
-            <div data-message-content>
+            <div ref={bodyRef}>
               <ExpandableUserText content={displayContent} />
             </div>
           )
         ) : (
-          <div data-message-content>
+          <div ref={bodyRef}>
             <Markdown content={message.content} />
           </div>
         )}
-        {/* Keyboard-accessible action menu for user messages. Mirrors the
-            assistant kebab below — same shape, same actions as the
-            right-click menu above. Hidden until hover/focus to keep the
-            outgoing-message look clean, but tab-reachable for keyboard
-            users who couldn't otherwise open the hidden right-click
-            trigger. */}
+        {/* Keyboard-accessible action menu for user messages — the
+            full-content actions (Copy message, Save as Snippet) that the
+            right-click menu intentionally omits. Hidden until hover/focus
+            to keep the outgoing-message look clean, but tab-reachable so
+            keyboard users have a discoverable path to these actions. */}
         {isUser && displayContent.length > 0 && (
           <div className="absolute -bottom-1 right-2 translate-y-full">
             <DropdownMenu open={userKebabOpen} onOpenChange={setUserKebabOpen}>
@@ -381,7 +636,7 @@ function MessageItemImpl({ message, isStreaming, metrics }: MessageProps) {
                   className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
                 >
                   <Copy className="h-4 w-4 text-foreground/60" />
-                  Copy
+                  Copy message
                 </DropdownMenuItem>
                 <DropdownMenuItem
                   onSelect={() =>
@@ -431,7 +686,7 @@ function MessageItemImpl({ message, isStreaming, metrics }: MessageProps) {
                   className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
                 >
                   <Copy className="h-4 w-4 text-foreground/60" />
-                  Copy
+                  Copy message
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
