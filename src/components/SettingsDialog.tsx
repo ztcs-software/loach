@@ -84,6 +84,14 @@ type ConnTestState =
   | { kind: "ok"; modelCount: number }
   | { kind: "error"; error: string };
 
+const API_BASE_URL_PRESETS: ReadonlyArray<{ label: string; url: string }> = [
+  { label: "OpenAI", url: "https://api.openai.com/v1" },
+  { label: "llama.cpp (llama-server)", url: "http://localhost:8080/v1" },
+  { label: "LM Studio", url: "http://localhost:1234/v1" },
+  { label: "vLLM", url: "http://localhost:8000/v1" },
+  { label: "LiteLLM", url: "http://localhost:4000/v1" },
+];
+
 const GITHUB_URL = "https://github.com/ztcs-software/loach";
 const DOCS_URL = "https://docs.loach.dev";
 
@@ -260,15 +268,46 @@ export function SettingsDialog() {
 
                 <div>
                   <Label>API base URL</Label>
-                  <Input
-                    className="mt-1.5"
-                    value={settings.openai_base_url}
-                    onChange={(e) => {
-                      settings.update("openai_base_url", e.target.value);
-                      if (openaiTest.kind !== "idle") setOpenaiTest({ kind: "idle" });
-                    }}
-                    placeholder="https://api.openai.com/v1"
-                  />
+                  <div className="relative mt-1.5">
+                    <Input
+                      className="pr-10"
+                      value={settings.openai_base_url}
+                      onChange={(e) => {
+                        settings.update("openai_base_url", e.target.value);
+                        if (openaiTest.kind !== "idle") setOpenaiTest({ kind: "idle" });
+                      }}
+                      placeholder="https://api.openai.com/v1"
+                    />
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <button
+                          type="button"
+                          aria-label="Choose a preset endpoint"
+                          title="Preset endpoints"
+                          className="absolute right-1.5 top-1/2 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-full text-foreground/55 transition-colors hover:bg-foreground/10 hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-foreground/25"
+                        >
+                          <ChevronDown className="h-4 w-4" />
+                        </button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end" className="w-72">
+                        {API_BASE_URL_PRESETS.map((p) => (
+                          <DropdownMenuItem
+                            key={p.label}
+                            onSelect={() => {
+                              settings.update("openai_base_url", p.url);
+                              if (openaiTest.kind !== "idle") setOpenaiTest({ kind: "idle" });
+                            }}
+                            className="flex flex-col items-start gap-0.5"
+                          >
+                            <span className="text-[13px]">{p.label}</span>
+                            <span className="font-mono text-[11px] text-foreground/55">
+                              {p.url}
+                            </span>
+                          </DropdownMenuItem>
+                        ))}
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  </div>
                   <p className="mt-1.5 text-[11px] text-foreground/50">
                     Override to use vLLM, LM Studio, LiteLLM or any OpenAI-compatible proxy.
                   </p>
