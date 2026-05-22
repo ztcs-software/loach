@@ -119,23 +119,29 @@ export function Onboarding() {
                   </p>
                 </div>
               </div>
+              {/* Hierarchy: the safe action ("Keep configuring") is the
+                  primary, prominent button; the destructive option
+                  ("Skip anyway") is demoted to a muted ghost so a user
+                  reflexively clicking the brighter target lands on the
+                  recoverable choice. */}
               <div className="mt-4 flex justify-end gap-2">
                 <Button
+                  size="sm"
                   variant="ghost"
-                  size="sm"
-                  onClick={() => setConfirming(false)}
-                >
-                  Keep configuring
-                </Button>
-                <Button
-                  size="sm"
-                  variant="outline"
                   onClick={() => {
                     setConfirming(false);
                     void complete();
                   }}
+                  className="text-foreground/55 hover:text-foreground"
                 >
                   Skip anyway
+                </Button>
+                <Button
+                  size="sm"
+                  onClick={() => setConfirming(false)}
+                  autoFocus
+                >
+                  Keep configuring
                 </Button>
               </div>
             </div>
