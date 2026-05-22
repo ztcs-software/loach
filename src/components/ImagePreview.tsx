@@ -50,16 +50,16 @@ export function ImagePreview({ open, onOpenChange, data, mime, name }: ImagePrev
   return (
     <DialogPrimitive.Root open={open} onOpenChange={onOpenChange}>
       <DialogPrimitive.Portal>
-        <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-black/75 backdrop-blur-md data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
+        <DialogPrimitive.Overlay className="fixed inset-x-0 bottom-0 top-9 z-50 bg-black/75 backdrop-blur-md data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
         <DialogPrimitive.Content
           aria-describedby={undefined}
-          className="fixed inset-0 z-50 flex flex-col items-center justify-center gap-4 p-6 outline-none"
+          className="fixed inset-x-0 bottom-0 top-9 z-50 flex flex-col items-center justify-center gap-4 p-6 outline-none"
         >
           <DialogPrimitive.Title className="sr-only">{name}</DialogPrimitive.Title>
           <img
             src={`data:${mime};base64,${data}`}
             alt={name}
-            className="max-h-[calc(100vh-9rem)] max-w-[calc(100vw-3rem)] rounded-lg object-contain shadow-2xl"
+            className="max-h-[calc(100vh-10rem)] max-w-[calc(100vw-3rem)] rounded-lg object-contain shadow-2xl"
           />
           <Button onClick={handleSave} disabled={saving} variant="secondary" size="sm">
             <Download className="h-4 w-4" />
