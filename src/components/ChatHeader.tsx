@@ -269,8 +269,11 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
     refresh();
   }, [settingsHydrated, refresh]);
 
+  // Display provider name in its canonical brand-cased form; the underlying
+  // `session.provider` value is the lower-case id.
+  const providerLabel = session?.provider === "openai" ? "OpenAI" : "Ollama";
   const currentLabel = session
-    ? `${session.model || "(no model)"} · ${session.provider}`
+    ? `${session.model || "(no model)"} · ${providerLabel}`
     : "Select a chat";
 
   const select = (provider: ProviderId, model: string) => {
@@ -384,14 +387,16 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
             {ollamaModels.length === 0 && !openaiKeySet && (
               <>
                 <DropdownMenuSeparator />
-                <div className="px-2 py-1.5 text-[11px] text-foreground/55">
-                  No models available. Configure one to get started:
+                <div className="px-2 py-1.5">
+                  <p className="text-[12px] font-medium text-foreground/85">
+                    No models yet
+                  </p>
+                  <p className="mt-0.5 text-[11px] text-foreground/55">
+                    Pick how you want to run models.
+                  </p>
                 </div>
-                <DropdownMenuItem onSelect={() => setSidebarTab("models")}>
-                  Install local models…
-                </DropdownMenuItem>
                 <DropdownMenuItem onSelect={() => openSettingsTab("providers")}>
-                  Add an API key…
+                  Configure providers…
                 </DropdownMenuItem>
               </>
             )}

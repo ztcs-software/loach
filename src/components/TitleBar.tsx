@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
-import { Minus, Square, X, Copy, PanelLeft, Search } from "lucide-react";
+import { Minus, Square, X, Copy, Ghost, PanelLeft, Search } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { isTauri } from "@/lib/tauri";
+import { useChatStore } from "@/stores/chatStore";
+import { usePrivateChatStore } from "@/stores/privateChatStore";
 import { useUIStore } from "@/stores/uiStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import topBarLogo from "@/assets/loach-icon.png";
@@ -30,6 +32,14 @@ export function TitleBar() {
   const settingsHydrated = useSettingsStore((s) => s.hydrated);
   const onboardingCompleted = useSettingsStore((s) => s.onboarding_completed);
   const onboardingActive = settingsHydrated && !onboardingCompleted;
+  // Private Chat takes over the whole surface below the title bar. The
+  // sidebar toggle and global search both interact with regular,
+  // SQLite-backed chats — clicking them while in private mode would either
+  // reveal the regular sidebar behind the overlay or surface persisted
+  // chat content through the search palette. Disable both for the duration
+  // of the private session.
+  const privateChatOpen = usePrivateChatStore((s) => s.open);
+  const topBarLocked = onboardingActive || privateChatOpen;
 
   useEffect(() => {
     if (!isTauri) return;
@@ -74,6 +84,21 @@ export function TitleBar() {
   const toggleMax = () => callWindow("toggleMaximize");
   const close = () => callWindow("close");
 
+  // Open Private Chat. Per the "pause regular while private" decision, we
+  // first cancel whichever regular chat (if any) is currently streaming so
+  // it doesn't keep generating tokens into the SQLite-backed transcript
+  // while the user is having an ephemeral conversation. The store is
+  // intentionally agnostic of `chatStore`, so this orchestration lives at
+  // the entry point.
+  const openPrivateChat = () => {
+    const chat = useChatStore.getState();
+    const streamingId = chat.streamingSessionId;
+    if (streamingId) {
+      void chat.cancelForSession(streamingId);
+    }
+    usePrivateChatStore.getState().setOpen(true);
+  };
+
   return (
     <div
       data-tauri-drag-region
@@ -92,7 +117,7 @@ export function TitleBar() {
       <button
         type="button"
         onClick={toggleSidebar}
-        disabled={onboardingActive}
+        disabled={topBarLocked}
         aria-label={sidebarOpen ? "Hide sidebar" : "Show sidebar"}
         title={sidebarOpen ? "Hide sidebar" : "Show sidebar"}
         className="inline-flex h-7 w-7 items-center justify-center rounded-md text-foreground/55 transition-colors hover:bg-foreground/10 hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
@@ -140,7 +165,7 @@ export function TitleBar() {
         <button
           type="button"
           onClick={() => window.dispatchEvent(new CustomEvent("loach:focus-search"))}
-          disabled={onboardingActive}
+          disabled={topBarLocked}
           aria-label="Search"
           title="Search"
           className="pointer-events-auto inline-flex h-7 w-72 items-center gap-2 rounded-md border border-foreground/[0.08] bg-foreground/[0.04] px-2.5 text-foreground/55 transition-colors hover:bg-foreground/[0.08] hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
@@ -157,7 +182,29 @@ export function TitleBar() {
 
       <div className="min-w-0 flex-1" />
 
-      {/* Right — window controls. */}
+      {/* Right — Private Chat trigger, then window controls. The Private
+          Chat button sits immediately to the left of the OS-style
+          minimize/maximize/close cluster with a small margin so it reads
+          as a related-but-separate action, not part of the window
+          chrome itself. Disabled during onboarding for the same reason
+          the sidebar toggle and search pill are disabled — the wizard
+          owns the user's attention. */}
+      <div className="flex shrink-0 items-center pr-2">
+        <button
+          type="button"
+          onClick={openPrivateChat}
+          disabled={topBarLocked}
+          aria-label="Open Private Chat"
+          title={
+            privateChatOpen
+              ? "Private Chat is already open"
+              : "Private Chat — temporary, nothing stored"
+          }
+          className="inline-flex h-7 w-7 items-center justify-center rounded-md text-foreground/55 transition-colors hover:bg-foreground/10 hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
+        >
+          <Ghost className="h-3.5 w-3.5" />
+        </button>
+      </div>
       <div className="flex shrink-0 items-center">
         <TitleButton onClick={minimize} ariaLabel="Minimize">
           <Minus className="h-3.5 w-3.5" />

@@ -702,6 +702,20 @@ impl Database {
         })
     }
 
+    /// Delete a single message. Scoped by `session_id` for the same
+    /// defense-in-depth reason `update_message` is: a leaked or
+    /// confused message id can't reach across sessions to delete an
+    /// arbitrary row. The 0-row case is silently accepted — callers
+    /// treat a miss as benign (the row may already be gone).
+    pub fn delete_message(&self, id: &str, session_id: &str) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "DELETE FROM messages WHERE id = ?1 AND session_id = ?2",
+            params![id, session_id],
+        )?;
+        Ok(())
+    }
+
     pub fn update_message(
         &self,
         id: &str,
@@ -1541,6 +1555,18 @@ impl Database {
             "UPDATE sessions SET archived_at = ?1, pinned_at = NULL
              WHERE archived_at IS NULL",
             params![now],
+        )?;
+        Ok(affected as i64)
+    }
+
+    /// Permanently delete every archived session (and their messages via
+    /// ON DELETE CASCADE). Live chats are untouched. Returns the row count
+    /// so the UI can confirm "Removed N chats".
+    pub fn delete_archived_sessions(&self) -> Result<i64> {
+        let conn = self.conn.lock();
+        let affected = conn.execute(
+            "DELETE FROM sessions WHERE archived_at IS NOT NULL",
+            [],
         )?;
         Ok(affected as i64)
     }

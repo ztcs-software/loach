@@ -6,7 +6,10 @@ import {
   BookOpen,
   Brain,
   Check,
+  CheckCircle2,
   ChevronDown,
+  ChevronRight,
+  CircleAlert,
   Clock,
   Database,
   Download,
@@ -23,6 +26,7 @@ import {
   RefreshCw,
   RotateCcw,
   Server,
+  Sparkles,
   Trash2,
   Upload,
   User,
@@ -50,6 +54,7 @@ import { resolveDefaultModelChoice, useChatStore } from "@/stores/chatStore";
 import { useModelsStore } from "@/stores/modelsStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useSpaceStore } from "@/stores/spaceStore";
+import { useToastStore } from "@/stores/toastStore";
 import { useUIStore } from "@/stores/uiStore";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { McpPanel } from "@/components/McpPanel";
@@ -63,6 +68,8 @@ import {
   factoryReset,
   importDataWithDialog,
   isTauri,
+  ollamaListModels,
+  openaiListModels,
   saveTextToFile,
   wipeUserData,
   type DestructiveAuth,
@@ -73,6 +80,20 @@ import { cn } from "@/lib/utils";
 import { DEFAULT_TONE_ID, TONES } from "@/lib/tones";
 import type { FontSize, ImportStats, ModelInfo, ProviderId, Session } from "@/types";
 import pkg from "../../package.json";
+
+type ConnTestState =
+  | { kind: "idle" }
+  | { kind: "testing" }
+  | { kind: "ok"; modelCount: number }
+  | { kind: "error"; error: string };
+
+const API_BASE_URL_PRESETS: ReadonlyArray<{ label: string; url: string }> = [
+  { label: "OpenAI", url: "https://api.openai.com/v1" },
+  { label: "llama.cpp (llama-server)", url: "http://localhost:8080/v1" },
+  { label: "LM Studio", url: "http://localhost:1234/v1" },
+  { label: "vLLM", url: "http://localhost:8000/v1" },
+  { label: "LiteLLM", url: "http://localhost:4000" },
+];
 
 const GITHUB_URL = "https://github.com/ztcs-software/loach";
 const DOCS_URL = "https://docs.loach.dev";
@@ -90,6 +111,7 @@ async function openExternal(url: string) {
 const NAV = [
   { value: "general", label: "General", icon: User },
   { value: "providers", label: "Providers", icon: Server },
+  { value: "features", label: "Features", icon: Sparkles },
   { value: "tools", label: "Tools", icon: Wrench },
   { value: "appearance", label: "Appearance", icon: Palette },
   { value: "mcp", label: "MCP", icon: Plug },
@@ -109,6 +131,36 @@ export function SettingsDialog() {
 
   const [pendingKey, setPendingKey] = useState("");
   const [busy, setBusy] = useState(false);
+  const [ollamaTest, setOllamaTest] = useState<ConnTestState>({ kind: "idle" });
+  const [openaiTest, setOpenaiTest] = useState<ConnTestState>({ kind: "idle" });
+  const [templateVarsOpen, setTemplateVarsOpen] = useState(false);
+  const [tonesInfoOpen, setTonesInfoOpen] = useState(false);
+
+  const runOllamaTest = async () => {
+    setOllamaTest({ kind: "testing" });
+    try {
+      const models = await ollamaListModels(settings.ollama_base_url);
+      setOllamaTest({ kind: "ok", modelCount: models.length });
+    } catch (e) {
+      setOllamaTest({
+        kind: "error",
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
+  };
+
+  const runOpenAITest = async () => {
+    setOpenaiTest({ kind: "testing" });
+    try {
+      const models = await openaiListModels(settings.openai_base_url);
+      setOpenaiTest({ kind: "ok", modelCount: models.length });
+    } catch (e) {
+      setOpenaiTest({
+        kind: "error",
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
+  };
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
@@ -177,7 +229,7 @@ export function SettingsDialog() {
 
           {/* ─────────── Right column: scrolling content ─────────── */}
           <div className="flex min-w-0 flex-1 flex-col">
-            <div className="flex-1 overflow-y-auto px-8 pb-8 pt-6 pr-14">
+            <div className="flex-1 overflow-y-auto px-8 pb-8 pt-6 pr-14 [scrollbar-gutter:stable]">
               {/* pr-14 keeps the scrolling content clear of the dialog's absolute close X */}
 
               <TabsContent value="providers" className="mt-0 space-y-6 focus-visible:ring-0 focus-visible:ring-offset-0">
@@ -188,26 +240,82 @@ export function SettingsDialog() {
                   <Input
                     className="mt-1.5"
                     value={settings.ollama_base_url}
-                    onChange={(e) => settings.update("ollama_base_url", e.target.value)}
+                    onChange={(e) => {
+                      settings.update("ollama_base_url", e.target.value);
+                      if (ollamaTest.kind !== "idle") setOllamaTest({ kind: "idle" });
+                    }}
                     placeholder="http://localhost:11434"
                   />
                   <p className="mt-1.5 text-[11px] text-foreground/50">
                     Auto-detected on app launch. Leave default unless you run Ollama remotely.
                   </p>
+                  <div className="mt-3 flex items-center gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => void runOllamaTest()}
+                      disabled={ollamaTest.kind === "testing"}
+                      className="gap-1.5"
+                    >
+                      {ollamaTest.kind === "testing" ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <Plug className="h-3.5 w-3.5" />
+                      )}
+                      Test connection
+                    </Button>
+                  </div>
+                  {ollamaTest.kind !== "idle" && ollamaTest.kind !== "testing" && (
+                    <ConnTestResult className="mt-2.5" result={ollamaTest} providerLabel="Ollama" />
+                  )}
                 </div>
 
                 <Separator />
 
                 <div>
-                  <Label>OpenAI base URL</Label>
-                  <Input
-                    className="mt-1.5"
-                    value={settings.openai_base_url}
-                    onChange={(e) => settings.update("openai_base_url", e.target.value)}
-                    placeholder="https://api.openai.com/v1"
-                  />
+                  <Label>API base URL</Label>
+                  <div className="relative mt-1.5">
+                    <Input
+                      className="pr-10"
+                      value={settings.openai_base_url}
+                      onChange={(e) => {
+                        settings.update("openai_base_url", e.target.value);
+                        if (openaiTest.kind !== "idle") setOpenaiTest({ kind: "idle" });
+                      }}
+                      placeholder="https://api.openai.com/v1"
+                    />
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <button
+                          type="button"
+                          aria-label="Choose a preset endpoint"
+                          title="Preset endpoints"
+                          className="absolute right-1.5 top-1/2 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-full text-foreground/55 transition-colors hover:bg-foreground/10 hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-foreground/25"
+                        >
+                          <ChevronDown className="h-4 w-4" />
+                        </button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end" className="w-72">
+                        {API_BASE_URL_PRESETS.map((p) => (
+                          <DropdownMenuItem
+                            key={p.label}
+                            onSelect={() => {
+                              settings.update("openai_base_url", p.url);
+                              if (openaiTest.kind !== "idle") setOpenaiTest({ kind: "idle" });
+                            }}
+                            className="flex flex-col items-start gap-0.5"
+                          >
+                            <span className="text-[13px]">{p.label}</span>
+                            <span className="font-mono text-[11px] text-foreground/55">
+                              {p.url}
+                            </span>
+                          </DropdownMenuItem>
+                        ))}
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  </div>
                   <p className="mt-1.5 text-[11px] text-foreground/50">
-                    Override to use vLLM, LM Studio, LiteLLM or any OpenAI-compatible proxy.
+                    Set an OpenAI-compatible API endpoint.
                   </p>
                 </div>
 
@@ -227,6 +335,7 @@ export function SettingsDialog() {
                         try {
                           await settings.setOpenAIKey(pendingKey);
                           setPendingKey("");
+                          if (openaiTest.kind !== "idle") setOpenaiTest({ kind: "idle" });
                         } finally {
                           setBusy(false);
                         }
@@ -242,6 +351,7 @@ export function SettingsDialog() {
                           setBusy(true);
                           try {
                             await settings.clearOpenAIKey();
+                            if (openaiTest.kind !== "idle") setOpenaiTest({ kind: "idle" });
                           } finally {
                             setBusy(false);
                           }
@@ -252,9 +362,38 @@ export function SettingsDialog() {
                     )}
                   </div>
                   <p className="mt-1.5 text-[11px] text-foreground/50">
-                    Stored in your OS credential manager (Windows Credential Manager / Linux Secret Service).
-                    Never written to disk in plain text.
+                    Leave blank for local servers (llama.cpp, LM Studio, vLLM).
+                    Only required for hosted providers like OpenAI.
                   </p>
+                  <div className="mt-3 flex items-center gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => void runOpenAITest()}
+                      disabled={openaiTest.kind === "testing" || pendingKey.length > 0}
+                      className="gap-1.5"
+                      title={
+                        pendingKey.length > 0
+                          ? "Save the key first, then test."
+                          : undefined
+                      }
+                    >
+                      {openaiTest.kind === "testing" ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <Plug className="h-3.5 w-3.5" />
+                      )}
+                      Test connection
+                    </Button>
+                    {pendingKey.length > 0 && (
+                      <span className="text-[11px] text-foreground/55">
+                        Save the key first, then test.
+                      </span>
+                    )}
+                  </div>
+                  {openaiTest.kind !== "idle" && openaiTest.kind !== "testing" && (
+                    <ConnTestResult className="mt-2.5" result={openaiTest} providerLabel="OpenAI" />
+                  )}
                 </div>
 
               </TabsContent>
@@ -342,6 +481,76 @@ export function SettingsDialog() {
                       );
                     })}
                   </div>
+                  <div className="mt-3 rounded-xl border border-foreground/10 bg-foreground/[0.03] p-3 text-[11px] leading-relaxed text-foreground/60">
+                    <button
+                      type="button"
+                      onClick={() => setTonesInfoOpen((v) => !v)}
+                      aria-expanded={tonesInfoOpen}
+                      className="flex w-full items-center gap-1.5 text-left font-medium text-foreground/75 transition-colors hover:text-foreground"
+                    >
+                      {tonesInfoOpen ? (
+                        <ChevronDown className="h-3.5 w-3.5 shrink-0" />
+                      ) : (
+                        <ChevronRight className="h-3.5 w-3.5 shrink-0" />
+                      )}
+                      What each tone does
+                    </button>
+                    {tonesInfoOpen && (
+                      <ul className="mt-1.5 space-y-1 pl-5">
+                        {TONES.map((t) => {
+                          const Icon = t.icon;
+                          return (
+                            <li
+                              key={t.id}
+                              className="flex items-center gap-1.5"
+                            >
+                              <Icon className="h-3 w-3 shrink-0 text-foreground/55" />
+                              <span className="font-medium text-foreground/75">
+                                {t.label}
+                              </span>
+                              <span className="text-foreground/55">
+                                — {t.shortDescription}
+                              </span>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    )}
+                  </div>
+                </div>
+
+              </TabsContent>
+
+              <TabsContent value="features" className="mt-0 space-y-6 focus-visible:ring-0 focus-visible:ring-offset-0">
+                <SectionTitle>Features</SectionTitle>
+
+                <div>
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="min-w-0">
+                      <Label className="flex items-center gap-1.5">
+                        <Brain className="h-3.5 w-3.5 text-foreground/60" />
+                        Thinking
+                      </Label>
+                      <p className="mt-1 text-[11px] text-foreground/50">
+                        Default state of the per-chat Thinking toggle for new
+                        chats. Thinking switch in chat settings overrides this.
+                        Only applies to thinking-capable Ollama models - OpenAI
+                        API providers ignore this field.
+                      </p>
+                    </div>
+                    <Switch
+                      checked={settings.thinking_default}
+                      onCheckedChange={(next) =>
+                        settings.update("thinking_default", next)
+                      }
+                      className="shrink-0"
+                      aria-label={
+                        settings.thinking_default
+                          ? "Disable LLM Thinking by default"
+                          : "Enable LLM Thinking by default"
+                      }
+                    />
+                  </div>
                 </div>
 
                 <Separator />
@@ -373,51 +582,34 @@ export function SettingsDialog() {
                     />
                   </div>
                   <div className="mt-3 rounded-xl border border-foreground/10 bg-foreground/[0.03] p-3 text-[11px] leading-relaxed text-foreground/60">
-                    <p className="mb-1 font-medium text-foreground/75">
+                    <button
+                      type="button"
+                      onClick={() => setTemplateVarsOpen((v) => !v)}
+                      aria-expanded={templateVarsOpen}
+                      className="flex w-full items-center gap-1.5 text-left font-medium text-foreground/75 transition-colors hover:text-foreground"
+                    >
+                      {templateVarsOpen ? (
+                        <ChevronDown className="h-3.5 w-3.5 shrink-0" />
+                      ) : (
+                        <ChevronRight className="h-3.5 w-3.5 shrink-0" />
+                      )}
                       Template variables
-                    </p>
-                    <p>
-                      You may use these variables inside general custom
-                      instructions or in Spaces, Snippets and per-chat.
-                    </p>
-                    <ul className="mt-1.5 space-y-0.5 font-mono text-[11px]">
-                      <li>{"{{CURRENT_DATE}}"} → 2026-04-17</li>
-                      <li>{"{{CURRENT_TIME}}"} → 14:32</li>
-                      <li>{"{{CURRENT_WEEKDAY}}"} → Friday</li>
-                      <li>{"{{CURRENT_DATETIME}}"} → 2026-04-17 14:32</li>
-                      <li>{"{{CURRENT_TIMEZONE}}"} → Europe/Warsaw</li>
-                    </ul>
-                  </div>
-                </div>
-
-                <Separator />
-
-                <div>
-                  <div className="flex items-start justify-between gap-4">
-                    <div className="min-w-0">
-                      <Label className="flex items-center gap-1.5">
-                        <Brain className="h-3.5 w-3.5 text-foreground/60" />
-                        Thinking
-                      </Label>
-                      <p className="mt-1 text-[11px] text-foreground/50">
-                        Default state of the per-chat Thinking toggle for new
-                        chats. Thinking switch in chat settings overrides this.
-                        Only applies to thinking-capable Ollama models - OpenAI
-                        API providers ignore this field.
-                      </p>
-                    </div>
-                    <Switch
-                      checked={settings.thinking_default}
-                      onCheckedChange={(next) =>
-                        settings.update("thinking_default", next)
-                      }
-                      className="shrink-0"
-                      aria-label={
-                        settings.thinking_default
-                          ? "Disable LLM Thinking by default"
-                          : "Enable LLM Thinking by default"
-                      }
-                    />
+                    </button>
+                    {templateVarsOpen && (
+                      <div className="mt-1.5 pl-5">
+                        <p>
+                          You may use these variables inside general custom
+                          instructions or in Spaces, Snippets and per-chat.
+                        </p>
+                        <ul className="mt-1.5 space-y-0.5 font-mono text-[11px]">
+                          <li>{"{{CURRENT_DATE}}"} → 2026-04-17</li>
+                          <li>{"{{CURRENT_TIME}}"} → 14:32</li>
+                          <li>{"{{CURRENT_WEEKDAY}}"} → Friday</li>
+                          <li>{"{{CURRENT_DATETIME}}"} → 2026-04-17 14:32</li>
+                          <li>{"{{CURRENT_TIMEZONE}}"} → Europe/Warsaw</li>
+                        </ul>
+                      </div>
+                    )}
                   </div>
                 </div>
 
@@ -641,6 +833,124 @@ export function SettingsDialog() {
 function SectionTitle({ children }: { children: React.ReactNode }) {
   return (
     <h3 className="text-lg font-semibold tracking-tight">{children}</h3>
+  );
+}
+
+/** Inline success / failure card for the Providers "Test connection"
+ *  buttons. Mirrors `McpPanel`'s TestResultCard styling so users see the
+ *  same visual language no matter which connection they're checking. */
+/** Bucket a raw connection-test error string into a short actionable hint.
+ *  Pattern-matches against the messages the Rust admin path actually
+ *  produces (SSRF guard text, reqwest's HTTP/IO display, our own URL-parse
+ *  error). Returns `kind: "other"` with an empty hint when nothing
+ *  matches — the raw message is still shown verbatim above the hint, so
+ *  unrecognised errors degrade gracefully instead of swallowing context. */
+function classifyConnError(msg: string): {
+  kind: "auth" | "ssrf" | "url" | "notfound" | "network" | "other";
+  hint: string;
+} {
+  const m = msg.toLowerCase();
+  if (m.includes("refusing to connect")) {
+    return {
+      kind: "ssrf",
+      hint: "Loach blocks this address range — link-local hosts cloud-metadata services that shouldn't see LLM traffic. Use a public host or a private LAN address instead.",
+    };
+  }
+  if (
+    m.includes("could not parse base url") ||
+    m.includes("invalid url") ||
+    m.includes("relative url without a base")
+  ) {
+    return {
+      kind: "url",
+      hint: "The base URL didn't parse. Make sure it starts with http:// or https:// and has no typos.",
+    };
+  }
+  if (
+    m.includes("401") ||
+    m.includes("unauthorized") ||
+    m.includes("403") ||
+    m.includes("forbidden")
+  ) {
+    return {
+      kind: "auth",
+      hint: "The server rejected the request as unauthorized. Check that the API key is set and valid for this endpoint.",
+    };
+  }
+  if (m.includes("404") || m.includes("not found")) {
+    return {
+      kind: "notfound",
+      hint: "The /models endpoint wasn't found. Double-check the base URL — OpenAI itself ends in /v1, but LiteLLM and Ollama's OpenAI-compat proxy don't.",
+    };
+  }
+  if (
+    m.includes("timed out") ||
+    m.includes("timeout") ||
+    m.includes("connection refused") ||
+    m.includes("dns error") ||
+    m.includes("error trying to connect") ||
+    m.includes("network unreachable") ||
+    m.includes("error sending request")
+  ) {
+    return {
+      kind: "network",
+      hint: "Couldn't reach the server. Is it running? Is the host/port correct? If it's a remote provider, check your internet connection.",
+    };
+  }
+  return { kind: "other", hint: "" };
+}
+
+function ConnTestResult({
+  result,
+  providerLabel,
+  className,
+}: {
+  result:
+    | { kind: "ok"; modelCount: number }
+    | { kind: "error"; error: string };
+  providerLabel: string;
+  className?: string;
+}) {
+  if (result.kind === "error") {
+    const { hint } = classifyConnError(result.error || "");
+    return (
+      <div
+        className={cn(
+          "rounded-xl border border-destructive/40 bg-destructive/10 p-3 text-[13px] text-destructive",
+          className,
+        )}
+      >
+        <div className="flex items-center gap-1.5 font-medium">
+          <CircleAlert className="h-4 w-4" />
+          Connection failed
+        </div>
+        <p className="mt-1 text-[12px] text-destructive/90 break-words">
+          {result.error || "Unknown error"}
+        </p>
+        {hint && (
+          <p className="mt-1.5 text-[12px] text-destructive/75 break-words">
+            {hint}
+          </p>
+        )}
+      </div>
+    );
+  }
+  return (
+    <div
+      className={cn(
+        "rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-3 text-[13px]",
+        className,
+      )}
+    >
+      <div className="flex items-center gap-1.5 font-medium text-emerald-500">
+        <CheckCircle2 className="h-4 w-4" />
+        Connected
+      </div>
+      <p className="mt-1 text-[12px] text-foreground/75">
+        {providerLabel} reachable · {result.modelCount}{" "}
+        {result.modelCount === 1 ? "model" : "models"} available.
+      </p>
+    </div>
   );
 }
 
@@ -1169,8 +1479,11 @@ function ArchivePanel({ onOpenChat }: { onOpenChat: () => void }) {
   const sessions = useChatStore((s) => s.sessions);
   const archive = useChatStore((s) => s.archive);
   const remove = useChatStore((s) => s.remove);
+  const removeAllArchived = useChatStore((s) => s.removeAllArchived);
   const select = useChatStore((s) => s.selectSession);
   const setViewingSpace = useSpaceStore((s) => s.setViewingSpace);
+  const { confirm } = useConfirm();
+  const [removingAll, setRemovingAll] = useState(false);
 
   const archived = sessions
     .filter((s) => s.archived_at != null)
@@ -1180,6 +1493,34 @@ function ArchivePanel({ onOpenChat }: { onOpenChat: () => void }) {
     setViewingSpace(null);
     await select(id);
     onOpenChat();
+  };
+
+  const handleRemoveAll = async () => {
+    const count = archived.length;
+    if (count === 0) return;
+    const ok = await confirm({
+      title: `Remove ${count} archived chat${count === 1 ? "" : "s"}?`,
+      body: "This permanently deletes the archived chats and all their messages. This cannot be undone.",
+      confirmLabel: "Remove all",
+      destructive: true,
+    });
+    if (!ok) return;
+    setRemovingAll(true);
+    try {
+      const n = await removeAllArchived();
+      useToastStore.getState().push({
+        kind: "info",
+        title: `Removed ${n} chat${n === 1 ? "" : "s"}`,
+      });
+    } catch (e) {
+      useToastStore.getState().push({
+        kind: "error",
+        title: "Couldn't remove archived chats",
+        body: e instanceof Error ? e.message : String(e),
+      });
+    } finally {
+      setRemovingAll(false);
+    }
   };
 
   if (archived.length === 0) {
@@ -1198,17 +1539,43 @@ function ArchivePanel({ onOpenChat }: { onOpenChat: () => void }) {
   }
 
   return (
-    <ul className="divide-y divide-foreground/5 rounded-2xl border border-foreground/10 bg-foreground/[0.03]">
-      {archived.map((s) => (
-        <ArchivedRow
-          key={s.id}
-          session={s}
-          onOpen={() => void handleOpen(s.id)}
-          onUnarchive={() => void archive(s.id, false)}
-          onDelete={() => void remove(s.id)}
-        />
-      ))}
-    </ul>
+    <>
+      <div className="flex items-center justify-between gap-3">
+        <span className="text-[12px] text-foreground/55">
+          {archived.length} archived chat{archived.length === 1 ? "" : "s"}
+        </span>
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={() => void handleRemoveAll()}
+          disabled={removingAll}
+          className="h-7 gap-1 rounded-lg px-2 text-destructive hover:bg-destructive/10 hover:text-destructive"
+        >
+          {removingAll ? (
+            <>
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              Removing…
+            </>
+          ) : (
+            <>
+              <Trash2 className="h-3.5 w-3.5" />
+              Remove all
+            </>
+          )}
+        </Button>
+      </div>
+      <ul className="divide-y divide-foreground/5 rounded-2xl border border-foreground/10 bg-foreground/[0.03]">
+        {archived.map((s) => (
+          <ArchivedRow
+            key={s.id}
+            session={s}
+            onOpen={() => void handleOpen(s.id)}
+            onUnarchive={() => void archive(s.id, false)}
+            onDelete={() => void remove(s.id)}
+          />
+        ))}
+      </ul>
+    </>
   );
 }
 

@@ -55,6 +55,14 @@
     --drop-ring-strong:   hsl(14 92% 45% / 0.75);
     --drop-glow-soft:     rgba(230, 80, 30, 0.30);
     --drop-glow-strong:   rgba(230, 80, 30, 0.45);
+
+    /* Text-selection tint, light theme. The light --foreground is near-
+       black against a ~97% lightness background; at 0.2 opacity the
+       resulting wash sat around 10% gray, which read as "is something
+       selected? maybe?" in high ambient light. 0.28 keeps the same hue
+       (so syntax-highlighted code stays legible underneath) but lands
+       firmly above the I'm-not-sure threshold. */
+    --selection-bg: hsl(var(--foreground) / 0.28);
   }
 
   .dark {
@@ -99,6 +107,11 @@
     --drop-ring-strong:   hsl(30 100% 72% / 0.65);
     --drop-glow-soft:     rgba(255, 110, 50, 0.45);
     --drop-glow-strong:   rgba(255, 130, 60, 0.70);
+
+    /* Text-selection tint, dark theme. The 0.2 opacity that read too
+       faint on light reads cleanly here — the dark backdrop gives the
+       near-white foreground plenty of contrast at the same opacity. */
+    --selection-bg: hsl(var(--foreground) / 0.20);
   }
 
   /* Solid background → azure accent in both light and dark modes. The
@@ -140,12 +153,11 @@
 
   /* Theme-aware text selection. The browser-default OS blue clashes with
      the gradient background; a translucent foreground tint reads as a
-     quiet highlight, auto-adapts between light and dark (since
-     `--foreground` flips with the theme), and intentionally omits a
-     `color` override so syntax-highlighted code keeps its colours when
-     selected. */
+     quiet highlight, auto-adapts between light and dark (the underlying
+     token flips per theme), and intentionally omits a `color` override
+     so syntax-highlighted code keeps its colours when selected. */
   ::selection {
-    background: hsl(var(--foreground) / 0.2);
+    background: var(--selection-bg);
     text-shadow: none;
   }
 

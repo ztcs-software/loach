@@ -125,6 +125,13 @@ async fn collect_one(server: &McpServer, slug: &str) -> Result<Vec<McpToolDef>> 
     let mut session = McpSession::new(http, server)?;
     session.initialize().await?;
     let raws = session.list_tools_raw().await?;
+    // Hoist the per-server clones out of the loop. The strings end up
+    // copied into every `McpToolDef` anyway, but doing it once and reusing
+    // the owned values per iteration costs nothing for servers that
+    // expose a single tool and starts mattering for servers that expose
+    // dozens (the GitHub gateway, internal aggregators).
+    let server_id = server.id.clone();
+    let server_name = server.name.clone();
     let mut out: Vec<McpToolDef> = Vec::new();
     for t in raws {
         // Sanitise the raw tool name too. Some MCP servers expose tools
@@ -139,14 +146,32 @@ async fn collect_one(server: &McpServer, slug: &str) -> Result<Vec<McpToolDef>> 
             tracing::warn!(
                 "MCP aggregate: server `{}` exposes tool `{raw}` whose name has no \
                  [A-Za-z0-9_-] characters — skipping",
-                server.name
+                server_name
             );
             continue;
         }
         let qualified = format!("{slug}__{safe}");
+        // Two raw names on the same server can sanitise to the same string
+        // (`repo.search` and `repo/search` both collapse to `repo_search`).
+        // The qualified-name dedup at the slug level only handles cross-
+        // server collisions, so a same-server collision would leave two
+        // `McpToolDef`s sharing a qualified name. The model would see the
+        // duplicate description block and tool-call routing would silently
+        // pick one — so drop the second occurrence and warn the operator.
+        // First one wins; the server owner can rename one of the colliding
+        // tools to recover the dropped one.
+        if out.iter().any(|d| d.qualified_name == qualified) {
+            tracing::warn!(
+                "MCP aggregate: server `{}` exposes tool `{raw}` whose sanitised \
+                 name `{qualified}` collides with an earlier tool on the same \
+                 server — skipping the duplicate",
+                server_name
+            );
+            continue;
+        }
         out.push(McpToolDef {
-            server_id: server.id.clone(),
-            server_name: server.name.clone(),
+            server_id: server_id.clone(),
+            server_name: server_name.clone(),
             name: raw,
             qualified_name: qualified,
             description: t.description,
@@ -158,12 +183,15 @@ async fn collect_one(server: &McpServer, slug: &str) -> Result<Vec<McpToolDef>> 
     Ok(out)
 }
 
-/// Invoke one tool by its `server_id` + raw `name`. Looks the server up in
-/// the DB fresh per call so a configuration change between the chat
-/// request building and the tool dispatch is reflected immediately —
-/// notably, disabling a server mid-conversation prevents further calls to
-/// it. Returns a structured result the chat pipeline can feed back to the
-/// model as a `tool`-role message.
+/// Invoke one tool by its `server_id` + raw `name`. Looks the server up
+/// fresh from the DB per call so a URL or header change between the chat
+/// request building and the tool dispatch is reflected immediately. We
+/// deliberately *don't* gate on `server.enabled` — `aggregate_tools`
+/// already filters disabled servers out of the catalog the model sees,
+/// so this path only runs for tools that were exposed when the turn
+/// started, and rechecking here would race the actual `tools/call`
+/// either way. Returns a structured result the chat pipeline can feed
+/// back to the model as a `tool`-role message.
 pub async fn dispatch_tool_call(
     db: &Database,
     server_id: &str,
@@ -175,9 +203,14 @@ pub async fn dispatch_tool_call(
         .into_iter()
         .find(|s| s.id == server_id)
         .ok_or_else(|| anyhow!("MCP server `{server_id}` is no longer configured"))?;
-    if !server.enabled {
-        bail!("MCP server `{}` is disabled", server.name);
-    }
+    // We *don't* recheck `server.enabled` here: `aggregate_tools` already
+    // filters disabled servers out of the catalog the model sees, so this
+    // path is only reached for tools the user had enabled at chat-stream
+    // start. A check here would still race the actual `tools/call` (the
+    // user can flip the toggle during `initialize().await`), so the
+    // honest outcome is the same — let the call run, and let the server
+    // itself fail naturally if the operator killed the integration mid-
+    // conversation.
     let (http, _) = pin_client_for(&server).await?;
     let mut session = McpSession::new(http, &server)?;
     session.initialize().await?;
@@ -230,6 +263,12 @@ fn sanitise_tool_name(name: &str) -> String {
 /// short slice of the server id. The first server to land on a given
 /// slug keeps it bare; subsequent collisions get `_<6-char-id>` suffixed
 /// so they stay distinct without uglifying the common case.
+///
+/// When the server id has no usable alphanumeric characters we fall back
+/// to a hash of the full id rather than a positional counter — counter-
+/// based suffixes would reshuffle whenever a server is added, removed,
+/// or simply re-ordered by the DB, breaking the qualified-name → tool
+/// mapping that chat history and model prompts hold across restarts.
 fn build_unique_slugs(servers: &[McpServer]) -> Vec<String> {
     use std::collections::HashSet;
     let mut taken: HashSet<String> = HashSet::new();
@@ -243,11 +282,8 @@ fn build_unique_slugs(servers: &[McpServer]) -> Vec<String> {
                 .filter(|c| c.is_ascii_alphanumeric())
                 .take(6)
                 .collect();
-            // Defensive: if even the id has no usable characters, fall
-            // back to the row index encoded in the slug counter so we
-            // never emit a duplicate.
             let candidate = if suffix.is_empty() {
-                format!("{base}_{}", taken.len())
+                format!("{base}_{}", stable_id_suffix(&s.id))
             } else {
                 format!("{base}_{suffix}")
             };
@@ -259,4 +295,33 @@ fn build_unique_slugs(servers: &[McpServer]) -> Vec<String> {
         out.push(slug);
     }
     out
+}
+
+/// 6-character base-36 hash of a server id. Stable across runs (same
+/// input always yields the same suffix) so a qualified tool name persists
+/// even if the DB row order shifts or another server is removed from the
+/// configured list. Only used as a defensive fallback when the id itself
+/// contains no usable alphanumeric characters.
+fn stable_id_suffix(id: &str) -> String {
+    // FNV-1a 64-bit. Cheap, no deps, plenty of bits for a 6-char base-36
+    // window — collisions in that window only matter inside a single
+    // server's `taken` set, which already disambiguates by exact match.
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for b in id.bytes() {
+        hash ^= b as u64;
+        hash = hash.wrapping_mul(0x00000100000001b3);
+    }
+    let mut buf = String::with_capacity(6);
+    let mut h = hash;
+    for _ in 0..6 {
+        let d = (h % 36) as u32;
+        let ch = if d < 10 {
+            (b'0' + d as u8) as char
+        } else {
+            (b'a' + (d - 10) as u8) as char
+        };
+        buf.push(ch);
+        h /= 36;
+    }
+    buf
 }

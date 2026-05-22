@@ -10,9 +10,11 @@ import {
   FileText,
   Loader2,
   MoreHorizontal,
+  RefreshCw,
   TextSelect,
   Wrench,
 } from "lucide-react";
+import { AttachmentActions } from "./AttachmentActions";
 import { Markdown } from "./Markdown";
 import {
   DropdownMenu,
@@ -29,6 +31,7 @@ import type {
 import { cn } from "@/lib/utils";
 import { stripInlinedAttachments } from "@/lib/files";
 import { Bookmark } from "lucide-react";
+import { useChatStore } from "@/stores/chatStore";
 import { useSnippetStore } from "@/stores/snippetStore";
 import { useToastStore } from "@/stores/toastStore";
 
@@ -36,6 +39,11 @@ interface MessageProps {
   message: ChatMessage;
   isStreaming?: boolean;
   metrics?: MessageMetrics | null;
+  /** True when this assistant message is eligible for one-click
+   *  regeneration — it's the last message in the chat and the chat
+   *  isn't currently busy. Drives whether the kebab menu surfaces
+   *  the Regenerate item. */
+  canRegenerate?: boolean;
 }
 
 /**
@@ -276,7 +284,8 @@ function ThinkingBlock({ text, isStreaming }: { text: string; isStreaming?: bool
   );
 }
 
-function MessageItemImpl({ message, isStreaming, metrics }: MessageProps) {
+function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: MessageProps) {
+  const regenerateLast = useChatStore((s) => s.regenerateLast);
   const [menuOpen, setMenuOpen] = useState(false);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   // Separate state for the keyboard-accessible kebab below the user
@@ -480,6 +489,12 @@ function MessageItemImpl({ message, isStreaming, metrics }: MessageProps) {
             </DropdownMenuTrigger>
             <DropdownMenuContent
               align="start"
+              // Radix flips / shifts the menu automatically (`avoidCollisions`
+              // is on by default) but only respects this padding when we
+              // give it room — without `collisionPadding` a right-click
+              // near the viewport edge can land the menu right against
+              // the window chrome and clip the action icons.
+              collisionPadding={8}
               className="!bg-none !bg-foreground/[0.08] border border-foreground/10 backdrop-blur-xl min-w-[160px]"
             >
               <DropdownMenuItem
@@ -521,6 +536,7 @@ function MessageItemImpl({ message, isStreaming, metrics }: MessageProps) {
             </DropdownMenuTrigger>
             <DropdownMenuContent
               align="start"
+              collisionPadding={8}
               className="!bg-none !bg-foreground/[0.08] border border-foreground/10 backdrop-blur-xl min-w-[160px]"
             >
               <DropdownMenuItem
@@ -543,31 +559,35 @@ function MessageItemImpl({ message, isStreaming, metrics }: MessageProps) {
         {isUser && images.length > 0 && (
           <div className="mb-2 flex flex-wrap gap-1.5">
             {images.map((img, i) => (
-              <img
+              // Thumbnail uses the same lazy-decode hints as before; click /
+              // right-click routing now lives in AttachmentActions so the
+              // image preview, the placeholder dialog, and the Code Canvas
+              // path all share one dispatcher.
+              <AttachmentActions
                 key={i}
-                src={`data:${img.mime};base64,${img.data}`}
-                alt={img.name}
-                // Fixed intrinsic size matches the rendered CSS box so the
-                // browser doesn't have to wait on the decode to know the
-                // layout. `loading="lazy"` + `decoding="async"` let chats
-                // with lots of historical images defer their decode until
-                // they scroll near the viewport — keeps the initial mount
-                // snappy even on long transcripts.
-                width={80}
-                height={80}
-                loading="lazy"
-                decoding="async"
-                className="h-20 w-20 rounded-lg object-cover"
-              />
+                attachment={img}
+                className="rounded-lg focus-visible:ring-2 focus-visible:ring-ring/40"
+              >
+                <img
+                  src={`data:${img.mime};base64,${img.data}`}
+                  alt={img.name}
+                  width={80}
+                  height={80}
+                  loading="lazy"
+                  decoding="async"
+                  className="h-20 w-20 rounded-lg object-cover"
+                />
+              </AttachmentActions>
             ))}
           </div>
         )}
         {isUser && files.length > 0 && (
           <div className="mb-2 flex flex-wrap gap-1.5">
             {files.map((f, i) => (
-              <span
+              <AttachmentActions
                 key={i}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-foreground/10 bg-foreground/[0.05] px-2.5 py-1 text-xs text-foreground/70"
+                attachment={f}
+                className="gap-1.5 rounded-lg border border-foreground/10 bg-foreground/[0.05] px-2.5 py-1 text-xs text-foreground/70"
               >
                 {f.kind === "text" ? (
                   <FileText className="h-3.5 w-3.5 shrink-0" />
@@ -575,7 +595,7 @@ function MessageItemImpl({ message, isStreaming, metrics }: MessageProps) {
                   <File className="h-3.5 w-3.5 shrink-0" />
                 )}
                 {f.name}
-              </span>
+              </AttachmentActions>
             ))}
           </div>
         )}
@@ -616,7 +636,12 @@ function MessageItemImpl({ message, isStreaming, metrics }: MessageProps) {
               <DropdownMenuTrigger asChild>
                 <button
                   type="button"
-                  aria-label="Message actions"
+                  // Tell screen-reader users what's behind the kebab —
+                  // a generic "Message actions" reads the same for the
+                  // user and assistant menus despite their action sets
+                  // differing. This one carries Copy + Save as Snippet,
+                  // which only make sense for the user's own message.
+                  aria-label="Copy or save this message"
                   className={cn(
                     "inline-flex h-7 w-7 items-center justify-center rounded-full text-foreground/55 transition-opacity hover:bg-foreground/10 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
                     userKebabOpen
@@ -664,7 +689,11 @@ function MessageItemImpl({ message, isStreaming, metrics }: MessageProps) {
               <DropdownMenuTrigger asChild>
                 <button
                   type="button"
-                  aria-label="Message actions"
+                  // Distinct label from the user kebab so screen-reader
+                  // users know whose message is being acted on. Noun-led
+                  // because the menu carries multiple actions (Copy,
+                  // Regenerate when eligible).
+                  aria-label="Assistant message actions"
                   className={cn(
                     "inline-flex h-7 w-7 items-center justify-center rounded-full text-foreground/60 transition-colors hover:bg-foreground/10 hover:text-foreground",
                     menuOpen && "bg-foreground/10 text-foreground",
@@ -688,6 +717,15 @@ function MessageItemImpl({ message, isStreaming, metrics }: MessageProps) {
                   <Copy className="h-4 w-4 text-foreground/60" />
                   Copy message
                 </DropdownMenuItem>
+                {canRegenerate && (
+                  <DropdownMenuItem
+                    onSelect={() => void regenerateLast(message.session_id)}
+                    className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
+                  >
+                    <RefreshCw className="h-4 w-4 text-foreground/60" />
+                    Regenerate
+                  </DropdownMenuItem>
+                )}
               </DropdownMenuContent>
             </DropdownMenu>
           </div>
@@ -704,5 +742,6 @@ function MessageItemImpl({ message, isStreaming, metrics }: MessageProps) {
 export const MessageItem = memo(MessageItemImpl, (prev, next) =>
   prev.message === next.message &&
   prev.isStreaming === next.isStreaming &&
-  prev.metrics === next.metrics,
+  prev.metrics === next.metrics &&
+  prev.canRegenerate === next.canRegenerate,
 );

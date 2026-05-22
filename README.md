@@ -147,7 +147,7 @@ Open **Settings → Providers**, paste your API key (stored safely in your OS cr
 | OpenAI | `https://api.openai.com/v1` *(default)* |
 | vLLM | `http://localhost:8000/v1` |
 | LM Studio | `http://localhost:1234/v1` |
-| LiteLLM | `http://localhost:4000/v1` |
+| LiteLLM | `http://localhost:4000` |
 | llama.cpp `llama-server` | `http://localhost:8080/v1` |
 | Groq, OpenRouter, Together, Fireworks, Mistral | per their docs |
 

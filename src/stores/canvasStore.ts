@@ -11,11 +11,18 @@ interface CanvasState {
   /** Optional human title shown in the canvas header. The canvas falls back
    *  to a derived label (e.g. "Python") when null. */
   title: string | null;
+  /** Optional filename hint — used as the Export dialog's default file
+   *  name when the canvas was opened from an attachment chip (so the saved
+   *  file inherits the original name like `notes.md` instead of a generic
+   *  `snippet.md`). Null when the canvas was opened from a code block in
+   *  a model reply, where there's no source filename to preserve. */
+  name: string | null;
 
   open: (args: {
     code: string;
     language: string | null;
     title?: string;
+    name?: string;
   }) => void;
   close: () => void;
 }
@@ -33,7 +40,14 @@ export const useCanvasStore = create<CanvasState>((set) => ({
   code: "",
   language: null,
   title: null,
-  open: ({ code, language, title }) =>
-    set({ isOpen: true, code, language, title: title ?? null }),
+  name: null,
+  open: ({ code, language, title, name }) =>
+    set({
+      isOpen: true,
+      code,
+      language,
+      title: title ?? null,
+      name: name ?? null,
+    }),
   close: () => set({ isOpen: false }),
 }));
