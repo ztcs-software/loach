@@ -68,13 +68,22 @@ export function ImagePreview({ open, onOpenChange, data, mime, name }: ImagePrev
             alt={name}
             className="max-h-[calc(100vh-10rem)] max-w-[calc(100vw-3rem)] rounded-lg object-contain shadow-2xl"
           />
-          <Button onClick={handleSave} disabled={saving} variant="secondary" size="sm">
+          {/* The dim backdrop stays dark in both themes (standard lightbox
+              treatment) so the buttons need theme-independent light colours
+              — `foreground` would flip to near-black in light mode and
+              disappear against the dark overlay. */}
+          <Button
+            onClick={handleSave}
+            disabled={saving}
+            size="sm"
+            className="bg-white/15 text-white hover:bg-white/25"
+          >
             <Download className="h-4 w-4" />
             {saving ? "Saving…" : "Save"}
           </Button>
           <DialogPrimitive.Close
             aria-label="Close preview"
-            className="absolute right-4 top-4 rounded-full bg-foreground/10 p-2 text-foreground/80 transition-colors hover:bg-foreground/20 hover:text-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+            className="absolute right-4 top-4 rounded-full bg-white/15 p-2 text-white/85 transition-colors hover:bg-white/25 hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-white/40"
           >
             <X className="h-4 w-4" />
           </DialogPrimitive.Close>
