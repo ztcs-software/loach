@@ -94,6 +94,12 @@ export interface Attachment {
   mime: string;
   /** base64 (no data: prefix) for images and files, plain text for text files */
   data: string;
+  /** Optional raw base64 of the original file, no `data:` prefix. Populated
+   *  for PDF and DOCX attachments so the preview UI can save the original
+   *  back to disk (PDF) or fall back to a "preview not available" placeholder
+   *  with a working Save (DOCX). Absent on attachments created before this
+   *  field existed — UI must treat it as optional. */
+  bytes?: string;
   /** True when the source document was larger than the per-attachment
    *  extraction cap and only a leading slice survived in `data`. The model
    *  is told via an inline marker; the UI shows a "truncated" pill on the
@@ -206,6 +212,11 @@ export interface ChatRequest {
   system_prompt: string | null;
   messages: ChatMessageIn[];
   params: GenerationParams;
+  /** Private Chat marker. When `true`, the backend skips MCP tool
+   *  aggregation so the model can't autonomously forward prompt content
+   *  to a user-configured MCP server. Omit (or pass `false`) for regular
+   *  chats — defaults on the Rust side via `#[serde(default)]`. */
+  private?: boolean;
 }
 
 export type StreamEvent =

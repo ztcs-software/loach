@@ -34,6 +34,26 @@ const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 /// that we then forward on every call for the rest of the session.
 const MAX_SESSION_ID_BYTES: usize = 1024;
 
+/// Ceiling on the concatenated text content we'll return from a single
+/// `tools/call`, applied at the MCP layer before the provider re-caps it
+/// per `MAX_TOOL_RESULT_BYTES`. The provider cap (32 KiB at present) is
+/// the one that bounds what reaches the model, but a buggy or hostile
+/// server can emit content arrays whose individual `text` pieces dwarf
+/// that limit and force us to allocate the full string before truncation
+/// runs. 256 KiB is two orders of magnitude over realistic tool output
+/// (search results, snippets, error messages) while staying small enough
+/// that even a flood of huge text fragments can't OOM the renderer.
+const MAX_TOOL_RESULT_TEXT_BYTES: usize = 256 * 1024;
+
+/// Per-`Resource` ceiling when we stringify a `CallToolContent::Resource`
+/// into the tool result. A resource is opaque JSON that the server thinks
+/// is relevant to the tool call; we don't render it specially, just
+/// `.to_string()` it as a fallback. A pathological server could return a
+/// multi-MB nested object — cap each one at 4 KiB so a long resource list
+/// doesn't blow past `MAX_TOOL_RESULT_TEXT_BYTES` on the strength of a
+/// single oversized resource.
+const MAX_RESOURCE_STRINGIFIED_BYTES: usize = 4 * 1024;
+
 const CLIENT_NAME: &str = "loach";
 const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -193,29 +213,33 @@ impl McpSession {
             self.session_id = Some(s);
         }
         let parsed: CallToolResult = unwrap_response(resp)?;
+        // Build the result text with a running cap. `append_capped` short-
+        // circuits once we've crossed `MAX_TOOL_RESULT_TEXT_BYTES`, so
+        // even a megabyte-of-text content array won't force us to allocate
+        // the full string before the provider's narrower cap runs.
         let mut text = String::new();
+        let mut truncated = false;
         for piece in parsed.content {
             match piece {
                 CallToolContent::Text { text: t } => {
-                    if !text.is_empty() {
-                        text.push('\n');
-                    }
-                    text.push_str(&t);
+                    truncated |= append_capped(&mut text, &t);
                 }
                 CallToolContent::Image { .. } => {
-                    if !text.is_empty() {
-                        text.push('\n');
-                    }
-                    text.push_str("[image content omitted]");
+                    truncated |= append_capped(&mut text, "[image content omitted]");
                 }
                 CallToolContent::Resource { resource } => {
-                    if !text.is_empty() {
-                        text.push('\n');
-                    }
                     if let Some(r) = resource {
-                        text.push_str(&r.to_string());
+                        // Cap the per-resource stringification too — a single
+                        // huge nested object can otherwise dominate the
+                        // result and crowd out the actual tool output.
+                        let s = r.to_string();
+                        let capped = clip_on_char_boundary(&s, MAX_RESOURCE_STRINGIFIED_BYTES);
+                        truncated |= append_capped(&mut text, capped);
+                        if capped.len() < s.len() {
+                            truncated |= append_capped(&mut text, "[…resource truncated]");
+                        }
                     } else {
-                        text.push_str("[resource]");
+                        truncated |= append_capped(&mut text, "[resource]");
                     }
                 }
                 CallToolContent::Unknown => {
@@ -224,6 +248,20 @@ impl McpSession {
                     // content array.
                 }
             }
+            if truncated {
+                // Stop walking the content array once we've crossed the cap;
+                // the provider sees more than enough already.
+                break;
+            }
+        }
+        if truncated {
+            // Append the truncation notice unconditionally — `append_capped`
+            // would otherwise consume it as part of the budget and the
+            // marker would never appear in the output. A ~100-byte
+            // overage on a 256 KiB cap is fine; the provider-layer
+            // re-cap (32 KiB) is the one that actually bounds what
+            // reaches the model anyway.
+            text.push_str("\n\n[…tool result truncated by Loach; ask the tool again with narrower arguments]");
         }
         if text.is_empty() && parsed.is_error {
             text.push_str("tool returned no content");
@@ -233,6 +271,38 @@ impl McpSession {
             is_error: parsed.is_error,
         })
     }
+}
+
+/// Append `chunk` to `out`, inserting a newline between non-empty pieces.
+/// Once `out` would cross `MAX_TOOL_RESULT_TEXT_BYTES`, write only enough
+/// of `chunk` to land exactly on the cap (on a UTF-8 boundary) and return
+/// `true` so the caller can stop iterating.
+fn append_capped(out: &mut String, chunk: &str) -> bool {
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    let remaining = MAX_TOOL_RESULT_TEXT_BYTES.saturating_sub(out.len());
+    if chunk.len() <= remaining {
+        out.push_str(chunk);
+        false
+    } else {
+        out.push_str(clip_on_char_boundary(chunk, remaining));
+        true
+    }
+}
+
+/// Largest prefix of `s` that fits in `max_bytes` and lands on a UTF-8
+/// codepoint boundary. Naive `&s[..max_bytes]` panics on multi-byte
+/// sequences whose middle aligns with the cap.
+fn clip_on_char_boundary(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut idx = max_bytes;
+    while idx > 0 && !s.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    &s[..idx]
 }
 
 /// Probe an MCP server: handshake + list tools. Never panics; any failure

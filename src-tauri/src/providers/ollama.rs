@@ -98,6 +98,9 @@ pub async fn show_model(
     base_url: &str,
     name: &str,
 ) -> Result<OllamaShowResponse> {
+    super::refuse_link_local_host(base_url)
+        .await
+        .map_err(|e| anyhow!(e))?;
     let url = format!("{}/api/show", base_url.trim_end_matches('/'));
     let body = serde_json::json!({ "name": name });
     let resp = http
@@ -112,6 +115,9 @@ pub async fn show_model(
 }
 
 pub async fn delete_model(http: &Client, base_url: &str, name: &str) -> Result<()> {
+    super::refuse_link_local_host(base_url)
+        .await
+        .map_err(|e| anyhow!(e))?;
     let url = format!("{}/api/delete", base_url.trim_end_matches('/'));
     let body = serde_json::json!({ "name": name });
     let resp = http
@@ -374,6 +380,9 @@ pub async fn probe(http: &Client, base_url: &str) -> bool {
 }
 
 pub async fn list_models(http: &Client, base_url: &str) -> Result<Vec<ModelInfo>> {
+    super::refuse_link_local_host(base_url)
+        .await
+        .map_err(|e| anyhow!(e))?;
     let url = format!("{}/api/tags", base_url.trim_end_matches('/'));
     let resp = http
         .get(url)
@@ -439,6 +448,14 @@ struct OllamaChunk {
     message: Option<OllamaChunkMsg>,
     #[serde(default)]
     done: bool,
+    /// Authoritative token count from the trailing `done: true` chunk.
+    /// Ollama only populates this on the final frame; intermediate
+    /// chunks leave it None. Preferred over our per-chunk approximation
+    /// (`total_tokens += 1` per non-empty content delta) because the
+    /// chunk counter undercounts when a single chunk carries multiple
+    /// tokens — which happens routinely on faster local models.
+    #[serde(default)]
+    eval_count: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -492,6 +509,15 @@ pub async fn chat_stream(
     // MCP aggregation phase aren't lost.
     let channel = event_channel(&req.stream_id);
 
+    // Defense-in-depth SSRF guard. Identical rationale to the OpenAI
+    // path — reject link-local addresses (cloud-metadata services live
+    // there) while allowing loopback, RFC 1918, CGNAT, and public IPs.
+    if let Err(e) = super::refuse_link_local_host(&req.base_url).await {
+        let _ = app.emit(&channel, StreamEvent::Error { message: e });
+        registry.finish(&req.stream_id);
+        return Ok(());
+    }
+
     // Seed the running conversation with system prompt + the messages the
     // frontend handed us. We mutate this list as the multi-turn tool loop
     // runs — each turn appends an assistant message (possibly with
@@ -524,8 +550,15 @@ pub async fn chat_stream(
     let start = Instant::now();
     let mut total_tokens: u32 = 0;
     let mut think_already_drop: bool = false; // sticky retry guard across turns
+    // Authoritative token count from Ollama's final `done: true` chunk
+    // (`eval_count`). Preferred over the per-chunk approximation —
+    // faster local models routinely batch several tokens per chunk.
+    let mut reported_tokens: Option<u32> = None;
 
     for turn in 0..MAX_TOOL_TURNS {
+        // Keep the running history under the soft cap before each turn.
+        super::bound_messages_payload(&mut messages);
+
         let mut body = json!({
             "model": req.model,
             "messages": messages,
@@ -549,6 +582,7 @@ pub async fn chat_stream(
             &cancel,
             &mut body,
             &mut total_tokens,
+            &mut reported_tokens,
             &mut think_already_drop,
             &req.stream_id,
             &registry,
@@ -562,7 +596,8 @@ pub async fn chat_stream(
 
         match outcome {
             TurnOutcome::Done => {
-                emit_metrics(&app, &channel, total_tokens, start);
+                let tokens_for_metrics = reported_tokens.unwrap_or(total_tokens);
+                emit_metrics(&app, &channel, tokens_for_metrics, start);
                 let _ = app.emit(&channel, StreamEvent::Done);
                 registry.finish(&req.stream_id);
                 return Ok(());
@@ -712,6 +747,7 @@ async fn run_one_turn(
     cancel: &Arc<tokio::sync::Notify>,
     body: &mut Value,
     total_tokens: &mut u32,
+    reported_tokens: &mut Option<u32>,
     think_already_drop: &mut bool,
     stream_id: &str,
     registry: &StreamRegistry,
@@ -786,6 +822,15 @@ async fn run_one_turn(
     let mut byte_stream = resp.bytes_stream();
     let mut buf: Vec<u8> = Vec::new();
     let mut pending_tool_calls: Vec<OllamaToolCall> = Vec::new();
+    // Per-turn eval_count snapshot, overwritten as chunks report it.
+    // Ollama emits the canonical value on the final `done: true` chunk;
+    // some older / forked builds emit running totals on intermediate
+    // chunks too. Overwriting (not accumulating) is right within a turn —
+    // we fold the final per-turn value into the session total only
+    // when the turn ends, so multi-turn tool use doesn't double-count
+    // and a forked build's intermediate emissions don't inflate the
+    // count either.
+    let mut turn_eval: Option<u32> = None;
 
     loop {
         select! {
@@ -823,6 +868,9 @@ async fn run_one_turn(
                             if line.is_empty() { continue; }
                             match serde_json::from_slice::<OllamaChunk>(line) {
                                 Ok(parsed) => {
+                                    if let Some(n) = parsed.eval_count {
+                                        turn_eval = Some(n);
+                                    }
                                     if let Some(msg) = parsed.message {
                                         if let Some(think) = msg.thinking {
                                             if !think.is_empty() {
@@ -862,6 +910,16 @@ async fn run_one_turn(
                             );
                         }
                         if finished {
+                            // Fold this turn's reported count (if any)
+                            // into the session total. Done here, not
+                            // inline with each chunk, so a build that
+                            // emits intermediate running totals
+                            // contributes its FINAL value once instead
+                            // of being summed multiple times.
+                            if let Some(n) = turn_eval {
+                                *reported_tokens =
+                                    Some(reported_tokens.unwrap_or(0).saturating_add(n));
+                            }
                             return Ok(Some(decide_outcome(pending_tool_calls)));
                         }
                     }
@@ -876,6 +934,11 @@ async fn run_one_turn(
                     None => {
                         // EOF without an explicit `done: true` — treat as a
                         // natural terminator and let the caller emit Done.
+                        // Still fold any partial turn_eval we got.
+                        if let Some(n) = turn_eval {
+                            *reported_tokens =
+                                Some(reported_tokens.unwrap_or(0).saturating_add(n));
+                        }
                         return Ok(Some(decide_outcome(pending_tool_calls)));
                     }
                 }
@@ -987,11 +1050,24 @@ fn serialise_tool_call(call: &OllamaToolCall) -> Value {
 /// Some Ollama builds (and the OpenAI compat passes) hand `arguments` as a
 /// stringified JSON instead of a parsed object. Normalise both shapes to a
 /// JSON value so the dispatcher always gets the same input.
+///
+/// When a string can't be parsed back as JSON (malformed model output, an
+/// edge-case escape, etc.) we forward it as a raw `Value::String` so the
+/// tool call still happens — the tool sees a malformed input and replies
+/// with an error the model can react to. We log the parse failure at
+/// `warn` so users debugging "why does this tool always fail" don't have
+/// to guess; the silent fallback would otherwise hide the cause.
 fn normalise_args(v: &Value) -> Value {
     match v {
-        Value::String(s) => {
-            serde_json::from_str(s).unwrap_or_else(|_| Value::String(s.clone()))
-        }
+        Value::String(s) => match serde_json::from_str(s) {
+            Ok(parsed) => parsed,
+            Err(e) => {
+                tracing::warn!(
+                    "ollama tool call: arguments are not valid JSON ({e}); forwarding raw text"
+                );
+                Value::String(s.clone())
+            }
+        },
         Value::Null => json!({}),
         other => other.clone(),
     }

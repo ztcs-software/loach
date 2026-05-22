@@ -263,6 +263,15 @@ pub async fn update_message(
         .map_err(err)
 }
 
+#[tauri::command]
+pub async fn delete_message(
+    state: State<'_, AppState>,
+    id: String,
+    session_id: String,
+) -> Result<(), String> {
+    state.db.delete_message(&id, &session_id).map_err(err)
+}
+
 // ---------- settings ----------
 
 #[tauri::command]
@@ -1126,15 +1135,25 @@ pub async fn chat_stream(
         // Cancel-aware MCP aggregation. A slow / wedged server can keep
         // tools/list busy for the full 30 s timeout; the user must be
         // able to stop us during that wait.
-        let agg_fut = crate::mcp::aggregate_tools(&db);
-        let (tools, errors) = tokio::select! {
-            biased;
-            _ = cancel.notified() => {
-                let _ = app.emit(&channel, crate::stream::StreamEvent::Cancelled);
-                registry.finish(&request.stream_id);
-                return;
+        //
+        // Private Chat skips this entirely: tool calls would let the model
+        // autonomously forward prompt content to a user-configured MCP
+        // server, which contradicts the "nothing leaves this box" promise
+        // the overlay makes. Empty `tools` short-circuits the catalogue so
+        // the model never sees a function it could call.
+        let (tools, errors) = if request.private {
+            (Vec::new(), Vec::new())
+        } else {
+            let agg_fut = crate::mcp::aggregate_tools(&db);
+            tokio::select! {
+                biased;
+                _ = cancel.notified() => {
+                    let _ = app.emit(&channel, crate::stream::StreamEvent::Cancelled);
+                    registry.finish(&request.stream_id);
+                    return;
+                }
+                r = agg_fut => r,
             }
-            r = agg_fut => r,
         };
         if !errors.is_empty() {
             let summary = errors
@@ -1287,6 +1306,65 @@ pub async fn save_text_to_file(
     Ok(Some(returned_path.to_string_lossy().to_string()))
 }
 
+/// Binary sibling of `save_text_to_file` — accepts base64-encoded bytes,
+/// decodes them in Rust, and writes the raw bytes to a user-chosen path.
+/// Powers "Save image" from the in-chat preview, where the image is already
+/// held in memory as base64 on an `Attachment`.
+#[tauri::command]
+pub async fn save_binary_to_file(
+    app: AppHandle,
+    base64_data: String,
+    default_path: Option<String>,
+    filters: Option<Vec<DialogFilter>>,
+) -> Result<Option<String>, String> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use tauri_plugin_dialog::DialogExt;
+
+    if base64_data.len() > MAX_SAVE_BYTES {
+        return Err(format!(
+            "save_binary_to_file refused: payload is {} bytes (cap {} bytes)",
+            base64_data.len(),
+            MAX_SAVE_BYTES
+        ));
+    }
+
+    let bytes = STANDARD
+        .decode(base64_data.as_bytes())
+        .map_err(|e| format!("invalid base64: {e}"))?;
+
+    let path_opt = tauri::async_runtime::spawn_blocking(move || {
+        let mut builder = app.dialog().file();
+        if let Some(name) = default_path.as_deref() {
+            builder = builder.set_file_name(name);
+        }
+        if let Some(filters) = filters.as_ref() {
+            for f in filters {
+                let exts: Vec<&str> = f.extensions.iter().map(|s| s.as_str()).collect();
+                builder = builder.add_filter(&f.name, &exts);
+            }
+        }
+        builder.blocking_save_file()
+    })
+    .await
+    .map_err(|e| format!("save dialog task failed: {e}"))?;
+
+    let chosen = match path_opt {
+        Some(fp) => fp,
+        None => return Ok(None),
+    };
+    let path = chosen
+        .into_path()
+        .map_err(|e| format!("invalid path returned from dialog: {e}"))?;
+
+    let returned_path = path.clone();
+    tokio::task::spawn_blocking(move || std::fs::write(&path, bytes))
+        .await
+        .map_err(|e| format!("save task panicked: {e}"))?
+        .map_err(|e| format!("couldn't write {}: {e}", returned_path.display()))?;
+
+    Ok(Some(returned_path.to_string_lossy().to_string()))
+}
+
 /// Serialise every table to a JSON string. Pretty-printed so users can
 /// diff or grep an export manually. The schema tag `"loach/v1"` is the
 /// forward-compat knob — `import_data_with_dialog` rejects anything else.
@@ -1415,6 +1493,13 @@ pub async fn import_data_with_dialog(
 #[tauri::command]
 pub async fn archive_all_sessions(state: State<'_, AppState>) -> Result<i64, String> {
     state.db.archive_all_sessions().map_err(err)
+}
+
+/// Permanently delete every archived session. Irreversible — messages
+/// cascade. Returns the row count so the UI can say "Removed 8 chats".
+#[tauri::command]
+pub async fn delete_archived_sessions(state: State<'_, AppState>) -> Result<i64, String> {
+    state.db.delete_archived_sessions().map_err(err)
 }
 
 /// Delete chats / spaces / snippets / MCP servers but leave app

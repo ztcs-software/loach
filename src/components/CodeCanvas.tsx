@@ -26,6 +26,7 @@ export function CodeCanvas() {
   const code = useCanvasStore((s) => s.code);
   const language = useCanvasStore((s) => s.language);
   const title = useCanvasStore((s) => s.title);
+  const name = useCanvasStore((s) => s.name);
   const close = useCanvasStore((s) => s.close);
 
   const [copied, setCopied] = useState(false);
@@ -84,7 +85,11 @@ export function CodeCanvas() {
   };
 
   const onExport = () => {
-    void saveCodeToFile(code, language, defaultFilename(language));
+    // When the canvas was opened from an attachment chip the original
+    // filename is the friendliest default (`notes.md`, `report.pdf.txt`).
+    // Code blocks pushed in from a model reply have no filename, so we
+    // fall back to the generic `snippet.<ext>` from `defaultFilename`.
+    void saveCodeToFile(code, language, name ?? defaultFilename(language));
   };
 
   return (
@@ -99,7 +104,14 @@ export function CodeCanvas() {
         // `[&_.hljs]:bg-transparent` then drops highlight.js's nested fill so
         // the code blends into the canvas instead of nesting another box.
         "bg-background",
-        "[&_.hljs]:bg-transparent [&_pre_code.hljs]:bg-transparent",
+        // github-dark.css ships `pre code.hljs { padding: 1em }` which
+        // would push the highlighted source down by one line relative to
+        // the gutter (phantom "blank line 1" + last line falling past the
+        // last number). The inline `CodeBlock` neutralises this via the
+        // `.prose pre code.hljs` rule in globals.css; the canvas isn't
+        // inside `.prose`, so we override here. Same for the dark slab
+        // background — the canvas already paints its own surface.
+        "[&_.hljs]:bg-transparent [&_pre_code.hljs]:bg-transparent [&_pre_code.hljs]:p-0",
         // Sized to roughly mirror ChatGPT's canvas — generous on wide
         // displays, tight (but usable) on narrow ones.
         "w-[clamp(360px,42vw,720px)]",

@@ -183,6 +183,7 @@ pub fn run() {
             let menu = Menu::with_items(app, &[&show_i, &hide_i, &quit_i])?;
 
             let _tray = TrayIconBuilder::with_id("loach-tray")
+                .icon(app.default_window_icon().unwrap().clone())
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .tooltip("Loach")
@@ -239,6 +240,7 @@ pub fn run() {
             commands::list_messages,
             commands::append_message,
             commands::update_message,
+            commands::delete_message,
             commands::get_settings,
             commands::set_setting,
             commands::set_openai_key,
@@ -287,7 +289,9 @@ pub fn run() {
             commands::export_data_json,
             commands::import_data_with_dialog,
             commands::save_text_to_file,
+            commands::save_binary_to_file,
             commands::archive_all_sessions,
+            commands::delete_archived_sessions,
             commands::wipe_user_data,
             commands::factory_reset,
             commands::updater_supported,

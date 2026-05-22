@@ -4,6 +4,8 @@ import {
   appendMessage,
   archiveSession,
   createSession,
+  deleteArchivedSessions,
+  deleteMessage,
   deleteSession,
   getSpaceContext,
   listMessages,
@@ -128,6 +130,9 @@ interface ChatState {
   rename: (id: string, title: string) => Promise<void>;
   pin: (id: string, pinned: boolean) => Promise<void>;
   archive: (id: string, archived: boolean) => Promise<void>;
+  /** Permanently delete every archived chat. Returns the number removed
+   *  so the caller can show a toast. */
+  removeAllArchived: () => Promise<number>;
   remove: (id: string) => Promise<void>;
   setSessionModel: (id: string, provider: ProviderId, model: string) => Promise<void>;
   setSessionSystemPrompt: (id: string, prompt: string) => Promise<void>;
@@ -146,6 +151,14 @@ interface ChatState {
   ) => Promise<void>;
 
   sendUserMessage: (content: string, attachments: Attachment[]) => Promise<void>;
+  /** Drop the trailing assistant message in `sessionId` and re-stream a
+   *  fresh reply from the same preceding user turn. No-op if the chat is
+   *  already busy (running or queued), if the last message isn't an
+   *  assistant turn, or if there's no preceding user turn to regenerate
+   *  from. The current persona / tone / temporal settings apply — a
+   *  regenerated reply uses today's settings, not the settings active
+   *  when the original was produced. */
+  regenerateLast: (sessionId: string) => Promise<void>;
   /** Interrupts whatever is happening for `sessionId`:
    *   - If that session is the currently running one → stops the stream,
    *     persists the partial reply, promotes the next waiter.
@@ -408,6 +421,123 @@ function chatHistory(messages: Message[], userText: string, images: string[]): C
     }));
   history.push({ role: "user", content: userText, images });
   return history;
+}
+
+/**
+ * Build the provider-bound `ChatRequest` shape for a session, given the
+ * trailing user turn that triggers it. Resolves the effective system
+ * prompt (Space instructions + memory + files, fallback chain, USER_NAME
+ * substitution, temporal preamble, persona prefix, tone suffix) and folds
+ * Space-level image attachments into the trailing user turn.
+ *
+ * Used by both `sendUserMessage` (with a freshly-persisted user turn) and
+ * `regenerateLast` (with the previous user turn already in history). The
+ * caller passes `history` containing every message EXCEPT the trigger user
+ * turn — the function appends the trigger as the trailing user turn so
+ * `images` is attached only to that one entry.
+ */
+async function buildTaskRequest(
+  session: Session,
+  sessionId: string,
+  history: Message[],
+  triggerContent: string,
+  triggerImages: string[],
+): Promise<QueueTask["request"]> {
+  const settings = useSettingsStore.getState();
+  const baseUrl =
+    session.provider === "ollama"
+      ? settings.ollama_base_url
+      : settings.openai_base_url;
+  const params = readSessionParams(session);
+
+  const fallbackPrompt =
+    session.system_prompt && session.system_prompt.length > 0
+      ? session.system_prompt
+      : settings.global_system_prompt || "";
+
+  let effectiveSystemPrompt: string | null = fallbackPrompt || null;
+  const spaceImages: string[] = [];
+  if (session.space_id) {
+    try {
+      const ctx = await getSpaceContext(session.space_id);
+      const spaceInstructions = ctx.space.instructions.trim();
+      let filesBlock = "";
+      const textFiles = ctx.files.filter((f) => f.kind === "text");
+      if (textFiles.length > 0) {
+        filesBlock = "--- Space reference files ---\n";
+        for (const f of textFiles) {
+          filesBlock += `\nFile: \`${f.name}\`\n\`\`\`\n${f.data}\n\`\`\`\n`;
+        }
+      }
+      for (const f of ctx.files) {
+        if (f.kind === "image") spaceImages.push(f.data);
+      }
+      let memoryBlock = "";
+      if (ctx.memories.length > 0) {
+        memoryBlock = "--- Space memory ---\n";
+        memoryBlock +=
+          "Facts to remember about the user across chats in this space:\n";
+        for (const m of ctx.memories) {
+          memoryBlock += `- ${m.content}\n`;
+        }
+      }
+      useSpaceStore.setState((s) => ({
+        spaceMemories: { ...s.spaceMemories, [session.space_id!]: ctx.memories },
+      }));
+      const base = spaceInstructions || fallbackPrompt;
+      const parts: string[] = [];
+      if (base) parts.push(base);
+      if (memoryBlock) parts.push(memoryBlock);
+      if (filesBlock) parts.push(filesBlock);
+      effectiveSystemPrompt = parts.length ? parts.join("\n\n") : null;
+    } catch (e) {
+      logger.warn("Failed to load space context", e);
+    }
+  }
+
+  if (effectiveSystemPrompt) {
+    effectiveSystemPrompt = effectiveSystemPrompt.replace(
+      /\{\{\s*USER_NAME\s*\}\}/g,
+      settings.user_name ?? "",
+    );
+  }
+
+  effectiveSystemPrompt = applyTemporalAwareness(
+    effectiveSystemPrompt,
+    settings.temporal_awareness,
+  );
+
+  const personaId = useUIStore.getState().personaIdBySession[sessionId];
+  const persona = getPersona(personaId);
+  if (persona && persona.systemPrompt.length > 0) {
+    effectiveSystemPrompt = effectiveSystemPrompt
+      ? `${persona.systemPrompt}\n\n${effectiveSystemPrompt}`
+      : persona.systemPrompt;
+  }
+
+  const toneId =
+    useUIStore.getState().toneIdBySession[sessionId] ??
+    settings.default_tone_id;
+  const tone = getTone(toneId);
+  if (tone && tone.systemPrompt.length > 0) {
+    effectiveSystemPrompt = effectiveSystemPrompt
+      ? `${effectiveSystemPrompt}\n\n${tone.systemPrompt}`
+      : tone.systemPrompt;
+  }
+
+  const chatMessages = chatHistory(history, triggerContent, [
+    ...triggerImages,
+    ...spaceImages,
+  ]);
+
+  return {
+    provider: session.provider,
+    model: session.model,
+    base_url: baseUrl,
+    system_prompt: effectiveSystemPrompt,
+    messages: chatMessages,
+    params,
+  };
 }
 
 async function maybeAutoTitle(
@@ -1107,6 +1237,28 @@ export const useChatStore = create<ChatState>((set, get) => ({
     });
   },
 
+  removeAllArchived: async () => {
+    const n = await deleteArchivedSessions();
+    set((s) => {
+      const archivedIds = new Set(
+        s.sessions.filter((x) => x.archived_at != null).map((x) => x.id),
+      );
+      if (archivedIds.size === 0) return s;
+      const sessions = s.sessions.filter((x) => !archivedIds.has(x.id));
+      const messages = { ...s.messages };
+      for (const id of archivedIds) delete messages[id];
+      // Defensive: if activeSessionId somehow points at an archived chat
+      // (deep link, restored state), drop the selection — the underlying
+      // row is gone.
+      const active =
+        s.activeSessionId && archivedIds.has(s.activeSessionId)
+          ? null
+          : s.activeSessionId;
+      return { sessions, messages, activeSessionId: active };
+    });
+    return n;
+  },
+
   setSessionModel: async (id, provider, model) => {
     const prev = get().sessions.find((x) => x.id === id);
     if (!prev) return;
@@ -1306,142 +1458,23 @@ export const useChatStore = create<ChatState>((set, get) => ({
     //    wait. Snapshotting at submit time freezes the prompt/history the
     //    model will see — later edits to other messages in the session
     //    can't retroactively change a queued request.
-    const settings = useSettingsStore.getState();
-    const baseUrl =
-      session.provider === "ollama"
-        ? settings.ollama_base_url
-        : settings.openai_base_url;
-    const params = readSessionParams(session);
     const history = get().messages[sessionId] ?? [];
     // Drop the just-inserted user message from the ambient history; we'll
     // re-add it as the trailing chat message so `images` is attached.
     const trimmed = history.filter((m) => m.id !== userMsg.id);
-
-    // Resolve system prompt. When the chat is in a space:
-    //  - Space instructions OVERRIDE the global / per-session prompt entirely
-    //    (the user opted into space-level guidance, so we don't want a stale
-    //    global prompt leaking through underneath).
-    //  - Reference files are additive — they ride along regardless and get
-    //    prepended to whichever prompt won, so the model has the file
-    //    context whether or not the space pinned its own instructions.
-    const fallbackPrompt =
-      session.system_prompt && session.system_prompt.length > 0
-        ? session.system_prompt
-        : settings.global_system_prompt || "";
-
-    let effectiveSystemPrompt: string | null = fallbackPrompt || null;
-    // Space-level image attachments ride along with the trailing user turn,
-    // same channel as per-message image attachments. Text files go into the
-    // system prompt (above); images can't, so they need this separate path.
-    const spaceImages: string[] = [];
-    if (session.space_id) {
-      try {
-        const ctx = await getSpaceContext(session.space_id);
-        const spaceInstructions = ctx.space.instructions.trim();
-        let filesBlock = "";
-        const textFiles = ctx.files.filter((f) => f.kind === "text");
-        if (textFiles.length > 0) {
-          filesBlock = "--- Space reference files ---\n";
-          for (const f of textFiles) {
-            filesBlock += `\nFile: \`${f.name}\`\n\`\`\`\n${f.data}\n\`\`\`\n`;
-          }
-        }
-        for (const f of ctx.files) {
-          if (f.kind === "image") spaceImages.push(f.data);
-        }
-        // Memory block — bulleted facts auto-extracted from prior chats in
-        // this space. Always rides along when memories exist, regardless of
-        // whether the toggle is currently on: turning the toggle off stops
-        // NEW writes but doesn't strip context the user might still want
-        // models to see (mirrors how disabling a system-prompt setting in
-        // most chat tools doesn't retroactively erase past additions).
-        let memoryBlock = "";
-        if (ctx.memories.length > 0) {
-          memoryBlock = "--- Space memory ---\n";
-          memoryBlock +=
-            "Facts to remember about the user across chats in this space:\n";
-          for (const m of ctx.memories) {
-            memoryBlock += `- ${m.content}\n`;
-          }
-        }
-        // Cache memories on the space store so the post-turn extractor can
-        // dedupe against the same list without a second round-trip.
-        useSpaceStore.setState((s) => ({
-          spaceMemories: { ...s.spaceMemories, [session.space_id!]: ctx.memories },
-        }));
-        const base = spaceInstructions || fallbackPrompt;
-        const parts: string[] = [];
-        if (base) parts.push(base);
-        if (memoryBlock) parts.push(memoryBlock);
-        if (filesBlock) parts.push(filesBlock);
-        effectiveSystemPrompt = parts.length ? parts.join("\n\n") : null;
-      } catch (e) {
-        logger.warn("Failed to load space context", e);
-      }
-    }
-
-    // {{USER_NAME}} → the name from General settings (empty string if the
-    // user hasn't set one). Done before temporal substitution so the temporal
-    // pass doesn't have to know about it.
-    if (effectiveSystemPrompt) {
-      effectiveSystemPrompt = effectiveSystemPrompt.replace(
-        /\{\{\s*USER_NAME\s*\}\}/g,
-        settings.user_name ?? "",
-      );
-    }
-
-    // Temporal awareness — always substitute {{CURRENT_*}} placeholders, and
-    // (when enabled) prepend a short "Current date/time" preamble so the
-    // model can answer "what day is it today?" without hallucinating.
-    effectiveSystemPrompt = applyTemporalAwareness(
-      effectiveSystemPrompt,
-      settings.temporal_awareness,
+    const request = await buildTaskRequest(
+      session,
+      sessionId,
+      trimmed,
+      inlinedContent,
+      images,
     );
-
-    // Persona role — prepended so the model reads "you are X" first and the
-    // user's free-form instructions / Space context follow. Layered at send
-    // time rather than baked into `system_prompt` so the textarea below the
-    // pickers stays purely user-authored: switching personas doesn't fight
-    // the user's edits, and editing the textarea doesn't drift the persona.
-    const personaId = useUIStore.getState().personaIdBySession[sessionId];
-    const persona = getPersona(personaId);
-    if (persona && persona.systemPrompt.length > 0) {
-      effectiveSystemPrompt = effectiveSystemPrompt
-        ? `${persona.systemPrompt}\n\n${effectiveSystemPrompt}`
-        : persona.systemPrompt;
-    }
-
-    // Tone modifier — appended last so the model reads role/instructions
-    // first and the style guidance second. Per-chat override wins; otherwise
-    // the global default tone applies. The default tone has an empty
-    // fragment, so a chat that hasn't picked anything sees no change.
-    const toneId =
-      useUIStore.getState().toneIdBySession[sessionId] ??
-      settings.default_tone_id;
-    const tone = getTone(toneId);
-    if (tone && tone.systemPrompt.length > 0) {
-      effectiveSystemPrompt = effectiveSystemPrompt
-        ? `${effectiveSystemPrompt}\n\n${tone.systemPrompt}`
-        : tone.systemPrompt;
-    }
-
-    const chatMessages = chatHistory(trimmed, inlinedContent, [
-      ...images,
-      ...spaceImages,
-    ]);
 
     const task: QueueTask = {
       id: `t_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
       sessionId,
       userMsgId: userMsg.id,
-      request: {
-        provider: session.provider,
-        model: session.model,
-        base_url: baseUrl,
-        system_prompt: effectiveSystemPrompt,
-        messages: chatMessages,
-        params,
-      },
+      request,
     };
 
     // 3. Dispatch. If nothing is running globally, start immediately.
@@ -1453,6 +1486,91 @@ export const useChatStore = create<ChatState>((set, get) => ({
     //    `promoteQueueHead` only fires when a task was dispatched from
     //    there). Without this nudge, a synchronous startup failure
     //    would strand any tasks queued in the meantime.
+    if (!get().runningTask) {
+      await startTask(task, get, set);
+      promoteQueueHead(get, set);
+    } else {
+      set((s) => ({ queue: [...s.queue, task] }));
+    }
+  },
+
+  regenerateLast: async (sessionId) => {
+    const state = get();
+    // Hard cap mirrors `sendUserMessage` — one in-flight task per chat.
+    // The UI hides the menu item in this state too; belt-and-suspenders.
+    if (state.runningTask?.sessionId === sessionId) return;
+    if (state.queue.some((t) => t.sessionId === sessionId)) return;
+
+    const messages = state.messages[sessionId] ?? [];
+    if (messages.length < 2) return;
+    const lastIdx = messages.length - 1;
+    const last = messages[lastIdx];
+    if (last.role !== "assistant") return;
+    const userMsg = messages[lastIdx - 1];
+    if (userMsg.role !== "user") return;
+
+    const session = state.sessions.find((s) => s.id === sessionId);
+    if (!session || !session.model) return;
+
+    // Drop the assistant turn from DB + store first. Same model as
+    // `sendUserMessage`'s placeholder: a fresh assistant row is created
+    // when the task actually starts streaming (inside `startTask`), so
+    // a cancel-while-waiting doesn't leave an empty bubble behind.
+    try {
+      await deleteMessage(last.id, sessionId);
+    } catch (e) {
+      useToastStore.getState().push({
+        kind: "error",
+        title: "Couldn't regenerate",
+        body: e instanceof Error ? e.message : String(e),
+      });
+      return;
+    }
+    set((s) => {
+      const sbm = { ...s.streamingByMessage };
+      delete sbm[last.id];
+      return {
+        messages: {
+          ...s.messages,
+          [sessionId]: (s.messages[sessionId] ?? []).filter(
+            (m) => m.id !== last.id,
+          ),
+        },
+        streamingByMessage: sbm,
+      };
+    });
+
+    // Re-extract images from the original user turn's attachments_json
+    // so the new request reaches the model with the same multimodal
+    // context as the original send.
+    let triggerImages: string[] = [];
+    if (userMsg.attachments_json) {
+      try {
+        const atts = JSON.parse(userMsg.attachments_json) as Attachment[];
+        triggerImages = imagesFromAttachments(atts);
+      } catch {
+        /* malformed JSON — proceed without images */
+      }
+    }
+
+    const history = (get().messages[sessionId] ?? []).filter(
+      (m) => m.id !== userMsg.id,
+    );
+    const request = await buildTaskRequest(
+      session,
+      sessionId,
+      history,
+      userMsg.content,
+      triggerImages,
+    );
+
+    const task: QueueTask = {
+      id: `t_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      sessionId,
+      userMsgId: userMsg.id,
+      request,
+    };
+
     if (!get().runningTask) {
       await startTask(task, get, set);
       promoteQueueHead(get, set);

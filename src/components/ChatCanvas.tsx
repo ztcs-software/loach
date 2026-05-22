@@ -15,6 +15,13 @@ export function ChatCanvas() {
       : EMPTY_MESSAGES,
   );
   const isStreaming = useChatStore((s) => s.isStreaming);
+  // True only when THIS session is the one currently streaming, regardless
+  // of whether some other chat is also running. Used to gate the
+  // Regenerate menu item — a chat that happens to share the global runner
+  // with a different session is still idle from the user's perspective.
+  const streamingHere = useChatStore(
+    (s) => !!s.activeSessionId && s.streamingSessionId === s.activeSessionId,
+  );
   const streamingByMessage = useChatStore((s) => s.streamingByMessage);
   // A chat is "waiting" when it has a task parked in the global queue
   // (runningTask is a DIFFERENT session). We render a banner instead of
@@ -262,6 +269,12 @@ export function ChatCanvas() {
                   message={m}
                   isStreaming={isLast && isStreaming && m.role === "assistant"}
                   metrics={streamingByMessage[m.id] ?? null}
+                  canRegenerate={
+                    isLast &&
+                    m.role === "assistant" &&
+                    !streamingHere &&
+                    !waitingHere
+                  }
                 />
               </div>
             );
