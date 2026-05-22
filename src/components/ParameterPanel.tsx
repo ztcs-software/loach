@@ -298,51 +298,49 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
               />
             </Section>
 
-            <Section title="Sampling">
-              <SliderRow
-                label="Temperature"
-                value={Math.min(params.temperature ?? 0.7, 1)}
-                min={0}
-                max={1}
-                step={0.05}
-                onChange={(v) => update({ temperature: v })}
-                hint="Controls randomness. Lower stays focused and predictable; higher gets more creative and varied. Capped at 1 — beyond that, output usually breaks down."
-              />
-              {isAdvanced && (
-                <>
-                  <SliderRow
-                    label="Top-P"
-                    value={params.top_p ?? 0.95}
-                    min={0}
-                    max={1}
-                    step={0.01}
-                    onChange={(v) => update({ top_p: v })}
-                    hint="Nucleus sampling. Pick from the smallest group of tokens whose probabilities add up to this value. Lower stays on-track; higher allows more variety."
-                  />
-                  <SliderRow
-                    label="Top-K"
-                    value={params.top_k ?? 40}
-                    min={0}
-                    max={200}
-                    step={1}
-                    precision={0}
-                    onChange={(v) => update({ top_k: Math.round(v) })}
-                    hint={`Only consider the K most likely tokens at each step. Lower is more focused; 0 disables the cap${isOpenAI ? ". Ignored by OpenAI providers" : ""}.`}
-                    dimmed={isOpenAI}
-                  />
-                  <SliderRow
-                    label="Min-P"
-                    value={params.min_p ?? 0.05}
-                    min={0}
-                    max={0.5}
-                    step={0.01}
-                    onChange={(v) => update({ min_p: v })}
-                    hint={`Drop any token whose probability is below this fraction of the top token's. A robust alternative to tuning Top-P/K${isOpenAI ? ". Ignored by OpenAI providers" : ""}.`}
-                    dimmed={isOpenAI}
-                  />
-                </>
-              )}
-            </Section>
+            {isAdvanced && (
+              <Section title="Sampling">
+                <SliderRow
+                  label="Temperature"
+                  value={Math.min(params.temperature ?? 0.7, 1)}
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  onChange={(v) => update({ temperature: v })}
+                  hint="Controls randomness. Lower stays focused and predictable; higher gets more creative and varied. Capped at 1 — beyond that, output usually breaks down."
+                />
+                <SliderRow
+                  label="Top-P"
+                  value={params.top_p ?? 0.95}
+                  min={0}
+                  max={1}
+                  step={0.01}
+                  onChange={(v) => update({ top_p: v })}
+                  hint="Nucleus sampling. Pick from the smallest group of tokens whose probabilities add up to this value. Lower stays on-track; higher allows more variety."
+                />
+                <SliderRow
+                  label="Top-K"
+                  value={params.top_k ?? 40}
+                  min={0}
+                  max={200}
+                  step={1}
+                  precision={0}
+                  onChange={(v) => update({ top_k: Math.round(v) })}
+                  hint={`Only consider the K most likely tokens at each step. Lower is more focused; 0 disables the cap${isOpenAI ? ". Ignored by OpenAI providers" : ""}.`}
+                  dimmed={isOpenAI}
+                />
+                <SliderRow
+                  label="Min-P"
+                  value={params.min_p ?? 0.05}
+                  min={0}
+                  max={0.5}
+                  step={0.01}
+                  onChange={(v) => update({ min_p: v })}
+                  hint={`Drop any token whose probability is below this fraction of the top token's. A robust alternative to tuning Top-P/K${isOpenAI ? ". Ignored by OpenAI providers" : ""}.`}
+                  dimmed={isOpenAI}
+                />
+              </Section>
+            )}
 
             <Section title="Length">
               <SliderRow
@@ -376,70 +374,72 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
             </Section>
 
             {isAdvanced && (
-              <>
-                <Section title="Repetition">
-                  <SliderRow
-                    label="Repeat Penalty"
-                    value={params.repeat_penalty ?? 1.1}
-                    min={0.8}
-                    max={2}
-                    step={0.05}
-                    onChange={(v) => update({ repeat_penalty: v })}
-                    hint={`Discourages the model from looping by penalizing tokens it's just used. 1.0 is off; much above 1.3 starts to sound robotic${isOpenAI ? ". Ignored by OpenAI providers" : ""}.`}
-                    dimmed={isOpenAI}
-                  />
-                  <SliderRow
-                    label="Frequency Penalty"
-                    value={params.frequency_penalty ?? 0}
-                    min={-2}
-                    max={2}
-                    step={0.05}
-                    onChange={(v) => update({ frequency_penalty: v })}
-                    hint="Pushes down tokens in proportion to how often they've already appeared in this reply. Negative values do the opposite and encourage repetition."
-                  />
-                  <SliderRow
-                    label="Presence Penalty"
-                    value={params.presence_penalty ?? 0}
-                    min={-2}
-                    max={2}
-                    step={0.05}
-                    onChange={(v) => update({ presence_penalty: v })}
-                    hint="A flat one-time penalty for any token that has already appeared. Nudges the model toward fresh vocabulary and new topics."
-                  />
-                </Section>
+              <Section title="Repetition">
+                <SliderRow
+                  label="Repeat Penalty"
+                  value={params.repeat_penalty ?? 1.1}
+                  min={0.8}
+                  max={2}
+                  step={0.05}
+                  onChange={(v) => update({ repeat_penalty: v })}
+                  hint={`Discourages the model from looping by penalizing tokens it's just used. 1.0 is off; much above 1.3 starts to sound robotic${isOpenAI ? ". Ignored by OpenAI providers" : ""}.`}
+                  dimmed={isOpenAI}
+                />
+                <SliderRow
+                  label="Frequency Penalty"
+                  value={params.frequency_penalty ?? 0}
+                  min={-2}
+                  max={2}
+                  step={0.05}
+                  onChange={(v) => update({ frequency_penalty: v })}
+                  hint="Pushes down tokens in proportion to how often they've already appeared in this reply. Negative values do the opposite and encourage repetition."
+                />
+                <SliderRow
+                  label="Presence Penalty"
+                  value={params.presence_penalty ?? 0}
+                  min={-2}
+                  max={2}
+                  step={0.05}
+                  onChange={(v) => update({ presence_penalty: v })}
+                  hint="A flat one-time penalty for any token that has already appeared. Nudges the model toward fresh vocabulary and new topics."
+                />
+              </Section>
+            )}
 
-                <Section title="Performance">
-                  <GpuLayersRow
-                    value={params.num_gpu ?? null}
-                    onChange={(num_gpu) =>
-                      update({ num_gpu: num_gpu ?? undefined })
-                    }
-                    isOpenAI={isOpenAI}
-                  />
-                  <LowVramRow
-                    checked={
-                      // Global pin wins above everything — show that state
-                      // honestly so users don't think their per-chat toggle
-                      // is broken when it's actually being overridden.
-                      lowVramGlobal && !isOpenAI
-                        ? true
-                        : (params.low_vram ?? false)
-                    }
-                    onChange={(next) =>
-                      update({ low_vram: next ? true : undefined })
-                    }
-                    isOpenAI={isOpenAI}
-                    pinnedByGlobal={lowVramGlobal && !isOpenAI}
-                  />
-                </Section>
+            <Section title="Performance">
+              {isAdvanced && (
+                <GpuLayersRow
+                  value={params.num_gpu ?? null}
+                  onChange={(num_gpu) =>
+                    update({ num_gpu: num_gpu ?? undefined })
+                  }
+                  isOpenAI={isOpenAI}
+                />
+              )}
+              <LowVramRow
+                checked={
+                  // Global pin wins above everything — show that state
+                  // honestly so users don't think their per-chat toggle
+                  // is broken when it's actually being overridden.
+                  lowVramGlobal && !isOpenAI
+                    ? true
+                    : (params.low_vram ?? false)
+                }
+                onChange={(next) =>
+                  update({ low_vram: next ? true : undefined })
+                }
+                isOpenAI={isOpenAI}
+                pinnedByGlobal={lowVramGlobal && !isOpenAI}
+              />
+            </Section>
 
-                <Section title="Reproducibility">
-                  <SeedRow
-                    value={params.seed ?? null}
-                    onChange={(seed) => update({ seed })}
-                  />
-                </Section>
-              </>
+            {isAdvanced && (
+              <Section title="Reproducibility">
+                <SeedRow
+                  value={params.seed ?? null}
+                  onChange={(seed) => update({ seed })}
+                />
+              </Section>
             )}
 
             <div className="pt-1">

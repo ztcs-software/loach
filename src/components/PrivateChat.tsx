@@ -8,6 +8,7 @@ import {
   CircleCheck,
   Ghost,
   Info,
+  MemoryStick,
   Plus,
   RefreshCw,
   RotateCcw,
@@ -554,15 +555,12 @@ function PrivateParamsPanel() {
   // merge order: DEFAULT_PARAMS < thinking-default < modelDefaults <
   // user overrides. We don't need the per-model think pref or space
   // defaults — Private Chat doesn't touch those layers.
-  const effectiveTemperature =
-    params.temperature ??
-    modelDefaults?.temperature ??
-    DEFAULT_PARAMS.temperature ??
-    0.7;
   const effectiveContext =
     params.num_ctx ?? modelDefaults?.num_ctx ?? DEFAULT_PARAMS.num_ctx ?? 8192;
   const effectiveThinking =
     params.think ?? modelDefaults?.think ?? thinkingDefault;
+  const effectiveLowVram =
+    params.low_vram ?? modelDefaults?.low_vram ?? false;
 
   const update = (patch: Partial<GenerationParams>) =>
     setParams({ ...params, ...patch });
@@ -604,18 +602,6 @@ function PrivateParamsPanel() {
             />
           </Section>
 
-          <Section title="Sampling">
-            <SliderRow
-              label="Temperature"
-              value={Math.min(effectiveTemperature, 1)}
-              min={0}
-              max={1}
-              step={0.05}
-              onChange={(v) => update({ temperature: v })}
-              hint="Controls randomness. Lower stays focused and predictable; higher gets more creative and varied."
-            />
-          </Section>
-
           <Section title="Length">
             <SliderRow
               label="Context Length"
@@ -624,6 +610,15 @@ function PrivateParamsPanel() {
               format={formatK}
               onChange={(v) => update({ num_ctx: Math.round(v) })}
               hint="How much conversation history the model can see at once. Larger windows remember more but use more VRAM."
+            />
+          </Section>
+
+          <Section title="Performance">
+            <LowVramRow
+              checked={effectiveLowVram}
+              onChange={(next) =>
+                update({ low_vram: next ? true : undefined })
+              }
             />
           </Section>
 
@@ -775,6 +770,33 @@ function ThinkingRow({
         {disabled
           ? disabledHint
           : "Let the model reason step-by-step before replying. Adds latency for long answers but may improve quality on complex prompts."}
+      </p>
+    </div>
+  );
+}
+
+function LowVramRow({
+  checked,
+  onChange,
+}: {
+  checked: boolean;
+  onChange: (next: boolean) => void;
+}) {
+  return (
+    <div>
+      <div className="flex items-center justify-between gap-3">
+        <Label className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.1em] text-zinc-300">
+          <MemoryStick className="h-3.5 w-3.5 shrink-0 text-zinc-300" />
+          Low VRAM
+        </Label>
+        <Switch
+          checked={checked}
+          onCheckedChange={onChange}
+          aria-label={checked ? "Disable low VRAM mode" : "Enable low VRAM mode"}
+        />
+      </div>
+      <p className="mt-1.5 text-[10.5px] leading-snug text-zinc-500">
+        Trade speed for memory: smaller batches and KV cache. Helpful when you're up against VRAM limits.
       </p>
     </div>
   );
