@@ -669,7 +669,12 @@ function ChatRow({
         <span className="min-w-0 flex-1 truncate text-foreground/80 group-hover:text-foreground">
           {session.title || "Untitled"}
         </span>
-        <span className="shrink-0 text-[11px] text-foreground/35">
+        <span
+          className={cn(
+            "shrink-0 text-[11px] text-foreground/35 transition-opacity",
+            menuOpen ? "opacity-0" : "opacity-100 group-hover:opacity-0",
+          )}
+        >
           {trimModelLabel(session.model)}
         </span>
 
@@ -677,10 +682,15 @@ function ChatRow({
           <DropdownMenuTrigger asChild>
             <button
               type="button"
-              aria-hidden
-              tabIndex={-1}
-              className="pointer-events-none absolute right-2 top-1/2 h-0 w-0 -translate-y-1/2"
-            />
+              aria-label="Chat actions"
+              onClick={(e) => e.stopPropagation()}
+              className={cn(
+                "absolute right-2 top-1/2 -translate-y-1/2 rounded-md p-1 text-foreground/55 transition-opacity hover:bg-foreground/10 hover:text-foreground",
+                menuOpen ? "opacity-100" : "opacity-0 group-hover:opacity-100 focus-visible:opacity-100",
+              )}
+            >
+              <MoreHorizontal className="h-4 w-4" />
+            </button>
           </DropdownMenuTrigger>
           <DropdownMenuContent
             align="end"
