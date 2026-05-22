@@ -761,6 +761,24 @@ export function saveTextToFile(args: {
   });
 }
 
+/** Binary sibling of `saveTextToFile`. `base64_data` is the raw image (or
+ *  other binary) payload as base64 — no `data:` prefix. The backend
+ *  decodes and writes the bytes to the user-chosen path. */
+export function saveBinaryToFile(args: {
+  base64_data: string;
+  default_path?: string;
+  filters?: SaveDialogFilter[];
+}): Promise<string | null> {
+  if (!isTauri) {
+    return Promise.reject(new Error("file save requires the Tauri runtime"));
+  }
+  return invoke<string | null>("save_binary_to_file", {
+    base64Data: args.base64_data,
+    defaultPath: args.default_path,
+    filters: args.filters,
+  });
+}
+
 /** Optional app-lock credentials for destructive Tauri commands. */
 export interface DestructiveAuth {
   pin?: string;

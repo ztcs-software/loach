@@ -288,6 +288,7 @@ pub fn run() {
             commands::export_data_json,
             commands::import_data_with_dialog,
             commands::save_text_to_file,
+            commands::save_binary_to_file,
             commands::archive_all_sessions,
             commands::delete_archived_sessions,
             commands::wipe_user_data,
