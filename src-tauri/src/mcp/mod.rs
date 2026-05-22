@@ -151,6 +151,24 @@ async fn collect_one(server: &McpServer, slug: &str) -> Result<Vec<McpToolDef>> 
             continue;
         }
         let qualified = format!("{slug}__{safe}");
+        // Two raw names on the same server can sanitise to the same string
+        // (`repo.search` and `repo/search` both collapse to `repo_search`).
+        // The qualified-name dedup at the slug level only handles cross-
+        // server collisions, so a same-server collision would leave two
+        // `McpToolDef`s sharing a qualified name. The model would see the
+        // duplicate description block and tool-call routing would silently
+        // pick one — so drop the second occurrence and warn the operator.
+        // First one wins; the server owner can rename one of the colliding
+        // tools to recover the dropped one.
+        if out.iter().any(|d| d.qualified_name == qualified) {
+            tracing::warn!(
+                "MCP aggregate: server `{}` exposes tool `{raw}` whose sanitised \
+                 name `{qualified}` collides with an earlier tool on the same \
+                 server — skipping the duplicate",
+                server_name
+            );
+            continue;
+        }
         out.push(McpToolDef {
             server_id: server_id.clone(),
             server_name: server_name.clone(),

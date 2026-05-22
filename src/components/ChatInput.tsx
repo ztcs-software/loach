@@ -490,9 +490,13 @@ export function ChatInput({ centered = false }: ChatInputProps) {
     // into the now-empty textarea.
     if (listening) stopDictation();
 
+    // Optimistic clear so the composer feels snappy. We snapshot what we're
+    // sending so the catch branch can put it back — losing the user's draft
+    // on a "No model selected" / network error is the worst kind of footgun.
+    const sentText = trimmed;
+    const sentAttachments = attachments;
     setText("");
     setComposerDraft("");
-    const toSend = attachments;
     setAttachments([]);
     setError(null);
 
@@ -501,9 +505,18 @@ export function ChatInput({ centered = false }: ChatInputProps) {
       // park in the global queue. If another chat is currently streaming,
       // this call will enqueue rather than run — the waiting banner in the
       // canvas tells the user that happened.
-      await send(trimmed, toSend);
+      await send(sentText, sentAttachments);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to send message");
+      // Restore the draft only if the user hasn't started a new one in the
+      // meantime — failures are typically synchronous ("no model selected")
+      // so this branch usually wins, but we don't want to clobber fresh
+      // typing if the send took long enough to lose to.
+      setText((curr) => (curr === "" ? sentText : curr));
+      if (useUIStore.getState().composerDraft === "") {
+        setComposerDraft(sentText);
+      }
+      setAttachments((curr) => (curr.length === 0 ? sentAttachments : curr));
     }
   };
 

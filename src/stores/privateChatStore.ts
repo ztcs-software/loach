@@ -190,6 +190,17 @@ export const usePrivateChatStore = create<PrivateChatState>((set, get) => ({
     const streamId = makeRequestId();
     const assistantId = assistantMsg.id;
 
+    // Apply the global Low-VRAM pin (Settings → Features) when the user
+    // hasn't set anything in the per-chat panel. Per-chat override wins —
+    // toggling Low VRAM off in the Private Chat sidebar stores `undefined`,
+    // so the only ambiguity is "untouched", which is when the global
+    // default should kick in. Ollama is the only provider Private Chat
+    // talks to, so no provider gate is needed here.
+    const params =
+      state.params.low_vram === undefined && settings.low_vram_global
+        ? { ...state.params, low_vram: true }
+        : state.params;
+
     // Update helper that mutates only the assistant placeholder. Identity
     // stability matters less here than in the main chat (no global runner,
     // single open surface) so we do a simple map() per event.
@@ -228,7 +239,7 @@ export const usePrivateChatStore = create<PrivateChatState>((set, get) => ({
           base_url: baseUrl,
           system_prompt: systemPrompt,
           messages: history,
-          params: state.params,
+          params,
           // Tell the backend to skip MCP tool aggregation. Without this
           // the model could autonomously call any enabled MCP server and
           // hand over prompt content as tool arguments — silently
@@ -308,6 +319,16 @@ export const usePrivateChatStore = create<PrivateChatState>((set, get) => ({
     // betrays nothing about the prior session (not even which model the
     // user was talking to). `ModelPicker` re-derives a default the next
     // time the overlay opens.
+    //
+    // Caveat — the "wipe" boundary is GC, not zero-on-free. JS strings are
+    // immutable, so we can drop the references but we can't overwrite the
+    // base64 attachment bytes (or message contents) sitting in the V8 /
+    // WebView2 heap. Once the runtime garbage-collects them the slots are
+    // reusable, but until then a process-memory dump could still find the
+    // strings. Acceptable for the documented threat model (single-user
+    // desktop app, no remote attacker, no on-disk persistence) — if zero-
+    // on-free becomes a requirement, attachments would need to be carried
+    // as `Uint8Array` end-to-end so we could `fill(0)` them here.
     set({
       open: false,
       messages: [],

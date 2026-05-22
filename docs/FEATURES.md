@@ -25,6 +25,9 @@ The default backend. Loach talks to a local `ollama serve` process over HTTP.
 - **Auto-detected on launch** — the model list refreshes as soon as the app
   reaches the providers panel; if Ollama isn't running, the panel surfaces a
   soft "start ollama serve" hint instead of erroring.
+- **Test connection** — the Providers panel exposes a one-click probe that
+  pings `/api/tags` and reports the daemon version and visible model count,
+  so the user can confirm a custom base URL works without leaving Settings.
 - **Streaming**, **multimodal images**, and **thinking-mode reasoning** are
   passed through to the daemon when the chosen model supports them.
 
@@ -34,12 +37,18 @@ Any endpoint that implements `/v1/chat/completions` works: the real OpenAI API,
 plus vLLM, LM Studio, LiteLLM, OpenRouter, Groq, and other proxies.
 
 - **Base URL** — defaults to `https://api.openai.com/v1`. Override per
-  endpoint.
+  endpoint. A **presets dropdown** next to the field one-clicks the URL to
+  the documented endpoint for OpenAI, llama.cpp (`llama-server`), LM Studio,
+  vLLM, or LiteLLM.
 - **API key** — saved into the OS credential manager (Windows Credential
   Manager, Linux Secret Service). Never written to disk in plain text, never
   shipped to the renderer.
 - **Catalog listing** — fetched on demand; the panel hides itself if no key
   is configured rather than spamming 401s.
+- **Test connection** — calls the endpoint's `/models` listing with the
+  stored key and reports the model count (or a readable error) so the user
+  can verify a base URL + key pair before opening a chat. Disabled while
+  there's an unsaved key in the input.
 
 ### 1.3 Model picker
 
@@ -77,8 +86,10 @@ transcript of messages.
   when nothing is selected) and **Select all** (highlights just the body
   text — metrics and toggles stay outside the selection).
 - **Per-message action menu** — a `…` button below each bubble exposes the
-  deliberate full-message actions: **Copy message** on every bubble, plus
-  **Save as Snippet** on user prompts.
+  deliberate full-message actions: **Copy message** on every bubble,
+  **Save as Snippet** on user prompts, and **Regenerate** on the *last*
+  assistant message (drops the previous reply, re-sends the preceding user
+  turn, and streams a fresh answer in place).
 
 ### 2.2 Composer
 
@@ -116,6 +127,19 @@ listed by name in a trailing footer so the model knows it exists.
 Files Loach can't decode (legacy `.doc`, archives, binaries) are kept as
 base64 in the transcript and announced to the model by name so it can ask
 for a readable version.
+
+Clicking an attachment chip opens a per-type preview without leaving the
+chat:
+
+- **Images** → lightbox with a **Save** button (clicking the dim backdrop
+  closes it, matching standard lightbox behaviour).
+- **PDFs** with original bytes retained → multi-page rendered preview
+  (lazy per-page rasterisation via `pdfjs-dist`) with **Save**.
+- **Text and code** → opens in the **Code canvas** (§10) with language
+  highlighting and export.
+- **DOCX, binaries, and older PDFs without raw bytes** → a file-info card
+  with **Save**, so the user can still pull the attachment back out even
+  when Loach can't render it inline.
 
 ### 2.4 Concurrency model
 
@@ -158,6 +182,38 @@ lives in **Settings → Archive** and lets you:
 - Unarchive to bring it back into the main list.
 - Permanently delete from the archive.
 - "Archive all" to mass-park your current chats before starting fresh.
+- "Remove all" to permanently delete every archived chat in one step
+  (guarded by a typed-confirm dialog because it's irreversible).
+
+### 2.8 Private Chat
+
+A **dark-only, ephemeral chat surface** for conversations that should leave
+no trace. Open it from the ghost icon in the title bar.
+
+- **Nothing is persisted.** No session row, no message row, no metrics, no
+  attachment store. The transcript lives entirely in memory and is wiped
+  the moment the overlay closes (along with the picked model, persona,
+  tone, per-chat instructions, and parameters panel state).
+- **Ollama-only.** OpenAI-compatible providers aren't shown in the model
+  picker — the data path for the cloud providers crosses too many
+  intermediaries to honour the "leaves no trace" promise.
+- **MCP tools are blocked.** Servers configured in **Settings → MCP** are
+  not exposed to the model inside Private Chat, so a tool call can't
+  side-channel the conversation out to a third party.
+- **No backdrop / Esc close.** The overlay can only be dismissed by the
+  explicit `X` in its header. The wipe is destructive; we don't want a
+  stray click to throw away the conversation.
+- **Regular chat is paused.** Opening Private Chat cancels any in-flight
+  regular generation; the regular chat surface is non-interactive
+  underneath until the overlay closes.
+- **Same shaping layers as regular chats** — persona, tone (falling back to
+  the default tone from **Settings → General** when not overridden), and a
+  free-form per-chat instructions textarea, layered persona → instructions
+  → tone. No Space context, no `{{USER_NAME}}` substitution, no temporal
+  preamble — those layers belong to persistent chats.
+- **Same parameters panel** — Simple / Advanced toggle, model defaults,
+  Thinking and Low VRAM toggles. Closes and wipes along with the rest of
+  the overlay.
 
 ---
 
@@ -186,7 +242,9 @@ context.
 - Create from the **Spaces** sidebar tab or the in-app library tile.
 - Edit name, description, instructions, default model, and defaults.
 - Open a Space to see its detail view — chats inside it, instructions,
-  files, memory, and model defaults — each on its own tab.
+  files, memory, and model defaults — each on its own tab. Each chat row
+  in the Chats tab exposes the same `…` action menu as the main sidebar
+  (Pin / Unpin, Rename, Move to archive, Delete).
 - Delete a Space and all its associated files / memories cascade out of
   the DB.
 
@@ -296,14 +354,22 @@ the session and survives a reload.
 Style modifier appended *after* the persona / instructions:
 
 - **Default** — model's natural voice (no override).
-- **Concise** — short answers, no preamble.
+- **Direct** — leads with the point; drops hedges and preamble. Replaces
+  the old "Concise" tone.
 - **Detailed** — thorough coverage with caveats and reasoning.
 - **Casual** — plain English, conversational.
 - **Formal** — business register.
 - **Encouraging** — supportive framing for learners and first drafts.
+- **Playful** — light wit and personality, humour in service of clarity.
+- **Skeptical** — stress-tests claims, surfaces counterarguments and
+  edge cases.
+- **Socratic** — guides with questions instead of handing over answers
+  (switches to direct answers when explicitly asked).
 
 Set per chat from the parameters sidebar, or pick a default tone in
-**Settings → General**.
+**Settings → General**. The General tab has an expandable
+**"What each tone does"** drawer that shows the one-line summary for
+every tone, so the default-tone picker doubles as a reference.
 
 ---
 
@@ -311,11 +377,15 @@ Set per chat from the parameters sidebar, or pick a default tone in
 
 Every chat has a slide-out **parameters panel** on the right. Two modes:
 
-- **Simple** — temperature, max tokens, num_ctx, seed, Thinking toggle,
-  Low VRAM toggle, per-chat system prompt textarea.
-- **Advanced** — adds top_p, top_k, min_p, repeat_penalty, frequency
-  and presence penalties, GPU layer count, and everything else the
-  providers expose.
+- **Simple** — max tokens, num_ctx, seed, Thinking toggle, Low VRAM
+  toggle, per-chat system prompt textarea. The view stays terse on
+  purpose so the common knobs are reachable without scrolling.
+- **Advanced** — adds **temperature**, top_p, top_k, min_p,
+  repeat_penalty, frequency and presence penalties, GPU layer count,
+  and everything else the providers expose.
+
+The same panel is reused by **Private Chat** (§2.8) with the same
+Simple / Advanced split.
 
 The parameter merge order, top to bottom (later layers win):
 
@@ -337,12 +407,12 @@ overrides and falls back to the merged defaults.
 
 Only meaningful for Ollama models whose `capabilities` include `"thinking"`.
 Sets the `think` parameter on `/api/chat`; ignored by OpenAI providers.
-The default for new chats comes from **Settings → General → Thinking**.
+The default for new chats comes from **Settings → Features → Thinking**.
 
 ### 7.2 Low VRAM toggle
 
 Ollama-only. Forces smaller batches and a leaner KV cache. The per-chat
-toggle is overridden when **Settings → General → Low VRAM mode** is on —
+toggle is overridden when **Settings → Features → Low VRAM mode** is on —
 the panel shows the toggle pinned and disabled with a pointer back to the
 setting.
 
@@ -533,11 +603,13 @@ authored (custom instructions, Space instructions, snippets, per-chat):
 
 ### 15.1 Temporal awareness
 
-When **Settings → General → Temporal awareness** is on, Loach prepends a
+When **Settings → Features → Temporal awareness** is on, Loach prepends a
 short "Current date / time / timezone" preamble to every system prompt if
 the prompt doesn't already use a `{{CURRENT_*}}` placeholder. Authors who
 need the values inline drop the placeholders in directly; everyone else
-gets the auto preamble.
+gets the auto preamble. The Features tab also includes an expandable
+**"Template variables"** cheat sheet listing every placeholder with an
+example value.
 
 ---
 

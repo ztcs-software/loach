@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   AlertCircle,
+  ArrowRight,
   Check,
   ChevronDown,
   ChevronRight,
@@ -508,10 +509,21 @@ function ModelCatalog({ onPulled }: { onPulled: () => void }) {
                 idx > 0 && "border-t border-foreground/[0.06]",
               )}
             >
-              <button
-                type="button"
+              {/* Family row is a div (not a button) because it contains an
+                  inner "ollama.com" button — nesting <button> inside <button>
+                  is invalid HTML and trips React's validateDOMNesting. Manual
+                  role + key handler keeps the row keyboard-operable. */}
+              <div
+                role="button"
+                tabIndex={0}
                 onClick={() => toggle(fam.family)}
-                className="flex w-full items-center justify-between gap-3 px-3.5 py-2.5 text-left hover:bg-foreground/[0.03]"
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    toggle(fam.family);
+                  }
+                }}
+                className="flex w-full cursor-pointer items-center justify-between gap-3 px-3.5 py-2.5 text-left hover:bg-foreground/[0.03] focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
               >
                 <span className="flex items-center gap-2.5 min-w-0">
                   <ChevronDown
@@ -537,7 +549,7 @@ function ModelCatalog({ onPulled }: { onPulled: () => void }) {
                   <ExternalLink className="h-3 w-3" />
                   ollama.com
                 </button>
-              </button>
+              </div>
               {open && (
                 <div className="border-t border-foreground/[0.05] bg-background/40">
                   {fam.variants.map((v) => {
@@ -806,7 +818,10 @@ function OpenAIPath({
               {busy ? (
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
               ) : (
-                <Check className="h-3.5 w-3.5" />
+                // Arrow (not Check) before the click — Check would read as
+                // "already verified". The success state below the input
+                // owns the check-mark once the probe returns.
+                <ArrowRight className="h-3.5 w-3.5" />
               )}
               {busy ? "Verifying" : "Verify & save"}
             </Button>

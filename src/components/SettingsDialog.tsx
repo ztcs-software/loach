@@ -839,6 +839,67 @@ function SectionTitle({ children }: { children: React.ReactNode }) {
 /** Inline success / failure card for the Providers "Test connection"
  *  buttons. Mirrors `McpPanel`'s TestResultCard styling so users see the
  *  same visual language no matter which connection they're checking. */
+/** Bucket a raw connection-test error string into a short actionable hint.
+ *  Pattern-matches against the messages the Rust admin path actually
+ *  produces (SSRF guard text, reqwest's HTTP/IO display, our own URL-parse
+ *  error). Returns `kind: "other"` with an empty hint when nothing
+ *  matches — the raw message is still shown verbatim above the hint, so
+ *  unrecognised errors degrade gracefully instead of swallowing context. */
+function classifyConnError(msg: string): {
+  kind: "auth" | "ssrf" | "url" | "notfound" | "network" | "other";
+  hint: string;
+} {
+  const m = msg.toLowerCase();
+  if (m.includes("refusing to connect")) {
+    return {
+      kind: "ssrf",
+      hint: "Loach blocks this address range — link-local hosts cloud-metadata services that shouldn't see LLM traffic. Use a public host or a private LAN address instead.",
+    };
+  }
+  if (
+    m.includes("could not parse base url") ||
+    m.includes("invalid url") ||
+    m.includes("relative url without a base")
+  ) {
+    return {
+      kind: "url",
+      hint: "The base URL didn't parse. Make sure it starts with http:// or https:// and has no typos.",
+    };
+  }
+  if (
+    m.includes("401") ||
+    m.includes("unauthorized") ||
+    m.includes("403") ||
+    m.includes("forbidden")
+  ) {
+    return {
+      kind: "auth",
+      hint: "The server rejected the request as unauthorized. Check that the API key is set and valid for this endpoint.",
+    };
+  }
+  if (m.includes("404") || m.includes("not found")) {
+    return {
+      kind: "notfound",
+      hint: "The /models endpoint wasn't found. Double-check the base URL — OpenAI itself ends in /v1, but LiteLLM and Ollama's OpenAI-compat proxy don't.",
+    };
+  }
+  if (
+    m.includes("timed out") ||
+    m.includes("timeout") ||
+    m.includes("connection refused") ||
+    m.includes("dns error") ||
+    m.includes("error trying to connect") ||
+    m.includes("network unreachable") ||
+    m.includes("error sending request")
+  ) {
+    return {
+      kind: "network",
+      hint: "Couldn't reach the server. Is it running? Is the host/port correct? If it's a remote provider, check your internet connection.",
+    };
+  }
+  return { kind: "other", hint: "" };
+}
+
 function ConnTestResult({
   result,
   providerLabel,
@@ -851,6 +912,7 @@ function ConnTestResult({
   className?: string;
 }) {
   if (result.kind === "error") {
+    const { hint } = classifyConnError(result.error || "");
     return (
       <div
         className={cn(
@@ -865,6 +927,11 @@ function ConnTestResult({
         <p className="mt-1 text-[12px] text-destructive/90 break-words">
           {result.error || "Unknown error"}
         </p>
+        {hint && (
+          <p className="mt-1.5 text-[12px] text-destructive/75 break-words">
+            {hint}
+          </p>
+        )}
       </div>
     );
   }
