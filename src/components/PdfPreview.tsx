@@ -128,8 +128,10 @@ function PdfPreviewBody({ open, onOpenChange, attachment }: PdfPreviewProps) {
             // Pages live inside a card-shaped scroller so the overlay's
             // click-outside-to-close behaviour stays available when the user
             // clicks past the page edges (a wide PDF on a narrow window).
+            // `max-w-4xl` (896px) gives A4 pages roughly their native CSS
+            // width without overflowing typical chat-pane viewports.
             onClick={(e) => e.stopPropagation()}
-            className="flex max-h-[calc(100vh-12rem)] w-full max-w-3xl flex-col items-center gap-3 overflow-auto rounded-lg p-2"
+            className="flex max-h-[calc(100vh-12rem)] w-full max-w-4xl flex-col items-center gap-3 overflow-auto rounded-lg p-2"
           >
             {!doc ? (
               <div className="flex items-center gap-2 py-12 text-white/70">
@@ -220,16 +222,24 @@ function PdfPage({ doc, pageNumber }: { doc: PDFDocumentProxy; pageNumber: numbe
     return () => obs.disconnect();
   }, []);
 
-  // Once visible, kick off the actual page render. We render at a slightly
-  // higher device-pixel-ratio than 1× so high-DPI displays don't get blurry.
+  // Once visible, kick off the actual page render. We rasterise at 2× the
+  // CSS width so the canvas stays sharp when CSS scales it down to fit the
+  // container — the previous version set an explicit pixel `style.width` on
+  // the canvas, which overflowed the dialog's max-width and clipped the
+  // page horizontally. Letting CSS own the layout via `w-full` keeps every
+  // page snapped to the scroller's width.
   useEffect(() => {
     if (!visible || rendered) return;
     let cancelled = false;
     let renderTask: RenderTask | null = null;
     (async () => {
       const page = await doc.getPage(pageNumber);
+      // 2× device-pixel-ratio is a good sharpness/cost balance: high-DPI
+      // displays get crisp text, while CPU/memory cost stays bounded
+      // (one A4 page at 2×2 is ~3 MB of pixel data — fine even for a
+      // 100-page PDF).
       const dpr = Math.min(window.devicePixelRatio || 1, 2);
-      const viewport = page.getViewport({ scale: 1.5 * dpr });
+      const viewport = page.getViewport({ scale: 2 * dpr });
       const canvas = canvasRef.current;
       if (!canvas || cancelled) {
         page.cleanup();
@@ -237,8 +247,6 @@ function PdfPage({ doc, pageNumber }: { doc: PDFDocumentProxy; pageNumber: numbe
       }
       canvas.width = viewport.width;
       canvas.height = viewport.height;
-      canvas.style.width = `${viewport.width / dpr}px`;
-      canvas.style.height = `${viewport.height / dpr}px`;
       const ctx = canvas.getContext("2d");
       if (!ctx) {
         page.cleanup();
@@ -267,21 +275,17 @@ function PdfPage({ doc, pageNumber }: { doc: PDFDocumentProxy; pageNumber: numbe
     };
   }, [visible, rendered, doc, pageNumber]);
 
-  // Container holds the natural dimensions even before the canvas paints, so
-  // the scroller's total height is correct from the start. Padding-bottom
-  // trick is unnecessary because we have the exact width/height up front.
+  // Container fills the scroller's width (capped by its `max-w-4xl`); the
+  // `aspectRatio` from the page's natural dimensions keeps the placeholder
+  // at the right height before the canvas finishes rasterising.
   return (
     <div
       ref={containerRef}
-      className="relative shrink-0 overflow-hidden rounded-md bg-white shadow-lg"
+      className="relative w-full shrink-0 overflow-hidden rounded-md bg-white shadow-lg"
       style={
         dims
-          ? {
-              width: `${dims.width}px`,
-              maxWidth: "100%",
-              aspectRatio: `${dims.width} / ${dims.height}`,
-            }
-          : { width: "100%", aspectRatio: "8.5 / 11" }
+          ? { aspectRatio: `${dims.width} / ${dims.height}` }
+          : { aspectRatio: "8.5 / 11" }
       }
     >
       <canvas ref={canvasRef} className="block h-full w-full" />
