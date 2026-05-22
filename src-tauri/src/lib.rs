@@ -183,6 +183,7 @@ pub fn run() {
             let menu = Menu::with_items(app, &[&show_i, &hide_i, &quit_i])?;
 
             let _tray = TrayIconBuilder::with_id("loach-tray")
+                .icon(app.default_window_icon().unwrap().clone())
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .tooltip("Loach")
