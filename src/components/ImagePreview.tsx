@@ -50,7 +50,7 @@ export function ImagePreview({ open, onOpenChange, data, mime, name }: ImagePrev
   return (
     <DialogPrimitive.Root open={open} onOpenChange={onOpenChange}>
       <DialogPrimitive.Portal>
-        <DialogPrimitive.Overlay className="fixed inset-x-0 bottom-0 top-9 z-50 bg-black/75 backdrop-blur-md data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
+        <DialogPrimitive.Overlay className="fixed inset-x-0 bottom-0 top-9 z-[95] bg-black/75 backdrop-blur-md data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
         <DialogPrimitive.Content
           aria-describedby={undefined}
           onClick={(e) => {
@@ -60,7 +60,12 @@ export function ImagePreview({ open, onOpenChange, data, mime, name }: ImagePrev
             // close, matching what users expect from a lightbox overlay.
             if (e.target === e.currentTarget) onOpenChange(false);
           }}
-          className="fixed inset-x-0 bottom-0 top-9 z-50 flex flex-col items-center justify-center gap-4 p-6 outline-none"
+          // z-[95] sits the lightbox above the PrivateChat overlay
+          // (z-[80]) and its dropdowns (z-[90]) so previewing an
+          // attachment from inside a private chat works the same as from
+          // a normal chat. Still below Toasts (z-[100]) so error toasts
+          // surface visibly even with a preview open.
+          className="fixed inset-x-0 bottom-0 top-9 z-[95] flex flex-col items-center justify-center gap-4 p-6 outline-none"
         >
           <DialogPrimitive.Title className="sr-only">{name}</DialogPrimitive.Title>
           <img

@@ -14,7 +14,7 @@ import {
   TextSelect,
   Wrench,
 } from "lucide-react";
-import { ImagePreview } from "./ImagePreview";
+import { AttachmentActions } from "./AttachmentActions";
 import { Markdown } from "./Markdown";
 import {
   DropdownMenu,
@@ -306,9 +306,6 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
   // bubble. Captured eagerly because opening the dropdown shifts focus and
   // can collapse the live selection before the menu item's handler runs.
   const [contextSelection, setContextSelection] = useState("");
-  // Index of the image attachment currently shown in the full-size preview,
-  // or null when the preview is closed.
-  const [previewIndex, setPreviewIndex] = useState<number | null>(null);
   // Ref to the message body wrapper. Used by the right-click "Select all"
   // item to programmatically select the body text — and only the body, so
   // metrics and the "Show more" toggle stay outside the highlight.
@@ -562,49 +559,35 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
         {isUser && images.length > 0 && (
           <div className="mb-2 flex flex-wrap gap-1.5">
             {images.map((img, i) => (
-              <button
+              // Thumbnail uses the same lazy-decode hints as before; click /
+              // right-click routing now lives in AttachmentActions so the
+              // image preview, the placeholder dialog, and the Code Canvas
+              // path all share one dispatcher.
+              <AttachmentActions
                 key={i}
-                type="button"
-                onClick={() => setPreviewIndex(i)}
-                className="rounded-lg outline-none transition-opacity hover:opacity-85 focus-visible:ring-2 focus-visible:ring-ring/40"
-                aria-label={`Preview ${img.name}`}
+                attachment={img}
+                className="rounded-lg focus-visible:ring-2 focus-visible:ring-ring/40"
               >
                 <img
                   src={`data:${img.mime};base64,${img.data}`}
                   alt={img.name}
-                  // Fixed intrinsic size matches the rendered CSS box so the
-                  // browser doesn't have to wait on the decode to know the
-                  // layout. `loading="lazy"` + `decoding="async"` let chats
-                  // with lots of historical images defer their decode until
-                  // they scroll near the viewport — keeps the initial mount
-                  // snappy even on long transcripts.
                   width={80}
                   height={80}
                   loading="lazy"
                   decoding="async"
                   className="h-20 w-20 rounded-lg object-cover"
                 />
-              </button>
+              </AttachmentActions>
             ))}
           </div>
-        )}
-        {previewIndex !== null && images[previewIndex] && (
-          <ImagePreview
-            open
-            onOpenChange={(o) => {
-              if (!o) setPreviewIndex(null);
-            }}
-            data={images[previewIndex].data}
-            mime={images[previewIndex].mime}
-            name={images[previewIndex].name}
-          />
         )}
         {isUser && files.length > 0 && (
           <div className="mb-2 flex flex-wrap gap-1.5">
             {files.map((f, i) => (
-              <span
+              <AttachmentActions
                 key={i}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-foreground/10 bg-foreground/[0.05] px-2.5 py-1 text-xs text-foreground/70"
+                attachment={f}
+                className="gap-1.5 rounded-lg border border-foreground/10 bg-foreground/[0.05] px-2.5 py-1 text-xs text-foreground/70"
               >
                 {f.kind === "text" ? (
                   <FileText className="h-3.5 w-3.5 shrink-0" />
@@ -612,7 +595,7 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
                   <File className="h-3.5 w-3.5 shrink-0" />
                 )}
                 {f.name}
-              </span>
+              </AttachmentActions>
             ))}
           </div>
         )}

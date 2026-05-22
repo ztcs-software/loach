@@ -1,4 +1,5 @@
 import type { Attachment } from "@/types";
+import { saveBinaryToFile, saveTextToFile } from "@/lib/tauri";
 
 export const MAX_FILE_BYTES = 20 * 1024 * 1024; // 20 MB
 export const SPACE_BYTES_CAP = 200 * 1024 * 1024; // 200 MB total per space
@@ -96,7 +97,7 @@ function blobToBase64(blob: Blob): Promise<string> {
 
 /** Lazy-loaded to keep the initial bundle small. */
 let pdfjsPromise: Promise<typeof import("pdfjs-dist")> | null = null;
-async function getPdfjs() {
+export async function getPdfjs() {
   if (!pdfjsPromise) {
     pdfjsPromise = (async () => {
       const pdfjs = await import("pdfjs-dist");
@@ -206,10 +207,17 @@ export async function fileToAttachment(file: File): Promise<Attachment> {
     };
   }
 
-  // PDF — extract text so the model can read it
+  // PDF — extract text so the model can read it, keep original bytes so the
+  // preview UI can render the PDF and the Save action can write it back.
   if (mime === PDF_MIME || ext === "pdf") {
     const buf = await file.arrayBuffer();
-    const { text, truncated } = await extractPdfText(buf);
+    // `extractPdfText` consumes the buffer internally (it clones into a
+    // fresh Uint8Array), so the same `buf` is still valid here for the
+    // base64 conversion. We re-read the blob to be safe across runtimes.
+    const [{ text, truncated }, bytes] = await Promise.all([
+      extractPdfText(buf),
+      blobToBase64(file),
+    ]);
     return {
       kind: "text",
       name: file.name,
@@ -217,19 +225,26 @@ export async function fileToAttachment(file: File): Promise<Attachment> {
       data:
         text ||
         "[PDF contained no extractable text — it may be a scanned image. Try attaching it as an image instead for a vision-capable model.]",
+      bytes,
       truncated: truncated || undefined,
     };
   }
 
-  // DOCX — extract raw text
+  // DOCX — extract raw text, keep original bytes so Save can round-trip the
+  // file. We don't render DOCX in-app (the preview is a placeholder); the
+  // bytes exist purely to make Save work.
   if (mime === DOCX_MIME || ext === "docx") {
     const buf = await file.arrayBuffer();
-    const { text, truncated } = await extractDocxText(buf);
+    const [{ text, truncated }, bytes] = await Promise.all([
+      extractDocxText(buf),
+      blobToBase64(file),
+    ]);
     return {
       kind: "text",
       name: file.name,
       mime: DOCX_MIME,
       data: text || "[DOCX contained no extractable text.]",
+      bytes,
       truncated: truncated || undefined,
     };
   }
@@ -338,6 +353,46 @@ export function inlineTextAttachments(
 
 export function imagesFromAttachments(attachments: Attachment[]): string[] {
   return attachments.filter((a) => a.kind === "image").map((a) => a.data);
+}
+
+/**
+ * Save an attachment to disk via the native picker. Picks the right write
+ * path per kind:
+ *
+ *  - Images and `kind: "file"` blobs — write base64 `data` as binary.
+ *  - PDF / DOCX (kind: "text" with `bytes`) — write the original `bytes` as
+ *    binary so the user gets back the file they uploaded, not the extracted
+ *    text. Older messages stored before the `bytes` field existed fall back
+ *    to writing the extracted text under a `.txt` extension.
+ *  - Plain text / code (kind: "text" without `bytes`) — write `data` as text.
+ *
+ * Resolves to the chosen path (or `null` when the user cancels). Throws on
+ * write failure so the caller can surface a toast.
+ */
+export async function saveAttachment(a: Attachment): Promise<string | null> {
+  if (a.kind === "image" || a.kind === "file") {
+    return saveBinaryToFile({
+      base64_data: a.data,
+      default_path: a.name,
+    });
+  }
+  if (a.bytes) {
+    return saveBinaryToFile({
+      base64_data: a.bytes,
+      default_path: a.name,
+    });
+  }
+  // Text-extracted PDF/DOCX without original bytes — best we can do is write
+  // the extracted text. Tack on `.txt` so the saved file's extension matches
+  // its actual contents (otherwise a `.pdf` file containing plain text would
+  // be confusing for the user when they reopen it).
+  const isExtractedDoc =
+    a.mime === "application/pdf" || a.mime.includes("wordprocessingml");
+  const defaultPath = isExtractedDoc ? `${a.name}.txt` : a.name;
+  return saveTextToFile({
+    content: a.data,
+    default_path: defaultPath,
+  });
 }
 
 /**

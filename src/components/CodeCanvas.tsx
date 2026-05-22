@@ -26,6 +26,7 @@ export function CodeCanvas() {
   const code = useCanvasStore((s) => s.code);
   const language = useCanvasStore((s) => s.language);
   const title = useCanvasStore((s) => s.title);
+  const name = useCanvasStore((s) => s.name);
   const close = useCanvasStore((s) => s.close);
 
   const [copied, setCopied] = useState(false);
@@ -84,7 +85,11 @@ export function CodeCanvas() {
   };
 
   const onExport = () => {
-    void saveCodeToFile(code, language, defaultFilename(language));
+    // When the canvas was opened from an attachment chip the original
+    // filename is the friendliest default (`notes.md`, `report.pdf.txt`).
+    // Code blocks pushed in from a model reply have no filename, so we
+    // fall back to the generic `snippet.<ext>` from `defaultFilename`.
+    void saveCodeToFile(code, language, name ?? defaultFilename(language));
   };
 
   return (

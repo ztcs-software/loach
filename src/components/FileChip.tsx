@@ -1,4 +1,5 @@
 import { File, FileText, Image as ImageIcon, X } from "lucide-react";
+import { AttachmentActions } from "./AttachmentActions";
 import type { Attachment } from "@/types";
 
 function AttachmentIcon({ kind }: { kind: Attachment["kind"] }) {
@@ -15,7 +16,10 @@ export function FileChip({
   onRemove: () => void;
 }) {
   return (
-    <div className="inline-flex items-center gap-1.5 rounded-md border border-border/60 bg-muted/40 px-2 py-1 text-xs">
+    <AttachmentActions
+      attachment={attachment}
+      className="gap-1.5 rounded-md border border-border/60 bg-muted/40 px-2 py-1 text-xs"
+    >
       <AttachmentIcon kind={attachment.kind} />
       <span className="max-w-[140px] truncate">{attachment.name}</span>
       {attachment.truncated && (
@@ -31,12 +35,17 @@ export function FileChip({
       )}
       <button
         type="button"
-        onClick={onRemove}
+        // Stop propagation so clicking ✕ removes the chip without also
+        // firing the wrapper's preview handler.
+        onClick={(e) => {
+          e.stopPropagation();
+          onRemove();
+        }}
         className="rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-accent-foreground"
         aria-label="Remove attachment"
       >
         <X className="h-3 w-3" />
       </button>
-    </div>
+    </AttachmentActions>
   );
 }
