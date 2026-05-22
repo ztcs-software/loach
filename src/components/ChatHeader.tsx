@@ -396,10 +396,7 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
                   </p>
                 </div>
                 <DropdownMenuItem onSelect={() => openSettingsTab("providers")}>
-                  Settings → Providers
-                </DropdownMenuItem>
-                <DropdownMenuItem onSelect={() => setSidebarTab("models")}>
-                  Install local models…
+                  Configure providers…
                 </DropdownMenuItem>
               </>
             )}
