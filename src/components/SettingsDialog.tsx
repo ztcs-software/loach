@@ -54,6 +54,7 @@ import { resolveDefaultModelChoice, useChatStore } from "@/stores/chatStore";
 import { useModelsStore } from "@/stores/modelsStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useSpaceStore } from "@/stores/spaceStore";
+import { useToastStore } from "@/stores/toastStore";
 import { useUIStore } from "@/stores/uiStore";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { McpPanel } from "@/components/McpPanel";
@@ -1411,8 +1412,11 @@ function ArchivePanel({ onOpenChat }: { onOpenChat: () => void }) {
   const sessions = useChatStore((s) => s.sessions);
   const archive = useChatStore((s) => s.archive);
   const remove = useChatStore((s) => s.remove);
+  const removeAllArchived = useChatStore((s) => s.removeAllArchived);
   const select = useChatStore((s) => s.selectSession);
   const setViewingSpace = useSpaceStore((s) => s.setViewingSpace);
+  const { confirm } = useConfirm();
+  const [removingAll, setRemovingAll] = useState(false);
 
   const archived = sessions
     .filter((s) => s.archived_at != null)
@@ -1422,6 +1426,34 @@ function ArchivePanel({ onOpenChat }: { onOpenChat: () => void }) {
     setViewingSpace(null);
     await select(id);
     onOpenChat();
+  };
+
+  const handleRemoveAll = async () => {
+    const count = archived.length;
+    if (count === 0) return;
+    const ok = await confirm({
+      title: `Remove ${count} archived chat${count === 1 ? "" : "s"}?`,
+      body: "This permanently deletes the archived chats and all their messages. This cannot be undone.",
+      confirmLabel: "Remove all",
+      destructive: true,
+    });
+    if (!ok) return;
+    setRemovingAll(true);
+    try {
+      const n = await removeAllArchived();
+      useToastStore.getState().push({
+        kind: "info",
+        title: `Removed ${n} chat${n === 1 ? "" : "s"}`,
+      });
+    } catch (e) {
+      useToastStore.getState().push({
+        kind: "error",
+        title: "Couldn't remove archived chats",
+        body: e instanceof Error ? e.message : String(e),
+      });
+    } finally {
+      setRemovingAll(false);
+    }
   };
 
   if (archived.length === 0) {
@@ -1440,17 +1472,43 @@ function ArchivePanel({ onOpenChat }: { onOpenChat: () => void }) {
   }
 
   return (
-    <ul className="divide-y divide-foreground/5 rounded-2xl border border-foreground/10 bg-foreground/[0.03]">
-      {archived.map((s) => (
-        <ArchivedRow
-          key={s.id}
-          session={s}
-          onOpen={() => void handleOpen(s.id)}
-          onUnarchive={() => void archive(s.id, false)}
-          onDelete={() => void remove(s.id)}
-        />
-      ))}
-    </ul>
+    <>
+      <div className="flex items-center justify-between gap-3">
+        <span className="text-[12px] text-foreground/55">
+          {archived.length} archived chat{archived.length === 1 ? "" : "s"}
+        </span>
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={() => void handleRemoveAll()}
+          disabled={removingAll}
+          className="h-7 gap-1 rounded-lg px-2 text-destructive hover:bg-destructive/10 hover:text-destructive"
+        >
+          {removingAll ? (
+            <>
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              Removing…
+            </>
+          ) : (
+            <>
+              <Trash2 className="h-3.5 w-3.5" />
+              Remove all
+            </>
+          )}
+        </Button>
+      </div>
+      <ul className="divide-y divide-foreground/5 rounded-2xl border border-foreground/10 bg-foreground/[0.03]">
+        {archived.map((s) => (
+          <ArchivedRow
+            key={s.id}
+            session={s}
+            onOpen={() => void handleOpen(s.id)}
+            onUnarchive={() => void archive(s.id, false)}
+            onDelete={() => void remove(s.id)}
+          />
+        ))}
+      </ul>
+    </>
   );
 }
 

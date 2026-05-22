@@ -1559,6 +1559,18 @@ impl Database {
         Ok(affected as i64)
     }
 
+    /// Permanently delete every archived session (and their messages via
+    /// ON DELETE CASCADE). Live chats are untouched. Returns the row count
+    /// so the UI can confirm "Removed N chats".
+    pub fn delete_archived_sessions(&self) -> Result<i64> {
+        let conn = self.conn.lock();
+        let affected = conn.execute(
+            "DELETE FROM sessions WHERE archived_at IS NOT NULL",
+            [],
+        )?;
+        Ok(affected as i64)
+    }
+
     /// Delete everything the user created (chats, spaces, snippets,
     /// MCP servers) while leaving app settings intact. `messages` and
     /// `space_files` fall via ON DELETE CASCADE.

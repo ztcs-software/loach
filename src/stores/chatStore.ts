@@ -4,6 +4,7 @@ import {
   appendMessage,
   archiveSession,
   createSession,
+  deleteArchivedSessions,
   deleteMessage,
   deleteSession,
   getSpaceContext,
@@ -129,6 +130,9 @@ interface ChatState {
   rename: (id: string, title: string) => Promise<void>;
   pin: (id: string, pinned: boolean) => Promise<void>;
   archive: (id: string, archived: boolean) => Promise<void>;
+  /** Permanently delete every archived chat. Returns the number removed
+   *  so the caller can show a toast. */
+  removeAllArchived: () => Promise<number>;
   remove: (id: string) => Promise<void>;
   setSessionModel: (id: string, provider: ProviderId, model: string) => Promise<void>;
   setSessionSystemPrompt: (id: string, prompt: string) => Promise<void>;
@@ -1231,6 +1235,28 @@ export const useChatStore = create<ChatState>((set, get) => ({
         s.activeSessionId === id ? sessions[0]?.id ?? null : s.activeSessionId;
       return { sessions, messages, queue, activeSessionId: active };
     });
+  },
+
+  removeAllArchived: async () => {
+    const n = await deleteArchivedSessions();
+    set((s) => {
+      const archivedIds = new Set(
+        s.sessions.filter((x) => x.archived_at != null).map((x) => x.id),
+      );
+      if (archivedIds.size === 0) return s;
+      const sessions = s.sessions.filter((x) => !archivedIds.has(x.id));
+      const messages = { ...s.messages };
+      for (const id of archivedIds) delete messages[id];
+      // Defensive: if activeSessionId somehow points at an archived chat
+      // (deep link, restored state), drop the selection — the underlying
+      // row is gone.
+      const active =
+        s.activeSessionId && archivedIds.has(s.activeSessionId)
+          ? null
+          : s.activeSessionId;
+      return { sessions, messages, activeSessionId: active };
+    });
+    return n;
   },
 
   setSessionModel: async (id, provider, model) => {

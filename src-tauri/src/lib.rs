@@ -289,6 +289,7 @@ pub fn run() {
             commands::import_data_with_dialog,
             commands::save_text_to_file,
             commands::archive_all_sessions,
+            commands::delete_archived_sessions,
             commands::wipe_user_data,
             commands::factory_reset,
             commands::updater_supported,

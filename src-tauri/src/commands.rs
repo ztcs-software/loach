@@ -1436,6 +1436,13 @@ pub async fn archive_all_sessions(state: State<'_, AppState>) -> Result<i64, Str
     state.db.archive_all_sessions().map_err(err)
 }
 
+/// Permanently delete every archived session. Irreversible — messages
+/// cascade. Returns the row count so the UI can say "Removed 8 chats".
+#[tauri::command]
+pub async fn delete_archived_sessions(state: State<'_, AppState>) -> Result<i64, String> {
+    state.db.delete_archived_sessions().map_err(err)
+}
+
 /// Delete chats / spaces / snippets / MCP servers but leave app
 /// settings (theme, provider URLs, system prompt, etc.) intact. The
 /// OpenAI key — which lives in the OS credential manager, not SQLite —

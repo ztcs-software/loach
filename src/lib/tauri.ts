@@ -787,6 +787,13 @@ export function archiveAllSessions(): Promise<number> {
   return invoke<number>("archive_all_sessions");
 }
 
+/** Permanently delete every archived session (messages cascade). Returns
+ *  the row count so the UI can confirm. Irreversible. */
+export function deleteArchivedSessions(): Promise<number> {
+  if (!isTauri) return notInTauri(0);
+  return invoke<number>("delete_archived_sessions");
+}
+
 /** Drop all user-authored content (chats, spaces, snippets, MCP servers)
  *  while leaving app settings and the stored OpenAI key intact. Gated on
  *  the app-lock credentials when a lock is configured. */
