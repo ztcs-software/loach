@@ -12,6 +12,9 @@ the merged version and uses its content as **both**:
 
 Keeping them in sync means there's no post-publish edit step.
 
+The macOS install / Gatekeeper-bypass instructions live in the top-level
+`README.md` ("Install on macOS") — don't repeat them in per-release notes.
+
 ## How a release happens
 
 1. On your dev branch, when the work is ready to ship:

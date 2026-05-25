@@ -72,12 +72,13 @@ We are working on extending the list above, including new RAG and agentic featur
 
 ![Windows](https://img.shields.io/badge/Windows-0078D6?logo=windows&logoColor=white)
 ![Linux](https://img.shields.io/badge/Linux-FCC624?logo=linux&logoColor=black)
+![macOS](https://img.shields.io/badge/macOS-000000?logo=apple&logoColor=white)
 
-Loach can be installed from a pre-built package (currently available for Windows and Linux) or built from source. 
+Loach can be installed from a pre-built package (Windows, Linux, macOS) or built from source.
 
 ### Install from a pre-built package
 
-With each stable release we publish pre-built `.exe`, `.deb`, `.rpm` or `.AppImage` packages ready to be downloaded and installed according to your operating system.
+With each stable release we publish pre-built `.exe`, `.deb`, `.rpm`, `.AppImage` or `.dmg` packages ready to be downloaded and installed according to your operating system.
 
 [![Latest release](https://img.shields.io/github/v/release/ztcs-software/loach?include_prereleases&label=release)](https://github.com/ztcs-software/loach/releases)
 
@@ -85,6 +86,19 @@ With each stable release we publish pre-built `.exe`, `.deb`, `.rpm` or `.AppIma
 
 > [!NOTE]
 >For local models make sure [Ollama](https://ollama.com) is up and running (`ollama serve`). If you don't have any models pulled yet, Loach will offer to install one during onboarding. 
+
+### Install on macOS
+
+The macOS build is **Apple Silicon (M-series) only** and is **not notarized** with Apple (we don't subscribe to the Apple Developer Program). On first launch macOS will block the app with a *"Loach is damaged and can't be opened"* or *"Apple cannot verify..."* warning. Bypass it once and the app runs normally:
+
+- **Right-click** `Loach.app` in **Applications** → **Open** → click **Open** in the prompt, or
+- Open **Terminal** and run:
+  ```bash
+  xattr -cr /Applications/Loach.app
+  ```
+  then launch the app normally.
+
+Auto-updates are delivered through Loach's own signed updater (independent of Apple), so you only need to do this once on install. If a future update is blocked the same way, the same workaround applies.
 
 ### Build from source
 
@@ -95,6 +109,7 @@ With each stable release we publish pre-built `.exe`, `.deb`, `.rpm` or `.AppIma
 - Platform build tooling — install once via the official Tauri prerequisites guide: <https://tauri.app/start/prerequisites/>
   - **Windows**: Microsoft Visual Studio Build Tools, WebView2 runtime (preinstalled on Windows 11)
   - **Linux**: `webkit2gtk-4.1`, `libayatana-appindicator3-dev`, `librsvg2-dev`, `build-essential`, `libssl-dev`, `pkg-config`, `libsecret-1-dev`
+  - **macOS**: Xcode Command Line Tools (`xcode-select --install`)
 
 #### Clone and install
 
@@ -122,6 +137,7 @@ Outputs land in `src-tauri/target/release/bundle/`:
 
 - **Windows**: `.exe` (NSIS)
 - **Linux**: `.deb`, `.rpm` and `.AppImage`
+- **macOS**: `.dmg` and `.app` (Apple Silicon)
 
 ---
 
@@ -171,7 +187,7 @@ Only one OpenAI-compatible endpoint is active at a time — switch the base URL 
 | Markdown | `react-markdown` + `remark-gfm` + `rehype-highlight` (highlight.js) |
 | Document parsing | `pdfjs-dist` (PDF) + `mammoth` (DOCX) |
 | System tray | Tauri 2 built-in (`tray-icon` feature) |
-| Bundle targets | `.exe` (NSIS) on Windows; `.deb` / `.rpm` / `.AppImage` on Linux |
+| Bundle targets | `.exe` (NSIS) on Windows; `.deb` / `.rpm` / `.AppImage` on Linux; `.dmg` on macOS (Apple Silicon) |
 
 ---
 

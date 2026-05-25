@@ -1553,9 +1553,12 @@ pub async fn factory_reset(
 //
 // The Tauri updater can replace a Windows NSIS install or a Linux AppImage in
 // place, but it cannot upgrade a `.deb`/`.rpm` install — that has to go
-// through the system package manager. We expose this so the UI can hide the
-// "Check for updates" affordance when running from an unsupported install
-// type, instead of letting the user click and hit a confusing failure.
+// through the system package manager. On macOS the updater patches the `.app`
+// bundle in place; that works even though we don't sign with Apple, because
+// the updater's integrity check uses our own Ed25519 signature (separate from
+// Apple notarization). We expose this so the UI can hide the "Check for
+// updates" affordance when running from an unsupported install type, instead
+// of letting the user click and hit a confusing failure.
 #[tauri::command]
 pub fn updater_supported() -> bool {
     #[cfg(target_os = "windows")]
@@ -1570,7 +1573,11 @@ pub fn updater_supported() -> bool {
         // updater plugin can patch.
         std::env::var("APPIMAGE").is_ok()
     }
-    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    #[cfg(target_os = "macos")]
+    {
+        true
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
     {
         false
     }
