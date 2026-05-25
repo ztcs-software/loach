@@ -7,6 +7,7 @@ import {
   deleteArchivedSessions,
   deleteMessage,
   deleteSession,
+  forkSession,
   getSpaceContext,
   listMessages,
   listSessions,
@@ -134,6 +135,12 @@ interface ChatState {
    *  so the caller can show a toast. */
   removeAllArchived: () => Promise<number>;
   remove: (id: string) => Promise<void>;
+  /** Branch a chat. `upToMessageId` omitted = copy the whole transcript
+   *  ("Fork this chat" in the header); set = copy up to and including that
+   *  message ("Fork from here" in the assistant message kebab). The new
+   *  session is added to the store, its messages are loaded, and it is
+   *  selected as the active chat. Returns the new session. */
+  fork: (sourceId: string, upToMessageId?: string) => Promise<Session>;
   setSessionModel: (id: string, provider: ProviderId, model: string) => Promise<void>;
   setSessionSystemPrompt: (id: string, prompt: string) => Promise<void>;
   /** Set per-session generation parameters. Pass `null` to remove the
@@ -1235,6 +1242,25 @@ export const useChatStore = create<ChatState>((set, get) => ({
         s.activeSessionId === id ? sessions[0]?.id ?? null : s.activeSessionId;
       return { sessions, messages, queue, activeSessionId: active };
     });
+  },
+
+  fork: async (sourceId, upToMessageId) => {
+    const session = await forkSession({
+      source_session_id: sourceId,
+      up_to_message_id: upToMessageId ?? null,
+    });
+    const msgs = await listMessages(session.id);
+    set((s) => ({
+      sessions: [session, ...s.sessions],
+      messages: { ...s.messages, [session.id]: msgs },
+      activeSessionId: session.id,
+    }));
+    // Warm the new chat's model defaults so the parameter panel reflects
+    // the right values without a delayed round-trip — same as `newSession`.
+    if (session.provider === "ollama" && session.model) {
+      void useModelsStore.getState().loadModelDefaults(session.model);
+    }
+    return session;
   },
 
   removeAllArchived: async () => {

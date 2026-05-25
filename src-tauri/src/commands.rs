@@ -86,6 +86,30 @@ pub async fn delete_session(state: State<'_, AppState>, id: String) -> Result<()
 }
 
 #[derive(Debug, Deserialize)]
+pub struct ForkSessionArgs {
+    pub source_session_id: String,
+    /// When set, the fork stops after this message (inclusive). When None,
+    /// every message in the source chat is copied. Matches the two UI entry
+    /// points: header "Fork this chat" → None, message kebab "Fork from
+    /// here" → Some(message_id).
+    #[serde(default)]
+    pub up_to_message_id: Option<String>,
+}
+
+/// Branch a chat. Returns the newly-created session — the caller is
+/// responsible for navigating to it.
+#[tauri::command]
+pub async fn fork_session(
+    state: State<'_, AppState>,
+    args: ForkSessionArgs,
+) -> Result<Session, String> {
+    state
+        .db
+        .fork_session(&args.source_session_id, args.up_to_message_id.as_deref())
+        .map_err(err)
+}
+
+#[derive(Debug, Deserialize)]
 pub struct UpdateSessionModelArgs {
     pub id: String,
     pub provider: String,

@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import {
   Archive,
   Cpu,
+  GitFork,
   Layers,
   Loader2,
   MoreHorizontal,
@@ -455,9 +456,17 @@ function SessionRow({
         {session.pinned_at && (
           <Pin className="mr-1.5 h-3 w-3 shrink-0 text-foreground/35" />
         )}
-        {session.space_id && !session.pinned_at && (
-          <Layers className="mr-1.5 h-3 w-3 shrink-0 text-foreground/35" />
+        {session.forked_from_session_id && !session.pinned_at && (
+          <GitFork
+            className="mr-1.5 h-3 w-3 shrink-0 text-foreground/35"
+            aria-label="Forked chat"
+          />
         )}
+        {session.space_id &&
+          !session.pinned_at &&
+          !session.forked_from_session_id && (
+            <Layers className="mr-1.5 h-3 w-3 shrink-0 text-foreground/35" />
+          )}
         <span className="min-w-0 flex-1 truncate">{session.title}</span>
 
         {/* Activity indicator — shares the right-side slot with the kebab.

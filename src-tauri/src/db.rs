@@ -52,6 +52,11 @@ pub struct Session {
     /// list. The value is the ms-timestamp of when it was archived.
     #[serde(default)]
     pub archived_at: Option<i64>,
+    /// Set when this session was created via `fork_session`. Points at the
+    /// chat it was branched from. FK uses ON DELETE SET NULL — deleting the
+    /// source clears the link so the fork survives on its own.
+    #[serde(default)]
+    pub forked_from_session_id: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -407,6 +412,17 @@ impl Database {
             )?;
         }
 
+        // Track which chat a session was forked from. Null = a normal chat
+        // the user created directly; non-null = pointer back to the source
+        // chat so the UI can show a "Forked" badge and a link back. FK uses
+        // ON DELETE SET NULL so deleting the source orphans the fork's link
+        // (and the badge falls off) without destroying the fork itself.
+        if !has_column(&conn, "sessions", "forked_from_session_id")? {
+            conn.execute_batch(
+                "ALTER TABLE sessions ADD COLUMN forked_from_session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL;",
+            )?;
+        }
+
         // Add per-space default model + params columns if missing. Null =
         // "inherit from General Settings" — see the Space struct for the
         // full layering story.
@@ -455,7 +471,7 @@ impl Database {
     pub fn list_sessions(&self) -> Result<Vec<Session>> {
         self.with_read(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, title, provider, model, system_prompt, params_json, space_id, pinned_at, archived_at, created_at, updated_at
+                "SELECT id, title, provider, model, system_prompt, params_json, space_id, pinned_at, archived_at, forked_from_session_id, created_at, updated_at
                  FROM sessions ORDER BY updated_at DESC",
             )?;
             let rows = stmt
@@ -470,8 +486,9 @@ impl Database {
                         space_id: r.get(6)?,
                         pinned_at: r.get(7)?,
                         archived_at: r.get(8)?,
-                        created_at: r.get(9)?,
-                        updated_at: r.get(10)?,
+                        forked_from_session_id: r.get(9)?,
+                        created_at: r.get(10)?,
+                        updated_at: r.get(11)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -491,8 +508,8 @@ impl Database {
         let now = Utc::now().timestamp_millis();
         let conn = self.conn.lock();
         conn.execute(
-            "INSERT INTO sessions (id, title, provider, model, system_prompt, params_json, space_id, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, ?7, ?7)",
+            "INSERT INTO sessions (id, title, provider, model, system_prompt, params_json, space_id, forked_from_session_id, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, NULL, ?7, ?7)",
             params![id, title, provider, model, system_prompt, space_id, now],
         )?;
         Ok(Session {
@@ -505,6 +522,109 @@ impl Database {
             space_id: space_id.map(|s| s.to_string()),
             pinned_at: None,
             archived_at: None,
+            forked_from_session_id: None,
+            created_at: now,
+            updated_at: now,
+        })
+    }
+
+    /// Create a new session as a fork of `source_id`, copying the source's
+    /// title / provider / model / system prompt / params / space verbatim,
+    /// and duplicating its messages up to (and including) `up_to_message_id`
+    /// — or every message in the source when that arg is None.
+    ///
+    /// Message copies get fresh ids and a fresh session_id but keep the
+    /// source's `created_at` so transcript ordering matches the original.
+    /// `forked_from_session_id` is stamped on the new session so the UI can
+    /// render the "Forked from …" badge and link back.
+    pub fn fork_session(
+        &self,
+        source_id: &str,
+        up_to_message_id: Option<&str>,
+    ) -> Result<Session> {
+        let source = self
+            .get_session(source_id)?
+            .ok_or_else(|| anyhow::anyhow!("source session not found"))?;
+
+        let messages = self.list_messages(source_id)?;
+        let take_until_idx = match up_to_message_id {
+            None => messages.len(),
+            Some(id) => {
+                // Inclusive of the named message — "Fork from here" branches
+                // *from* that turn, so the user can immediately reply with a
+                // different follow-up.
+                match messages.iter().position(|m| m.id == id) {
+                    Some(i) => i + 1,
+                    None => {
+                        return Err(anyhow::anyhow!(
+                            "up_to_message_id not found in source chat"
+                        ));
+                    }
+                }
+            }
+        };
+        let to_copy = &messages[..take_until_idx];
+
+        let new_id = Uuid::new_v4().to_string();
+        let now = Utc::now().timestamp_millis();
+        let conn = self.conn.lock();
+        let tx_conn = &*conn;
+
+        // Insert the new session row, then duplicate the selected messages.
+        // Done under the writer lock without an explicit transaction — the
+        // two writes are independent (FK enforces session-must-exist for the
+        // child inserts) and the worst case if the message inserts fail
+        // mid-loop is a session with a partial transcript, which the UI
+        // tolerates.
+        tx_conn.execute(
+            "INSERT INTO sessions (id, title, provider, model, system_prompt, params_json,
+                                   space_id, pinned_at, archived_at, forked_from_session_id,
+                                   created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, ?8, ?9, ?9)",
+            params![
+                new_id,
+                source.title,
+                source.provider,
+                source.model,
+                source.system_prompt,
+                source.params_json,
+                source.space_id,
+                source.id,
+                now,
+            ],
+        )?;
+
+        for m in to_copy {
+            let msg_id = Uuid::new_v4().to_string();
+            tx_conn.execute(
+                "INSERT INTO messages (id, session_id, role, content, thinking,
+                                       attachments_json, metrics_json, tool_calls_json, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    msg_id,
+                    new_id,
+                    m.role,
+                    m.content,
+                    m.thinking,
+                    m.attachments_json,
+                    m.metrics_json,
+                    m.tool_calls_json,
+                    m.created_at,
+                ],
+            )?;
+        }
+
+        Ok(Session {
+            id: new_id,
+            title: source.title,
+            provider: source.provider,
+            model: source.model,
+            system_prompt: source.system_prompt,
+            params_json: source.params_json,
+            space_id: source.space_id,
+            pinned_at: None,
+            archived_at: None,
+            forked_from_session_id: Some(source.id),
             created_at: now,
             updated_at: now,
         })
@@ -620,7 +740,7 @@ impl Database {
     pub fn get_session(&self, id: &str) -> Result<Option<Session>> {
         self.with_read(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, title, provider, model, system_prompt, params_json, space_id, pinned_at, archived_at, created_at, updated_at
+                "SELECT id, title, provider, model, system_prompt, params_json, space_id, pinned_at, archived_at, forked_from_session_id, created_at, updated_at
                  FROM sessions WHERE id = ?1",
             )?;
             let mut rows = stmt.query(params![id])?;
@@ -635,8 +755,9 @@ impl Database {
                     space_id: r.get(6)?,
                     pinned_at: r.get(7)?,
                     archived_at: r.get(8)?,
-                    created_at: r.get(9)?,
-                    updated_at: r.get(10)?,
+                    forked_from_session_id: r.get(9)?,
+                    created_at: r.get(10)?,
+                    updated_at: r.get(11)?,
                 }))
             } else {
                 Ok(None)
@@ -1409,8 +1530,9 @@ impl Database {
         for s in &d.sessions {
             tx.execute(
                 "INSERT INTO sessions (id, title, provider, model, system_prompt, params_json,
-                                       space_id, pinned_at, archived_at, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                                       space_id, pinned_at, archived_at, forked_from_session_id,
+                                       created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 params![
                     s.id,
                     s.title,
@@ -1421,6 +1543,7 @@ impl Database {
                     s.space_id,
                     s.pinned_at,
                     s.archived_at,
+                    s.forked_from_session_id,
                     s.created_at,
                     s.updated_at,
                 ],

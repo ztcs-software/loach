@@ -8,6 +8,7 @@ import {
   Copy,
   File,
   FileText,
+  GitFork,
   Loader2,
   MoreHorizontal,
   RefreshCw,
@@ -286,6 +287,7 @@ function ThinkingBlock({ text, isStreaming }: { text: string; isStreaming?: bool
 
 function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: MessageProps) {
   const regenerateLast = useChatStore((s) => s.regenerateLast);
+  const forkChat = useChatStore((s) => s.fork);
   const [menuOpen, setMenuOpen] = useState(false);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   // Separate state for the keyboard-accessible kebab below the user
@@ -726,6 +728,15 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
                     Regenerate
                   </DropdownMenuItem>
                 )}
+                <DropdownMenuItem
+                  onSelect={() =>
+                    void forkChat(message.session_id, message.id)
+                  }
+                  className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
+                >
+                  <GitFork className="h-4 w-4 text-foreground/60" />
+                  Fork from here
+                </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
           </div>

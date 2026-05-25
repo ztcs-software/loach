@@ -11,6 +11,11 @@ export interface Session {
   pinned_at: number | null;
   /** Null → live chat; ms timestamp → archived at that time. */
   archived_at: number | null;
+  /** Set when the chat was created via `forkSession`. Points at the source
+   *  chat so the header can render a "Forked from …" badge with a link
+   *  back. ON DELETE SET NULL on the FK clears this if the source is
+   *  deleted — the fork survives, the badge just falls off. */
+  forked_from_session_id: string | null;
   created_at: number;
   updated_at: number;
 }

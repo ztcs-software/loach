@@ -242,6 +242,7 @@ pub fn run() {
             commands::pin_session,
             commands::archive_session,
             commands::delete_session,
+            commands::fork_session,
             commands::update_session_model,
             commands::update_session_system_prompt,
             commands::update_session_params,

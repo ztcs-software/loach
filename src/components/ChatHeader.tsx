@@ -10,6 +10,7 @@ import {
   ClipboardPaste,
   Copy,
   FileText,
+  GitFork,
   MessageSquare,
   MoreHorizontal,
   Pencil,
@@ -64,6 +65,17 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
   const pinSession = useChatStore((s) => s.pin);
   const archiveSession = useChatStore((s) => s.archive);
   const removeSession = useChatStore((s) => s.remove);
+  const forkChat = useChatStore((s) => s.fork);
+  const selectSession = useChatStore((s) => s.selectSession);
+  // Subscribe to the source chat's title separately so the "Forked from X"
+  // badge stays truthful when the source is renamed. Falls back to null
+  // when the source no longer exists (deleted, or never loaded), in which
+  // case we hide the badge entirely.
+  const forkedFromTitle = useChatStore((s) => {
+    const srcId = session?.forked_from_session_id;
+    if (!srcId) return null;
+    return s.sessions.find((x) => x.id === srcId)?.title ?? null;
+  });
   const toggleParams = useUIStore((s) => s.toggleParams);
   const setSidebarTab = useUIStore((s) => s.setSidebarTab);
   const openSettingsTab = useUIStore((s) => s.openSettingsTab);
@@ -173,6 +185,20 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
   const toggleArchive = () => {
     if (!session) return;
     void archiveSession(session.id, session.archived_at == null);
+  };
+
+  const handleFork = async () => {
+    if (!session) return;
+    try {
+      await forkChat(session.id);
+    } catch (e) {
+      logger.warn("fork chat failed", e);
+    }
+  };
+
+  const openSourceChat = () => {
+    if (!session?.forked_from_session_id) return;
+    void selectSession(session.forked_from_session_id);
   };
 
   const handleDelete = async () => {
@@ -300,6 +326,19 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
             <Archive className="h-3 w-3" />
             Archived
           </span>
+        )}
+        {session?.forked_from_session_id && forkedFromTitle && (
+          <button
+            type="button"
+            onClick={openSourceChat}
+            title={`Open source chat "${forkedFromTitle}"`}
+            className="flex shrink-0 items-center gap-1 rounded-full bg-foreground/[0.07] px-2.5 py-0.5 text-[11px] font-medium text-foreground/60 hover:bg-foreground/10 hover:text-foreground"
+          >
+            <GitFork className="h-3 w-3" />
+            <span className="max-w-[140px] truncate">
+              Forked from {forkedFromTitle}
+            </span>
+          </button>
         )}
         {session ? (
           <div className="flex min-w-0 items-center gap-1.5 text-sm">
@@ -450,6 +489,10 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
             <DropdownMenuItem onSelect={startRename}>
               <Pencil className="mr-2 h-4 w-4" />
               Rename
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => void handleFork()}>
+              <GitFork className="mr-2 h-4 w-4" />
+              Fork this chat
             </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem onSelect={() => void openExport()}>

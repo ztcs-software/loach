@@ -60,11 +60,40 @@ export function createSession(args: {
       space_id: args.space_id ?? null,
       pinned_at: null,
       archived_at: null,
+      forked_from_session_id: null,
       created_at: now,
       updated_at: now,
     });
   }
   return invoke("create_session", { args });
+}
+
+/** Branch a chat. When `up_to_message_id` is omitted, every message in the
+ *  source is copied; when set, the fork stops after that message (inclusive).
+ *  The returned `Session` has `forked_from_session_id` pointing at the
+ *  source so the header can render the "Forked from …" badge. */
+export function forkSession(args: {
+  source_session_id: string;
+  up_to_message_id?: string | null;
+}): Promise<Session> {
+  if (!isTauri) {
+    const now = Date.now();
+    return notInTauri<Session>({
+      id: `mock-fork-${now}`,
+      title: "Forked chat",
+      provider: "ollama",
+      model: "",
+      system_prompt: null,
+      params_json: null,
+      space_id: null,
+      pinned_at: null,
+      archived_at: null,
+      forked_from_session_id: args.source_session_id,
+      created_at: now,
+      updated_at: now,
+    });
+  }
+  return invoke("fork_session", { args });
 }
 
 export function renameSession(id: string, title: string): Promise<void> {
