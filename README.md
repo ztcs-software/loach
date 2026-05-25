@@ -89,7 +89,7 @@ With each stable release we publish pre-built `.exe`, `.deb`, `.rpm`, `.AppImage
 
 ### Install on macOS
 
-The macOS build is **Apple Silicon (M-series) only** and is **not notarized** with Apple (we don't subscribe to the Apple Developer Program). On first launch macOS will block the app with a *"Loach is damaged and can't be opened"* or *"Apple cannot verify..."* warning. Bypass it once and the app runs normally:
+The macOS build is **Apple Silicon (M-series CPUs) only** and is currently not notarized in Apple Developer Program On first launch macOS will block the app with a *"Loach is damaged and can't be opened"* or *"Apple cannot verify..."* warning. Bypass it once and the app runs normally:
 
 - **Right-click** `Loach.app` in **Applications** → **Open** → click **Open** in the prompt, or
 - Open **Terminal** and run:
