@@ -32,9 +32,11 @@ import { getPersona } from "@/lib/personas";
 import { getTone } from "@/lib/tones";
 import { applyTemporalAwareness } from "@/lib/temporal";
 import {
+  buildFetchToolRecords,
   extractUrls,
   fetchAll,
   inlineFetchedPages,
+  type FetchOutcome,
 } from "@/lib/webFetch";
 import {
   DEFAULT_PARAMS,
@@ -1457,14 +1459,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // the user's raw prompt and append them as fenced blocks so the model has
     // the page content as prompt context. Silent on failure — a dead link
     // should never block the send. Off by default; opt-in in Settings.
+    //
+    // `fetchOutcomes` survives the block so the chip persistence below can
+    // build a `ToolCallRecord[]` from it and attach the same call/result
+    // chip UX the calculator and MCP tools get. Without that, web fetch
+    // was the only "tool" that ran silently — no indication in the UI
+    // that the user's prompt had been augmented with page content.
+    let fetchOutcomes: FetchOutcome[] = [];
     {
       const s = useSettingsStore.getState();
       if (s.web_fetch_enabled) {
         const urls = extractUrls(rawContent);
         if (urls.length > 0) {
           try {
-            const outcomes = await fetchAll(urls);
-            inlinedContent = inlineFetchedPages(inlinedContent, outcomes);
+            fetchOutcomes = await fetchAll(urls);
+            inlinedContent = inlineFetchedPages(inlinedContent, fetchOutcomes);
           } catch (e) {
             // fetchAll itself never throws, but be defensive — a thrown
             // exception here would eat the whole submit, and we'd rather
@@ -1474,6 +1483,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
         }
       }
     }
+    const fetchToolRecords =
+      fetchOutcomes.length > 0 ? buildFetchToolRecords(fetchOutcomes) : [];
 
     // 1. Persist user message.
     const userMsg = await appendMessage({
@@ -1482,6 +1493,30 @@ export const useChatStore = create<ChatState>((set, get) => ({
       content: inlinedContent,
       attachments_json: attachmentsJson,
     });
+    // 1b. If web-fetch ran, persist the per-URL tool-call records on the
+    // user row so the chip UI has something to render. Done as a follow-up
+    // update because `appendMessage` doesn't accept `tool_calls_json` (and
+    // adding it for one caller would mean touching the Rust IPC surface
+    // too). `update_message` COALESCEs nullable columns, so passing the
+    // same content back is a no-op except for the tool_calls_json write.
+    if (fetchToolRecords.length > 0) {
+      const toolCallsJson = JSON.stringify(fetchToolRecords);
+      userMsg.tool_calls_json = toolCallsJson;
+      try {
+        await updateMessage({
+          id: userMsg.id,
+          session_id: sessionId,
+          content: inlinedContent,
+          tool_calls_json: toolCallsJson,
+        });
+      } catch (e) {
+        // Same defensive stance as fetchAll above: failing to persist
+        // the chip metadata shouldn't block the chat. The records still
+        // live on the optimistic `userMsg` so the chip shows up in this
+        // session; only the persisted reload would lose them.
+        logger.warn("persist web_fetch tool records failed", e);
+      }
+    }
     set((s) => ({
       messages: {
         ...s.messages,

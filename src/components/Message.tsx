@@ -428,7 +428,10 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
   const isUser = message.role === "user";
   const persistedMetrics = parseMetrics(message.metrics_json);
   const showMetrics = metrics ?? persistedMetrics;
-  const toolCalls = !isUser ? parseToolCalls(message.tool_calls_json) : [];
+  // Tool-call records exist on user rows too, but only when web-fetch
+  // ran on the prompt — see `buildFetchToolRecords` in `lib/webFetch.ts`.
+  // The chip UX is identical to the assistant-side MCP / calculator case.
+  const toolCalls = parseToolCalls(message.tool_calls_json);
   const attachments = isUser ? parseAttachments(message.attachments_json) : [];
   const images = attachments.filter((a) => a.kind === "image");
   const files = attachments.filter((a) => a.kind === "text" || a.kind === "file");
@@ -599,6 +602,11 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
                 {f.name}
               </AttachmentActions>
             ))}
+          </div>
+        )}
+        {isUser && toolCalls.length > 0 && (
+          <div className="mb-2">
+            <ToolCallsBlock calls={toolCalls} />
           </div>
         )}
         {!isUser && message.thinking && (
