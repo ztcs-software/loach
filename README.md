@@ -4,7 +4,7 @@
 
 **A native, local-first AI workspace for desktops**
 
-Run local LLMs with [Ollama](https://ollama.com) or connect any OpenAI-compatible API endpoint side-by-side, with a focused UX, local-first design, native apps for Windows and Linux, and simple yet powerful features out of the box.
+Run local LLMs with [Ollama](https://ollama.com) or connect any OpenAI-compatible API endpoint side-by-side, with a focused UX, local-first design, native apps for Windows, Linux and macOS, and simple yet powerful features out of the box.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
@@ -181,7 +181,7 @@ Only one OpenAI-compatible endpoint is active at a time — switch the base URL 
 | Icons | `lucide-react` |
 | State | Zustand (in-memory; backed by SQLite for persistence where appropriate) |
 | Storage | SQLite via `rusqlite` (bundled feature — no system dependency) |
-| Secrets | `keyring` crate → Windows Credential Manager / Linux Secret Service |
+| Secrets | `keyring` crate → Windows Credential Manager / Linux Secret Service / macOS Keychain |
 | Argon2id | `argon2` + `rand_core` (for app-lock hashing) |
 | HTTP | `reqwest` with streaming + `rustls-tls` |
 | Markdown | `react-markdown` + `remark-gfm` + `rehype-highlight` (highlight.js) |
@@ -196,11 +196,12 @@ Only one OpenAI-compatible endpoint is active at a time — switch the base URL 
 | What | Where |
 |---|---|
 | Chats, messages, spaces, snippets, MCP servers, app settings | SQLite at `<app-data-dir>/loach.db` |
-| OpenAI API key | OS credential manager (Windows Credential Manager / Linux Secret Service) |
+| OpenAI API key | OS credential manager (Windows Credential Manager / Linux Secret Service / macOS Keychain) |
 | App-lock hash + hint | OS credential manager — same store, separate entry |
 | Attached files (images, text) | Inlined into the message at send time; no separate file store |
 | App data dir on Windows | `%APPDATA%\dev.loach.app\` |
 | App data dir on Linux | `~/.local/share/dev.loach.app/` |
+| App data dir on macOS | `~/Library/Application Support/dev.loach.app/` |
 
 Loach launches and works completely offline as long as you stick to local providers. The **Models** library, **Spaces**, **Snippets**, search, parameter sidebar, app lock, and chat history are all available without network access. Only chat generations against remote endpoints (OpenAI, Groq, OpenRouter, …) require internet connection.
 

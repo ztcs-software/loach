@@ -18,7 +18,9 @@ dropdown is empty even though `ollama list` works in a terminal.
 **Solution.**
 
 1. Make sure `ollama serve` is running. On Windows, the Ollama tray icon
-   needs to be active; on Linux, the `ollama` service must be started.
+   needs to be active; on Linux, the `ollama` service must be started; on
+   macOS, launch the Ollama menu-bar app or run `ollama serve` from a
+   terminal.
 2. Open **Settings → Providers → Ollama** and check the **Base URL**.
    The default is `http://localhost:11434`. If you run Ollama on another
    machine or a custom port, change it here.
@@ -332,7 +334,7 @@ decrypt it back. Your options are:
 - **Factory reset** the install — this wipes every chat, Space, snippet,
   and setting. On Windows that means removing the app's data directory and
   reinstalling; on Linux, deleting the app-data folder under your home
-  directory.
+  directory; on macOS, deleting `~/Library/Application Support/dev.loach.app/`.
 
 Set a hint when you create a lock — it's stored alongside in plain text
 for exactly this case.
@@ -486,13 +488,32 @@ app first.
 
 ## 13. Platform
 
-### macOS
+### macOS: "Loach is damaged and can't be opened" on first launch
 
-**Problem.** There's no macOS build.
+**Problem.** macOS refuses to open the app after install, showing either
+*"Loach is damaged and can't be opened"* or *"Apple cannot verify Loach is
+free of malware"*.
 
-**Solution.** macOS is not currently supported. The codebase is Tauri 2
-and portable in principle, but no builds, signing, or test coverage exist
-for macOS yet.
+**Solution.** The macOS build is **not Apple-notarized** (we don't
+subscribe to the Apple Developer Program), so Gatekeeper blocks it on
+first launch. Bypass it once and the app runs normally afterwards:
+
+- **Right-click** `Loach.app` in **Applications** → **Open** → click
+  **Open** in the prompt, or
+- Run `xattr -cr /Applications/Loach.app` in **Terminal** and launch
+  normally.
+
+Auto-updates flow through Loach's own Ed25519-signed updater (independent
+of Apple), so this is a one-time install step. If a future update is
+blocked the same way, the same workaround applies.
+
+### macOS: Intel Mac
+
+**Problem.** The downloaded `.dmg` won't install or run on an Intel Mac.
+
+**Solution.** The macOS build is **Apple Silicon (M-series) only**.
+Intel Macs aren't supported. Build from source if you need to run on
+Intel — see the README "Build from source" section.
 
 ### Windows: "Credential Manager access denied"
 

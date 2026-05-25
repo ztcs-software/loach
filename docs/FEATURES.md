@@ -1,8 +1,9 @@
 # Loach — Feature Documentation
 
 A native desktop chat client for local and OpenAI-compatible language models.
-Loach runs as a Tauri 2 app on Windows and Linux, stores everything locally in
-SQLite, and treats the OS credential store as the only place secrets ever land.
+Loach runs as a Tauri 2 app on Windows, Linux and macOS, stores everything
+locally in SQLite, and treats the OS credential store as the only place
+secrets ever land.
 
 This document is the source of truth for the public documentation website. Each
 section describes a user-visible feature, what problem it solves, and the
@@ -41,8 +42,8 @@ plus vLLM, LM Studio, LiteLLM, OpenRouter, Groq, and other proxies.
   the documented endpoint for OpenAI, llama.cpp (`llama-server`), LM Studio,
   vLLM, or LiteLLM.
 - **API key** — saved into the OS credential manager (Windows Credential
-  Manager, Linux Secret Service). Never written to disk in plain text, never
-  shipped to the renderer.
+  Manager, Linux Secret Service, macOS Keychain). Never written to disk in
+  plain text, never shipped to the renderer.
 - **Catalog listing** — fetched on demand; the panel hides itself if no key
   is configured rather than spamming 401s.
 - **Test connection** — calls the endpoint's `/models` listing with the
@@ -521,8 +522,8 @@ in **Settings → Security**.
 - **Optional hint** stored alongside (plaintext — the user has to be able
   to read it after a failed unlock).
 - **Argon2id** hashing in Rust; the lock blob lives in the OS credential
-  store (Windows Credential Manager / Linux Secret Service), never on disk
-  in plaintext, never in SQLite.
+  store (Windows Credential Manager / Linux Secret Service / macOS
+  Keychain), never on disk in plaintext, never in SQLite.
 
 ### 12.1 Lock screen
 
@@ -640,6 +641,10 @@ In-app updater for the Tauri-supported install formats:
 - **Linux `.deb` / `.rpm`** — managed by the system package manager.
   The Updates panel detects this and points to the GitHub releases page
   instead of pretending in-app updates work.
+- **macOS `.app`** — in-place replacement of the application bundle from
+  the downloaded `.app.tar.gz`. Works even though the build isn't
+  Apple-notarized: the updater's integrity check uses our own Ed25519
+  signature, separate from Apple notarization.
 
 **What's new** — every release includes a markdown notes file that
 populates both the GitHub release body and the in-app **Updates** panel
@@ -656,7 +661,8 @@ verification happens before the binary is replaced.
   user's app-data directory. Foreign keys are on; backups round-trip
   schema constraints.
 - **API keys, app-lock hashes** — OS credential store only (Windows
-  Credential Manager / Linux Secret Service via the `keyring` crate).
+  Credential Manager / Linux Secret Service / macOS Keychain via the
+  `keyring` crate).
 - **No telemetry** — Loach makes no outbound network requests beyond
   the providers the user configures, the optional URL fetches the user
   triggers, the MCP servers the user wires up, and the in-app updater
@@ -687,7 +693,11 @@ verification happens before the binary is replaced.
 - **Windows 10/11 x86_64** — NSIS installer, in-app updater.
 - **Linux x86_64** — AppImage (with in-app updater), `.deb`, and `.rpm`
   (managed by the package manager).
-- macOS is **not currently supported**.
+- **macOS 11+ Apple Silicon** — `.dmg` install plus a `.app` bundle, with
+  in-app updater. The build is **not Apple-notarized** (we don't subscribe
+  to the Apple Developer Program), so first launch requires a one-time
+  Gatekeeper bypass — see the README "Install on macOS" section. Intel
+  Macs are not supported.
 
 System requirements depend on the local model you pick (Loach itself is
 small — a few hundred megabytes resident); Ollama's GPU requirements

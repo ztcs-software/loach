@@ -27,8 +27,9 @@ The macOS install / Gatekeeper-bypass instructions live in the top-level
    build. If either is missing, the workflow silently skips — normal merges
    don't trigger anything.
 4. When the build finishes, inspect the **draft** release on GitHub. Verify
-   `latest.json` references `*.nsis.zip` and `*.AppImage` and has non-empty
-   signatures.
+   `latest.json` references `*.nsis.zip` (Windows), `*.AppImage` (Linux)
+   and `*.app.tar.gz` (macOS) and that each entry has a non-empty
+   signature.
 5. Click **Publish release**. The in-app updater picks it up on next check.
 
 ## Style
