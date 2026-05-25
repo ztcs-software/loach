@@ -1,17 +1,18 @@
 import { useChatStore } from "@/stores/chatStore";
 import { useMcpStore } from "@/stores/mcpStore";
 import { useModelsStore } from "@/stores/modelsStore";
+import { usePrivateChatStore } from "@/stores/privateChatStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useSnippetStore } from "@/stores/snippetStore";
 import { useSpaceStore } from "@/stores/spaceStore";
-import { useUIStore } from "@/stores/uiStore";
+import { useUIStore, type SettingsTab } from "@/stores/uiStore";
 import { DEFAULT_PERSONA_ID, PERSONAS } from "@/lib/personas";
 import {
   deleteMessage,
   fetchUrl,
   mcpTest,
 } from "@/lib/tauri";
-import type { GenerationParams, Session } from "@/types";
+import type { GenerationParams, Message, MessageMetrics, Session } from "@/types";
 import { findCommand, parseInput } from "./parser";
 import type { CommandResult, CommandResultItem } from "./types";
 
@@ -158,6 +159,20 @@ async function run(name: string, rest: string): Promise<CommandResult> {
       return runFetch(rest);
     case "thinking":
       return runThinking(rest);
+    case "help":
+      return runHelp();
+    case "copy":
+      return runCopy(rest);
+    case "settings":
+      return runSettings(rest);
+    case "regenerate":
+      return runRegenerate();
+    case "stats":
+      return runStats();
+    case "private":
+      return runPrivate();
+    case "compact":
+      return runCompact();
     default:
       // Defensive — `dispatch` already filtered unknown commands. Treat as a
       // toast error so the bug surfaces if a new entry in `COMMANDS` is
@@ -539,5 +554,203 @@ async function runThinking(rest: string): Promise<CommandResult> {
   if (flag !== "on" && flag !== "off") throw new Error("Usage: /thinking on|off");
   await patchParams({ think: flag === "on" });
   return ok("Thinking", flag === "on" ? "Enabled" : "Disabled");
+}
+
+async function runHelp(): Promise<CommandResult> {
+  // Pure UI surface — the dialog lives in App.tsx and reads `helpOpen` /
+  // the registry directly. The dispatcher just flips the flag and returns
+  // a noop result so the composer doesn't drop a toast on top of the
+  // dialog the user just opened.
+  useUIStore.getState().setHelpOpen(true);
+  return { kind: "noop" };
+}
+
+async function runCopy(rest: string): Promise<CommandResult> {
+  const session = requireSession();
+  const arg = rest.trim();
+  // Default to the last assistant reply; `/copy 2` walks back N. We do NOT
+  // count user turns — the command is about copying *assistant* output, so
+  // `N` indexes into the filtered list (1 = latest reply, 2 = the one
+  // before that, etc.).
+  const n = arg.length === 0 ? 1 : Math.max(1, Math.floor(Number(arg)));
+  if (!Number.isFinite(n)) throw new Error("Usage: /copy [N]");
+  const messages = useChatStore.getState().messages[session.id] ?? [];
+  const assistantReplies = messages.filter((m) => m.role === "assistant");
+  if (assistantReplies.length < n) {
+    throw new Error(
+      assistantReplies.length === 0
+        ? "Nothing to copy yet — wait for a reply first."
+        : `This chat only has ${assistantReplies.length} reply${assistantReplies.length === 1 ? "" : "s"}.`,
+    );
+  }
+  const target = assistantReplies[assistantReplies.length - n]!;
+  if (!target.content.trim()) {
+    throw new Error("That reply is empty.");
+  }
+  try {
+    await navigator.clipboard.writeText(target.content);
+  } catch {
+    throw new Error("Clipboard access was blocked.");
+  }
+  const preview = target.content.length > 80 ? target.content.slice(0, 80) + "…" : target.content;
+  return ok(
+    n === 1 ? "Copied last reply" : `Copied reply ${n} back`,
+    preview,
+  );
+}
+
+// Settings tabs the dialog can land on. Mirrors `SettingsTab` in uiStore —
+// we re-state the list here so a typo in the user's `/settings` arg falls
+// back to "general" instead of routing to an undefined tab.
+const SETTINGS_TABS: readonly SettingsTab[] = [
+  "general",
+  "providers",
+  "features",
+  "tools",
+  "appearance",
+  "mcp",
+  "archive",
+  "data",
+  "security",
+  "updates",
+  "about",
+];
+
+async function runSettings(rest: string): Promise<CommandResult> {
+  const arg = rest.trim().toLowerCase();
+  if (arg.length === 0) {
+    useUIStore.getState().setSettingsOpen(true);
+    return { kind: "noop" };
+  }
+  const tab = SETTINGS_TABS.find((t) => t === arg);
+  if (!tab) {
+    throw new Error(`Unknown settings tab "${arg}". Try: ${SETTINGS_TABS.join(", ")}.`);
+  }
+  useUIStore.getState().openSettingsTab(tab);
+  return { kind: "noop" };
+}
+
+async function runRegenerate(): Promise<CommandResult> {
+  const session = requireSession();
+  // `regenerateLast` already guards against busy chats and missing user
+  // turns; on a no-op call it silently returns. We surface the busy /
+  // empty-history case ourselves so the user gets feedback instead of
+  // wondering whether the command landed.
+  const messages = useChatStore.getState().messages[session.id] ?? [];
+  const last = messages[messages.length - 1];
+  if (!last || last.role !== "assistant") {
+    throw new Error("Nothing to regenerate — the last turn isn't an assistant reply.");
+  }
+  const state = useChatStore.getState();
+  if (
+    state.runningTask?.sessionId === session.id ||
+    state.queue.some((t) => t.sessionId === session.id)
+  ) {
+    throw new Error("This chat is busy — wait for the current reply to finish.");
+  }
+  await useChatStore.getState().regenerateLast(session.id);
+  return ok("Regenerating reply", "Streaming a fresh response with current settings");
+}
+
+async function runStats(): Promise<CommandResult> {
+  const session = requireSession();
+  const messages = useChatStore.getState().messages[session.id] ?? [];
+  const userCount = messages.filter((m) => m.role === "user").length;
+  const assistantCount = messages.filter((m) => m.role === "assistant").length;
+
+  let totalTokens = 0;
+  let totalElapsed = 0;
+  let metricsCount = 0;
+  for (const m of messages) {
+    const metrics = readMetrics(m);
+    if (!metrics) continue;
+    totalTokens += metrics.tokens;
+    totalElapsed += metrics.elapsed_ms;
+    metricsCount += 1;
+  }
+  const avgTps =
+    totalElapsed > 0 ? (totalTokens / (totalElapsed / 1000)) : 0;
+
+  // Last assistant reply with metrics — usually the most recent turn.
+  const last = [...messages]
+    .reverse()
+    .find((m) => m.role === "assistant" && readMetrics(m) !== null);
+  const lastMetrics = last ? readMetrics(last) : null;
+
+  const items: CommandResultItem[] = [
+    { label: "Messages", detail: `${messages.length} (${userCount} user / ${assistantCount} assistant)` },
+    {
+      label: "Tokens (assistant)",
+      detail: metricsCount > 0 ? `${totalTokens} across ${metricsCount} replies` : "—",
+    },
+    {
+      label: "Avg tokens/sec",
+      detail: metricsCount > 0 ? avgTps.toFixed(1) : "—",
+    },
+  ];
+  if (lastMetrics) {
+    items.push({
+      label: "Last reply",
+      detail: `${lastMetrics.tokens} tok · ${lastMetrics.tokens_per_second.toFixed(1)} tok/s · ${formatMs(lastMetrics.elapsed_ms)}`,
+    });
+  }
+  items.push({
+    label: "Model",
+    detail: `${session.model || "—"} (${session.provider})`,
+  });
+
+  return listItems("Chat stats", items);
+}
+
+function readMetrics(m: Message): MessageMetrics | null {
+  if (!m.metrics_json) return null;
+  try {
+    const parsed = JSON.parse(m.metrics_json) as MessageMetrics;
+    if (
+      typeof parsed.tokens === "number" &&
+      typeof parsed.elapsed_ms === "number" &&
+      typeof parsed.tokens_per_second === "number"
+    ) {
+      return parsed;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function formatMs(ms: number): string {
+  if (ms < 1000) return `${Math.round(ms)} ms`;
+  const s = ms / 1000;
+  if (s < 60) return `${s.toFixed(1)} s`;
+  const m = Math.floor(s / 60);
+  const rest = Math.round(s - m * 60);
+  return `${m}m ${rest}s`;
+}
+
+async function runPrivate(): Promise<CommandResult> {
+  usePrivateChatStore.getState().setOpen(true);
+  return { kind: "noop" };
+}
+
+async function runCompact(): Promise<CommandResult> {
+  const session = requireSession();
+  const state = useChatStore.getState();
+  if (state.compactingSessionId) {
+    throw new Error("Another chat is already being compacted. Try again in a moment.");
+  }
+  const messages = state.messages[session.id] ?? [];
+  // Mirrors the gating logic in ContextUsageBar's popover: small chats
+  // aren't worth a round-trip to the summariser. We can't easily compute
+  // the ratio from here without duplicating `computeContextUsage`, so we
+  // fall back to the more conservative half of the gate (message count)
+  // and let the store layer reject impossibly tiny chats.
+  if (messages.length < 6) {
+    throw new Error("Not enough history to compact yet — keep chatting.");
+  }
+  // Fire and forget; the store flips `compactingSessionId` so the context
+  // bar shows a spinner, and toasts its own success/failure when done.
+  void useChatStore.getState().compactContext(session.id);
+  return ok("Compacting context", "Summarising older messages with this chat's model");
 }
 

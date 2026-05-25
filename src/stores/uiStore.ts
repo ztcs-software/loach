@@ -24,6 +24,10 @@ interface UIState {
   sidebarOpen: boolean;
   paramsOpen: boolean;
   settingsOpen: boolean;
+  /** Visibility of the slash-command help dialog. Toggled by `/help` and
+   *  by the dialog's close button. Lives on uiStore so the dispatcher
+   *  can flip it without ChatInput having to own a local state. */
+  helpOpen: boolean;
   /** Which Settings tab to show when the dialog opens. Defaults to `general`
    *  so the cold-open lands on the user-personalisation surface. */
   settingsTab: SettingsTab;
@@ -60,6 +64,7 @@ interface UIState {
   toggleSidebar: () => void;
   toggleParams: () => void;
   setSettingsOpen: (open: boolean) => void;
+  setHelpOpen: (open: boolean) => void;
   setSettingsTab: (tab: SettingsTab) => void;
   /** Open the Settings dialog on a specific tab in one call — used by
    *  "Archive" in the sidebar rail. */
@@ -82,6 +87,7 @@ export const useUIStore = create<UIState>((set, get) => ({
   sidebarOpen: true,
   paramsOpen: false,
   settingsOpen: false,
+  helpOpen: false,
   settingsTab: "general",
   sidebarTab: "chats",
   composerDraft: "",
@@ -94,6 +100,7 @@ export const useUIStore = create<UIState>((set, get) => ({
   toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
   toggleParams: () => set((s) => ({ paramsOpen: !s.paramsOpen })),
   setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
+  setHelpOpen: (helpOpen) => set({ helpOpen }),
   setSettingsTab: (settingsTab) => set({ settingsTab }),
   openSettingsTab: (settingsTab) => set({ settingsTab, settingsOpen: true }),
   setSidebarTab: (sidebarTab) => set({ sidebarTab }),

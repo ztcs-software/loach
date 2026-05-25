@@ -13,6 +13,9 @@ export interface CommandSpec {
    *  parent. Example: `/list models`, `/list snippets`. The handler still
    *  receives the raw rest-string and decides what to do with it. */
   subcommands?: readonly string[];
+  /** Category label used by the `/help` dialog to group commands into
+   *  scannable sections. Omit to land in the trailing "Other" bucket. */
+  group?: string;
 }
 
 /** Outcome of running a command. The composer treats each variant differently

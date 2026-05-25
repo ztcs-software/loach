@@ -6,6 +6,7 @@ import { ChatCanvas } from "@/components/ChatCanvas";
 import { ChatInput } from "@/components/ChatInput";
 import { ParameterPanel } from "@/components/ParameterPanel";
 import { SettingsDialog } from "@/components/SettingsDialog";
+import { HelpDialog } from "@/components/HelpDialog";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { SwitchVariantProvider } from "@/components/ui/switch";
 import { SpaceForm } from "@/components/SpaceForm";
@@ -257,6 +258,9 @@ export default function App() {
             would otherwise blank the whole app. */}
         <ErrorBoundary name="Settings">
           <SettingsDialog />
+        </ErrorBoundary>
+        <ErrorBoundary name="Help">
+          <HelpDialog />
         </ErrorBoundary>
         <ErrorBoundary name="Space form">
           <SpaceForm />
