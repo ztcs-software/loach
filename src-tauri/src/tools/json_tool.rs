@@ -113,6 +113,7 @@ fn ok(s: impl Into<String>) -> McpCallResult {
     McpCallResult {
         content_text: s.into(),
         is_error: false,
+        ..Default::default()
     }
 }
 
@@ -120,6 +121,7 @@ fn err(s: impl Into<String>) -> McpCallResult {
     McpCallResult {
         content_text: s.into(),
         is_error: true,
+        ..Default::default()
     }
 }
 

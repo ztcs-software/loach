@@ -197,6 +197,11 @@ export function updateMessage(args: {
    *  calls; the backend `COALESCE`'s on the column so streaming flushes
    *  don't clobber tool-call records saved on a separate write. */
   tool_calls_json?: string | null;
+  /** JSON-encoded `Attachment[]` produced by built-in tools during this
+   *  assistant turn (today only `pdf`). Same COALESCE semantics as
+   *  `tool_calls_json` — pass undefined / null on writes that don't
+   *  touch attachments. */
+  attachments_json?: string | null;
 }): Promise<void> {
   if (!isTauri) return notInTauri(undefined);
   return invoke("update_message", { args });

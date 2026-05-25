@@ -74,6 +74,15 @@ similar = "2"
 natord = "1"
 ipnet = "2"
 
+# PDF generation + merging for the built-in `pdf` tool. printpdf builds
+# documents from a structured spec; lopdf concatenates existing PDFs
+# (used for the `merge` action). v1 uses printpdf's built-in Helvetica
+# (PDF base-14), so the output is ASCII-only — non-ASCII characters
+# are stripped before render so the file stays valid. Documented in
+# the tool description so the model knows the limitation.
+printpdf = "0.7"
+lopdf = "0.33"
+
 [dev-dependencies]
 # Only used by the db.rs test suite, which opens a fresh database in a
 # tempdir per test so we don't trample the user's real `loach.db` and so

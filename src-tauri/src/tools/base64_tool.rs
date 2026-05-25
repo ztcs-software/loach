@@ -67,6 +67,7 @@ pub fn dispatch(args: &Value) -> McpCallResult {
         "encode" => McpCallResult {
             content_text: engine.encode(input.as_bytes()),
             is_error: false,
+            ..Default::default()
         },
         "decode" => {
             // Be permissive about missing padding — match the convention
@@ -92,6 +93,7 @@ pub fn dispatch(args: &Value) -> McpCallResult {
                     Err(_) => format!("(non-UTF-8 bytes, hex) {}", hex(&decoded)),
                 },
                 is_error: false,
+                ..Default::default()
             }
         }
         other => err(format!("unknown op `{other}` — use encode or decode")),
@@ -110,6 +112,7 @@ fn err(msg: impl Into<String>) -> McpCallResult {
     McpCallResult {
         content_text: msg.into(),
         is_error: true,
+        ..Default::default()
     }
 }
 

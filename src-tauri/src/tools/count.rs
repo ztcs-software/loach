@@ -91,6 +91,7 @@ pub fn dispatch(args: &Value) -> McpCallResult {
     McpCallResult {
         content_text: n.to_string(),
         is_error: false,
+        ..Default::default()
     }
 }
 
@@ -98,6 +99,7 @@ fn err(msg: impl Into<String>) -> McpCallResult {
     McpCallResult {
         content_text: msg.into(),
         is_error: true,
+        ..Default::default()
     }
 }
 

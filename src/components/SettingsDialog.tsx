@@ -33,6 +33,7 @@ import {
   Palette,
   Plug,
   Calculator,
+  FileText,
   RefreshCw,
   RotateCcw,
   Ruler,
@@ -1026,6 +1027,40 @@ export function SettingsDialog() {
                         settings.ip_tool_enabled
                           ? "Disable IP / CIDR tool"
                           : "Enable IP / CIDR tool"
+                      }
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="min-w-0">
+                      <Label className="flex items-center gap-1.5">
+                        <FileText className="h-3.5 w-3.5 text-foreground/60" />
+                        PDF
+                      </Label>
+                      <p className="mt-1 text-[11px] text-foreground/50">
+                        Exposes a <span className="font-mono">pdf</span>{" "}
+                        tool the model can call to produce a downloadable
+                        PDF from a structured spec — headings, paragraphs,
+                        bullet / numbered lists, horizontal rules, page
+                        breaks, and simple tables. The result attaches to
+                        the assistant message and opens in the built-in
+                        viewer. ASCII-only in this build (Helvetica base
+                        font); image blocks and merging existing PDFs
+                        aren't supported yet. In-process.
+                      </p>
+                    </div>
+                    <Switch
+                      checked={settings.pdf_tool_enabled}
+                      onCheckedChange={(next) =>
+                        settings.update("pdf_tool_enabled", next)
+                      }
+                      className="shrink-0"
+                      aria-label={
+                        settings.pdf_tool_enabled
+                          ? "Disable PDF tool"
+                          : "Enable PDF tool"
                       }
                     />
                   </div>

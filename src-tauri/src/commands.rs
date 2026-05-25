@@ -267,6 +267,11 @@ pub struct UpdateMessageArgs {
     /// tool calls that landed in a separate write).
     #[serde(default)]
     pub tool_calls_json: Option<String>,
+    /// JSON-encoded `Attachment[]` — files produced by built-in tools
+    /// during this assistant turn (today only `pdf`). Same COALESCE
+    /// semantics as `tool_calls_json`.
+    #[serde(default)]
+    pub attachments_json: Option<String>,
 }
 
 #[tauri::command]
@@ -283,6 +288,7 @@ pub async fn update_message(
             args.thinking.as_deref(),
             args.metrics_json.as_deref(),
             args.tool_calls_json.as_deref(),
+            args.attachments_json.as_deref(),
         )
         .map_err(err)
 }

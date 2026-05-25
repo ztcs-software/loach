@@ -23,6 +23,7 @@ pub mod fetch_url;
 pub mod hash;
 pub mod ip_tool;
 pub mod json_tool;
+pub mod pdf;
 pub mod sort_tool;
 pub mod unit_convert;
 pub mod uuid_gen;

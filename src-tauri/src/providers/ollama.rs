@@ -670,6 +670,7 @@ pub async fn chat_stream(
                                     id: call_id.clone(),
                                     content: msg.clone(),
                                     is_error: true,
+                                    attachments: Vec::new(),
                                 },
                             );
                             messages.push(json!({
@@ -711,7 +712,7 @@ pub async fn chat_stream(
                         &tool_name,
                         &args,
                     );
-                    let (content, is_error) = select! {
+                    let (content, is_error, attachments) = select! {
                         biased;
                         _ = cancel.notified() => {
                             let _ = app.emit(&channel, StreamEvent::Cancelled);
@@ -719,8 +720,8 @@ pub async fn chat_stream(
                             return Ok(());
                         }
                         r = dispatch => match r {
-                            Ok(r) => (r.content_text, r.is_error),
-                            Err(e) => (format!("tool call failed: {e:#}"), true),
+                            Ok(r) => (r.content_text, r.is_error, r.attachments),
+                            Err(e) => (format!("tool call failed: {e:#}"), true, Vec::new()),
                         },
                     };
 
@@ -737,6 +738,7 @@ pub async fn chat_stream(
                             id: call_id.clone(),
                             content: for_ui,
                             is_error,
+                            attachments,
                         },
                     );
 

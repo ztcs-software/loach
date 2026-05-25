@@ -116,6 +116,13 @@ const BUILTINS: &[Builtin] = &[
         input_schema: super::ip_tool::input_schema,
         dispatch: super::ip_tool::dispatch,
     },
+    Builtin {
+        setting_key: "pdf_tool_enabled",
+        name: super::pdf::TOOL_NAME,
+        description: super::pdf::tool_description,
+        input_schema: super::pdf::input_schema,
+        dispatch: super::pdf::dispatch,
+    },
 ];
 
 /// Build catalogue entries for every built-in tool whose settings toggle

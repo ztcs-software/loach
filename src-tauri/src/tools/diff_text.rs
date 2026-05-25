@@ -81,11 +81,13 @@ pub fn dispatch(args: &Value) -> McpCallResult {
         return McpCallResult {
             content_text: "(no differences)".to_string(),
             is_error: false,
+            ..Default::default()
         };
     }
     McpCallResult {
         content_text: out,
         is_error: false,
+        ..Default::default()
     }
 }
 
@@ -126,6 +128,7 @@ fn err(msg: impl Into<String>) -> McpCallResult {
     McpCallResult {
         content_text: msg.into(),
         is_error: true,
+        ..Default::default()
     }
 }
 

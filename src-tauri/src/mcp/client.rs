@@ -269,6 +269,7 @@ impl McpSession {
         Ok(McpCallResult {
             content_text: text,
             is_error: parsed.is_error,
+            ..Default::default()
         })
     }
 }

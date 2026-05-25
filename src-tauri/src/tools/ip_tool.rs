@@ -84,6 +84,7 @@ fn op_in_cidr(args: &Value, cidr: IpNet) -> McpCallResult {
     McpCallResult {
         content_text: inside.to_string(),
         is_error: false,
+        ..Default::default()
     }
 }
 
@@ -147,6 +148,7 @@ fn op_subnet_info(cidr: IpNet) -> McpCallResult {
     McpCallResult {
         content_text: out,
         is_error: false,
+        ..Default::default()
     }
 }
 
@@ -154,6 +156,7 @@ fn err(msg: impl Into<String>) -> McpCallResult {
     McpCallResult {
         content_text: msg.into(),
         is_error: true,
+        ..Default::default()
     }
 }
 

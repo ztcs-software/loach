@@ -28,7 +28,7 @@ pub mod client;
 pub mod types;
 
 pub use client::{test_server, McpSession};
-pub use types::{McpCallResult, McpTestResult, McpToolDef};
+pub use types::{Attachment, McpCallResult, McpTestResult, McpToolDef};
 
 use anyhow::{anyhow, bail, Context, Result};
 use reqwest::Url;

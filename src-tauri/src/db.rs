@@ -908,6 +908,7 @@ impl Database {
         thinking: Option<&str>,
         metrics_json: Option<&str>,
         tool_calls_json: Option<&str>,
+        attachments_json: Option<&str>,
     ) -> Result<()> {
         // Scope by session_id so a renderer that ever gets confused — or a
         // compromised one calling commands directly with a leaked message id
@@ -920,16 +921,20 @@ impl Database {
         // passing `None` preserves whatever's already on the row, so the
         // chat path can update content+thinking on the streaming flush
         // without clobbering tool-call records that were saved on a
-        // separate write.
+        // separate write. `attachments_json` follows the same pattern so
+        // tools that produce attachments (e.g. the built-in `pdf` tool)
+        // can append them onto the assistant message without the next
+        // streaming flush clobbering them back to NULL.
         let conn = self.conn.lock();
         conn.execute(
             "UPDATE messages
              SET content = ?1,
                  thinking = ?2,
                  metrics_json = COALESCE(?3, metrics_json),
-                 tool_calls_json = COALESCE(?4, tool_calls_json)
-             WHERE id = ?5 AND session_id = ?6",
-            params![content, thinking, metrics_json, tool_calls_json, id, session_id],
+                 tool_calls_json = COALESCE(?4, tool_calls_json),
+                 attachments_json = COALESCE(?5, attachments_json)
+             WHERE id = ?6 AND session_id = ?7",
+            params![content, thinking, metrics_json, tool_calls_json, attachments_json, id, session_id],
         )?;
         Ok(())
     }

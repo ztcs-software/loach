@@ -83,6 +83,7 @@ pub fn dispatch(arguments: &Value) -> McpCallResult {
         Ok(value) => McpCallResult {
             content_text: format_result(value),
             is_error: false,
+            ..Default::default()
         },
         Err(e) => err(format!("could not evaluate `{trimmed}`: {e}")),
     }
@@ -92,6 +93,7 @@ fn err(msg: impl Into<String>) -> McpCallResult {
     McpCallResult {
         content_text: msg.into(),
         is_error: true,
+        ..Default::default()
     }
 }
 

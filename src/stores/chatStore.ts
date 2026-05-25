@@ -226,6 +226,12 @@ let runningBuffers: {
    *  message at `finishRunning` (or in real time on each tool_result
    *  event so a cancel mid-loop doesn't lose partial work). */
   toolCalls: ToolCallRecord[];
+  /** Attachments produced by built-in tools mid-turn (today only `pdf`).
+   *  Accumulated across `tool_result` events with non-empty `attachments`
+   *  and persisted onto the assistant message's `attachments_json` at
+   *  flush time so the chat UI renders them as file cards via the same
+   *  path user-uploaded attachments use. */
+  attachments: Attachment[];
 } | null = null;
 
 /** rAF-batched render flush state for streaming events. Rather than calling
@@ -247,6 +253,7 @@ const pendingDirty = {
   thinking: false,
   metrics: false,
   toolCalls: false,
+  attachments: false,
 };
 
 function scheduleFlush(get: Getter, set: Setter) {
@@ -266,11 +273,13 @@ function flushPendingFrame(get: Getter, set: Setter) {
   const dThinking = pendingDirty.thinking;
   const dMetrics = pendingDirty.metrics;
   const dTools = pendingDirty.toolCalls;
-  if (!dContent && !dThinking && !dMetrics && !dTools) return;
+  const dAttach = pendingDirty.attachments;
+  if (!dContent && !dThinking && !dMetrics && !dTools && !dAttach) return;
   pendingDirty.content = false;
   pendingDirty.thinking = false;
   pendingDirty.metrics = false;
   pendingDirty.toolCalls = false;
+  pendingDirty.attachments = false;
   const buf = runningBuffers;
   if (!buf) return;
   const task = get().runningTask;
@@ -284,9 +293,13 @@ function flushPendingFrame(get: Getter, set: Setter) {
   // place by the stream handlers, so we serialize at flush time to give
   // every subscriber a stable reference.
   const newToolsJson = dTools ? JSON.stringify(buf.toolCalls) : null;
+  // Same snapshot pattern for attachments — produced by built-in tools
+  // (pdf today) and rendered by AttachmentActions / PdfPreview via the
+  // existing `attachments_json` field on the message.
+  const newAttachJson = dAttach ? JSON.stringify(buf.attachments) : null;
   set((s) => {
     const next: Partial<ChatState> = {};
-    if (dContent || dThinking || dTools) {
+    if (dContent || dThinking || dTools || dAttach) {
       const list = s.messages[sessionId] ?? [];
       next.messages = {
         ...s.messages,
@@ -297,6 +310,7 @@ function flushPendingFrame(get: Getter, set: Setter) {
                 ...(dContent ? { content: newContent } : {}),
                 ...(dThinking ? { thinking: newThinking } : {}),
                 ...(dTools ? { tool_calls_json: newToolsJson } : {}),
+                ...(dAttach ? { attachments_json: newAttachJson } : {}),
               }
             : m,
         ),
@@ -646,6 +660,8 @@ function finishRunning(get: Getter, set: Setter, reason: FinishReason = "done") 
       metrics_json: buf.metrics ? JSON.stringify(buf.metrics) : null,
       tool_calls_json:
         buf.toolCalls.length > 0 ? JSON.stringify(buf.toolCalls) : null,
+      attachments_json:
+        buf.attachments.length > 0 ? JSON.stringify(buf.attachments) : null,
     }).catch((e) => {
       const detail = e instanceof Error ? e.message : String(e);
       logger.error("failed to persist assistant reply", e);
@@ -844,6 +860,7 @@ async function startTask(task: QueueTask, get: Getter, set: Setter) {
     thinking: "",
     metrics: null,
     toolCalls: [...preCalls],
+    attachments: [],
   };
 
   const streamId = makeRequestId();
@@ -910,6 +927,14 @@ async function startTask(task: QueueTask, get: Getter, set: Setter) {
             });
           }
           pendingDirty.toolCalls = true;
+          // Append any attachments the tool produced (today only the
+          // built-in `pdf` tool fills this). Accumulated across results
+          // so a multi-call turn ("create one PDF, then another") lands
+          // both on the assistant message.
+          if (ev.attachments && ev.attachments.length > 0) {
+            buf.attachments.push(...ev.attachments);
+            pendingDirty.attachments = true;
+          }
           scheduleFlush(get, set);
         } else if (ev.kind === "error") {
           // Wrap raw provider error in a sentence the user can act on. We

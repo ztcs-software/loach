@@ -280,6 +280,12 @@ export type StreamEvent =
       id: string;
       content: string;
       is_error: boolean;
+      /** Files produced by the tool (today only the built-in `pdf` tool
+       *  fills this). The chat store appends them to the assistant
+       *  message's `attachments_json` so the existing PdfPreview /
+       *  file-card renderers handle display. Optional with default `[]`
+       *  so prior tool_result events deserialise unchanged. */
+      attachments?: Attachment[];
     };
 
 export type ThemeChoice = "light" | "dark" | "system";
@@ -352,6 +358,13 @@ export interface Settings {
   diff_text_tool_enabled: boolean;
   sort_tool_enabled: boolean;
   ip_tool_enabled: boolean;
+  /** Built-in `pdf` tool — `create` action generates PDFs from a
+   *  structured spec (headings, paragraphs, lists, tables) and attaches
+   *  them to the assistant message via the existing `PdfPreview`. v1 is
+   *  ASCII-only (built-in Helvetica) and doesn't support image blocks
+   *  or merging existing PDFs yet — `merge` returns a not-yet-supported
+   *  error. */
+  pdf_tool_enabled: boolean;
   /** Global override for Ollama's `low_vram` option. When `true`, every
    *  Ollama request is sent with `low_vram: true` regardless of per-chat
    *  params or per-model Modelfile defaults — handy on memory-constrained
@@ -401,6 +414,7 @@ export const DEFAULT_SETTINGS: Settings = {
   diff_text_tool_enabled: false,
   sort_tool_enabled: false,
   ip_tool_enabled: false,
+  pdf_tool_enabled: false,
   low_vram_global: false,
   thinking_default: true,
   default_tone_id: "default",
