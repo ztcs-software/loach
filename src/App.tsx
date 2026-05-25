@@ -13,6 +13,8 @@ import { SpaceForm } from "@/components/SpaceForm";
 import { SpaceView } from "@/components/SpaceView";
 import { SpacesLibrary } from "@/components/SpacesLibrary";
 import { SnippetDialog } from "@/components/SnippetDialog";
+import { SnippetVariableDialog } from "@/components/SnippetVariableDialog";
+import { SnippetVariableFillDialog } from "@/components/SnippetVariableFillDialog";
 import { SnippetsLibrary } from "@/components/SnippetsLibrary";
 import { ModelsView } from "@/components/ModelsView";
 import { ModelsLibrary } from "@/components/ModelsLibrary";
@@ -32,6 +34,7 @@ import { useModelsStore } from "@/stores/modelsStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { ollamaPreloadModel } from "@/lib/tauri";
 import { useSnippetStore } from "@/stores/snippetStore";
+import { useSnippetVarStore } from "@/stores/snippetVarStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useSecurityStore, lockUntilHydrated } from "@/stores/securityStore";
 import { useUIStore } from "@/stores/uiStore";
@@ -46,6 +49,7 @@ export default function App() {
   const hydrateChats = useChatStore((s) => s.hydrate);
   const hydrateSpaces = useSpaceStore((s) => s.hydrate);
   const hydrateSnippets = useSnippetStore((s) => s.hydrate);
+  const hydrateSnippetVars = useSnippetVarStore((s) => s.hydrate);
   const hydrateModels = useModelsStore((s) => s.hydrate);
   const hydrateSecurity = useSecurityStore((s) => s.hydrate);
   const securityHydrated = useSecurityStore((s) => s.hydrated);
@@ -104,6 +108,7 @@ export default function App() {
     const chatsP = hydrateChats();
     void hydrateSpaces();
     void hydrateSnippets();
+    void hydrateSnippetVars();
     // `hydrateModels` is network-bound (Ollama /api/tags) — fire-and-forget
     // so its latency never blocks anything the user sees.
     void hydrateModels();
@@ -134,6 +139,7 @@ export default function App() {
     hydrateSettings,
     hydrateSpaces,
     hydrateSnippets,
+    hydrateSnippetVars,
     hydrateChats,
     hydrateModels,
   ]);
@@ -267,6 +273,12 @@ export default function App() {
         </ErrorBoundary>
         <ErrorBoundary name="Snippet editor">
           <SnippetDialog />
+        </ErrorBoundary>
+        <ErrorBoundary name="Snippet variable editor">
+          <SnippetVariableDialog />
+        </ErrorBoundary>
+        <ErrorBoundary name="Snippet variable fill">
+          <SnippetVariableFillDialog />
         </ErrorBoundary>
         {showOnboarding && (
           <ErrorBoundary name="Onboarding">

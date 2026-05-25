@@ -14,6 +14,8 @@ import type {
   OllamaShowResponse,
   Session,
   Snippet,
+  SnippetFillValue,
+  SnippetVariable,
   Space,
   SpaceContext,
   SpaceFile,
@@ -634,6 +636,63 @@ export function updateSnippet(args: {
 export function deleteSnippet(id: string): Promise<void> {
   if (!isTauri) return notInTauri(undefined);
   return invoke("delete_snippet", { id });
+}
+
+// ------------ snippet variables ------------
+
+export function listSnippetVariables(): Promise<SnippetVariable[]> {
+  if (!isTauri) return notInTauri([]);
+  return invoke("list_snippet_variables");
+}
+
+export function createSnippetVariable(args: {
+  key: string;
+  value: string;
+  description?: string | null;
+}): Promise<SnippetVariable> {
+  if (!isTauri) {
+    const now = Date.now();
+    return notInTauri<SnippetVariable>({
+      id: `mock-var-${now}`,
+      key: args.key.toUpperCase(),
+      value: args.value,
+      description: args.description ?? null,
+      created_at: now,
+      updated_at: now,
+    });
+  }
+  return invoke("create_snippet_variable", { args });
+}
+
+export function updateSnippetVariable(args: {
+  id: string;
+  key: string;
+  value: string;
+  description?: string | null;
+}): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("update_snippet_variable", { args });
+}
+
+export function deleteSnippetVariable(id: string): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("delete_snippet_variable", { id });
+}
+
+export function listSnippetFillValues(
+  snippetId: string,
+): Promise<SnippetFillValue[]> {
+  if (!isTauri) return notInTauri([]);
+  return invoke("list_snippet_fill_values", { snippetId });
+}
+
+export function upsertSnippetFillValues(args: {
+  snippet_id: string;
+  /** Flat tuples matching the Rust `Vec<(String, String)>`. */
+  values: [string, string][];
+}): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("upsert_snippet_fill_values", { args });
 }
 
 // ------------ chat streaming ------------

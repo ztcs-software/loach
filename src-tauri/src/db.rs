@@ -144,6 +144,36 @@ pub struct Snippet {
     pub updated_at: i64,
 }
 
+/// User-defined static substitution variable. The `key` is the uppercase
+/// identifier the user references as `{{KEY}}` inside a snippet body; the
+/// `value` is the text that replaces it at expansion time. `description`
+/// is an optional human note (e.g. "Default project name"). Reserved keys
+/// (`USER_NAME`, `CURRENT_*`) are rejected at the command layer so a custom
+/// var can never silently shadow a built-in.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SnippetVariable {
+    pub id: String,
+    pub key: String,
+    pub value: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// Last value the user typed into a prompt-on-use placeholder for a given
+/// snippet. Persisted so the fill-blanks dialog can pre-populate on the next
+/// run instead of starting blank. Keyed by `(snippet_id, key)` — values for
+/// the same key on different snippets stay independent. Cascades on snippet
+/// delete so orphan rows don't accumulate.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SnippetFillValue {
+    pub snippet_id: String,
+    pub key: String,
+    pub value: String,
+    pub updated_at: i64,
+}
+
 /// A user-configured MCP (Model Context Protocol) server. Loach only
 /// speaks the Streamable-HTTP transport — one URL, POST JSON-RPC bodies,
 /// optional auth headers. The underlying SQLite table still carries the
@@ -460,6 +490,39 @@ impl Database {
             );
             CREATE INDEX IF NOT EXISTS idx_space_memories_space
                 ON space_memories(space_id, created_at DESC);
+            "#,
+        )?;
+
+        // Custom snippet variables.
+        //   `snippet_variables` — user-defined KEY=VALUE pairs substituted into
+        //   snippet bodies at expansion time. UNIQUE on `key` so the same name
+        //   can't be defined twice; UI also normalises to uppercase before
+        //   insert. Reserved-key collisions (`USER_NAME`, `CURRENT_*`) are
+        //   blocked at the command layer.
+        //
+        //   `snippet_fill_values` — last value the user typed for each
+        //   prompt-on-use placeholder on each snippet. Composite PK keeps
+        //   recall scoped per-snippet so renaming a placeholder across
+        //   snippets doesn't cross-contaminate. ON DELETE CASCADE on
+        //   `snippet_id` means deleting a snippet drops its recall rows for
+        //   free.
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS snippet_variables (
+                id TEXT PRIMARY KEY,
+                key TEXT NOT NULL UNIQUE,
+                value TEXT NOT NULL,
+                description TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS snippet_fill_values (
+                snippet_id TEXT NOT NULL REFERENCES snippets(id) ON DELETE CASCADE,
+                key TEXT NOT NULL,
+                value TEXT NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (snippet_id, key)
+            );
             "#,
         )?;
 
@@ -1289,6 +1352,132 @@ impl Database {
     pub fn delete_snippet(&self, id: &str) -> Result<()> {
         let conn = self.conn.lock();
         conn.execute("DELETE FROM snippets WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    // ------------ snippet variables ------------
+
+    pub fn list_snippet_variables(&self) -> Result<Vec<SnippetVariable>> {
+        self.with_read(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, key, value, description, created_at, updated_at
+                 FROM snippet_variables ORDER BY key ASC",
+            )?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok(SnippetVariable {
+                        id: r.get(0)?,
+                        key: r.get(1)?,
+                        value: r.get(2)?,
+                        description: r.get(3)?,
+                        created_at: r.get(4)?,
+                        updated_at: r.get(5)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+    }
+
+    pub fn create_snippet_variable(
+        &self,
+        key: &str,
+        value: &str,
+        description: Option<&str>,
+    ) -> Result<SnippetVariable> {
+        let id = Uuid::new_v4().to_string();
+        let now = Utc::now().timestamp_millis();
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO snippet_variables (id, key, value, description, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+            params![id, key, value, description, now],
+        )?;
+        Ok(SnippetVariable {
+            id,
+            key: key.to_string(),
+            value: value.to_string(),
+            description: description.map(|s| s.to_string()),
+            created_at: now,
+            updated_at: now,
+        })
+    }
+
+    pub fn update_snippet_variable(
+        &self,
+        id: &str,
+        key: &str,
+        value: &str,
+        description: Option<&str>,
+    ) -> Result<()> {
+        let now = Utc::now().timestamp_millis();
+        let conn = self.conn.lock();
+        conn.execute(
+            "UPDATE snippet_variables
+             SET key = ?1, value = ?2, description = ?3, updated_at = ?4
+             WHERE id = ?5",
+            params![key, value, description, now, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_snippet_variable(&self, id: &str) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "DELETE FROM snippet_variables WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(())
+    }
+
+    // ------------ snippet fill values (prompt-on-use recall) ------------
+
+    pub fn list_snippet_fill_values(
+        &self,
+        snippet_id: &str,
+    ) -> Result<Vec<SnippetFillValue>> {
+        self.with_read(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT snippet_id, key, value, updated_at
+                 FROM snippet_fill_values WHERE snippet_id = ?1",
+            )?;
+            let rows = stmt
+                .query_map(params![snippet_id], |r| {
+                    Ok(SnippetFillValue {
+                        snippet_id: r.get(0)?,
+                        key: r.get(1)?,
+                        value: r.get(2)?,
+                        updated_at: r.get(3)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+    }
+
+    /// Upsert a batch of `(key, value)` pairs for one snippet. The whole batch
+    /// runs inside a single transaction so a partial write can't leave the
+    /// recall row half-applied. Empty values are stored verbatim — the UI
+    /// treats them as "no recall" but persisting them keeps round-trips
+    /// idempotent.
+    pub fn upsert_snippet_fill_values(
+        &self,
+        snippet_id: &str,
+        values: &[(String, String)],
+    ) -> Result<()> {
+        let now = Utc::now().timestamp_millis();
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction()?;
+        for (k, v) in values {
+            tx.execute(
+                "INSERT INTO snippet_fill_values (snippet_id, key, value, updated_at)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(snippet_id, key)
+                 DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                params![snippet_id, k, v, now],
+            )?;
+        }
+        tx.commit()?;
         Ok(())
     }
 

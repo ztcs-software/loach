@@ -5,8 +5,8 @@ use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
 
 use crate::db::{
-    DatabaseSnapshot, ImportStats, McpServer, Message, Session, Snippet, Space, SpaceFile,
-    SpaceMemory,
+    DatabaseSnapshot, ImportStats, McpServer, Message, Session, Snippet, SnippetFillValue,
+    SnippetVariable, Space, SpaceFile, SpaceMemory,
 };
 use crate::mcp::{self, McpTestResult};
 use crate::providers::{self, ChatRequest, ModelInfo};
@@ -960,6 +960,140 @@ pub async fn update_snippet(
 #[tauri::command]
 pub async fn delete_snippet(state: State<'_, AppState>, id: String) -> Result<(), String> {
     state.db.delete_snippet(&id).map_err(err)
+}
+
+// ---------- snippet variables ----------
+
+/// Reserved variable names. These collide with built-in substitutions
+/// (`{{USER_NAME}}` set from Settings + `{{CURRENT_*}}` from `temporal.ts`)
+/// and would silently shadow them if a user redefined the same key, so the
+/// command layer rejects them. The frontend duplicates the list for inline
+/// validation, but the server-side check is the source of truth.
+const RESERVED_VAR_KEYS: &[&str] = &[
+    "USER_NAME",
+    "CURRENT_DATE",
+    "CURRENT_TIME",
+    "CURRENT_WEEKDAY",
+    "CURRENT_DATETIME",
+    "CURRENT_TIMEZONE",
+];
+
+/// Validate a variable key: uppercase letters / digits / underscore, must
+/// start with a letter or underscore (no leading digit), 1-64 chars, and
+/// not a reserved built-in. Returns the normalised key (already-uppercase
+/// passes through unchanged) so callers can rely on a canonical form
+/// reaching the DB.
+fn normalise_var_key(key: &str) -> Result<String, String> {
+    let trimmed = key.trim();
+    if trimmed.is_empty() {
+        return Err("Variable key cannot be empty".to_string());
+    }
+    if trimmed.len() > 64 {
+        return Err("Variable key is too long (max 64 chars)".to_string());
+    }
+    let upper = trimmed.to_ascii_uppercase();
+    let mut chars = upper.chars();
+    let first = chars.next().unwrap();
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return Err(
+            "Variable key must start with a letter or underscore".to_string(),
+        );
+    }
+    for c in chars {
+        if !(c.is_ascii_alphanumeric() || c == '_') {
+            return Err(format!(
+                "Variable key contains invalid character '{c}'. Use A-Z, 0-9, or _."
+            ));
+        }
+    }
+    if RESERVED_VAR_KEYS.iter().any(|r| *r == upper.as_str()) {
+        return Err(format!(
+            "'{upper}' is reserved by Loach — pick a different name."
+        ));
+    }
+    Ok(upper)
+}
+
+#[tauri::command]
+pub async fn list_snippet_variables(
+    state: State<'_, AppState>,
+) -> Result<Vec<SnippetVariable>, String> {
+    state.db.list_snippet_variables().map_err(err)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateSnippetVariableArgs {
+    pub key: String,
+    pub value: String,
+    pub description: Option<String>,
+}
+
+#[tauri::command]
+pub async fn create_snippet_variable(
+    state: State<'_, AppState>,
+    args: CreateSnippetVariableArgs,
+) -> Result<SnippetVariable, String> {
+    let key = normalise_var_key(&args.key)?;
+    state
+        .db
+        .create_snippet_variable(&key, &args.value, args.description.as_deref())
+        .map_err(err)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateSnippetVariableArgs {
+    pub id: String,
+    pub key: String,
+    pub value: String,
+    pub description: Option<String>,
+}
+
+#[tauri::command]
+pub async fn update_snippet_variable(
+    state: State<'_, AppState>,
+    args: UpdateSnippetVariableArgs,
+) -> Result<(), String> {
+    let key = normalise_var_key(&args.key)?;
+    state
+        .db
+        .update_snippet_variable(&args.id, &key, &args.value, args.description.as_deref())
+        .map_err(err)
+}
+
+#[tauri::command]
+pub async fn delete_snippet_variable(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<(), String> {
+    state.db.delete_snippet_variable(&id).map_err(err)
+}
+
+#[tauri::command]
+pub async fn list_snippet_fill_values(
+    state: State<'_, AppState>,
+    snippet_id: String,
+) -> Result<Vec<SnippetFillValue>, String> {
+    state.db.list_snippet_fill_values(&snippet_id).map_err(err)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpsertSnippetFillValuesArgs {
+    pub snippet_id: String,
+    /// Flat `(key, value)` pairs. The frontend sends every placeholder the
+    /// user just filled, including ones whose value didn't change — the
+    /// upsert path is idempotent so over-sending is harmless.
+    pub values: Vec<(String, String)>,
+}
+
+#[tauri::command]
+pub async fn upsert_snippet_fill_values(
+    state: State<'_, AppState>,
+    args: UpsertSnippetFillValuesArgs,
+) -> Result<(), String> {
+    state
+        .db
+        .upsert_snippet_fill_values(&args.snippet_id, &args.values)
+        .map_err(err)
 }
 
 // ---------- mcp servers ----------

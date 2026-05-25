@@ -93,6 +93,29 @@ export interface Snippet {
   updated_at: number;
 }
 
+/** User-defined static substitution. Resolved into `{{KEY}}` placeholders
+ *  in a snippet body at expansion time. `key` is always uppercase
+ *  (normalised at the command layer); reserved built-ins (`USER_NAME`,
+ *  `CURRENT_*`) are rejected on save. */
+export interface SnippetVariable {
+  id: string;
+  key: string;
+  value: string;
+  description: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+/** Last value the user filled in for a prompt-on-use placeholder on a
+ *  specific snippet. Loaded when the fill-blanks dialog opens so the
+ *  inputs aren't blank on every run. */
+export interface SnippetFillValue {
+  snippet_id: string;
+  key: string;
+  value: string;
+  updated_at: number;
+}
+
 export interface Attachment {
   kind: "image" | "text" | "file";
   name: string;

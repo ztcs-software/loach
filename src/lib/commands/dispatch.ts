@@ -7,6 +7,7 @@ import { useSnippetStore } from "@/stores/snippetStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useUIStore, type SettingsTab } from "@/stores/uiStore";
 import { DEFAULT_PERSONA_ID, PERSONAS } from "@/lib/personas";
+import { expandAndPrimeSnippet } from "@/lib/runSnippet";
 import {
   deleteMessage,
   fetchUrl,
@@ -433,7 +434,11 @@ async function runSnippet(rest: string): Promise<CommandResult> {
     snippets.find((s) => s.title.toLowerCase() === lower) ??
     snippets.find((s) => s.title.toLowerCase().includes(lower));
   if (!match) throw new Error(`No snippet matches "${query}". Try /list snippets.`);
-  useUIStore.getState().primeComposer(match.prompt, []);
+  // Fire-and-forget: when the snippet has prompt-on-use placeholders the
+  // helper opens a modal and resolves later, after the user fills it in.
+  // The slash-command toast lands immediately either way — the dialog is
+  // its own surface and doesn't need to gate the result here.
+  void expandAndPrimeSnippet(match);
   return ok("Loaded snippet", match.title);
 }
 
