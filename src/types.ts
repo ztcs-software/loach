@@ -307,6 +307,13 @@ export interface Settings {
    *  network round-trip per URL — default is off so Loach stays offline-first
    *  unless the user opts in. */
   web_fetch_enabled: boolean;
+  /** When true, a built-in `calculate` tool is exposed to the model
+   *  alongside any MCP tools. The tool runs a real math evaluator
+   *  (meval) in-process — no network, no DB. Off by default so the model
+   *  catalogue stays minimal until the user opts in. Useful because
+   *  local models are unreliable at multi-digit / multi-step arithmetic
+   *  and otherwise tend to hallucinate answers. */
+  calculate_tool_enabled: boolean;
   /** Global override for Ollama's `low_vram` option. When `true`, every
    *  Ollama request is sent with `low_vram: true` regardless of per-chat
    *  params or per-model Modelfile defaults — handy on memory-constrained
@@ -345,6 +352,7 @@ export const DEFAULT_SETTINGS: Settings = {
   user_name: "",
   temporal_awareness: true,
   web_fetch_enabled: false,
+  calculate_tool_enabled: false,
   low_vram_global: false,
   thinking_default: true,
   default_tone_id: "default",

@@ -23,6 +23,7 @@ import {
   MoreHorizontal,
   Palette,
   Plug,
+  Calculator,
   RefreshCw,
   RotateCcw,
   Server,
@@ -678,6 +679,38 @@ export function SettingsDialog() {
                         settings.web_fetch_enabled
                           ? "Disable web fetch"
                           : "Enable web fetch"
+                      }
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="min-w-0">
+                      <Label className="flex items-center gap-1.5">
+                        <Calculator className="h-3.5 w-3.5 text-foreground/60" />
+                        Calculator
+                      </Label>
+                      <p className="mt-1 text-[11px] text-foreground/50">
+                        Exposes a built-in{" "}
+                        <span className="font-mono">calculate</span> tool the
+                        model can call mid-response to evaluate math
+                        expressions. Local models often miscalculate
+                        multi-step arithmetic; this gives them an exact
+                        answer instead. Runs entirely in-process — no
+                        network — and is available even in Private Chat.
+                      </p>
+                    </div>
+                    <Switch
+                      checked={settings.calculate_tool_enabled}
+                      onCheckedChange={(next) =>
+                        settings.update("calculate_tool_enabled", next)
+                      }
+                      className="shrink-0"
+                      aria-label={
+                        settings.calculate_tool_enabled
+                          ? "Disable calculator tool"
+                          : "Enable calculator tool"
                       }
                     />
                   </div>

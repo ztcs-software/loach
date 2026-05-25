@@ -17,7 +17,7 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -881,6 +881,23 @@ impl Database {
             params![key, value],
         )?;
         Ok(())
+    }
+
+    /// Fetch a single setting by key. Returns `None` when the row is
+    /// missing so callers can apply their own default rather than guess
+    /// from an empty string. Used by chat_stream to gate built-in tools
+    /// (e.g. `calculate_tool_enabled`) without paying for the full
+    /// `all_settings` scan on every turn.
+    pub fn get_setting(&self, key: &str) -> Result<Option<String>> {
+        self.with_read(|conn| {
+            conn.query_row(
+                "SELECT value FROM settings WHERE key = ?1",
+                params![key],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(Into::into)
+        })
     }
 
     pub fn all_settings(&self) -> Result<Vec<(String, String)>> {

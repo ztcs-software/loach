@@ -198,6 +198,18 @@ pub async fn dispatch_tool_call(
     name: &str,
     arguments: &Value,
 ) -> Result<McpCallResult> {
+    // Built-in tools take a synthetic `server_id` and don't touch the DB
+    // or open a network session. Keep the catch ahead of `list_mcp_servers`
+    // so the builtin works even when the user has zero MCP servers
+    // configured.
+    if server_id == crate::tools::calculate::BUILTIN_SERVER_ID {
+        return match name {
+            crate::tools::calculate::TOOL_NAME => {
+                Ok(crate::tools::calculate::dispatch(arguments))
+            }
+            other => Err(anyhow!("unknown built-in tool `{other}`")),
+        };
+    }
     let server = db
         .list_mcp_servers()?
         .into_iter()

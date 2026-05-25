@@ -331,6 +331,7 @@ const WRITABLE_SETTING_KEYS: &[&str] = &[
     "user_name",
     "temporal_awareness",
     "web_fetch_enabled",
+    "calculate_tool_enabled",
     "low_vram_global",
     "thinking_default",
     "default_tone_id",
@@ -1278,6 +1279,31 @@ pub async fn chat_stream(
             );
         }
         request.tools = tools;
+
+        // Append built-in tools after the MCP catalogue. Order matters
+        // for `resolve_qualified`'s first-match scan, but a clash is
+        // impossible in practice: MCP qualified names always carry the
+        // `<slug>__` prefix, and the builtin uses a bare `calculate`.
+        //
+        // The `calculate` tool is purely local (no network, no DB), so
+        // we expose it in Private Chat too — the privacy guarantee is
+        // about data leaving the box, not about hiding builtin compute.
+        let calc_enabled = db
+            .get_setting("calculate_tool_enabled")
+            .ok()
+            .flatten()
+            .as_deref()
+            == Some("true");
+        if calc_enabled {
+            request.tools.push(crate::mcp::McpToolDef {
+                server_id: crate::tools::calculate::BUILTIN_SERVER_ID.to_string(),
+                server_name: "Loach".to_string(),
+                name: crate::tools::calculate::TOOL_NAME.to_string(),
+                qualified_name: crate::tools::calculate::TOOL_NAME.to_string(),
+                description: Some(crate::tools::calculate::tool_description().to_string()),
+                input_schema: crate::tools::calculate::input_schema(),
+            });
+        }
 
         let res = match provider.as_str() {
             "ollama" => {
