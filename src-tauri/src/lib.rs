@@ -182,11 +182,19 @@ pub fn run() {
             let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show_i, &hide_i, &quit_i])?;
 
-            let _tray = TrayIconBuilder::with_id("loach-tray")
-                .icon(app.default_window_icon().unwrap().clone())
-                .menu(&menu)
-                .show_menu_on_left_click(false)
-                .tooltip("Loach")
+            // macOS menu-bar icons render as template images — single-channel
+            // masks taken from the alpha channel — so they auto-invert in
+            // light vs. dark menu bars. The flag is a no-op on Windows /
+            // Linux, but we still gate it so the intent reads clearly.
+            let _tray = {
+                let builder = TrayIconBuilder::with_id("loach-tray")
+                    .icon(app.default_window_icon().unwrap().clone())
+                    .menu(&menu)
+                    .show_menu_on_left_click(false)
+                    .tooltip("Loach");
+                #[cfg(target_os = "macos")]
+                let builder = builder.icon_as_template(true);
+                builder
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => {
                         if let Some(w) = app.get_webview_window("main") {
@@ -222,7 +230,8 @@ pub fn run() {
                         }
                     }
                 })
-                .build(app)?;
+                .build(app)?
+            };
 
             Ok(())
         })

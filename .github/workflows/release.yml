@@ -90,6 +90,15 @@ jobs:
             args: '--bundles nsis'
           - platform: ubuntu-22.04
             args: '--bundles deb,appimage,rpm'
+          # Apple Silicon only — macos-14 is an M1 runner, so the target
+          # matches the host arch and no extra `rustup target add` is needed.
+          # We're not signing with Apple (no Developer Program subscription);
+          # signingIdentity: "-" in tauri.conf.json applies an ad-hoc signature
+          # that satisfies the updater bundle's structural checks but not
+          # Gatekeeper. Users must bypass Gatekeeper on first launch — see
+          # README.md "Install on macOS".
+          - platform: macos-14
+            args: '--target aarch64-apple-darwin --bundles app,dmg'
 
     runs-on: ${{ matrix.platform }}
     steps:
