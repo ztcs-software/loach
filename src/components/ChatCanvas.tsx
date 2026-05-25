@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ArrowDown, ChevronDown, ChevronUp, Hourglass, Search, Zap, X } from "lucide-react";
+import { ArrowDown, ChevronDown, ChevronUp, Hourglass, Search, Sparkles, Zap, X } from "lucide-react";
 import { MessageItem } from "./Message";
 import { Button } from "@/components/ui/button";
 import { useChatStore } from "@/stores/chatStore";
+import { extractSummary } from "@/lib/contextUsage";
+import { cn } from "@/lib/utils";
 import type { Message } from "@/types";
 
 const EMPTY_MESSAGES: Message[] = [];
@@ -33,6 +35,20 @@ export function ChatCanvas() {
   );
   const promoteSession = useChatStore((s) => s.promoteSession);
   const cancelForSession = useChatStore((s) => s.cancelForSession);
+  // Auto-summary text from the active session's system_prompt, if any.
+  // Drives the "context was compacted here" divider at the top of the
+  // transcript so the user has a visible marker (and inspectable
+  // content) for what the Compact button actually did. Falls out as
+  // null the moment the user deletes the marker block from the
+  // parameter panel's "Custom instructions" textarea.
+  const compactedSummary = useChatStore((s) =>
+    s.activeSessionId
+      ? extractSummary(
+          s.sessions.find((x) => x.id === s.activeSessionId)?.system_prompt ??
+            null,
+        )
+      : null,
+  );
 
   const scrollerRef = useRef<HTMLDivElement>(null);
   const stickToBottom = useRef(true);
@@ -249,6 +265,7 @@ export function ChatCanvas() {
     <div className="relative flex-1 overflow-hidden">
       <div ref={scrollerRef} className="h-full overflow-y-auto">
         <div className="mx-auto w-full max-w-3xl px-4">
+          {compactedSummary && <CompactionMarker summary={compactedSummary} />}
           {messages.map((m, i) => {
             const isLast = i === messages.length - 1;
             return (
@@ -505,6 +522,67 @@ function WaitingForOtherChats({
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+/**
+ * Inline marker shown at the top of the transcript whenever the session
+ * has a Loach auto-summary block in its system_prompt. The bar's
+ * Compact button is what creates that block — this is its visual
+ * counterpart in the chat surface so the user can SEE that earlier
+ * turns were rolled up, and click to inspect the exact bullets the
+ * model produced. The summary itself isn't editable from here on
+ * purpose: editing it from inside the transcript would be a confusing
+ * second source of truth alongside the parameter panel's "Custom
+ * instructions" textarea, which is the canonical home for system-prompt
+ * content.
+ */
+function CompactionMarker({ summary }: { summary: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="py-4">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        title={open ? "Hide summary" : "Show summary of compacted messages"}
+        className="group flex w-full items-center gap-2 rounded-full px-2 py-1 text-[11px] text-foreground/55 transition-colors hover:bg-foreground/[0.05] hover:text-foreground/80"
+      >
+        <span
+          aria-hidden
+          className="h-px flex-1 bg-gradient-to-r from-transparent to-foreground/15"
+        />
+        <span className="inline-flex items-center gap-1.5">
+          <Sparkles className="h-3 w-3 text-primary/70" />
+          <span className="font-medium tracking-wide uppercase text-[10px]">
+            Earlier messages compacted
+          </span>
+          <ChevronDown
+            className={cn(
+              "h-3 w-3 transition-transform",
+              open && "rotate-180",
+            )}
+          />
+        </span>
+        <span
+          aria-hidden
+          className="h-px flex-1 bg-gradient-to-l from-transparent to-foreground/15"
+        />
+      </button>
+      {open && (
+        <div className="mt-2 rounded-2xl border border-foreground/[0.10] bg-foreground/[0.03] px-4 py-3 text-[12.5px] leading-relaxed text-foreground/75 backdrop-blur-md">
+          <div className="mb-1.5 text-[10px] font-medium uppercase tracking-wide text-foreground/45">
+            Summary stored in system prompt
+          </div>
+          {/* The summary is plain bullet text from the model — render as
+              whitespace-preserved so the bullets keep their formatting
+              without pulling in the full Markdown pipeline. */}
+          <pre className="whitespace-pre-wrap font-sans text-[12.5px] leading-relaxed">
+            {summary}
+          </pre>
+        </div>
+      )}
     </div>
   );
 }

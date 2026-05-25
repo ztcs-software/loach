@@ -92,6 +92,42 @@ export function computeContextUsage(
   };
 }
 
+// ---------------------------------------------------------------------------
+// Compaction marker
+//
+// The Compact button stuffs a summary block into `session.system_prompt`
+// with these exact delimiters so future compactions can strip the old
+// block before prepending a new one (otherwise the prompt would grow
+// unboundedly with every compaction). The same marker is what
+// `ChatCanvas` and the parameter panel detect to render a "context was
+// compacted here" affordance.
+// ---------------------------------------------------------------------------
+
+export const SUMMARY_START_TAG = "[Loach: earlier conversation summary]";
+export const SUMMARY_END_TAG = "[End of Loach summary]";
+
+const SUMMARY_BLOCK_RE =
+  /\[Loach: earlier conversation summary\]\n([\s\S]*?)\n\[End of Loach summary\]/;
+
+/** Strip the auto-summary block out of a system prompt. Used when
+ *  re-compacting (so the prompt doesn't pile up) and when the user wants
+ *  the bar to estimate against just their own custom instructions. */
+export function stripSummaryBlock(prompt: string | null): string {
+  if (!prompt) return "";
+  return prompt.replace(
+    /\[Loach: earlier conversation summary\][\s\S]*?\[End of Loach summary\]\n?\n?/g,
+    "",
+  );
+}
+
+/** Return the inner summary text (the bullets between the markers), or
+ *  null if no summary block is present. */
+export function extractSummary(prompt: string | null): string | null {
+  if (!prompt) return null;
+  const m = SUMMARY_BLOCK_RE.exec(prompt);
+  return m ? m[1].trim() : null;
+}
+
 /** Format an integer token count compactly: 1234 → "1.2k", 12345 → "12k". */
 export function formatTokens(n: number): string {
   if (n < 1000) return `${n}`;

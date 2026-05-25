@@ -27,6 +27,11 @@ import {
   inlineTextAttachments,
 } from "@/lib/files";
 import { extractMemories } from "@/lib/memory";
+import {
+  stripSummaryBlock,
+  SUMMARY_END_TAG,
+  SUMMARY_START_TAG,
+} from "@/lib/contextUsage";
 import { formatProviderError } from "@/lib/providerErrors";
 import { getPersona } from "@/lib/personas";
 import { getTone } from "@/lib/tones";
@@ -1870,15 +1875,20 @@ ${transcript}
     // textarea, which is intentional — compaction shouldn't be a black
     // box.
     const existing = session.system_prompt ?? "";
-    const stripped = existing.replace(
-      /\[Loach: earlier conversation summary\][\s\S]*?\[End of Loach summary\]\n?\n?/g,
-      "",
-    );
-    const block = `[Loach: earlier conversation summary]\n${cleanSummary}\n[End of Loach summary]\n\n`;
+    const stripped = stripSummaryBlock(existing);
+    const block = `${SUMMARY_START_TAG}\n${cleanSummary}\n${SUMMARY_END_TAG}\n\n`;
     const newPrompt = block + stripped;
 
+    // Persist the system-prompt update straight to the backend rather
+    // than going through `setSessionSystemPrompt` — that action does
+    // its own `set()` for the new prompt, which would land BEFORE the
+    // message deletions below. The UsageBar reads system_prompt and
+    // messages together, so a split update flashes a misleading "bigger
+    // than before" reading for one render. Doing both DB writes here
+    // and then a single combined state update keeps the bar's
+    // re-render aligned with the final state.
     try {
-      await get().setSessionSystemPrompt(sessionId, newPrompt);
+      await persistSessionSystemPrompt({ id: sessionId, prompt: newPrompt });
     } catch (e) {
       set({ compactingSessionId: null });
       useToastStore.getState().push({
@@ -1902,7 +1912,15 @@ ${transcript}
         logger.warn("compact: failed to delete message", e);
       }
     }
+    // Single, combined state update: the new system_prompt and the
+    // surviving message list land in one render. The UsageBar /
+    // popover re-render exactly once and see the new (smaller) numbers
+    // without an intermediate "bigger" flash. The popover is left open
+    // on purpose so the user sees the change happen.
     set((s) => ({
+      sessions: s.sessions.map((x) =>
+        x.id === sessionId ? { ...x, system_prompt: newPrompt } : x,
+      ),
       messages: {
         ...s.messages,
         [sessionId]: (s.messages[sessionId] ?? []).filter(
