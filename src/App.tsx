@@ -20,6 +20,7 @@ import { Onboarding } from "@/components/Onboarding";
 import { CodeCanvas } from "@/components/CodeCanvas";
 import { SearchBar } from "@/components/SearchBar";
 import { PrivateChat } from "@/components/PrivateChat";
+import { KeyboardShortcuts } from "@/components/KeyboardShortcuts";
 import { ToastHost } from "@/components/ToastHost";
 import { ConfirmDialogHost } from "@/components/ConfirmDialog";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
@@ -279,6 +280,12 @@ export default function App() {
           wizard is modal and Cmd+K should stay inert until the user finishes
           or dismisses. */}
       {!showLock && !showOnboarding && <SearchBar />}
+      {/* Global keyboard shortcuts. Mounts below the same lock/onboarding
+          gates as SearchBar — the handler itself ALSO checks those gates
+          plus private chat at the moment of keypress, so re-mounting on
+          gate transitions doesn't matter; this conditional just keeps the
+          ShortcutListDialog out of the tree while the gates are active. */}
+      {!showLock && !showOnboarding && <KeyboardShortcuts />}
       {/* Private Chat overlay. Suppressed during lock/onboarding for the
           same reason as the search palette — those gates own the screen.
           The component renders nothing until the user opens it from the

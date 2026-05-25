@@ -14,17 +14,27 @@ import {
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { FileChip } from "./FileChip";
+import { CommandPalette } from "./CommandPalette";
+import { CommandResultPanel } from "./CommandResultPanel";
 import {
   fileToAttachment,
   FileTooLargeError,
 } from "@/lib/files";
 import { useChatStore } from "@/stores/chatStore";
 import { useUIStore } from "@/stores/uiStore";
+import { useToastStore } from "@/stores/toastStore";
 import { cn } from "@/lib/utils";
 import {
   DEFAULT_PERSONA_ID,
   getPersona,
 } from "@/lib/personas";
+import { dispatch as dispatchCommand } from "@/lib/commands/dispatch";
+import {
+  isCommandInput,
+  matchCommands,
+  type PaletteEntry,
+} from "@/lib/commands/parser";
+import type { CommandResult } from "@/lib/commands/types";
 import type { Attachment } from "@/types";
 
 interface ChatInputProps {
@@ -78,9 +88,50 @@ export function ChatInput({ centered = false }: ChatInputProps) {
   const [ctxMenu, setCtxMenu] = useState<
     { x: number; y: number; selStart: number; selEnd: number } | null
   >(null);
+  // Slash-command palette state. `paletteDismissed` is sticky for the
+  // current draft so Esc can hide the palette even while the user keeps
+  // typing — it resets the next time the textarea clears or the leading
+  // `/` disappears.
+  const [paletteIndex, setPaletteIndex] = useState(0);
+  const [paletteDismissed, setPaletteDismissed] = useState(false);
+  const [commandResult, setCommandResult] = useState<CommandResult | null>(null);
+  const paletteEntries: PaletteEntry[] = useMemo(
+    () => (isCommandInput(text) ? matchCommands(text.slice(1)) : []),
+    [text],
+  );
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const ctxMenuRef = useRef<HTMLDivElement>(null);
+
+  const paletteOpen =
+    !paletteDismissed && isCommandInput(text) && paletteEntries.length > 0;
+
+  // Reset the Esc-dismissed flag when the user clears the textarea or
+  // removes the leading slash — otherwise the palette would stay hidden
+  // forever once the user has dismissed it once per session.
+  useEffect(() => {
+    if (!isCommandInput(text) && paletteDismissed) setPaletteDismissed(false);
+  }, [text, paletteDismissed]);
+
+  // Clamp the highlight when the entry list shrinks (e.g. the user typed
+  // another character and only one suggestion remains).
+  useEffect(() => {
+    if (paletteIndex >= paletteEntries.length) {
+      setPaletteIndex(Math.max(0, paletteEntries.length - 1));
+    }
+  }, [paletteEntries.length, paletteIndex]);
+
+  const acceptPaletteEntry = (entry: PaletteEntry) => {
+    setText(entry.insertText);
+    setComposerDraft(entry.insertText);
+    requestAnimationFrame(() => {
+      const el = textareaRef.current;
+      if (!el) return;
+      el.focus();
+      const caret = entry.insertText.length;
+      el.setSelectionRange(caret, caret);
+    });
+  };
 
   // External insert (e.g. from suggestion chips or a Snippet "Run") bumps
   // the seq counter. Text always reseeds; attachments reseed only when the
@@ -188,6 +239,16 @@ export function ChatInput({ centered = false }: ChatInputProps) {
       window.removeEventListener("dragleave", onDragLeave);
       window.removeEventListener("drop", onDrop);
     };
+  }, []);
+
+  // Ctrl/Cmd+U bridge. The global shortcut handler dispatches this event;
+  // ChatInput owns the file-input ref so we open the picker from here
+  // instead of reaching across the tree for the DOM node.
+  useEffect(() => {
+    const openPicker = () => fileInputRef.current?.click();
+    window.addEventListener("loach:open-file-picker", openPicker);
+    return () =>
+      window.removeEventListener("loach:open-file-picker", openPicker);
   }, []);
 
   const ingest = async (files: File[]) => {
@@ -471,6 +532,40 @@ export function ChatInput({ centered = false }: ChatInputProps) {
     const trimmed = text.trim();
     if (!trimmed && attachments.length === 0) return;
 
+    // Slash-command path: parse + dispatch BEFORE the busy / send branches
+    // so commands work even while another chat is streaming, and so they
+    // don't get clobbered by the one-prompt-per-chat cap. Unknown commands
+    // fall through to the normal send path so the user's literal text still
+    // reaches the model (the "ignore unknown" rule).
+    if (trimmed && isCommandInput(trimmed)) {
+      const outcome = await dispatchCommand(trimmed);
+      if (outcome.kind === "handled") {
+        setText("");
+        setComposerDraft("");
+        setError(null);
+        setPaletteDismissed(false);
+        const result = outcome.result;
+        if (result.kind === "toast") {
+          useToastStore.getState().push({
+            kind: result.tone === "error" ? "error" : "info",
+            title: result.title,
+            body: result.body,
+          });
+          setCommandResult(null);
+        } else if (result.kind === "list") {
+          setCommandResult(result);
+        } else {
+          setCommandResult(null);
+        }
+        return;
+      }
+      // Passthrough → fall through to send() with the literal text.
+    }
+
+    // Sending a real chat message clears any lingering command result so
+    // it doesn't visually shadow the next assistant reply.
+    setCommandResult(null);
+
     // Snapshot live store state so branching matches what sendUserMessage
     // will actually observe (the hook-bound selectors above could be a
     // render behind).
@@ -570,7 +665,13 @@ export function ChatInput({ centered = false }: ChatInputProps) {
         centered ? "py-0" : "pb-5 pt-3",
       )}
     >
-      <div className="mx-auto w-full max-w-3xl">
+      <div className="relative mx-auto w-full max-w-3xl">
+        {commandResult && commandResult.kind === "list" && (
+          <CommandResultPanel
+            result={commandResult}
+            onDismiss={() => setCommandResult(null)}
+          />
+        )}
         {(attachments.length > 0 || activePersona) && (
           <div className="mb-3 flex flex-wrap items-center gap-2">
             {activePersona && (
@@ -584,6 +685,14 @@ export function ChatInput({ centered = false }: ChatInputProps) {
               />
             ))}
           </div>
+        )}
+        {paletteOpen && (
+          <CommandPalette
+            entries={paletteEntries}
+            highlightIndex={paletteIndex}
+            onHighlightChange={setPaletteIndex}
+            onSelect={acceptPaletteEntry}
+          />
         )}
         <div
           className={cn(
@@ -629,7 +738,38 @@ export function ChatInput({ centered = false }: ChatInputProps) {
             value={text}
             onChange={(e) => setText(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+              if (e.nativeEvent.isComposing) return;
+              // Palette navigation. Order matters: Tab/Enter accept the
+              // highlighted entry into the textarea (no message send);
+              // Enter without an open palette still sends, so unknown
+              // commands fall through to submit() and the "ignore
+              // unknown" rule kicks in inside there.
+              if (paletteOpen) {
+                if (e.key === "ArrowDown") {
+                  e.preventDefault();
+                  setPaletteIndex((i) => (i + 1) % paletteEntries.length);
+                  return;
+                }
+                if (e.key === "ArrowUp") {
+                  e.preventDefault();
+                  setPaletteIndex(
+                    (i) => (i - 1 + paletteEntries.length) % paletteEntries.length,
+                  );
+                  return;
+                }
+                if (e.key === "Tab") {
+                  e.preventDefault();
+                  const entry = paletteEntries[paletteIndex];
+                  if (entry) acceptPaletteEntry(entry);
+                  return;
+                }
+                if (e.key === "Escape") {
+                  e.preventDefault();
+                  setPaletteDismissed(true);
+                  return;
+                }
+              }
+              if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
                 void submit();
               }
