@@ -176,6 +176,17 @@ interface ChatState {
    *  the head of the waiting queue, then cancels the current runner —
    *  which causes the teardown path to pick our task as the new head. */
   promoteSession: (sessionId: string) => Promise<void>;
+
+  /** Session id that's currently being compacted, or null. Drives the
+   *  spinner in the Context popup so the user sees that the summarizer
+   *  call is in flight. At most one compaction runs at a time. */
+  compactingSessionId: string | null;
+  /** Summarize the older messages in a session via the same model and
+   *  store the summary in `session.system_prompt` with a unique marker
+   *  block, then delete the summarized messages so they no longer
+   *  consume context. Earlier auto-summary blocks in `system_prompt`
+   *  are replaced, not stacked. */
+  compactContext: (sessionId: string) => Promise<void>;
 }
 
 /** Module-level re-entry guard for the auto-dispatcher. Set synchronously
@@ -1007,6 +1018,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   runningTask: null,
   queue: [],
   unread: {},
+  compactingSessionId: null,
 
   hydrate: async () => {
     try {
@@ -1680,5 +1692,180 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
     }
     finishRunning(get, set, "cancelled");
+  },
+
+  compactContext: async (sessionId) => {
+    const state = get();
+    const session = state.sessions.find((s) => s.id === sessionId);
+    if (!session) return;
+    if (!session.model) {
+      useToastStore.getState().push({
+        kind: "error",
+        title: "Can't compact",
+        body: "Pick a model first.",
+      });
+      return;
+    }
+    if (state.compactingSessionId) return;
+    if (
+      state.runningTask?.sessionId === sessionId ||
+      state.queue.some((t) => t.sessionId === sessionId)
+    ) {
+      useToastStore.getState().push({
+        kind: "info",
+        title: "Chat is busy",
+        body: "Wait for the current reply before compacting.",
+      });
+      return;
+    }
+
+    const all = state.messages[sessionId] ?? [];
+    const visible = all.filter((m) => m.role !== "system");
+    // Keep the most recent 4 messages untouched so the user still has
+    // their latest exchange visible verbatim. Anything below that we'd
+    // be summarizing two turns — not worth the round-trip.
+    const KEEP_TAIL = 4;
+    const MIN_TOTAL = 6;
+    if (visible.length < MIN_TOTAL) {
+      useToastStore.getState().push({
+        kind: "info",
+        title: "Not enough to compact",
+        body: `Compaction needs at least ${MIN_TOTAL} messages.`,
+      });
+      return;
+    }
+    const toSummarize = visible.slice(0, visible.length - KEEP_TAIL);
+    const transcript = toSummarize
+      .map((m) => {
+        const speaker = m.role === "user" ? "User" : "Assistant";
+        return `${speaker}: ${m.content}`;
+      })
+      .join("\n\n");
+
+    const summaryPrompt = `Summarize the conversation below in concise bullet points. Capture the user's goals, important decisions or conclusions, key facts established, and any unresolved threads. Output ONLY the bullets — no preamble, no closing line.
+
+Conversation:
+---
+${transcript}
+---`;
+
+    const settings = useSettingsStore.getState();
+    const baseUrl =
+      session.provider === "ollama"
+        ? settings.ollama_base_url
+        : settings.openai_base_url;
+    const params = readSessionParams(session);
+
+    set({ compactingSessionId: sessionId });
+
+    let summary = "";
+    let streamErr: string | null = null;
+    const unlistenHolder: { fn: (() => void) | null } = { fn: null };
+    try {
+      await new Promise<void>((resolve, reject) => {
+        startChatStream(
+          {
+            stream_id: makeRequestId(),
+            provider: session.provider,
+            model: session.model,
+            base_url: baseUrl,
+            system_prompt: null,
+            messages: [{ role: "user", content: summaryPrompt, images: [] }],
+            params,
+          },
+          (ev) => {
+            if (ev.kind === "token") {
+              summary += ev.delta;
+            } else if (ev.kind === "error") {
+              streamErr = ev.message;
+              resolve();
+            } else if (ev.kind === "done" || ev.kind === "cancelled") {
+              resolve();
+            }
+          },
+        )
+          .then((handle) => {
+            unlistenHolder.fn = handle.unlisten;
+          })
+          .catch(reject);
+      });
+    } catch (e) {
+      streamErr = e instanceof Error ? e.message : String(e);
+    } finally {
+      const fn = unlistenHolder.fn;
+      if (fn) {
+        try {
+          fn();
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+
+    const cleanSummary = summary.trim();
+    if (streamErr || !cleanSummary) {
+      set({ compactingSessionId: null });
+      useToastStore.getState().push({
+        kind: "error",
+        title: "Compaction failed",
+        body: streamErr ?? "Model returned no summary.",
+      });
+      return;
+    }
+
+    // Stash the summary inside `session.system_prompt` using a unique
+    // marker block. Re-compacting strips the previous block first so
+    // the prompt doesn't grow unboundedly. The user can still see and
+    // edit the block in the Parameters panel's "Custom instructions"
+    // textarea, which is intentional — compaction shouldn't be a black
+    // box.
+    const existing = session.system_prompt ?? "";
+    const stripped = existing.replace(
+      /\[Loach: earlier conversation summary\][\s\S]*?\[End of Loach summary\]\n?\n?/g,
+      "",
+    );
+    const block = `[Loach: earlier conversation summary]\n${cleanSummary}\n[End of Loach summary]\n\n`;
+    const newPrompt = block + stripped;
+
+    try {
+      await get().setSessionSystemPrompt(sessionId, newPrompt);
+    } catch (e) {
+      set({ compactingSessionId: null });
+      useToastStore.getState().push({
+        kind: "error",
+        title: "Couldn't save summary",
+        body: e instanceof Error ? e.message : String(e),
+      });
+      return;
+    }
+
+    // Delete the summarized messages from the DB so the next request
+    // actually has fewer tokens. Failures here are non-fatal — the
+    // summary is in place and would just mean the user's next send has
+    // both the summary and the originals (extra context, not wrong
+    // context). We log but don't roll back.
+    const summarizedIds = new Set(toSummarize.map((m) => m.id));
+    for (const m of toSummarize) {
+      try {
+        await deleteMessage(m.id, sessionId);
+      } catch (e) {
+        logger.warn("compact: failed to delete message", e);
+      }
+    }
+    set((s) => ({
+      messages: {
+        ...s.messages,
+        [sessionId]: (s.messages[sessionId] ?? []).filter(
+          (m) => !summarizedIds.has(m.id),
+        ),
+      },
+      compactingSessionId: null,
+    }));
+
+    useToastStore.getState().push({
+      kind: "info",
+      title: "Context compacted",
+      body: `Summarized ${toSummarize.length} earlier messages into the system prompt.`,
+    });
   },
 }));

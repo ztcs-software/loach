@@ -16,6 +16,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { FileChip } from "./FileChip";
 import { CommandPalette } from "./CommandPalette";
 import { CommandResultPanel } from "./CommandResultPanel";
+import { ContextUsageBar } from "./ContextUsageBar";
 import {
   fileToAttachment,
   FileTooLargeError,
@@ -845,6 +846,7 @@ export function ChatInput({ centered = false }: ChatInputProps) {
         {error && (
           <p className="mt-2 text-xs text-rose-300">{error}</p>
         )}
+        {!centered && <ContextUsageBar />}
       </div>
       {ctxMenu && (
         <TextareaContextMenu
