@@ -140,6 +140,9 @@ pub async fn copy_model(
     source: &str,
     destination: &str,
 ) -> Result<()> {
+    super::refuse_link_local_host(base_url)
+        .await
+        .map_err(|e| anyhow!(e))?;
     let url = format!("{}/api/copy", base_url.trim_end_matches('/'));
     let body = serde_json::json!({
         "source": source,
@@ -324,6 +327,17 @@ pub async fn pull_model(
     name: &str,
     stream_id: String,
 ) -> Result<()> {
+    if let Err(e) = super::refuse_link_local_host(base_url).await {
+        // Mirror the shape of an in-flight admin failure: emit an Error
+        // event on the admin channel and finish the registry slot so the
+        // UI sees the same teardown path as a network failure.
+        let _ = app.emit(
+            &admin_channel(&stream_id),
+            AdminEvent::Error { message: e },
+        );
+        registry.finish(&stream_id);
+        return Ok(());
+    }
     let url = format!("{}/api/pull", base_url.trim_end_matches('/'));
     let body = serde_json::json!({ "name": name, "stream": true });
     drive_progress_stream(app, registry, stream_id, url, body, http).await
@@ -338,6 +352,14 @@ pub async fn create_model(
     modelfile: &str,
     stream_id: String,
 ) -> Result<()> {
+    if let Err(e) = super::refuse_link_local_host(base_url).await {
+        let _ = app.emit(
+            &admin_channel(&stream_id),
+            AdminEvent::Error { message: e },
+        );
+        registry.finish(&stream_id);
+        return Ok(());
+    }
     let url = format!("{}/api/create", base_url.trim_end_matches('/'));
     // Ollama 0.3+ supports `modelfile` as a field on `/api/create` so we
     // don't need to write a temp file. `stream: true` keeps the NDJSON
@@ -371,6 +393,13 @@ struct TagDetails {
 }
 
 pub async fn probe(http: &Client, base_url: &str) -> bool {
+    // SSRF guard: refuse to probe link-local even though `probe` returns
+    // a bool. Without this the renderer could call `ollama_probe` against
+    // 169.254.169.254 (or fe80::/10) and use the boolean response as a
+    // cheap detector for a reachable cloud-metadata service.
+    if super::refuse_link_local_host(base_url).await.is_err() {
+        return false;
+    }
     http.get(format!("{}/api/tags", base_url.trim_end_matches('/')))
         .timeout(PROBE_TIMEOUT)
         .send()
@@ -406,6 +435,9 @@ pub async fn list_models(http: &Client, base_url: &str) -> Result<Vec<ModelInfo>
 
 /// Unload a model from VRAM by sending an empty chat with keep_alive=0.
 pub async fn unload_model(http: &Client, base_url: &str, model: &str) -> Result<()> {
+    super::refuse_link_local_host(base_url)
+        .await
+        .map_err(|e| anyhow!(e))?;
     let url = format!("{}/api/chat", base_url.trim_end_matches('/'));
     let body = serde_json::json!({
         "model": model,
@@ -423,6 +455,9 @@ pub async fn unload_model(http: &Client, base_url: &str, model: &str) -> Result<
 /// load. Errors are swallowed — preload is best-effort and must never block
 /// app startup if Ollama is unreachable or the model is missing.
 pub async fn preload_model(http: &Client, base_url: &str, model: &str) -> Result<()> {
+    super::refuse_link_local_host(base_url)
+        .await
+        .map_err(|e| anyhow!(e))?;
     let url = format!("{}/api/chat", base_url.trim_end_matches('/'));
     let body = serde_json::json!({
         "model": model,

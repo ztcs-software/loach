@@ -280,12 +280,50 @@ pub async fn get_settings(state: State<'_, AppState>) -> Result<HashMap<String, 
     Ok(rows.into_iter().collect())
 }
 
+/// Settings keys the renderer is allowed to write. Mirrors the
+/// `DEFAULT_SETTINGS` map in `src/types.ts` — keep them in lockstep when
+/// adding a new user-facing setting.
+///
+/// The allowlist is a defence against a compromised renderer planting
+/// arbitrary KV rows. The concrete attack it closes: silently repointing
+/// `openai_base_url` at an attacker host so the stored bearer token gets
+/// shipped on the next chat request. With this gate in place, the only
+/// way to write a setting from the UI is to use a known key — a future
+/// settings consumer that forgets its own validation can't be exploited
+/// via a key the renderer was free to mint. Unknown keys fail loudly so
+/// a stale frontend with a typo errors instead of silently dropping the
+/// write.
+const WRITABLE_SETTING_KEYS: &[&str] = &[
+    "theme",
+    "background_style",
+    "font_size",
+    "ollama_base_url",
+    "openai_base_url",
+    "global_system_prompt",
+    "default_provider",
+    "default_model",
+    "default_model_choice",
+    "default_model_preload",
+    "user_name",
+    "temporal_awareness",
+    "web_fetch_enabled",
+    "low_vram_global",
+    "thinking_default",
+    "default_tone_id",
+    "onboarding_completed",
+];
+
 #[tauri::command]
 pub async fn set_setting(
     state: State<'_, AppState>,
     key: String,
     value: String,
 ) -> Result<(), String> {
+    if !WRITABLE_SETTING_KEYS.contains(&key.as_str()) {
+        return Err(format!(
+            "setting `{key}` is not on the writable allowlist"
+        ));
+    }
     state.db.set_setting(&key, &value).map_err(err)
 }
 
@@ -931,6 +969,32 @@ impl McpServerInput {
     }
 }
 
+/// Render an upstream error string safe to splice into a chat-bubble
+/// notice. Collapses whitespace / control chars to single spaces and
+/// truncates on a char boundary so a misbehaving server can't:
+///   - inject newlines that break the surrounding markdown wrap
+///   - bloat the message body with a multi-KB stack trace
+///   - silently smuggle echoed `Authorization` headers (or anything
+///     similarly shaped) into the persisted transcript, which would
+///     then land in snapshots / shared exports.
+/// The operator-facing tracing log keeps the unredacted text — only the
+/// renderer-visible notice is clipped.
+fn sanitize_chat_error(s: &str) -> String {
+    const MAX_CHARS: usize = 120;
+    let collapsed: String = s
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if collapsed.chars().count() <= MAX_CHARS {
+        return collapsed;
+    }
+    let cut: String = collapsed.chars().take(MAX_CHARS).collect();
+    format!("{cut}…")
+}
+
 /// Header-name syntax: RFC 7230 token = 1*tchar, with `tchar` being
 /// alphanumerics and a small set of punctuation. We accept the same set so a
 /// pasted header name like `Authorization` or `X-API-Key` rolls through but
@@ -1156,19 +1220,33 @@ pub async fn chat_stream(
             }
         };
         if !errors.is_empty() {
-            let summary = errors
+            // Full text goes to the operator-facing log (with whatever
+            // identifying / debug detail the underlying error carried).
+            let log_summary = errors
                 .iter()
                 .map(|(name, e)| format!("{name}: {e}"))
                 .collect::<Vec<_>>()
                 .join("; ");
-            tracing::warn!("MCP aggregate errors — {summary}");
+            tracing::warn!("MCP aggregate errors — {log_summary}");
+            // The chat-bubble notice is sanitised: every error string is
+            // collapsed to a single line and truncated. A misbehaving MCP
+            // server that echoes an `Authorization` header (or any other
+            // secret) into its 401 body would otherwise land that text in
+            // the persisted message — and from there into snapshots and
+            // shared exports. Truncation is conservative; the operator
+            // still has the full text in the log above.
+            let ui_summary = errors
+                .iter()
+                .map(|(name, e)| format!("{name}: {}", sanitize_chat_error(e)))
+                .collect::<Vec<_>>()
+                .join("; ");
             // Surface to the user so a totally-broken MCP config isn't
             // silently invisible. We prepend ONE notice (not a sequence of
             // Error events — those trigger teardown in the frontend) as a
             // Token, so it lands at the head of the assistant bubble and
             // the chat continues normally with whatever tools survived.
             let notice = format!(
-                "_⚠ Some MCP servers couldn't be reached: {summary}. Continuing with the rest._\n\n"
+                "_⚠ Some MCP servers couldn't be reached: {ui_summary}. Continuing with the rest._\n\n"
             );
             let _ = app.emit(
                 &channel,
