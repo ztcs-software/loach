@@ -331,7 +331,6 @@ const WRITABLE_SETTING_KEYS: &[&str] = &[
     "user_name",
     "temporal_awareness",
     "web_fetch_enabled",
-    "calculate_tool_enabled",
     "low_vram_global",
     "thinking_default",
     "default_tone_id",
@@ -344,7 +343,13 @@ pub async fn set_setting(
     key: String,
     value: String,
 ) -> Result<(), String> {
-    if !WRITABLE_SETTING_KEYS.contains(&key.as_str()) {
+    // Built-in tool toggles (`*_tool_enabled`) live in the registry at
+    // [`crate::tools::builtin`] so a new tool is a one-line registry
+    // edit instead of a separate allowlist update. Everything else has
+    // to match the static `WRITABLE_SETTING_KEYS` exactly.
+    let allowed = WRITABLE_SETTING_KEYS.contains(&key.as_str())
+        || crate::tools::builtin::setting_keys().any(|k| k == key);
+    if !allowed {
         return Err(format!(
             "setting `{key}` is not on the writable allowlist"
         ));
@@ -1280,30 +1285,17 @@ pub async fn chat_stream(
         }
         request.tools = tools;
 
-        // Append built-in tools after the MCP catalogue. Order matters
-        // for `resolve_qualified`'s first-match scan, but a clash is
-        // impossible in practice: MCP qualified names always carry the
-        // `<slug>__` prefix, and the builtin uses a bare `calculate`.
+        // Append built-in tools after the MCP catalogue. Order is safe:
+        // MCP qualified names always carry a `<slug>__` prefix, so the
+        // bare names used by built-ins (`calculate`, `datetime`, …)
+        // can't collide with `resolve_qualified`'s first-match scan.
         //
-        // The `calculate` tool is purely local (no network, no DB), so
-        // we expose it in Private Chat too — the privacy guarantee is
-        // about data leaving the box, not about hiding builtin compute.
-        let calc_enabled = db
-            .get_setting("calculate_tool_enabled")
-            .ok()
-            .flatten()
-            .as_deref()
-            == Some("true");
-        if calc_enabled {
-            request.tools.push(crate::mcp::McpToolDef {
-                server_id: crate::tools::calculate::BUILTIN_SERVER_ID.to_string(),
-                server_name: "Loach".to_string(),
-                name: crate::tools::calculate::TOOL_NAME.to_string(),
-                qualified_name: crate::tools::calculate::TOOL_NAME.to_string(),
-                description: Some(crate::tools::calculate::tool_description().to_string()),
-                input_schema: crate::tools::calculate::input_schema(),
-            });
-        }
+        // Built-ins are purely local (no network, no DB writes), so we
+        // expose them in Private Chat too — the privacy guarantee is
+        // about data leaving the box, not about hiding local compute.
+        request
+            .tools
+            .extend(crate::tools::builtin::enabled_builtin_defs(&db));
 
         let res = match provider.as_str() {
             "ollama" => {

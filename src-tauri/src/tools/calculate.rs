@@ -5,12 +5,10 @@
 //! chains). Exposing a deterministic evaluator as a tool lets the model
 //! off-load the math instead of hallucinating an answer.
 //!
-//! Wiring:
-//! * The chat pipeline injects a synthetic [`McpToolDef`] with
-//!   `server_id == "__builtin__"` and `qualified_name == "calculate"`
-//!   alongside the MCP catalogue (see `commands::chat_stream`).
-//! * [`crate::mcp::dispatch_tool_call`] short-circuits the builtin server
-//!   id and routes here instead of opening an MCP session.
+//! Wiring lives in [`super::builtin`] — the chat pipeline pulls every
+//! enabled built-in tool from there and the MCP dispatcher routes by
+//! bare tool name. This file only owns the schema, the description, and
+//! the math.
 //!
 //! Safety surface is tiny: meval is pure-compute, no I/O, no allocation
 //! patterns that scale with input size beyond the expression's own length.
@@ -30,10 +28,6 @@ const MAX_EXPR_CHARS: usize = 1024;
 /// Tool name as the model sees it. Lives here so the catalogue injection
 /// and the dispatch short-circuit can't drift.
 pub const TOOL_NAME: &str = "calculate";
-
-/// Sentinel server id used to mark the builtin in `McpToolDef::server_id`.
-/// Matched verbatim in `crate::mcp::dispatch_tool_call`.
-pub const BUILTIN_SERVER_ID: &str = "__builtin__";
 
 /// Description and JSON-Schema sent to the model with the rest of the
 /// tools catalogue. Keep the description prescriptive — local models

@@ -314,6 +314,21 @@ export interface Settings {
    *  local models are unreliable at multi-digit / multi-step arithmetic
    *  and otherwise tend to hallucinate answers. */
   calculate_tool_enabled: boolean;
+  /** Per-tool toggles for the rest of the built-in tools. Each runs
+   *  entirely in-process (no network, no DB writes) and is exposed to
+   *  the model alongside MCP tools when on. All default to off so the
+   *  model catalogue stays minimal until the user opts in — see
+   *  `src-tauri/src/tools/builtin.rs` for the registry. */
+  datetime_tool_enabled: boolean;
+  count_tool_enabled: boolean;
+  hash_tool_enabled: boolean;
+  uuid_tool_enabled: boolean;
+  base64_tool_enabled: boolean;
+  json_tool_enabled: boolean;
+  unit_convert_tool_enabled: boolean;
+  diff_text_tool_enabled: boolean;
+  sort_tool_enabled: boolean;
+  ip_tool_enabled: boolean;
   /** Global override for Ollama's `low_vram` option. When `true`, every
    *  Ollama request is sent with `low_vram: true` regardless of per-chat
    *  params or per-model Modelfile defaults — handy on memory-constrained
@@ -353,6 +368,16 @@ export const DEFAULT_SETTINGS: Settings = {
   temporal_awareness: true,
   web_fetch_enabled: false,
   calculate_tool_enabled: false,
+  datetime_tool_enabled: false,
+  count_tool_enabled: false,
+  hash_tool_enabled: false,
+  uuid_tool_enabled: false,
+  base64_tool_enabled: false,
+  json_tool_enabled: false,
+  unit_convert_tool_enabled: false,
+  diff_text_tool_enabled: false,
+  sort_tool_enabled: false,
+  ip_tool_enabled: false,
   low_vram_global: false,
   thinking_default: true,
   default_tone_id: "default",

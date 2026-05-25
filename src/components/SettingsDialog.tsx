@@ -3,8 +3,12 @@ import {
   AlertTriangle,
   Archive,
   ArchiveRestore,
+  ArrowDownAZ,
+  Binary,
   BookOpen,
+  Braces,
   Brain,
+  CalendarClock,
   Check,
   CheckCircle2,
   ChevronDown,
@@ -12,20 +16,26 @@ import {
   CircleAlert,
   Clock,
   Database,
+  Diff,
   Download,
+  Fingerprint,
   Github,
   Globe,
+  Hash,
   Info,
+  KeyRound,
   Layers,
   Loader2,
   Lock,
   MemoryStick,
   MoreHorizontal,
+  Network,
   Palette,
   Plug,
   Calculator,
   RefreshCw,
   RotateCcw,
+  Ruler,
   Server,
   Sparkles,
   Trash2,
@@ -711,6 +721,311 @@ export function SettingsDialog() {
                         settings.calculate_tool_enabled
                           ? "Disable calculator tool"
                           : "Enable calculator tool"
+                      }
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="min-w-0">
+                      <Label className="flex items-center gap-1.5">
+                        <CalendarClock className="h-3.5 w-3.5 text-foreground/60" />
+                        Date &amp; time
+                      </Label>
+                      <p className="mt-1 text-[11px] text-foreground/50">
+                        Exposes a{" "}
+                        <span className="font-mono">datetime</span> tool for
+                        parsing, formatting, and arithmetic on dates — DST-aware
+                        timezone conversion, "47 business days from today",
+                        weekday lookup. Local models pick wrong weekdays and
+                        miscount business days; chrono is exact. In-process.
+                      </p>
+                    </div>
+                    <Switch
+                      checked={settings.datetime_tool_enabled}
+                      onCheckedChange={(next) =>
+                        settings.update("datetime_tool_enabled", next)
+                      }
+                      className="shrink-0"
+                      aria-label={
+                        settings.datetime_tool_enabled
+                          ? "Disable datetime tool"
+                          : "Enable datetime tool"
+                      }
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="min-w-0">
+                      <Label className="flex items-center gap-1.5">
+                        <Hash className="h-3.5 w-3.5 text-foreground/60" />
+                        Count
+                      </Label>
+                      <p className="mt-1 text-[11px] text-foreground/50">
+                        Exposes a <span className="font-mono">count</span>{" "}
+                        tool for exact character / byte / word / line /
+                        substring counts. Tokenization hides character
+                        identity from the model — this fixes the "how many
+                        r's in strawberry" class of failure. In-process.
+                      </p>
+                    </div>
+                    <Switch
+                      checked={settings.count_tool_enabled}
+                      onCheckedChange={(next) =>
+                        settings.update("count_tool_enabled", next)
+                      }
+                      className="shrink-0"
+                      aria-label={
+                        settings.count_tool_enabled
+                          ? "Disable count tool"
+                          : "Enable count tool"
+                      }
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="min-w-0">
+                      <Label className="flex items-center gap-1.5">
+                        <Fingerprint className="h-3.5 w-3.5 text-foreground/60" />
+                        Hash
+                      </Label>
+                      <p className="mt-1 text-[11px] text-foreground/50">
+                        Exposes a <span className="font-mono">hash</span>{" "}
+                        tool for SHA-224 / SHA-256 / SHA-384 / SHA-512
+                        digests over UTF-8, hex, or base64 input. Models
+                        will fabricate a digest that looks plausible but
+                        isn't — this gives an exact one. In-process.
+                      </p>
+                    </div>
+                    <Switch
+                      checked={settings.hash_tool_enabled}
+                      onCheckedChange={(next) =>
+                        settings.update("hash_tool_enabled", next)
+                      }
+                      className="shrink-0"
+                      aria-label={
+                        settings.hash_tool_enabled
+                          ? "Disable hash tool"
+                          : "Enable hash tool"
+                      }
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="min-w-0">
+                      <Label className="flex items-center gap-1.5">
+                        <KeyRound className="h-3.5 w-3.5 text-foreground/60" />
+                        UUID
+                      </Label>
+                      <p className="mt-1 text-[11px] text-foreground/50">
+                        Exposes a <span className="font-mono">uuid</span>{" "}
+                        tool that generates v4 (random) or v7
+                        (time-ordered) UUIDs, up to 100 per call. Models
+                        will hallucinate UUID-shaped strings that
+                        eventually collide — this generates real ones.
+                        In-process.
+                      </p>
+                    </div>
+                    <Switch
+                      checked={settings.uuid_tool_enabled}
+                      onCheckedChange={(next) =>
+                        settings.update("uuid_tool_enabled", next)
+                      }
+                      className="shrink-0"
+                      aria-label={
+                        settings.uuid_tool_enabled
+                          ? "Disable uuid tool"
+                          : "Enable uuid tool"
+                      }
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="min-w-0">
+                      <Label className="flex items-center gap-1.5">
+                        <Binary className="h-3.5 w-3.5 text-foreground/60" />
+                        Base64
+                      </Label>
+                      <p className="mt-1 text-[11px] text-foreground/50">
+                        Exposes a <span className="font-mono">base64</span>{" "}
+                        tool for standard / URL-safe encode and decode.
+                        Models routinely garble padding or mix alphabets —
+                        this just does it right. In-process.
+                      </p>
+                    </div>
+                    <Switch
+                      checked={settings.base64_tool_enabled}
+                      onCheckedChange={(next) =>
+                        settings.update("base64_tool_enabled", next)
+                      }
+                      className="shrink-0"
+                      aria-label={
+                        settings.base64_tool_enabled
+                          ? "Disable base64 tool"
+                          : "Enable base64 tool"
+                      }
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="min-w-0">
+                      <Label className="flex items-center gap-1.5">
+                        <Braces className="h-3.5 w-3.5 text-foreground/60" />
+                        JSON
+                      </Label>
+                      <p className="mt-1 text-[11px] text-foreground/50">
+                        Exposes a <span className="font-mono">json</span>{" "}
+                        tool that pretty-prints, validates, or extracts a
+                        value at a JSON Pointer path. Catches the
+                        almost-valid JSON (trailing commas, smart quotes)
+                        models like to produce. In-process.
+                      </p>
+                    </div>
+                    <Switch
+                      checked={settings.json_tool_enabled}
+                      onCheckedChange={(next) =>
+                        settings.update("json_tool_enabled", next)
+                      }
+                      className="shrink-0"
+                      aria-label={
+                        settings.json_tool_enabled
+                          ? "Disable json tool"
+                          : "Enable json tool"
+                      }
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="min-w-0">
+                      <Label className="flex items-center gap-1.5">
+                        <Ruler className="h-3.5 w-3.5 text-foreground/60" />
+                        Unit conversion
+                      </Label>
+                      <p className="mt-1 text-[11px] text-foreground/50">
+                        Exposes a{" "}
+                        <span className="font-mono">unit_convert</span> tool
+                        with a curated factor table for length, mass,
+                        temperature, volume, area, speed, time, energy,
+                        and pressure — including uncommon units like
+                        furlong, troy ounce, parsec. Models hallucinate
+                        factors for anything past km↔mi. In-process.
+                      </p>
+                    </div>
+                    <Switch
+                      checked={settings.unit_convert_tool_enabled}
+                      onCheckedChange={(next) =>
+                        settings.update("unit_convert_tool_enabled", next)
+                      }
+                      className="shrink-0"
+                      aria-label={
+                        settings.unit_convert_tool_enabled
+                          ? "Disable unit conversion tool"
+                          : "Enable unit conversion tool"
+                      }
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="min-w-0">
+                      <Label className="flex items-center gap-1.5">
+                        <Diff className="h-3.5 w-3.5 text-foreground/60" />
+                        Text diff
+                      </Label>
+                      <p className="mt-1 text-[11px] text-foreground/50">
+                        Exposes a <span className="font-mono">diff_text</span>{" "}
+                        tool that computes a unified diff between two
+                        strings, by line, word, or character. Models try
+                        to eyeball diffs and miss small changes in long
+                        inputs. In-process.
+                      </p>
+                    </div>
+                    <Switch
+                      checked={settings.diff_text_tool_enabled}
+                      onCheckedChange={(next) =>
+                        settings.update("diff_text_tool_enabled", next)
+                      }
+                      className="shrink-0"
+                      aria-label={
+                        settings.diff_text_tool_enabled
+                          ? "Disable text diff tool"
+                          : "Enable text diff tool"
+                      }
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="min-w-0">
+                      <Label className="flex items-center gap-1.5">
+                        <ArrowDownAZ className="h-3.5 w-3.5 text-foreground/60" />
+                        Sort
+                      </Label>
+                      <p className="mt-1 text-[11px] text-foreground/50">
+                        Exposes a <span className="font-mono">sort</span>{" "}
+                        tool for lexical, natural, and numeric line sort
+                        with reverse / unique / case-insensitive flags.
+                        Natural sort (file1, file2, file10 — not file1,
+                        file10, file2) is easy to get wrong by hand.
+                        In-process.
+                      </p>
+                    </div>
+                    <Switch
+                      checked={settings.sort_tool_enabled}
+                      onCheckedChange={(next) =>
+                        settings.update("sort_tool_enabled", next)
+                      }
+                      className="shrink-0"
+                      aria-label={
+                        settings.sort_tool_enabled
+                          ? "Disable sort tool"
+                          : "Enable sort tool"
+                      }
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="min-w-0">
+                      <Label className="flex items-center gap-1.5">
+                        <Network className="h-3.5 w-3.5 text-foreground/60" />
+                        IP / CIDR
+                      </Label>
+                      <p className="mt-1 text-[11px] text-foreground/50">
+                        Exposes an <span className="font-mono">ip</span>{" "}
+                        tool for CIDR containment ("does 10.0.5.7 fall in
+                        10.0.0.0/16?") and subnet info (network,
+                        broadcast, first/last usable host, total). IPv4
+                        and IPv6. Easy to get wrong on /23, /127, or
+                        anything past a /24. In-process.
+                      </p>
+                    </div>
+                    <Switch
+                      checked={settings.ip_tool_enabled}
+                      onCheckedChange={(next) =>
+                        settings.update("ip_tool_enabled", next)
+                      }
+                      className="shrink-0"
+                      aria-label={
+                        settings.ip_tool_enabled
+                          ? "Disable IP / CIDR tool"
+                          : "Enable IP / CIDR tool"
                       }
                     />
                   </div>

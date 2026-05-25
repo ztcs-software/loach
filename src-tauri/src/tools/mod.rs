@@ -5,10 +5,24 @@
 //!   user message, calls `fetch_url` for each link, and inlines the
 //!   returned text into the outgoing prompt before streaming starts.
 //!   The model doesn't get to *decide* to fetch.
-//! * [`calculate`] — model-driven math evaluator. Exposed to the model as
-//!   a tool alongside MCP tools (when the user enables the toggle in
-//!   Settings → Tools); the model calls it via `tools/call` and the
-//!   answer flows back through the standard tool-result path.
+//! * Model-driven built-ins (`calculate`, `datetime`, `count`, …) —
+//!   exposed to the model alongside MCP tools when their per-tool toggle
+//!   in Settings → Tools is on. The model calls them via `tools/call`
+//!   and the answer flows back through the standard tool-result path.
+//!   [`builtin`] is the registry every built-in is registered in; it's
+//!   the only thing `commands::chat_stream` and `mcp::dispatch_tool_call`
+//!   need to talk to.
 
+pub mod base64_tool;
+pub mod builtin;
 pub mod calculate;
+pub mod count;
+pub mod datetime;
+pub mod diff_text;
 pub mod fetch_url;
+pub mod hash;
+pub mod ip_tool;
+pub mod json_tool;
+pub mod sort_tool;
+pub mod unit_convert;
+pub mod uuid_gen;
