@@ -80,6 +80,15 @@ interface QueueTask {
     messages: ChatMessageIn[];
     params: GenerationParams;
   };
+  /** Pre-stream tool-call records that should appear on the assistant
+   *  bubble alongside any MCP / calculator calls the model itself makes
+   *  during streaming. Currently used for web-fetch: the frontend ran
+   *  the fetches before the chat request was built, and we want the
+   *  same chip UX users get for model-initiated tools. Seeded into
+   *  `runningBuffers.toolCalls` in `startTask` so the streaming
+   *  flush / finish paths persist them on the assistant row without
+   *  any extra DB write. */
+  preToolCalls?: ToolCallRecord[];
 }
 
 interface ChatState {
@@ -784,6 +793,35 @@ async function startTask(task: QueueTask, get: Getter, set: Setter) {
     return;
   }
 
+  // Seed pre-stream tool-call records (e.g. web-fetch outcomes) onto
+  // the assistant bubble before any token arrives. The optimistic
+  // `assistantMsg` carries them so the chip appears instantly; the
+  // `runningBuffers.toolCalls` array is the source the streaming
+  // flush + `finishRunning` persistence path both read, so any MCP /
+  // calculator calls the model makes during the turn append to the
+  // same list and land on the assistant row alongside the seeds.
+  //
+  // Also persist them to disk immediately. `finishRunning` would write
+  // them at stream end, but the startup-error catch below replaces the
+  // row's content without touching `tool_calls_json` — so a request
+  // that fails to connect (bad URL, unreachable Ollama, expired key)
+  // would otherwise lose the chips on next reload. The follow-up
+  // `update_message` is COALESCE-safe; the eventual finish-path write
+  // simply overrides with any MCP / calculator calls that appended.
+  const preCalls = task.preToolCalls ?? [];
+  if (preCalls.length > 0) {
+    const preCallsJson = JSON.stringify(preCalls);
+    assistantMsg = { ...assistantMsg, tool_calls_json: preCallsJson };
+    void updateMessage({
+      id: assistantMsg.id,
+      session_id: sessionId,
+      content: "",
+      tool_calls_json: preCallsJson,
+    }).catch((e) =>
+      logger.warn("persist pre-stream tool records failed", e),
+    );
+  }
+
   set((s) => ({
     messages: {
       ...s.messages,
@@ -800,7 +838,7 @@ async function startTask(task: QueueTask, get: Getter, set: Setter) {
     content: "",
     thinking: "",
     metrics: null,
-    toolCalls: [],
+    toolCalls: [...preCalls],
   };
 
   const streamId = makeRequestId();
@@ -1493,30 +1531,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
       content: inlinedContent,
       attachments_json: attachmentsJson,
     });
-    // 1b. If web-fetch ran, persist the per-URL tool-call records on the
-    // user row so the chip UI has something to render. Done as a follow-up
-    // update because `appendMessage` doesn't accept `tool_calls_json` (and
-    // adding it for one caller would mean touching the Rust IPC surface
-    // too). `update_message` COALESCEs nullable columns, so passing the
-    // same content back is a no-op except for the tool_calls_json write.
-    if (fetchToolRecords.length > 0) {
-      const toolCallsJson = JSON.stringify(fetchToolRecords);
-      userMsg.tool_calls_json = toolCallsJson;
-      try {
-        await updateMessage({
-          id: userMsg.id,
-          session_id: sessionId,
-          content: inlinedContent,
-          tool_calls_json: toolCallsJson,
-        });
-      } catch (e) {
-        // Same defensive stance as fetchAll above: failing to persist
-        // the chip metadata shouldn't block the chat. The records still
-        // live on the optimistic `userMsg` so the chip shows up in this
-        // session; only the persisted reload would lose them.
-        logger.warn("persist web_fetch tool records failed", e);
-      }
-    }
     set((s) => ({
       messages: {
         ...s.messages,
@@ -1548,6 +1562,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       sessionId,
       userMsgId: userMsg.id,
       request,
+      preToolCalls: fetchToolRecords.length > 0 ? fetchToolRecords : undefined,
     };
 
     // 3. Dispatch. If nothing is running globally, start immediately.
