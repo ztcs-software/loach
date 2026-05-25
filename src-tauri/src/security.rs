@@ -1,8 +1,8 @@
 //! App-lock subsystem.
 //!
 //! Stores a single JSON blob in the OS credential store (Windows Credential
-//! Manager / Linux Secret Service via the same `keyring` crate we use for the
-//! OpenAI key). The blob carries:
+//! Manager / Linux Secret Service / macOS Keychain via the same `keyring`
+//! crate we use for the OpenAI key). The blob carries:
 //!
 //!   - the lock method (PIN, password, or both),
 //!   - argon2id PHC strings for whichever credentials are configured,

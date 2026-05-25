@@ -18,9 +18,11 @@
 //!   [`MAX_TEXT_CHARS`]. The frontend is free to truncate further.
 
 use std::net::{IpAddr, SocketAddr};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
+use once_cell::sync::Lazy;
+use parking_lot::Mutex;
 use reqwest::Url;
 use serde::Serialize;
 use tokio::net::lookup_host;
@@ -36,6 +38,46 @@ pub const MAX_REDIRECTS: usize = 10;
 /// on a public host and stops a single dead link from hanging the fetch
 /// for the better part of a minute.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+// ---------------------------------------------------------------------------
+// Rate limiter
+//
+// The "Web fetch" toggle is a normal-user feature, but the same IPC
+// surface is reachable by a compromised renderer (XSS in a paste, DevTools
+// on a shipped build). Without a cap, the attacker can drive Loach as a
+// scriptable HTTP client against arbitrary public hosts for harassment,
+// scraping, or to amplify a DDoS.
+//
+// The window is generous enough that a legitimate multi-URL prompt (a few
+// links in the user's input) fits comfortably, but tight enough that a
+// tight loop bottoms out within a second of starting. State is per-
+// process and resets on app restart — fits the same model as the
+// app-lock rate limiter in `security.rs`.
+// ---------------------------------------------------------------------------
+
+const RATE_WINDOW: Duration = Duration::from_secs(60);
+const RATE_LIMIT: usize = 60;
+
+static RATE_LOG: Lazy<Mutex<Vec<Instant>>> = Lazy::new(|| Mutex::new(Vec::new()));
+
+/// Consume one slot in the sliding window. Returns `Err` (with a message
+/// suitable for surfacing in the UI) when the cap is exceeded.
+fn rate_acquire() -> Result<(), String> {
+    let mut log = RATE_LOG.lock();
+    let now = Instant::now();
+    // Drop entries older than the window in-place. The log only grows to
+    // RATE_LIMIT under steady abuse, so the linear scan is cheap.
+    log.retain(|t| now.duration_since(*t) < RATE_WINDOW);
+    if log.len() >= RATE_LIMIT {
+        return Err(format!(
+            "Web fetch rate limit hit ({} URLs / {} seconds). Try again shortly.",
+            RATE_LIMIT,
+            RATE_WINDOW.as_secs()
+        ));
+    }
+    log.push(now);
+    Ok(())
+}
 
 /// What we hand back to the frontend for a single URL. `truncated` signals
 /// that either the response body or the extracted text hit a cap — useful
@@ -64,6 +106,10 @@ pub struct FetchedPage {
 /// to close the TOCTOU window between "we resolved a public IP" and
 /// "reqwest dials a now-private one".
 pub async fn fetch(_shared_http: &reqwest::Client, raw_url: &str) -> Result<FetchedPage, String> {
+    // Rate-limit before URL parsing so even an invalid-URL flood is bounded.
+    // The slot is consumed regardless of fetch success — a renderer that
+    // keeps firing fetches against malformed URLs still gets throttled.
+    rate_acquire()?;
     let initial_url =
         Url::parse(raw_url).map_err(|e| format!("Invalid URL `{raw_url}`: {e}"))?;
 
@@ -719,6 +765,27 @@ mod tests {
         let s = "日本&amp;語";
         let decoded = decode_entities(s);
         assert_eq!(decoded, "日本&語");
+    }
+
+    #[test]
+    fn rate_limiter_allows_under_cap_and_rejects_at_cap() {
+        // The limiter is a module-level singleton. Reset and drive it from
+        // here — the test runs serialised because it holds the same lock
+        // every production call uses.
+        {
+            let mut log = RATE_LOG.lock();
+            log.clear();
+        }
+        for i in 0..RATE_LIMIT {
+            rate_acquire().unwrap_or_else(|e| {
+                panic!("acquire #{i} should succeed under the cap; got {e}")
+            });
+        }
+        let err = rate_acquire().expect_err("call #RATE_LIMIT+1 must be rate-limited");
+        assert!(err.contains("Web fetch rate limit"), "unexpected: {err}");
+        // Clean up so we don't poison parallel tests in the same binary.
+        let mut log = RATE_LOG.lock();
+        log.clear();
     }
 
     #[test]

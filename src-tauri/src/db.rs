@@ -1328,7 +1328,25 @@ impl Database {
     /// can ship to disk as JSON. `settings` is a key/value list — its
     /// shape is deliberately loose so future settings keys don't require
     /// a schema bump.
+    ///
+    /// **MCP credentials are scrubbed.** Each `mcp_servers` row's
+    /// `headers_json` carries the user's bearer tokens / API keys for
+    /// that integration. A snapshot is meant to be portable (backup,
+    /// support handoff, hand-edited gist) so shipping credentials in
+    /// plaintext would silently leak them whenever the user shared a
+    /// dump. We blank the field at export time; the user must
+    /// reconfigure auth after re-importing. The import path tolerates
+    /// a NULL `headers_json` already (an MCP server with no auth headers
+    /// is a valid configuration), so the round-trip remains valid.
     pub fn snapshot(&self) -> Result<DatabaseSnapshot> {
+        let mcp_servers: Vec<McpServer> = self
+            .list_mcp_servers()?
+            .into_iter()
+            .map(|mut s| {
+                s.headers_json = None;
+                s
+            })
+            .collect();
         Ok(DatabaseSnapshot {
             schema: "loach/v1".to_string(),
             exported_at: Utc::now().timestamp_millis(),
@@ -1340,7 +1358,7 @@ impl Database {
                 space_files: self.all_space_files()?,
                 space_memories: self.all_space_memories()?,
                 snippets: self.list_snippets()?,
-                mcp_servers: self.list_mcp_servers()?,
+                mcp_servers,
                 settings: self.all_settings()?,
             },
         })
