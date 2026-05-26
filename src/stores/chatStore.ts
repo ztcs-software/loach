@@ -12,6 +12,7 @@ import {
   listMessages,
   listSessions,
   makeRequestId,
+  markMessagesCompacted,
   ollamaUnloadModel,
   pinSession,
   renameSession,
@@ -28,6 +29,7 @@ import {
 } from "@/lib/files";
 import { extractMemories } from "@/lib/memory";
 import {
+  extractSummary,
   stripSummaryBlock,
   SUMMARY_END_TAG,
   SUMMARY_START_TAG,
@@ -460,8 +462,14 @@ function readSessionParams(session: Session | undefined): GenerationParams {
 }
 
 function chatHistory(messages: Message[], userText: string, images: string[]): ChatMessageIn[] {
+  // Compacted messages stay visible to the user but must NOT reach the
+  // model — the running auto-summary (in `session.system_prompt`) is the
+  // model's substitute for them, and re-sending the originals would
+  // defeat the whole point of compaction. System rows are dropped here
+  // because they're sent via the dedicated `system_prompt` field, not as
+  // chat turns.
   const history: ChatMessageIn[] = messages
-    .filter((m) => m.role !== "system")
+    .filter((m) => m.role !== "system" && m.compacted_at == null)
     .map((m) => ({
       role: m.role,
       content: m.content,
@@ -1800,7 +1808,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
 
     const all = state.messages[sessionId] ?? [];
-    const visible = all.filter((m) => m.role !== "system");
+    // Already-compacted rows have a summary representing them in the
+    // system prompt — re-summarising them would just feed the model
+    // their own summary twice. Build the candidate list from non-system,
+    // not-yet-compacted messages only.
+    const visible = all.filter(
+      (m) => m.role !== "system" && m.compacted_at == null,
+    );
     // Keep the most recent 4 messages untouched so the user still has
     // their latest exchange visible verbatim. Anything below that we'd
     // be summarizing two turns — not worth the round-trip.
@@ -1822,7 +1836,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
       })
       .join("\n\n");
 
-    const summaryPrompt = `Summarize the conversation below in concise bullet points. Capture the user's goals, important decisions or conclusions, key facts established, and any unresolved threads. Output ONLY the bullets — no preamble, no closing line.
+    // Re-compaction: the existing summary in `session.system_prompt`
+    // represents the messages that were rolled up on the previous round.
+    // We feed it back to the model alongside the new transcript so the
+    // refreshed summary keeps the older context — otherwise the prior
+    // bullets would be silently dropped when we replace the block.
+    const priorSummary = extractSummary(session.system_prompt ?? null);
+    const priorBlock = priorSummary
+      ? `Previous summary (carry forward — do NOT discard):\n${priorSummary}\n\n`
+      : "";
+
+    const summaryPrompt = `${priorBlock}Summarize the conversation below in concise bullet points. Capture the user's goals, important decisions or conclusions, key facts established, and any unresolved threads. Output ONLY the bullets — no preamble, no closing line.
 
 Conversation:
 ---
@@ -1924,32 +1948,35 @@ ${transcript}
       return;
     }
 
-    // Delete the summarized messages from the DB so the next request
-    // actually has fewer tokens. Failures here are non-fatal — the
-    // summary is in place and would just mean the user's next send has
-    // both the summary and the originals (extra context, not wrong
-    // context). We log but don't roll back.
-    const summarizedIds = new Set(toSummarize.map((m) => m.id));
-    for (const m of toSummarize) {
-      try {
-        await deleteMessage(m.id, sessionId);
-      } catch (e) {
-        logger.warn("compact: failed to delete message", e);
-      }
+    // Mark the summarised messages as compacted in the DB. They stay in
+    // the rows table so the user can still scroll back through them —
+    // only the chat-history builder ignores them on the next request.
+    // Failure is non-fatal: the summary is already in place, so a
+    // missed mark just means the next send carries those originals
+    // alongside the summary (extra context, not wrong context).
+    const summarizedIds = toSummarize.map((m) => m.id);
+    const compactedAt = Date.now();
+    try {
+      await markMessagesCompacted({ session_id: sessionId, ids: summarizedIds });
+    } catch (e) {
+      logger.warn("compact: failed to mark messages compacted", e);
     }
     // Single, combined state update: the new system_prompt and the
-    // surviving message list land in one render. The UsageBar /
+    // freshly-flagged messages land in one render. The UsageBar /
     // popover re-render exactly once and see the new (smaller) numbers
     // without an intermediate "bigger" flash. The popover is left open
     // on purpose so the user sees the change happen.
+    const flagged = new Set(summarizedIds);
     set((s) => ({
       sessions: s.sessions.map((x) =>
         x.id === sessionId ? { ...x, system_prompt: newPrompt } : x,
       ),
       messages: {
         ...s.messages,
-        [sessionId]: (s.messages[sessionId] ?? []).filter(
-          (m) => !summarizedIds.has(m.id),
+        [sessionId]: (s.messages[sessionId] ?? []).map((m) =>
+          flagged.has(m.id) && m.compacted_at == null
+            ? { ...m, compacted_at: compactedAt }
+            : m,
         ),
       },
       compactingSessionId: null,
@@ -1958,7 +1985,7 @@ ${transcript}
     useToastStore.getState().push({
       kind: "info",
       title: "Context compacted",
-      body: `Summarized ${toSummarize.length} earlier messages into the system prompt.`,
+      body: `Summarized ${toSummarize.length} earlier messages. They stay visible above the divider; the model only sees the summary.`,
     });
   },
 }));

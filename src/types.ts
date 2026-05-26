@@ -153,6 +153,14 @@ export interface Message {
    *  during this assistant turn. Null for user / system messages and for
    *  pre-MCP assistant rows. */
   tool_calls_json: string | null;
+  /** Non-null ms-timestamp = this message was rolled into the running
+   *  auto-summary by the Compact button at that moment. The row keeps
+   *  rendering in the transcript (so the user can scroll back) but
+   *  `chatHistory()` skips it when building the next provider request,
+   *  so the model only sees the summary block plus the trailing
+   *  uncompacted turns. Null on every pre-existing row and on every
+   *  freshly-appended message. */
+  compacted_at: number | null;
   created_at: number;
 }
 

@@ -36,11 +36,10 @@ export function ChatCanvas() {
   const promoteSession = useChatStore((s) => s.promoteSession);
   const cancelForSession = useChatStore((s) => s.cancelForSession);
   // Auto-summary text from the active session's system_prompt, if any.
-  // Drives the "context was compacted here" divider at the top of the
-  // transcript so the user has a visible marker (and inspectable
-  // content) for what the Compact button actually did. Falls out as
-  // null the moment the user deletes the marker block from the
-  // parameter panel's "Custom instructions" textarea.
+  // Drives the "context was compacted here" divider that sits between
+  // the rolled-up history and the still-active turns. Falls out as null
+  // the moment the user deletes the marker block from the parameter
+  // panel's "Custom instructions" textarea.
   const compactedSummary = useChatStore((s) =>
     s.activeSessionId
       ? extractSummary(
@@ -49,6 +48,18 @@ export function ChatCanvas() {
         )
       : null,
   );
+
+  // Index of the first message that is NOT compacted. The divider
+  // renders right above this row, so the line visually separates "the
+  // model can't see these anymore — only the summary" (above) from
+  // "active context" (below). If every message is compacted (edge
+  // case, shouldn't happen because compactContext keeps a 4-message
+  // tail) we fall back to placing the divider at the very end.
+  const firstActiveIndex = useMemo(() => {
+    if (!compactedSummary) return -1;
+    const i = messages.findIndex((m) => m.compacted_at == null);
+    return i === -1 ? messages.length : i;
+  }, [messages, compactedSummary]);
 
   const scrollerRef = useRef<HTMLDivElement>(null);
   const stickToBottom = useRef(true);
@@ -265,9 +276,10 @@ export function ChatCanvas() {
     <div className="relative flex-1 overflow-hidden">
       <div ref={scrollerRef} className="h-full overflow-y-auto">
         <div className="mx-auto w-full max-w-3xl px-4">
-          {compactedSummary && <CompactionMarker summary={compactedSummary} />}
           {messages.map((m, i) => {
             const isLast = i === messages.length - 1;
+            const showMarkerBefore =
+              compactedSummary != null && i === firstActiveIndex;
             return (
               <div
                 key={m.id}
@@ -282,6 +294,9 @@ export function ChatCanvas() {
                   else messageRefs.current.delete(m.id);
                 }}
               >
+                {showMarkerBefore && (
+                  <CompactionMarker summary={compactedSummary!} />
+                )}
                 <MessageItem
                   message={m}
                   isStreaming={isLast && isStreaming && m.role === "assistant"}
@@ -296,6 +311,14 @@ export function ChatCanvas() {
               </div>
             );
           })}
+          {/* Edge case: every message is compacted (no active tail).
+              Show the marker at the very bottom so the user still sees
+              "compaction happened here". */}
+          {compactedSummary != null &&
+            messages.length > 0 &&
+            firstActiveIndex === messages.length && (
+              <CompactionMarker summary={compactedSummary} />
+            )}
           {/* Banner shown only while THIS chat's task is parked behind another
               chat's running task. Replaces the assistant streaming-dots bubble
               (which would otherwise mislead the user into thinking the model

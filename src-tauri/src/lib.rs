@@ -251,6 +251,7 @@ pub fn run() {
             commands::append_message,
             commands::update_message,
             commands::delete_message,
+            commands::mark_messages_compacted,
             commands::get_settings,
             commands::set_setting,
             commands::set_openai_key,

@@ -302,6 +302,24 @@ pub async fn delete_message(
     state.db.delete_message(&id, &session_id).map_err(err)
 }
 
+/// Mark a batch of messages as "rolled into the auto-summary": the rows
+/// stay in the DB and keep rendering in the transcript, but the chat
+/// history builder skips them so the model only consumes the summary
+/// block (in `session.system_prompt`) plus the trailing uncompacted
+/// turns. Replaces the older flow where the Compact button hard-deleted
+/// the summarised messages — which lost user-visible history forever.
+#[tauri::command]
+pub async fn mark_messages_compacted(
+    state: State<'_, AppState>,
+    session_id: String,
+    ids: Vec<String>,
+) -> Result<(), String> {
+    state
+        .db
+        .mark_messages_compacted(&session_id, &ids)
+        .map_err(err)
+}
+
 // ---------- settings ----------
 
 #[tauri::command]

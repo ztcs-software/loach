@@ -186,6 +186,7 @@ export function appendMessage(args: {
       attachments_json: args.attachments_json ?? null,
       metrics_json: null,
       tool_calls_json: null,
+      compacted_at: null,
       created_at: Date.now(),
     });
   }
@@ -221,6 +222,22 @@ export function updateMessage(args: {
 export function deleteMessage(id: string, sessionId: string): Promise<void> {
   if (!isTauri) return notInTauri(undefined);
   return invoke("delete_message", { id, sessionId });
+}
+
+/** Mark a batch of messages as "rolled into the auto-summary": the rows
+ *  stay in the DB and keep rendering in the transcript, but the chat
+ *  history builder skips them so the model only consumes the summary
+ *  block. Scoped by `session_id` — the backend rejects ids that don't
+ *  belong to the given session. No-op in preview mode (no backend). */
+export function markMessagesCompacted(args: {
+  session_id: string;
+  ids: string[];
+}): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("mark_messages_compacted", {
+    sessionId: args.session_id,
+    ids: args.ids,
+  });
 }
 
 // ------------ settings ------------

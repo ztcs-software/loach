@@ -220,6 +220,16 @@ pub struct Message {
     /// fail with "missing field" — the absent value rehydrates to None.
     #[serde(default)]
     pub tool_calls_json: Option<String>,
+    /// Non-null = this message was rolled into an auto-summary by the
+    /// Compact button at this ms-timestamp. The row stays in the DB and
+    /// keeps rendering in the transcript so the user can still scroll
+    /// back through it — but the chat-history builder skips it when
+    /// constructing the next provider request, so the model only sees the
+    /// summary block (in `session.system_prompt`) plus the trailing
+    /// uncompacted turns. Null on every message until the user
+    /// explicitly compacts.
+    #[serde(default)]
+    pub compacted_at: Option<i64>,
     pub created_at: i64,
 }
 
@@ -421,6 +431,19 @@ impl Database {
         if !has_column(&conn, "messages", "tool_calls_json")? {
             conn.execute_batch(
                 "ALTER TABLE messages ADD COLUMN tool_calls_json TEXT;",
+            )?;
+        }
+
+        // `compacted_at`: ms-timestamp set by the Compact button on each
+        // message that got rolled into the running auto-summary. Non-null
+        // rows stay visible in the transcript but are excluded from the
+        // outgoing chat history so the model only consumes the summary.
+        // Null on every pre-existing row — older databases just keep
+        // showing their full history with the next compaction free to
+        // mark new rows.
+        if !has_column(&conn, "messages", "compacted_at")? {
+            conn.execute_batch(
+                "ALTER TABLE messages ADD COLUMN compacted_at INTEGER;",
             )?;
         }
 
@@ -661,8 +684,8 @@ impl Database {
             let msg_id = Uuid::new_v4().to_string();
             tx_conn.execute(
                 "INSERT INTO messages (id, session_id, role, content, thinking,
-                                       attachments_json, metrics_json, tool_calls_json, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                                       attachments_json, metrics_json, tool_calls_json, compacted_at, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 params![
                     msg_id,
                     new_id,
@@ -672,6 +695,7 @@ impl Database {
                     m.attachments_json,
                     m.metrics_json,
                     m.tool_calls_json,
+                    m.compacted_at,
                     m.created_at,
                 ],
             )?;
@@ -833,7 +857,7 @@ impl Database {
     pub fn list_messages(&self, session_id: &str) -> Result<Vec<Message>> {
         self.with_read(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, session_id, role, content, thinking, attachments_json, metrics_json, tool_calls_json, created_at
+                "SELECT id, session_id, role, content, thinking, attachments_json, metrics_json, tool_calls_json, compacted_at, created_at
                  FROM messages WHERE session_id = ?1 ORDER BY created_at ASC",
             )?;
             let rows = stmt
@@ -847,7 +871,8 @@ impl Database {
                         attachments_json: r.get(5)?,
                         metrics_json: r.get(6)?,
                         tool_calls_json: r.get(7)?,
-                        created_at: r.get(8)?,
+                        compacted_at: r.get(8)?,
+                        created_at: r.get(9)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -867,8 +892,8 @@ impl Database {
         {
             let conn = self.conn.lock();
             conn.execute(
-                "INSERT INTO messages (id, session_id, role, content, thinking, attachments_json, metrics_json, tool_calls_json, created_at)
-                 VALUES (?1, ?2, ?3, ?4, NULL, ?5, NULL, NULL, ?6)",
+                "INSERT INTO messages (id, session_id, role, content, thinking, attachments_json, metrics_json, tool_calls_json, compacted_at, created_at)
+                 VALUES (?1, ?2, ?3, ?4, NULL, ?5, NULL, NULL, NULL, ?6)",
                 params![id, session_id, role, content, attachments_json, now],
             )?;
         }
@@ -882,8 +907,41 @@ impl Database {
             attachments_json: attachments_json.map(|s| s.to_string()),
             metrics_json: None,
             tool_calls_json: None,
+            compacted_at: None,
             created_at: now,
         })
+    }
+
+    /// Mark a batch of messages as compacted — sets `compacted_at = now`
+    /// on every row whose id is in `ids` AND that belongs to
+    /// `session_id`. The session filter is defensive (matches
+    /// `delete_message` / `update_message`) so a leaked id can't reach
+    /// across sessions. Rows that are already compacted have their
+    /// timestamp left alone, since the divider should track the FIRST
+    /// time a message left the model's context, not the most recent
+    /// re-compaction.
+    pub fn mark_messages_compacted(
+        &self,
+        session_id: &str,
+        ids: &[String],
+    ) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let now = Utc::now().timestamp_millis();
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction()?;
+        {
+            let mut stmt = tx.prepare(
+                "UPDATE messages SET compacted_at = ?1
+                 WHERE id = ?2 AND session_id = ?3 AND compacted_at IS NULL",
+            )?;
+            for id in ids {
+                stmt.execute(params![now, id, session_id])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     /// Delete a single message. Scoped by `session_id` for the same
@@ -1632,7 +1690,7 @@ impl Database {
     pub fn all_messages(&self) -> Result<Vec<Message>> {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(
-            "SELECT id, session_id, role, content, thinking, attachments_json, metrics_json, tool_calls_json, created_at
+            "SELECT id, session_id, role, content, thinking, attachments_json, metrics_json, tool_calls_json, compacted_at, created_at
              FROM messages ORDER BY session_id, created_at",
         )?;
         let rows = stmt
@@ -1646,7 +1704,8 @@ impl Database {
                     attachments_json: r.get(5)?,
                     metrics_json: r.get(6)?,
                     tool_calls_json: r.get(7)?,
-                    created_at: r.get(8)?,
+                    compacted_at: r.get(8)?,
+                    created_at: r.get(9)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -1793,8 +1852,8 @@ impl Database {
         for m in &d.messages {
             tx.execute(
                 "INSERT INTO messages (id, session_id, role, content, thinking,
-                                       attachments_json, metrics_json, tool_calls_json, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                                       attachments_json, metrics_json, tool_calls_json, compacted_at, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 params![
                     m.id,
                     m.session_id,
@@ -1804,6 +1863,7 @@ impl Database {
                     m.attachments_json,
                     m.metrics_json,
                     m.tool_calls_json,
+                    m.compacted_at,
                     m.created_at,
                 ],
             )?;

@@ -60,10 +60,13 @@ export function computeContextUsage(
   let attachmentChars = 0;
   let nonSystemCount = 0;
   for (const m of messages) {
-    // The chatHistory builder excludes role:"system" rows because they're
-    // sent via the system_prompt field. Mirror that here so the estimate
-    // matches what actually reaches the model.
+    // The chatHistory builder excludes role:"system" rows (sent via the
+    // system_prompt field) AND messages flagged `compacted_at` (rolled
+    // into the running auto-summary). Mirror both filters here so the
+    // popup's "what reaches the model" estimate stays accurate after a
+    // compaction.
     if (m.role === "system") continue;
+    if (m.compacted_at != null) continue;
     nonSystemCount += 1;
     messageChars += m.content.length;
     if (m.thinking) messageChars += m.thinking.length;
