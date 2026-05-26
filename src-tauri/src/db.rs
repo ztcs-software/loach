@@ -1460,6 +1460,28 @@ impl Database {
         })
     }
 
+    /// Every fill-value row across every snippet. Used by `snapshot()` to
+    /// round-trip prompt-on-use recall through export / import; the
+    /// per-snippet `list_snippet_fill_values` powers the live dialog.
+    fn all_snippet_fill_values(&self) -> Result<Vec<SnippetFillValue>> {
+        self.with_read(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT snippet_id, key, value, updated_at FROM snippet_fill_values",
+            )?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok(SnippetFillValue {
+                        snippet_id: r.get(0)?,
+                        key: r.get(1)?,
+                        value: r.get(2)?,
+                        updated_at: r.get(3)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+    }
+
     /// Upsert a batch of `(key, value)` pairs for one snippet. The whole batch
     /// runs inside a single transaction so a partial write can't leave the
     /// recall row half-applied. Empty values are stored verbatim — the UI
@@ -1690,6 +1712,8 @@ impl Database {
                 space_files: self.all_space_files()?,
                 space_memories: self.all_space_memories()?,
                 snippets: self.list_snippets()?,
+                snippet_variables: self.list_snippet_variables()?,
+                snippet_fill_values: self.all_snippet_fill_values()?,
                 mcp_servers,
                 settings: self.all_settings()?,
             },
@@ -1723,6 +1747,9 @@ impl Database {
         snap: &DatabaseSnapshot,
     ) -> Result<ImportStats> {
         let tx = conn.transaction()?;
+        // `snippet_fill_values` is deleted ahead of `snippets` so its FK to
+        // `snippets(id)` is satisfied at delete time even with FK enforcement
+        // toggled back on mid-transaction. `snippet_variables` is independent.
         tx.execute_batch(
             r#"
             DELETE FROM messages;
@@ -1730,6 +1757,8 @@ impl Database {
             DELETE FROM space_memories;
             DELETE FROM sessions;
             DELETE FROM spaces;
+            DELETE FROM snippet_fill_values;
+            DELETE FROM snippet_variables;
             DELETE FROM snippets;
             DELETE FROM mcp_servers;
             DELETE FROM settings;
@@ -1874,6 +1903,27 @@ impl Database {
             )?;
         }
 
+        for v in &d.snippet_variables {
+            tx.execute(
+                "INSERT INTO snippet_variables (id, key, value, description, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![v.id, v.key, v.value, v.description, v.created_at, v.updated_at],
+            )?;
+        }
+
+        for f in &d.snippet_fill_values {
+            // `snippet_id` references `snippets(id)`. FK is OFF for this
+            // transaction so an orphaned row imports cleanly — but with the
+            // snippets table populated above, the common case lines up.
+            tx.execute(
+                "INSERT INTO snippet_fill_values (snippet_id, key, value, updated_at)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(snippet_id, key)
+                 DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                params![f.snippet_id, f.key, f.value, f.updated_at],
+            )?;
+        }
+
         for (k, v) in &d.settings {
             tx.execute(
                 "INSERT INTO settings (key, value) VALUES (?1, ?2)
@@ -1889,6 +1939,8 @@ impl Database {
             space_files: d.space_files.len(),
             space_memories: d.space_memories.len(),
             snippets: d.snippets.len(),
+            snippet_variables: d.snippet_variables.len(),
+            snippet_fill_values: d.snippet_fill_values.len(),
             mcp_servers: d.mcp_servers.len(),
             settings: d.settings.len(),
         };
@@ -1942,6 +1994,11 @@ impl Database {
 
     fn wipe_user_data_locked(conn: &mut Connection) -> Result<()> {
         let tx = conn.transaction()?;
+        // `snippet_fill_values` and `snippet_variables` are user-authored
+        // content too — `wipe_user_data` is the "drop everything I made,
+        // keep my settings" path, so they belong here. Without these two
+        // DELETEs a wipe used to leave ghost variables behind that then
+        // resurfaced on the next snippet run.
         tx.execute_batch(
             r#"
             DELETE FROM messages;
@@ -1949,6 +2006,8 @@ impl Database {
             DELETE FROM space_memories;
             DELETE FROM sessions;
             DELETE FROM spaces;
+            DELETE FROM snippet_fill_values;
+            DELETE FROM snippet_variables;
             DELETE FROM snippets;
             DELETE FROM mcp_servers;
             "#,
@@ -1986,6 +2045,8 @@ impl Database {
             DELETE FROM space_memories;
             DELETE FROM sessions;
             DELETE FROM spaces;
+            DELETE FROM snippet_fill_values;
+            DELETE FROM snippet_variables;
             DELETE FROM snippets;
             DELETE FROM mcp_servers;
             DELETE FROM settings;
@@ -2017,6 +2078,13 @@ pub struct SnapshotData {
     #[serde(default)]
     pub space_memories: Vec<SpaceMemory>,
     pub snippets: Vec<Snippet>,
+    /// User-defined `{{KEY}}` global variables. Defaults to empty on older
+    /// exports that predate the feature so loading them stays a no-op.
+    #[serde(default)]
+    pub snippet_variables: Vec<SnippetVariable>,
+    /// Per-snippet prompt-on-use recall. Empty on older exports.
+    #[serde(default)]
+    pub snippet_fill_values: Vec<SnippetFillValue>,
     pub mcp_servers: Vec<McpServer>,
     /// Key/value settings as stored in the `settings` table. A plain list
     /// (not a map) so round-trip order is stable.
@@ -2032,6 +2100,8 @@ pub struct ImportStats {
     pub space_files: usize,
     pub space_memories: usize,
     pub snippets: usize,
+    pub snippet_variables: usize,
+    pub snippet_fill_values: usize,
     pub mcp_servers: usize,
     pub settings: usize,
 }

@@ -36,6 +36,15 @@ function notInTauri<T>(fallback: T): Promise<T> {
   return Promise.resolve(fallback);
 }
 
+/** Mint a unique-ish id for the no-backend fallback path. `Date.now()` alone
+ *  collides on rapid double-clicks (two "New chat" presses in the same
+ *  millisecond ship the same id and trip React's duplicate-key warning in the
+ *  sidebar); appending a random suffix sidesteps that. Browser-preview only —
+ *  production runs always hit the Tauri backend and get real UUIDs. */
+function mockId(prefix: string): string {
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
 // ------------ sessions ------------
 
 export function listSessions(): Promise<Session[]> {
@@ -53,7 +62,7 @@ export function createSession(args: {
   if (!isTauri) {
     const now = Date.now();
     return notInTauri<Session>({
-      id: `mock-${now}`,
+      id: mockId("mock"),
       title: args.title ?? "New chat",
       provider: args.provider as Session["provider"],
       model: args.model,
@@ -81,7 +90,7 @@ export function forkSession(args: {
   if (!isTauri) {
     const now = Date.now();
     return notInTauri<Session>({
-      id: `mock-fork-${now}`,
+      id: mockId("mock-fork"),
       title: "Forked chat",
       provider: "ollama",
       model: "",
@@ -169,7 +178,7 @@ export function appendMessage(args: {
 }): Promise<Message> {
   if (!isTauri) {
     return notInTauri<Message>({
-      id: `mock-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      id: mockId("mock"),
       session_id: args.session_id,
       role: args.role,
       content: args.content,
@@ -458,7 +467,7 @@ export function createSpace(args: {
   if (!isTauri) {
     const now = Date.now();
     return notInTauri<Space>({
-      id: `mock-space-${now}`,
+      id: mockId("mock-space"),
       name: args.name,
       description: args.description ?? "",
       instructions: args.instructions ?? "",
@@ -509,7 +518,7 @@ export function addSpaceFile(args: {
   if (!isTauri) {
     const now = Date.now();
     return notInTauri<SpaceFile>({
-      id: `mock-sf-${now}`,
+      id: mockId("mock-sf"),
       space_id: args.space_id,
       name: args.name,
       mime: args.mime,
@@ -565,7 +574,7 @@ export function addSpaceMemory(args: {
   if (!isTauri) {
     const now = Date.now();
     return notInTauri<SpaceMemory>({
-      id: `mock-mem-${now}`,
+      id: mockId("mock-mem"),
       space_id: args.space_id,
       content: args.content,
       source_session_id: args.source_session_id ?? null,
@@ -613,7 +622,7 @@ export function createSnippet(args: {
   if (!isTauri) {
     const now = Date.now();
     return notInTauri<Snippet>({
-      id: `mock-snip-${now}`,
+      id: mockId("mock-snip"),
       title: args.title,
       prompt: args.prompt,
       attachments_json: args.attachments_json ?? null,
@@ -658,7 +667,7 @@ export function createSnippetVariable(args: {
   if (!isTauri) {
     const now = Date.now();
     return notInTauri<SnippetVariable>({
-      id: `mock-var-${now}`,
+      id: mockId("mock-var"),
       key: args.key.toUpperCase(),
       value: args.value,
       description: args.description ?? null,

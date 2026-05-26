@@ -446,7 +446,9 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
             <Button
               variant="ghost"
               size="icon"
-              aria-label="Chat actions"
+              // "Current chat actions" disambiguates from each sidebar
+              // row's "Actions for chat: <title>" kebab.
+              aria-label="Current chat actions"
               className="rounded-xl text-foreground/70 hover:bg-foreground/10 hover:text-foreground"
             >
               <MoreHorizontal className="h-4 w-4" />

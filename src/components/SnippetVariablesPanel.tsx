@@ -53,16 +53,29 @@ export function SnippetVariablesPanel() {
 
   return (
     <section className="mb-6 rounded-2xl border border-foreground/10 bg-foreground/[0.02]">
-      <button
-        type="button"
-        onClick={toggle}
+      {/* The toggle and the "New" affordance used to be nested as
+          <button><span role="button">...</span></button>, which violates the
+          HTML "interactive inside interactive" rule (browsers flatten the
+          a11y tree and the inner click target inherits the outer's label).
+          Split into a row with the toggle as the only large hit target and
+          a separate `<button>` for "New" anchored to the right edge. */}
+      <div
         className={cn(
-          "flex w-full items-center justify-between gap-3 rounded-2xl px-4 py-3 text-left",
-          "transition-colors hover:bg-foreground/[0.03]",
+          "relative flex items-stretch rounded-2xl",
         )}
-        aria-expanded={expanded}
       >
-        <div className="flex min-w-0 items-center gap-2">
+        <button
+          type="button"
+          onClick={toggle}
+          className={cn(
+            // Reserve room on the right for the "New" button so the toggle's
+            // hit target doesn't extend underneath it (which would let a
+            // pointer between the icons fire the toggle by accident).
+            "flex flex-1 items-center gap-2 rounded-2xl px-4 py-3 pr-28 text-left",
+            "transition-colors hover:bg-foreground/[0.03]",
+          )}
+          aria-expanded={expanded}
+        >
           {expanded ? (
             <ChevronDown className="h-4 w-4 text-foreground/55" />
           ) : (
@@ -79,27 +92,23 @@ export function SnippetVariablesPanel() {
           <span className="ml-2 hidden text-[11px] text-foreground/45 sm:inline">
             Reusable values for {`{{KEY}}`} placeholders inside snippets
           </span>
-        </div>
-        <span
+        </button>
+        <button
+          type="button"
           onClick={(e) => {
             e.stopPropagation();
             openDialog("new");
           }}
-          className="inline-flex h-7 items-center gap-1 rounded-lg border border-foreground/15 px-2 text-[11px] text-foreground/75 hover:bg-foreground/10"
-          role="button"
-          tabIndex={0}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" || e.key === " ") {
-              e.preventDefault();
-              e.stopPropagation();
-              openDialog("new");
-            }
-          }}
+          aria-label="New variable"
+          className={cn(
+            "absolute right-3 top-1/2 -translate-y-1/2",
+            "inline-flex h-7 items-center gap-1 rounded-lg border border-foreground/15 px-2 text-[11px] text-foreground/75 hover:bg-foreground/10",
+          )}
         >
           <Plus className="h-3 w-3" />
           New
-        </span>
-      </button>
+        </button>
+      </div>
 
       {expanded && (
         <div className="border-t border-foreground/[0.06] px-4 py-3">

@@ -70,7 +70,15 @@ pub fn dispatch(args: &Value) -> McpCallResult {
                 Ok(v) => v,
                 Err(e) => return err(format!("invalid JSON at line {} column {}: {e}", e.line(), e.column())),
             };
-            let indent = args.get("indent").and_then(|v| v.as_u64()).unwrap_or(2);
+            // Clamp at the schema's documented max of 8. The schema declares
+            // `maximum: 8` but Tauri does not enforce JSON-Schema at the IPC
+            // boundary, so a model that ignores the schema could otherwise
+            // pass `indent: 1_000_000` and allocate a 1 MiB indent string.
+            let indent = args
+                .get("indent")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(2)
+                .min(8);
             // serde_json::to_string_pretty hard-codes 2-space indent, so
             // we build a formatter when the user asks for something else.
             let out = if indent == 2 {

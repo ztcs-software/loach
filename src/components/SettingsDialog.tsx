@@ -2403,6 +2403,8 @@ function formatImportSummary(s: ImportStats): string {
   if (s.messages) parts.push(`${s.messages} message${s.messages === 1 ? "" : "s"}`);
   if (s.spaces) parts.push(`${s.spaces} space${s.spaces === 1 ? "" : "s"}`);
   if (s.snippets) parts.push(`${s.snippets} snippet${s.snippets === 1 ? "" : "s"}`);
+  if (s.snippet_variables)
+    parts.push(`${s.snippet_variables} variable${s.snippet_variables === 1 ? "" : "s"}`);
   if (s.mcp_servers)
     parts.push(`${s.mcp_servers} MCP server${s.mcp_servers === 1 ? "" : "s"}`);
   const body = parts.length > 0 ? parts.join(" · ") : "0 records";

@@ -578,6 +578,8 @@ export interface ImportStats {
   space_files: number;
   space_memories: number;
   snippets: number;
+  snippet_variables: number;
+  snippet_fill_values: number;
   mcp_servers: number;
   settings: number;
 }

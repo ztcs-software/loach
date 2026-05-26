@@ -429,8 +429,8 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
   const persistedMetrics = parseMetrics(message.metrics_json);
   const showMetrics = metrics ?? persistedMetrics;
   const toolCalls = !isUser ? parseToolCalls(message.tool_calls_json) : [];
-  const attachments = isUser ? parseAttachments(message.attachments_json) : [];
-  const images = attachments.filter((a) => a.kind === "image");
+  const attachments = parseAttachments(message.attachments_json);
+  const images = isUser ? attachments.filter((a) => a.kind === "image") : [];
   const files = attachments.filter((a) => a.kind === "text" || a.kind === "file");
   // Attachment bodies are inlined into the stored user content for the model;
   // strip that tail when rendering so the user sees just their typed prompt.
@@ -625,6 +625,24 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
         ) : (
           <div ref={bodyRef}>
             <Markdown content={message.content} />
+          </div>
+        )}
+        {!isUser && files.length > 0 && (
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {files.map((f, i) => (
+              <AttachmentActions
+                key={i}
+                attachment={f}
+                className="gap-1.5 rounded-lg border border-foreground/10 bg-foreground/[0.05] px-2.5 py-1 text-xs text-foreground/70"
+              >
+                {f.kind === "text" ? (
+                  <FileText className="h-3.5 w-3.5 shrink-0" />
+                ) : (
+                  <File className="h-3.5 w-3.5 shrink-0" />
+                )}
+                {f.name}
+              </AttachmentActions>
+            ))}
           </div>
         )}
         {/* Keyboard-accessible action menu for user messages — the

@@ -512,7 +512,11 @@ function SessionRow({
                 menuOpen ? "opacity-100" : "opacity-0 group-hover/row:opacity-100",
               )}
               onClick={(e) => e.stopPropagation()}
-              aria-label="Chat actions"
+              // Distinguish from the chat-header kebab which carries the
+              // same icon and lives on the same page. Screen readers
+              // otherwise hear three "Chat actions" buttons (two sidebar
+              // rows + the header) with no way to tell which one's which.
+              aria-label={`Actions for chat: ${session.title || "Untitled"}`}
             >
               <MoreHorizontal className="h-4 w-4" />
             </button>

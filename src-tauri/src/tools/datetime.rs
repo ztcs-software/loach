@@ -172,8 +172,14 @@ fn op_add(args: &Value) -> McpCallResult {
         Some(n) => n,
         None => return err("missing required `amount` argument (integer)"),
     };
-    if amount.unsigned_abs() as i64 > MAX_AMOUNT_ABS {
-        return err(format!("amount magnitude {} exceeds cap of {MAX_AMOUNT_ABS}", amount.abs()));
+    // The cap check compares unsigned magnitudes — `amount.unsigned_abs()`
+    // returns a `u64` so it handles `i64::MIN` correctly (whereas `as i64`
+    // would wrap to a negative value and bypass the cap). Same with
+    // `amount.abs()` in the error message: that panics on `i64::MIN` in
+    // debug builds, so we format the unsigned magnitude instead.
+    let mag = amount.unsigned_abs();
+    if mag > MAX_AMOUNT_ABS as u64 {
+        return err(format!("amount magnitude {mag} exceeds cap of {MAX_AMOUNT_ABS}"));
     }
     let tz = match resolve_tz(args.get("timezone").and_then(|v| v.as_str())) {
         Ok(tz) => tz,
@@ -269,8 +275,11 @@ fn op_business_days_from(args: &Value) -> McpCallResult {
         Some(n) => n,
         None => return err("missing required `amount` argument (integer, negative goes backward)"),
     };
-    if amount.unsigned_abs() as i64 > MAX_AMOUNT_ABS {
-        return err(format!("amount magnitude {} exceeds cap of {MAX_AMOUNT_ABS}", amount.abs()));
+    // Same `i64::MIN`-safe cap check as `op_add` — compare unsigned
+    // magnitudes so a wrap on cast back to i64 can't bypass the limit.
+    let mag = amount.unsigned_abs();
+    if mag > MAX_AMOUNT_ABS as u64 {
+        return err(format!("amount magnitude {mag} exceeds cap of {MAX_AMOUNT_ABS}"));
     }
     let tz = match resolve_tz(args.get("timezone").and_then(|v| v.as_str())) {
         Ok(tz) => tz,
@@ -648,6 +657,32 @@ mod tests {
         let r = dispatch(&json!({"op": "now", "timezone": "Middle/Earth"}));
         assert!(r.is_error);
         assert!(r.content_text.contains("unknown timezone"));
+    }
+
+    #[test]
+    fn add_rejects_i64_min_amount() {
+        // Regression: `amount.unsigned_abs() as i64` wraps `i64::MIN` to
+        // `i64::MIN` (negative), which would slip past the cap. The unsigned
+        // comparison guards against it.
+        let r = dispatch(&json!({
+            "op": "add",
+            "input": "2026-05-25",
+            "unit": "business_days",
+            "amount": i64::MIN,
+        }));
+        assert!(r.is_error, "got: {}", r.content_text);
+        assert!(r.content_text.contains("exceeds cap"), "got: {}", r.content_text);
+    }
+
+    #[test]
+    fn business_days_from_rejects_i64_min_amount() {
+        let r = dispatch(&json!({
+            "op": "business_days_from",
+            "input": "2026-05-25",
+            "amount": i64::MIN,
+        }));
+        assert!(r.is_error, "got: {}", r.content_text);
+        assert!(r.content_text.contains("exceeds cap"), "got: {}", r.content_text);
     }
 
     #[test]

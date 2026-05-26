@@ -86,8 +86,12 @@ const UNITS: &[Unit] = &[
     Unit { name: "ly", category: Category::Length, factor: 9.460_730_472_580_8e15 },
     Unit { name: "light_year", category: Category::Length, factor: 9.460_730_472_580_8e15 },
     Unit { name: "au", category: Category::Length, factor: 1.495_978_707e11 },
-    Unit { name: "pc", category: Category::Length, factor: 3.085_677_581_491_367_4e16 },
-    Unit { name: "parsec", category: Category::Length, factor: 3.085_677_581_491_367_4e16 },
+    // 3.0856775814913673e16 m is the IAU-2015 parsec; the literal here is
+    // truncated to the digits f64 can faithfully represent (the trailing `3`
+    // is below f64's ~16-decimal-digit precision and just trips clippy's
+    // `excessive_precision` lint without changing the stored value).
+    Unit { name: "pc", category: Category::Length, factor: 3.085_677_581_491_367e16 },
+    Unit { name: "parsec", category: Category::Length, factor: 3.085_677_581_491_367e16 },
 
     // ---------- Mass (base: kilogram) ----------
     Unit { name: "kg", category: Category::Mass, factor: 1.0 },

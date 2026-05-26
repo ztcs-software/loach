@@ -83,6 +83,80 @@ pub fn tool_description() -> &'static str {
 }
 
 pub fn input_schema() -> Value {
+    // Every block object MUST carry a `type` discriminator. Smaller models
+    // miss this when it lives only in the prose description, so we encode
+    // it structurally as a `oneOf` here — the Rust deserializer already
+    // enforces it via `#[serde(tag = "type", ...)]`.
+    let block_schema = json!({
+        "oneOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "type": { "const": "heading" },
+                    "level": { "type": "integer", "minimum": 1, "maximum": 3 },
+                    "text": { "type": "string" }
+                },
+                "required": ["type", "text"],
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "type": { "const": "paragraph" },
+                    "text": { "type": "string" }
+                },
+                "required": ["type", "text"],
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "type": { "const": "bullet_list" },
+                    "items": { "type": "array", "items": { "type": "string" } }
+                },
+                "required": ["type", "items"],
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "type": { "const": "numbered_list" },
+                    "items": { "type": "array", "items": { "type": "string" } }
+                },
+                "required": ["type", "items"],
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "type": { "const": "horizontal_rule" }
+                },
+                "required": ["type"],
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "type": { "const": "page_break" }
+                },
+                "required": ["type"],
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "type": { "const": "table" },
+                    "headers": { "type": "array", "items": { "type": "string" } },
+                    "rows": {
+                        "type": "array",
+                        "items": { "type": "array", "items": { "type": "string" } }
+                    }
+                },
+                "required": ["type", "rows"],
+                "additionalProperties": false
+            }
+        ]
+    });
     json!({
         "type": "object",
         "properties": {
@@ -103,7 +177,8 @@ pub fn input_schema() -> Value {
                     "properties": {
                         "blocks": {
                             "type": "array",
-                            "items": { "type": "object" }
+                            "description": "Ordered list of block objects. Every block MUST include a `type` field — one of: `heading`, `paragraph`, `bullet_list`, `numbered_list`, `horizontal_rule`, `page_break`, `table`.",
+                            "items": block_schema
                         }
                     },
                     "required": ["blocks"]
@@ -170,13 +245,16 @@ fn do_create(args: &Value) -> McpCallResult {
     };
     let filename = build_filename(title_raw);
     let base64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    // `bytes` is the canonical field — `PdfPreview` reads it first and falls
+    // back to `data` only when missing. We deliberately leave `data` empty
+    // here rather than duplicating the base64 string, which on a 200 KB PDF
+    // would ship ~270 KB of redundant content over the IPC channel and
+    // through `tool_result` event handling on the frontend.
     let attachment = Attachment {
         kind: "file".to_string(),
         name: filename.clone(),
         mime: "application/pdf".to_string(),
-        // PdfPreview falls back to bytes when present, then to data —
-        // populate both so either path works.
-        data: base64.clone(),
+        data: String::new(),
         bytes: Some(base64),
         truncated: None,
     };
@@ -675,12 +753,15 @@ mod tests {
         assert_eq!(a.kind, "file");
         assert_eq!(a.mime, "application/pdf");
         assert!(a.name.ends_with(".pdf"));
-        // PDF files start with `%PDF-` — base64 decode the first few
-        // bytes and check. This confirms printpdf actually produced a
-        // valid file, not just an empty buffer.
+        // PDF files start with `%PDF-` — base64 decode the first few bytes
+        // and check. This confirms printpdf actually produced a valid file,
+        // not just an empty buffer. The canonical payload lives on `bytes`
+        // now; `data` is left empty to avoid duplicating the base64 string.
+        assert!(a.data.is_empty(), "expected `data` to be empty (use `bytes`)");
+        let raw = a.bytes.as_deref().expect("bytes field present");
         let decoded = base64::engine::general_purpose::STANDARD
-            .decode(&a.data)
-            .expect("attachment data is base64");
+            .decode(raw)
+            .expect("attachment bytes is base64");
         assert!(
             decoded.starts_with(b"%PDF-"),
             "expected PDF magic bytes, got: {:?}",

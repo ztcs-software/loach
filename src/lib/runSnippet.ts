@@ -13,8 +13,23 @@
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useSnippetVarStore } from "@/stores/snippetVarStore";
 import { useUIStore } from "@/stores/uiStore";
+import { logger } from "@/lib/logger";
 import { expandKnownVars } from "@/lib/snippetVars";
 import type { Attachment, Snippet } from "@/types";
+
+/** Decode a snippet's stored attachments JSON. Returns an empty list on a
+ *  null / malformed blob so a corrupt row doesn't tank the snippet run —
+ *  the body still primes the composer, just without the attachments. */
+function parseSnippetAttachments(json: string | null): Attachment[] {
+  if (!json) return [];
+  try {
+    const v = JSON.parse(json);
+    return Array.isArray(v) ? (v as Attachment[]) : [];
+  } catch (e) {
+    logger.warn("snippet attachments_json was malformed; dropping", e);
+    return [];
+  }
+}
 
 /**
  * Substitute variables in `snippet.prompt` and prime the composer with the
@@ -35,8 +50,14 @@ export function expandAndPrimeSnippet(snippet: Snippet): Promise<void> {
       userName,
     );
 
+    // Forward the snippet's stored attachments to the composer so files
+    // saved with the snippet ride along on the run. Decoded once here so
+    // both the resolved-immediately path and the post-fill-dialog path
+    // hand the same list to `primeComposer`.
+    const attachments = parseSnippetAttachments(snippet.attachments_json);
+
     const prime = (text: string) => {
-      useUIStore.getState().primeComposer(text, [] as Attachment[]);
+      useUIStore.getState().primeComposer(text, attachments);
     };
 
     if (unresolved.length === 0) {
