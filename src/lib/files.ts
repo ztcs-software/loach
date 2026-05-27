@@ -371,8 +371,13 @@ export function imagesFromAttachments(attachments: Attachment[]): string[] {
  */
 export async function saveAttachment(a: Attachment): Promise<string | null> {
   if (a.kind === "image" || a.kind === "file") {
+    // Tool-produced files (today: the `pdf` tool) put their base64 payload on
+    // `bytes` and leave `data` empty to avoid shipping the same blob twice
+    // through the chat-stream event. Prefer `bytes` when present so the
+    // saved file isn't empty; fall back to `data` for user-uploaded blobs
+    // that use the legacy `data`-only shape.
     return saveBinaryToFile({
-      base64_data: a.data,
+      base64_data: a.bytes ?? a.data,
       default_path: a.name,
     });
   }
