@@ -142,9 +142,8 @@ function ToolCallItem({ call }: { call: ToolCallRecord }) {
         ) : (
           <Wrench className="h-3.5 w-3.5 shrink-0 text-foreground/55" />
         )}
-        <span className="min-w-0 truncate font-mono">
-          <span className="text-foreground/45">{call.server_name || "tool"} · </span>
-          <span className="text-foreground/80">{rawTool}</span>
+        <span className="min-w-0 truncate font-mono text-foreground/80">
+          {rawTool}
         </span>
       </button>
       {open && (
@@ -186,11 +185,55 @@ function ToolCallItem({ call }: { call: ToolCallRecord }) {
 }
 
 function ToolCallsBlock({ calls }: { calls: ToolCallRecord[] }) {
+  const [open, setOpen] = useState(false);
+  if (calls.length === 0) return null;
+
+  const anyPending = calls.some((c) => c.result === null);
+  const anyFailed = calls.some((c) => c.result !== null && c.is_error);
+
+  const displayName = (tool: string) =>
+    tool.includes("__") ? tool.slice(tool.indexOf("__") + 2) : tool;
+
+  let label: string;
+  if (anyPending) {
+    label =
+      calls.length === 1
+        ? `Calling ${displayName(calls[0].tool)} tool…`
+        : "Calling tools…";
+  } else if (calls.length === 1) {
+    label = `Called ${displayName(calls[0].tool)} tool`;
+  } else {
+    label = `Called ${calls.length} tools`;
+  }
+
   return (
-    <div className="mb-2 space-y-1.5">
-      {calls.map((c) => (
-        <ToolCallItem key={c.id} call={c} />
-      ))}
+    <div className="mb-2">
+      <button
+        type="button"
+        onClick={() => setOpen(!open)}
+        className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground/70 transition-colors"
+      >
+        {open ? (
+          <ChevronDown className="h-3.5 w-3.5" />
+        ) : (
+          <ChevronRight className="h-3.5 w-3.5" />
+        )}
+        {anyPending ? (
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+        ) : anyFailed ? (
+          <AlertTriangle className="h-3.5 w-3.5 text-red-400" />
+        ) : (
+          <Wrench className="h-3.5 w-3.5" />
+        )}
+        <span>{label}</span>
+      </button>
+      {open && (
+        <div className="mt-1.5 ml-5 space-y-1.5">
+          {calls.map((c) => (
+            <ToolCallItem key={c.id} call={c} />
+          ))}
+        </div>
+      )}
     </div>
   );
 }
