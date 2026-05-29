@@ -28,6 +28,7 @@ import {
   inlineTextAttachments,
 } from "@/lib/files";
 import { extractMemories } from "@/lib/memory";
+import { buildCompactedMarkdown } from "@/lib/export";
 import {
   extractSummary,
   stripSummaryBlock,
@@ -205,6 +206,13 @@ interface ChatState {
    *  consume context. Earlier auto-summary blocks in `system_prompt`
    *  are replaced, not stacked. */
   compactContext: (sessionId: string) => Promise<void>;
+  /** Build a compacted Markdown export without touching the session.
+   *  Summarizes the older messages (same model + prompt as `compactContext`)
+   *  and returns an export where that summary stands in for them while the
+   *  most recent messages stay verbatim. Read-only — nothing is persisted.
+   *  Throws with a user-facing message when there's no model or too little
+   *  to compact. */
+  exportCompactedContext: (sessionId: string) => Promise<string>;
 }
 
 /** Module-level re-entry guard for the auto-dispatcher. Set synchronously
@@ -477,6 +485,105 @@ function chatHistory(messages: Message[], userText: string, images: string[]): C
     }));
   history.push({ role: "user", content: userText, images });
   return history;
+}
+
+/** Compaction thresholds shared by `compactContext` (which persists the
+ *  result) and `exportCompactedContext` (which only builds a smaller
+ *  export). KEEP_TAIL recent messages stay verbatim; we refuse to compact
+ *  below MIN_TOTAL because summarizing one or two turns isn't worth the
+ *  round-trip. */
+const COMPACT_KEEP_TAIL = 4;
+const COMPACT_MIN_TOTAL = 6;
+
+/**
+ * Run the summarization model call shared by `compactContext` and
+ * `exportCompactedContext`. Builds a transcript from `toSummarize`, folds in
+ * any `priorSummary` so earlier rolled-up context survives, streams the
+ * model, and resolves with the trimmed summary. Throws on stream error or an
+ * empty summary so each caller can surface its own message. Does not touch
+ * store state — callers own any persistence.
+ */
+async function generateSummary(
+  session: Session,
+  toSummarize: Message[],
+  priorSummary: string | null,
+): Promise<string> {
+  const transcript = toSummarize
+    .map((m) => {
+      const speaker = m.role === "user" ? "User" : "Assistant";
+      return `${speaker}: ${m.content}`;
+    })
+    .join("\n\n");
+
+  // The existing summary represents the messages rolled up on a previous
+  // round. Feed it back alongside the new transcript so the refreshed
+  // summary keeps the older context instead of silently dropping it.
+  const priorBlock = priorSummary
+    ? `Previous summary (carry forward — do NOT discard):\n${priorSummary}\n\n`
+    : "";
+
+  const summaryPrompt = `${priorBlock}Summarize the conversation below in concise bullet points. Capture the user's goals, important decisions or conclusions, key facts established, and any unresolved threads. Output ONLY the bullets — no preamble, no closing line.
+
+Conversation:
+---
+${transcript}
+---`;
+
+  const settings = useSettingsStore.getState();
+  const baseUrl =
+    session.provider === "ollama"
+      ? settings.ollama_base_url
+      : settings.openai_base_url;
+  const params = readSessionParams(session);
+
+  let summary = "";
+  let streamErr: string | null = null;
+  const unlistenHolder: { fn: (() => void) | null } = { fn: null };
+  try {
+    await new Promise<void>((resolve, reject) => {
+      startChatStream(
+        {
+          stream_id: makeRequestId(),
+          provider: session.provider,
+          model: session.model,
+          base_url: baseUrl,
+          system_prompt: null,
+          messages: [{ role: "user", content: summaryPrompt, images: [] }],
+          params,
+        },
+        (ev) => {
+          if (ev.kind === "token") {
+            summary += ev.delta;
+          } else if (ev.kind === "error") {
+            streamErr = ev.message;
+            resolve();
+          } else if (ev.kind === "done" || ev.kind === "cancelled") {
+            resolve();
+          }
+        },
+      )
+        .then((handle) => {
+          unlistenHolder.fn = handle.unlisten;
+        })
+        .catch(reject);
+    });
+  } catch (e) {
+    streamErr = e instanceof Error ? e.message : String(e);
+  } finally {
+    const fn = unlistenHolder.fn;
+    if (fn) {
+      try {
+        fn();
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  const cleanSummary = summary.trim();
+  if (streamErr) throw new Error(streamErr);
+  if (!cleanSummary) throw new Error("Model returned no summary.");
+  return cleanSummary;
 }
 
 /**
@@ -1815,104 +1922,34 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const visible = all.filter(
       (m) => m.role !== "system" && m.compacted_at == null,
     );
-    // Keep the most recent 4 messages untouched so the user still has
-    // their latest exchange visible verbatim. Anything below that we'd
-    // be summarizing two turns — not worth the round-trip.
-    const KEEP_TAIL = 4;
-    const MIN_TOTAL = 6;
-    if (visible.length < MIN_TOTAL) {
+    // Keep the most recent COMPACT_KEEP_TAIL messages untouched so the user
+    // still has their latest exchange visible verbatim. Anything below that
+    // we'd be summarizing two turns — not worth the round-trip.
+    if (visible.length < COMPACT_MIN_TOTAL) {
       useToastStore.getState().push({
         kind: "info",
         title: "Not enough to compact",
-        body: `Compaction needs at least ${MIN_TOTAL} messages.`,
+        body: `Compaction needs at least ${COMPACT_MIN_TOTAL} messages.`,
       });
       return;
     }
-    const toSummarize = visible.slice(0, visible.length - KEEP_TAIL);
-    const transcript = toSummarize
-      .map((m) => {
-        const speaker = m.role === "user" ? "User" : "Assistant";
-        return `${speaker}: ${m.content}`;
-      })
-      .join("\n\n");
-
-    // Re-compaction: the existing summary in `session.system_prompt`
-    // represents the messages that were rolled up on the previous round.
-    // We feed it back to the model alongside the new transcript so the
-    // refreshed summary keeps the older context — otherwise the prior
-    // bullets would be silently dropped when we replace the block.
-    const priorSummary = extractSummary(session.system_prompt ?? null);
-    const priorBlock = priorSummary
-      ? `Previous summary (carry forward — do NOT discard):\n${priorSummary}\n\n`
-      : "";
-
-    const summaryPrompt = `${priorBlock}Summarize the conversation below in concise bullet points. Capture the user's goals, important decisions or conclusions, key facts established, and any unresolved threads. Output ONLY the bullets — no preamble, no closing line.
-
-Conversation:
----
-${transcript}
----`;
-
-    const settings = useSettingsStore.getState();
-    const baseUrl =
-      session.provider === "ollama"
-        ? settings.ollama_base_url
-        : settings.openai_base_url;
-    const params = readSessionParams(session);
+    const toSummarize = visible.slice(0, visible.length - COMPACT_KEEP_TAIL);
 
     set({ compactingSessionId: sessionId });
 
-    let summary = "";
-    let streamErr: string | null = null;
-    const unlistenHolder: { fn: (() => void) | null } = { fn: null };
+    let cleanSummary: string;
     try {
-      await new Promise<void>((resolve, reject) => {
-        startChatStream(
-          {
-            stream_id: makeRequestId(),
-            provider: session.provider,
-            model: session.model,
-            base_url: baseUrl,
-            system_prompt: null,
-            messages: [{ role: "user", content: summaryPrompt, images: [] }],
-            params,
-          },
-          (ev) => {
-            if (ev.kind === "token") {
-              summary += ev.delta;
-            } else if (ev.kind === "error") {
-              streamErr = ev.message;
-              resolve();
-            } else if (ev.kind === "done" || ev.kind === "cancelled") {
-              resolve();
-            }
-          },
-        )
-          .then((handle) => {
-            unlistenHolder.fn = handle.unlisten;
-          })
-          .catch(reject);
-      });
+      cleanSummary = await generateSummary(
+        session,
+        toSummarize,
+        extractSummary(session.system_prompt ?? null),
+      );
     } catch (e) {
-      streamErr = e instanceof Error ? e.message : String(e);
-    } finally {
-      const fn = unlistenHolder.fn;
-      if (fn) {
-        try {
-          fn();
-        } catch {
-          /* ignore */
-        }
-      }
-    }
-
-    const cleanSummary = summary.trim();
-    if (streamErr || !cleanSummary) {
       set({ compactingSessionId: null });
       useToastStore.getState().push({
         kind: "error",
         title: "Compaction failed",
-        body: streamErr ?? "Model returned no summary.",
+        body: e instanceof Error ? e.message : String(e),
       });
       return;
     }
@@ -1987,5 +2024,36 @@ ${transcript}
       title: "Context compacted",
       body: `Summarized ${toSummarize.length} earlier messages. They stay visible above the divider; the model only sees the summary.`,
     });
+  },
+
+  exportCompactedContext: async (sessionId) => {
+    const state = get();
+    const session = state.sessions.find((s) => s.id === sessionId);
+    if (!session) throw new Error("Chat not found.");
+    if (!session.model) throw new Error("Pick a model first.");
+
+    // Mirror `compactContext`'s candidate selection: already-compacted and
+    // system rows are excluded — the former are folded into the carried-
+    // forward summary, the latter ride along in the system prompt.
+    const all = state.messages[sessionId] ?? [];
+    const visible = all.filter(
+      (m) => m.role !== "system" && m.compacted_at == null,
+    );
+    if (visible.length === 0) {
+      throw new Error("No messages to compact.");
+    }
+    // Unlike the live Compact button (which keeps the most recent
+    // COMPACT_KEEP_TAIL messages verbatim), the export path summarizes the
+    // ENTIRE context — the switch being ON is an explicit ask to compact
+    // everything into the summary, with no raw tail left behind.
+    const toSummarize = visible;
+
+    const summary = await generateSummary(
+      session,
+      toSummarize,
+      extractSummary(session.system_prompt ?? null),
+    );
+
+    return buildCompactedMarkdown(session, summary, []);
   },
 }));

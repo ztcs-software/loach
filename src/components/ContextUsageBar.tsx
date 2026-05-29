@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Gauge, Loader2, Sparkles, X } from "lucide-react";
+import { Gauge, Loader2, Maximize2, Sparkles, X } from "lucide-react";
 import { useChatStore } from "@/stores/chatStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useModelsStore } from "@/stores/modelsStore";
@@ -66,6 +66,7 @@ export function ContextUsageBar() {
   );
   const compactingSessionId = useChatStore((s) => s.compactingSessionId);
   const compactContext = useChatStore((s) => s.compactContext);
+  const setSessionParams = useChatStore((s) => s.setSessionParams);
 
   const [open, setOpen] = useState(false);
   const popoverRef = useRef<HTMLDivElement>(null);
@@ -207,6 +208,13 @@ export function ContextUsageBar() {
           usage={usage}
           compacting={isCompacting}
           onCompact={() => void compactContext(session.id)}
+          expandedSize={usage.total * 2}
+          onExpand={() => {
+            void setSessionParams(session.id, {
+              ...params,
+              num_ctx: usage.total * 2,
+            });
+          }}
           onClose={() => setOpen(false)}
         />
       )}
@@ -218,6 +226,8 @@ interface PopoverProps {
   usage: ReturnType<typeof computeContextUsage>;
   compacting: boolean;
   onCompact: () => void;
+  onExpand: () => void;
+  expandedSize: number;
   onClose: () => void;
   popoverRef: React.RefObject<HTMLDivElement>;
 }
@@ -226,6 +236,8 @@ const ContextUsagePopover = ({
   usage,
   compacting,
   onCompact,
+  onExpand,
+  expandedSize,
   onClose,
   popoverRef,
 }: PopoverProps) => {
@@ -340,6 +352,28 @@ const ContextUsagePopover = ({
           : canCompact
             ? "Summarizes older messages with the chat's model and replaces them with a brief recap in the system prompt."
             : "Not enough history yet — keep chatting and try again when usage climbs."}
+      </p>
+
+      <div className="my-3 h-px bg-foreground/10" />
+
+      <button
+        type="button"
+        onClick={onExpand}
+        disabled={compacting}
+        className={cn(
+          "flex w-full items-center justify-center gap-2 rounded-full px-3 py-2 text-[12px] font-medium transition-colors",
+          "bg-foreground/[0.08] text-foreground/85",
+          "hover:bg-foreground/[0.14] hover:text-foreground",
+          "disabled:opacity-50 disabled:cursor-not-allowed",
+          "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40",
+        )}
+      >
+        <Maximize2 className="h-3.5 w-3.5" />
+        Expand context window
+      </button>
+      <p className="mt-1.5 text-[10.5px] leading-relaxed text-foreground/45">
+        Doubles the window from {formatTokens(usage.total)} to{" "}
+        {formatTokens(expandedSize)} tokens.
       </p>
     </div>
   );

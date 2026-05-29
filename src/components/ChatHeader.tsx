@@ -19,9 +19,12 @@ import {
   RefreshCw,
   Search,
   Sliders,
+  Sparkles,
   Trash2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import {
   Dialog,
   DialogContent,
@@ -57,6 +60,7 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
   const { confirm } = useConfirm();
   const setSessionModel = useChatStore((s) => s.setSessionModel);
   const importMessages = useChatStore((s) => s.importMessages);
+  const exportCompactedContext = useChatStore((s) => s.exportCompactedContext);
   // Single-chat actions piped through chatStore. We deliberately don't keep
   // local mirrors of these — the store re-renders ChatHeader's `session`
   // prop when state flips, so labels (Pin/Unpin, Move/Restore) stay
@@ -110,13 +114,19 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
     setModelMenuOpen(true);
   }, [pendingOpenModelPicker, session, consumePendingOpenModelPicker]);
 
-  /** Export-context dialog state. `text` is null while the Markdown is still
-   *  being fetched from the Rust side so we can show a "Loading…" placeholder
-   *  instead of an empty textarea. `error` surfaces any failure inline. */
+  /** Export-context dialog state. The dialog offers two views via `exportMode`:
+   *  the verbatim "full" export (fetched from Rust) and a "compacted" export
+   *  that summarizes older messages first. Each view's text is cached
+   *  separately so toggling back and forth doesn't re-fetch (and, for
+   *  compacted, doesn't re-run the model). A null cache entry means that view
+   *  is still loading; `exportError` surfaces any failure inline. */
   const [exportOpen, setExportOpen] = useState(false);
-  const [exportText, setExportText] = useState<string | null>(null);
+  const [exportMode, setExportMode] = useState<"full" | "compacted">("full");
+  const [fullText, setFullText] = useState<string | null>(null);
+  const [compactedText, setCompactedText] = useState<string | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const exportText = exportMode === "full" ? fullText : compactedText;
 
   /** Marks the "Search in chat" path so we can skip Radix's
    *  `onCloseAutoFocus` for that one menu item. Without this, Radix
@@ -215,12 +225,35 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
   const openExport = async () => {
     if (!session) return;
     setExportOpen(true);
-    setExportText(null);
+    setExportMode("full");
+    setFullText(null);
+    setCompactedText(null);
     setExportError(null);
     setCopied(false);
     try {
       const md = await exportSession(session.id, "md");
-      setExportText(md);
+      setFullText(md);
+    } catch (e) {
+      setExportError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const showFull = () => {
+    setExportMode("full");
+    setExportError(null);
+    setCopied(false);
+  };
+
+  const showCompacted = async () => {
+    setExportMode("compacted");
+    setExportError(null);
+    setCopied(false);
+    // Already summarized once this dialog session — reuse the cached text
+    // rather than spending another model round-trip.
+    if (compactedText !== null || !session) return;
+    try {
+      const md = await exportCompactedContext(session.id);
+      setCompactedText(md);
     } catch (e) {
       setExportError(e instanceof Error ? e.message : String(e));
     }
@@ -657,26 +690,53 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
           <DialogHeader>
             <DialogTitle>Export context</DialogTitle>
             <DialogDescription>
-              The full chat context in Markdown. Copy it to share or reuse
+              The chat context in Markdown. Copy it to share or reuse
               elsewhere.
             </DialogDescription>
           </DialogHeader>
+          <div className="mt-3 flex items-start justify-between gap-4">
+            <div className="min-w-0">
+              <Label className="flex items-center gap-1.5">
+                <Sparkles className="h-3.5 w-3.5 text-foreground/60" />
+                Compact context
+              </Label>
+              <p className="mt-1 text-[11px] text-foreground/50">
+                Summarize older messages into a shorter export. Your chat isn't
+                changed.
+              </p>
+            </div>
+            <Switch
+              checked={exportMode === "compacted"}
+              onCheckedChange={(next) => {
+                if (next) void showCompacted();
+                else showFull();
+              }}
+              className="shrink-0"
+              aria-label={
+                exportMode === "compacted"
+                  ? "Export full context"
+                  : "Compact context before export"
+              }
+            />
+          </div>
           <div className="mt-2">
-            {exportError ? (
-              <div className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
-                {exportError}
-              </div>
-            ) : exportText === null ? (
-              <div className="flex h-64 items-center justify-center rounded-md border border-foreground/10 text-sm text-foreground/60">
-                Loading…
-              </div>
-            ) : (
+            {exportText !== null ? (
               <textarea
                 readOnly
                 value={exportText}
                 className="h-64 w-full resize-none rounded-md border border-foreground/10 bg-background/60 p-3 font-mono text-xs leading-relaxed text-foreground/80 focus:outline-none focus:ring-1 focus:ring-foreground/20"
                 onFocus={(e) => e.currentTarget.select()}
               />
+            ) : exportError ? (
+              <div className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
+                {exportError}
+              </div>
+            ) : (
+              <div className="flex h-64 items-center justify-center rounded-md border border-foreground/10 text-sm text-foreground/60">
+                {exportMode === "compacted"
+                  ? `Summarizing earlier messages with ${session?.model || "the chat model"}…`
+                  : "Loading…"}
+              </div>
             )}
           </div>
           <div className="mt-3 flex items-center justify-end gap-2">
