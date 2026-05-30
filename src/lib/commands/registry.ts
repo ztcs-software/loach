@@ -39,6 +39,11 @@ export const COMMANDS: readonly CommandSpec[] = [
     group: "Chat",
   },
   {
+    name: "fork",
+    description: "Fork this chat into a new copy",
+    group: "Chat",
+  },
+  {
     name: "regenerate",
     description: "Re-stream the last assistant reply",
     group: "Chat",
@@ -47,6 +52,11 @@ export const COMMANDS: readonly CommandSpec[] = [
     name: "copy",
     description: "Copy the last (or Nth-latest) assistant reply",
     usage: "[N]",
+    group: "Chat",
+  },
+  {
+    name: "export",
+    description: "Export this chat's context",
     group: "Chat",
   },
   {
@@ -82,7 +92,7 @@ export const COMMANDS: readonly CommandSpec[] = [
   // ----- listings -----
   {
     name: "list",
-    description: "List something",
+    description: "List models, personas, spaces, snippets, MCP servers…",
     subcommands: [
       "models",
       "personas",
@@ -93,56 +103,6 @@ export const COMMANDS: readonly CommandSpec[] = [
       "memories",
     ],
     group: "Listings",
-  },
-
-  // ----- generation parameters -----
-  {
-    name: "temp",
-    description: "Set sampling temperature",
-    usage: "<0–2>",
-    group: "Parameters",
-  },
-  {
-    name: "top_p",
-    description: "Set nucleus-sampling top_p",
-    usage: "<0–1>",
-    group: "Parameters",
-  },
-  {
-    name: "top_k",
-    description: "Set top_k",
-    usage: "<int>",
-    group: "Parameters",
-  },
-  {
-    name: "min_p",
-    description: "Set min_p",
-    usage: "<0–1>",
-    group: "Parameters",
-  },
-  {
-    name: "max-tokens",
-    description: "Set max output tokens",
-    usage: "<int>",
-    group: "Parameters",
-  },
-  {
-    name: "num_ctx",
-    description: "Set context window",
-    usage: "<int>",
-    group: "Parameters",
-  },
-  {
-    name: "seed",
-    description: "Set RNG seed (or 'random')",
-    usage: "<int|random>",
-    group: "Parameters",
-  },
-  {
-    name: "parameters",
-    description: "Reset generation parameters",
-    subcommands: ["reset"],
-    group: "Parameters",
   },
 
   // ----- per-chat instructions & snippets -----
@@ -190,7 +150,6 @@ export const COMMANDS: readonly CommandSpec[] = [
     name: "web-fetch",
     description: "Toggle URL fetching for prompts",
     usage: "on|off",
-    subcommands: ["on", "off"],
     group: "Tools & web",
   },
   {
@@ -203,7 +162,6 @@ export const COMMANDS: readonly CommandSpec[] = [
     name: "thinking",
     description: "Toggle the model's reasoning step (Ollama)",
     usage: "on|off",
-    subcommands: ["on", "off"],
     group: "Tools & web",
   },
 

@@ -61,6 +61,11 @@ interface UIState {
    *  the onboarding finish path so the user lands on a fresh chat with the
    *  model picker already expanded for selection. */
   pendingOpenModelPicker: boolean;
+  /** One-shot flag: when true, the ChatHeader opens its "Export context"
+   *  dialog on its next render with a session available, then clears itself.
+   *  Set by the `/export` slash command, which can't reach the dialog's
+   *  local state directly. Mirrors `pendingOpenModelPicker`. */
+  pendingOpenExport: boolean;
   toggleSidebar: () => void;
   toggleParams: () => void;
   setSettingsOpen: (open: boolean) => void;
@@ -81,6 +86,8 @@ interface UIState {
   setSessionTone: (sessionId: string, toneId: string) => void;
   setPendingOpenModelPicker: (v: boolean) => void;
   consumePendingOpenModelPicker: () => boolean;
+  setPendingOpenExport: (v: boolean) => void;
+  consumePendingOpenExport: () => boolean;
 }
 
 export const useUIStore = create<UIState>((set, get) => ({
@@ -97,6 +104,7 @@ export const useUIStore = create<UIState>((set, get) => ({
   pendingPersonaId: null,
   toneIdBySession: {},
   pendingOpenModelPicker: false,
+  pendingOpenExport: false,
   toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
   toggleParams: () => set((s) => ({ paramsOpen: !s.paramsOpen })),
   setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
@@ -135,6 +143,12 @@ export const useUIStore = create<UIState>((set, get) => ({
   consumePendingOpenModelPicker: (): boolean => {
     const v = get().pendingOpenModelPicker;
     if (v) set({ pendingOpenModelPicker: false });
+    return v;
+  },
+  setPendingOpenExport: (v) => set({ pendingOpenExport: v }),
+  consumePendingOpenExport: (): boolean => {
+    const v = get().pendingOpenExport;
+    if (v) set({ pendingOpenExport: false });
     return v;
   },
 }));

@@ -14,6 +14,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { FileChip } from "./FileChip";
+import { useConfirm } from "./ConfirmDialog";
 import { CommandPalette } from "./CommandPalette";
 import { CommandResultPanel } from "./CommandResultPanel";
 import { ContextUsageBar } from "./ContextUsageBar";
@@ -67,6 +68,10 @@ export function ChatInput({ centered = false }: ChatInputProps) {
   const pendingPersonaId = useUIStore((s) => s.pendingPersonaId);
   const setSessionPersona = useUIStore((s) => s.setSessionPersona);
   const setPendingPersona = useUIStore((s) => s.setPendingPersona);
+  // Imperative confirm for destructive slash commands (/clear, /delete). The
+  // dispatcher isn't a component, so it can't call the hook itself — we inject
+  // the resolver into dispatch().
+  const { confirm } = useConfirm();
 
   // Active persona resolves to whichever scope owns the picker right now:
   // an open chat reads from `personaIdBySession`; the welcome screen (no
@@ -539,7 +544,7 @@ export function ChatInput({ centered = false }: ChatInputProps) {
     // fall through to the normal send path so the user's literal text still
     // reaches the model (the "ignore unknown" rule).
     if (trimmed && isCommandInput(trimmed)) {
-      const outcome = await dispatchCommand(trimmed);
+      const outcome = await dispatchCommand(trimmed, { confirm });
       if (outcome.kind === "handled") {
         setText("");
         setComposerDraft("");

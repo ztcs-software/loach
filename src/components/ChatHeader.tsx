@@ -107,6 +107,10 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
   const consumePendingOpenModelPicker = useUIStore(
     (s) => s.consumePendingOpenModelPicker,
   );
+  const pendingOpenExport = useUIStore((s) => s.pendingOpenExport);
+  const consumePendingOpenExport = useUIStore(
+    (s) => s.consumePendingOpenExport,
+  );
   useEffect(() => {
     if (!pendingOpenModelPicker) return;
     if (!session) return;
@@ -237,6 +241,16 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
       setExportError(e instanceof Error ? e.message : String(e));
     }
   };
+
+  // `/export` can't reach this dialog's local state, so it flips a uiStore
+  // flag that we consume here — opening the same dialog the menu item does.
+  useEffect(() => {
+    if (!pendingOpenExport || !session) return;
+    consumePendingOpenExport();
+    void openExport();
+    // openExport is recreated each render; deps kept minimal for this one-shot.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingOpenExport, session]);
 
   const showFull = () => {
     setExportMode("full");

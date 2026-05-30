@@ -8,6 +8,7 @@ import { useSpaceStore } from "@/stores/spaceStore";
 import { useUIStore, type SettingsTab } from "@/stores/uiStore";
 import { DEFAULT_PERSONA_ID, PERSONAS } from "@/lib/personas";
 import { expandAndPrimeSnippet } from "@/lib/runSnippet";
+import { stripSummaryBlock } from "@/lib/contextUsage";
 import {
   deleteMessage,
   fetchUrl,
@@ -27,16 +28,33 @@ export type DispatchOutcome =
   | { kind: "handled"; result: CommandResult }
   | { kind: "passthrough" };
 
+/** Capabilities the dispatcher needs from the React layer. Injected by the
+ *  composer so destructive handlers can route through the app's confirm
+ *  dialog without the commands layer importing component code. */
+export interface CommandDeps {
+  /** Async confirm — mirrors `useConfirm().confirm`. Resolves true on
+   *  approval, false on cancel / Escape / backdrop. */
+  confirm: (req: {
+    title: string;
+    body?: string;
+    confirmLabel?: string;
+    destructive?: boolean;
+  }) => Promise<boolean>;
+}
+
 /** Entry point. Returns synchronously-resolved promises so the composer
  *  can `await dispatch(text)` once and branch on the outcome. */
-export async function dispatch(text: string): Promise<DispatchOutcome> {
+export async function dispatch(
+  text: string,
+  deps: CommandDeps,
+): Promise<DispatchOutcome> {
   const parsed = parseInput(text);
   if (!parsed || parsed.name.length === 0) return { kind: "passthrough" };
   const cmd = findCommand(parsed.name);
   if (!cmd) return { kind: "passthrough" };
 
   try {
-    const result = await run(parsed.name, parsed.rest);
+    const result = await run(parsed.name, parsed.rest, deps);
     return { kind: "handled", result };
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
@@ -72,12 +90,6 @@ function activeSpaceId(): string {
   );
 }
 
-function parseNumber(label: string, raw: string): number {
-  const n = Number(raw);
-  if (!Number.isFinite(n)) throw new Error(`${label} must be a number, got "${raw}".`);
-  return n;
-}
-
 function readCurrentParams(session: Session): Partial<GenerationParams> {
   if (!session.params_json) return {};
   try {
@@ -106,12 +118,16 @@ function listItems(title: string, items: CommandResultItem[]): CommandResult {
 // Per-command handlers
 // ---------------------------------------------------------------------------
 
-async function run(name: string, rest: string): Promise<CommandResult> {
+async function run(
+  name: string,
+  rest: string,
+  deps: CommandDeps,
+): Promise<CommandResult> {
   switch (name) {
     case "new":
       return runNew();
     case "clear":
-      return runClear();
+      return runClear(deps);
     case "rename":
       return runRename(rest);
     case "pin":
@@ -119,29 +135,17 @@ async function run(name: string, rest: string): Promise<CommandResult> {
     case "archive":
       return runArchive();
     case "delete":
-      return runDelete();
+      return runDelete(deps);
+    case "fork":
+      return runFork();
+    case "export":
+      return runExport();
     case "model":
       return runModel(rest);
     case "persona":
       return runPersona(rest);
     case "list":
       return runList(rest);
-    case "temp":
-      return runParam("temperature", rest);
-    case "top_p":
-      return runParam("top_p", rest);
-    case "top_k":
-      return runParam("top_k", rest);
-    case "min_p":
-      return runParam("min_p", rest);
-    case "max-tokens":
-      return runParam("max_tokens", rest);
-    case "num_ctx":
-      return runParam("num_ctx", rest);
-    case "seed":
-      return runSeed(rest);
-    case "parameters":
-      return runParametersReset(rest);
     case "instructions":
       return runInstructions(rest);
     case "snippet":
@@ -187,10 +191,17 @@ async function runNew(): Promise<CommandResult> {
   return ok("New chat", session.title || "Untitled");
 }
 
-async function runClear(): Promise<CommandResult> {
+async function runClear(deps: CommandDeps): Promise<CommandResult> {
   const session = requireSession();
   const messages = useChatStore.getState().messages[session.id] ?? [];
   if (messages.length === 0) return ok("Chat is already empty");
+  const approved = await deps.confirm({
+    title: "Clear this chat?",
+    body: `All ${messages.length} message${messages.length === 1 ? "" : "s"} in “${session.title || "Untitled"}” will be removed permanently.`,
+    confirmLabel: "Clear chat",
+    destructive: true,
+  });
+  if (!approved) return { kind: "noop" };
   for (const m of messages) {
     await deleteMessage(m.id, session.id);
   }
@@ -226,10 +237,33 @@ async function runArchive(): Promise<CommandResult> {
   return ok("Archived chat", session.title);
 }
 
-async function runDelete(): Promise<CommandResult> {
+async function runDelete(deps: CommandDeps): Promise<CommandResult> {
   const session = requireSession();
+  const approved = await deps.confirm({
+    title: "Delete this chat?",
+    body: `“${session.title || "Untitled"}” will be removed permanently — all messages and metrics will be gone.`,
+    confirmLabel: "Delete chat",
+    destructive: true,
+  });
+  if (!approved) return { kind: "noop" };
   await useChatStore.getState().remove(session.id);
   return ok("Deleted chat", session.title);
+}
+
+async function runFork(): Promise<CommandResult> {
+  const session = requireSession();
+  const forked = await useChatStore.getState().fork(session.id);
+  return ok("Forked chat", forked.title || "Untitled");
+}
+
+async function runExport(): Promise<CommandResult> {
+  // Reuses the ChatHeader's "Export context" dialog (full / compacted views,
+  // copy, save-to-file) rather than duplicating that surface here. The header
+  // owns the dialog's data-loading, so we flip a one-shot flag it consumes —
+  // same pattern as the onboarding model-picker auto-open.
+  requireSession();
+  useUIStore.getState().setPendingOpenExport(true);
+  return { kind: "noop" };
 }
 
 async function runModel(rest: string): Promise<CommandResult> {
@@ -268,18 +302,26 @@ async function runPersona(rest: string): Promise<CommandResult> {
   if (!query) throw new Error("Usage: /persona <name>");
   const session = requireSession();
   const lower = query.toLowerCase();
-  const persona =
-    PERSONAS.find(
-      (p) => p.id.toLowerCase() === lower || p.label.toLowerCase() === lower,
-    ) ??
-    PERSONAS.find(
-      (p) =>
-        p.id.toLowerCase().includes(lower) ||
-        p.label.toLowerCase().includes(lower),
-    );
-  if (!persona) {
+  const exact = PERSONAS.find(
+    (p) => p.id.toLowerCase() === lower || p.label.toLowerCase() === lower,
+  );
+  const matches = exact
+    ? [exact]
+    : PERSONAS.filter(
+        (p) =>
+          p.id.toLowerCase().includes(lower) ||
+          p.label.toLowerCase().includes(lower),
+      );
+  if (matches.length === 0) {
     throw new Error(`No persona matches "${query}". Try /list personas.`);
   }
+  if (matches.length > 1) {
+    return listItems(
+      `Multiple personas match "${query}"`,
+      matches.map((p) => ({ label: p.label, detail: p.id, hint: p.description })),
+    );
+  }
+  const persona = matches[0]!;
   useUIStore.getState().setSessionPersona(session.id, persona.id);
   return ok(
     persona.id === DEFAULT_PERSONA_ID ? "Cleared persona" : "Applied persona",
@@ -376,46 +418,21 @@ async function runList(rest: string): Promise<CommandResult> {
   }
 }
 
-async function runParam(
-  field: keyof GenerationParams,
-  rest: string,
-): Promise<CommandResult> {
-  const raw = rest.trim();
-  if (!raw) throw new Error(`Usage: /${paramFlagFor(field)} <number>`);
-  const value = parseNumber(field, raw);
-  await patchParams({ [field]: value } as Partial<GenerationParams>);
-  return ok("Updated parameter", `${field} = ${value}`);
-}
-
-function paramFlagFor(field: keyof GenerationParams): string {
-  return field === "max_tokens" ? "max-tokens" : (field as string);
-}
-
-async function runSeed(rest: string): Promise<CommandResult> {
-  const raw = rest.trim();
-  if (!raw) throw new Error("Usage: /seed <int|random>");
-  if (raw.toLowerCase() === "random" || raw.toLowerCase() === "none") {
-    await patchParams({ seed: null });
-    return ok("Updated parameter", "seed = random");
-  }
-  const value = parseNumber("seed", raw);
-  await patchParams({ seed: value });
-  return ok("Updated parameter", `seed = ${value}`);
-}
-
-async function runParametersReset(rest: string): Promise<CommandResult> {
-  if (rest.trim().toLowerCase() !== "reset") {
-    throw new Error("Usage: /parameters reset");
-  }
-  const session = requireSession();
-  await useChatStore.getState().setSessionParams(session.id, null);
-  return ok("Reset parameters", "Falling back to model defaults");
-}
-
 async function runInstructions(rest: string): Promise<CommandResult> {
   const session = requireSession();
   const value = rest.trim();
-  if (value.length === 0 || value.toLowerCase() === "clear") {
+  // Bare `/instructions` SHOWS the current instructions rather than wiping
+  // them — typing it to recall what's set used to silently clear. Strip any
+  // auto-summary block so the user sees only their own text. Clearing now
+  // requires the explicit `/instructions clear`.
+  if (value.length === 0) {
+    const current = stripSummaryBlock(session.system_prompt ?? null).trim();
+    if (!current) {
+      return ok("No instructions set", "Add some with /instructions <text>.");
+    }
+    return listItems("Chat instructions", [{ label: current }]);
+  }
+  if (value.toLowerCase() === "clear") {
     await useChatStore.getState().setSessionSystemPrompt(session.id, "");
     return ok("Cleared instructions");
   }
@@ -430,10 +447,20 @@ async function runSnippet(rest: string): Promise<CommandResult> {
   if (!query) throw new Error("Usage: /snippet <name>");
   const snippets = useSnippetStore.getState().snippets;
   const lower = query.toLowerCase();
-  const match =
-    snippets.find((s) => s.title.toLowerCase() === lower) ??
-    snippets.find((s) => s.title.toLowerCase().includes(lower));
-  if (!match) throw new Error(`No snippet matches "${query}". Try /list snippets.`);
+  const exact = snippets.find((s) => s.title.toLowerCase() === lower);
+  const matches = exact
+    ? [exact]
+    : snippets.filter((s) => s.title.toLowerCase().includes(lower));
+  if (matches.length === 0) {
+    throw new Error(`No snippet matches "${query}". Try /list snippets.`);
+  }
+  if (matches.length > 1) {
+    return listItems(
+      `Multiple snippets match "${query}"`,
+      matches.map((s) => ({ label: s.title, detail: s.model ?? undefined })),
+    );
+  }
+  const match = matches[0]!;
   // Fire-and-forget: when the snippet has prompt-on-use placeholders the
   // helper opens a modal and resolves later, after the user fills it in.
   // The slash-command toast lands immediately either way — the dialog is
@@ -494,10 +521,20 @@ async function runSpace(rest: string): Promise<CommandResult> {
   if (!query) throw new Error("Usage: /space <name>");
   const spaces = useSpaceStore.getState().spaces;
   const lower = query.toLowerCase();
-  const match =
-    spaces.find((s) => s.name.toLowerCase() === lower) ??
-    spaces.find((s) => s.name.toLowerCase().includes(lower));
-  if (!match) throw new Error(`No space matches "${query}". Try /list spaces.`);
+  const exact = spaces.find((s) => s.name.toLowerCase() === lower);
+  const matches = exact
+    ? [exact]
+    : spaces.filter((s) => s.name.toLowerCase().includes(lower));
+  if (matches.length === 0) {
+    throw new Error(`No space matches "${query}". Try /list spaces.`);
+  }
+  if (matches.length > 1) {
+    return listItems(
+      `Multiple spaces match "${query}"`,
+      matches.map((s) => ({ label: s.name, hint: s.description || undefined })),
+    );
+  }
+  const match = matches[0]!;
   useSpaceStore.getState().selectSpace(match.id);
   return ok("Active space", match.name);
 }
