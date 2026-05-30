@@ -5,9 +5,11 @@ import {
   archiveSession,
   createSession,
   deleteArchivedSessions,
+  deleteImportGroup,
   deleteMessage,
   deleteSession,
   forkSession,
+  importMessages as tauriImportMessages,
   getSpaceContext,
   listMessages,
   listSessions,
@@ -166,15 +168,22 @@ interface ChatState {
    *  override entirely so the session falls back to (model defaults +
    *  app defaults). */
   setSessionParams: (id: string, params: GenerationParams | null) => Promise<void>;
-  /** Append parsed messages onto the end of a session's transcript. Used by
-   *  the "Import context" dialog — see `lib/importContext.ts` for the
-   *  parser that produces the input shape. Each message is persisted via
-   *  the same `append_message` command that real user/assistant turns use,
-   *  so imported context shows up in exports too. */
+  /** Append parsed messages onto the end of a session's transcript as one
+   *  import batch. Used by the "Import context" dialog — see
+   *  `lib/importContext.ts` for the parser that produces the input shape.
+   *  The batch shares one `import_group` so the transcript renders it as a
+   *  single collapsible card and can remove it as a unit; `hidden` folds
+   *  that card out of the transcript while the content still reaches the
+   *  model. Imported context shows up in exports either way. */
   importMessages: (
     id: string,
     messages: { role: "user" | "assistant" | "system"; content: string }[],
+    hidden: boolean,
   ) => Promise<void>;
+  /** Remove an imported batch (every row sharing `group`) from a session,
+   *  in the DB and the in-memory transcript. Used by the Remove control on
+   *  the imported-context card. */
+  removeImportGroup: (id: string, group: string) => Promise<void>;
 
   sendUserMessage: (content: string, attachments: Attachment[]) => Promise<void>;
   /** Drop the trailing assistant message in `sessionId` and re-stream a
@@ -1568,25 +1577,31 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  importMessages: async (id, parsed) => {
+  importMessages: async (id, parsed, hidden) => {
     if (parsed.length === 0) return;
-    // Persist each message in order so timestamps line up monotonically
-    // (the backend stamps `created_at = now()` on insert). We append to the
-    // local cache only after the round-trip resolves so a backend failure
-    // doesn't leave ghost messages in the UI.
-    const created: Message[] = [];
-    for (const p of parsed) {
-      const m = await appendMessage({
-        session_id: id,
-        role: p.role,
-        content: p.content,
-      });
-      created.push(m);
-    }
+    // One round-trip inserts the whole batch under a shared `import_group`
+    // (timestamps stepped monotonically in the backend). We append to the
+    // local cache only after it resolves so a backend failure doesn't leave
+    // ghost messages in the UI.
+    const created = await tauriImportMessages({
+      session_id: id,
+      messages: parsed,
+      hidden,
+    });
     set((s) => ({
       messages: {
         ...s.messages,
         [id]: [...(s.messages[id] ?? []), ...created],
+      },
+    }));
+  },
+
+  removeImportGroup: async (id, group) => {
+    await deleteImportGroup(id, group);
+    set((s) => ({
+      messages: {
+        ...s.messages,
+        [id]: (s.messages[id] ?? []).filter((m) => m.import_group !== group),
       },
     }));
   },

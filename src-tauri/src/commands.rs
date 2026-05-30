@@ -252,6 +252,54 @@ pub async fn append_message(
 }
 
 #[derive(Debug, Deserialize)]
+pub struct ImportedMessageIn {
+    pub role: String,
+    pub content: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ImportMessagesArgs {
+    pub session_id: String,
+    pub messages: Vec<ImportedMessageIn>,
+    /// `true` = fold the imported batch out of the transcript (it still
+    /// reaches the model). See `Database::import_messages`.
+    pub hidden: bool,
+}
+
+/// Insert a batch of imported messages as one group. Returns the created
+/// rows so the frontend can splice them into the transcript without a
+/// re-fetch.
+#[tauri::command]
+pub async fn import_messages(
+    state: State<'_, AppState>,
+    args: ImportMessagesArgs,
+) -> Result<Vec<Message>, String> {
+    let items: Vec<(String, String)> = args
+        .messages
+        .into_iter()
+        .map(|m| (m.role, m.content))
+        .collect();
+    state
+        .db
+        .import_messages(&args.session_id, &items, args.hidden)
+        .map_err(err)
+}
+
+/// Delete an imported batch as a unit, addressed by its group id. Scoped by
+/// `session_id` for defense-in-depth (see `Database::delete_import_group`).
+#[tauri::command]
+pub async fn delete_import_group(
+    state: State<'_, AppState>,
+    session_id: String,
+    group: String,
+) -> Result<(), String> {
+    state
+        .db
+        .delete_import_group(&session_id, &group)
+        .map_err(err)
+}
+
+#[derive(Debug, Deserialize)]
 pub struct UpdateMessageArgs {
     pub id: String,
     /// The session this message is expected to belong to. The DB layer

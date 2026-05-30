@@ -52,7 +52,7 @@ import {
   ollamaProbe,
   openaiListModels,
 } from "@/lib/tauri";
-import { Layers } from "lucide-react";
+import { EyeOff, Layers } from "lucide-react";
 import { parseImportContext, type ParsedImport } from "@/lib/importContext";
 import type { ModelInfo, ProviderId, Session } from "@/types";
 
@@ -155,6 +155,10 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
   const [importText, setImportText] = useState("");
   const [importBusy, setImportBusy] = useState(false);
   const [importError, setImportError] = useState<string | null>(null);
+  /** When on, the imported batch is folded out of the transcript (rendered as
+   *  a single collapsed card) instead of shown inline as messages. Either way
+   *  the content reaches the model — this only governs how it's displayed. */
+  const [importHidden, setImportHidden] = useState(false);
   const importPreview: ParsedImport = useMemo(
     () => parseImportContext(importText),
     [importText],
@@ -278,6 +282,7 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
     setImportOpen(true);
     setImportText("");
     setImportError(null);
+    setImportHidden(false);
   };
 
   const doImport = async () => {
@@ -291,7 +296,7 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
     setImportBusy(true);
     setImportError(null);
     try {
-      await importMessages(session.id, importPreview.messages);
+      await importMessages(session.id, importPreview.messages, importHidden);
       setImportOpen(false);
       setImportText("");
     } catch (e) {
@@ -672,6 +677,27 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
                 <span className="text-destructive">{importError}</span>
               )}
             </div>
+          </div>
+          <div className="mt-3 flex items-start justify-between gap-4 rounded-lg border border-foreground/10 bg-background/40 px-3 py-2.5">
+            <div className="min-w-0">
+              <Label
+                htmlFor="import-hidden"
+                className="flex items-center gap-1.5"
+              >
+                <EyeOff className="h-3.5 w-3.5 text-foreground/60" />
+                Hide from transcript
+              </Label>
+              <p className="mt-1 text-[11px] text-foreground/50">
+                Keep the imported messages folded into a collapsed card instead
+                of showing them inline. Either way they're sent to the model.
+              </p>
+            </div>
+            <Switch
+              id="import-hidden"
+              checked={importHidden}
+              onCheckedChange={setImportHidden}
+              disabled={importBusy}
+            />
           </div>
           <div className="mt-3 flex items-center justify-end gap-2">
             <Button

@@ -187,10 +187,54 @@ export function appendMessage(args: {
       metrics_json: null,
       tool_calls_json: null,
       compacted_at: null,
+      import_group: null,
+      import_hidden: false,
       created_at: Date.now(),
     });
   }
   return invoke("append_message", { args });
+}
+
+/** Insert a batch of imported messages as one group (one collapsible card in
+ *  the transcript, removable as a unit). `hidden` folds the card out of the
+ *  transcript while the content still reaches the model. Returns the created
+ *  rows so the caller can splice them straight into the in-memory list. */
+export function importMessages(args: {
+  session_id: string;
+  messages: { role: "user" | "assistant" | "system"; content: string }[];
+  hidden: boolean;
+}): Promise<Message[]> {
+  if (!isTauri) {
+    const group = mockId("import");
+    const base = Date.now();
+    return notInTauri<Message[]>(
+      args.messages.map((m, i) => ({
+        id: mockId("mock"),
+        session_id: args.session_id,
+        role: m.role,
+        content: m.content,
+        thinking: null,
+        attachments_json: null,
+        metrics_json: null,
+        tool_calls_json: null,
+        compacted_at: null,
+        import_group: group,
+        import_hidden: args.hidden,
+        created_at: base + i,
+      })),
+    );
+  }
+  return invoke("import_messages", { args });
+}
+
+/** Delete an imported batch as a unit, addressed by its group id. Scoped by
+ *  `session_id` — the backend rejects calls whose rows don't belong to it. */
+export function deleteImportGroup(
+  sessionId: string,
+  group: string,
+): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("delete_import_group", { sessionId, group });
 }
 
 export function updateMessage(args: {

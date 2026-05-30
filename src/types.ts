@@ -161,6 +161,15 @@ export interface Message {
    *  uncompacted turns. Null on every pre-existing row and on every
    *  freshly-appended message. */
   compacted_at: number | null;
+  /** Non-null = this message came from the "Import context" dialog; the value
+   *  is a group id shared by every row of one import, so the transcript can
+   *  fold the batch into a single collapsible card and remove it as a unit.
+   *  Null on normal user/assistant/system turns. */
+  import_group: string | null;
+  /** Only meaningful when `import_group` is set: `true` = the user chose to
+   *  keep the imported batch folded out of the transcript. It still reaches
+   *  the model like any other import — this flag governs display only. */
+  import_hidden: boolean;
   created_at: number;
 }
 

@@ -255,6 +255,8 @@ pub fn run() {
             commands::export_session,
             commands::list_messages,
             commands::append_message,
+            commands::import_messages,
+            commands::delete_import_group,
             commands::update_message,
             commands::delete_message,
             commands::mark_messages_compacted,

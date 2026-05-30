@@ -230,6 +230,18 @@ pub struct Message {
     /// explicitly compacts.
     #[serde(default)]
     pub compacted_at: Option<i64>,
+    /// Non-null = this message came from the "Import context" dialog. Every
+    /// row of a single import shares one freshly-generated group id so the
+    /// UI can render the batch as one collapsible card and remove it as a
+    /// unit. Null on normal user/assistant/system turns.
+    #[serde(default)]
+    pub import_group: Option<String>,
+    /// Only meaningful when `import_group` is set: `true` = the user chose
+    /// to keep the imported batch folded out of the transcript. It still
+    /// reaches the model exactly like a visible import — this flag governs
+    /// display only.
+    #[serde(default)]
+    pub import_hidden: bool,
     pub created_at: i64,
 }
 
@@ -444,6 +456,20 @@ impl Database {
         if !has_column(&conn, "messages", "compacted_at")? {
             conn.execute_batch(
                 "ALTER TABLE messages ADD COLUMN compacted_at INTEGER;",
+            )?;
+        }
+
+        // `import_group` / `import_hidden`: set on rows that came from the
+        // "Import context" dialog. A shared group id lets the UI fold one
+        // import into a single collapsible card and delete it as a unit;
+        // `import_hidden` keeps that card out of the transcript while the
+        // content still reaches the model. Both columns are added together,
+        // so probing one is enough. Existing rows default to "not imported"
+        // (NULL group, 0 hidden).
+        if !has_column(&conn, "messages", "import_group")? {
+            conn.execute_batch(
+                "ALTER TABLE messages ADD COLUMN import_group TEXT;
+                 ALTER TABLE messages ADD COLUMN import_hidden INTEGER NOT NULL DEFAULT 0;",
             )?;
         }
 
@@ -684,8 +710,8 @@ impl Database {
             let msg_id = Uuid::new_v4().to_string();
             tx_conn.execute(
                 "INSERT INTO messages (id, session_id, role, content, thinking,
-                                       attachments_json, metrics_json, tool_calls_json, compacted_at, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                                       attachments_json, metrics_json, tool_calls_json, compacted_at, created_at, import_group, import_hidden)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 params![
                     msg_id,
                     new_id,
@@ -697,6 +723,8 @@ impl Database {
                     m.tool_calls_json,
                     m.compacted_at,
                     m.created_at,
+                    m.import_group,
+                    m.import_hidden,
                 ],
             )?;
         }
@@ -857,7 +885,7 @@ impl Database {
     pub fn list_messages(&self, session_id: &str) -> Result<Vec<Message>> {
         self.with_read(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, session_id, role, content, thinking, attachments_json, metrics_json, tool_calls_json, compacted_at, created_at
+                "SELECT id, session_id, role, content, thinking, attachments_json, metrics_json, tool_calls_json, compacted_at, created_at, import_group, import_hidden
                  FROM messages WHERE session_id = ?1 ORDER BY created_at ASC",
             )?;
             let rows = stmt
@@ -873,6 +901,8 @@ impl Database {
                         tool_calls_json: r.get(7)?,
                         compacted_at: r.get(8)?,
                         created_at: r.get(9)?,
+                        import_group: r.get(10)?,
+                        import_hidden: r.get(11)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -892,8 +922,8 @@ impl Database {
         {
             let conn = self.conn.lock();
             conn.execute(
-                "INSERT INTO messages (id, session_id, role, content, thinking, attachments_json, metrics_json, tool_calls_json, compacted_at, created_at)
-                 VALUES (?1, ?2, ?3, ?4, NULL, ?5, NULL, NULL, NULL, ?6)",
+                "INSERT INTO messages (id, session_id, role, content, thinking, attachments_json, metrics_json, tool_calls_json, compacted_at, created_at, import_group, import_hidden)
+                 VALUES (?1, ?2, ?3, ?4, NULL, ?5, NULL, NULL, NULL, ?6, NULL, 0)",
                 params![id, session_id, role, content, attachments_json, now],
             )?;
         }
@@ -909,7 +939,76 @@ impl Database {
             tool_calls_json: None,
             compacted_at: None,
             created_at: now,
+            import_group: None,
+            import_hidden: false,
         })
+    }
+
+    /// Insert a batch of imported messages as one unit. Every row shares a
+    /// freshly-generated `import_group` so the UI renders the batch as a
+    /// single collapsible card and can delete it as a unit; `hidden`
+    /// controls whether that card sits inline in the transcript or stays
+    /// folded away — the content reaches the model either way. `created_at`
+    /// steps forward one ms per row so ordering inside a single import is
+    /// stable. Returns the inserted rows (with ids + timestamps) so the
+    /// caller can splice them straight into the in-memory transcript.
+    pub fn import_messages(
+        &self,
+        session_id: &str,
+        items: &[(String, String)],
+        hidden: bool,
+    ) -> Result<Vec<Message>> {
+        if items.is_empty() {
+            return Ok(Vec::new());
+        }
+        let group = Uuid::new_v4().to_string();
+        let base = Utc::now().timestamp_millis();
+        let mut out = Vec::with_capacity(items.len());
+        {
+            let mut conn = self.conn.lock();
+            let tx = conn.transaction()?;
+            {
+                let mut stmt = tx.prepare(
+                    "INSERT INTO messages (id, session_id, role, content, thinking, attachments_json, metrics_json, tool_calls_json, compacted_at, created_at, import_group, import_hidden)
+                     VALUES (?1, ?2, ?3, ?4, NULL, NULL, NULL, NULL, NULL, ?5, ?6, ?7)",
+                )?;
+                for (i, (role, content)) in items.iter().enumerate() {
+                    let id = Uuid::new_v4().to_string();
+                    let created_at = base + i as i64;
+                    stmt.execute(params![id, session_id, role, content, created_at, group, hidden])?;
+                    out.push(Message {
+                        id,
+                        session_id: session_id.to_string(),
+                        role: role.clone(),
+                        content: content.clone(),
+                        thinking: None,
+                        attachments_json: None,
+                        metrics_json: None,
+                        tool_calls_json: None,
+                        compacted_at: None,
+                        created_at,
+                        import_group: Some(group.clone()),
+                        import_hidden: hidden,
+                    });
+                }
+            }
+            tx.commit()?;
+        }
+        self.touch_session(session_id)?;
+        Ok(out)
+    }
+
+    /// Delete every message belonging to one import batch. Scoped by
+    /// `session_id` for the same defense-in-depth reason `delete_message`
+    /// is. The 0-row case is silently accepted (the batch may already be
+    /// gone).
+    pub fn delete_import_group(&self, session_id: &str, group: &str) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "DELETE FROM messages WHERE session_id = ?1 AND import_group = ?2",
+            params![session_id, group],
+        )?;
+        Ok(())
     }
 
     /// Mark a batch of messages as compacted — sets `compacted_at = now`
@@ -1690,7 +1789,7 @@ impl Database {
     pub fn all_messages(&self) -> Result<Vec<Message>> {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(
-            "SELECT id, session_id, role, content, thinking, attachments_json, metrics_json, tool_calls_json, compacted_at, created_at
+            "SELECT id, session_id, role, content, thinking, attachments_json, metrics_json, tool_calls_json, compacted_at, created_at, import_group, import_hidden
              FROM messages ORDER BY session_id, created_at",
         )?;
         let rows = stmt
@@ -1706,6 +1805,8 @@ impl Database {
                     tool_calls_json: r.get(7)?,
                     compacted_at: r.get(8)?,
                     created_at: r.get(9)?,
+                    import_group: r.get(10)?,
+                    import_hidden: r.get(11)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -1852,8 +1953,8 @@ impl Database {
         for m in &d.messages {
             tx.execute(
                 "INSERT INTO messages (id, session_id, role, content, thinking,
-                                       attachments_json, metrics_json, tool_calls_json, compacted_at, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                                       attachments_json, metrics_json, tool_calls_json, compacted_at, created_at, import_group, import_hidden)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 params![
                     m.id,
                     m.session_id,
@@ -1865,6 +1966,8 @@ impl Database {
                     m.tool_calls_json,
                     m.compacted_at,
                     m.created_at,
+                    m.import_group,
+                    m.import_hidden,
                 ],
             )?;
         }
