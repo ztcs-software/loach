@@ -898,6 +898,45 @@ export function saveBinaryToFile(args: {
   });
 }
 
+/** Snapshot handed to a popped-out code window. Mirrors the Rust
+ *  `CodeWindowPayload`. The window pulls this once on load via
+ *  `getCodeWindowPayload`; live updates afterwards arrive as
+ *  `code-window:update` events. */
+export interface CodeWindowPayload {
+  code: string;
+  language: string | null;
+  title: string | null;
+  dark: boolean;
+}
+
+/** Spawn a native OS window showing `code`. Returns the new window's label
+ *  (used to register it with the streaming bridge), or null outside Tauri. */
+export function openCodeWindow(args: {
+  code: string;
+  language: string | null;
+  title: string | null;
+  dark: boolean;
+}): Promise<string | null> {
+  if (!isTauri) return notInTauri(null);
+  return invoke<string>("open_code_window", { payload: args });
+}
+
+/** Fetch the initial payload stashed for a pop-out window, keyed by its own
+ *  window label. Non-consuming (safe to call more than once); the entry is
+ *  freed via `dropCodeWindowPayload` when the window closes. */
+export function getCodeWindowPayload(
+  label: string,
+): Promise<CodeWindowPayload | null> {
+  if (!isTauri) return notInTauri(null);
+  return invoke<CodeWindowPayload | null>("get_code_window_payload", { label });
+}
+
+/** Free a pop-out window's stashed payload once the window has closed. */
+export function dropCodeWindowPayload(label: string): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke<void>("drop_code_window_payload", { label });
+}
+
 /** Optional app-lock credentials for destructive Tauri commands. */
 export interface DestructiveAuth {
   pin?: string;

@@ -142,7 +142,7 @@ const TEX_SYMBOLS: Record<string, string> = {
 const TEX_INLINE_RE = /\$\\([a-zA-Z]+)\s*\$/g;
 const TEX_BARE_RE = /\\([a-zA-Z]+)(?![a-zA-Z])/g;
 
-function preprocessTex(input: string): string {
+export function preprocessTex(input: string): string {
   return input
     .replace(TEX_INLINE_RE, (whole, name: string) => {
       const sym = TEX_SYMBOLS[name];

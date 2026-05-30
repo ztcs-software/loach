@@ -1,4 +1,4 @@
-import { memo, useLayoutEffect, useRef, useState } from "react";
+import { memo, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   Brain,
@@ -16,7 +16,9 @@ import {
   Wrench,
 } from "lucide-react";
 import { AttachmentActions } from "./AttachmentActions";
-import { Markdown } from "./Markdown";
+import { Markdown, preprocessTex } from "./Markdown";
+import { MarkdownSourceProvider } from "./markdownSource";
+import { lastCodeBlock } from "@/lib/codeBlocks";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -479,6 +481,17 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
   // strip that tail when rendering so the user sees just their typed prompt.
   const displayContent = isUser ? stripInlinedAttachments(message.content) : message.content;
 
+  // Source binding for the Code Canvas. We only need the LAST fenced block's
+  // raw text (the one that grows mid-stream) so "Open in canvas" can tell
+  // whether the clicked block is the streaming tail. Pre-process the content
+  // the same way `Markdown` does so the comparison matches the `raw` a
+  // `CodeBlock` actually renders. Skipped entirely for user bubbles and once
+  // streaming stops (there's nothing live to track then).
+  const lastBlockRaw = useMemo(() => {
+    if (isUser || !isStreaming) return null;
+    return lastCodeBlock(preprocessTex(message.content))?.code ?? null;
+  }, [isUser, isStreaming, message.content]);
+
   return (
     <div
       className={cn(
@@ -667,7 +680,16 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
           )
         ) : (
           <div ref={bodyRef}>
-            <Markdown content={message.content} />
+            <MarkdownSourceProvider
+              value={{
+                sessionId: message.session_id,
+                messageId: message.id,
+                streaming: !!isStreaming,
+                lastBlockRaw,
+              }}
+            >
+              <Markdown content={message.content} />
+            </MarkdownSourceProvider>
           </div>
         )}
         {!isUser && files.length > 0 && (

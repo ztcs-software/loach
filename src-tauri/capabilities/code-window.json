@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "code-window",
+  "description": "Capabilities for popped-out code canvas windows (label `code-*`). They need IPC to fetch their initial payload, listen for live `code-window:update` events, and emit `code-window:closed` on unload.",
+  "windows": ["code-*"],
+  "permissions": ["core:default"]
+}

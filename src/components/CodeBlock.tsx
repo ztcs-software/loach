@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { Check, Copy, Download, PanelRight } from "lucide-react";
 import { useCanvasStore } from "@/stores/canvasStore";
+import { useMarkdownSource } from "./markdownSource";
 import { saveCodeToFile, defaultFilename } from "@/lib/codeExport";
 import { cn } from "@/lib/utils";
 
@@ -41,6 +42,8 @@ interface CodeBlockProps {
 export function CodeBlock({ className, children, raw, language }: CodeBlockProps) {
   const [copied, setCopied] = useState(false);
   const openCanvas = useCanvasStore((s) => s.open);
+  const openCanvasLive = useCanvasStore((s) => s.openLive);
+  const source = useMarkdownSource();
 
   const lineCount = useMemo(() => {
     if (!raw) return 1;
@@ -64,7 +67,24 @@ export function CodeBlock({ className, children, raw, language }: CodeBlockProps
   };
 
   const onOpenCanvas = () => {
-    openCanvas({ code: raw, language: language ?? null });
+    // Bind the canvas live only when this block is the one still streaming —
+    // i.e. the last fenced block of a message that's actively generating.
+    // Earlier blocks are already complete, so a static snapshot is correct
+    // (and avoids the canvas jumping to a different, growing block).
+    const isStreamingTail =
+      source?.streaming &&
+      source.lastBlockRaw != null &&
+      raw.trimEnd() === source.lastBlockRaw.trimEnd();
+    if (isStreamingTail && source) {
+      openCanvasLive({
+        sessionId: source.sessionId,
+        messageId: source.messageId,
+        code: raw,
+        language: language ?? null,
+      });
+    } else {
+      openCanvas({ code: raw, language: language ?? null });
+    }
   };
 
   return (
