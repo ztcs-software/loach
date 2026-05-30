@@ -758,17 +758,24 @@ export function ChatInput({ centered = false }: ChatInputProps) {
                   );
                   return;
                 }
-                // Both Tab and Enter accept the highlighted entry — the
-                // palette footer and the /help dialog advertise it that way.
-                // Without the Enter branch here, the keystroke would fall
-                // through to `submit()` and dispatch the literal typed text
-                // (e.g. `/he`) instead of the highlighted `/help` entry.
-                // Shift+Enter still inserts a newline (no `preventDefault`).
+                // Tab always autocompletes the highlighted entry. Enter only
+                // autocompletes when doing so would change the text — i.e. it
+                // completes a partial command (`/he` → `/help`) or steps into
+                // a subcommand. Once the typed text already equals the entry
+                // (a complete command such as `/new`), Enter falls through to
+                // `submit()` so the command actually dispatches. Without that
+                // fall-through, fully-typed no-arg commands could never run:
+                // every Enter re-selected the same text and never reached
+                // `submit()`. Shift+Enter still inserts a newline (handled
+                // by the Enter branch below, which leaves Shift+Enter alone).
                 if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) {
-                  e.preventDefault();
                   const entry = paletteEntries[paletteIndex];
-                  if (entry) acceptPaletteEntry(entry);
-                  return;
+                  if (e.key === "Tab" || (entry && entry.insertText !== text)) {
+                    e.preventDefault();
+                    if (entry) acceptPaletteEntry(entry);
+                    return;
+                  }
+                  // Enter on an already-complete command → fall through.
                 }
                 if (e.key === "Escape") {
                   e.preventDefault();
