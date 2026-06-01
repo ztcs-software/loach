@@ -1932,9 +1932,11 @@ pub async fn factory_reset(
 
 // ---------- code canvas pop-out window ----------
 //
-// "Open in window" on the code canvas spawns a separate, native-decorated OS
-// window that reuses the same frontend bundle (main.tsx routes to the
-// standalone viewer when the window label starts with `code-`). The initial
+// "Open in window" on the code canvas spawns a separate OS window that reuses
+// the same frontend bundle (main.tsx routes to the standalone viewer when the
+// window label starts with `code-`). It carries the app's own custom chrome
+// (decorations off + a draggable title bar in `CodeWindow.tsx`), matching the
+// main window. The initial
 // snapshot is too large to pass safely through a URL, so we stash it here keyed
 // by the new window's label and the viewer pulls it once on load. Live updates
 // while a block is still streaming arrive separately, as `code-window:update`
@@ -1970,6 +1972,10 @@ pub fn open_code_window(
         .inner_size(820.0, 620.0)
         .min_inner_size(360.0, 240.0)
         .resizable(true)
+        // Custom chrome to match the main window — the title bar lives in
+        // `CodeWindow.tsx` (drag region + minimize/maximize/close).
+        .decorations(false)
+        .center()
         .build()
         .map_err(|e| {
             // Don't leak the stashed payload if the window failed to open.

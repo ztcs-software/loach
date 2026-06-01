@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Check, Copy, Download, X } from "lucide-react";
+import { Check, Copy, Download, Minus, Square, X } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen, emit } from "@tauri-apps/api/event";
 import { CodeView } from "./CodeView";
@@ -8,8 +8,13 @@ import { saveCodeToFile, defaultFilename } from "@/lib/codeExport";
 import { cn } from "@/lib/utils";
 
 /**
- * Standalone code view shown in a popped-out native OS window. main.tsx routes
- * here (instead of the full app) when the window label is a `code-*` pop-out.
+ * Standalone code view shown in a popped-out OS window. main.tsx routes here
+ * (instead of the full app) when the window label is a `code-*` pop-out.
+ *
+ * The window is created with decorations off (see `open_code_window`), so this
+ * component owns the entire chrome: a custom title bar matching the app's
+ * `TitleBar` — draggable, with the same minimize/maximize/close controls —
+ * plus the code-specific Copy/Export actions and a line-numbered `CodeView`.
  *
  * Lifecycle:
  *  - pulls its one-shot initial payload from the Rust-side stash keyed by its
@@ -25,6 +30,7 @@ export function CodeWindow() {
   const [title, setTitle] = useState("Code");
   const [copied, setCopied] = useState(false);
   const [loaded, setLoaded] = useState(false);
+  const [isMaximized, setIsMaximized] = useState(false);
 
   useEffect(() => {
     const label = getCurrentWindow().label;
@@ -75,6 +81,39 @@ export function CodeWindow() {
     };
   }, []);
 
+  // Keep the maximize/restore icon in sync with the window state, mirroring the
+  // main `TitleBar`. The pop-out starts un-maximized (centered, fixed size), so
+  // the initial read just confirms that and resize events flip it thereafter.
+  useEffect(() => {
+    const w = getCurrentWindow();
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    void w
+      .isMaximized()
+      .then((m) => {
+        if (!cancelled) setIsMaximized(m);
+      })
+      .catch(() => {
+        /* ignore */
+      });
+    void w
+      .onResized(async () => {
+        try {
+          setIsMaximized(await w.isMaximized());
+        } catch {
+          /* ignore */
+        }
+      })
+      .then((u) => {
+        if (cancelled) u();
+        else unlisten = u;
+      });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
   const isText =
     !language ||
     language === "text" ||
@@ -96,9 +135,9 @@ export function CodeWindow() {
     void saveCodeToFile(code, language, defaultFilename(language));
   };
 
-  const onClose = () => {
-    void getCurrentWindow().close();
-  };
+  const minimize = () => void getCurrentWindow().minimize();
+  const toggleMax = () => void getCurrentWindow().toggleMaximize();
+  const close = () => void getCurrentWindow().close();
 
   return (
     <div
@@ -107,16 +146,27 @@ export function CodeWindow() {
         "[&_.hljs]:bg-transparent [&_pre_code.hljs]:bg-transparent [&_pre_code.hljs]:p-0",
       )}
     >
-      <header className="flex h-11 shrink-0 items-center justify-between gap-2 border-b border-foreground/[0.06] px-3">
-        <div className="flex min-w-0 items-center gap-2">
-          <h1 className="min-w-0 truncate text-sm font-semibold tracking-tight text-foreground/85">
+      {/* Custom title bar — same chrome as the main window's `TitleBar`. The
+          bar itself is a Tauri drag region; interactive descendants (the
+          action and window-control buttons) are auto-excluded from dragging,
+          and the title/badge group is pointer-events-none so a drag started
+          over it still moves the window. */}
+      <div
+        data-tauri-drag-region
+        className="relative z-[70] flex h-9 shrink-0 items-center gap-2 border-b border-foreground/8 bg-foreground/[0.03] pl-3 pr-0 select-none backdrop-blur-2xl"
+      >
+        <div className="pointer-events-none flex min-w-0 items-center gap-2">
+          <h1 className="min-w-0 truncate text-xs font-medium tracking-wide text-foreground/80">
             {title}
           </h1>
           <span className="rounded-full bg-foreground/[0.06] px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider text-foreground/55">
             {isText ? "Text" : language}
           </span>
         </div>
-        <div className="flex shrink-0 items-center gap-1">
+
+        <div className="min-w-0 flex-1" />
+
+        <div className="flex shrink-0 items-center gap-1 pr-1">
           <button
             type="button"
             onClick={() => void onCopy()}
@@ -141,16 +191,28 @@ export function CodeWindow() {
           >
             <Download className="h-3.5 w-3.5" /> Export
           </button>
-          <button
-            type="button"
-            onClick={onClose}
-            title="Close window"
-            className="ml-1 inline-flex h-7 w-7 items-center justify-center rounded-md text-foreground/65 transition-colors hover:bg-foreground/10 hover:text-foreground"
+        </div>
+
+        <div className="flex shrink-0 items-center">
+          <TitleButton onClick={minimize} ariaLabel="Minimize">
+            <Minus className="h-3.5 w-3.5" />
+          </TitleButton>
+          <TitleButton onClick={toggleMax} ariaLabel="Maximize">
+            {isMaximized ? (
+              <Copy className="h-3.5 w-3.5 rotate-180" />
+            ) : (
+              <Square className="h-3 w-3" />
+            )}
+          </TitleButton>
+          <TitleButton
+            onClick={close}
+            ariaLabel="Close"
+            className="hover:bg-destructive hover:text-destructive-foreground"
           >
             <X className="h-3.5 w-3.5" />
-          </button>
+          </TitleButton>
         </div>
-      </header>
+      </div>
 
       {loaded || code ? (
         <CodeView code={code} language={language} />
@@ -160,5 +222,31 @@ export function CodeWindow() {
         </div>
       )}
     </div>
+  );
+}
+
+function TitleButton({
+  children,
+  onClick,
+  ariaLabel,
+  className,
+}: {
+  children: React.ReactNode;
+  onClick: () => void;
+  ariaLabel: string;
+  className?: string;
+}) {
+  return (
+    <button
+      type="button"
+      aria-label={ariaLabel}
+      onClick={onClick}
+      className={cn(
+        "inline-flex h-9 w-11 items-center justify-center text-foreground/55 hover:bg-foreground/10 hover:text-foreground transition-colors",
+        className,
+      )}
+    >
+      {children}
+    </button>
   );
 }
