@@ -74,14 +74,12 @@ similar = "2"
 natord = "1"
 ipnet = "2"
 
-# PDF generation + merging for the built-in `pdf` tool. printpdf builds
-# documents from a structured spec; lopdf concatenates existing PDFs
-# (used for the `merge` action). v1 uses printpdf's built-in Helvetica
-# (PDF base-14), so the output is ASCII-only — non-ASCII characters
-# are stripped before render so the file stays valid. Documented in
-# the tool description so the model knows the limitation.
-printpdf = "0.7"
-lopdf = "0.33"
+# PDF generation for the built-in `pdf` tool. printpdf builds documents
+# from a structured spec and subsets a bundled Liberation Sans TTF (see
+# src-tauri/assets/fonts) into each file, so output supports Unicode —
+# Latin, European accents, common symbols — not just ASCII. Glyphs the
+# font lacks (e.g. CJK, emoji) fall back to `?` at render time.
+printpdf = "0.9"
 
 [dev-dependencies]
 # Only used by the db.rs test suite, which opens a fresh database in a

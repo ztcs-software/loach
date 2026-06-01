@@ -6,21 +6,33 @@
 //! the chat-stream layer appends to the assistant message; the existing
 //! `PdfPreview` component then renders it inline.
 //!
-//! ASCII-only by design (v1): printpdf's built-in Helvetica is a base-14
-//! font with no Unicode coverage. Non-ASCII characters in the spec are
-//! replaced with `?` before render so the file stays valid. Bundling a
-//! Unicode TTF (Liberation Sans / DejaVu) is the natural v2 upgrade but
-//! adds ~700 KB to the binary and a font-loading code path; deferred
-//! until someone asks for it.
+//! Unicode text: we bundle Liberation Sans (regular + bold), pre-subset to
+//! Latin + European + common punctuation/currency, and embed it into each
+//! PDF — so accented text (e.g. Polish), the euro sign, em dashes and
+//! bullets render correctly. Liberation Sans is metric-compatible with
+//! Helvetica/Arial, so the fixed per-character width estimate the layout
+//! relies on stays valid. Glyphs outside the bundled set (e.g. CJK, emoji)
+//! are replaced with `?` at render time so the file stays legible rather
+//! than showing blank `.notdef` boxes.
 
 use base64::Engine;
-use printpdf::{BuiltinFont, IndirectFontRef, Mm, PdfDocument, PdfDocumentReference, PdfLayerReference};
+use printpdf::*;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::mcp::{Attachment, McpCallResult};
 
 pub const TOOL_NAME: &str = "pdf";
+
+/// Bundled text fonts: Liberation Sans (SIL OFL — see
+/// `assets/fonts/LICENSE-Liberation.txt`), metric-compatible with
+/// Helvetica/Arial so the fixed width estimate holds. printpdf 0.9 embeds
+/// each registered font *whole* (its runtime subsetting is disabled), so
+/// the vendored files are themselves pre-subset (via fonttools) to Latin +
+/// European + common punctuation/currency — ≈80 KB each instead of ≈410 KB.
+/// Characters outside that coverage become `?` in [`sanitise`].
+const FONT_REGULAR: &[u8] = include_bytes!("../../assets/fonts/LiberationSans-Regular.ttf");
+const FONT_BOLD: &[u8] = include_bytes!("../../assets/fonts/LiberationSans-Bold.ttf");
 
 /// A4 in millimeters. printpdf's `Mm` wraps `f32`, so every mm-typed
 /// constant and intermediate result stays `f32` to avoid a sea of
@@ -35,15 +47,16 @@ const BODY_FONT_SIZE_PT: f32 = 11.0;
 /// 11 pt × 1.4 line-height ≈ 5.4 mm. Used by every block that emits a
 /// line of text so vertical rhythm stays consistent.
 const BODY_LINE_HEIGHT_MM: f32 = 5.4;
-/// Conservative per-character width estimate for Helvetica at body size,
-/// in mm. Real Helvetica is proportional (each glyph has its own width)
-/// so this slightly under-fills lines — that's the right side to err on
-/// because over-estimating would let lines overflow the right margin.
+/// Conservative per-character width estimate at body size, in mm
+/// (Liberation Sans ≈ Helvetica/Arial metrics). The font is proportional
+/// (each glyph has its own width) so this slightly under-fills lines —
+/// that's the right side to err on because over-estimating would let
+/// lines overflow the right margin.
 const BODY_CHAR_WIDTH_MM: f32 = 2.0;
 
 /// Spec ceiling. A single PDF spec beyond ~256 KiB is almost certainly a
-/// runaway prompt — Helvetica-rendered text at 11 pt fits about 4000
-/// characters per A4 page, and a structured spec is denser than that.
+/// runaway prompt — text at 11 pt fits about 4000 characters per A4 page,
+/// and a structured spec is denser than that.
 const MAX_SPEC_BYTES: usize = 256 * 1024;
 /// Per-action page ceiling — bounds rasterisation cost on the receiving
 /// pdfjs viewer if a model decides to ask for 10 000 pages of bullet
@@ -64,8 +77,8 @@ pub fn tool_description() -> &'static str {
      `table` (with `headers: [string]` and `rows: [[string]]` — equal \
      column widths, no cell-wrap so keep cells short). \
      `title` is optional and becomes the filename (sanitised). \
-     ASCII-only: non-ASCII characters are replaced with `?` because the \
-     built-in font has no Unicode coverage."
+     Unicode text (Latin, accents, common symbols) renders fine; glyphs \
+     the bundled font lacks (e.g. CJK, emoji) are replaced with `?`."
 }
 
 pub fn input_schema() -> Value {
@@ -198,7 +211,6 @@ fn do_create(args: &Value) -> McpCallResult {
         .get("title")
         .and_then(|v| v.as_str())
         .unwrap_or("document");
-    let title = sanitise_text(title_raw);
     let pages: Vec<PageSpec> = match args.get("pages") {
         Some(v) => match serde_json::from_value(v.clone()) {
             Ok(p) => p,
@@ -215,7 +227,7 @@ fn do_create(args: &Value) -> McpCallResult {
             pages.len()
         ));
     }
-    let bytes = match render_document(&title, &pages) {
+    let bytes = match render_document(title_raw, &pages) {
         Ok(b) => b,
         Err(e) => return err(format!("PDF render failed: {e}")),
     };
@@ -285,22 +297,30 @@ fn default_heading_level() -> u8 {
 
 // ---------- rendering ----------
 
-/// Carries the mutable cursor state across blocks. printpdf doesn't have
-/// a concept of "current layer / y position" — the caller threads them.
-struct RenderState<'doc> {
-    doc: &'doc PdfDocumentReference,
-    font: IndirectFontRef,
-    bold: IndirectFontRef,
-    /// Current page's layer reference. Each page gets a fresh layer
-    /// because printpdf scopes drawing calls to a layer handle.
-    layer: PdfLayerReference,
-    /// Y cursor in mm from the bottom of the page (printpdf's origin).
+/// Carries the mutable cursor state across blocks. printpdf 0.9 is
+/// operation-based: a page is a `Vec<Op>`. We accumulate ops for the
+/// current page and flush a `PdfPage` whenever we flow onto a new one.
+struct RenderState<'f> {
+    /// Regular font, kept for glyph-coverage checks in `sanitise`.
+    coverage: &'f ParsedFont,
+    /// Registered font handles for emitting `SetFont` ops.
+    regular: FontId,
+    bold: FontId,
+    /// Pages flushed so far.
+    pages: Vec<PdfPage>,
+    /// Ops accumulating for the page currently being built.
+    ops: Vec<Op>,
+    /// Y cursor in mm from the bottom of the page (PDF origin).
     cursor_y_mm: f32,
 }
 
-impl<'doc> RenderState<'doc> {
-    fn new_page(&mut self, layer: PdfLayerReference) {
-        self.layer = layer;
+impl RenderState<'_> {
+    /// Flush the in-progress page and begin a fresh one with the cursor
+    /// back at the top margin.
+    fn new_page(&mut self) {
+        let ops = std::mem::replace(&mut self.ops, page_init_ops());
+        self.pages
+            .push(PdfPage::new(Mm(PAGE_WIDTH_MM), Mm(PAGE_HEIGHT_MM), ops));
         self.cursor_y_mm = PAGE_HEIGHT_MM - MARGIN_MM;
     }
 
@@ -308,53 +328,118 @@ impl<'doc> RenderState<'doc> {
     /// the bottom margin, flow to a new page.
     fn ensure_room(&mut self, space_mm: f32) {
         if self.cursor_y_mm - space_mm < MARGIN_MM {
-            let (page, layer) = self.doc.add_page(
-                Mm(PAGE_WIDTH_MM),
-                Mm(PAGE_HEIGHT_MM),
-                "Layer 1",
-            );
-            let new_layer = self.doc.get_page(page).get_layer(layer);
-            self.new_page(new_layer);
+            self.new_page();
         }
     }
 
     fn advance(&mut self, dy_mm: f32) {
         self.cursor_y_mm -= dy_mm;
     }
+
+    /// Consume the state, flushing the last in-progress page.
+    fn into_pages(mut self) -> Vec<PdfPage> {
+        self.pages
+            .push(PdfPage::new(Mm(PAGE_WIDTH_MM), Mm(PAGE_HEIGHT_MM), self.ops));
+        self.pages
+    }
+
+    /// Draw one line of text at an absolute mm position. Emits a self-
+    /// contained text section so each call positions independently —
+    /// the op-based equivalent of printpdf 0.7's `layer.use_text`.
+    fn draw_text(&mut self, text: &str, size_pt: f32, x_mm: f32, y_mm: f32, bold: bool) {
+        let font = if bold { self.bold.clone() } else { self.regular.clone() };
+        self.ops.extend([
+            Op::StartTextSection,
+            Op::SetTextCursor {
+                pos: Point::new(Mm(x_mm), Mm(y_mm)),
+            },
+            Op::SetFont {
+                font: PdfFontHandle::External(font),
+                size: Pt(size_pt),
+            },
+            Op::ShowText {
+                items: vec![TextItem::Text(text.to_string())],
+            },
+            Op::EndTextSection,
+        ]);
+    }
+
+    /// Draw a straight stroked line between two mm points.
+    fn draw_line(&mut self, x1: f32, y1: f32, x2: f32, y2: f32) {
+        self.ops.push(Op::DrawLine {
+            line: Line {
+                points: vec![
+                    LinePoint {
+                        p: Point::new(Mm(x1), Mm(y1)),
+                        bezier: false,
+                    },
+                    LinePoint {
+                        p: Point::new(Mm(x2), Mm(y2)),
+                        bezier: false,
+                    },
+                ],
+                is_closed: false,
+            },
+        });
+    }
+}
+
+/// Graphics-state ops applied at the top of every page: black fill (text)
+/// and a thin black stroke (table / rule lines). Reset per page because a
+/// fresh page's op stream starts with default state.
+fn page_init_ops() -> Vec<Op> {
+    vec![
+        Op::SetFillColor { col: black() },
+        Op::SetOutlineColor { col: black() },
+        Op::SetOutlineThickness { pt: Pt(0.5) },
+    ]
+}
+
+fn black() -> Color {
+    Color::Rgb(Rgb {
+        r: 0.0,
+        g: 0.0,
+        b: 0.0,
+        icc_profile: None,
+    })
 }
 
 fn render_document(title: &str, pages: &[PageSpec]) -> Result<Vec<u8>, String> {
-    let (doc, first_page, first_layer) =
-        PdfDocument::new(title, Mm(PAGE_WIDTH_MM), Mm(PAGE_HEIGHT_MM), "Layer 1");
-    let font = doc
-        .add_builtin_font(BuiltinFont::Helvetica)
-        .map_err(|e| format!("Helvetica load failed: {e}"))?;
-    let bold = doc
-        .add_builtin_font(BuiltinFont::HelveticaBold)
-        .map_err(|e| format!("Helvetica-Bold load failed: {e}"))?;
+    let mut doc = PdfDocument::new(title);
+    let regular = ParsedFont::from_bytes(FONT_REGULAR, 0, &mut Vec::new())
+        .ok_or("bundled regular font failed to parse")?;
+    let bold = ParsedFont::from_bytes(FONT_BOLD, 0, &mut Vec::new())
+        .ok_or("bundled bold font failed to parse")?;
+    let regular_id = doc.add_font(&regular);
+    let bold_id = doc.add_font(&bold);
+
     let mut state = RenderState {
-        doc: &doc,
-        font,
-        bold,
-        layer: doc.get_page(first_page).get_layer(first_layer),
+        coverage: &regular,
+        regular: regular_id,
+        bold: bold_id,
+        pages: Vec::new(),
+        ops: page_init_ops(),
         cursor_y_mm: PAGE_HEIGHT_MM - MARGIN_MM,
     };
 
     for (page_idx, page) in pages.iter().enumerate() {
-        // Spec'd page boundaries always force a new physical page after
-        // the first — the first page already exists from `PdfDocument::new`.
+        // Each spec page starts a fresh physical page; the first is already
+        // in progress from initialisation. `ensure_room` may also flow onto
+        // further pages mid-block.
         if page_idx > 0 {
-            let (p, l) = doc.add_page(Mm(PAGE_WIDTH_MM), Mm(PAGE_HEIGHT_MM), "Layer 1");
-            let new_layer = doc.get_page(p).get_layer(l);
-            state.new_page(new_layer);
+            state.new_page();
         }
         for block in &page.blocks {
             render_block(&mut state, block)?;
         }
     }
 
-    doc.save_to_bytes()
-        .map_err(|e| format!("save_to_bytes failed: {e}"))
+    let rendered_pages = state.into_pages();
+    // printpdf 0.9 embeds whole fonts (its runtime subsetting is disabled),
+    // so we keep PDFs small by pre-subsetting the bundled fonts instead —
+    // `PdfSaveOptions::subset_fonts` would be a no-op here.
+    let opts = PdfSaveOptions::default();
+    Ok(doc.with_pages(rendered_pages).save(&opts, &mut Vec::new()))
 }
 
 fn render_block(state: &mut RenderState, block: &Block) -> Result<(), String> {
@@ -365,11 +450,7 @@ fn render_block(state: &mut RenderState, block: &Block) -> Result<(), String> {
         Block::NumberedList { items } => render_list(state, items, ListStyle::Numbered),
         Block::HorizontalRule => render_hr(state),
         Block::PageBreak => {
-            let (p, l) = state
-                .doc
-                .add_page(Mm(PAGE_WIDTH_MM), Mm(PAGE_HEIGHT_MM), "Layer 1");
-            let new_layer = state.doc.get_page(p).get_layer(l);
-            state.new_page(new_layer);
+            state.new_page();
             Ok(())
         }
         Block::Table { headers, rows } => render_table(state, headers, rows),
@@ -394,34 +475,24 @@ fn render_heading(state: &mut RenderState, level: u8, text: &str) -> Result<(), 
     state.advance(top_pad_mm);
     // Headings are proportionally wider than body text, so scale the
     // per-char width estimate by the font-size ratio before wrapping —
-    // otherwise a long heading runs off the right margin (`wrap_text`
-    // already sanitises each line).
+    // otherwise a long heading runs off the right margin.
     let char_width_mm = BODY_CHAR_WIDTH_MM * size_pt / BODY_FONT_SIZE_PT;
-    for line in wrap_text(text, body_width_mm(), char_width_mm) {
+    let cleaned = sanitise(text, state.coverage);
+    for line in wrap_text(&cleaned, body_width_mm(), char_width_mm) {
         state.ensure_room(line_mm);
-        state.layer.use_text(
-            line,
-            size_pt,
-            Mm(MARGIN_MM),
-            Mm(state.cursor_y_mm - pt_to_mm(size_pt)),
-            &state.bold,
-        );
+        let y = state.cursor_y_mm - pt_to_mm(size_pt);
+        state.draw_text(&line, size_pt, MARGIN_MM, y, true);
         state.advance(line_mm);
     }
     Ok(())
 }
 
 fn render_paragraph(state: &mut RenderState, text: &str) -> Result<(), String> {
-    let lines = wrap_text(text, body_width_mm(), BODY_CHAR_WIDTH_MM);
-    for line in lines {
+    let cleaned = sanitise(text, state.coverage);
+    for line in wrap_text(&cleaned, body_width_mm(), BODY_CHAR_WIDTH_MM) {
         state.ensure_room(BODY_LINE_HEIGHT_MM);
-        state.layer.use_text(
-            line,
-            BODY_FONT_SIZE_PT,
-            Mm(MARGIN_MM),
-            Mm(state.cursor_y_mm - pt_to_mm(BODY_FONT_SIZE_PT)),
-            &state.font,
-        );
+        let y = state.cursor_y_mm - pt_to_mm(BODY_FONT_SIZE_PT);
+        state.draw_text(&line, BODY_FONT_SIZE_PT, MARGIN_MM, y, false);
         state.advance(BODY_LINE_HEIGHT_MM);
     }
     // Trailing blank to separate from the next block.
@@ -447,32 +518,21 @@ fn render_list(
         let marker = match style {
             ListStyle::Bullet => "•".to_string(),
             // Numbers wrap monotonically; we don't try to detect nested
-            // ordering. ASCII-only constraint means we always use `1.`
-            // style rather than `①` or similar.
+            // ordering, so always the flat `1.` style.
             ListStyle::Numbered => format!("{}.", i + 1),
         };
-        let marker = sanitise_text(&marker);
-        let lines = wrap_text(item, wrap_width_mm, BODY_CHAR_WIDTH_MM);
+        let marker = sanitise(&marker, state.coverage);
+        let cleaned = sanitise(item, state.coverage);
+        let lines = wrap_text(&cleaned, wrap_width_mm, BODY_CHAR_WIDTH_MM);
         for (line_idx, line) in lines.iter().enumerate() {
             state.ensure_room(BODY_LINE_HEIGHT_MM);
+            let y = state.cursor_y_mm - pt_to_mm(BODY_FONT_SIZE_PT);
             // Marker only on the first wrapped line; continuation lines
             // align under the text column.
             if line_idx == 0 {
-                state.layer.use_text(
-                    &marker,
-                    BODY_FONT_SIZE_PT,
-                    Mm(bullet_col_mm),
-                    Mm(state.cursor_y_mm - pt_to_mm(BODY_FONT_SIZE_PT)),
-                    &state.font,
-                );
+                state.draw_text(&marker, BODY_FONT_SIZE_PT, bullet_col_mm, y, false);
             }
-            state.layer.use_text(
-                line,
-                BODY_FONT_SIZE_PT,
-                Mm(text_col_mm),
-                Mm(state.cursor_y_mm - pt_to_mm(BODY_FONT_SIZE_PT)),
-                &state.font,
-            );
+            state.draw_text(line, BODY_FONT_SIZE_PT, text_col_mm, y, false);
             state.advance(BODY_LINE_HEIGHT_MM);
         }
     }
@@ -481,19 +541,11 @@ fn render_list(
 }
 
 fn render_hr(state: &mut RenderState) -> Result<(), String> {
-    use printpdf::{Line, Point};
     let pad_mm = BODY_LINE_HEIGHT_MM * 0.5;
     state.advance(pad_mm);
     state.ensure_room(0.5);
-    let y_mm = state.cursor_y_mm;
-    let line = Line {
-        points: vec![
-            (Point::new(Mm(MARGIN_MM), Mm(y_mm)), false),
-            (Point::new(Mm(PAGE_WIDTH_MM - MARGIN_MM), Mm(y_mm)), false),
-        ],
-        is_closed: false,
-    };
-    state.layer.add_line(line);
+    let y = state.cursor_y_mm;
+    state.draw_line(MARGIN_MM, y, PAGE_WIDTH_MM - MARGIN_MM, y);
     state.advance(pad_mm);
     Ok(())
 }
@@ -547,77 +599,59 @@ fn render_table_row(
     row_height_mm: f32,
     bold: bool,
 ) {
-    use printpdf::{Line, Point};
     let top_y = state.cursor_y_mm;
     let bottom_y = top_y - row_height_mm;
     // Horizontal border lines (top + bottom of this row).
     for y in [top_y, bottom_y] {
-        let line = Line {
-            points: vec![
-                (Point::new(Mm(MARGIN_MM), Mm(y)), false),
-                (Point::new(Mm(PAGE_WIDTH_MM - MARGIN_MM), Mm(y)), false),
-            ],
-            is_closed: false,
-        };
-        state.layer.add_line(line);
+        state.draw_line(MARGIN_MM, y, PAGE_WIDTH_MM - MARGIN_MM, y);
     }
-    // Cell text + vertical borders.
+    // Cell text + left vertical border per column.
     for col in 0..cols {
         let x = MARGIN_MM + col as f32 * col_width_mm;
-        // Vertical border at the left of each column.
-        let line = Line {
-            points: vec![
-                (Point::new(Mm(x), Mm(top_y)), false),
-                (Point::new(Mm(x), Mm(bottom_y)), false),
-            ],
-            is_closed: false,
-        };
-        state.layer.add_line(line);
+        state.draw_line(x, top_y, x, bottom_y);
         // Cell text — truncated to col width (no wrap inside cells).
         let raw = cells.get(col).map(String::as_str).unwrap_or("");
         let max_chars = ((col_width_mm - cell_pad_mm * 2.0_f32) / BODY_CHAR_WIDTH_MM).floor() as usize;
-        let text = truncate_to_chars(&sanitise_text(raw), max_chars);
+        let text = truncate_to_chars(&sanitise(raw, state.coverage), max_chars);
         let text_y = top_y - cell_pad_mm - pt_to_mm(BODY_FONT_SIZE_PT);
-        let font = if bold { &state.bold } else { &state.font };
-        state
-            .layer
-            .use_text(text, BODY_FONT_SIZE_PT, Mm(x + cell_pad_mm), Mm(text_y), font);
+        state.draw_text(&text, BODY_FONT_SIZE_PT, x + cell_pad_mm, text_y, bold);
     }
     // Right border of the rightmost column.
     let right_x = PAGE_WIDTH_MM - MARGIN_MM;
-    let line = Line {
-        points: vec![
-            (Point::new(Mm(right_x), Mm(top_y)), false),
-            (Point::new(Mm(right_x), Mm(bottom_y)), false),
-        ],
-        is_closed: false,
-    };
-    state.layer.add_line(line);
+    state.draw_line(right_x, top_y, right_x, bottom_y);
     state.advance(row_height_mm);
 }
 
 // ---------- helpers ----------
 
-/// Replace non-ASCII characters with `?` so printpdf's built-in fonts
-/// (which have no Unicode glyphs) emit a valid PDF. The model is told
-/// about this limitation in the tool description.
-fn sanitise_text(s: &str) -> String {
+/// Replace characters the bundled font can't render with `?`. ASCII is
+/// always kept (the font covers it, and `\n` drives `wrap_text`); other
+/// characters are kept when the font has a glyph for them (Latin/European
+/// accents, common symbols, bullets) and dropped to `?` only when it does
+/// not (e.g. CJK, emoji) so output stays legible instead of showing blank
+/// `.notdef` boxes.
+fn sanitise(s: &str, font: &ParsedFont) -> String {
     s.chars()
-        .map(|c| if c.is_ascii() { c } else { '?' })
+        .map(|c| {
+            if c.is_ascii() || font.lookup_glyph_index(c as u32).map_or(false, |g| g != 0) {
+                c
+            } else {
+                '?'
+            }
+        })
         .collect()
 }
 
-/// Greedy word wrap based on a fixed per-character width estimate. Real
-/// Helvetica is proportional, so this is conservative — lines will
-/// under-fill rather than overflow.
+/// Greedy word wrap based on a fixed per-character width estimate. The
+/// bundled font is proportional, so this is conservative — lines will
+/// under-fill rather than overflow. Input is assumed already sanitised.
 fn wrap_text(text: &str, width_mm: f32, char_width_mm: f32) -> Vec<String> {
-    let cleaned = sanitise_text(text);
     let max_chars = (width_mm / char_width_mm).floor() as usize;
     if max_chars == 0 {
-        return vec![cleaned];
+        return vec![text.to_string()];
     }
     let mut out: Vec<String> = Vec::new();
-    for paragraph in cleaned.split('\n') {
+    for paragraph in text.split('\n') {
         let mut current = String::new();
         for word in paragraph.split_whitespace() {
             if current.is_empty() {
@@ -677,8 +711,8 @@ fn truncate_to_chars(s: &str, max: usize) -> String {
     if max <= 1 {
         return s.chars().take(max).collect();
     }
-    // Take max - 1 chars and append `…` ... wait, that's non-ASCII.
-    // Use `~` as the ellipsis hint since we're ASCII-only.
+    // Append `~` as the clipped-cell hint — kept as plain ASCII so the
+    // marker width stays predictable (a real `…` would render fine now too).
     let mut out: String = s.chars().take(max - 1).collect();
     out.push('~');
     out
@@ -839,10 +873,37 @@ mod tests {
     }
 
     #[test]
-    fn sanitise_replaces_non_ascii() {
-        // `d` is ASCII and survives; the three Polish glyphs become `?`.
-        assert_eq!(sanitise_text("Łódź"), "??d?");
-        assert_eq!(sanitise_text("plain ascii"), "plain ascii");
+    fn sanitise_keeps_covered_glyphs_and_replaces_unsupported() {
+        let font = printpdf::ParsedFont::from_bytes(FONT_REGULAR, 0, &mut Vec::new())
+            .expect("bundled regular font parses");
+        // Polish accents and the euro sign are covered by Liberation Sans
+        // → preserved (the old ASCII-only build turned these into `?`).
+        assert_eq!(sanitise("Łódź €", &font), "Łódź €");
+        // Plain ASCII is untouched.
+        assert_eq!(sanitise("plain ascii", &font), "plain ascii");
+        // A glyph the font lacks (CJK) still falls back to `?`.
+        assert_eq!(sanitise("A中B", &font), "A?B");
+    }
+
+    #[test]
+    fn create_renders_unicode_text() {
+        // Full path with non-ASCII headings, paragraph, and list items —
+        // must produce a valid PDF, not error or mangle to `?`.
+        let r = dispatch(&json!({
+            "action": "create",
+            "title": "Zażółć gęślą jaźń",
+            "pages": [{ "blocks": [
+                { "type": "heading", "level": 1, "text": "Zażółć gęślą jaźń" },
+                { "type": "paragraph", "text": "Cena: 100 € — naprawdę." },
+                { "type": "bullet_list", "items": ["Ćma", "Łódź", "Źdźbło"] }
+            ]}]
+        }));
+        assert!(!r.is_error, "{}", r.content_text);
+        let raw = r.attachments[0].bytes.as_deref().expect("bytes field present");
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(raw)
+            .expect("attachment bytes is base64");
+        assert!(decoded.starts_with(b"%PDF-"), "expected a valid PDF");
     }
 
     #[test]
