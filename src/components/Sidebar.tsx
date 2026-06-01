@@ -541,7 +541,7 @@ function SessionRow({
             </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem onSelect={() => void archiveChat(session.id, true)}>
-              <Archive className="h-4 w-4" /> Move to Archive
+              <Archive className="h-4 w-4" /> Move to archive
             </DropdownMenuItem>
             <DropdownMenuItem
               onSelect={() =>

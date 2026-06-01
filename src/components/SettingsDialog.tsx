@@ -1046,9 +1046,12 @@ export function SettingsDialog() {
                         bullet / numbered lists, horizontal rules, page
                         breaks, and simple tables. The result attaches to
                         the assistant message and opens in the built-in
-                        viewer. ASCII-only in this build (Helvetica base
-                        font); image blocks and merging existing PDFs
-                        aren't supported yet. In-process.
+                        viewer. Renders Unicode text (Latin, European
+                        accents, common punctuation and currency) via a
+                        bundled font; characters outside that set (e.g.
+                        CJK, emoji) become <span className="font-mono">?</span>.
+                        Image blocks and merging existing PDFs aren't
+                        supported yet. In-process.
                       </p>
                     </div>
                     <Switch
@@ -1914,7 +1917,7 @@ function ArchivePanel({ onOpenChat }: { onOpenChat: () => void }) {
         </div>
         <h2 className="mt-3 text-sm font-medium">Nothing archived</h2>
         <p className="mt-1 max-w-md text-[12px] text-foreground/55">
-          Right-click a chat in the sidebar and choose <em>Move to Archive</em>{" "}
+          Right-click a chat in the sidebar and choose <em>Move to archive</em>{" "}
           to stash it here without losing the history.
         </p>
       </div>
@@ -2313,7 +2316,7 @@ function DataPanel({ onCloseDialog: _onCloseDialog }: { onCloseDialog: () => voi
             </h4>
             <p className="mt-1 text-[12px] leading-relaxed text-foreground/60">
               Permanently delete your data, or factory-reset the app to its
-              default state. This operation can not be undone. Consider
+              default state. This operation cannot be undone. Consider
               performing an export first.
             </p>
           </div>
