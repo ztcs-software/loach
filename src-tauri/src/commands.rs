@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
 
 use crate::db::{
@@ -1928,105 +1928,6 @@ pub async fn factory_reset(
         tracing::warn!("security::clear during factory_reset failed: {e:?}");
     }
     Ok(())
-}
-
-// ---------- code canvas pop-out window ----------
-//
-// "Open in window" on the code canvas spawns a separate OS window that reuses
-// the same frontend bundle (main.tsx routes to the standalone viewer when the
-// window label starts with `code-`). It carries the app's own custom chrome
-// (decorations off + a draggable title bar in `CodeWindow.tsx`), matching the
-// main window. The initial
-// snapshot is too large to pass safely through a URL, so we stash it here keyed
-// by the new window's label and the viewer pulls it once on load. Live updates
-// while a block is still streaming arrive separately, as `code-window:update`
-// events the main window emits.
-
-#[derive(serde::Serialize, serde::Deserialize, Clone)]
-pub struct CodeWindowPayload {
-    pub code: String,
-    pub language: Option<String>,
-    pub title: Option<String>,
-    pub dark: bool,
-}
-
-#[tauri::command]
-pub fn open_code_window(
-    app: AppHandle,
-    state: State<AppState>,
-    payload: CodeWindowPayload,
-) -> Result<String, String> {
-    use tauri::{WebviewUrl, WebviewWindowBuilder};
-
-    // Unique label; the `code-` prefix is what main.tsx keys the standalone
-    // viewer on, and what the streaming bridge addresses with `emitTo`.
-    let label = format!("code-{}", Uuid::new_v4());
-    let win_title = payload.title.clone().unwrap_or_else(|| "Code".to_string());
-    state
-        .code_windows
-        .lock()
-        .insert(label.clone(), payload);
-
-    let window = WebviewWindowBuilder::new(&app, &label, WebviewUrl::App("index.html".into()))
-        .title(win_title)
-        .inner_size(820.0, 620.0)
-        .min_inner_size(360.0, 240.0)
-        .resizable(true)
-        // Custom chrome to match the main window — the title bar lives in
-        // `CodeWindow.tsx` (drag region + minimize/maximize/close).
-        .decorations(false)
-        .center()
-        .build()
-        .map_err(|e| {
-            // Don't leak the stashed payload if the window failed to open.
-            state.code_windows.lock().remove(&label);
-            err(e)
-        })?;
-
-    // Authoritative cleanup, keyed off the real OS window-destroyed event
-    // rather than the renderer's best-effort `beforeunload`. This fires on
-    // EVERY close path — X button, Ctrl-W, OS kill, WebView crash, or a close
-    // that races the viewer's load effect before its JS listener attaches —
-    // so the stashed snapshot (which holds the full code string) can't leak
-    // for the rest of the process. We also re-emit `code-window:closed` so
-    // the main-window `CodeWindowBridge` prunes its streaming registry (and
-    // stops doing per-token extraction + `emitTo` against a dead window) even
-    // when the JS path never ran. Both paths converge on
-    // `drop_code_window_payload` / `unregister`, which are idempotent, so the
-    // surviving JS `beforeunload` emit is just a redundant fast-path.
-    let cleanup_app = app.clone();
-    let cleanup_label = label.clone();
-    window.on_window_event(move |event| {
-        if matches!(event, tauri::WindowEvent::Destroyed) {
-            if let Some(state) = cleanup_app.try_state::<AppState>() {
-                state.code_windows.lock().remove(&cleanup_label);
-            }
-            let _ = cleanup_app.emit(
-                "code-window:closed",
-                serde_json::json!({ "label": cleanup_label }),
-            );
-        }
-    });
-
-    Ok(label)
-}
-
-#[tauri::command]
-pub fn get_code_window_payload(
-    state: State<AppState>,
-    label: String,
-) -> Option<CodeWindowPayload> {
-    // Clone rather than remove: the viewer's load effect can run more than
-    // once (React StrictMode in dev, HMR, a window reload), and a consuming
-    // read would hand the second call `None` → a blank window. Snapshots are
-    // small; the leftover entry is dropped when the window closes (see
-    // `drop_code_window_payload`, called from the `code-window:closed` path).
-    state.code_windows.lock().get(&label).cloned()
-}
-
-#[tauri::command]
-pub fn drop_code_window_payload(state: State<AppState>, label: String) {
-    state.code_windows.lock().remove(&label);
 }
 
 // ---------- updater support ----------

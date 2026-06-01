@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Check, Copy, Download, ExternalLink, X } from "lucide-react";
+import { Check, Copy, Download, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { CodeView } from "./CodeView";
 import {
@@ -7,11 +7,9 @@ import {
   clampCanvasWidth,
   CANVAS_MIN_WIDTH,
 } from "@/stores/canvasStore";
-import { useCodeWindowStore } from "@/stores/codeWindowStore";
 import { useChatStore } from "@/stores/chatStore";
 import { lastCodeBlock } from "@/lib/codeBlocks";
 import { preprocessTex } from "./Markdown";
-import { openCodeWindow } from "@/lib/tauri";
 import { saveCodeToFile, defaultFilename } from "@/lib/codeExport";
 import { cn } from "@/lib/utils";
 
@@ -19,12 +17,11 @@ import { cn } from "@/lib/utils";
  * Right-side code canvas — opens via "Open in canvas" on any inline
  * `CodeBlock`, or from an attachment chip.
  *
- * Three behaviours layered on the original read-only viewer:
+ * Two behaviours layered on the original read-only viewer:
  *  - horizontally resizable via a left-edge drag handle (width persisted in
  *    `canvasStore`);
  *  - live: when opened on a still-streaming code block it mirrors that block
- *    as it generates, by re-deriving from the bound message in `chatStore`;
- *  - poppable into a separate native OS window ("Open in window").
+ *    as it generates, by re-deriving from the bound message in `chatStore`.
  *
  * Mutually exclusive with `ParameterPanel` (App.tsx swaps which one renders
  * in the right slot).
@@ -101,20 +98,6 @@ export function CodeCanvas() {
     );
   };
 
-  const onOpenWindow = async () => {
-    const label = await openCodeWindow({
-      code: displayCode,
-      language: displayLanguage,
-      title: heading,
-      dark: document.documentElement.classList.contains("dark"),
-    });
-    // Register so the bridge streams updates when bound; static pop-outs pass
-    // a null binding and simply show their snapshot.
-    if (label) {
-      useCodeWindowStore.getState().register(label, binding, displayCode);
-    }
-  };
-
   const onResizeStart = (e: React.PointerEvent<HTMLDivElement>) => {
     e.preventDefault();
     const startX = e.clientX;
@@ -184,15 +167,6 @@ export function CodeCanvas() {
           </span>
         </div>
         <div className="flex shrink-0 items-center gap-1">
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => void onOpenWindow()}
-            className="h-7 gap-1 rounded-md px-2 text-[11px] text-foreground/65 hover:bg-foreground/10 hover:text-foreground"
-            title="Open in a separate window"
-          >
-            <ExternalLink className="h-3.5 w-3.5" /> Window
-          </Button>
           <Button
             variant="ghost"
             size="sm"

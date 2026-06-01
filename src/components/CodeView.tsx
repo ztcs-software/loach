@@ -6,8 +6,7 @@ import hljs from "highlight.js/lib/common";
  * the highlighted source, with both axes of scrolling owned by the outer
  * container so the horizontal scrollbar lands at the bottom of the viewport.
  *
- * Used by both the in-app `CodeCanvas` and the popped-out `CodeWindow` so the
- * two surfaces render identically. Parents own their own header chrome.
+ * Used by the in-app `CodeCanvas`. Parents own their own header chrome.
  */
 export function CodeView({
   code,

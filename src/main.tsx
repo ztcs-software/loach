@@ -1,24 +1,8 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import App from "./App";
-import { CodeWindow } from "./components/CodeWindow";
 import { ErrorBoundary } from "./components/ErrorBoundary";
-import { isTauri } from "./lib/tauri";
 import "./styles/globals.css";
-
-// Pop-out code windows reuse this same bundle. They're identified by a
-// `code-*` window label (assigned by the `open_code_window` Rust command), so
-// we render the lightweight standalone viewer instead of the whole app — no
-// sidebar, no chat hydrate, no stores beyond what the viewer needs.
-const isCodeWindow = (() => {
-  if (!isTauri) return false;
-  try {
-    return getCurrentWindow().label.startsWith("code-");
-  } catch {
-    return false;
-  }
-})();
 
 // Suppress the WebView's native context menu globally, EXCEPT inside form
 // fields where right-click → Cut/Copy/Paste is genuinely useful and the
@@ -74,7 +58,7 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
         mount — e.g., a crash in a top-level provider, store hydrate, etc.).
         `scope="app"` means the only escape is a full Reload Loach button. */}
     <ErrorBoundary name="Loach" scope="app">
-      {isCodeWindow ? <CodeWindow /> : <App />}
+      <App />
     </ErrorBoundary>
   </React.StrictMode>,
 );

@@ -48,11 +48,6 @@ pub struct AppState {
     pub db: Arc<Database>,
     pub http: reqwest::Client,
     pub streams: StreamRegistry,
-    /// Initial snapshots for popped-out code canvas windows, keyed by the
-    /// new window's label. Each entry is consumed once by the standalone
-    /// viewer's load-time `get_code_window_payload` call.
-    pub code_windows:
-        parking_lot::Mutex<std::collections::HashMap<String, crate::commands::CodeWindowPayload>>,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -169,7 +164,6 @@ pub fn run() {
                 db,
                 http,
                 streams: StreamRegistry::new(),
-                code_windows: parking_lot::Mutex::new(std::collections::HashMap::new()),
             };
             app.manage(state);
 
@@ -321,9 +315,6 @@ pub fn run() {
             commands::wipe_user_data,
             commands::factory_reset,
             commands::updater_supported,
-            commands::open_code_window,
-            commands::get_code_window_payload,
-            commands::drop_code_window_payload,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Loach");

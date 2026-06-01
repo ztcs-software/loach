@@ -21,7 +21,6 @@ import { ModelsLibrary } from "@/components/ModelsLibrary";
 import { LockScreen } from "@/components/LockScreen";
 import { Onboarding } from "@/components/Onboarding";
 import { CodeCanvas } from "@/components/CodeCanvas";
-import { CodeWindowBridge } from "@/components/CodeWindowBridge";
 import { SearchBar } from "@/components/SearchBar";
 import { PrivateChat } from "@/components/PrivateChat";
 import { KeyboardShortcuts } from "@/components/KeyboardShortcuts";
@@ -281,10 +280,6 @@ export default function App() {
         <ErrorBoundary name="Snippet variable fill">
           <SnippetVariableFillDialog />
         </ErrorBoundary>
-        {/* Invisible: streams live code into popped-out code windows and
-            prunes them on close. Mounted unconditionally so a pop-out keeps
-            updating even after the in-app canvas is closed. */}
-        <CodeWindowBridge />
         {showOnboarding && (
           <ErrorBoundary name="Onboarding">
             <Onboarding />
