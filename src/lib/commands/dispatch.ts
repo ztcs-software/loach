@@ -10,7 +10,7 @@ import { DEFAULT_PERSONA_ID, PERSONAS } from "@/lib/personas";
 import { expandAndPrimeSnippet } from "@/lib/runSnippet";
 import { stripSummaryBlock } from "@/lib/contextUsage";
 import {
-  deleteMessage,
+  clearSessionMessages,
   fetchUrl,
   mcpTest,
 } from "@/lib/tauri";
@@ -202,9 +202,7 @@ async function runClear(deps: CommandDeps): Promise<CommandResult> {
     destructive: true,
   });
   if (!approved) return { kind: "noop" };
-  for (const m of messages) {
-    await deleteMessage(m.id, session.id);
-  }
+  await clearSessionMessages(session.id);
   useChatStore.setState((s) => ({
     messages: { ...s.messages, [session.id]: [] },
     streamingByMessage: Object.fromEntries(

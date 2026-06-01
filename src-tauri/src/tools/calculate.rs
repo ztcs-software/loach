@@ -124,11 +124,14 @@ fn format_result(value: f64) -> String {
     // is still well beyond what the user can verify by hand.
     let s = format!("{value:.12}");
     let trimmed = s.trim_end_matches('0').trim_end_matches('.');
-    if trimmed.is_empty() || trimmed == "-" {
-        "0".to_string()
-    } else {
-        trimmed.to_string()
+    // `value` is non-zero here (an exact zero takes the integer branch
+    // above), but a tiny magnitude can still round away to "0" / "-0" at
+    // 12 decimals. Surface those in scientific notation so a real result
+    // like 1.2e-15 isn't reported as a flat "0".
+    if trimmed.is_empty() || trimmed == "-" || trimmed == "0" || trimmed == "-0" {
+        return format!("{value:e}");
     }
+    trimmed.to_string()
 }
 
 #[cfg(test)]
@@ -217,5 +220,20 @@ mod tests {
         // sqrt of negative is NaN in f64; surface it with context.
         assert!(!r.is_error);
         assert!(r.content_text.contains("NaN"), "got: {}", r.content_text);
+    }
+
+    #[test]
+    fn tiny_values_use_scientific_notation() {
+        // A magnitude far below the 12-decimal threshold must not collapse
+        // to a flat "0" — that would silently lose a real result.
+        let s = format_result(1.2e-15);
+        assert!(s.contains('e'), "expected scientific notation, got: {s}");
+        assert_ne!(s, "0");
+        // The negative tiny case is covered too (used to render "-0").
+        assert!(format_result(-1.2e-15).contains('e'));
+        // Exact zero still renders as a plain integer 0.
+        assert_eq!(format_result(0.0), "0");
+        // Ordinary fractions are untouched by the new branch.
+        assert!(format_result(1.0 / 3.0).starts_with("0.3333"));
     }
 }

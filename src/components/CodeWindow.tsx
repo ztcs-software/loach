@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Check, Copy, Download } from "lucide-react";
+import { Check, Copy, Download, X } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen, emit } from "@tauri-apps/api/event";
 import { CodeView } from "./CodeView";
@@ -96,6 +96,10 @@ export function CodeWindow() {
     void saveCodeToFile(code, language, defaultFilename(language));
   };
 
+  const onClose = () => {
+    void getCurrentWindow().close();
+  };
+
   return (
     <div
       className={cn(
@@ -136,6 +140,14 @@ export function CodeWindow() {
             className="inline-flex h-7 items-center gap-1 rounded-md px-2 text-[11px] text-foreground/65 transition-colors hover:bg-foreground/10 hover:text-foreground"
           >
             <Download className="h-3.5 w-3.5" /> Export
+          </button>
+          <button
+            type="button"
+            onClick={onClose}
+            title="Close window"
+            className="ml-1 inline-flex h-7 w-7 items-center justify-center rounded-md text-foreground/65 transition-colors hover:bg-foreground/10 hover:text-foreground"
+          >
+            <X className="h-3.5 w-3.5" />
           </button>
         </div>
       </header>

@@ -133,7 +133,7 @@ pub struct McpToolDef {
 /// alongside their textual result (e.g. the `pdf` tool returns a PDF the
 /// user can preview / save); these flow through the chat-stream layer
 /// onto the assistant message rather than into the model's tool-result
-/// context (the model is text-only). MCP servers don't currently produce
+/// context (the model is text-only). MCP servers can also produce image
 /// attachments — see the `attachments` field on [`McpCallResult`].
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Attachment {
@@ -161,9 +161,10 @@ pub struct Attachment {
 /// failure isn't a transport failure — the model is supposed to see the
 /// error message and react.
 ///
-/// `attachments` carries any files the tool produced (today only built-in
-/// tools fill this — `pdf::create` / `pdf::merge`). They're forwarded to
-/// the frontend on the `tool_result` stream event and end up attached to
+/// `attachments` carries any files the tool produced — the built-in
+/// `pdf::create` tool's PDF, or image content returned by an MCP server.
+/// They're forwarded to the frontend on the `tool_result` stream event
+/// and end up attached to
 /// the assistant message; they do **not** get fed back to the model as
 /// part of the tool-result text (the model can't read PDFs anyway).
 #[derive(Debug, Clone, Serialize, Default)]
@@ -189,10 +190,8 @@ pub enum CallToolContent {
         text: String,
     },
     Image {
-        #[allow(dead_code)]
         data: String,
         #[serde(default, rename = "mimeType")]
-        #[allow(dead_code)]
         mime_type: Option<String>,
     },
     Resource {

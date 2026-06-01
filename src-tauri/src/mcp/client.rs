@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use crate::db::McpServer;
 
 use super::types::{
-    CallToolContent, CallToolResult, InitializeResult, JsonRpcError, JsonRpcResponse,
+    Attachment, CallToolContent, CallToolResult, InitializeResult, JsonRpcError, JsonRpcResponse,
     ListToolsResult, McpCallResult, McpTestResult, McpTool, McpToolRaw, PROTOCOL_VERSION,
 };
 
@@ -213,65 +213,102 @@ impl McpSession {
             self.session_id = Some(s);
         }
         let parsed: CallToolResult = unwrap_response(resp)?;
-        // Build the result text with a running cap. `append_capped` short-
-        // circuits once we've crossed `MAX_TOOL_RESULT_TEXT_BYTES`, so
-        // even a megabyte-of-text content array won't force us to allocate
-        // the full string before the provider's narrower cap runs.
-        let mut text = String::new();
-        let mut truncated = false;
-        for piece in parsed.content {
-            match piece {
-                CallToolContent::Text { text: t } => {
-                    truncated |= append_capped(&mut text, &t);
-                }
-                CallToolContent::Image { .. } => {
-                    truncated |= append_capped(&mut text, "[image content omitted]");
-                }
-                CallToolContent::Resource { resource } => {
-                    if let Some(r) = resource {
-                        // Cap the per-resource stringification too — a single
-                        // huge nested object can otherwise dominate the
-                        // result and crowd out the actual tool output.
-                        let s = r.to_string();
-                        let capped = clip_on_char_boundary(&s, MAX_RESOURCE_STRINGIFIED_BYTES);
-                        truncated |= append_capped(&mut text, capped);
-                        if capped.len() < s.len() {
-                            truncated |= append_capped(&mut text, "[…resource truncated]");
-                        }
-                    } else {
-                        truncated |= append_capped(&mut text, "[resource]");
+        // Fold the content array (text, images, resources) into the
+        // flattened result. Extracted as a pure function so the mapping —
+        // notably image → attachment — is unit-testable without a live
+        // server.
+        Ok(assemble_call_result(parsed.content, parsed.is_error))
+    }
+}
+
+/// Fold a tool's content array into the result we hand the provider layer:
+/// text pieces concatenated under a running byte cap, `Image` content
+/// surfaced as image attachments (the frontend renders them inline rather
+/// than dropping them to a placeholder), and resources stringified with a
+/// per-item cap. Pure and allocation-bounded so it's unit-testable without
+/// a live server.
+fn assemble_call_result(content: Vec<CallToolContent>, is_error: bool) -> McpCallResult {
+    let mut text = String::new();
+    let mut attachments: Vec<Attachment> = Vec::new();
+    let mut truncated = false;
+    for piece in content {
+        match piece {
+            CallToolContent::Text { text: t } => {
+                truncated |= append_capped(&mut text, &t);
+            }
+            CallToolContent::Image { data, mime_type } => {
+                // Surface the image as an attachment so the frontend can
+                // render it. The model is text-only, so it still gets a
+                // short breadcrumb in the result text.
+                let mime = mime_type.unwrap_or_else(|| "image/png".to_string());
+                let name = image_attachment_name(&mime, attachments.len());
+                attachments.push(Attachment {
+                    kind: "image".to_string(),
+                    name,
+                    mime,
+                    data,
+                    ..Default::default()
+                });
+                truncated |= append_capped(&mut text, "[image attached]");
+            }
+            CallToolContent::Resource { resource } => {
+                if let Some(r) = resource {
+                    // Cap the per-resource stringification too — a single
+                    // huge nested object can otherwise dominate the
+                    // result and crowd out the actual tool output.
+                    let s = r.to_string();
+                    let capped = clip_on_char_boundary(&s, MAX_RESOURCE_STRINGIFIED_BYTES);
+                    truncated |= append_capped(&mut text, capped);
+                    if capped.len() < s.len() {
+                        truncated |= append_capped(&mut text, "[…resource truncated]");
                     }
-                }
-                CallToolContent::Unknown => {
-                    // Drop unknown variants rather than fabricate text —
-                    // the model can still react to the rest of the
-                    // content array.
+                } else {
+                    truncated |= append_capped(&mut text, "[resource]");
                 }
             }
-            if truncated {
-                // Stop walking the content array once we've crossed the cap;
-                // the provider sees more than enough already.
-                break;
+            CallToolContent::Unknown => {
+                // Drop unknown variants rather than fabricate text —
+                // the model can still react to the rest of the
+                // content array.
             }
         }
         if truncated {
-            // Append the truncation notice unconditionally — `append_capped`
-            // would otherwise consume it as part of the budget and the
-            // marker would never appear in the output. A ~100-byte
-            // overage on a 256 KiB cap is fine; the provider-layer
-            // re-cap (32 KiB) is the one that actually bounds what
-            // reaches the model anyway.
-            text.push_str("\n\n[…tool result truncated by Loach; ask the tool again with narrower arguments]");
+            // Stop walking the content array once we've crossed the cap;
+            // the provider sees more than enough already.
+            break;
         }
-        if text.is_empty() && parsed.is_error {
-            text.push_str("tool returned no content");
-        }
-        Ok(McpCallResult {
-            content_text: text,
-            is_error: parsed.is_error,
-            ..Default::default()
-        })
     }
+    if truncated {
+        // Append the truncation notice unconditionally — `append_capped`
+        // would otherwise consume it as part of the budget and the
+        // marker would never appear in the output. A ~100-byte
+        // overage on a 256 KiB cap is fine; the provider-layer
+        // re-cap (32 KiB) is the one that actually bounds what
+        // reaches the model anyway.
+        text.push_str("\n\n[…tool result truncated by Loach; ask the tool again with narrower arguments]");
+    }
+    if text.is_empty() && is_error {
+        text.push_str("tool returned no content");
+    }
+    McpCallResult {
+        content_text: text,
+        is_error,
+        attachments,
+    }
+}
+
+/// Filename for an image attachment derived from an MCP `Image` block.
+/// The extension only drives how the frontend labels / downloads it.
+fn image_attachment_name(mime: &str, idx: usize) -> String {
+    let ext = match mime {
+        "image/png" => "png",
+        "image/jpeg" | "image/jpg" => "jpg",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        "image/svg+xml" => "svg",
+        _ => "img",
+    };
+    format!("mcp-image-{}.{ext}", idx + 1)
 }
 
 /// Append `chunk` to `out`, inserting a newline between non-empty pieces.
@@ -468,4 +505,96 @@ fn truncate(s: &str) -> String {
         .map(|(i, _)| i)
         .unwrap_or(s.len());
     format!("{}…", &s[..cut])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn image_content_becomes_an_attachment() {
+        let content = vec![CallToolContent::Image {
+            data: "aGVsbG8=".to_string(),
+            mime_type: Some("image/jpeg".to_string()),
+        }];
+        let r = assemble_call_result(content, false);
+        assert_eq!(r.attachments.len(), 1);
+        let a = &r.attachments[0];
+        assert_eq!(a.kind, "image");
+        assert_eq!(a.mime, "image/jpeg");
+        assert_eq!(a.data, "aGVsbG8=");
+        assert!(a.name.ends_with(".jpg"), "name: {}", a.name);
+        // The text-only model still gets a breadcrumb that an image returned.
+        assert!(r.content_text.contains("image attached"));
+        assert!(!r.is_error);
+    }
+
+    #[test]
+    fn image_defaults_mime_when_missing() {
+        let content = vec![CallToolContent::Image {
+            data: "eA==".to_string(),
+            mime_type: None,
+        }];
+        let r = assemble_call_result(content, false);
+        assert_eq!(r.attachments[0].mime, "image/png");
+        assert!(r.attachments[0].name.ends_with(".png"));
+    }
+
+    #[test]
+    fn text_and_image_mix_preserves_both() {
+        let content = vec![
+            CallToolContent::Text { text: "before".to_string() },
+            CallToolContent::Image { data: "eQ==".to_string(), mime_type: Some("image/png".to_string()) },
+            CallToolContent::Text { text: "after".to_string() },
+        ];
+        let r = assemble_call_result(content, false);
+        assert_eq!(r.attachments.len(), 1);
+        assert!(r.content_text.contains("before"));
+        assert!(r.content_text.contains("after"));
+    }
+
+    #[test]
+    fn oversized_text_is_capped_with_marker() {
+        let big = "a".repeat(MAX_TOOL_RESULT_TEXT_BYTES);
+        let content = vec![
+            CallToolContent::Text { text: big.clone() },
+            CallToolContent::Text { text: big },
+        ];
+        let r = assemble_call_result(content, false);
+        assert!(r.content_text.contains("truncated by Loach"));
+    }
+
+    #[test]
+    fn empty_error_result_gets_placeholder_text() {
+        let r = assemble_call_result(vec![], true);
+        assert!(r.is_error);
+        assert_eq!(r.content_text, "tool returned no content");
+        assert!(r.attachments.is_empty());
+    }
+
+    #[test]
+    fn resource_is_stringified() {
+        let content = vec![CallToolContent::Resource {
+            resource: Some(json!({ "uri": "file:///x", "text": "hi" })),
+        }];
+        let r = assemble_call_result(content, false);
+        assert!(r.content_text.contains("file:///x"));
+        assert!(r.attachments.is_empty());
+    }
+
+    #[test]
+    fn image_content_deserialises_from_mcp_json() {
+        // MCP servers send `type: "image"` with a camelCase `mimeType`.
+        let parsed: CallToolContent =
+            serde_json::from_value(json!({ "type": "image", "data": "Zm9v", "mimeType": "image/webp" }))
+                .expect("image content parses");
+        match parsed {
+            CallToolContent::Image { data, mime_type } => {
+                assert_eq!(data, "Zm9v");
+                assert_eq!(mime_type.as_deref(), Some("image/webp"));
+            }
+            _ => panic!("expected Image variant"),
+        }
+    }
 }

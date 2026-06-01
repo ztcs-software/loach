@@ -475,7 +475,9 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
   const showMetrics = metrics ?? persistedMetrics;
   const toolCalls = !isUser ? parseToolCalls(message.tool_calls_json) : [];
   const attachments = parseAttachments(message.attachments_json);
-  const images = isUser ? attachments.filter((a) => a.kind === "image") : [];
+  // Images can come from a user upload or, on an assistant turn, from an
+  // MCP tool result (mapped to an image attachment in mcp/client.rs).
+  const images = attachments.filter((a) => a.kind === "image");
   const files = attachments.filter((a) => a.kind === "text" || a.kind === "file");
   // Attachment bodies are inlined into the stored user content for the model;
   // strip that tail when rendering so the user sees just their typed prompt.
@@ -690,6 +692,27 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
             >
               <Markdown content={message.content} />
             </MarkdownSourceProvider>
+          </div>
+        )}
+        {!isUser && images.length > 0 && (
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {images.map((img, i) => (
+              <AttachmentActions
+                key={i}
+                attachment={img}
+                className="rounded-lg focus-visible:ring-2 focus-visible:ring-ring/40"
+              >
+                <img
+                  src={`data:${img.mime};base64,${img.data}`}
+                  alt={img.name}
+                  width={80}
+                  height={80}
+                  loading="lazy"
+                  decoding="async"
+                  className="h-20 w-20 rounded-lg object-cover"
+                />
+              </AttachmentActions>
+            ))}
           </div>
         )}
         {!isUser && files.length > 0 && (

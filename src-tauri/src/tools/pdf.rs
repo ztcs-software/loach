@@ -1,19 +1,10 @@
 //! Built-in `pdf` tool — generate PDFs from a structured spec.
 //!
-//! Two actions live behind this single tool (mirroring `json_tool`'s
-//! op-enum pattern):
-//!
-//!   * `create` — builds a PDF from a model-supplied page/block spec
-//!     (headings, paragraphs, bullet / numbered lists, horizontal rules,
-//!     page breaks, tables). The result is returned as an [`Attachment`]
-//!     that the chat-stream layer appends to the assistant message; the
-//!     existing `PdfPreview` component then renders it inline.
-//!
-//!   * `merge` — concatenates existing PDF attachments. Stubbed for v1:
-//!     the model would need to reference attachments by name, which
-//!     requires a name → bytes resolver we haven't plumbed through
-//!     yet. Returns a structured `not yet supported` error so the model
-//!     can self-correct and fall back to `create`.
+//! A single `create` action builds a PDF from a model-supplied page/block
+//! spec (headings, paragraphs, bullet / numbered lists, horizontal rules,
+//! page breaks, tables). The result is returned as an [`Attachment`] that
+//! the chat-stream layer appends to the assistant message; the existing
+//! `PdfPreview` component then renders it inline.
 //!
 //! ASCII-only by design (v1): printpdf's built-in Helvetica is a base-14
 //! font with no Unicode coverage. Non-ASCII characters in the spec are
@@ -60,12 +51,10 @@ const MAX_SPEC_BYTES: usize = 256 * 1024;
 const MAX_PAGES: usize = 200;
 
 pub fn tool_description() -> &'static str {
-    "Create a PDF from a structured spec, or merge existing PDF \
-     attachments. Use this to produce a downloadable document instead of \
-     a long markdown block in chat — the user gets a real file they can \
-     save, print, or forward. \
-     Actions: \
-     `create` — render `pages: [{blocks: [...]}]` to a PDF. Block types: \
+    "Create a PDF from a structured spec. Use this to produce a \
+     downloadable document instead of a long markdown block in chat — the \
+     user gets a real file they can save, print, or forward. \
+     Render `pages: [{blocks: [...]}]` to a PDF. Block types: \
      `heading` (with `level` 1–3 and `text`), \
      `paragraph` (with `text` — word-wrapped at the right margin), \
      `bullet_list` (with `items: [string]`), \
@@ -74,9 +63,6 @@ pub fn tool_description() -> &'static str {
      `page_break` (force the next block onto a new page), \
      `table` (with `headers: [string]` and `rows: [[string]]` — equal \
      column widths, no cell-wrap so keep cells short). \
-     `merge` — concatenate existing PDF attachments by `attachment_names`. \
-     **Currently returns a not-yet-supported error** in this build; use \
-     `create` instead. \
      `title` is optional and becomes the filename (sanitised). \
      ASCII-only: non-ASCII characters are replaced with `?` because the \
      built-in font has no Unicode coverage."
@@ -162,7 +148,7 @@ pub fn input_schema() -> Value {
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["create", "merge"],
+                "enum": ["create"],
                 "description": "Which action to perform."
             },
             "title": {
@@ -183,11 +169,6 @@ pub fn input_schema() -> Value {
                     },
                     "required": ["blocks"]
                 }
-            },
-            "attachment_names": {
-                "type": "array",
-                "description": "For `merge`. Names of PDF attachments already in the conversation to concatenate in order.",
-                "items": { "type": "string" }
             }
         },
         "required": ["action"],
@@ -208,12 +189,7 @@ pub fn dispatch(args: &Value) -> McpCallResult {
     };
     match action {
         "create" => do_create(args),
-        "merge" => err(
-            "merge action is not yet supported in this build — it requires a \
-             name → bytes attachment resolver that hasn't been plumbed through \
-             the chat stream yet. Use `create` to produce a new PDF instead."
-        ),
-        other => err(format!("unknown action `{other}` — use \"create\" or \"merge\"")),
+        other => err(format!("unknown action `{other}` — only \"create\" is supported")),
     }
 }
 
@@ -416,16 +392,22 @@ fn render_heading(state: &mut RenderState, level: u8, text: &str) -> Result<(), 
         0.0
     };
     state.advance(top_pad_mm);
-    state.ensure_room(line_mm);
-    let cleaned = sanitise_text(text);
-    state.layer.use_text(
-        cleaned,
-        size_pt,
-        Mm(MARGIN_MM),
-        Mm(state.cursor_y_mm - pt_to_mm(size_pt)),
-        &state.bold,
-    );
-    state.advance(line_mm);
+    // Headings are proportionally wider than body text, so scale the
+    // per-char width estimate by the font-size ratio before wrapping —
+    // otherwise a long heading runs off the right margin (`wrap_text`
+    // already sanitises each line).
+    let char_width_mm = BODY_CHAR_WIDTH_MM * size_pt / BODY_FONT_SIZE_PT;
+    for line in wrap_text(text, body_width_mm(), char_width_mm) {
+        state.ensure_room(line_mm);
+        state.layer.use_text(
+            line,
+            size_pt,
+            Mm(MARGIN_MM),
+            Mm(state.cursor_y_mm - pt_to_mm(size_pt)),
+            &state.bold,
+        );
+        state.advance(line_mm);
+    }
     Ok(())
 }
 
@@ -534,12 +516,22 @@ fn render_table(
     let row_height_mm = BODY_LINE_HEIGHT_MM + cell_pad_mm * 2.0;
 
     // Headers first (if any), in bold.
-    if !headers.is_empty() {
+    let has_headers = !headers.is_empty();
+    if has_headers {
         state.ensure_room(row_height_mm);
         render_table_row(state, headers, cols, col_width_mm, cell_pad_mm, row_height_mm, true);
     }
     for row in rows {
+        // If this row would overflow the page, `ensure_room` flows to a new
+        // one. Detect that up front (the same predicate `ensure_room` uses)
+        // so we can repeat the header band at the top of the continued
+        // table rather than leaving the carried-over rows unlabelled.
+        let flowed = state.cursor_y_mm - row_height_mm < MARGIN_MM;
         state.ensure_room(row_height_mm);
+        if flowed && has_headers {
+            render_table_row(state, headers, cols, col_width_mm, cell_pad_mm, row_height_mm, true);
+            state.ensure_room(row_height_mm);
+        }
         render_table_row(state, row, cols, col_width_mm, cell_pad_mm, row_height_mm, false);
     }
     state.advance(BODY_LINE_HEIGHT_MM * 0.4);
@@ -840,17 +832,6 @@ mod tests {
     }
 
     #[test]
-    fn merge_returns_not_supported() {
-        let r = dispatch(&json!({ "action": "merge", "attachment_names": ["a.pdf"] }));
-        assert!(r.is_error);
-        assert!(
-            r.content_text.contains("not yet supported"),
-            "got: {}",
-            r.content_text
-        );
-    }
-
-    #[test]
     fn unknown_action_errors() {
         let r = dispatch(&json!({ "action": "convert" }));
         assert!(r.is_error);
@@ -876,5 +857,62 @@ mod tests {
         for line in &wrapped {
             assert!(line.len() <= 30, "line too long: `{line}` ({} chars)", line.len());
         }
+    }
+
+    #[test]
+    fn truncate_to_chars_adds_hint_when_clipping() {
+        // Fits within the budget — returned unchanged.
+        assert_eq!(truncate_to_chars("hi", 5), "hi");
+        // Clipped — keeps `max - 1` chars and appends the ASCII `~` hint,
+        // landing exactly on the budget.
+        let t = truncate_to_chars("abcdefgh", 4);
+        assert_eq!(t, "abc~");
+        assert_eq!(t.chars().count(), 4);
+        // Degenerate widths must not panic.
+        assert_eq!(truncate_to_chars("abc", 0), "");
+        assert_eq!(truncate_to_chars("abc", 1), "a");
+    }
+
+    #[test]
+    fn wrap_text_hard_breaks_overlong_word() {
+        // A single token longer than the line is chunked rather than
+        // overflowing the right margin. 10 mm / 2 mm per char ≈ 5 chars.
+        let wrapped = wrap_text("aaaaaaaaaaaaaaaaaaaa", 10.0, 2.0);
+        assert!(wrapped.len() >= 2, "expected a hard break, got: {wrapped:?}");
+        for line in &wrapped {
+            assert!(line.len() <= 5, "chunk too long: `{line}`");
+        }
+    }
+
+    #[test]
+    fn table_spanning_multiple_pages_renders() {
+        // ~33 rows fit per A4 page; 120 rows force several page splits. The
+        // table must flow across pages without erroring (headers repeat on
+        // each continued page — see `render_table`).
+        let rows: Vec<serde_json::Value> = (0..120)
+            .map(|i| json!([format!("row {i}"), format!("value {i}")]))
+            .collect();
+        let r = dispatch(&json!({
+            "action": "create",
+            "pages": [{ "blocks": [
+                { "type": "table", "headers": ["Key", "Value"], "rows": rows }
+            ]}]
+        }));
+        assert!(!r.is_error, "{}", r.content_text);
+        assert_eq!(r.attachments.len(), 1);
+    }
+
+    #[test]
+    fn long_heading_wraps_without_error() {
+        let long = "This is an extremely long level-one heading that clearly \
+                    exceeds the printable width of a single A4 line and so must \
+                    wrap across several lines instead of running off the right \
+                    margin of the page";
+        let r = dispatch(&json!({
+            "action": "create",
+            "pages": [{ "blocks": [{ "type": "heading", "level": 1, "text": long }] }]
+        }));
+        assert!(!r.is_error, "{}", r.content_text);
+        assert_eq!(r.attachments.len(), 1);
     }
 }

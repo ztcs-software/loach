@@ -1954,7 +1954,17 @@ function ArchivePanel({ onOpenChat }: { onOpenChat: () => void }) {
             session={s}
             onOpen={() => void handleOpen(s.id)}
             onUnarchive={() => void archive(s.id, false)}
-            onDelete={() => void remove(s.id)}
+            onDelete={() =>
+              void (async () => {
+                const ok = await confirm({
+                  title: "Delete this chat?",
+                  body: `“${s.title || "Untitled"}” and all its messages will be permanently deleted. This cannot be undone.`,
+                  confirmLabel: "Delete",
+                  destructive: true,
+                });
+                if (ok) await remove(s.id);
+              })()
+            }
           />
         ))}
       </ul>

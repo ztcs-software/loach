@@ -268,6 +268,14 @@ export function deleteMessage(id: string, sessionId: string): Promise<void> {
   return invoke("delete_message", { id, sessionId });
 }
 
+/** Delete every message in a session in one transactional call. Backs the
+ *  `/clear` command — atomic and single round-trip, vs. a deleteMessage per
+ *  message. */
+export function clearSessionMessages(sessionId: string): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("clear_session_messages", { sessionId });
+}
+
 /** Mark a batch of messages as "rolled into the auto-summary": the rows
  *  stay in the DB and keep rendering in the transcript, but the chat
  *  history builder skips them so the model only consumes the summary

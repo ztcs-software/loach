@@ -1057,6 +1057,20 @@ impl Database {
         Ok(())
     }
 
+    /// Delete every message in a session in a single statement — the atomic
+    /// backing for the `/clear` command, replacing a per-message
+    /// `delete_message` IPC loop. A lone `DELETE` is itself atomic, so a
+    /// mid-clear failure can't leave the chat half-emptied. The 0-row case
+    /// is silently accepted (an already-empty chat).
+    pub fn clear_session_messages(&self, session_id: &str) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "DELETE FROM messages WHERE session_id = ?1",
+            params![session_id],
+        )?;
+        Ok(())
+    }
+
     pub fn update_message(
         &self,
         id: &str,

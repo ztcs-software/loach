@@ -24,6 +24,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { useConfirm } from "@/components/ConfirmDialog";
 import { useChatStore } from "@/stores/chatStore";
 import { useModelsStore } from "@/stores/modelsStore";
 import { useSpaceStore } from "@/stores/spaceStore";
@@ -397,6 +398,7 @@ function SessionRow({
   const pinChat = useChatStore((s) => s.pin);
   const archiveChat = useChatStore((s) => s.archive);
   const remove = useChatStore((s) => s.remove);
+  const { confirm } = useConfirm();
   // Per-row activity flags. `generating` is true if this session has the
   // running stream OR is parked in the queue waiting for it. `unread` is
   // a sticky flag set by the store when an assistant turn finishes on a
@@ -542,7 +544,17 @@ function SessionRow({
               <Archive className="h-4 w-4" /> Move to Archive
             </DropdownMenuItem>
             <DropdownMenuItem
-              onSelect={() => remove(session.id)}
+              onSelect={() =>
+                void (async () => {
+                  const ok = await confirm({
+                    title: "Delete this chat?",
+                    body: `“${session.title || "Untitled"}” and all its messages will be permanently deleted. This cannot be undone.`,
+                    confirmLabel: "Delete",
+                    destructive: true,
+                  });
+                  if (ok) await remove(session.id);
+                })()
+              }
               className="text-destructive focus:text-destructive"
             >
               <Trash2 className="h-4 w-4" /> Delete

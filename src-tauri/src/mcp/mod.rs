@@ -282,22 +282,36 @@ fn build_unique_slugs(servers: &[McpServer]) -> Vec<String> {
     let mut out: Vec<String> = Vec::with_capacity(servers.len());
     for s in servers {
         let base = slug_for(&s.name);
-        let slug = if taken.contains(&base) {
+        let mut slug = if taken.contains(&base) {
             let suffix: String = s
                 .id
                 .chars()
                 .filter(|c| c.is_ascii_alphanumeric())
                 .take(6)
                 .collect();
-            let candidate = if suffix.is_empty() {
+            if suffix.is_empty() {
                 format!("{base}_{}", stable_id_suffix(&s.id))
             } else {
                 format!("{base}_{suffix}")
-            };
-            candidate
+            }
         } else {
-            base
+            base.clone()
         };
+        // The disambiguated candidate can itself collide — e.g. a third
+        // server sharing the same name whose id has the same first 6 alnum
+        // chars, or a literal name that slugifies to an already-suffixed
+        // form. Fall back to the full-id hash (stable across runs and DB
+        // row order, since it derives from the id rather than a counter),
+        // then a deterministic counter only if even that clashes.
+        if taken.contains(&slug) {
+            let hashed = stable_id_suffix(&s.id);
+            slug = format!("{base}_{hashed}");
+            let mut n = 2;
+            while taken.contains(&slug) {
+                slug = format!("{base}_{hashed}_{n}");
+                n += 1;
+            }
+        }
         taken.insert(slug.clone());
         out.push(slug);
     }

@@ -350,6 +350,14 @@ pub async fn delete_message(
     state.db.delete_message(&id, &session_id).map_err(err)
 }
 
+#[tauri::command]
+pub async fn clear_session_messages(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<(), String> {
+    state.db.clear_session_messages(&session_id).map_err(err)
+}
+
 /// Mark a batch of messages as "rolled into the auto-summary": the rows
 /// stay in the DB and keep rendering in the transcript, but the chat
 /// history builder skips them so the model only consumes the summary

@@ -259,6 +259,7 @@ pub fn run() {
             commands::delete_import_group,
             commands::update_message,
             commands::delete_message,
+            commands::clear_session_messages,
             commands::mark_messages_compacted,
             commands::get_settings,
             commands::set_setting,
