@@ -36,31 +36,45 @@ Behind a calm, beautifully crafted UI sits a rich feature set - ready when you n
 
 ## ✨ Features
 
+<!-- Providers & models -->
 - **Provider selection** - switch between Ollama local models and any OpenAI-compatible endpoint (OpenAI API, llama.cpp, LM Studio etc.) from the chat header.
 - **Local model management** - pull, copy, customize and delete local models from inside the app. 
+- **Default model selector** - pick a model new chats open with, per provider - no need to re-select on each fresh conversation.
+- **Model preloading** - optionally warm your default local model into VRAM at launch so the first message streams faster. 
+- **Per-chat parameters** - set temperature, top_k, top_p, min_p, max tokens, context length, per-chat system prompts and more. Layered over Modelfile and per-model defaults.
+- **Low VRAM mode** - global or per-chat toggle that sends Ollama's `low_vram` flag to every request. Useful on lower-spec devices. 
+
+<!-- Organizing chats & content -->
 - **Spaces** - group chats around a project, with shared instructions, reference files and memory. 
 - **Snippets** - save reusable prompts with an optional pinned model and click `Run` to start a fresh chat pre-filled and ready to send.
-- **Voice dictation** - mic button in the composer turns speech into text in real time. 
-- **Generation stats** - inline `tok/s · total tokens · elapsed` under every model turn.
-- **Markdown rendering** - full GitHub-flavoured Markdown with tables, task lists and LaTeX support.
-- **Code blocks** - syntax-highlighted with line numbers, copy, export and open in canvas options.
-- **Code canvas** - open any code block in a wider, theme-aware view. 
-- **Per-chat parameters** - set temperature, top_k, top_p, min_p, max tokens, context length, per-chat system prompts and more. Layered over Modelfile and per-model defaults.
-- **Personas and Tones** - pick a role (Code Reviewer, Translator, ELI5...) and delivery style (Formal, Casual, Concise, Detailed...).
-- **Custom instructions** - set your custom instructions for models globally, per-chat or per-Space. 
-- **Import and export context** - export chat context to JSON or Markdown and paste exported data - or any text - back to any chat's context.
-- **Search** - search across chats, spaces and snippets, plus a browser-style in-chat finder with phrase highlighting.
+- **Custom snippet variables** - parameterize snippets with static globals and prompt-on-use placeholders that fill in when you run them.
+- **Fork chats** - branch any conversation into a new copy that links back to its source.
+- **Private chats** - an ephemeral chat that writes nothing to disk and wipes its transcript the moment you close it; open it from the ghost icon in the title bar.
 - **Chat archive** - move chats out of the sidebar without deleting them; restore or delete them from dedicated archive view.
+- **Search** - search across chats, spaces and snippets, plus a browser-style in-chat finder with phrase highlighting.
+
+<!-- Composing & steering a chat -->
+- **Slash commands** - type `/` in the composer for a command palette: `/fork`, `/regenerate`, `/compact`, `/private`, `/model`, `/persona`, `/snippet`, `/remember` and more.
+- **Personas and Tones** - pick a role (Code Reviewer, Translator, ELI5...) and delivery style (Formal, Casual, Direct, Detailed...).
+- **Context management** - a live bar under the composer shows how full the context window is, with one-click compaction that summarizes older turns to free space.
+- **Import / export context** - export chat context to JSON or Markdown, optionally summarized to compact it, and paste exported data - or any text - back to any chat's context.
+
+<!-- Model tools & capabilities -->
+- **Tools** - let models call local tools including calculate, date/time, count, hash, UUID, base64, JSON, unit convert, text diff, sort, IP math and PDF generation. 
+- **PDF generation** - the built-in pdf tool turns a model's structured spec (headings, lists, tables, page breaks) into a real PDF attached to the reply.
 - **MCP support** - register Model Context Protocol servers (Streamable HTTP), test the handshake and inspect the tools they provide. 
 - **Web fetch** - add URLs to messages and they will be fetched, sanitized and inlined to context. 
 - **Temporal awareness** - inject current date, time, weekday and timezone into the system prompt so models can answer to "what day is it today?".
-- **Default model selector** - pick a model new chats open with, per provider - no need to re-select on each fresh conversation.
-- **Model preloading** - optionally warm your default local model into VRAM at launch so the first message streams faster. 
-- **Low VRAM mode** - global or per-chat toggle that sends Ollama's `low_vram` flag to every request. Useful on lower-spec devices. 
+
+<!-- Viewing content -->
+- **Code canvas** - open any code block in a wider view that's resizable and updates live as the model streams, with copy, export and Open in VS Code actions.
+- **Attachment previews** - click an attachment to open the right viewer: image lightbox, multi-page PDF preview, code canvas, or a file-info card with Save.
+
+<!-- App, data & updates -->
 - **Data management** - make backups of your content to JSON file, restore data or permanently delete it with a few clicks. 
 - **App lock** - optional PIN, password or PIN + password gate at launch; credentials are hashed and stored in OS credential manager.
 - **Themes** - glassy, gradient Aurora or flat Solid, both available in Dark and Light variants.
-- **OTA updates** - get new features, bug fixes, performance improvements and security patches directly from the app. 
+- **OTA updates** - get new features, bug fixes, performance improvements and security patches directly from the app.
 
 ...and more! 
 
@@ -89,7 +103,7 @@ With each stable release we publish pre-built `.exe`, `.deb`, `.rpm`, `.AppImage
 
 ### Install on macOS
 
-The macOS build is **Apple Silicon (M-series CPUs) only** and is currently not notarized in Apple Developer Program On first launch macOS will block the app with a *"Loach is damaged and can't be opened"* or *"Apple cannot verify..."* warning. Bypass it once and the app runs normally:
+The macOS build is **Apple Silicon (M-series CPUs) only** and is currently not notarized in the Apple Developer Program. On first launch macOS will block the app with a *"Loach is damaged and can't be opened"* or *"Apple cannot verify..."* warning. Bypass it once and the app runs normally:
 
 - **Right-click** `Loach.app` in **Applications** → **Open** → click **Open** in the prompt, or
 - Open **Terminal** and run:
@@ -186,6 +200,7 @@ Only one OpenAI-compatible endpoint is active at a time — switch the base URL 
 | HTTP | `reqwest` with streaming + `rustls-tls` |
 | Markdown | `react-markdown` + `remark-gfm` + `rehype-highlight` (highlight.js) |
 | Document parsing | `pdfjs-dist` (PDF) + `mammoth` (DOCX) |
+| PDF generation | `printpdf` 0.9 with a bundled Liberation Sans subset (Unicode-capable output) |
 | System tray | Tauri 2 built-in (`tray-icon` feature) |
 | Bundle targets | `.exe` (NSIS) on Windows; `.deb` / `.rpm` / `.AppImage` on Linux; `.dmg` on macOS (Apple Silicon) |
 
@@ -195,7 +210,7 @@ Only one OpenAI-compatible endpoint is active at a time — switch the base URL 
 
 | What | Where |
 |---|---|
-| Chats, messages, spaces, snippets, MCP servers, app settings | SQLite at `<app-data-dir>/loach.db` |
+| Chats, messages, spaces, snippets, snippet variables, MCP servers, app settings | SQLite at `<app-data-dir>/loach.db` |
 | OpenAI API key | OS credential manager (Windows Credential Manager / Linux Secret Service / macOS Keychain) |
 | App-lock hash + hint | OS credential manager — same store, separate entry |
 | Attached files (images, text) | Inlined into the message at send time; no separate file store |
