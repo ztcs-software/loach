@@ -453,7 +453,6 @@ async fn post_rpc_raw(
     let payload = if content_type.contains("text/event-stream") {
         extract_first_sse_data(&text)
             .ok_or_else(|| anyhow!("event-stream response contained no data frame"))?
-            .to_string()
     } else {
         text
     };
@@ -481,13 +480,33 @@ async fn read_capped_text(resp: reqwest::Response) -> Result<String> {
     String::from_utf8(buf).context("MCP server response was not valid UTF-8")
 }
 
-fn extract_first_sse_data(s: &str) -> Option<&str> {
+fn extract_first_sse_data(s: &str) -> Option<String> {
+    // A single SSE event's payload may span multiple consecutive `data:`
+    // lines, which the spec says to join with `\n`. The previous version
+    // returned only the first line, so a server that split its JSON-RPC
+    // response across several `data:` lines (legal SSE) handed us a
+    // truncated, unparseable frame and its tools silently never loaded.
+    // Gather every `data:` line of the first event (terminated by a blank
+    // line) and join them.
+    let mut data: Vec<&str> = Vec::new();
     for line in s.lines() {
         if let Some(rest) = line.strip_prefix("data:") {
-            return Some(rest.trim_start());
+            // Per spec, a single leading space after the colon is stripped.
+            data.push(rest.strip_prefix(' ').unwrap_or(rest));
+        } else if line.is_empty() {
+            // Blank line ends the event. Stop once we have a payload;
+            // otherwise keep scanning past leading comments / other events.
+            if !data.is_empty() {
+                break;
+            }
         }
+        // Other field lines (event:, id:, retry:, comments) are ignored.
     }
-    None
+    if data.is_empty() {
+        None
+    } else {
+        Some(data.join("\n"))
+    }
 }
 
 fn truncate(s: &str) -> String {

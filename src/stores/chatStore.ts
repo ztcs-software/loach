@@ -1294,8 +1294,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
     });
     if (!id) return;
     if (!get().messages[id]) {
-      const msgs = await listMessages(id);
-      set((s) => ({ messages: { ...s.messages, [id]: msgs } }));
+      // Every caller fires this without awaiting (`void select(id)`), so an
+      // unguarded reject here surfaces only as an unhandled promise rejection
+      // and strands the chat empty with no feedback. Mirror the other store
+      // actions: log + toast so a failed read is visible and retryable.
+      try {
+        const msgs = await listMessages(id);
+        set((s) => ({ messages: { ...s.messages, [id]: msgs } }));
+      } catch (e) {
+        logger.error("failed to load messages for session", e);
+        useToastStore.getState().push({
+          kind: "error",
+          title: "Couldn't open chat",
+          body: e instanceof Error ? e.message : String(e),
+        });
+      }
     }
   },
 
@@ -1757,6 +1770,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (last.role !== "assistant") return;
     const userMsg = messages[lastIdx - 1];
     if (userMsg.role !== "user") return;
+    // Don't regenerate an imported turn. The assistant row belongs to an
+    // import group the import-card renderer treats as atomic; deleting it here
+    // would desync the rendered card from its remaining DB rows.
+    if (last.import_group != null) return;
 
     const session = state.sessions.find((s) => s.id === sessionId);
     if (!session || !session.model) return;

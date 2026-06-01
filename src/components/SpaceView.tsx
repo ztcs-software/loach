@@ -417,7 +417,13 @@ function EditSpaceDialog({
       setError("Name is required");
       return;
     }
-    if (trimmedName === initialName && trimmedDesc === initialDescription) {
+    // Compare trimmed-vs-trimmed so an unchanged dialog whose stored values
+    // carry incidental whitespace still short-circuits instead of firing a
+    // redundant save.
+    if (
+      trimmedName === initialName.trim() &&
+      trimmedDesc === initialDescription.trim()
+    ) {
       onOpenChange(false);
       return;
     }

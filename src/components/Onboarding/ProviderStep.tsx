@@ -138,7 +138,7 @@ export function ProviderStep({
       step="provider"
       title="Pick a provider"
       subtitle="Loach can run local models through Ollama or talk to any OpenAI-compatible API."
-      primaryLabel={phase === "choose" ? "Continue" : "Continue"}
+      primaryLabel="Continue"
       primaryDisabled={!provisioned}
       onPrimary={goNext}
       canGoBack={phase === "choose"}

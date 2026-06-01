@@ -198,7 +198,7 @@ const MARKDOWN_COMPONENTS: Components = {
       </CodeBlock>
     );
   },
-  a({ children, href, ...props }) {
+  a({ children, href, node: _node, ...props }) {
     return (
       <a href={href} target="_blank" rel="noreferrer noopener" {...props}>
         {children}

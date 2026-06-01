@@ -12,10 +12,18 @@
 //! catalogue-injection or dispatch boilerplate in `commands.rs` /
 //! `mcp::dispatch_tool_call`.
 
+use std::time::Duration;
+
 use serde_json::Value;
 
 use crate::db::Database;
 use crate::mcp::{McpCallResult, McpToolDef};
+
+/// Hard ceiling on a single built-in tool call. Built-ins are pure CPU and
+/// should return in well under a second; this only exists so a pathological
+/// model-supplied input (e.g. a giant `diff_text`) can't pin a worker
+/// indefinitely.
+const BUILTIN_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Synthetic `server_id` stamped on every built-in [`McpToolDef`]. The
 /// MCP dispatcher checks for this exact value and routes the call here
@@ -153,6 +161,61 @@ pub fn dispatch_builtin(name: &str, arguments: &Value) -> Option<McpCallResult> 
         .iter()
         .find(|b| b.name == name)
         .map(|b| (b.dispatch)(arguments))
+}
+
+/// Run a built-in tool with a panic boundary and a wall-clock timeout.
+///
+/// Built-in dispatch is synchronous CPU work invoked inline on the chat
+/// stream's async task. Without isolation, a panic on adversarial model
+/// input unwinds the whole stream task (no `Done`/`Error` emitted, leaked
+/// `StreamRegistry` entry, hung turn) and a slow tool blocks an async worker
+/// the cancel button can't preempt. We offload to `spawn_blocking`, catch any
+/// panic, and bound the runtime — mapping both failure modes to an `is_error`
+/// result the model can read instead of a stuck conversation.
+///
+/// Returns `None` only for an unknown tool name, preserving the caller's
+/// existing "unknown built-in tool" error.
+pub async fn dispatch_builtin_guarded(name: &str, arguments: &Value) -> Option<McpCallResult> {
+    let name_owned = name.to_string();
+    let args_owned = arguments.clone();
+    let outcome = tokio::time::timeout(
+        BUILTIN_TIMEOUT,
+        tokio::task::spawn_blocking(move || {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                dispatch_builtin(&name_owned, &args_owned)
+            }))
+        }),
+    )
+    .await;
+
+    let error_result = |msg: String| {
+        Some(McpCallResult {
+            content_text: msg,
+            is_error: true,
+            ..Default::default()
+        })
+    };
+
+    match outcome {
+        // Ran to completion — `None` (unknown tool) or `Some(result)` pass
+        // straight through.
+        Ok(Ok(Ok(result))) => result,
+        // The tool panicked; contain it and tell the model.
+        Ok(Ok(Err(_panic))) => {
+            tracing::error!("built-in tool `{name}` panicked");
+            error_result(format!("Built-in tool `{name}` failed (internal error)."))
+        }
+        // spawn_blocking's join failed (runtime shutting down / task aborted).
+        Ok(Err(join_err)) => {
+            tracing::error!("built-in tool `{name}` task failed: {join_err}");
+            error_result(format!("Built-in tool `{name}` did not complete."))
+        }
+        // Blew the wall-clock budget.
+        Err(_elapsed) => error_result(format!(
+            "Built-in tool `{name}` timed out after {}s — try smaller input.",
+            BUILTIN_TIMEOUT.as_secs()
+        )),
+    }
 }
 
 /// Every settings key managed by this module. `commands::set_setting`

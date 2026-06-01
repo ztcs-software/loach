@@ -742,7 +742,15 @@ export function ChatInput({ centered = false }: ChatInputProps) {
           <Textarea
             ref={textareaRef}
             value={text}
-            onChange={(e) => setText(e.target.value)}
+            onChange={(e) => {
+              // Mirror every keystroke into the persisted draft. ChatInput is
+              // mounted at several sites (hero composer, normal composer,
+              // SpaceView) and switching sessions / entering a Space remounts
+              // it; without this the in-progress draft re-seeds from a stale
+              // composerDraft on remount and is silently lost.
+              setText(e.target.value);
+              setComposerDraft(e.target.value);
+            }}
             onKeyDown={(e) => {
               if (e.nativeEvent.isComposing) return;
               // Palette navigation. Order matters: Tab/Enter accept the

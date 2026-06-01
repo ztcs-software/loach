@@ -121,6 +121,13 @@ pub async fn fetch(_shared_http: &reqwest::Client, raw_url: &str) -> Result<Fetc
     // `resolve_safe_addrs` + `build_pinned_client` fresh on every hop.
     let mut url = initial_url.clone();
     let mut resp_opt: Option<reqwest::Response> = None;
+    // Single wall-clock budget shared across the whole redirect chain. Each
+    // hop builds a fresh client and would otherwise get its own full
+    // `FETCH_TIMEOUT`, so a chain of slow-but-not-timing-out hops could run
+    // up to MAX_REDIRECTS × FETCH_TIMEOUT — far past the "30 s total per
+    // fetch" the module docs promise. Shrinking each hop's timeout to the
+    // remaining budget keeps the whole fetch bounded.
+    let deadline = Instant::now() + FETCH_TIMEOUT;
     for hop in 0..=MAX_REDIRECTS {
         // Scheme allowlist (re-checked per hop in case a redirect tries to
         // jump to `file:` / `ftp:` / etc.).
@@ -140,9 +147,16 @@ pub async fn fetch(_shared_http: &reqwest::Client, raw_url: &str) -> Result<Fetc
         let resolved = resolve_safe_addrs(&url).await?;
         let http = build_pinned_client(&url, &resolved)?;
 
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(format!(
+                "Fetch exceeded its {}s time budget",
+                FETCH_TIMEOUT.as_secs()
+            ));
+        }
         let resp = http
             .get(url.clone())
-            .timeout(FETCH_TIMEOUT)
+            .timeout(remaining)
             .header(reqwest::header::ACCEPT, "text/html,text/plain,*/*;q=0.8")
             .send()
             .await
@@ -179,7 +193,8 @@ pub async fn fetch(_shared_http: &reqwest::Client, raw_url: &str) -> Result<Fetc
         break;
     }
 
-    let resp = resp_opt.expect("redirect loop exited without a response");
+    let resp = resp_opt
+        .ok_or_else(|| "redirect loop exited without a response".to_string())?;
     let final_url = resp.url().clone();
 
     let content_type = resp
@@ -347,6 +362,11 @@ pub fn is_public_ip(ip: &IpAddr) -> bool {
             }
             // 198.18.0.0/15 benchmark networks.
             if oct[0] == 198 && (oct[1] == 18 || oct[1] == 19) {
+                return false;
+            }
+            // 240.0.0.0/4 reserved (Class E). 255.255.255.255 is already
+            // caught by `is_broadcast()` above; the rest is non-routable.
+            if oct[0] >= 240 {
                 return false;
             }
             true

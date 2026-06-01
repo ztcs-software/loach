@@ -4,6 +4,8 @@
 //! (e.g. a single character flip in a hundred-line config). `similar`
 //! is the de facto Rust line/word-diff implementation; this just wraps it.
 
+use std::time::Duration;
+
 use serde_json::{json, Value};
 use similar::{ChangeTag, TextDiff};
 
@@ -11,10 +13,18 @@ use crate::mcp::McpCallResult;
 
 pub const TOOL_NAME: &str = "diff_text";
 
-/// Per-side input cap. 512 KiB is well over what fits in a chat turn and
-/// keeps the O(n·m) Myers-style diff bounded enough that the model
-/// stays responsive even on adversarial inputs.
+/// Per-side input cap. 512 KiB is well over what fits in a chat turn. The
+/// cap alone does NOT bound `word`/`char` diffs — `similar`'s Myers diff is
+/// ~O(n²) on small-alphabet input, so a 512 KiB char diff could otherwise
+/// run for minutes and pin a worker. `DIFF_TIMEOUT` is what actually bounds
+/// the wall-clock cost; the byte cap just keeps memory reasonable.
 const MAX_INPUT_BYTES: usize = 512 * 1024;
+
+/// Wall-clock ceiling for `word`/`char` diffs. When the Myers algorithm
+/// can't finish in time, `similar` returns a best-effort (still valid, just
+/// possibly less minimal) diff instead of running to completion. Line diffs
+/// are cheap and don't need it.
+const DIFF_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub fn tool_description() -> &'static str {
     "Compute a unified diff between two strings. Use this rather than \
@@ -73,8 +83,8 @@ pub fn dispatch(args: &Value) -> McpCallResult {
         .min(1000) as usize;
     let out = match mode {
         "line" => unified_lines(a, b, context),
-        "word" => inline_diff(TextDiff::from_words(a, b)),
-        "char" => inline_diff(TextDiff::from_chars(a, b)),
+        "word" => inline_diff(TextDiff::configure().timeout(DIFF_TIMEOUT).diff_words(a, b)),
+        "char" => inline_diff(TextDiff::configure().timeout(DIFF_TIMEOUT).diff_chars(a, b)),
         other => return err(format!("unknown mode `{other}`")),
     };
     if out.trim().is_empty() {

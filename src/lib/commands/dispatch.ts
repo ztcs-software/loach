@@ -490,10 +490,16 @@ async function runForget(rest: string): Promise<CommandResult> {
     useSpaceStore.getState().spaceMemories[spaceId] ??
     (await useSpaceStore.getState().loadSpaceMemories(spaceId));
   // First try a full or prefix id match (memories surface their short id in
-  // /list memories, so the user might paste either form).
+  // /list memories, so the user might paste either form). Only treat the
+  // query as an id prefix when it's specific enough — /list memories shows
+  // 8-char ids, so anything shorter is almost certainly a content search.
+  // A loose 1-char prefix silently deleting the first UUID that happens to
+  // start with it is a footgun; require a unique >=8-char prefix match.
+  const exactId = memories.find((m) => m.id === query);
+  const prefixMatches =
+    query.length >= 8 ? memories.filter((m) => m.id.startsWith(query)) : [];
   const byId =
-    memories.find((m) => m.id === query) ??
-    memories.find((m) => m.id.startsWith(query));
+    exactId ?? (prefixMatches.length === 1 ? prefixMatches[0] : undefined);
   if (byId) {
     await useSpaceStore.getState().removeMemory(byId.id, spaceId);
     return ok("Removed memory", byId.content.length > 60 ? byId.content.slice(0, 60) + "…" : byId.content);
@@ -620,8 +626,11 @@ async function runCopy(rest: string): Promise<CommandResult> {
   if (arg.length === 0) {
     n = 1;
   } else {
+    // Require a plain decimal. `Number("0x10")`/`"1e2"`/`"0b11"` all pass
+    // `Number.isInteger`, so without the shape check `/copy 0x10` would be
+    // silently read as "16 replies back".
     const parsed = Number(arg);
-    if (!Number.isInteger(parsed) || parsed < 1) {
+    if (!/^\d+$/.test(arg) || parsed < 1) {
       throw new Error("Usage: /copy [N] — N must be a positive whole number.");
     }
     n = parsed;
@@ -692,6 +701,9 @@ async function runRegenerate(): Promise<CommandResult> {
   const last = messages[messages.length - 1];
   if (!last || last.role !== "assistant") {
     throw new Error("Nothing to regenerate — the last turn isn't an assistant reply.");
+  }
+  if (last.import_group != null) {
+    throw new Error("Can't regenerate an imported reply.");
   }
   // Previously missing: a model-less chat made `regenerateLast` bail silently
   // while this handler still reported a success toast — a false "Regenerating

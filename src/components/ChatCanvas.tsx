@@ -393,7 +393,7 @@ export function ChatCanvas() {
                 {marker}
                 <MessageItem
                   message={m}
-                  isStreaming={isLast && isStreaming && m.role === "assistant"}
+                  isStreaming={isLast && streamingHere && m.role === "assistant"}
                   metrics={streamingByMessage[m.id] ?? null}
                   canRegenerate={
                     isLast &&

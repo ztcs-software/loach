@@ -2,13 +2,12 @@ import * as React from "react";
 import * as LabelPrimitive from "@radix-ui/react-label";
 import { cn } from "@/lib/utils";
 
-// Wraps `@radix-ui/react-label` so a click on the label text reliably
-// focuses the associated control even when callers omit `htmlFor`. The
-// Radix primitive handles the focus delegation by walking up from the
-// click target and dispatching to the nearest focusable descendant —
-// matches what users expect from a native `<label>` and unblocks
-// keyboard / screen-reader users who'd otherwise have to tab to the
-// input directly.
+// Wraps `@radix-ui/react-label` for consistent styling. Note: Radix Label
+// only delegates click-to-focus when the control is a *descendant* of the
+// Label or the caller sets `htmlFor` to the control's id — it does NOT walk
+// the DOM to find a sibling input. Most call sites render the label as a
+// sibling, so they get the styling but not click-to-focus; pass `htmlFor`
+// (with a matching input `id`) when that behaviour is needed.
 const Label = React.forwardRef<
   React.ElementRef<typeof LabelPrimitive.Root>,
   React.ComponentPropsWithoutRef<typeof LabelPrimitive.Root>

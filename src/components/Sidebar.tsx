@@ -248,15 +248,11 @@ function Quicklink({
   label,
   onClick,
   active = false,
-  kbd,
 }: {
   icon: React.ReactNode;
   label: string;
   onClick: () => void;
   active?: boolean;
-  /** Optional keyboard shortcut hint shown right-aligned. Cosmetic — the
-   *  actual shortcut is owned by whichever component implements it. */
-  kbd?: string;
 }) {
   return (
     <button
@@ -273,11 +269,6 @@ function Quicklink({
         {icon}
       </span>
       <span className="min-w-0 flex-1 truncate text-left">{label}</span>
-      {kbd && (
-        <span className="font-mono text-[10px] tracking-tight text-foreground/35">
-          {kbd}
-        </span>
-      )}
     </button>
   );
 }

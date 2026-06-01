@@ -1878,6 +1878,17 @@ pub async fn archive_all_sessions(state: State<'_, AppState>) -> Result<i64, Str
 
 /// Permanently delete every archived session. Irreversible — messages
 /// cascade. Returns the row count so the UI can say "Removed 8 chats".
+///
+/// Intentionally **not** gated on `require_unlocked`, unlike the
+/// nuke-everything commands (`wipe_user_data`, `factory_reset`,
+/// `import_data_with_dialog`). This sits in the same tier as the ungated
+/// per-session `delete_session` / `delete_message`: ordinary user-initiated
+/// deletes of content the renderer can already enumerate. Gating *only* this
+/// command would be security theater — a compromised renderer can achieve the
+/// identical bulk deletion by looping the ungated `delete_session` over the
+/// archived ids. The app-lock's re-auth boundary deliberately protects the
+/// one-shot catastrophic resets, not every delete. The UI still shows a
+/// destructive confirmation before calling this.
 #[tauri::command]
 pub async fn delete_archived_sessions(state: State<'_, AppState>) -> Result<i64, String> {
     state.db.delete_archived_sessions().map_err(err)

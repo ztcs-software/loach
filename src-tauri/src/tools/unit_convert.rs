@@ -282,6 +282,13 @@ pub fn dispatch(args: &Value) -> McpCallResult {
     } else {
         value * from.factor / to.factor
     };
+    // A finite-but-huge `value` times a large factor (e.g. parsec → light-year
+    // at 1e308) can overflow to infinity. `format_number` would then emit a
+    // bare "inf"; return an explanatory error instead, mirroring
+    // `calculate::format_result`'s NaN/Infinity handling.
+    if !result.is_finite() {
+        return err("conversion result is out of range (overflowed)");
+    }
     McpCallResult {
         content_text: format_number(result),
         is_error: false,

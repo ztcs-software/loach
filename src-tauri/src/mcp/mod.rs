@@ -202,7 +202,8 @@ pub async fn dispatch_tool_call(
     // or open a network session. Keep the catch ahead of `list_mcp_servers`
     // so they work even when the user has zero MCP servers configured.
     if server_id == crate::tools::builtin::BUILTIN_SERVER_ID {
-        return crate::tools::builtin::dispatch_builtin(name, arguments)
+        return crate::tools::builtin::dispatch_builtin_guarded(name, arguments)
+            .await
             .ok_or_else(|| anyhow!("unknown built-in tool `{name}`"));
     }
     let server = db

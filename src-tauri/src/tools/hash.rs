@@ -85,6 +85,15 @@ fn decode_input(input: &str, fmt: &str) -> Result<Vec<u8>, String> {
         "utf8" => Ok(input.as_bytes().to_vec()),
         "hex" => {
             let cleaned: String = input.chars().filter(|c| !c.is_ascii_whitespace()).collect();
+            // Reject non-ASCII before the byte-index slicing below. `cleaned`
+            // is built by filtering `chars()`, so a retained multi-byte char
+            // (e.g. `中`) would otherwise make `&cleaned[i..i + 2]` slice mid-
+            // character and panic ("byte index N is not a char boundary").
+            // Hex digits are ASCII by definition, so anything else is invalid
+            // input, not a crash.
+            if !cleaned.is_ascii() {
+                return Err("hex input must contain only ASCII hex digits".to_string());
+            }
             if cleaned.len() % 2 != 0 {
                 return Err("hex input has an odd number of characters".to_string());
             }

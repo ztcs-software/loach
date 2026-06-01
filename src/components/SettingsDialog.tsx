@@ -1159,7 +1159,7 @@ export function SettingsDialog() {
                   Back up, restore, or clear everything Loach has stored on
                   this machine excluding API keys saved in credentials manager.
                 </p>
-                <DataPanel onCloseDialog={() => setOpen(false)} />
+                <DataPanel />
               </TabsContent>
 
               <TabsContent value="security" className="mt-0 focus-visible:ring-0 focus-visible:ring-offset-0">
@@ -2077,7 +2077,7 @@ function ArchivedRow({
 
 type BusyKind = "export" | "import" | "archive-all" | null;
 
-function DataPanel({ onCloseDialog: _onCloseDialog }: { onCloseDialog: () => void }) {
+function DataPanel() {
   const { confirm } = useConfirm();
   const [busy, setBusy] = useState<BusyKind>(null);
   const [message, setMessage] = useState<{

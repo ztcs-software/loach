@@ -188,10 +188,18 @@ pub fn run() {
             // Linux, but we still gate it so the intent reads clearly.
             let _tray = {
                 let builder = TrayIconBuilder::with_id("loach-tray")
-                    .icon(app.default_window_icon().unwrap().clone())
                     .menu(&menu)
                     .show_menu_on_left_click(false)
                     .tooltip("Loach");
+                // `default_window_icon()` is Some in any normal bundled build,
+                // but guard rather than `unwrap()` so a packaging slip that
+                // ships without the icon degrades to an icon-less tray instead
+                // of panicking the whole `setup` (which would bypass the
+                // friendly `fatal_setup_error` dialog the rest of setup uses).
+                let builder = match app.default_window_icon() {
+                    Some(icon) => builder.icon(icon.clone()),
+                    None => builder,
+                };
                 #[cfg(target_os = "macos")]
                 let builder = builder.icon_as_template(true);
                 builder

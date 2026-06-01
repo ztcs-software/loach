@@ -31,14 +31,21 @@ export interface ContextUsageBreakdown {
 const FALLBACK_CTX = 8192;
 
 /**
- * Crude detector for the inlined attachment block — `inlineTextAttachments`
- * wraps every text attachment in `\`\`\`<lang>\n…\n\`\`\`` with a leading
- * `--- Attached file: name ---` header. We sum the length of those blocks
- * so the popup can show "X tokens of your context are attachments".
+ * Detector for the inlined attachment blocks `inlineTextAttachments`
+ * (src/lib/files.ts) appends. For each text attachment it emits:
+ *
+ *   \n\n---\nAttached file: `name`\n```\n<body>\n```
+ *
+ * with the label reading `Attached PDF:` / `Attached Word document:` for
+ * those types. We sum the length of those blocks so the popup can show
+ * "X tokens of your context are attachments". Keep these patterns in sync
+ * with the `header`/`footer` in `inlineTextAttachments` — they previously
+ * drifted (the old regex expected a `--- Attached file: name ---` header
+ * the inliner never emitted, so this always returned 0).
  */
-const ATTACHMENT_HEADER = /^--- Attached file: /m;
+const ATTACHMENT_HEADER = /\n---\nAttached (?:file|PDF|Word document): /;
 const ATTACHMENT_BLOCK =
-  /--- Attached file: [^\n]+ ---\n```[a-zA-Z0-9_+-]*\n[\s\S]*?\n```/g;
+  /\n\n---\nAttached (?:file|PDF|Word document): [^\n]*\n```\n[\s\S]*?\n```/g;
 
 function attachmentCharsIn(content: string): number {
   if (!ATTACHMENT_HEADER.test(content)) return 0;

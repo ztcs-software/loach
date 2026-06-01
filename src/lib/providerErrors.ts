@@ -86,6 +86,18 @@ const MAPPINGS: Mapping[] = [
   },
 ];
 
+// Match a single needle against the lowercased error string. Purely numeric
+// needles (HTTP status codes) match only as standalone tokens, so a port
+// (`:5000`), a model name (`gpt-4o-2024`), or a byte count can't be mistaken
+// for a status code. Word needles keep plain substring matching. We avoid
+// regex lookbehind for older-WebKit (macOS) compatibility.
+function matchNeedle(hay: string, needle: string): boolean {
+  if (/^\d+$/.test(needle)) {
+    return new RegExp(`(^|\\D)${needle}(\\D|$)`).test(hay);
+  }
+  return hay.includes(needle);
+}
+
 /**
  * Build the `_⚠ … _` Markdown-italicised error line that ends up inside the
  * assistant message bubble. The line is always:
@@ -105,7 +117,9 @@ export function formatProviderError(opts: {
   const { provider, baseUrl, raw } = opts;
   const label = PROVIDER_LABEL[provider] ?? provider;
   const hay = raw.toLowerCase();
-  const matched = MAPPINGS.find((m) => m.match.some((needle) => hay.includes(needle)));
+  const matched = MAPPINGS.find((m) =>
+    m.match.some((needle) => matchNeedle(hay, needle)),
+  );
   const friendly = matched ? matched.build(raw) : raw;
   // Strip a leading "Error: " that the Rust side sometimes prepends —
   // looks odd next to our own "_⚠" prefix.

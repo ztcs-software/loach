@@ -48,7 +48,6 @@ export function SecurityPanel() {
       <SetupWizard
         initialMethod={status.method ?? "pin"}
         initialPinLength={(status.pin_length as PinLength) ?? 4}
-        existingHint={status.has_hint}
         // Whether we're replacing an existing lock — controls whether the
         // wizard demands the user's CURRENT credentials before overwriting.
         replacing={status.configured}
@@ -318,7 +317,6 @@ function ConfiguredCard({
 function SetupWizard({
   initialMethod,
   initialPinLength,
-  existingHint: _existingHint,
   replacing,
   configuredMethod,
   configuredPinLength,
@@ -327,7 +325,6 @@ function SetupWizard({
 }: {
   initialMethod: LockMethod;
   initialPinLength: PinLength;
-  existingHint: boolean;
   /** True when a lock is already configured — the wizard is being used to
    *  replace it. We then demand the user's CURRENT credentials too. */
   replacing: boolean;
