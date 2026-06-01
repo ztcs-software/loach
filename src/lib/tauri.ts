@@ -950,6 +950,15 @@ export function saveBinaryToFile(args: {
   });
 }
 
+/** Write `code` to a temp file (named `filename`, used only for its basename +
+ *  extension) and open it in VS Code via the `code` CLI. Rejects with a
+ *  user-facing message when VS Code isn't on PATH or the launch fails. No-op
+ *  outside Tauri. */
+export function openInVscode(code: string, filename: string): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke<void>("open_in_vscode", { code, filename });
+}
+
 /** Optional app-lock credentials for destructive Tauri commands. */
 export interface DestructiveAuth {
   pin?: string;

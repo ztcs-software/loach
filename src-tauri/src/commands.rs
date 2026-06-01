@@ -1930,6 +1930,77 @@ pub async fn factory_reset(
     Ok(())
 }
 
+// ---------- open in external editor ----------
+//
+// The code canvas holds a snippet, not a file. "Open in VS Code" writes the
+// current snapshot to a temp file (the renderer supplies the language-derived
+// filename; we own the directory and reduce the name to a bare basename so a
+// compromised renderer can't write outside the temp dir) and launches VS
+// Code's `code` CLI on it. Snapshot only — it does not stream as the block
+// keeps generating.
+
+#[tauri::command]
+pub fn open_in_vscode(code: String, filename: String) -> Result<(), String> {
+    use std::io::Write;
+    use std::process::Command;
+
+    // Honour only the basename — never directory components the renderer may
+    // have sent — so the write can't escape the temp dir.
+    let safe_name = std::path::Path::new(&filename)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .filter(|n| !n.is_empty())
+        .unwrap_or("snippet.txt");
+
+    let dir = std::env::temp_dir().join("loach-canvas");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Couldn't create the temp folder: {e}"))?;
+    let path = dir.join(safe_name);
+    std::fs::File::create(&path)
+        .and_then(|mut f| f.write_all(code.as_bytes()))
+        .map_err(|e| format!("Couldn't write the temp file: {e}"))?;
+
+    let not_found = "VS Code's `code` command isn't on your PATH. Open VS Code and run \
+                     \"Shell Command: Install 'code' command in PATH\", then try again."
+        .to_string();
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // CreateProcess can't run `code.cmd` directly, so go through cmd. cmd
+        // also swallows a missing-`code` error (it exits non-zero rather than
+        // failing to spawn), so confirm presence with `where` first.
+        // CREATE_NO_WINDOW stops a console from flashing on screen.
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let present = Command::new("where")
+            .arg("code")
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !present {
+            return Err(not_found);
+        }
+        Command::new("cmd")
+            .args(["/C", "code"])
+            .arg(&path)
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .map_err(|e| format!("Couldn't launch VS Code: {e}"))?;
+    }
+    #[cfg(not(windows))]
+    {
+        Command::new("code").arg(&path).spawn().map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                not_found
+            } else {
+                format!("Couldn't launch VS Code: {e}")
+            }
+        })?;
+    }
+
+    Ok(())
+}
+
 // ---------- updater support ----------
 //
 // The Tauri updater can replace a Windows NSIS install or a Linux AppImage in

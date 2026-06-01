@@ -8,8 +8,10 @@ import {
   CANVAS_MIN_WIDTH,
 } from "@/stores/canvasStore";
 import { useChatStore } from "@/stores/chatStore";
+import { useToastStore } from "@/stores/toastStore";
 import { lastCodeBlock } from "@/lib/codeBlocks";
 import { preprocessTex } from "./Markdown";
+import { openInVscode } from "@/lib/tauri";
 import { saveCodeToFile, defaultFilename } from "@/lib/codeExport";
 import { cn } from "@/lib/utils";
 
@@ -98,6 +100,20 @@ export function CodeCanvas() {
     );
   };
 
+  const onOpenInVscode = async () => {
+    try {
+      await openInVscode(displayCode, name ?? defaultFilename(displayLanguage));
+    } catch (e) {
+      // The Rust command rejects with a ready-to-show string (e.g. `code`
+      // not on PATH); fall back to a generic line for anything unexpected.
+      useToastStore.getState().push({
+        kind: "error",
+        title: "Couldn't open in VS Code",
+        body: typeof e === "string" ? e : "Something went wrong launching VS Code.",
+      });
+    }
+  };
+
   const onResizeStart = (e: React.PointerEvent<HTMLDivElement>) => {
     e.preventDefault();
     const startX = e.clientX;
@@ -170,6 +186,15 @@ export function CodeCanvas() {
           <Button
             variant="ghost"
             size="sm"
+            onClick={() => void onOpenInVscode()}
+            className="h-7 gap-1 rounded-md px-2 text-[11px] text-foreground/65 hover:bg-foreground/10 hover:text-foreground"
+            title="Open in VS Code"
+          >
+            <VsCodeIcon className="h-3.5 w-3.5" /> VS Code
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
             onClick={() => void onCopy()}
             className="h-7 gap-1 rounded-md px-2 text-[11px] text-foreground/65 hover:bg-foreground/10 hover:text-foreground"
             title="Copy code"
@@ -198,5 +223,22 @@ export function CodeCanvas() {
 
       <CodeView code={displayCode} language={displayLanguage} />
     </aside>
+  );
+}
+
+/** The official VS Code logo mark (single-path silhouette), rendered in the
+ *  brand blue so the action reads unmistakably as VS Code rather than a
+ *  generic editor glyph. Sizing comes from the caller via `className`. */
+function VsCodeIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      className={className}
+      fill="#0098FF"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <path d="M23.15 2.587L18.21.21a1.494 1.494 0 0 0-1.705.29l-9.46 8.63-4.12-3.128a.999.999 0 0 0-1.276.057L.327 7.261A1 1 0 0 0 .326 8.74L3.899 12 .326 15.26a1 1 0 0 0 .001 1.479L1.65 17.94a.999.999 0 0 0 1.276.057l4.12-3.128 9.46 8.63a1.492 1.492 0 0 0 1.704.29l4.942-2.377A1.5 1.5 0 0 0 24 20.06V3.939a1.5 1.5 0 0 0-.85-1.352zm-5.146 14.861L10.826 12l7.178-5.448v10.896z" />
+    </svg>
   );
 }
