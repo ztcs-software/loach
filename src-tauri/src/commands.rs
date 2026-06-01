@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
 
 use crate::db::{
@@ -219,6 +219,22 @@ pub async fn export_session(
 
 // ---------- messages ----------
 
+/// The only roles the `messages.role` column is documented to hold
+/// (`db.rs`). The streaming path only ever appends `"user"` / `"assistant"`,
+/// but `append_message` / `import_messages` take the role as a free string —
+/// without this guard a crafted import (or a buggy frontend) could store an
+/// arbitrary role that the chat-history builder then forwards to the
+/// provider as a turn, surfacing as a confusing upstream 400 rather than a
+/// clear validation error.
+fn validate_role(role: &str) -> Result<(), String> {
+    match role {
+        "user" | "assistant" | "system" => Ok(()),
+        other => Err(format!(
+            "invalid message role `{other}` (expected user, assistant, or system)"
+        )),
+    }
+}
+
 #[tauri::command]
 pub async fn list_messages(
     state: State<'_, AppState>,
@@ -240,6 +256,7 @@ pub async fn append_message(
     state: State<'_, AppState>,
     args: AppendMessageArgs,
 ) -> Result<Message, String> {
+    validate_role(&args.role)?;
     state
         .db
         .append_message(
@@ -274,6 +291,12 @@ pub async fn import_messages(
     state: State<'_, AppState>,
     args: ImportMessagesArgs,
 ) -> Result<Vec<Message>, String> {
+    // Reject the whole batch up front if any row carries an unexpected role,
+    // before any DB write — the import dialog only ever produces user /
+    // assistant / system, so a bad role here means a malformed payload.
+    for m in &args.messages {
+        validate_role(&m.role)?;
+    }
     let items: Vec<(String, String)> = args
         .messages
         .into_iter()
@@ -417,19 +440,24 @@ const WRITABLE_SETTING_KEYS: &[&str] = &[
     "onboarding_completed",
 ];
 
+/// Whether `key` is a setting the app is allowed to write. Built-in tool
+/// toggles (`*_tool_enabled`) live in the registry at
+/// [`crate::tools::builtin`] so a new tool is a one-line registry edit
+/// instead of a separate allowlist update; everything else must match the
+/// static `WRITABLE_SETTING_KEYS` exactly. Shared by `set_setting` and the
+/// snapshot-import path so both enforce the same boundary.
+fn is_writable_setting_key(key: &str) -> bool {
+    WRITABLE_SETTING_KEYS.contains(&key)
+        || crate::tools::builtin::setting_keys().any(|k| k == key)
+}
+
 #[tauri::command]
 pub async fn set_setting(
     state: State<'_, AppState>,
     key: String,
     value: String,
 ) -> Result<(), String> {
-    // Built-in tool toggles (`*_tool_enabled`) live in the registry at
-    // [`crate::tools::builtin`] so a new tool is a one-line registry
-    // edit instead of a separate allowlist update. Everything else has
-    // to match the static `WRITABLE_SETTING_KEYS` exactly.
-    let allowed = WRITABLE_SETTING_KEYS.contains(&key.as_str())
-        || crate::tools::builtin::setting_keys().any(|k| k == key);
-    if !allowed {
+    if !is_writable_setting_key(&key) {
         return Err(format!(
             "setting `{key}` is not on the writable allowlist"
         ));
@@ -1755,7 +1783,7 @@ pub async fn import_data_with_dialog(
     // Stage 1 — file read + JSON parse on the blocking pool. The IO + serde
     // pass blocks for as long as the file is large, so we don't want it on
     // the tokio runtime.
-    let snap: DatabaseSnapshot =
+    let mut snap: DatabaseSnapshot =
         tokio::task::spawn_blocking(move || -> Result<DatabaseSnapshot, String> {
             let text = std::fs::read_to_string(&path)
                 .map_err(|e| format!("couldn't read {}: {e}", path.display()))?;
@@ -1806,6 +1834,25 @@ pub async fn import_data_with_dialog(
                 row.name
             )
         })?;
+    }
+
+    // Stage 2.5 — filter imported settings through the SAME allowlist
+    // `set_setting` enforces. `restore_snapshot` writes settings rows
+    // verbatim, which otherwise bypasses the gate entirely: a hand-edited
+    // export could plant arbitrary keys or repoint `openai_base_url` at an
+    // attacker host — the exact attack `set_setting`'s allowlist closes.
+    // (We deliberately do NOT value-screen base URLs: they're freely
+    // user-writable on the normal path — local proxies like LM Studio need
+    // `localhost:1234` — so the import path matches that.)
+    let before = snap.data.settings.len();
+    snap.data
+        .settings
+        .retain(|(k, _)| is_writable_setting_key(k));
+    let dropped = before - snap.data.settings.len();
+    if dropped > 0 {
+        tracing::warn!(
+            "import: dropped {dropped} setting(s) not on the writable allowlist"
+        );
     }
 
     // Stage 3 — apply. `restore_snapshot` holds the single DB mutex for
@@ -1918,7 +1965,7 @@ pub fn open_code_window(
         .lock()
         .insert(label.clone(), payload);
 
-    WebviewWindowBuilder::new(&app, &label, WebviewUrl::App("index.html".into()))
+    let window = WebviewWindowBuilder::new(&app, &label, WebviewUrl::App("index.html".into()))
         .title(win_title)
         .inner_size(820.0, 620.0)
         .min_inner_size(360.0, 240.0)
@@ -1929,6 +1976,31 @@ pub fn open_code_window(
             state.code_windows.lock().remove(&label);
             err(e)
         })?;
+
+    // Authoritative cleanup, keyed off the real OS window-destroyed event
+    // rather than the renderer's best-effort `beforeunload`. This fires on
+    // EVERY close path — X button, Ctrl-W, OS kill, WebView crash, or a close
+    // that races the viewer's load effect before its JS listener attaches —
+    // so the stashed snapshot (which holds the full code string) can't leak
+    // for the rest of the process. We also re-emit `code-window:closed` so
+    // the main-window `CodeWindowBridge` prunes its streaming registry (and
+    // stops doing per-token extraction + `emitTo` against a dead window) even
+    // when the JS path never ran. Both paths converge on
+    // `drop_code_window_payload` / `unregister`, which are idempotent, so the
+    // surviving JS `beforeunload` emit is just a redundant fast-path.
+    let cleanup_app = app.clone();
+    let cleanup_label = label.clone();
+    window.on_window_event(move |event| {
+        if matches!(event, tauri::WindowEvent::Destroyed) {
+            if let Some(state) = cleanup_app.try_state::<AppState>() {
+                state.code_windows.lock().remove(&cleanup_label);
+            }
+            let _ = cleanup_app.emit(
+                "code-window:closed",
+                serde_json::json!({ "label": cleanup_label }),
+            );
+        }
+    });
 
     Ok(label)
 }

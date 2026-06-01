@@ -679,16 +679,17 @@ impl Database {
 
         let new_id = Uuid::new_v4().to_string();
         let now = Utc::now().timestamp_millis();
-        let conn = self.conn.lock();
-        let tx_conn = &*conn;
+        let mut conn = self.conn.lock();
 
-        // Insert the new session row, then duplicate the selected messages.
-        // Done under the writer lock without an explicit transaction — the
-        // two writes are independent (FK enforces session-must-exist for the
-        // child inserts) and the worst case if the message inserts fail
-        // mid-loop is a session with a partial transcript, which the UI
-        // tolerates.
-        tx_conn.execute(
+        // Insert the new session row, then duplicate the selected messages —
+        // all inside ONE transaction so a fork is atomic. Without it, a
+        // message insert failing mid-loop (disk full, oversized row) left a
+        // committed session holding a partial transcript while the command
+        // returned Err, so the UI never navigated to it but the half-baked
+        // chat lingered in the sidebar. Mirrors the transactional pattern in
+        // `import_messages` / `mark_messages_compacted`.
+        let tx = conn.transaction()?;
+        tx.execute(
             "INSERT INTO sessions (id, title, provider, model, system_prompt, params_json,
                                    space_id, pinned_at, archived_at, forked_from_session_id,
                                    created_at, updated_at)
@@ -708,7 +709,7 @@ impl Database {
 
         for m in to_copy {
             let msg_id = Uuid::new_v4().to_string();
-            tx_conn.execute(
+            tx.execute(
                 "INSERT INTO messages (id, session_id, role, content, thinking,
                                        attachments_json, metrics_json, tool_calls_json, compacted_at, created_at, import_group, import_hidden)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
@@ -728,6 +729,8 @@ impl Database {
                 ],
             )?;
         }
+        tx.commit()?;
+        drop(conn);
 
         Ok(Session {
             id: new_id,

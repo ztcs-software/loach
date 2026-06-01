@@ -612,8 +612,20 @@ async function runCopy(rest: string): Promise<CommandResult> {
   // count user turns — the command is about copying *assistant* output, so
   // `N` indexes into the filtered list (1 = latest reply, 2 = the one
   // before that, etc.).
-  const n = arg.length === 0 ? 1 : Math.max(1, Math.floor(Number(arg)));
-  if (!Number.isFinite(n)) throw new Error("Usage: /copy [N]");
+  // Validate BEFORE clamping. The old `Math.max(1, Math.floor(Number(arg)))`
+  // silently turned `/copy 0` and `/copy -5` into `1` (copying the latest
+  // reply) instead of rejecting them, because the clamp ran before the
+  // finite check. Parse, then require a positive whole number.
+  let n: number;
+  if (arg.length === 0) {
+    n = 1;
+  } else {
+    const parsed = Number(arg);
+    if (!Number.isInteger(parsed) || parsed < 1) {
+      throw new Error("Usage: /copy [N] — N must be a positive whole number.");
+    }
+    n = parsed;
+  }
   const messages = useChatStore.getState().messages[session.id] ?? [];
   const assistantReplies = messages.filter((m) => m.role === "assistant");
   if (assistantReplies.length < n) {
@@ -672,14 +684,20 @@ async function runSettings(rest: string): Promise<CommandResult> {
 
 async function runRegenerate(): Promise<CommandResult> {
   const session = requireSession();
-  // `regenerateLast` already guards against busy chats and missing user
-  // turns; on a no-op call it silently returns. We surface the busy /
-  // empty-history case ourselves so the user gets feedback instead of
-  // wondering whether the command landed.
+  // Surface the preconditions `regenerateLast` checks SILENTLY (it just
+  // returns on a bad call) so the user gets feedback instead of a dead
+  // command. Mirror its guards: last turn must be an assistant reply, a
+  // model must be set, and the chat mustn't be busy.
   const messages = useChatStore.getState().messages[session.id] ?? [];
   const last = messages[messages.length - 1];
   if (!last || last.role !== "assistant") {
     throw new Error("Nothing to regenerate — the last turn isn't an assistant reply.");
+  }
+  // Previously missing: a model-less chat made `regenerateLast` bail silently
+  // while this handler still reported a success toast — a false "Regenerating
+  // reply". Check it here so the user gets the real reason.
+  if (!session.model) {
+    throw new Error("Pick a model first.");
   }
   const state = useChatStore.getState();
   if (
@@ -688,8 +706,12 @@ async function runRegenerate(): Promise<CommandResult> {
   ) {
     throw new Error("This chat is busy — wait for the current reply to finish.");
   }
+  // No premature success toast: `regenerateLast` owns failure feedback (it
+  // toasts "Couldn't regenerate" if the delete fails), and on success the
+  // fresh reply streams in visibly. A success toast here could stack on top
+  // of the store's error toast for the same action.
   await useChatStore.getState().regenerateLast(session.id);
-  return ok("Regenerating reply", "Streaming a fresh response with current settings");
+  return { kind: "noop" };
 }
 
 async function runStats(): Promise<CommandResult> {
@@ -775,22 +797,22 @@ async function runPrivate(): Promise<CommandResult> {
 
 async function runCompact(): Promise<CommandResult> {
   const session = requireSession();
-  const state = useChatStore.getState();
-  if (state.compactingSessionId) {
+  // Only surface the one guard `compactContext` checks SILENTLY (a
+  // concurrent compaction of another chat). Its other gates — busy,
+  // model-missing, too-few-messages — already toast their own feedback, and
+  // its count gate (non-system, non-compacted ≥ COMPACT_MIN_TOTAL) is the
+  // authoritative one. The old coarser `messages.length < 6` check here
+  // could pass while the store's gate failed, producing a success toast
+  // immediately followed by the store's contradictory "Not enough to
+  // compact".
+  if (useChatStore.getState().compactingSessionId) {
     throw new Error("Another chat is already being compacted. Try again in a moment.");
   }
-  const messages = state.messages[session.id] ?? [];
-  // Mirrors the gating logic in ContextUsageBar's popover: small chats
-  // aren't worth a round-trip to the summariser. We can't easily compute
-  // the ratio from here without duplicating `computeContextUsage`, so we
-  // fall back to the more conservative half of the gate (message count)
-  // and let the store layer reject impossibly tiny chats.
-  if (messages.length < 6) {
-    throw new Error("Not enough history to compact yet — keep chatting.");
-  }
-  // Fire and forget; the store flips `compactingSessionId` so the context
-  // bar shows a spinner, and toasts its own success/failure when done.
+  // Fire-and-forget so the composer doesn't freeze for the summariser
+  // round-trip. The store flips `compactingSessionId` (context-bar spinner)
+  // and owns ALL outcome feedback, so we return noop rather than a premature
+  // success toast that could contradict the store's result.
   void useChatStore.getState().compactContext(session.id);
-  return ok("Compacting context", "Summarising older messages with this chat's model");
+  return { kind: "noop" };
 }
 

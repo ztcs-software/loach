@@ -105,13 +105,14 @@ export const useSnippetVarStore = create<SnippetVarState>((set, get) => ({
       value,
       description: description ?? null,
     });
+    // Don't fabricate `updated_at: Date.now()` — the command returns void,
+    // so we don't know the server's real timestamp. Guessing it risks a
+    // value that disagrees with the DB (and would mis-sort a future
+    // "recently edited" view). Keep the prior `updated_at`; the list sorts
+    // by key, so the displayed timestamp is never a guess.
     set((s) => ({
       variables: s.variables
-        .map((v) =>
-          v.id === id
-            ? { ...v, key, value, description, updated_at: Date.now() }
-            : v,
-        )
+        .map((v) => (v.id === id ? { ...v, key, value, description } : v))
         .sort((a, b) => a.key.localeCompare(b.key)),
     }));
   },

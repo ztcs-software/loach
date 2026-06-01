@@ -216,11 +216,12 @@ interface ChatState {
    *  are replaced, not stacked. */
   compactContext: (sessionId: string) => Promise<void>;
   /** Build a compacted Markdown export without touching the session.
-   *  Summarizes the older messages (same model + prompt as `compactContext`)
-   *  and returns an export where that summary stands in for them while the
-   *  most recent messages stay verbatim. Read-only — nothing is persisted.
-   *  Throws with a user-facing message when there's no model or too little
-   *  to compact. */
+   *  Summarizes the ENTIRE visible context (same model + prompt as
+   *  `compactContext`) into a single recap — unlike the live Compact button,
+   *  no recent messages are kept verbatim, because turning the export switch
+   *  on is an explicit ask to collapse everything into the summary.
+   *  Read-only — nothing is persisted. Throws with a user-facing message when
+   *  there's no model or fewer than COMPACT_MIN_TOTAL messages to compact. */
   exportCompactedContext: (sessionId: string) => Promise<string>;
 }
 
@@ -2054,8 +2055,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const visible = all.filter(
       (m) => m.role !== "system" && m.compacted_at == null,
     );
-    if (visible.length === 0) {
-      throw new Error("No messages to compact.");
+    // Apply the same minimum-size floor as the live Compact button. Below it,
+    // summarizing isn't worth a model round-trip (and produces a worse export
+    // than just including the messages verbatim), so reject with a clear
+    // message rather than spending a request to "summarize" a 1-2 message chat.
+    if (visible.length < COMPACT_MIN_TOTAL) {
+      throw new Error(
+        `Not enough to compact — needs at least ${COMPACT_MIN_TOTAL} messages.`,
+      );
     }
     // Unlike the live Compact button (which keeps the most recent
     // COMPACT_KEEP_TAIL messages verbatim), the export path summarizes the

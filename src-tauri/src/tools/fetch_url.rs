@@ -367,6 +367,16 @@ pub fn is_public_ip(ip: &IpAddr) -> bool {
             if (segs[0] & 0xffc0) == 0xfe80 {
                 return false;
             }
+            // Helper: rebuild the embedded IPv4 from the low 32 bits and run
+            // it back through the v4 screen.
+            let embedded_v4 = |segs: &[u16; 8]| {
+                std::net::Ipv4Addr::new(
+                    (segs[6] >> 8) as u8,
+                    (segs[6] & 0xff) as u8,
+                    (segs[7] >> 8) as u8,
+                    (segs[7] & 0xff) as u8,
+                )
+            };
             // ::ffff:0:0/96 — IPv4-mapped: delegate to the v4 check.
             if segs[0] == 0
                 && segs[1] == 0
@@ -375,13 +385,34 @@ pub fn is_public_ip(ip: &IpAddr) -> bool {
                 && segs[4] == 0
                 && segs[5] == 0xffff
             {
-                let mapped = std::net::Ipv4Addr::new(
-                    (segs[6] >> 8) as u8,
-                    (segs[6] & 0xff) as u8,
-                    (segs[7] >> 8) as u8,
-                    (segs[7] & 0xff) as u8,
-                );
-                return is_public_ip(&IpAddr::V4(mapped));
+                return is_public_ip(&IpAddr::V4(embedded_v4(&segs)));
+            }
+            // 64:ff9b::/96 — NAT64 well-known prefix. A host whose AAAA record
+            // is `64:ff9b::7f00:1` routes to 127.0.0.1 through a NAT64
+            // gateway, so decode the embedded v4 and screen it the same way
+            // as the IPv4-mapped case. Without this it fell through to the
+            // `true` fallthrough below and bypassed the SSRF guard.
+            if segs[0] == 0x0064
+                && segs[1] == 0xff9b
+                && segs[2] == 0
+                && segs[3] == 0
+                && segs[4] == 0
+                && segs[5] == 0
+            {
+                return is_public_ip(&IpAddr::V4(embedded_v4(&segs)));
+            }
+            // ::a.b.c.d — deprecated IPv4-compatible addresses (high 96 bits
+            // zero, low 32 the v4). Loopback (::1) and unspecified (::) are
+            // already handled above, so a remaining all-zero-prefix address
+            // with a non-zero tail is an embedded v4 — screen it too.
+            if segs[0] == 0
+                && segs[1] == 0
+                && segs[2] == 0
+                && segs[3] == 0
+                && segs[4] == 0
+                && segs[5] == 0
+            {
+                return is_public_ip(&IpAddr::V4(embedded_v4(&segs)));
             }
             true
         }
@@ -794,5 +825,33 @@ mod tests {
         assert!(!is_public_ip(&"fc00::1".parse().unwrap()));
         assert!(!is_public_ip(&"fe80::1".parse().unwrap()));
         assert!(is_public_ip(&"2606:4700:4700::1111".parse().unwrap()));
+    }
+
+    #[test]
+    fn rejects_ipv4_mapped_private() {
+        // ::ffff:a.b.c.d must inherit the v4 screen.
+        assert!(!is_public_ip(&"::ffff:127.0.0.1".parse().unwrap()));
+        assert!(!is_public_ip(&"::ffff:169.254.169.254".parse().unwrap()));
+        assert!(!is_public_ip(&"::ffff:10.0.0.1".parse().unwrap()));
+        assert!(is_public_ip(&"::ffff:8.8.8.8".parse().unwrap()));
+    }
+
+    #[test]
+    fn rejects_nat64_embedded_private() {
+        // 64:ff9b::/96 — the embedded v4 must be screened, not waved through.
+        // 0x7f000001 = 127.0.0.1, 0xa9fea9fe = 169.254.169.254 (metadata).
+        assert!(!is_public_ip(&"64:ff9b::7f00:1".parse().unwrap()));
+        assert!(!is_public_ip(&"64:ff9b::a9fe:a9fe".parse().unwrap()));
+        // 0x08080808 = 8.8.8.8 — a public embedded v4 still passes.
+        assert!(is_public_ip(&"64:ff9b::808:808".parse().unwrap()));
+    }
+
+    #[test]
+    fn rejects_ipv4_compatible_private() {
+        // ::a.b.c.d (deprecated IPv4-compatible). ::1 is loopback and handled
+        // separately, so a non-trivial embedded v4 is what we screen here.
+        assert!(!is_public_ip(&"::7f00:1".parse().unwrap())); // 127.0.0.1
+        assert!(!is_public_ip(&"::a9fe:a9fe".parse().unwrap())); // 169.254.169.254
+        assert!(is_public_ip(&"::808:808".parse().unwrap())); // 8.8.8.8
     }
 }

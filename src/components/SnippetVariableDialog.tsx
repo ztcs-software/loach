@@ -23,6 +23,7 @@ export function SnippetVariableDialog() {
   const close = useSnippetVarStore((s) => s.closeDialog);
   const create = useSnippetVarStore((s) => s.create);
   const update = useSnippetVarStore((s) => s.update);
+  const variables = useSnippetVarStore((s) => s.variables);
 
   const editing = target && target !== "new" ? target : null;
   const isEditMode = !!editing;
@@ -59,6 +60,13 @@ export function SnippetVariableDialog() {
     }
     if (RESERVED_VAR_KEYS.includes(upper)) {
       return `'${upper}' is reserved by Loach`;
+    }
+    // Catch a duplicate key BEFORE the save round-trip — the `key` column is
+    // UNIQUE, so otherwise the user would see a raw "UNIQUE constraint
+    // failed" SQLite string from the backend. Exclude the row being edited
+    // (renaming a variable to its own current key is fine).
+    if (variables.some((v) => v.key === upper && v.id !== editing?.id)) {
+      return `'${upper}' already exists — pick a different name`;
     }
     return null;
   })();
