@@ -75,6 +75,10 @@ transcript of messages.
   `requestAnimationFrame` so the UI stays smooth even on fast local models.
 - **Thinking traces** — for reasoning-capable models the chain-of-thought
   stream is rendered into a separate collapsible block above the answer.
+- **Tool-call blocks** — when the model calls a tool (a built-in utility
+  or an MCP tool), the calls collapse into a single **"Called N tools"**
+  header above the answer, styled like the Thinking block. Expand it to
+  see each call's name, arguments, and result (or error).
 - **Metrics chip** — every assistant turn shows the prompt+completion token
   count, wall-clock time, and tokens/sec when the provider reports them.
 - **Markdown + code highlighting** — `react-markdown` + `rehype-highlight`
@@ -97,6 +101,9 @@ transcript of messages.
 The input box at the bottom of every chat.
 
 - **Multiline input** with Enter to send and Shift+Enter for newline.
+- **Slash commands** — type `/` at the start of the composer to open the
+  command palette and run chat actions, switch model, fetch a URL, and
+  more without leaving the keyboard (see §2.9).
 - **File picker** (`+` icon) — opens the native file dialog directly. Drag
   and drop also works onto the composer or anywhere over the chat area.
 - **Suggestion chips** — on the welcome hero screen of an empty chat,
@@ -167,11 +174,22 @@ FIFO queue:
 ### 2.6 Header actions (per chat)
 
 - **Rename**, **Pin/Unpin**, **Move to Archive**, **Delete**.
+- **Fork this chat** — clone the conversation into a new chat (same model
+  and Space) so you can branch a tangent without disturbing the original.
+  The fork carries a **"Forked from …"** badge in its header that jumps
+  back to the source; the badge disappears if the source is deleted. Also
+  available from a message's `…` menu (forks up to that point) and via the
+  `/fork` command.
 - **Copy as Markdown** — copies the full transcript to the clipboard.
-- **Export** to JSON or Markdown via the native save dialog. The dialog
-  and file write both happen in Rust; the renderer never sees the path.
+- **Export** to JSON or Markdown via the native save dialog. A **Compact
+  context** toggle in the dialog exports a summarised version instead of
+  the verbatim transcript (your chat isn't changed). The dialog and file
+  write both happen in Rust; the renderer never sees the path.
 - **Import context** — paste exported JSON/Markdown or any plain text;
-  it's parsed into messages and appended to the current chat.
+  it's parsed into messages and appended to the current chat. A **Hide
+  from transcript** toggle folds the imported messages into a single
+  collapsed card instead of showing them inline — either way they're
+  still sent to the model.
 - **Search transcript** — Cmd/Ctrl+F-style find within the chat.
 
 ### 2.7 Archive
@@ -200,7 +218,9 @@ no trace. Open it from the ghost icon in the title bar.
   intermediaries to honour the "leaves no trace" promise.
 - **MCP tools are blocked.** Servers configured in **Settings → MCP** are
   not exposed to the model inside Private Chat, so a tool call can't
-  side-channel the conversation out to a third party.
+  side-channel the conversation out to a third party. Built-in tools
+  (§8.3) still work — they run entirely on your machine, so they can't
+  leak the conversation.
 - **No backdrop / Esc close.** The overlay can only be dismissed by the
   explicit `X` in its header. The wipe is destructive; we don't want a
   stray click to throw away the conversation.
@@ -215,6 +235,53 @@ no trace. Open it from the ghost icon in the title bar.
 - **Same parameters panel** — Simple / Advanced toggle, model defaults,
   Thinking and Low VRAM toggles. Closes and wipes along with the rest of
   the overlay.
+
+### 2.9 Slash commands
+
+Type `/` as the first character in the composer to open the **command
+palette** — a floating list that filters as you type. Arrow keys move the
+selection, **Tab** completes the highlighted command, and **Enter** runs a
+fully-typed command (or completes a partial one). **Esc** dismisses the
+palette. Anything that isn't a recognised command is sent as an ordinary
+message, so a prompt that happens to start with `/` is never swallowed.
+
+Commands are grouped the way `/help` lists them:
+
+- **Chat** — `/new`, `/clear`, `/rename <title>`, `/pin`, `/archive`,
+  `/delete`, `/fork`, `/regenerate`, `/copy [N]` (copy the last or
+  Nth-latest assistant reply), `/export`, `/stats`, `/compact`,
+  `/private`.
+- **Model & persona** — `/model <name>`, `/persona <name>` (both
+  fuzzy-matched against the catalog).
+- **Listings** — `/list models | personas | spaces | snippets | mcp |
+  providers | memories`.
+- **Prompts** — `/instructions <text|clear>` (set or clear the per-chat
+  system prompt), `/snippet <name>` (expand a saved snippet into the
+  composer).
+- **Memory & spaces** — `/remember <fact>`, `/forget <id|query>`,
+  `/space <name>`.
+- **Tools & web** — `/tools` (list tools from enabled MCP servers),
+  `/web-fetch on|off`, `/fetch <url>`, `/thinking on|off`.
+- **App** — `/settings [tab]`, `/help`.
+
+`/clear` and `/delete` are destructive and route through a confirmation
+dialog before they run.
+
+### 2.10 Context usage and compaction
+
+A slim **context usage bar** sits just above the composer. It shows how
+much of the model's context window the chat is using — `used / total`
+tokens and a percentage — with a popover that breaks the estimate down
+into the system prompt, message history, and attachments.
+
+When a chat grows long, **Compact context** (the button on the bar, or
+the `/compact` command) summarises the older turns with the chat's own
+model and tucks the summary into the system prompt. The original messages
+aren't deleted — they stay in the transcript for scrollback, marked with a
+compaction divider, but are dropped from what the model sees on the next
+turn so the freed context goes to new conversation. Compaction is only
+offered once a chat is large enough to benefit (a handful of messages and
+at least a quarter of the window in use).
 
 ---
 
@@ -287,6 +354,20 @@ in the **Snippets** sidebar tab.
   that text.
 - **Library view** — tile grid sorted by recency, search field at the top.
 - **Edit / Delete** behind a per-tile `⋯` menu.
+
+### 4.1 Snippet variables
+
+Snippet bodies can contain `{{PLACEHOLDER}}` variables (uppercase names)
+that get filled in when the snippet is expanded:
+
+- **Static variables** — reusable key/value pairs defined once in the
+  Snippets library (e.g. `{{TEAM_NAME}}` → "Engineering"). They're
+  substituted automatically every time a snippet that references them is
+  run. The built-in template variables (`{{USER_NAME}}`,
+  `{{CURRENT_DATE}}`, …; see §15) are reserved and can't be redefined.
+- **Prompt-on-use placeholders** — any `{{PLACEHOLDER}}` left unresolved
+  after the static pass opens a small fill-in dialog when you run the
+  snippet. Your answers are remembered per snippet for next time.
 
 ---
 
@@ -439,6 +520,8 @@ strips HTML to readable text, and appends it as a fenced block.
   rejected. Redirects are walked manually and re-screened per hop.
 - **Failures are silent per-URL** — a dead link does not block the send;
   the failure is rendered as a short stub so the model knows we tried.
+- **Shown on the reply** — the URLs Loach fetched for a turn appear as
+  small chips on the assistant message.
 
 ### 8.2 MCP (Model Context Protocol)
 
@@ -458,6 +541,35 @@ For each server:
 URLs are validated, headers go through size and character checks, and per-
 request bodies are capped at 4 MiB so a misconfigured endpoint can't OOM
 the app. Per-request timeout is 30 s.
+
+### 8.3 Built-in tools
+
+A set of small, local utilities the model can call mid-answer through the
+same tool-call loop as MCP. Each has its own toggle in **Settings →
+Tools** and all of them are **off by default** — turn on only what you
+want a given model to reach for. They run entirely in Rust on your machine
+(no network, no disk writes beyond a PDF you ask for), so they also work
+inside Private Chat.
+
+- **calculate** — evaluate arithmetic, trig, functions, and constants.
+- **datetime** — parse, format, and do arithmetic on dates/times, with
+  timezone conversion and business-day counting.
+- **count** — count characters, bytes, words, lines, or substring hits.
+- **hash** — SHA-224/256/384/512 over UTF-8, hex, or base64 input.
+- **uuid** — generate v4 or v7 UUIDs (up to 100 per call).
+- **base64** — encode/decode with the standard or URL-safe alphabet.
+- **json** — validate, pretty-print, or pull values out by JSON Pointer.
+- **unit_convert** — convert between units across nine categories (length,
+  mass, volume, speed, time, area, energy, pressure, temperature).
+- **diff_text** — unified diff between two strings, by line, word, or
+  character.
+- **sort** — sort lines (lexical, natural, or numeric; reverse / unique).
+- **ip** — CIDR membership checks and subnet info.
+- **pdf** — generate a downloadable PDF from a structured spec (headings,
+  paragraphs, lists, tables, page breaks). The result lands in the chat as
+  a previewable, savable attachment.
+
+Calls render in the collapsible tool-call block described in §2.1.
 
 ---
 
@@ -488,9 +600,16 @@ Clicking opens a right-side panel:
 - **Export** — opens the native save dialog with a sensible default
   filename (extension picked from the language: `snippet.ts`, `snippet.py`,
   `Dockerfile`, etc.).
+- **Open in VS Code** — writes the snippet to a temp file and opens it in
+  VS Code via the `code` CLI. If `code` isn't on your PATH, the button
+  surfaces a short hint on how to add it rather than failing silently.
 - Read-only body with line numbers and syntax highlighting via
   `highlight.js`. Highlighting is language-aware; unknown languages fall
   back to auto-detect.
+- **Live updates** — when opened on a reply that's still streaming, the
+  canvas keeps mirroring the latest code block as more tokens arrive.
+- **Resizable** — drag the left edge to set the panel width; the choice
+  is remembered.
 
 The canvas and the parameters sidebar share the right slot — the canvas
 wins when both would be open.
@@ -680,11 +799,13 @@ verification happens before the binary is replaced.
 
 - `Cmd/Ctrl + K` — global search palette.
 - `Cmd/Ctrl + F` — find within the current chat transcript.
-- `Enter` — send the composer.
+- `/` (start of the composer) — open the slash-command palette.
+- `Enter` — send the composer, or run the typed slash command.
 - `Shift + Enter` — newline in the composer.
-- `Esc` — close the search palette, dismiss menus and dialogs, exit
-  onboarding (with confirm on the provider step).
-- Up / Down inside the search palette — move the active result.
+- `Tab` — in the command palette, complete the highlighted command.
+- `Esc` — close the search or command palette, dismiss menus and dialogs,
+  exit onboarding (with confirm on the provider step).
+- Up / Down inside the search or command palette — move the active entry.
 
 ---
 
