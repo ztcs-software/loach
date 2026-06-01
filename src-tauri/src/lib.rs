@@ -315,6 +315,7 @@ pub fn run() {
             commands::wipe_user_data,
             commands::factory_reset,
             commands::updater_supported,
+            commands::open_in_vscode,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Loach");
