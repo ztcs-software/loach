@@ -11,7 +11,8 @@ import { useChatStore } from "@/stores/chatStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useSnippetStore } from "@/stores/snippetStore";
 import { useUIStore } from "@/stores/uiStore";
-import type { Attachment, Session, Snippet, Space } from "@/types";
+import { expandAndPrimeSnippet } from "@/lib/runSnippet";
+import type { Session, Snippet, Space } from "@/types";
 
 /**
  * Floating command-palette-style search.
@@ -65,7 +66,6 @@ export function SearchBar() {
   const newSession = useChatStore((s) => s.newSession);
   const setViewingSpace = useSpaceStore((s) => s.setViewingSpace);
   const setSidebarTab = useUIStore((s) => s.setSidebarTab);
-  const primeComposer = useUIStore((s) => s.primeComposer);
 
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
@@ -217,7 +217,7 @@ export function SearchBar() {
       provider: r.snippet.provider ?? undefined,
       model: r.snippet.model ?? undefined,
     });
-    primeComposer(r.snippet.prompt, [] as Attachment[]);
+    await expandAndPrimeSnippet(r.snippet);
   };
 
   const onKeyDown = (e: ReactKeyboardEvent<HTMLInputElement>) => {

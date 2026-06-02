@@ -19,7 +19,6 @@ import type { Space, SpaceFile, SpaceMemory } from "@/types";
 interface SpaceState {
   spaces: Space[];
   activeSpaceId: string | null;
-  editingSpace: Space | null;
   viewingSpaceId: string | null;
   spaceFiles: Record<string, SpaceFile[]>;
   /** Per-space memory cache, keyed by `space_id`. Hydrated lazily — the
@@ -27,7 +26,6 @@ interface SpaceState {
    *  they need it. Mutated directly by the extractor when it auto-saves a
    *  new row so the Memory tab reflects writes without a re-fetch. */
   spaceMemories: Record<string, SpaceMemory[]>;
-  spacesExpanded: boolean;
   spaceFormOpen: boolean;
 
   hydrate: () => Promise<void>;
@@ -50,10 +48,8 @@ interface SpaceState {
     },
   ) => Promise<void>;
   deleteSpace: (id: string) => Promise<void>;
-  setEditingSpace: (space: Space | null) => void;
   setSpaceFormOpen: (open: boolean) => void;
   setViewingSpace: (id: string | null) => void;
-  toggleSpacesExpanded: () => void;
 
   loadSpaceFiles: (spaceId: string) => Promise<SpaceFile[]>;
   addFile: (
@@ -83,11 +79,9 @@ interface SpaceState {
 export const useSpaceStore = create<SpaceState>((set, get) => ({
   spaces: [],
   activeSpaceId: null,
-  editingSpace: null,
   viewingSpaceId: null,
   spaceFiles: {},
   spaceMemories: {},
-  spacesExpanded: false,
   spaceFormOpen: false,
 
   hydrate: async () => {
@@ -184,11 +178,8 @@ export const useSpaceStore = create<SpaceState>((set, get) => ({
     });
   },
 
-  setEditingSpace: (space) => set({ editingSpace: space }),
   setSpaceFormOpen: (open) => set({ spaceFormOpen: open }),
   setViewingSpace: (id) => set({ viewingSpaceId: id, activeSpaceId: id }),
-  toggleSpacesExpanded: () =>
-    set((s) => ({ spacesExpanded: !s.spacesExpanded })),
 
   loadSpaceFiles: async (spaceId) => {
     const files = await listSpaceFiles(spaceId);

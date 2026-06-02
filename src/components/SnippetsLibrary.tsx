@@ -17,10 +17,12 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useConfirm } from "@/components/ConfirmDialog";
+import { SnippetVariablesPanel } from "@/components/SnippetVariablesPanel";
 import { useChatStore } from "@/stores/chatStore";
 import { useSnippetStore } from "@/stores/snippetStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useUIStore } from "@/stores/uiStore";
+import { expandAndPrimeSnippet } from "@/lib/runSnippet";
 import { cn, relativeTime } from "@/lib/utils";
 import type { Snippet } from "@/types";
 
@@ -42,7 +44,6 @@ export function SnippetsLibrary() {
   const newSession = useChatStore((s) => s.newSession);
   const setViewingSpace = useSpaceStore((s) => s.setViewingSpace);
   const setSidebarTab = useUIStore((s) => s.setSidebarTab);
-  const primeComposer = useUIStore((s) => s.primeComposer);
 
   const sorted = useMemo(
     () => [...snippets].sort((a, b) => b.updated_at - a.updated_at),
@@ -60,7 +61,10 @@ export function SnippetsLibrary() {
       provider: snippet.provider ?? undefined,
       model: snippet.model ?? undefined,
     });
-    primeComposer(snippet.prompt, []);
+    // `expandAndPrimeSnippet` substitutes built-ins + custom globals; if any
+    // `{{VAR}}` is still unresolved it opens the fill-blanks dialog before
+    // priming the composer.
+    await expandAndPrimeSnippet(snippet);
   };
 
   const handleDelete = async (snippet: Snippet) => {
@@ -98,6 +102,8 @@ export function SnippetsLibrary() {
               New snippet
             </Button>
           </header>
+
+          <SnippetVariablesPanel />
 
           {snippets.length === 0 ? (
             <EmptyLibraryState

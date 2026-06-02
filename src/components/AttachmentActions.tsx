@@ -28,7 +28,14 @@ type PreviewKind = "image" | "pdf" | "canvas" | "file";
  */
 function previewKindFor(a: Attachment): PreviewKind {
   if (a.kind === "image") return "image";
-  if (a.kind === "file") return "file";
+  // Tool-produced PDFs use kind: "file" with the base64 payload on `bytes`
+  // (the canonical field) rather than `data` — see the comment block in
+  // `src-tauri/src/tools/pdf.rs`. Route those into PdfPreview the same way
+  // user-uploaded PDFs are routed.
+  if (a.kind === "file") {
+    if (a.mime === PDF_MIME && a.bytes) return "pdf";
+    return "file";
+  }
   // text-kind from here on
   if (a.mime === PDF_MIME) return a.bytes ? "pdf" : "file";
   if (a.mime === DOCX_MIME) return "file";

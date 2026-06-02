@@ -3,7 +3,6 @@ import {
   ArrowLeft,
   Brain,
   Cpu,
-  Download,
   Eye,
   EyeOff,
   HardDrive,
@@ -758,7 +757,3 @@ function StopEditor({
     </div>
   );
 }
-
-// These icons used elsewhere in the file but re-exported here as a visual
-// reminder of the Modelfile primitives if we ever add a legend.
-export const MODEL_ICONS = { Cpu, Download, Sliders } as const;

@@ -51,8 +51,8 @@ export function FinalStep({ onClose }: { onClose: () => void }) {
           You're all set
         </h1>
         <p className="mt-2.5 max-w-sm text-[13.5px] leading-relaxed text-foreground/60">
-          Loach is ready to chat. Anything set up here may be later
-          changed in Settings.
+          Loach is ready to chat. Anything set up here can be changed
+          later in Settings.
         </p>
 
         <Button

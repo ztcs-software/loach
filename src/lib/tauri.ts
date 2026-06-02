@@ -4,7 +4,6 @@ import type {
   AdminEvent,
   ChatRequest,
   FetchedPage,
-  GenerationParams,
   ImportStats,
   McpServer,
   McpServerInput,
@@ -14,6 +13,8 @@ import type {
   OllamaShowResponse,
   Session,
   Snippet,
+  SnippetFillValue,
+  SnippetVariable,
   Space,
   SpaceContext,
   SpaceFile,
@@ -34,6 +35,15 @@ function notInTauri<T>(fallback: T): Promise<T> {
   return Promise.resolve(fallback);
 }
 
+/** Mint a unique-ish id for the no-backend fallback path. `Date.now()` alone
+ *  collides on rapid double-clicks (two "New chat" presses in the same
+ *  millisecond ship the same id and trip React's duplicate-key warning in the
+ *  sidebar); appending a random suffix sidesteps that. Browser-preview only —
+ *  production runs always hit the Tauri backend and get real UUIDs. */
+function mockId(prefix: string): string {
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
 // ------------ sessions ------------
 
 export function listSessions(): Promise<Session[]> {
@@ -51,7 +61,7 @@ export function createSession(args: {
   if (!isTauri) {
     const now = Date.now();
     return notInTauri<Session>({
-      id: `mock-${now}`,
+      id: mockId("mock"),
       title: args.title ?? "New chat",
       provider: args.provider as Session["provider"],
       model: args.model,
@@ -60,11 +70,40 @@ export function createSession(args: {
       space_id: args.space_id ?? null,
       pinned_at: null,
       archived_at: null,
+      forked_from_session_id: null,
       created_at: now,
       updated_at: now,
     });
   }
   return invoke("create_session", { args });
+}
+
+/** Branch a chat. When `up_to_message_id` is omitted, every message in the
+ *  source is copied; when set, the fork stops after that message (inclusive).
+ *  The returned `Session` has `forked_from_session_id` pointing at the
+ *  source so the header can render the "Forked from …" badge. */
+export function forkSession(args: {
+  source_session_id: string;
+  up_to_message_id?: string | null;
+}): Promise<Session> {
+  if (!isTauri) {
+    const now = Date.now();
+    return notInTauri<Session>({
+      id: mockId("mock-fork"),
+      title: "Forked chat",
+      provider: "ollama",
+      model: "",
+      system_prompt: null,
+      params_json: null,
+      space_id: null,
+      pinned_at: null,
+      archived_at: null,
+      forked_from_session_id: args.source_session_id,
+      created_at: now,
+      updated_at: now,
+    });
+  }
+  return invoke("fork_session", { args });
 }
 
 export function renameSession(id: string, title: string): Promise<void> {
@@ -138,7 +177,7 @@ export function appendMessage(args: {
 }): Promise<Message> {
   if (!isTauri) {
     return notInTauri<Message>({
-      id: `mock-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      id: mockId("mock"),
       session_id: args.session_id,
       role: args.role,
       content: args.content,
@@ -146,10 +185,55 @@ export function appendMessage(args: {
       attachments_json: args.attachments_json ?? null,
       metrics_json: null,
       tool_calls_json: null,
+      compacted_at: null,
+      import_group: null,
+      import_hidden: false,
       created_at: Date.now(),
     });
   }
   return invoke("append_message", { args });
+}
+
+/** Insert a batch of imported messages as one group (one collapsible card in
+ *  the transcript, removable as a unit). `hidden` folds the card out of the
+ *  transcript while the content still reaches the model. Returns the created
+ *  rows so the caller can splice them straight into the in-memory list. */
+export function importMessages(args: {
+  session_id: string;
+  messages: { role: "user" | "assistant" | "system"; content: string }[];
+  hidden: boolean;
+}): Promise<Message[]> {
+  if (!isTauri) {
+    const group = mockId("import");
+    const base = Date.now();
+    return notInTauri<Message[]>(
+      args.messages.map((m, i) => ({
+        id: mockId("mock"),
+        session_id: args.session_id,
+        role: m.role,
+        content: m.content,
+        thinking: null,
+        attachments_json: null,
+        metrics_json: null,
+        tool_calls_json: null,
+        compacted_at: null,
+        import_group: group,
+        import_hidden: args.hidden,
+        created_at: base + i,
+      })),
+    );
+  }
+  return invoke("import_messages", { args });
+}
+
+/** Delete an imported batch as a unit, addressed by its group id. Scoped by
+ *  `session_id` — the backend rejects calls whose rows don't belong to it. */
+export function deleteImportGroup(
+  sessionId: string,
+  group: string,
+): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("delete_import_group", { sessionId, group });
 }
 
 export function updateMessage(args: {
@@ -166,6 +250,11 @@ export function updateMessage(args: {
    *  calls; the backend `COALESCE`'s on the column so streaming flushes
    *  don't clobber tool-call records saved on a separate write. */
   tool_calls_json?: string | null;
+  /** JSON-encoded `Attachment[]` produced by built-in tools during this
+   *  assistant turn (today only `pdf`). Same COALESCE semantics as
+   *  `tool_calls_json` — pass undefined / null on writes that don't
+   *  touch attachments. */
+  attachments_json?: string | null;
 }): Promise<void> {
   if (!isTauri) return notInTauri(undefined);
   return invoke("update_message", { args });
@@ -176,6 +265,30 @@ export function updateMessage(args: {
 export function deleteMessage(id: string, sessionId: string): Promise<void> {
   if (!isTauri) return notInTauri(undefined);
   return invoke("delete_message", { id, sessionId });
+}
+
+/** Delete every message in a session in one transactional call. Backs the
+ *  `/clear` command — atomic and single round-trip, vs. a deleteMessage per
+ *  message. */
+export function clearSessionMessages(sessionId: string): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("clear_session_messages", { sessionId });
+}
+
+/** Mark a batch of messages as "rolled into the auto-summary": the rows
+ *  stay in the DB and keep rendering in the transcript, but the chat
+ *  history builder skips them so the model only consumes the summary
+ *  block. Scoped by `session_id` — the backend rejects ids that don't
+ *  belong to the given session. No-op in preview mode (no backend). */
+export function markMessagesCompacted(args: {
+  session_id: string;
+  ids: string[];
+}): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("mark_messages_compacted", {
+    sessionId: args.session_id,
+    ids: args.ids,
+  });
 }
 
 // ------------ settings ------------
@@ -422,7 +535,7 @@ export function createSpace(args: {
   if (!isTauri) {
     const now = Date.now();
     return notInTauri<Space>({
-      id: `mock-space-${now}`,
+      id: mockId("mock-space"),
       name: args.name,
       description: args.description ?? "",
       instructions: args.instructions ?? "",
@@ -473,7 +586,7 @@ export function addSpaceFile(args: {
   if (!isTauri) {
     const now = Date.now();
     return notInTauri<SpaceFile>({
-      id: `mock-sf-${now}`,
+      id: mockId("mock-sf"),
       space_id: args.space_id,
       name: args.name,
       mime: args.mime,
@@ -529,7 +642,7 @@ export function addSpaceMemory(args: {
   if (!isTauri) {
     const now = Date.now();
     return notInTauri<SpaceMemory>({
-      id: `mock-mem-${now}`,
+      id: mockId("mock-mem"),
       space_id: args.space_id,
       content: args.content,
       source_session_id: args.source_session_id ?? null,
@@ -577,7 +690,7 @@ export function createSnippet(args: {
   if (!isTauri) {
     const now = Date.now();
     return notInTauri<Snippet>({
-      id: `mock-snip-${now}`,
+      id: mockId("mock-snip"),
       title: args.title,
       prompt: args.prompt,
       attachments_json: args.attachments_json ?? null,
@@ -605,6 +718,63 @@ export function updateSnippet(args: {
 export function deleteSnippet(id: string): Promise<void> {
   if (!isTauri) return notInTauri(undefined);
   return invoke("delete_snippet", { id });
+}
+
+// ------------ snippet variables ------------
+
+export function listSnippetVariables(): Promise<SnippetVariable[]> {
+  if (!isTauri) return notInTauri([]);
+  return invoke("list_snippet_variables");
+}
+
+export function createSnippetVariable(args: {
+  key: string;
+  value: string;
+  description?: string | null;
+}): Promise<SnippetVariable> {
+  if (!isTauri) {
+    const now = Date.now();
+    return notInTauri<SnippetVariable>({
+      id: mockId("mock-var"),
+      key: args.key.toUpperCase(),
+      value: args.value,
+      description: args.description ?? null,
+      created_at: now,
+      updated_at: now,
+    });
+  }
+  return invoke("create_snippet_variable", { args });
+}
+
+export function updateSnippetVariable(args: {
+  id: string;
+  key: string;
+  value: string;
+  description?: string | null;
+}): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("update_snippet_variable", { args });
+}
+
+export function deleteSnippetVariable(id: string): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("delete_snippet_variable", { id });
+}
+
+export function listSnippetFillValues(
+  snippetId: string,
+): Promise<SnippetFillValue[]> {
+  if (!isTauri) return notInTauri([]);
+  return invoke("list_snippet_fill_values", { snippetId });
+}
+
+export function upsertSnippetFillValues(args: {
+  snippet_id: string;
+  /** Flat tuples matching the Rust `Vec<(String, String)>`. */
+  values: [string, string][];
+}): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("upsert_snippet_fill_values", { args });
 }
 
 // ------------ chat streaming ------------
@@ -663,13 +833,6 @@ export function makeRequestId(): string {
     globalThis.crypto?.randomUUID?.() ??
     `${Date.now()}-${Math.random().toString(36).slice(2)}`
   );
-}
-
-export function mergeParams(
-  base: GenerationParams,
-  override?: GenerationParams | null,
-): GenerationParams {
-  return { ...base, ...(override ?? {}) };
 }
 
 // ------------ tools ------------
@@ -777,6 +940,15 @@ export function saveBinaryToFile(args: {
     defaultPath: args.default_path,
     filters: args.filters,
   });
+}
+
+/** Write `code` to a temp file (named `filename`, used only for its basename +
+ *  extension) and open it in VS Code via the `code` CLI. Rejects with a
+ *  user-facing message when VS Code isn't on PATH or the launch fails. No-op
+ *  outside Tauri. */
+export function openInVscode(code: string, filename: string): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke<void>("open_in_vscode", { code, filename });
 }
 
 /** Optional app-lock credentials for destructive Tauri commands. */

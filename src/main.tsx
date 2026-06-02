@@ -33,16 +33,17 @@ window.addEventListener("contextmenu", (e) => {
   e.preventDefault();
 });
 
-// Suppress the WebView's built-in find-in-page bar. On Windows (WebView2)
-// Ctrl+F, F3 and Ctrl+G pop a Chrome-style toolbar that doesn't match the
-// app's chrome and isn't wired to any Loach search surface. Loach's own
-// command palette lives on Ctrl/Cmd+K (see `SearchBar`), so killing these
-// shortcuts at the document level just removes the stray UI.
+// Suppress the WebView's built-in find-in-page accelerators we don't bind
+// ourselves. On Windows (WebView2) F3 and Ctrl+G pop a Chrome-style
+// toolbar that doesn't match the app's chrome and isn't wired to any
+// Loach search surface. Ctrl+F is intentionally NOT suppressed here —
+// the global shortcut handler (`KeyboardShortcuts`) binds it to the
+// in-chat finder overlay.
 window.addEventListener(
   "keydown",
   (e) => {
     const k = e.key.toLowerCase();
-    if (((e.ctrlKey || e.metaKey) && (k === "f" || k === "g")) || e.key === "F3") {
+    if (((e.ctrlKey || e.metaKey) && k === "g") || e.key === "F3") {
       e.preventDefault();
       e.stopPropagation();
     }

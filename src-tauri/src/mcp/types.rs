@@ -128,6 +128,31 @@ pub struct McpToolDef {
     pub input_schema: Value,
 }
 
+/// Frontend-mirrored attachment shape — see `src/types.ts` for the
+/// authoritative definition. Built-in tools can produce attachments
+/// alongside their textual result (e.g. the `pdf` tool returns a PDF the
+/// user can preview / save); these flow through the chat-stream layer
+/// onto the assistant message rather than into the model's tool-result
+/// context (the model is text-only). MCP servers can also produce image
+/// attachments — see the `attachments` field on [`McpCallResult`].
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct Attachment {
+    /// "image" | "text" | "file" — must match the TS union.
+    pub kind: String,
+    pub name: String,
+    pub mime: String,
+    /// base64 (no `data:` prefix) for image / file; plain text for text.
+    pub data: String,
+    /// Raw base64 of the original bytes — required for PDFs so the
+    /// frontend's `PdfPreview` can hand the bytes to pdfjs without an
+    /// extra round-trip. Optional to stay schema-compatible with the
+    /// pre-existing TS shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truncated: Option<bool>,
+}
+
 /// Outcome of a single `tools/call`. `content_text` is the human/model-
 /// readable string concatenated from every text block in the MCP response —
 /// stringified JSON for any non-text content (image, resource link) so the
@@ -135,10 +160,19 @@ pub struct McpToolDef {
 /// `isError` field; we still return Ok at the Rust layer because a tool
 /// failure isn't a transport failure — the model is supposed to see the
 /// error message and react.
-#[derive(Debug, Clone, Serialize)]
+///
+/// `attachments` carries any files the tool produced — the built-in
+/// `pdf::create` tool's PDF, or image content returned by an MCP server.
+/// They're forwarded to the frontend on the `tool_result` stream event
+/// and end up attached to
+/// the assistant message; they do **not** get fed back to the model as
+/// part of the tool-result text (the model can't read PDFs anyway).
+#[derive(Debug, Clone, Serialize, Default)]
 pub struct McpCallResult {
     pub content_text: String,
     pub is_error: bool,
+    #[serde(default)]
+    pub attachments: Vec<Attachment>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -156,10 +190,8 @@ pub enum CallToolContent {
         text: String,
     },
     Image {
-        #[allow(dead_code)]
         data: String,
         #[serde(default, rename = "mimeType")]
-        #[allow(dead_code)]
         mime_type: Option<String>,
     },
     Resource {

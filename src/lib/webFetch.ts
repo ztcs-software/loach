@@ -1,6 +1,6 @@
 import { fetchUrl } from "@/lib/tauri";
 import { MAX_INLINED_CHARS_PER_MESSAGE } from "@/lib/files";
-import type { FetchedPage } from "@/types";
+import type { FetchedPage, ToolCallRecord } from "@/types";
 
 /**
  * URL prefetch helper.
@@ -159,4 +159,57 @@ export function inlineFetchedPages(
     out += `\n\n---\n${skippedUrls.length === 1 ? "This URL was" : `${skippedUrls.length} URLs were`} fetched successfully but couldn't be inlined into this turn (per-message size budget reached): ${urls}.`;
   }
   return out;
+}
+
+/**
+ * Turn fetch outcomes into the same `ToolCallRecord` shape MCP and
+ * the built-in `calculate` tool use, so the renderer can show a chip
+ * per URL on the user's message bubble.
+ *
+ * Web fetch isn't *technically* a model-initiated tool call (the
+ * frontend fires it before the chat request is built), but the chip
+ * UX maps cleanly onto it: arguments = the URL the user wrote,
+ * result = a short summary of what was fetched, `is_error` = the
+ * outcome. The actual page body stays inlined in the user's content
+ * (hidden from the bubble by `stripInlinedAttachments`) so the model
+ * still sees the full text on replay.
+ *
+ * `server_id` mirrors the calculator's `__builtin__` sentinel — the
+ * chip renderer doesn't care, but using a consistent marker keeps the
+ * data shape uniform if a future code path ever needs to distinguish
+ * built-ins from real MCP tools client-side.
+ */
+export function buildFetchToolRecords(
+  outcomes: FetchOutcome[],
+): ToolCallRecord[] {
+  return outcomes.map((o, i) => {
+    const id = `web_fetch_${Date.now()}_${i}`;
+    if (o.ok) {
+      const p = o.page;
+      const titleBit = p.title ? `"${p.title}"` : "(no title)";
+      const truncatedBit = p.truncated ? " — truncated by Loach" : "";
+      const finalBit =
+        p.final_url && p.final_url !== o.url
+          ? `\nFinal URL (after redirects): ${p.final_url}`
+          : "";
+      return {
+        id,
+        server_id: "__builtin__",
+        server_name: "Loach",
+        tool: "web_fetch",
+        arguments: { url: o.url },
+        result: `Fetched ${titleBit}, ${p.bytes.toLocaleString()} bytes${truncatedBit}.${finalBit}`,
+        is_error: false,
+      };
+    }
+    return {
+      id,
+      server_id: "__builtin__",
+      server_name: "Loach",
+      tool: "web_fetch",
+      arguments: { url: o.url },
+      result: o.error,
+      is_error: true,
+    };
+  });
 }

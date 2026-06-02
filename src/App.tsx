@@ -6,12 +6,15 @@ import { ChatCanvas } from "@/components/ChatCanvas";
 import { ChatInput } from "@/components/ChatInput";
 import { ParameterPanel } from "@/components/ParameterPanel";
 import { SettingsDialog } from "@/components/SettingsDialog";
+import { HelpDialog } from "@/components/HelpDialog";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { SwitchVariantProvider } from "@/components/ui/switch";
 import { SpaceForm } from "@/components/SpaceForm";
 import { SpaceView } from "@/components/SpaceView";
 import { SpacesLibrary } from "@/components/SpacesLibrary";
 import { SnippetDialog } from "@/components/SnippetDialog";
+import { SnippetVariableDialog } from "@/components/SnippetVariableDialog";
+import { SnippetVariableFillDialog } from "@/components/SnippetVariableFillDialog";
 import { SnippetsLibrary } from "@/components/SnippetsLibrary";
 import { ModelsView } from "@/components/ModelsView";
 import { ModelsLibrary } from "@/components/ModelsLibrary";
@@ -20,6 +23,7 @@ import { Onboarding } from "@/components/Onboarding";
 import { CodeCanvas } from "@/components/CodeCanvas";
 import { SearchBar } from "@/components/SearchBar";
 import { PrivateChat } from "@/components/PrivateChat";
+import { KeyboardShortcuts } from "@/components/KeyboardShortcuts";
 import { ToastHost } from "@/components/ToastHost";
 import { ConfirmDialogHost } from "@/components/ConfirmDialog";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
@@ -30,6 +34,7 @@ import { useModelsStore } from "@/stores/modelsStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { ollamaPreloadModel } from "@/lib/tauri";
 import { useSnippetStore } from "@/stores/snippetStore";
+import { useSnippetVarStore } from "@/stores/snippetVarStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useSecurityStore, lockUntilHydrated } from "@/stores/securityStore";
 import { useUIStore } from "@/stores/uiStore";
@@ -44,6 +49,7 @@ export default function App() {
   const hydrateChats = useChatStore((s) => s.hydrate);
   const hydrateSpaces = useSpaceStore((s) => s.hydrate);
   const hydrateSnippets = useSnippetStore((s) => s.hydrate);
+  const hydrateSnippetVars = useSnippetVarStore((s) => s.hydrate);
   const hydrateModels = useModelsStore((s) => s.hydrate);
   const hydrateSecurity = useSecurityStore((s) => s.hydrate);
   const securityHydrated = useSecurityStore((s) => s.hydrated);
@@ -102,6 +108,7 @@ export default function App() {
     const chatsP = hydrateChats();
     void hydrateSpaces();
     void hydrateSnippets();
+    void hydrateSnippetVars();
     // `hydrateModels` is network-bound (Ollama /api/tags) — fire-and-forget
     // so its latency never blocks anything the user sees.
     void hydrateModels();
@@ -132,6 +139,7 @@ export default function App() {
     hydrateSettings,
     hydrateSpaces,
     hydrateSnippets,
+    hydrateSnippetVars,
     hydrateChats,
     hydrateModels,
   ]);
@@ -257,11 +265,20 @@ export default function App() {
         <ErrorBoundary name="Settings">
           <SettingsDialog />
         </ErrorBoundary>
+        <ErrorBoundary name="Help">
+          <HelpDialog />
+        </ErrorBoundary>
         <ErrorBoundary name="Space form">
           <SpaceForm />
         </ErrorBoundary>
         <ErrorBoundary name="Snippet editor">
           <SnippetDialog />
+        </ErrorBoundary>
+        <ErrorBoundary name="Snippet variable editor">
+          <SnippetVariableDialog />
+        </ErrorBoundary>
+        <ErrorBoundary name="Snippet variable fill">
+          <SnippetVariableFillDialog />
         </ErrorBoundary>
         {showOnboarding && (
           <ErrorBoundary name="Onboarding">
@@ -279,6 +296,12 @@ export default function App() {
           wizard is modal and Cmd+K should stay inert until the user finishes
           or dismisses. */}
       {!showLock && !showOnboarding && <SearchBar />}
+      {/* Global keyboard shortcuts. Mounts below the same lock/onboarding
+          gates as SearchBar — the handler itself ALSO checks those gates
+          plus private chat at the moment of keypress, so re-mounting on
+          gate transitions doesn't matter; this conditional just keeps the
+          ShortcutListDialog out of the tree while the gates are active. */}
+      {!showLock && !showOnboarding && <KeyboardShortcuts />}
       {/* Private Chat overlay. Suppressed during lock/onboarding for the
           same reason as the search palette — those gates own the screen.
           The component renders nothing until the user opens it from the

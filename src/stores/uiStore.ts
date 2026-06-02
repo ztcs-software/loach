@@ -24,6 +24,10 @@ interface UIState {
   sidebarOpen: boolean;
   paramsOpen: boolean;
   settingsOpen: boolean;
+  /** Visibility of the slash-command help dialog. Toggled by `/help` and
+   *  by the dialog's close button. Lives on uiStore so the dispatcher
+   *  can flip it without ChatInput having to own a local state. */
+  helpOpen: boolean;
   /** Which Settings tab to show when the dialog opens. Defaults to `general`
    *  so the cold-open lands on the user-personalisation surface. */
   settingsTab: SettingsTab;
@@ -57,9 +61,15 @@ interface UIState {
    *  the onboarding finish path so the user lands on a fresh chat with the
    *  model picker already expanded for selection. */
   pendingOpenModelPicker: boolean;
+  /** One-shot flag: when true, the ChatHeader opens its "Export context"
+   *  dialog on its next render with a session available, then clears itself.
+   *  Set by the `/export` slash command, which can't reach the dialog's
+   *  local state directly. Mirrors `pendingOpenModelPicker`. */
+  pendingOpenExport: boolean;
   toggleSidebar: () => void;
   toggleParams: () => void;
   setSettingsOpen: (open: boolean) => void;
+  setHelpOpen: (open: boolean) => void;
   setSettingsTab: (tab: SettingsTab) => void;
   /** Open the Settings dialog on a specific tab in one call — used by
    *  "Archive" in the sidebar rail. */
@@ -76,12 +86,15 @@ interface UIState {
   setSessionTone: (sessionId: string, toneId: string) => void;
   setPendingOpenModelPicker: (v: boolean) => void;
   consumePendingOpenModelPicker: () => boolean;
+  setPendingOpenExport: (v: boolean) => void;
+  consumePendingOpenExport: () => boolean;
 }
 
 export const useUIStore = create<UIState>((set, get) => ({
   sidebarOpen: true,
   paramsOpen: false,
   settingsOpen: false,
+  helpOpen: false,
   settingsTab: "general",
   sidebarTab: "chats",
   composerDraft: "",
@@ -91,9 +104,11 @@ export const useUIStore = create<UIState>((set, get) => ({
   pendingPersonaId: null,
   toneIdBySession: {},
   pendingOpenModelPicker: false,
+  pendingOpenExport: false,
   toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
   toggleParams: () => set((s) => ({ paramsOpen: !s.paramsOpen })),
   setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
+  setHelpOpen: (helpOpen) => set({ helpOpen }),
   setSettingsTab: (settingsTab) => set({ settingsTab }),
   openSettingsTab: (settingsTab) => set({ settingsTab, settingsOpen: true }),
   setSidebarTab: (sidebarTab) => set({ sidebarTab }),
@@ -128,6 +143,12 @@ export const useUIStore = create<UIState>((set, get) => ({
   consumePendingOpenModelPicker: (): boolean => {
     const v = get().pendingOpenModelPicker;
     if (v) set({ pendingOpenModelPicker: false });
+    return v;
+  },
+  setPendingOpenExport: (v) => set({ pendingOpenExport: v }),
+  consumePendingOpenExport: (): boolean => {
+    const v = get().pendingOpenExport;
+    if (v) set({ pendingOpenExport: false });
     return v;
   },
 }));
