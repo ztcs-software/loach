@@ -10,6 +10,7 @@ import {
   ClipboardPaste,
   Copy,
   FileText,
+  GitFork,
   MessageSquare,
   MoreHorizontal,
   Pencil,
@@ -18,9 +19,12 @@ import {
   RefreshCw,
   Search,
   Sliders,
+  Sparkles,
   Trash2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import {
   Dialog,
   DialogContent,
@@ -48,7 +52,7 @@ import {
   ollamaProbe,
   openaiListModels,
 } from "@/lib/tauri";
-import { Layers } from "lucide-react";
+import { EyeOff, Layers } from "lucide-react";
 import { parseImportContext, type ParsedImport } from "@/lib/importContext";
 import type { ModelInfo, ProviderId, Session } from "@/types";
 
@@ -56,6 +60,7 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
   const { confirm } = useConfirm();
   const setSessionModel = useChatStore((s) => s.setSessionModel);
   const importMessages = useChatStore((s) => s.importMessages);
+  const exportCompactedContext = useChatStore((s) => s.exportCompactedContext);
   // Single-chat actions piped through chatStore. We deliberately don't keep
   // local mirrors of these — the store re-renders ChatHeader's `session`
   // prop when state flips, so labels (Pin/Unpin, Move/Restore) stay
@@ -64,6 +69,17 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
   const pinSession = useChatStore((s) => s.pin);
   const archiveSession = useChatStore((s) => s.archive);
   const removeSession = useChatStore((s) => s.remove);
+  const forkChat = useChatStore((s) => s.fork);
+  const selectSession = useChatStore((s) => s.selectSession);
+  // Subscribe to the source chat's title separately so the "Forked from X"
+  // badge stays truthful when the source is renamed. Falls back to null
+  // when the source no longer exists (deleted, or never loaded), in which
+  // case we hide the badge entirely.
+  const forkedFromTitle = useChatStore((s) => {
+    const srcId = session?.forked_from_session_id;
+    if (!srcId) return null;
+    return s.sessions.find((x) => x.id === srcId)?.title ?? null;
+  });
   const toggleParams = useUIStore((s) => s.toggleParams);
   const setSidebarTab = useUIStore((s) => s.setSidebarTab);
   const openSettingsTab = useUIStore((s) => s.openSettingsTab);
@@ -91,6 +107,10 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
   const consumePendingOpenModelPicker = useUIStore(
     (s) => s.consumePendingOpenModelPicker,
   );
+  const pendingOpenExport = useUIStore((s) => s.pendingOpenExport);
+  const consumePendingOpenExport = useUIStore(
+    (s) => s.consumePendingOpenExport,
+  );
   useEffect(() => {
     if (!pendingOpenModelPicker) return;
     if (!session) return;
@@ -98,13 +118,19 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
     setModelMenuOpen(true);
   }, [pendingOpenModelPicker, session, consumePendingOpenModelPicker]);
 
-  /** Export-context dialog state. `text` is null while the Markdown is still
-   *  being fetched from the Rust side so we can show a "Loading…" placeholder
-   *  instead of an empty textarea. `error` surfaces any failure inline. */
+  /** Export-context dialog state. The dialog offers two views via `exportMode`:
+   *  the verbatim "full" export (fetched from Rust) and a "compacted" export
+   *  that summarizes older messages first. Each view's text is cached
+   *  separately so toggling back and forth doesn't re-fetch (and, for
+   *  compacted, doesn't re-run the model). A null cache entry means that view
+   *  is still loading; `exportError` surfaces any failure inline. */
   const [exportOpen, setExportOpen] = useState(false);
-  const [exportText, setExportText] = useState<string | null>(null);
+  const [exportMode, setExportMode] = useState<"full" | "compacted">("full");
+  const [fullText, setFullText] = useState<string | null>(null);
+  const [compactedText, setCompactedText] = useState<string | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const exportText = exportMode === "full" ? fullText : compactedText;
 
   /** Marks the "Search in chat" path so we can skip Radix's
    *  `onCloseAutoFocus` for that one menu item. Without this, Radix
@@ -129,6 +155,10 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
   const [importText, setImportText] = useState("");
   const [importBusy, setImportBusy] = useState(false);
   const [importError, setImportError] = useState<string | null>(null);
+  /** When on, the imported batch is folded out of the transcript (rendered as
+   *  a single collapsed card) instead of shown inline as messages. Either way
+   *  the content reaches the model — this only governs how it's displayed. */
+  const [importHidden, setImportHidden] = useState(false);
   const importPreview: ParsedImport = useMemo(
     () => parseImportContext(importText),
     [importText],
@@ -175,6 +205,20 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
     void archiveSession(session.id, session.archived_at == null);
   };
 
+  const handleFork = async () => {
+    if (!session) return;
+    try {
+      await forkChat(session.id);
+    } catch (e) {
+      logger.warn("fork chat failed", e);
+    }
+  };
+
+  const openSourceChat = () => {
+    if (!session?.forked_from_session_id) return;
+    void selectSession(session.forked_from_session_id);
+  };
+
   const handleDelete = async () => {
     if (!session) return;
     const ok = await confirm({
@@ -189,12 +233,45 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
   const openExport = async () => {
     if (!session) return;
     setExportOpen(true);
-    setExportText(null);
+    setExportMode("full");
+    setFullText(null);
+    setCompactedText(null);
     setExportError(null);
     setCopied(false);
     try {
       const md = await exportSession(session.id, "md");
-      setExportText(md);
+      setFullText(md);
+    } catch (e) {
+      setExportError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  // `/export` can't reach this dialog's local state, so it flips a uiStore
+  // flag that we consume here — opening the same dialog the menu item does.
+  useEffect(() => {
+    if (!pendingOpenExport || !session) return;
+    consumePendingOpenExport();
+    void openExport();
+    // openExport is recreated each render; deps kept minimal for this one-shot.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingOpenExport, session]);
+
+  const showFull = () => {
+    setExportMode("full");
+    setExportError(null);
+    setCopied(false);
+  };
+
+  const showCompacted = async () => {
+    setExportMode("compacted");
+    setExportError(null);
+    setCopied(false);
+    // Already summarized once this dialog session — reuse the cached text
+    // rather than spending another model round-trip.
+    if (compactedText !== null || !session) return;
+    try {
+      const md = await exportCompactedContext(session.id);
+      setCompactedText(md);
     } catch (e) {
       setExportError(e instanceof Error ? e.message : String(e));
     }
@@ -205,6 +282,7 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
     setImportOpen(true);
     setImportText("");
     setImportError(null);
+    setImportHidden(false);
   };
 
   const doImport = async () => {
@@ -218,7 +296,7 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
     setImportBusy(true);
     setImportError(null);
     try {
-      await importMessages(session.id, importPreview.messages);
+      await importMessages(session.id, importPreview.messages, importHidden);
       setImportOpen(false);
       setImportText("");
     } catch (e) {
@@ -300,6 +378,19 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
             <Archive className="h-3 w-3" />
             Archived
           </span>
+        )}
+        {session?.forked_from_session_id && forkedFromTitle && (
+          <button
+            type="button"
+            onClick={openSourceChat}
+            title={`Open source chat "${forkedFromTitle}"`}
+            className="flex shrink-0 items-center gap-1 rounded-full bg-foreground/[0.07] px-2.5 py-0.5 text-[11px] font-medium text-foreground/60 hover:bg-foreground/10 hover:text-foreground"
+          >
+            <GitFork className="h-3 w-3" />
+            <span className="max-w-[140px] truncate">
+              Forked from {forkedFromTitle}
+            </span>
+          </button>
         )}
         {session ? (
           <div className="flex min-w-0 items-center gap-1.5 text-sm">
@@ -407,7 +498,9 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
             <Button
               variant="ghost"
               size="icon"
-              aria-label="Chat actions"
+              // "Current chat actions" disambiguates from each sidebar
+              // row's "Actions for chat: <title>" kebab.
+              aria-label="Current chat actions"
               className="rounded-xl text-foreground/70 hover:bg-foreground/10 hover:text-foreground"
             >
               <MoreHorizontal className="h-4 w-4" />
@@ -450,6 +543,10 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
             <DropdownMenuItem onSelect={startRename}>
               <Pencil className="mr-2 h-4 w-4" />
               Rename
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => void handleFork()}>
+              <GitFork className="mr-2 h-4 w-4" />
+              Fork this chat
             </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem onSelect={() => void openExport()}>
@@ -581,6 +678,27 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
               )}
             </div>
           </div>
+          <div className="mt-3 flex items-start justify-between gap-4 rounded-lg border border-foreground/10 bg-background/40 px-3 py-2.5">
+            <div className="min-w-0">
+              <Label
+                htmlFor="import-hidden"
+                className="flex items-center gap-1.5"
+              >
+                <EyeOff className="h-3.5 w-3.5 text-foreground/60" />
+                Hide from transcript
+              </Label>
+              <p className="mt-1 text-[11px] text-foreground/50">
+                Keep the imported messages folded into a collapsed card instead
+                of showing them inline. Either way they're sent to the model.
+              </p>
+            </div>
+            <Switch
+              id="import-hidden"
+              checked={importHidden}
+              onCheckedChange={setImportHidden}
+              disabled={importBusy}
+            />
+          </div>
           <div className="mt-3 flex items-center justify-end gap-2">
             <Button
               variant="outline"
@@ -612,26 +730,53 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
           <DialogHeader>
             <DialogTitle>Export context</DialogTitle>
             <DialogDescription>
-              The full chat context in Markdown. Copy it to share or reuse
+              The chat context in Markdown. Copy it to share or reuse
               elsewhere.
             </DialogDescription>
           </DialogHeader>
+          <div className="mt-3 flex items-start justify-between gap-4">
+            <div className="min-w-0">
+              <Label className="flex items-center gap-1.5">
+                <Sparkles className="h-3.5 w-3.5 text-foreground/60" />
+                Compact context
+              </Label>
+              <p className="mt-1 text-[11px] text-foreground/50">
+                Summarize older messages into a shorter export. Your chat isn't
+                changed.
+              </p>
+            </div>
+            <Switch
+              checked={exportMode === "compacted"}
+              onCheckedChange={(next) => {
+                if (next) void showCompacted();
+                else showFull();
+              }}
+              className="shrink-0"
+              aria-label={
+                exportMode === "compacted"
+                  ? "Export full context"
+                  : "Compact context before export"
+              }
+            />
+          </div>
           <div className="mt-2">
-            {exportError ? (
-              <div className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
-                {exportError}
-              </div>
-            ) : exportText === null ? (
-              <div className="flex h-64 items-center justify-center rounded-md border border-foreground/10 text-sm text-foreground/60">
-                Loading…
-              </div>
-            ) : (
+            {exportText !== null ? (
               <textarea
                 readOnly
                 value={exportText}
                 className="h-64 w-full resize-none rounded-md border border-foreground/10 bg-background/60 p-3 font-mono text-xs leading-relaxed text-foreground/80 focus:outline-none focus:ring-1 focus:ring-foreground/20"
                 onFocus={(e) => e.currentTarget.select()}
               />
+            ) : exportError ? (
+              <div className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
+                {exportError}
+              </div>
+            ) : (
+              <div className="flex h-64 items-center justify-center rounded-md border border-foreground/10 text-sm text-foreground/60">
+                {exportMode === "compacted"
+                  ? `Summarizing earlier messages with ${session?.model || "the chat model"}…`
+                  : "Loading…"}
+              </div>
             )}
           </div>
           <div className="mt-3 flex items-center justify-end gap-2">

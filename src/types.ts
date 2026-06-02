@@ -11,6 +11,11 @@ export interface Session {
   pinned_at: number | null;
   /** Null → live chat; ms timestamp → archived at that time. */
   archived_at: number | null;
+  /** Set when the chat was created via `forkSession`. Points at the source
+   *  chat so the header can render a "Forked from …" badge with a link
+   *  back. ON DELETE SET NULL on the FK clears this if the source is
+   *  deleted — the fork survives, the badge just falls off. */
+  forked_from_session_id: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -88,6 +93,29 @@ export interface Snippet {
   updated_at: number;
 }
 
+/** User-defined static substitution. Resolved into `{{KEY}}` placeholders
+ *  in a snippet body at expansion time. `key` is always uppercase
+ *  (normalised at the command layer); reserved built-ins (`USER_NAME`,
+ *  `CURRENT_*`) are rejected on save. */
+export interface SnippetVariable {
+  id: string;
+  key: string;
+  value: string;
+  description: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+/** Last value the user filled in for a prompt-on-use placeholder on a
+ *  specific snippet. Loaded when the fill-blanks dialog opens so the
+ *  inputs aren't blank on every run. */
+export interface SnippetFillValue {
+  snippet_id: string;
+  key: string;
+  value: string;
+  updated_at: number;
+}
+
 export interface Attachment {
   kind: "image" | "text" | "file";
   name: string;
@@ -125,6 +153,23 @@ export interface Message {
    *  during this assistant turn. Null for user / system messages and for
    *  pre-MCP assistant rows. */
   tool_calls_json: string | null;
+  /** Non-null ms-timestamp = this message was rolled into the running
+   *  auto-summary by the Compact button at that moment. The row keeps
+   *  rendering in the transcript (so the user can scroll back) but
+   *  `chatHistory()` skips it when building the next provider request,
+   *  so the model only sees the summary block plus the trailing
+   *  uncompacted turns. Null on every pre-existing row and on every
+   *  freshly-appended message. */
+  compacted_at: number | null;
+  /** Non-null = this message came from the "Import context" dialog; the value
+   *  is a group id shared by every row of one import, so the transcript can
+   *  fold the batch into a single collapsible card and remove it as a unit.
+   *  Null on normal user/assistant/system turns. */
+  import_group: string | null;
+  /** Only meaningful when `import_group` is set: `true` = the user chose to
+   *  keep the imported batch folded out of the transcript. It still reaches
+   *  the model like any other import — this flag governs display only. */
+  import_hidden: boolean;
   created_at: number;
 }
 
@@ -252,6 +297,12 @@ export type StreamEvent =
       id: string;
       content: string;
       is_error: boolean;
+      /** Files produced by the tool (today only the built-in `pdf` tool
+       *  fills this). The chat store appends them to the assistant
+       *  message's `attachments_json` so the existing PdfPreview /
+       *  file-card renderers handle display. Optional with default `[]`
+       *  so prior tool_result events deserialise unchanged. */
+      attachments?: Attachment[];
     };
 
 export type ThemeChoice = "light" | "dark" | "system";
@@ -302,6 +353,35 @@ export interface Settings {
    *  network round-trip per URL — default is off so Loach stays offline-first
    *  unless the user opts in. */
   web_fetch_enabled: boolean;
+  /** When true, a built-in `calculate` tool is exposed to the model
+   *  alongside any MCP tools. The tool runs a real math evaluator
+   *  (meval) in-process — no network, no DB. Off by default so the model
+   *  catalogue stays minimal until the user opts in. Useful because
+   *  local models are unreliable at multi-digit / multi-step arithmetic
+   *  and otherwise tend to hallucinate answers. */
+  calculate_tool_enabled: boolean;
+  /** Per-tool toggles for the rest of the built-in tools. Each runs
+   *  entirely in-process (no network, no DB writes) and is exposed to
+   *  the model alongside MCP tools when on. All default to off so the
+   *  model catalogue stays minimal until the user opts in — see
+   *  `src-tauri/src/tools/builtin.rs` for the registry. */
+  datetime_tool_enabled: boolean;
+  count_tool_enabled: boolean;
+  hash_tool_enabled: boolean;
+  uuid_tool_enabled: boolean;
+  base64_tool_enabled: boolean;
+  json_tool_enabled: boolean;
+  unit_convert_tool_enabled: boolean;
+  diff_text_tool_enabled: boolean;
+  sort_tool_enabled: boolean;
+  ip_tool_enabled: boolean;
+  /** Built-in `pdf` tool — `create` action generates PDFs from a
+   *  structured spec (headings, paragraphs, lists, tables) and attaches
+   *  them to the assistant message via the existing `PdfPreview`. v1 is
+   *  ASCII-only (built-in Helvetica) and doesn't support image blocks
+   *  or merging existing PDFs yet — `merge` returns a not-yet-supported
+   *  error. */
+  pdf_tool_enabled: boolean;
   /** Global override for Ollama's `low_vram` option. When `true`, every
    *  Ollama request is sent with `low_vram: true` regardless of per-chat
    *  params or per-model Modelfile defaults — handy on memory-constrained
@@ -340,6 +420,18 @@ export const DEFAULT_SETTINGS: Settings = {
   user_name: "",
   temporal_awareness: true,
   web_fetch_enabled: false,
+  calculate_tool_enabled: false,
+  datetime_tool_enabled: false,
+  count_tool_enabled: false,
+  hash_tool_enabled: false,
+  uuid_tool_enabled: false,
+  base64_tool_enabled: false,
+  json_tool_enabled: false,
+  unit_convert_tool_enabled: false,
+  diff_text_tool_enabled: false,
+  sort_tool_enabled: false,
+  ip_tool_enabled: false,
+  pdf_tool_enabled: false,
   low_vram_global: false,
   thinking_default: true,
   default_tone_id: "default",
@@ -503,6 +595,8 @@ export interface ImportStats {
   space_files: number;
   space_memories: number;
   snippets: number;
+  snippet_variables: number;
+  snippet_fill_values: number;
   mcp_servers: number;
   settings: number;
 }

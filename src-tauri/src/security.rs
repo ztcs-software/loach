@@ -303,6 +303,19 @@ pub fn setup(
         if pw.chars().count() < 8 {
             return Err(anyhow!("Password must be at least 8 characters"));
         }
+        // Upper bound so a renderer can't shove a multi-MB password into the
+        // keyring blob. Argon2's cost is length-independent, but the stored
+        // input and any error paths shouldn't carry unbounded data — mirrors
+        // the `MAX_KEY_BYTES` cap on the OpenAI key in secrets.rs.
+        if pw.chars().count() > 1024 {
+            return Err(anyhow!("Password must be at most 1024 characters"));
+        }
+    }
+
+    if let Some(h) = hint.as_ref() {
+        if h.chars().count() > 256 {
+            return Err(anyhow!("Hint must be at most 256 characters"));
+        }
     }
 
     let cfg = LockConfig {

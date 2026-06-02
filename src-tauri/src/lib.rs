@@ -188,10 +188,18 @@ pub fn run() {
             // Linux, but we still gate it so the intent reads clearly.
             let _tray = {
                 let builder = TrayIconBuilder::with_id("loach-tray")
-                    .icon(app.default_window_icon().unwrap().clone())
                     .menu(&menu)
                     .show_menu_on_left_click(false)
                     .tooltip("Loach");
+                // `default_window_icon()` is Some in any normal bundled build,
+                // but guard rather than `unwrap()` so a packaging slip that
+                // ships without the icon degrades to an icon-less tray instead
+                // of panicking the whole `setup` (which would bypass the
+                // friendly `fatal_setup_error` dialog the rest of setup uses).
+                let builder = match app.default_window_icon() {
+                    Some(icon) => builder.icon(icon.clone()),
+                    None => builder,
+                };
                 #[cfg(target_os = "macos")]
                 let builder = builder.icon_as_template(true);
                 builder
@@ -242,14 +250,19 @@ pub fn run() {
             commands::pin_session,
             commands::archive_session,
             commands::delete_session,
+            commands::fork_session,
             commands::update_session_model,
             commands::update_session_system_prompt,
             commands::update_session_params,
             commands::export_session,
             commands::list_messages,
             commands::append_message,
+            commands::import_messages,
+            commands::delete_import_group,
             commands::update_message,
             commands::delete_message,
+            commands::clear_session_messages,
+            commands::mark_messages_compacted,
             commands::get_settings,
             commands::set_setting,
             commands::set_openai_key,
@@ -290,6 +303,12 @@ pub fn run() {
             commands::create_snippet,
             commands::update_snippet,
             commands::delete_snippet,
+            commands::list_snippet_variables,
+            commands::create_snippet_variable,
+            commands::update_snippet_variable,
+            commands::delete_snippet_variable,
+            commands::list_snippet_fill_values,
+            commands::upsert_snippet_fill_values,
             commands::fetch_url,
             commands::mcp_list,
             commands::mcp_save,
@@ -304,6 +323,7 @@ pub fn run() {
             commands::wipe_user_data,
             commands::factory_reset,
             commands::updater_supported,
+            commands::open_in_vscode,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Loach");

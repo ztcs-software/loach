@@ -1,11 +1,63 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ArrowDown, ChevronDown, ChevronUp, Hourglass, Search, Zap, X } from "lucide-react";
+import { ArrowDown, ChevronDown, ChevronUp, Hourglass, Import, Search, Sparkles, Trash2, Zap, X } from "lucide-react";
 import { MessageItem } from "./Message";
 import { Button } from "@/components/ui/button";
+import { useConfirm } from "@/components/ConfirmDialog";
 import { useChatStore } from "@/stores/chatStore";
+import { extractSummary } from "@/lib/contextUsage";
+import { cn } from "@/lib/utils";
 import type { Message } from "@/types";
 
 const EMPTY_MESSAGES: Message[] = [];
+
+/** A transcript row to render: either a single normal message or a *hidden*
+ *  imported batch (a run of rows sharing one `import_group`) folded into one
+ *  collapsible card. Visible imports are NOT folded — they render as ordinary
+ *  messages, exactly like a non-imported turn. */
+type RenderItem =
+  | { kind: "message"; message: Message; index: number }
+  | {
+      kind: "import";
+      group: string;
+      messages: Message[];
+      /** Indices into the flat `messages` array — used to place the
+       *  compaction divider relative to the card. */
+      startIndex: number;
+      endIndex: number;
+    };
+
+/** Walk the flat transcript and collapse only *hidden* imported batches into
+ *  one import card; everything else (normal turns AND visible imports) passes
+ *  through one-to-one so it renders as an ordinary message. Rows of a hidden
+ *  batch are always contiguous (inserted together with stepped timestamps),
+ *  so a single forward scan groups them. */
+function buildRenderItems(messages: Message[]): RenderItem[] {
+  const items: RenderItem[] = [];
+  let i = 0;
+  while (i < messages.length) {
+    const m = messages[i];
+    if (m.import_group && m.import_hidden) {
+      const group = m.import_group;
+      const startIndex = i;
+      const batch: Message[] = [];
+      while (i < messages.length && messages[i].import_group === group) {
+        batch.push(messages[i]);
+        i++;
+      }
+      items.push({
+        kind: "import",
+        group,
+        messages: batch,
+        startIndex,
+        endIndex: i - 1,
+      });
+    } else {
+      items.push({ kind: "message", message: m, index: i });
+      i++;
+    }
+  }
+  return items;
+}
 
 export function ChatCanvas() {
   const sessionId = useChatStore((s) => s.activeSessionId);
@@ -33,6 +85,49 @@ export function ChatCanvas() {
   );
   const promoteSession = useChatStore((s) => s.promoteSession);
   const cancelForSession = useChatStore((s) => s.cancelForSession);
+  const removeImportGroup = useChatStore((s) => s.removeImportGroup);
+  const { confirm } = useConfirm();
+  // Auto-summary text from the active session's system_prompt, if any.
+  // Drives the "context was compacted here" divider that sits between
+  // the rolled-up history and the still-active turns. Falls out as null
+  // the moment the user deletes the marker block from the parameter
+  // panel's "Custom instructions" textarea.
+  const compactedSummary = useChatStore((s) =>
+    s.activeSessionId
+      ? extractSummary(
+          s.sessions.find((x) => x.id === s.activeSessionId)?.system_prompt ??
+            null,
+        )
+      : null,
+  );
+
+  // Index of the first message that is NOT compacted. The divider
+  // renders right above this row, so the line visually separates "the
+  // model can't see these anymore — only the summary" (above) from
+  // "active context" (below). If every message is compacted (edge
+  // case, shouldn't happen because compactContext keeps a 4-message
+  // tail) we fall back to placing the divider at the very end.
+  const firstActiveIndex = useMemo(() => {
+    if (!compactedSummary) return -1;
+    const i = messages.findIndex((m) => m.compacted_at == null);
+    return i === -1 ? messages.length : i;
+  }, [messages, compactedSummary]);
+
+  // Collapse each run of messages sharing an `import_group` into one render
+  // item so an imported batch shows as a single collapsible card instead of
+  // a stream of fake turns. Normal messages pass through one-to-one.
+  const renderItems = useMemo(() => buildRenderItems(messages), [messages]);
+
+  const handleRemoveImport = async (group: string, count: number) => {
+    if (!sessionId) return;
+    const ok = await confirm({
+      title: "Remove imported context?",
+      body: `${count} imported message${count === 1 ? "" : "s"} will be removed from this chat. You can import them again later.`,
+      confirmLabel: "Remove",
+      destructive: true,
+    });
+    if (ok) void removeImportGroup(sessionId, group);
+  };
 
   const scrollerRef = useRef<HTMLDivElement>(null);
   const stickToBottom = useRef(true);
@@ -249,8 +344,38 @@ export function ChatCanvas() {
     <div className="relative flex-1 overflow-hidden">
       <div ref={scrollerRef} className="h-full overflow-y-auto">
         <div className="mx-auto w-full max-w-3xl px-4">
-          {messages.map((m, i) => {
-            const isLast = i === messages.length - 1;
+          {renderItems.map((item) => {
+            // The compaction divider sits before whichever render item holds
+            // the first still-active (uncompacted) message. For an import
+            // card that's a range check, since the card spans several rows.
+            const markerHere =
+              compactedSummary != null &&
+              firstActiveIndex >= 0 &&
+              (item.kind === "message"
+                ? item.index === firstActiveIndex
+                : firstActiveIndex >= item.startIndex &&
+                  firstActiveIndex <= item.endIndex);
+            const marker = markerHere ? (
+              <CompactionMarker summary={compactedSummary!} />
+            ) : null;
+
+            if (item.kind === "import") {
+              return (
+                <div key={`import-${item.group}`}>
+                  {marker}
+                  <ImportedContextGroup
+                    messages={item.messages}
+                    messageRefs={messageRefs}
+                    onRemove={() =>
+                      void handleRemoveImport(item.group, item.messages.length)
+                    }
+                  />
+                </div>
+              );
+            }
+
+            const m = item.message;
+            const isLast = item.index === messages.length - 1;
             return (
               <div
                 key={m.id}
@@ -265,9 +390,10 @@ export function ChatCanvas() {
                   else messageRefs.current.delete(m.id);
                 }}
               >
+                {marker}
                 <MessageItem
                   message={m}
-                  isStreaming={isLast && isStreaming && m.role === "assistant"}
+                  isStreaming={isLast && streamingHere && m.role === "assistant"}
                   metrics={streamingByMessage[m.id] ?? null}
                   canRegenerate={
                     isLast &&
@@ -279,6 +405,14 @@ export function ChatCanvas() {
               </div>
             );
           })}
+          {/* Edge case: every message is compacted (no active tail).
+              Show the marker at the very bottom so the user still sees
+              "compaction happened here". */}
+          {compactedSummary != null &&
+            messages.length > 0 &&
+            firstActiveIndex === messages.length && (
+              <CompactionMarker summary={compactedSummary} />
+            )}
           {/* Banner shown only while THIS chat's task is parked behind another
               chat's running task. Replaces the assistant streaming-dots bubble
               (which would otherwise mislead the user into thinking the model
@@ -505,6 +639,141 @@ function WaitingForOtherChats({
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+/**
+ * Inline marker shown at the top of the transcript whenever the session
+ * has a Loach auto-summary block in its system_prompt. The bar's
+ * Compact button is what creates that block — this is its visual
+ * counterpart in the chat surface so the user can SEE that earlier
+ * turns were rolled up, and click to inspect the exact bullets the
+ * model produced. The summary itself isn't editable from here on
+ * purpose: editing it from inside the transcript would be a confusing
+ * second source of truth alongside the parameter panel's "Custom
+ * instructions" textarea, which is the canonical home for system-prompt
+ * content.
+ */
+function CompactionMarker({ summary }: { summary: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="py-4">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        title={open ? "Hide summary" : "Show summary of compacted messages"}
+        className="group flex w-full items-center gap-2 rounded-full px-2 py-1 text-[11px] text-foreground/55 transition-colors hover:bg-foreground/[0.05] hover:text-foreground/80"
+      >
+        <span
+          aria-hidden
+          className="h-px flex-1 bg-gradient-to-r from-transparent to-foreground/15"
+        />
+        <span className="inline-flex items-center gap-1.5">
+          <Sparkles className="h-3 w-3 text-primary/70" />
+          <span className="font-medium tracking-wide uppercase text-[10px]">
+            Earlier messages compacted
+          </span>
+          <ChevronDown
+            className={cn(
+              "h-3 w-3 transition-transform",
+              open && "rotate-180",
+            )}
+          />
+        </span>
+        <span
+          aria-hidden
+          className="h-px flex-1 bg-gradient-to-l from-transparent to-foreground/15"
+        />
+      </button>
+      {open && (
+        <div className="mt-2 rounded-2xl border border-foreground/[0.10] bg-foreground/[0.03] px-4 py-3 text-[12.5px] leading-relaxed text-foreground/75 backdrop-blur-md">
+          <div className="mb-1.5 text-[10px] font-medium uppercase tracking-wide text-foreground/45">
+            Summary stored in system prompt
+          </div>
+          {/* The summary is plain bullet text from the model — render as
+              whitespace-preserved so the bullets keep their formatting
+              without pulling in the full Markdown pipeline. */}
+          <pre className="whitespace-pre-wrap font-sans text-[12.5px] leading-relaxed">
+            {summary}
+          </pre>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** A *hidden* imported batch, folded into a single collapsible card so it
+ *  stays out of the transcript flow. Starts collapsed — the header is then
+ *  just an indicator that the content is in context; expanding reveals the
+ *  messages. The batch still reaches the model. The Remove control deletes
+ *  the whole batch as a unit. (Visible imports never reach this component —
+ *  they render as ordinary messages.) */
+function ImportedContextGroup({
+  messages,
+  messageRefs,
+  onRemove,
+}: {
+  messages: Message[];
+  messageRefs: { current: Map<string, HTMLDivElement> };
+  onRemove: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const count = messages.length;
+  return (
+    <div className="py-4">
+      <div className="flex items-center gap-2 text-[11px] text-foreground/55">
+        <span
+          aria-hidden
+          className="h-px flex-1 bg-gradient-to-r from-transparent to-foreground/15"
+        />
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          aria-expanded={open}
+          title={open ? "Collapse imported context" : "Show imported context"}
+          className="group inline-flex items-center gap-1.5 rounded-full px-2 py-1 transition-colors hover:bg-foreground/[0.05] hover:text-foreground/80"
+        >
+          <Import className="h-3 w-3 text-primary/70" />
+          <span className="font-medium tracking-wide uppercase text-[10px]">
+            Imported context · {count} message{count === 1 ? "" : "s"}
+          </span>
+          <ChevronDown
+            className={cn("h-3 w-3 transition-transform", open && "rotate-180")}
+          />
+        </button>
+        <button
+          type="button"
+          onClick={onRemove}
+          title="Remove imported context"
+          className="inline-flex items-center rounded-full p-1 text-foreground/40 transition-colors hover:bg-destructive/10 hover:text-destructive"
+        >
+          <Trash2 className="h-3 w-3" />
+        </button>
+        <span
+          aria-hidden
+          className="h-px flex-1 bg-gradient-to-l from-transparent to-foreground/15"
+        />
+      </div>
+      {open && (
+        <div className="mt-2 rounded-2xl border border-foreground/[0.10] bg-foreground/[0.03] px-2 pb-1 backdrop-blur-md">
+          <div className="px-2 pt-2 pb-1 text-[10px] font-medium uppercase tracking-wide text-foreground/45">
+            Hidden from the transcript — still sent to the model
+          </div>
+          {messages.map((m) => (
+            <div
+              key={m.id}
+              ref={(el) => {
+                if (el) messageRefs.current.set(m.id, el);
+                else messageRefs.current.delete(m.id);
+              }}
+            >
+              <MessageItem message={m} />
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

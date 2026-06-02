@@ -5,8 +5,8 @@ use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
 
 use crate::db::{
-    DatabaseSnapshot, ImportStats, McpServer, Message, Session, Snippet, Space, SpaceFile,
-    SpaceMemory,
+    DatabaseSnapshot, ImportStats, McpServer, Message, Session, Snippet, SnippetFillValue,
+    SnippetVariable, Space, SpaceFile, SpaceMemory,
 };
 use crate::mcp::{self, McpTestResult};
 use crate::providers::{self, ChatRequest, ModelInfo};
@@ -83,6 +83,30 @@ pub async fn archive_session(
 #[tauri::command]
 pub async fn delete_session(state: State<'_, AppState>, id: String) -> Result<(), String> {
     state.db.delete_session(&id).map_err(err)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ForkSessionArgs {
+    pub source_session_id: String,
+    /// When set, the fork stops after this message (inclusive). When None,
+    /// every message in the source chat is copied. Matches the two UI entry
+    /// points: header "Fork this chat" → None, message kebab "Fork from
+    /// here" → Some(message_id).
+    #[serde(default)]
+    pub up_to_message_id: Option<String>,
+}
+
+/// Branch a chat. Returns the newly-created session — the caller is
+/// responsible for navigating to it.
+#[tauri::command]
+pub async fn fork_session(
+    state: State<'_, AppState>,
+    args: ForkSessionArgs,
+) -> Result<Session, String> {
+    state
+        .db
+        .fork_session(&args.source_session_id, args.up_to_message_id.as_deref())
+        .map_err(err)
 }
 
 #[derive(Debug, Deserialize)]
@@ -195,6 +219,22 @@ pub async fn export_session(
 
 // ---------- messages ----------
 
+/// The only roles the `messages.role` column is documented to hold
+/// (`db.rs`). The streaming path only ever appends `"user"` / `"assistant"`,
+/// but `append_message` / `import_messages` take the role as a free string —
+/// without this guard a crafted import (or a buggy frontend) could store an
+/// arbitrary role that the chat-history builder then forwards to the
+/// provider as a turn, surfacing as a confusing upstream 400 rather than a
+/// clear validation error.
+fn validate_role(role: &str) -> Result<(), String> {
+    match role {
+        "user" | "assistant" | "system" => Ok(()),
+        other => Err(format!(
+            "invalid message role `{other}` (expected user, assistant, or system)"
+        )),
+    }
+}
+
 #[tauri::command]
 pub async fn list_messages(
     state: State<'_, AppState>,
@@ -216,6 +256,7 @@ pub async fn append_message(
     state: State<'_, AppState>,
     args: AppendMessageArgs,
 ) -> Result<Message, String> {
+    validate_role(&args.role)?;
     state
         .db
         .append_message(
@@ -224,6 +265,60 @@ pub async fn append_message(
             &args.content,
             args.attachments_json.as_deref(),
         )
+        .map_err(err)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ImportedMessageIn {
+    pub role: String,
+    pub content: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ImportMessagesArgs {
+    pub session_id: String,
+    pub messages: Vec<ImportedMessageIn>,
+    /// `true` = fold the imported batch out of the transcript (it still
+    /// reaches the model). See `Database::import_messages`.
+    pub hidden: bool,
+}
+
+/// Insert a batch of imported messages as one group. Returns the created
+/// rows so the frontend can splice them into the transcript without a
+/// re-fetch.
+#[tauri::command]
+pub async fn import_messages(
+    state: State<'_, AppState>,
+    args: ImportMessagesArgs,
+) -> Result<Vec<Message>, String> {
+    // Reject the whole batch up front if any row carries an unexpected role,
+    // before any DB write — the import dialog only ever produces user /
+    // assistant / system, so a bad role here means a malformed payload.
+    for m in &args.messages {
+        validate_role(&m.role)?;
+    }
+    let items: Vec<(String, String)> = args
+        .messages
+        .into_iter()
+        .map(|m| (m.role, m.content))
+        .collect();
+    state
+        .db
+        .import_messages(&args.session_id, &items, args.hidden)
+        .map_err(err)
+}
+
+/// Delete an imported batch as a unit, addressed by its group id. Scoped by
+/// `session_id` for defense-in-depth (see `Database::delete_import_group`).
+#[tauri::command]
+pub async fn delete_import_group(
+    state: State<'_, AppState>,
+    session_id: String,
+    group: String,
+) -> Result<(), String> {
+    state
+        .db
+        .delete_import_group(&session_id, &group)
         .map_err(err)
 }
 
@@ -243,6 +338,11 @@ pub struct UpdateMessageArgs {
     /// tool calls that landed in a separate write).
     #[serde(default)]
     pub tool_calls_json: Option<String>,
+    /// JSON-encoded `Attachment[]` — files produced by built-in tools
+    /// during this assistant turn (today only `pdf`). Same COALESCE
+    /// semantics as `tool_calls_json`.
+    #[serde(default)]
+    pub attachments_json: Option<String>,
 }
 
 #[tauri::command]
@@ -259,6 +359,7 @@ pub async fn update_message(
             args.thinking.as_deref(),
             args.metrics_json.as_deref(),
             args.tool_calls_json.as_deref(),
+            args.attachments_json.as_deref(),
         )
         .map_err(err)
 }
@@ -270,6 +371,32 @@ pub async fn delete_message(
     session_id: String,
 ) -> Result<(), String> {
     state.db.delete_message(&id, &session_id).map_err(err)
+}
+
+#[tauri::command]
+pub async fn clear_session_messages(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<(), String> {
+    state.db.clear_session_messages(&session_id).map_err(err)
+}
+
+/// Mark a batch of messages as "rolled into the auto-summary": the rows
+/// stay in the DB and keep rendering in the transcript, but the chat
+/// history builder skips them so the model only consumes the summary
+/// block (in `session.system_prompt`) plus the trailing uncompacted
+/// turns. Replaces the older flow where the Compact button hard-deleted
+/// the summarised messages — which lost user-visible history forever.
+#[tauri::command]
+pub async fn mark_messages_compacted(
+    state: State<'_, AppState>,
+    session_id: String,
+    ids: Vec<String>,
+) -> Result<(), String> {
+    state
+        .db
+        .mark_messages_compacted(&session_id, &ids)
+        .map_err(err)
 }
 
 // ---------- settings ----------
@@ -313,13 +440,24 @@ const WRITABLE_SETTING_KEYS: &[&str] = &[
     "onboarding_completed",
 ];
 
+/// Whether `key` is a setting the app is allowed to write. Built-in tool
+/// toggles (`*_tool_enabled`) live in the registry at
+/// [`crate::tools::builtin`] so a new tool is a one-line registry edit
+/// instead of a separate allowlist update; everything else must match the
+/// static `WRITABLE_SETTING_KEYS` exactly. Shared by `set_setting` and the
+/// snapshot-import path so both enforce the same boundary.
+fn is_writable_setting_key(key: &str) -> bool {
+    WRITABLE_SETTING_KEYS.contains(&key)
+        || crate::tools::builtin::setting_keys().any(|k| k == key)
+}
+
 #[tauri::command]
 pub async fn set_setting(
     state: State<'_, AppState>,
     key: String,
     value: String,
 ) -> Result<(), String> {
-    if !WRITABLE_SETTING_KEYS.contains(&key.as_str()) {
+    if !is_writable_setting_key(&key) {
         return Err(format!(
             "setting `{key}` is not on the writable allowlist"
         ));
@@ -932,6 +1070,140 @@ pub async fn delete_snippet(state: State<'_, AppState>, id: String) -> Result<()
     state.db.delete_snippet(&id).map_err(err)
 }
 
+// ---------- snippet variables ----------
+
+/// Reserved variable names. These collide with built-in substitutions
+/// (`{{USER_NAME}}` set from Settings + `{{CURRENT_*}}` from `temporal.ts`)
+/// and would silently shadow them if a user redefined the same key, so the
+/// command layer rejects them. The frontend duplicates the list for inline
+/// validation, but the server-side check is the source of truth.
+const RESERVED_VAR_KEYS: &[&str] = &[
+    "USER_NAME",
+    "CURRENT_DATE",
+    "CURRENT_TIME",
+    "CURRENT_WEEKDAY",
+    "CURRENT_DATETIME",
+    "CURRENT_TIMEZONE",
+];
+
+/// Validate a variable key: uppercase letters / digits / underscore, must
+/// start with a letter or underscore (no leading digit), 1-64 chars, and
+/// not a reserved built-in. Returns the normalised key (already-uppercase
+/// passes through unchanged) so callers can rely on a canonical form
+/// reaching the DB.
+fn normalise_var_key(key: &str) -> Result<String, String> {
+    let trimmed = key.trim();
+    if trimmed.is_empty() {
+        return Err("Variable key cannot be empty".to_string());
+    }
+    if trimmed.len() > 64 {
+        return Err("Variable key is too long (max 64 chars)".to_string());
+    }
+    let upper = trimmed.to_ascii_uppercase();
+    let mut chars = upper.chars();
+    let first = chars.next().unwrap();
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return Err(
+            "Variable key must start with a letter or underscore".to_string(),
+        );
+    }
+    for c in chars {
+        if !(c.is_ascii_alphanumeric() || c == '_') {
+            return Err(format!(
+                "Variable key contains invalid character '{c}'. Use A-Z, 0-9, or _."
+            ));
+        }
+    }
+    if RESERVED_VAR_KEYS.iter().any(|r| *r == upper.as_str()) {
+        return Err(format!(
+            "'{upper}' is reserved by Loach — pick a different name."
+        ));
+    }
+    Ok(upper)
+}
+
+#[tauri::command]
+pub async fn list_snippet_variables(
+    state: State<'_, AppState>,
+) -> Result<Vec<SnippetVariable>, String> {
+    state.db.list_snippet_variables().map_err(err)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateSnippetVariableArgs {
+    pub key: String,
+    pub value: String,
+    pub description: Option<String>,
+}
+
+#[tauri::command]
+pub async fn create_snippet_variable(
+    state: State<'_, AppState>,
+    args: CreateSnippetVariableArgs,
+) -> Result<SnippetVariable, String> {
+    let key = normalise_var_key(&args.key)?;
+    state
+        .db
+        .create_snippet_variable(&key, &args.value, args.description.as_deref())
+        .map_err(err)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateSnippetVariableArgs {
+    pub id: String,
+    pub key: String,
+    pub value: String,
+    pub description: Option<String>,
+}
+
+#[tauri::command]
+pub async fn update_snippet_variable(
+    state: State<'_, AppState>,
+    args: UpdateSnippetVariableArgs,
+) -> Result<(), String> {
+    let key = normalise_var_key(&args.key)?;
+    state
+        .db
+        .update_snippet_variable(&args.id, &key, &args.value, args.description.as_deref())
+        .map_err(err)
+}
+
+#[tauri::command]
+pub async fn delete_snippet_variable(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<(), String> {
+    state.db.delete_snippet_variable(&id).map_err(err)
+}
+
+#[tauri::command]
+pub async fn list_snippet_fill_values(
+    state: State<'_, AppState>,
+    snippet_id: String,
+) -> Result<Vec<SnippetFillValue>, String> {
+    state.db.list_snippet_fill_values(&snippet_id).map_err(err)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpsertSnippetFillValuesArgs {
+    pub snippet_id: String,
+    /// Flat `(key, value)` pairs. The frontend sends every placeholder the
+    /// user just filled, including ones whose value didn't change — the
+    /// upsert path is idempotent so over-sending is harmless.
+    pub values: Vec<(String, String)>,
+}
+
+#[tauri::command]
+pub async fn upsert_snippet_fill_values(
+    state: State<'_, AppState>,
+    args: UpsertSnippetFillValuesArgs,
+) -> Result<(), String> {
+    state
+        .db
+        .upsert_snippet_fill_values(&args.snippet_id, &args.values)
+        .map_err(err)
+}
+
 // ---------- mcp servers ----------
 
 /// Input for `mcp_save`. Matches the frontend `McpServerInput` shape: `id`
@@ -1255,6 +1527,18 @@ pub async fn chat_stream(
         }
         request.tools = tools;
 
+        // Append built-in tools after the MCP catalogue. Order is safe:
+        // MCP qualified names always carry a `<slug>__` prefix, so the
+        // bare names used by built-ins (`calculate`, `datetime`, …)
+        // can't collide with `resolve_qualified`'s first-match scan.
+        //
+        // Built-ins are purely local (no network, no DB writes), so we
+        // expose them in Private Chat too — the privacy guarantee is
+        // about data leaving the box, not about hiding local compute.
+        request
+            .tools
+            .extend(crate::tools::builtin::enabled_builtin_defs(&db));
+
         let res = match provider.as_str() {
             "ollama" => {
                 providers::ollama::chat_stream(app, http, registry, db, cancel, request).await
@@ -1499,7 +1783,7 @@ pub async fn import_data_with_dialog(
     // Stage 1 — file read + JSON parse on the blocking pool. The IO + serde
     // pass blocks for as long as the file is large, so we don't want it on
     // the tokio runtime.
-    let snap: DatabaseSnapshot =
+    let mut snap: DatabaseSnapshot =
         tokio::task::spawn_blocking(move || -> Result<DatabaseSnapshot, String> {
             let text = std::fs::read_to_string(&path)
                 .map_err(|e| format!("couldn't read {}: {e}", path.display()))?;
@@ -1552,6 +1836,25 @@ pub async fn import_data_with_dialog(
         })?;
     }
 
+    // Stage 2.5 — filter imported settings through the SAME allowlist
+    // `set_setting` enforces. `restore_snapshot` writes settings rows
+    // verbatim, which otherwise bypasses the gate entirely: a hand-edited
+    // export could plant arbitrary keys or repoint `openai_base_url` at an
+    // attacker host — the exact attack `set_setting`'s allowlist closes.
+    // (We deliberately do NOT value-screen base URLs: they're freely
+    // user-writable on the normal path — local proxies like LM Studio need
+    // `localhost:1234` — so the import path matches that.)
+    let before = snap.data.settings.len();
+    snap.data
+        .settings
+        .retain(|(k, _)| is_writable_setting_key(k));
+    let dropped = before - snap.data.settings.len();
+    if dropped > 0 {
+        tracing::warn!(
+            "import: dropped {dropped} setting(s) not on the writable allowlist"
+        );
+    }
+
     // Stage 3 — apply. `restore_snapshot` holds the single DB mutex for
     // the duration of the transaction and inserts every row serially, so
     // it has to run on the blocking pool too.
@@ -1575,6 +1878,17 @@ pub async fn archive_all_sessions(state: State<'_, AppState>) -> Result<i64, Str
 
 /// Permanently delete every archived session. Irreversible — messages
 /// cascade. Returns the row count so the UI can say "Removed 8 chats".
+///
+/// Intentionally **not** gated on `require_unlocked`, unlike the
+/// nuke-everything commands (`wipe_user_data`, `factory_reset`,
+/// `import_data_with_dialog`). This sits in the same tier as the ungated
+/// per-session `delete_session` / `delete_message`: ordinary user-initiated
+/// deletes of content the renderer can already enumerate. Gating *only* this
+/// command would be security theater — a compromised renderer can achieve the
+/// identical bulk deletion by looping the ungated `delete_session` over the
+/// archived ids. The app-lock's re-auth boundary deliberately protects the
+/// one-shot catastrophic resets, not every delete. The UI still shows a
+/// destructive confirmation before calling this.
 #[tauri::command]
 pub async fn delete_archived_sessions(state: State<'_, AppState>) -> Result<i64, String> {
     state.db.delete_archived_sessions().map_err(err)
@@ -1624,6 +1938,77 @@ pub async fn factory_reset(
     if let Err(e) = security::clear() {
         tracing::warn!("security::clear during factory_reset failed: {e:?}");
     }
+    Ok(())
+}
+
+// ---------- open in external editor ----------
+//
+// The code canvas holds a snippet, not a file. "Open in VS Code" writes the
+// current snapshot to a temp file (the renderer supplies the language-derived
+// filename; we own the directory and reduce the name to a bare basename so a
+// compromised renderer can't write outside the temp dir) and launches VS
+// Code's `code` CLI on it. Snapshot only — it does not stream as the block
+// keeps generating.
+
+#[tauri::command]
+pub fn open_in_vscode(code: String, filename: String) -> Result<(), String> {
+    use std::io::Write;
+    use std::process::Command;
+
+    // Honour only the basename — never directory components the renderer may
+    // have sent — so the write can't escape the temp dir.
+    let safe_name = std::path::Path::new(&filename)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .filter(|n| !n.is_empty())
+        .unwrap_or("snippet.txt");
+
+    let dir = std::env::temp_dir().join("loach-canvas");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Couldn't create the temp folder: {e}"))?;
+    let path = dir.join(safe_name);
+    std::fs::File::create(&path)
+        .and_then(|mut f| f.write_all(code.as_bytes()))
+        .map_err(|e| format!("Couldn't write the temp file: {e}"))?;
+
+    let not_found = "VS Code's `code` command isn't on your PATH. Open VS Code and run \
+                     \"Shell Command: Install 'code' command in PATH\", then try again."
+        .to_string();
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // CreateProcess can't run `code.cmd` directly, so go through cmd. cmd
+        // also swallows a missing-`code` error (it exits non-zero rather than
+        // failing to spawn), so confirm presence with `where` first.
+        // CREATE_NO_WINDOW stops a console from flashing on screen.
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let present = Command::new("where")
+            .arg("code")
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !present {
+            return Err(not_found);
+        }
+        Command::new("cmd")
+            .args(["/C", "code"])
+            .arg(&path)
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .map_err(|e| format!("Couldn't launch VS Code: {e}"))?;
+    }
+    #[cfg(not(windows))]
+    {
+        Command::new("code").arg(&path).spawn().map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                not_found
+            } else {
+                format!("Couldn't launch VS Code: {e}")
+            }
+        })?;
+    }
+
     Ok(())
 }
 

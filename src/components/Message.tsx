@@ -1,4 +1,4 @@
-import { memo, useLayoutEffect, useRef, useState } from "react";
+import { memo, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   Brain,
@@ -8,6 +8,7 @@ import {
   Copy,
   File,
   FileText,
+  GitFork,
   Loader2,
   MoreHorizontal,
   RefreshCw,
@@ -15,7 +16,9 @@ import {
   Wrench,
 } from "lucide-react";
 import { AttachmentActions } from "./AttachmentActions";
-import { Markdown } from "./Markdown";
+import { Markdown, preprocessTex } from "./Markdown";
+import { MarkdownSourceProvider } from "./markdownSource";
+import { lastCodeBlock } from "@/lib/codeBlocks";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -34,6 +37,21 @@ import { Bookmark } from "lucide-react";
 import { useChatStore } from "@/stores/chatStore";
 import { useSnippetStore } from "@/stores/snippetStore";
 import { useToastStore } from "@/stores/toastStore";
+
+// Image attachments on assistant turns can originate from an MCP tool result,
+// whose `mime` is fully server-controlled. Constrain it to a known raster
+// image type before we ask the webview to decode it as a `data:` URL. React
+// escapes the attribute so this isn't an injection fix — it's defense-in-depth
+// against a malicious server picking the MIME the browser decodes.
+const SAFE_IMAGE_MIMES = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/gif",
+  "image/webp",
+]);
+function safeImageMime(mime: string): string {
+  return SAFE_IMAGE_MIMES.has(mime.toLowerCase().trim()) ? mime : "image/png";
+}
 
 interface MessageProps {
   message: ChatMessage;
@@ -141,9 +159,8 @@ function ToolCallItem({ call }: { call: ToolCallRecord }) {
         ) : (
           <Wrench className="h-3.5 w-3.5 shrink-0 text-foreground/55" />
         )}
-        <span className="min-w-0 truncate font-mono">
-          <span className="text-foreground/45">{call.server_name || "tool"} · </span>
-          <span className="text-foreground/80">{rawTool}</span>
+        <span className="min-w-0 truncate font-mono text-foreground/80">
+          {rawTool}
         </span>
       </button>
       {open && (
@@ -185,11 +202,55 @@ function ToolCallItem({ call }: { call: ToolCallRecord }) {
 }
 
 function ToolCallsBlock({ calls }: { calls: ToolCallRecord[] }) {
+  const [open, setOpen] = useState(false);
+  if (calls.length === 0) return null;
+
+  const anyPending = calls.some((c) => c.result === null);
+  const anyFailed = calls.some((c) => c.result !== null && c.is_error);
+
+  const displayName = (tool: string) =>
+    tool.includes("__") ? tool.slice(tool.indexOf("__") + 2) : tool;
+
+  let label: string;
+  if (anyPending) {
+    label =
+      calls.length === 1
+        ? `Calling ${displayName(calls[0].tool)} tool…`
+        : "Calling tools…";
+  } else if (calls.length === 1) {
+    label = `Called ${displayName(calls[0].tool)} tool`;
+  } else {
+    label = `Called ${calls.length} tools`;
+  }
+
   return (
-    <div className="mb-2 space-y-1.5">
-      {calls.map((c) => (
-        <ToolCallItem key={c.id} call={c} />
-      ))}
+    <div className="mb-2">
+      <button
+        type="button"
+        onClick={() => setOpen(!open)}
+        className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground/70 transition-colors"
+      >
+        {open ? (
+          <ChevronDown className="h-3.5 w-3.5" />
+        ) : (
+          <ChevronRight className="h-3.5 w-3.5" />
+        )}
+        {anyPending ? (
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+        ) : anyFailed ? (
+          <AlertTriangle className="h-3.5 w-3.5 text-red-400" />
+        ) : (
+          <Wrench className="h-3.5 w-3.5" />
+        )}
+        <span>{label}</span>
+      </button>
+      {open && (
+        <div className="mt-1.5 ml-5 space-y-1.5">
+          {calls.map((c) => (
+            <ToolCallItem key={c.id} call={c} />
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -286,6 +347,7 @@ function ThinkingBlock({ text, isStreaming }: { text: string; isStreaming?: bool
 
 function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: MessageProps) {
   const regenerateLast = useChatStore((s) => s.regenerateLast);
+  const forkChat = useChatStore((s) => s.fork);
   const [menuOpen, setMenuOpen] = useState(false);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   // Separate state for the keyboard-accessible kebab below the user
@@ -427,12 +489,25 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
   const persistedMetrics = parseMetrics(message.metrics_json);
   const showMetrics = metrics ?? persistedMetrics;
   const toolCalls = !isUser ? parseToolCalls(message.tool_calls_json) : [];
-  const attachments = isUser ? parseAttachments(message.attachments_json) : [];
+  const attachments = parseAttachments(message.attachments_json);
+  // Images can come from a user upload or, on an assistant turn, from an
+  // MCP tool result (mapped to an image attachment in mcp/client.rs).
   const images = attachments.filter((a) => a.kind === "image");
   const files = attachments.filter((a) => a.kind === "text" || a.kind === "file");
   // Attachment bodies are inlined into the stored user content for the model;
   // strip that tail when rendering so the user sees just their typed prompt.
   const displayContent = isUser ? stripInlinedAttachments(message.content) : message.content;
+
+  // Source binding for the Code Canvas. We only need the LAST fenced block's
+  // raw text (the one that grows mid-stream) so "Open in canvas" can tell
+  // whether the clicked block is the streaming tail. Pre-process the content
+  // the same way `Markdown` does so the comparison matches the `raw` a
+  // `CodeBlock` actually renders. Skipped entirely for user bubbles and once
+  // streaming stops (there's nothing live to track then).
+  const lastBlockRaw = useMemo(() => {
+    if (isUser || !isStreaming) return null;
+    return lastCodeBlock(preprocessTex(message.content))?.code ?? null;
+  }, [isUser, isStreaming, message.content]);
 
   return (
     <div
@@ -569,7 +644,7 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
                 className="rounded-lg focus-visible:ring-2 focus-visible:ring-ring/40"
               >
                 <img
-                  src={`data:${img.mime};base64,${img.data}`}
+                  src={`data:${safeImageMime(img.mime)};base64,${img.data}`}
                   alt={img.name}
                   width={80}
                   height={80}
@@ -622,7 +697,55 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
           )
         ) : (
           <div ref={bodyRef}>
-            <Markdown content={message.content} />
+            <MarkdownSourceProvider
+              value={{
+                sessionId: message.session_id,
+                messageId: message.id,
+                streaming: !!isStreaming,
+                lastBlockRaw,
+              }}
+            >
+              <Markdown content={message.content} />
+            </MarkdownSourceProvider>
+          </div>
+        )}
+        {!isUser && images.length > 0 && (
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {images.map((img, i) => (
+              <AttachmentActions
+                key={i}
+                attachment={img}
+                className="rounded-lg focus-visible:ring-2 focus-visible:ring-ring/40"
+              >
+                <img
+                  src={`data:${safeImageMime(img.mime)};base64,${img.data}`}
+                  alt={img.name}
+                  width={80}
+                  height={80}
+                  loading="lazy"
+                  decoding="async"
+                  className="h-20 w-20 rounded-lg object-cover"
+                />
+              </AttachmentActions>
+            ))}
+          </div>
+        )}
+        {!isUser && files.length > 0 && (
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {files.map((f, i) => (
+              <AttachmentActions
+                key={i}
+                attachment={f}
+                className="gap-1.5 rounded-lg border border-foreground/10 bg-foreground/[0.05] px-2.5 py-1 text-xs text-foreground/70"
+              >
+                {f.kind === "text" ? (
+                  <FileText className="h-3.5 w-3.5 shrink-0" />
+                ) : (
+                  <File className="h-3.5 w-3.5 shrink-0" />
+                )}
+                {f.name}
+              </AttachmentActions>
+            ))}
           </div>
         )}
         {/* Keyboard-accessible action menu for user messages — the
@@ -726,6 +849,15 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
                     Regenerate
                   </DropdownMenuItem>
                 )}
+                <DropdownMenuItem
+                  onSelect={() =>
+                    void forkChat(message.session_id, message.id)
+                  }
+                  className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
+                >
+                  <GitFork className="h-4 w-4 text-foreground/60" />
+                  Fork from here
+                </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
           </div>

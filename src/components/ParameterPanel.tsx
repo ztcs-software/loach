@@ -276,27 +276,30 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
                 the active model doesn't list `thinking` in its
                 `/api/show` capabilities — flipping it would just be
                 ignored by Ollama, so we make that obvious upfront. */}
-            <Section title="Thinking">
-              <ThinkingRow
-                checked={
-                  // For supporting models the in-memory `think` from
-                  // params drives the switch. `undefined` means "no
-                  // explicit override" — for thinking-capable models the
-                  // implicit default is ON (Ollama's behaviour for those
-                  // models), so we surface that as ON.
-                  params.think ?? supportsThinking
-                }
-                disabled={!supportsThinking}
-                disabledHint={
-                  isOpenAI
-                    ? "Ignored by OpenAI providers — chain-of-thought is internal to the model."
-                    : modelCapabilities === undefined
-                      ? "Loading model capabilities…"
-                      : "This model doesn't support a thinking step."
-                }
-                onChange={(next) => update({ think: next })}
-              />
-            </Section>
+            {/* No <Section> wrapper: ThinkingRow is self-labeling (icon +
+                "Thinking" + switch), so a "THINKING" section header above it
+                would just duplicate the row's own label. */}
+            <ThinkingRow
+              checked={
+                // Disabled rows (unsupported model / OpenAI) always read
+                // as OFF so the toggle never shows an "on" state next to a
+                // "doesn't support a thinking step" caption. For supporting
+                // models the in-memory `think` drives the switch;
+                // `undefined` means "no explicit override", which for
+                // thinking-capable models is implicitly ON (Ollama's
+                // behaviour), so we surface that as ON.
+                supportsThinking && (params.think ?? true)
+              }
+              disabled={!supportsThinking}
+              disabledHint={
+                isOpenAI
+                  ? "Ignored by OpenAI providers — chain-of-thought is internal to the model."
+                  : modelCapabilities === undefined
+                    ? "Loading model capabilities…"
+                    : "This model doesn't support a thinking step."
+              }
+              onChange={(next) => update({ think: next })}
+            />
 
             {isAdvanced && (
               <Section title="Sampling">

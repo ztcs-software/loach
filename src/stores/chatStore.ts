@@ -5,12 +5,16 @@ import {
   archiveSession,
   createSession,
   deleteArchivedSessions,
+  deleteImportGroup,
   deleteMessage,
   deleteSession,
+  forkSession,
+  importMessages as tauriImportMessages,
   getSpaceContext,
   listMessages,
   listSessions,
   makeRequestId,
+  markMessagesCompacted,
   ollamaUnloadModel,
   pinSession,
   renameSession,
@@ -26,14 +30,23 @@ import {
   inlineTextAttachments,
 } from "@/lib/files";
 import { extractMemories } from "@/lib/memory";
+import { buildCompactedMarkdown } from "@/lib/export";
+import {
+  extractSummary,
+  stripSummaryBlock,
+  SUMMARY_END_TAG,
+  SUMMARY_START_TAG,
+} from "@/lib/contextUsage";
 import { formatProviderError } from "@/lib/providerErrors";
 import { getPersona } from "@/lib/personas";
 import { getTone } from "@/lib/tones";
 import { applyTemporalAwareness } from "@/lib/temporal";
 import {
+  buildFetchToolRecords,
   extractUrls,
   fetchAll,
   inlineFetchedPages,
+  type FetchOutcome,
 } from "@/lib/webFetch";
 import {
   DEFAULT_PARAMS,
@@ -77,6 +90,15 @@ interface QueueTask {
     messages: ChatMessageIn[];
     params: GenerationParams;
   };
+  /** Pre-stream tool-call records that should appear on the assistant
+   *  bubble alongside any MCP / calculator calls the model itself makes
+   *  during streaming. Currently used for web-fetch: the frontend ran
+   *  the fetches before the chat request was built, and we want the
+   *  same chip UX users get for model-initiated tools. Seeded into
+   *  `runningBuffers.toolCalls` in `startTask` so the streaming
+   *  flush / finish paths persist them on the assistant row without
+   *  any extra DB write. */
+  preToolCalls?: ToolCallRecord[];
 }
 
 interface ChatState {
@@ -134,21 +156,34 @@ interface ChatState {
    *  so the caller can show a toast. */
   removeAllArchived: () => Promise<number>;
   remove: (id: string) => Promise<void>;
+  /** Branch a chat. `upToMessageId` omitted = copy the whole transcript
+   *  ("Fork this chat" in the header); set = copy up to and including that
+   *  message ("Fork from here" in the assistant message kebab). The new
+   *  session is added to the store, its messages are loaded, and it is
+   *  selected as the active chat. Returns the new session. */
+  fork: (sourceId: string, upToMessageId?: string) => Promise<Session>;
   setSessionModel: (id: string, provider: ProviderId, model: string) => Promise<void>;
   setSessionSystemPrompt: (id: string, prompt: string) => Promise<void>;
   /** Set per-session generation parameters. Pass `null` to remove the
    *  override entirely so the session falls back to (model defaults +
    *  app defaults). */
   setSessionParams: (id: string, params: GenerationParams | null) => Promise<void>;
-  /** Append parsed messages onto the end of a session's transcript. Used by
-   *  the "Import context" dialog — see `lib/importContext.ts` for the
-   *  parser that produces the input shape. Each message is persisted via
-   *  the same `append_message` command that real user/assistant turns use,
-   *  so imported context shows up in exports too. */
+  /** Append parsed messages onto the end of a session's transcript as one
+   *  import batch. Used by the "Import context" dialog — see
+   *  `lib/importContext.ts` for the parser that produces the input shape.
+   *  The batch shares one `import_group` so the transcript renders it as a
+   *  single collapsible card and can remove it as a unit; `hidden` folds
+   *  that card out of the transcript while the content still reaches the
+   *  model. Imported context shows up in exports either way. */
   importMessages: (
     id: string,
     messages: { role: "user" | "assistant" | "system"; content: string }[],
+    hidden: boolean,
   ) => Promise<void>;
+  /** Remove an imported batch (every row sharing `group`) from a session,
+   *  in the DB and the in-memory transcript. Used by the Remove control on
+   *  the imported-context card. */
+  removeImportGroup: (id: string, group: string) => Promise<void>;
 
   sendUserMessage: (content: string, attachments: Attachment[]) => Promise<void>;
   /** Drop the trailing assistant message in `sessionId` and re-stream a
@@ -169,6 +204,25 @@ interface ChatState {
    *  the head of the waiting queue, then cancels the current runner —
    *  which causes the teardown path to pick our task as the new head. */
   promoteSession: (sessionId: string) => Promise<void>;
+
+  /** Session id that's currently being compacted, or null. Drives the
+   *  spinner in the Context popup so the user sees that the summarizer
+   *  call is in flight. At most one compaction runs at a time. */
+  compactingSessionId: string | null;
+  /** Summarize the older messages in a session via the same model and
+   *  store the summary in `session.system_prompt` with a unique marker
+   *  block, then delete the summarized messages so they no longer
+   *  consume context. Earlier auto-summary blocks in `system_prompt`
+   *  are replaced, not stacked. */
+  compactContext: (sessionId: string) => Promise<void>;
+  /** Build a compacted Markdown export without touching the session.
+   *  Summarizes the ENTIRE visible context (same model + prompt as
+   *  `compactContext`) into a single recap — unlike the live Compact button,
+   *  no recent messages are kept verbatim, because turning the export switch
+   *  on is an explicit ask to collapse everything into the summary.
+   *  Read-only — nothing is persisted. Throws with a user-facing message when
+   *  there's no model or fewer than COMPACT_MIN_TOTAL messages to compact. */
+  exportCompactedContext: (sessionId: string) => Promise<string>;
 }
 
 /** Module-level re-entry guard for the auto-dispatcher. Set synchronously
@@ -192,6 +246,12 @@ let runningBuffers: {
    *  message at `finishRunning` (or in real time on each tool_result
    *  event so a cancel mid-loop doesn't lose partial work). */
   toolCalls: ToolCallRecord[];
+  /** Attachments produced by built-in tools mid-turn (today only `pdf`).
+   *  Accumulated across `tool_result` events with non-empty `attachments`
+   *  and persisted onto the assistant message's `attachments_json` at
+   *  flush time so the chat UI renders them as file cards via the same
+   *  path user-uploaded attachments use. */
+  attachments: Attachment[];
 } | null = null;
 
 /** rAF-batched render flush state for streaming events. Rather than calling
@@ -213,6 +273,7 @@ const pendingDirty = {
   thinking: false,
   metrics: false,
   toolCalls: false,
+  attachments: false,
 };
 
 function scheduleFlush(get: Getter, set: Setter) {
@@ -232,11 +293,13 @@ function flushPendingFrame(get: Getter, set: Setter) {
   const dThinking = pendingDirty.thinking;
   const dMetrics = pendingDirty.metrics;
   const dTools = pendingDirty.toolCalls;
-  if (!dContent && !dThinking && !dMetrics && !dTools) return;
+  const dAttach = pendingDirty.attachments;
+  if (!dContent && !dThinking && !dMetrics && !dTools && !dAttach) return;
   pendingDirty.content = false;
   pendingDirty.thinking = false;
   pendingDirty.metrics = false;
   pendingDirty.toolCalls = false;
+  pendingDirty.attachments = false;
   const buf = runningBuffers;
   if (!buf) return;
   const task = get().runningTask;
@@ -250,9 +313,13 @@ function flushPendingFrame(get: Getter, set: Setter) {
   // place by the stream handlers, so we serialize at flush time to give
   // every subscriber a stable reference.
   const newToolsJson = dTools ? JSON.stringify(buf.toolCalls) : null;
+  // Same snapshot pattern for attachments — produced by built-in tools
+  // (pdf today) and rendered by AttachmentActions / PdfPreview via the
+  // existing `attachments_json` field on the message.
+  const newAttachJson = dAttach ? JSON.stringify(buf.attachments) : null;
   set((s) => {
     const next: Partial<ChatState> = {};
-    if (dContent || dThinking || dTools) {
+    if (dContent || dThinking || dTools || dAttach) {
       const list = s.messages[sessionId] ?? [];
       next.messages = {
         ...s.messages,
@@ -263,6 +330,7 @@ function flushPendingFrame(get: Getter, set: Setter) {
                 ...(dContent ? { content: newContent } : {}),
                 ...(dThinking ? { thinking: newThinking } : {}),
                 ...(dTools ? { tool_calls_json: newToolsJson } : {}),
+                ...(dAttach ? { attachments_json: newAttachJson } : {}),
               }
             : m,
         ),
@@ -412,8 +480,14 @@ function readSessionParams(session: Session | undefined): GenerationParams {
 }
 
 function chatHistory(messages: Message[], userText: string, images: string[]): ChatMessageIn[] {
+  // Compacted messages stay visible to the user but must NOT reach the
+  // model — the running auto-summary (in `session.system_prompt`) is the
+  // model's substitute for them, and re-sending the originals would
+  // defeat the whole point of compaction. System rows are dropped here
+  // because they're sent via the dedicated `system_prompt` field, not as
+  // chat turns.
   const history: ChatMessageIn[] = messages
-    .filter((m) => m.role !== "system")
+    .filter((m) => m.role !== "system" && m.compacted_at == null)
     .map((m) => ({
       role: m.role,
       content: m.content,
@@ -421,6 +495,105 @@ function chatHistory(messages: Message[], userText: string, images: string[]): C
     }));
   history.push({ role: "user", content: userText, images });
   return history;
+}
+
+/** Compaction thresholds shared by `compactContext` (which persists the
+ *  result) and `exportCompactedContext` (which only builds a smaller
+ *  export). KEEP_TAIL recent messages stay verbatim; we refuse to compact
+ *  below MIN_TOTAL because summarizing one or two turns isn't worth the
+ *  round-trip. */
+const COMPACT_KEEP_TAIL = 4;
+const COMPACT_MIN_TOTAL = 6;
+
+/**
+ * Run the summarization model call shared by `compactContext` and
+ * `exportCompactedContext`. Builds a transcript from `toSummarize`, folds in
+ * any `priorSummary` so earlier rolled-up context survives, streams the
+ * model, and resolves with the trimmed summary. Throws on stream error or an
+ * empty summary so each caller can surface its own message. Does not touch
+ * store state — callers own any persistence.
+ */
+async function generateSummary(
+  session: Session,
+  toSummarize: Message[],
+  priorSummary: string | null,
+): Promise<string> {
+  const transcript = toSummarize
+    .map((m) => {
+      const speaker = m.role === "user" ? "User" : "Assistant";
+      return `${speaker}: ${m.content}`;
+    })
+    .join("\n\n");
+
+  // The existing summary represents the messages rolled up on a previous
+  // round. Feed it back alongside the new transcript so the refreshed
+  // summary keeps the older context instead of silently dropping it.
+  const priorBlock = priorSummary
+    ? `Previous summary (carry forward — do NOT discard):\n${priorSummary}\n\n`
+    : "";
+
+  const summaryPrompt = `${priorBlock}Summarize the conversation below in concise bullet points. Capture the user's goals, important decisions or conclusions, key facts established, and any unresolved threads. Output ONLY the bullets — no preamble, no closing line.
+
+Conversation:
+---
+${transcript}
+---`;
+
+  const settings = useSettingsStore.getState();
+  const baseUrl =
+    session.provider === "ollama"
+      ? settings.ollama_base_url
+      : settings.openai_base_url;
+  const params = readSessionParams(session);
+
+  let summary = "";
+  let streamErr: string | null = null;
+  const unlistenHolder: { fn: (() => void) | null } = { fn: null };
+  try {
+    await new Promise<void>((resolve, reject) => {
+      startChatStream(
+        {
+          stream_id: makeRequestId(),
+          provider: session.provider,
+          model: session.model,
+          base_url: baseUrl,
+          system_prompt: null,
+          messages: [{ role: "user", content: summaryPrompt, images: [] }],
+          params,
+        },
+        (ev) => {
+          if (ev.kind === "token") {
+            summary += ev.delta;
+          } else if (ev.kind === "error") {
+            streamErr = ev.message;
+            resolve();
+          } else if (ev.kind === "done" || ev.kind === "cancelled") {
+            resolve();
+          }
+        },
+      )
+        .then((handle) => {
+          unlistenHolder.fn = handle.unlisten;
+        })
+        .catch(reject);
+    });
+  } catch (e) {
+    streamErr = e instanceof Error ? e.message : String(e);
+  } finally {
+    const fn = unlistenHolder.fn;
+    if (fn) {
+      try {
+        fn();
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  const cleanSummary = summary.trim();
+  if (streamErr) throw new Error(streamErr);
+  if (!cleanSummary) throw new Error("Model returned no summary.");
+  return cleanSummary;
 }
 
 /**
@@ -612,6 +785,8 @@ function finishRunning(get: Getter, set: Setter, reason: FinishReason = "done") 
       metrics_json: buf.metrics ? JSON.stringify(buf.metrics) : null,
       tool_calls_json:
         buf.toolCalls.length > 0 ? JSON.stringify(buf.toolCalls) : null,
+      attachments_json:
+        buf.attachments.length > 0 ? JSON.stringify(buf.attachments) : null,
     }).catch((e) => {
       const detail = e instanceof Error ? e.message : String(e);
       logger.error("failed to persist assistant reply", e);
@@ -764,6 +939,35 @@ async function startTask(task: QueueTask, get: Getter, set: Setter) {
     return;
   }
 
+  // Seed pre-stream tool-call records (e.g. web-fetch outcomes) onto
+  // the assistant bubble before any token arrives. The optimistic
+  // `assistantMsg` carries them so the chip appears instantly; the
+  // `runningBuffers.toolCalls` array is the source the streaming
+  // flush + `finishRunning` persistence path both read, so any MCP /
+  // calculator calls the model makes during the turn append to the
+  // same list and land on the assistant row alongside the seeds.
+  //
+  // Also persist them to disk immediately. `finishRunning` would write
+  // them at stream end, but the startup-error catch below replaces the
+  // row's content without touching `tool_calls_json` — so a request
+  // that fails to connect (bad URL, unreachable Ollama, expired key)
+  // would otherwise lose the chips on next reload. The follow-up
+  // `update_message` is COALESCE-safe; the eventual finish-path write
+  // simply overrides with any MCP / calculator calls that appended.
+  const preCalls = task.preToolCalls ?? [];
+  if (preCalls.length > 0) {
+    const preCallsJson = JSON.stringify(preCalls);
+    assistantMsg = { ...assistantMsg, tool_calls_json: preCallsJson };
+    void updateMessage({
+      id: assistantMsg.id,
+      session_id: sessionId,
+      content: "",
+      tool_calls_json: preCallsJson,
+    }).catch((e) =>
+      logger.warn("persist pre-stream tool records failed", e),
+    );
+  }
+
   set((s) => ({
     messages: {
       ...s.messages,
@@ -780,7 +984,8 @@ async function startTask(task: QueueTask, get: Getter, set: Setter) {
     content: "",
     thinking: "",
     metrics: null,
-    toolCalls: [],
+    toolCalls: [...preCalls],
+    attachments: [],
   };
 
   const streamId = makeRequestId();
@@ -847,6 +1052,14 @@ async function startTask(task: QueueTask, get: Getter, set: Setter) {
             });
           }
           pendingDirty.toolCalls = true;
+          // Append any attachments the tool produced (today only the
+          // built-in `pdf` tool fills this). Accumulated across results
+          // so a multi-call turn ("create one PDF, then another") lands
+          // both on the assistant message.
+          if (ev.attachments && ev.attachments.length > 0) {
+            buf.attachments.push(...ev.attachments);
+            pendingDirty.attachments = true;
+          }
           scheduleFlush(get, set);
         } else if (ev.kind === "error") {
           // Wrap raw provider error in a sentence the user can act on. We
@@ -1000,6 +1213,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   runningTask: null,
   queue: [],
   unread: {},
+  compactingSessionId: null,
 
   hydrate: async () => {
     try {
@@ -1080,8 +1294,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
     });
     if (!id) return;
     if (!get().messages[id]) {
-      const msgs = await listMessages(id);
-      set((s) => ({ messages: { ...s.messages, [id]: msgs } }));
+      // Every caller fires this without awaiting (`void select(id)`), so an
+      // unguarded reject here surfaces only as an unhandled promise rejection
+      // and strands the chat empty with no feedback. Mirror the other store
+      // actions: log + toast so a failed read is visible and retryable.
+      try {
+        const msgs = await listMessages(id);
+        set((s) => ({ messages: { ...s.messages, [id]: msgs } }));
+      } catch (e) {
+        logger.error("failed to load messages for session", e);
+        useToastStore.getState().push({
+          kind: "error",
+          title: "Couldn't open chat",
+          body: e instanceof Error ? e.message : String(e),
+        });
+      }
     }
   },
 
@@ -1237,6 +1464,25 @@ export const useChatStore = create<ChatState>((set, get) => ({
     });
   },
 
+  fork: async (sourceId, upToMessageId) => {
+    const session = await forkSession({
+      source_session_id: sourceId,
+      up_to_message_id: upToMessageId ?? null,
+    });
+    const msgs = await listMessages(session.id);
+    set((s) => ({
+      sessions: [session, ...s.sessions],
+      messages: { ...s.messages, [session.id]: msgs },
+      activeSessionId: session.id,
+    }));
+    // Warm the new chat's model defaults so the parameter panel reflects
+    // the right values without a delayed round-trip — same as `newSession`.
+    if (session.provider === "ollama" && session.model) {
+      void useModelsStore.getState().loadModelDefaults(session.model);
+    }
+    return session;
+  },
+
   removeAllArchived: async () => {
     const n = await deleteArchivedSessions();
     set((s) => {
@@ -1345,25 +1591,31 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  importMessages: async (id, parsed) => {
+  importMessages: async (id, parsed, hidden) => {
     if (parsed.length === 0) return;
-    // Persist each message in order so timestamps line up monotonically
-    // (the backend stamps `created_at = now()` on insert). We append to the
-    // local cache only after the round-trip resolves so a backend failure
-    // doesn't leave ghost messages in the UI.
-    const created: Message[] = [];
-    for (const p of parsed) {
-      const m = await appendMessage({
-        session_id: id,
-        role: p.role,
-        content: p.content,
-      });
-      created.push(m);
-    }
+    // One round-trip inserts the whole batch under a shared `import_group`
+    // (timestamps stepped monotonically in the backend). We append to the
+    // local cache only after it resolves so a backend failure doesn't leave
+    // ghost messages in the UI.
+    const created = await tauriImportMessages({
+      session_id: id,
+      messages: parsed,
+      hidden,
+    });
     set((s) => ({
       messages: {
         ...s.messages,
         [id]: [...(s.messages[id] ?? []), ...created],
+      },
+    }));
+  },
+
+  removeImportGroup: async (id, group) => {
+    await deleteImportGroup(id, group);
+    set((s) => ({
+      messages: {
+        ...s.messages,
+        [id]: (s.messages[id] ?? []).filter((m) => m.import_group !== group),
       },
     }));
   },
@@ -1419,14 +1671,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // the user's raw prompt and append them as fenced blocks so the model has
     // the page content as prompt context. Silent on failure — a dead link
     // should never block the send. Off by default; opt-in in Settings.
+    //
+    // `fetchOutcomes` survives the block so the chip persistence below can
+    // build a `ToolCallRecord[]` from it and attach the same call/result
+    // chip UX the calculator and MCP tools get. Without that, web fetch
+    // was the only "tool" that ran silently — no indication in the UI
+    // that the user's prompt had been augmented with page content.
+    let fetchOutcomes: FetchOutcome[] = [];
     {
       const s = useSettingsStore.getState();
       if (s.web_fetch_enabled) {
         const urls = extractUrls(rawContent);
         if (urls.length > 0) {
           try {
-            const outcomes = await fetchAll(urls);
-            inlinedContent = inlineFetchedPages(inlinedContent, outcomes);
+            fetchOutcomes = await fetchAll(urls);
+            inlinedContent = inlineFetchedPages(inlinedContent, fetchOutcomes);
           } catch (e) {
             // fetchAll itself never throws, but be defensive — a thrown
             // exception here would eat the whole submit, and we'd rather
@@ -1436,6 +1695,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
         }
       }
     }
+    const fetchToolRecords =
+      fetchOutcomes.length > 0 ? buildFetchToolRecords(fetchOutcomes) : [];
 
     // 1. Persist user message.
     const userMsg = await appendMessage({
@@ -1475,6 +1736,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       sessionId,
       userMsgId: userMsg.id,
       request,
+      preToolCalls: fetchToolRecords.length > 0 ? fetchToolRecords : undefined,
     };
 
     // 3. Dispatch. If nothing is running globally, start immediately.
@@ -1508,6 +1770,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (last.role !== "assistant") return;
     const userMsg = messages[lastIdx - 1];
     if (userMsg.role !== "user") return;
+    // Don't regenerate an imported turn. The assistant row belongs to an
+    // import group the import-card renderer treats as atomic; deleting it here
+    // would desync the rendered card from its remaining DB rows.
+    if (last.import_group != null) return;
 
     const session = state.sessions.find((s) => s.id === sessionId);
     if (!session || !session.model) return;
@@ -1654,5 +1920,179 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
     }
     finishRunning(get, set, "cancelled");
+  },
+
+  compactContext: async (sessionId) => {
+    const state = get();
+    const session = state.sessions.find((s) => s.id === sessionId);
+    if (!session) return;
+    if (!session.model) {
+      useToastStore.getState().push({
+        kind: "error",
+        title: "Can't compact",
+        body: "Pick a model first.",
+      });
+      return;
+    }
+    if (state.compactingSessionId) return;
+    if (
+      state.runningTask?.sessionId === sessionId ||
+      state.queue.some((t) => t.sessionId === sessionId)
+    ) {
+      useToastStore.getState().push({
+        kind: "info",
+        title: "Chat is busy",
+        body: "Wait for the current reply before compacting.",
+      });
+      return;
+    }
+
+    const all = state.messages[sessionId] ?? [];
+    // Already-compacted rows have a summary representing them in the
+    // system prompt — re-summarising them would just feed the model
+    // their own summary twice. Build the candidate list from non-system,
+    // not-yet-compacted messages only.
+    const visible = all.filter(
+      (m) => m.role !== "system" && m.compacted_at == null,
+    );
+    // Keep the most recent COMPACT_KEEP_TAIL messages untouched so the user
+    // still has their latest exchange visible verbatim. Anything below that
+    // we'd be summarizing two turns — not worth the round-trip.
+    if (visible.length < COMPACT_MIN_TOTAL) {
+      useToastStore.getState().push({
+        kind: "info",
+        title: "Not enough to compact",
+        body: `Compaction needs at least ${COMPACT_MIN_TOTAL} messages.`,
+      });
+      return;
+    }
+    const toSummarize = visible.slice(0, visible.length - COMPACT_KEEP_TAIL);
+
+    set({ compactingSessionId: sessionId });
+
+    let cleanSummary: string;
+    try {
+      cleanSummary = await generateSummary(
+        session,
+        toSummarize,
+        extractSummary(session.system_prompt ?? null),
+      );
+    } catch (e) {
+      set({ compactingSessionId: null });
+      useToastStore.getState().push({
+        kind: "error",
+        title: "Compaction failed",
+        body: e instanceof Error ? e.message : String(e),
+      });
+      return;
+    }
+
+    // Stash the summary inside `session.system_prompt` using a unique
+    // marker block. Re-compacting strips the previous block first so
+    // the prompt doesn't grow unboundedly. The user can still see and
+    // edit the block in the Parameters panel's "Custom instructions"
+    // textarea, which is intentional — compaction shouldn't be a black
+    // box.
+    const existing = session.system_prompt ?? "";
+    const stripped = stripSummaryBlock(existing);
+    const block = `${SUMMARY_START_TAG}\n${cleanSummary}\n${SUMMARY_END_TAG}\n\n`;
+    const newPrompt = block + stripped;
+
+    // Persist the system-prompt update straight to the backend rather
+    // than going through `setSessionSystemPrompt` — that action does
+    // its own `set()` for the new prompt, which would land BEFORE the
+    // message deletions below. The UsageBar reads system_prompt and
+    // messages together, so a split update flashes a misleading "bigger
+    // than before" reading for one render. Doing both DB writes here
+    // and then a single combined state update keeps the bar's
+    // re-render aligned with the final state.
+    try {
+      await persistSessionSystemPrompt({ id: sessionId, prompt: newPrompt });
+    } catch (e) {
+      set({ compactingSessionId: null });
+      useToastStore.getState().push({
+        kind: "error",
+        title: "Couldn't save summary",
+        body: e instanceof Error ? e.message : String(e),
+      });
+      return;
+    }
+
+    // Mark the summarised messages as compacted in the DB. They stay in
+    // the rows table so the user can still scroll back through them —
+    // only the chat-history builder ignores them on the next request.
+    // Failure is non-fatal: the summary is already in place, so a
+    // missed mark just means the next send carries those originals
+    // alongside the summary (extra context, not wrong context).
+    const summarizedIds = toSummarize.map((m) => m.id);
+    const compactedAt = Date.now();
+    try {
+      await markMessagesCompacted({ session_id: sessionId, ids: summarizedIds });
+    } catch (e) {
+      logger.warn("compact: failed to mark messages compacted", e);
+    }
+    // Single, combined state update: the new system_prompt and the
+    // freshly-flagged messages land in one render. The UsageBar /
+    // popover re-render exactly once and see the new (smaller) numbers
+    // without an intermediate "bigger" flash. The popover is left open
+    // on purpose so the user sees the change happen.
+    const flagged = new Set(summarizedIds);
+    set((s) => ({
+      sessions: s.sessions.map((x) =>
+        x.id === sessionId ? { ...x, system_prompt: newPrompt } : x,
+      ),
+      messages: {
+        ...s.messages,
+        [sessionId]: (s.messages[sessionId] ?? []).map((m) =>
+          flagged.has(m.id) && m.compacted_at == null
+            ? { ...m, compacted_at: compactedAt }
+            : m,
+        ),
+      },
+      compactingSessionId: null,
+    }));
+
+    useToastStore.getState().push({
+      kind: "info",
+      title: "Context compacted",
+      body: `Summarized ${toSummarize.length} earlier messages. They stay visible above the divider; the model only sees the summary.`,
+    });
+  },
+
+  exportCompactedContext: async (sessionId) => {
+    const state = get();
+    const session = state.sessions.find((s) => s.id === sessionId);
+    if (!session) throw new Error("Chat not found.");
+    if (!session.model) throw new Error("Pick a model first.");
+
+    // Mirror `compactContext`'s candidate selection: already-compacted and
+    // system rows are excluded — the former are folded into the carried-
+    // forward summary, the latter ride along in the system prompt.
+    const all = state.messages[sessionId] ?? [];
+    const visible = all.filter(
+      (m) => m.role !== "system" && m.compacted_at == null,
+    );
+    // Apply the same minimum-size floor as the live Compact button. Below it,
+    // summarizing isn't worth a model round-trip (and produces a worse export
+    // than just including the messages verbatim), so reject with a clear
+    // message rather than spending a request to "summarize" a 1-2 message chat.
+    if (visible.length < COMPACT_MIN_TOTAL) {
+      throw new Error(
+        `Not enough to compact — needs at least ${COMPACT_MIN_TOTAL} messages.`,
+      );
+    }
+    // Unlike the live Compact button (which keeps the most recent
+    // COMPACT_KEEP_TAIL messages verbatim), the export path summarizes the
+    // ENTIRE context — the switch being ON is an explicit ask to compact
+    // everything into the summary, with no raw tail left behind.
+    const toSummarize = visible;
+
+    const summary = await generateSummary(
+      session,
+      toSummarize,
+      extractSummary(session.system_prompt ?? null),
+    );
+
+    return buildCompactedMarkdown(session, summary, []);
   },
 }));

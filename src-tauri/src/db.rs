@@ -17,7 +17,7 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -52,6 +52,11 @@ pub struct Session {
     /// list. The value is the ms-timestamp of when it was archived.
     #[serde(default)]
     pub archived_at: Option<i64>,
+    /// Set when this session was created via `fork_session`. Points at the
+    /// chat it was branched from. FK uses ON DELETE SET NULL — deleting the
+    /// source clears the link so the fork survives on its own.
+    #[serde(default)]
+    pub forked_from_session_id: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -139,6 +144,36 @@ pub struct Snippet {
     pub updated_at: i64,
 }
 
+/// User-defined static substitution variable. The `key` is the uppercase
+/// identifier the user references as `{{KEY}}` inside a snippet body; the
+/// `value` is the text that replaces it at expansion time. `description`
+/// is an optional human note (e.g. "Default project name"). Reserved keys
+/// (`USER_NAME`, `CURRENT_*`) are rejected at the command layer so a custom
+/// var can never silently shadow a built-in.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SnippetVariable {
+    pub id: String,
+    pub key: String,
+    pub value: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// Last value the user typed into a prompt-on-use placeholder for a given
+/// snippet. Persisted so the fill-blanks dialog can pre-populate on the next
+/// run instead of starting blank. Keyed by `(snippet_id, key)` — values for
+/// the same key on different snippets stay independent. Cascades on snippet
+/// delete so orphan rows don't accumulate.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SnippetFillValue {
+    pub snippet_id: String,
+    pub key: String,
+    pub value: String,
+    pub updated_at: i64,
+}
+
 /// A user-configured MCP (Model Context Protocol) server. Loach only
 /// speaks the Streamable-HTTP transport — one URL, POST JSON-RPC bodies,
 /// optional auth headers. The underlying SQLite table still carries the
@@ -185,6 +220,28 @@ pub struct Message {
     /// fail with "missing field" — the absent value rehydrates to None.
     #[serde(default)]
     pub tool_calls_json: Option<String>,
+    /// Non-null = this message was rolled into an auto-summary by the
+    /// Compact button at this ms-timestamp. The row stays in the DB and
+    /// keeps rendering in the transcript so the user can still scroll
+    /// back through it — but the chat-history builder skips it when
+    /// constructing the next provider request, so the model only sees the
+    /// summary block (in `session.system_prompt`) plus the trailing
+    /// uncompacted turns. Null on every message until the user
+    /// explicitly compacts.
+    #[serde(default)]
+    pub compacted_at: Option<i64>,
+    /// Non-null = this message came from the "Import context" dialog. Every
+    /// row of a single import shares one freshly-generated group id so the
+    /// UI can render the batch as one collapsible card and remove it as a
+    /// unit. Null on normal user/assistant/system turns.
+    #[serde(default)]
+    pub import_group: Option<String>,
+    /// Only meaningful when `import_group` is set: `true` = the user chose
+    /// to keep the imported batch folded out of the transcript. It still
+    /// reaches the model exactly like a visible import — this flag governs
+    /// display only.
+    #[serde(default)]
+    pub import_hidden: bool,
     pub created_at: i64,
 }
 
@@ -389,6 +446,33 @@ impl Database {
             )?;
         }
 
+        // `compacted_at`: ms-timestamp set by the Compact button on each
+        // message that got rolled into the running auto-summary. Non-null
+        // rows stay visible in the transcript but are excluded from the
+        // outgoing chat history so the model only consumes the summary.
+        // Null on every pre-existing row — older databases just keep
+        // showing their full history with the next compaction free to
+        // mark new rows.
+        if !has_column(&conn, "messages", "compacted_at")? {
+            conn.execute_batch(
+                "ALTER TABLE messages ADD COLUMN compacted_at INTEGER;",
+            )?;
+        }
+
+        // `import_group` / `import_hidden`: set on rows that came from the
+        // "Import context" dialog. A shared group id lets the UI fold one
+        // import into a single collapsible card and delete it as a unit;
+        // `import_hidden` keeps that card out of the transcript while the
+        // content still reaches the model. Both columns are added together,
+        // so probing one is enough. Existing rows default to "not imported"
+        // (NULL group, 0 hidden).
+        if !has_column(&conn, "messages", "import_group")? {
+            conn.execute_batch(
+                "ALTER TABLE messages ADD COLUMN import_group TEXT;
+                 ALTER TABLE messages ADD COLUMN import_hidden INTEGER NOT NULL DEFAULT 0;",
+            )?;
+        }
+
         // Add provider + model columns to snippets if missing (for pinning a
         // default model to a snippet).
         if !has_column(&conn, "snippets", "provider")? {
@@ -404,6 +488,17 @@ impl Database {
             conn.execute_batch(
                 "ALTER TABLE sessions ADD COLUMN archived_at INTEGER;
                  CREATE INDEX IF NOT EXISTS idx_sessions_archived ON sessions(archived_at);",
+            )?;
+        }
+
+        // Track which chat a session was forked from. Null = a normal chat
+        // the user created directly; non-null = pointer back to the source
+        // chat so the UI can show a "Forked" badge and a link back. FK uses
+        // ON DELETE SET NULL so deleting the source orphans the fork's link
+        // (and the badge falls off) without destroying the fork itself.
+        if !has_column(&conn, "sessions", "forked_from_session_id")? {
+            conn.execute_batch(
+                "ALTER TABLE sessions ADD COLUMN forked_from_session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL;",
             )?;
         }
 
@@ -447,6 +542,39 @@ impl Database {
             "#,
         )?;
 
+        // Custom snippet variables.
+        //   `snippet_variables` — user-defined KEY=VALUE pairs substituted into
+        //   snippet bodies at expansion time. UNIQUE on `key` so the same name
+        //   can't be defined twice; UI also normalises to uppercase before
+        //   insert. Reserved-key collisions (`USER_NAME`, `CURRENT_*`) are
+        //   blocked at the command layer.
+        //
+        //   `snippet_fill_values` — last value the user typed for each
+        //   prompt-on-use placeholder on each snippet. Composite PK keeps
+        //   recall scoped per-snippet so renaming a placeholder across
+        //   snippets doesn't cross-contaminate. ON DELETE CASCADE on
+        //   `snippet_id` means deleting a snippet drops its recall rows for
+        //   free.
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS snippet_variables (
+                id TEXT PRIMARY KEY,
+                key TEXT NOT NULL UNIQUE,
+                value TEXT NOT NULL,
+                description TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS snippet_fill_values (
+                snippet_id TEXT NOT NULL REFERENCES snippets(id) ON DELETE CASCADE,
+                key TEXT NOT NULL,
+                value TEXT NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (snippet_id, key)
+            );
+            "#,
+        )?;
+
         Ok(())
     }
 
@@ -455,7 +583,7 @@ impl Database {
     pub fn list_sessions(&self) -> Result<Vec<Session>> {
         self.with_read(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, title, provider, model, system_prompt, params_json, space_id, pinned_at, archived_at, created_at, updated_at
+                "SELECT id, title, provider, model, system_prompt, params_json, space_id, pinned_at, archived_at, forked_from_session_id, created_at, updated_at
                  FROM sessions ORDER BY updated_at DESC",
             )?;
             let rows = stmt
@@ -470,8 +598,9 @@ impl Database {
                         space_id: r.get(6)?,
                         pinned_at: r.get(7)?,
                         archived_at: r.get(8)?,
-                        created_at: r.get(9)?,
-                        updated_at: r.get(10)?,
+                        forked_from_session_id: r.get(9)?,
+                        created_at: r.get(10)?,
+                        updated_at: r.get(11)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -491,8 +620,8 @@ impl Database {
         let now = Utc::now().timestamp_millis();
         let conn = self.conn.lock();
         conn.execute(
-            "INSERT INTO sessions (id, title, provider, model, system_prompt, params_json, space_id, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, ?7, ?7)",
+            "INSERT INTO sessions (id, title, provider, model, system_prompt, params_json, space_id, forked_from_session_id, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, NULL, ?7, ?7)",
             params![id, title, provider, model, system_prompt, space_id, now],
         )?;
         Ok(Session {
@@ -505,6 +634,115 @@ impl Database {
             space_id: space_id.map(|s| s.to_string()),
             pinned_at: None,
             archived_at: None,
+            forked_from_session_id: None,
+            created_at: now,
+            updated_at: now,
+        })
+    }
+
+    /// Create a new session as a fork of `source_id`, copying the source's
+    /// title / provider / model / system prompt / params / space verbatim,
+    /// and duplicating its messages up to (and including) `up_to_message_id`
+    /// — or every message in the source when that arg is None.
+    ///
+    /// Message copies get fresh ids and a fresh session_id but keep the
+    /// source's `created_at` so transcript ordering matches the original.
+    /// `forked_from_session_id` is stamped on the new session so the UI can
+    /// render the "Forked from …" badge and link back.
+    pub fn fork_session(
+        &self,
+        source_id: &str,
+        up_to_message_id: Option<&str>,
+    ) -> Result<Session> {
+        let source = self
+            .get_session(source_id)?
+            .ok_or_else(|| anyhow::anyhow!("source session not found"))?;
+
+        let messages = self.list_messages(source_id)?;
+        let take_until_idx = match up_to_message_id {
+            None => messages.len(),
+            Some(id) => {
+                // Inclusive of the named message — "Fork from here" branches
+                // *from* that turn, so the user can immediately reply with a
+                // different follow-up.
+                match messages.iter().position(|m| m.id == id) {
+                    Some(i) => i + 1,
+                    None => {
+                        return Err(anyhow::anyhow!(
+                            "up_to_message_id not found in source chat"
+                        ));
+                    }
+                }
+            }
+        };
+        let to_copy = &messages[..take_until_idx];
+
+        let new_id = Uuid::new_v4().to_string();
+        let now = Utc::now().timestamp_millis();
+        let mut conn = self.conn.lock();
+
+        // Insert the new session row, then duplicate the selected messages —
+        // all inside ONE transaction so a fork is atomic. Without it, a
+        // message insert failing mid-loop (disk full, oversized row) left a
+        // committed session holding a partial transcript while the command
+        // returned Err, so the UI never navigated to it but the half-baked
+        // chat lingered in the sidebar. Mirrors the transactional pattern in
+        // `import_messages` / `mark_messages_compacted`.
+        let tx = conn.transaction()?;
+        tx.execute(
+            "INSERT INTO sessions (id, title, provider, model, system_prompt, params_json,
+                                   space_id, pinned_at, archived_at, forked_from_session_id,
+                                   created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, ?8, ?9, ?9)",
+            params![
+                new_id,
+                source.title,
+                source.provider,
+                source.model,
+                source.system_prompt,
+                source.params_json,
+                source.space_id,
+                source.id,
+                now,
+            ],
+        )?;
+
+        for m in to_copy {
+            let msg_id = Uuid::new_v4().to_string();
+            tx.execute(
+                "INSERT INTO messages (id, session_id, role, content, thinking,
+                                       attachments_json, metrics_json, tool_calls_json, compacted_at, created_at, import_group, import_hidden)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                params![
+                    msg_id,
+                    new_id,
+                    m.role,
+                    m.content,
+                    m.thinking,
+                    m.attachments_json,
+                    m.metrics_json,
+                    m.tool_calls_json,
+                    m.compacted_at,
+                    m.created_at,
+                    m.import_group,
+                    m.import_hidden,
+                ],
+            )?;
+        }
+        tx.commit()?;
+        drop(conn);
+
+        Ok(Session {
+            id: new_id,
+            title: source.title,
+            provider: source.provider,
+            model: source.model,
+            system_prompt: source.system_prompt,
+            params_json: source.params_json,
+            space_id: source.space_id,
+            pinned_at: None,
+            archived_at: None,
+            forked_from_session_id: Some(source.id),
             created_at: now,
             updated_at: now,
         })
@@ -620,7 +858,7 @@ impl Database {
     pub fn get_session(&self, id: &str) -> Result<Option<Session>> {
         self.with_read(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, title, provider, model, system_prompt, params_json, space_id, pinned_at, archived_at, created_at, updated_at
+                "SELECT id, title, provider, model, system_prompt, params_json, space_id, pinned_at, archived_at, forked_from_session_id, created_at, updated_at
                  FROM sessions WHERE id = ?1",
             )?;
             let mut rows = stmt.query(params![id])?;
@@ -635,8 +873,9 @@ impl Database {
                     space_id: r.get(6)?,
                     pinned_at: r.get(7)?,
                     archived_at: r.get(8)?,
-                    created_at: r.get(9)?,
-                    updated_at: r.get(10)?,
+                    forked_from_session_id: r.get(9)?,
+                    created_at: r.get(10)?,
+                    updated_at: r.get(11)?,
                 }))
             } else {
                 Ok(None)
@@ -649,7 +888,7 @@ impl Database {
     pub fn list_messages(&self, session_id: &str) -> Result<Vec<Message>> {
         self.with_read(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, session_id, role, content, thinking, attachments_json, metrics_json, tool_calls_json, created_at
+                "SELECT id, session_id, role, content, thinking, attachments_json, metrics_json, tool_calls_json, compacted_at, created_at, import_group, import_hidden
                  FROM messages WHERE session_id = ?1 ORDER BY created_at ASC",
             )?;
             let rows = stmt
@@ -663,7 +902,10 @@ impl Database {
                         attachments_json: r.get(5)?,
                         metrics_json: r.get(6)?,
                         tool_calls_json: r.get(7)?,
-                        created_at: r.get(8)?,
+                        compacted_at: r.get(8)?,
+                        created_at: r.get(9)?,
+                        import_group: r.get(10)?,
+                        import_hidden: r.get(11)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -683,8 +925,8 @@ impl Database {
         {
             let conn = self.conn.lock();
             conn.execute(
-                "INSERT INTO messages (id, session_id, role, content, thinking, attachments_json, metrics_json, tool_calls_json, created_at)
-                 VALUES (?1, ?2, ?3, ?4, NULL, ?5, NULL, NULL, ?6)",
+                "INSERT INTO messages (id, session_id, role, content, thinking, attachments_json, metrics_json, tool_calls_json, compacted_at, created_at, import_group, import_hidden)
+                 VALUES (?1, ?2, ?3, ?4, NULL, ?5, NULL, NULL, NULL, ?6, NULL, 0)",
                 params![id, session_id, role, content, attachments_json, now],
             )?;
         }
@@ -698,8 +940,110 @@ impl Database {
             attachments_json: attachments_json.map(|s| s.to_string()),
             metrics_json: None,
             tool_calls_json: None,
+            compacted_at: None,
             created_at: now,
+            import_group: None,
+            import_hidden: false,
         })
+    }
+
+    /// Insert a batch of imported messages as one unit. Every row shares a
+    /// freshly-generated `import_group` so the UI renders the batch as a
+    /// single collapsible card and can delete it as a unit; `hidden`
+    /// controls whether that card sits inline in the transcript or stays
+    /// folded away — the content reaches the model either way. `created_at`
+    /// steps forward one ms per row so ordering inside a single import is
+    /// stable. Returns the inserted rows (with ids + timestamps) so the
+    /// caller can splice them straight into the in-memory transcript.
+    pub fn import_messages(
+        &self,
+        session_id: &str,
+        items: &[(String, String)],
+        hidden: bool,
+    ) -> Result<Vec<Message>> {
+        if items.is_empty() {
+            return Ok(Vec::new());
+        }
+        let group = Uuid::new_v4().to_string();
+        let base = Utc::now().timestamp_millis();
+        let mut out = Vec::with_capacity(items.len());
+        {
+            let mut conn = self.conn.lock();
+            let tx = conn.transaction()?;
+            {
+                let mut stmt = tx.prepare(
+                    "INSERT INTO messages (id, session_id, role, content, thinking, attachments_json, metrics_json, tool_calls_json, compacted_at, created_at, import_group, import_hidden)
+                     VALUES (?1, ?2, ?3, ?4, NULL, NULL, NULL, NULL, NULL, ?5, ?6, ?7)",
+                )?;
+                for (i, (role, content)) in items.iter().enumerate() {
+                    let id = Uuid::new_v4().to_string();
+                    let created_at = base + i as i64;
+                    stmt.execute(params![id, session_id, role, content, created_at, group, hidden])?;
+                    out.push(Message {
+                        id,
+                        session_id: session_id.to_string(),
+                        role: role.clone(),
+                        content: content.clone(),
+                        thinking: None,
+                        attachments_json: None,
+                        metrics_json: None,
+                        tool_calls_json: None,
+                        compacted_at: None,
+                        created_at,
+                        import_group: Some(group.clone()),
+                        import_hidden: hidden,
+                    });
+                }
+            }
+            tx.commit()?;
+        }
+        self.touch_session(session_id)?;
+        Ok(out)
+    }
+
+    /// Delete every message belonging to one import batch. Scoped by
+    /// `session_id` for the same defense-in-depth reason `delete_message`
+    /// is. The 0-row case is silently accepted (the batch may already be
+    /// gone).
+    pub fn delete_import_group(&self, session_id: &str, group: &str) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "DELETE FROM messages WHERE session_id = ?1 AND import_group = ?2",
+            params![session_id, group],
+        )?;
+        Ok(())
+    }
+
+    /// Mark a batch of messages as compacted — sets `compacted_at = now`
+    /// on every row whose id is in `ids` AND that belongs to
+    /// `session_id`. The session filter is defensive (matches
+    /// `delete_message` / `update_message`) so a leaked id can't reach
+    /// across sessions. Rows that are already compacted have their
+    /// timestamp left alone, since the divider should track the FIRST
+    /// time a message left the model's context, not the most recent
+    /// re-compaction.
+    pub fn mark_messages_compacted(
+        &self,
+        session_id: &str,
+        ids: &[String],
+    ) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let now = Utc::now().timestamp_millis();
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction()?;
+        {
+            let mut stmt = tx.prepare(
+                "UPDATE messages SET compacted_at = ?1
+                 WHERE id = ?2 AND session_id = ?3 AND compacted_at IS NULL",
+            )?;
+            for id in ids {
+                stmt.execute(params![now, id, session_id])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     /// Delete a single message. Scoped by `session_id` for the same
@@ -716,6 +1060,20 @@ impl Database {
         Ok(())
     }
 
+    /// Delete every message in a session in a single statement — the atomic
+    /// backing for the `/clear` command, replacing a per-message
+    /// `delete_message` IPC loop. A lone `DELETE` is itself atomic, so a
+    /// mid-clear failure can't leave the chat half-emptied. The 0-row case
+    /// is silently accepted (an already-empty chat).
+    pub fn clear_session_messages(&self, session_id: &str) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "DELETE FROM messages WHERE session_id = ?1",
+            params![session_id],
+        )?;
+        Ok(())
+    }
+
     pub fn update_message(
         &self,
         id: &str,
@@ -724,6 +1082,7 @@ impl Database {
         thinking: Option<&str>,
         metrics_json: Option<&str>,
         tool_calls_json: Option<&str>,
+        attachments_json: Option<&str>,
     ) -> Result<()> {
         // Scope by session_id so a renderer that ever gets confused — or a
         // compromised one calling commands directly with a leaked message id
@@ -736,16 +1095,20 @@ impl Database {
         // passing `None` preserves whatever's already on the row, so the
         // chat path can update content+thinking on the streaming flush
         // without clobbering tool-call records that were saved on a
-        // separate write.
+        // separate write. `attachments_json` follows the same pattern so
+        // tools that produce attachments (e.g. the built-in `pdf` tool)
+        // can append them onto the assistant message without the next
+        // streaming flush clobbering them back to NULL.
         let conn = self.conn.lock();
         conn.execute(
             "UPDATE messages
              SET content = ?1,
                  thinking = ?2,
                  metrics_json = COALESCE(?3, metrics_json),
-                 tool_calls_json = COALESCE(?4, tool_calls_json)
-             WHERE id = ?5 AND session_id = ?6",
-            params![content, thinking, metrics_json, tool_calls_json, id, session_id],
+                 tool_calls_json = COALESCE(?4, tool_calls_json),
+                 attachments_json = COALESCE(?5, attachments_json)
+             WHERE id = ?6 AND session_id = ?7",
+            params![content, thinking, metrics_json, tool_calls_json, attachments_json, id, session_id],
         )?;
         Ok(())
     }
@@ -760,6 +1123,23 @@ impl Database {
             params![key, value],
         )?;
         Ok(())
+    }
+
+    /// Fetch a single setting by key. Returns `None` when the row is
+    /// missing so callers can apply their own default rather than guess
+    /// from an empty string. Used by chat_stream to gate built-in tools
+    /// (e.g. `calculate_tool_enabled`) without paying for the full
+    /// `all_settings` scan on every turn.
+    pub fn get_setting(&self, key: &str) -> Result<Option<String>> {
+        self.with_read(|conn| {
+            conn.query_row(
+                "SELECT value FROM settings WHERE key = ?1",
+                params![key],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(Into::into)
+        })
     }
 
     pub fn all_settings(&self) -> Result<Vec<(String, String)>> {
@@ -1154,6 +1534,154 @@ impl Database {
         Ok(())
     }
 
+    // ------------ snippet variables ------------
+
+    pub fn list_snippet_variables(&self) -> Result<Vec<SnippetVariable>> {
+        self.with_read(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, key, value, description, created_at, updated_at
+                 FROM snippet_variables ORDER BY key ASC",
+            )?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok(SnippetVariable {
+                        id: r.get(0)?,
+                        key: r.get(1)?,
+                        value: r.get(2)?,
+                        description: r.get(3)?,
+                        created_at: r.get(4)?,
+                        updated_at: r.get(5)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+    }
+
+    pub fn create_snippet_variable(
+        &self,
+        key: &str,
+        value: &str,
+        description: Option<&str>,
+    ) -> Result<SnippetVariable> {
+        let id = Uuid::new_v4().to_string();
+        let now = Utc::now().timestamp_millis();
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO snippet_variables (id, key, value, description, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+            params![id, key, value, description, now],
+        )?;
+        Ok(SnippetVariable {
+            id,
+            key: key.to_string(),
+            value: value.to_string(),
+            description: description.map(|s| s.to_string()),
+            created_at: now,
+            updated_at: now,
+        })
+    }
+
+    pub fn update_snippet_variable(
+        &self,
+        id: &str,
+        key: &str,
+        value: &str,
+        description: Option<&str>,
+    ) -> Result<()> {
+        let now = Utc::now().timestamp_millis();
+        let conn = self.conn.lock();
+        conn.execute(
+            "UPDATE snippet_variables
+             SET key = ?1, value = ?2, description = ?3, updated_at = ?4
+             WHERE id = ?5",
+            params![key, value, description, now, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_snippet_variable(&self, id: &str) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "DELETE FROM snippet_variables WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(())
+    }
+
+    // ------------ snippet fill values (prompt-on-use recall) ------------
+
+    pub fn list_snippet_fill_values(
+        &self,
+        snippet_id: &str,
+    ) -> Result<Vec<SnippetFillValue>> {
+        self.with_read(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT snippet_id, key, value, updated_at
+                 FROM snippet_fill_values WHERE snippet_id = ?1",
+            )?;
+            let rows = stmt
+                .query_map(params![snippet_id], |r| {
+                    Ok(SnippetFillValue {
+                        snippet_id: r.get(0)?,
+                        key: r.get(1)?,
+                        value: r.get(2)?,
+                        updated_at: r.get(3)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+    }
+
+    /// Every fill-value row across every snippet. Used by `snapshot()` to
+    /// round-trip prompt-on-use recall through export / import; the
+    /// per-snippet `list_snippet_fill_values` powers the live dialog.
+    fn all_snippet_fill_values(&self) -> Result<Vec<SnippetFillValue>> {
+        self.with_read(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT snippet_id, key, value, updated_at FROM snippet_fill_values",
+            )?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok(SnippetFillValue {
+                        snippet_id: r.get(0)?,
+                        key: r.get(1)?,
+                        value: r.get(2)?,
+                        updated_at: r.get(3)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+    }
+
+    /// Upsert a batch of `(key, value)` pairs for one snippet. The whole batch
+    /// runs inside a single transaction so a partial write can't leave the
+    /// recall row half-applied. Empty values are stored verbatim — the UI
+    /// treats them as "no recall" but persisting them keeps round-trips
+    /// idempotent.
+    pub fn upsert_snippet_fill_values(
+        &self,
+        snippet_id: &str,
+        values: &[(String, String)],
+    ) -> Result<()> {
+        let now = Utc::now().timestamp_millis();
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction()?;
+        for (k, v) in values {
+            tx.execute(
+                "INSERT INTO snippet_fill_values (snippet_id, key, value, updated_at)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(snippet_id, key)
+                 DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                params![snippet_id, k, v, now],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     // ------------ mcp servers ------------
     //
     // Only the HTTP transport is supported, so every row has a URL and the
@@ -1278,7 +1806,7 @@ impl Database {
     pub fn all_messages(&self) -> Result<Vec<Message>> {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(
-            "SELECT id, session_id, role, content, thinking, attachments_json, metrics_json, tool_calls_json, created_at
+            "SELECT id, session_id, role, content, thinking, attachments_json, metrics_json, tool_calls_json, compacted_at, created_at, import_group, import_hidden
              FROM messages ORDER BY session_id, created_at",
         )?;
         let rows = stmt
@@ -1292,7 +1820,10 @@ impl Database {
                     attachments_json: r.get(5)?,
                     metrics_json: r.get(6)?,
                     tool_calls_json: r.get(7)?,
-                    created_at: r.get(8)?,
+                    compacted_at: r.get(8)?,
+                    created_at: r.get(9)?,
+                    import_group: r.get(10)?,
+                    import_hidden: r.get(11)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -1358,6 +1889,8 @@ impl Database {
                 space_files: self.all_space_files()?,
                 space_memories: self.all_space_memories()?,
                 snippets: self.list_snippets()?,
+                snippet_variables: self.list_snippet_variables()?,
+                snippet_fill_values: self.all_snippet_fill_values()?,
                 mcp_servers,
                 settings: self.all_settings()?,
             },
@@ -1391,6 +1924,9 @@ impl Database {
         snap: &DatabaseSnapshot,
     ) -> Result<ImportStats> {
         let tx = conn.transaction()?;
+        // `snippet_fill_values` is deleted ahead of `snippets` so its FK to
+        // `snippets(id)` is satisfied at delete time even with FK enforcement
+        // toggled back on mid-transaction. `snippet_variables` is independent.
         tx.execute_batch(
             r#"
             DELETE FROM messages;
@@ -1398,6 +1934,8 @@ impl Database {
             DELETE FROM space_memories;
             DELETE FROM sessions;
             DELETE FROM spaces;
+            DELETE FROM snippet_fill_values;
+            DELETE FROM snippet_variables;
             DELETE FROM snippets;
             DELETE FROM mcp_servers;
             DELETE FROM settings;
@@ -1409,8 +1947,9 @@ impl Database {
         for s in &d.sessions {
             tx.execute(
                 "INSERT INTO sessions (id, title, provider, model, system_prompt, params_json,
-                                       space_id, pinned_at, archived_at, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                                       space_id, pinned_at, archived_at, forked_from_session_id,
+                                       created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 params![
                     s.id,
                     s.title,
@@ -1421,6 +1960,7 @@ impl Database {
                     s.space_id,
                     s.pinned_at,
                     s.archived_at,
+                    s.forked_from_session_id,
                     s.created_at,
                     s.updated_at,
                 ],
@@ -1430,8 +1970,8 @@ impl Database {
         for m in &d.messages {
             tx.execute(
                 "INSERT INTO messages (id, session_id, role, content, thinking,
-                                       attachments_json, metrics_json, tool_calls_json, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                                       attachments_json, metrics_json, tool_calls_json, compacted_at, created_at, import_group, import_hidden)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 params![
                     m.id,
                     m.session_id,
@@ -1441,7 +1981,10 @@ impl Database {
                     m.attachments_json,
                     m.metrics_json,
                     m.tool_calls_json,
+                    m.compacted_at,
                     m.created_at,
+                    m.import_group,
+                    m.import_hidden,
                 ],
             )?;
         }
@@ -1540,6 +2083,27 @@ impl Database {
             )?;
         }
 
+        for v in &d.snippet_variables {
+            tx.execute(
+                "INSERT INTO snippet_variables (id, key, value, description, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![v.id, v.key, v.value, v.description, v.created_at, v.updated_at],
+            )?;
+        }
+
+        for f in &d.snippet_fill_values {
+            // `snippet_id` references `snippets(id)`. FK is OFF for this
+            // transaction so an orphaned row imports cleanly — but with the
+            // snippets table populated above, the common case lines up.
+            tx.execute(
+                "INSERT INTO snippet_fill_values (snippet_id, key, value, updated_at)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(snippet_id, key)
+                 DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                params![f.snippet_id, f.key, f.value, f.updated_at],
+            )?;
+        }
+
         for (k, v) in &d.settings {
             tx.execute(
                 "INSERT INTO settings (key, value) VALUES (?1, ?2)
@@ -1555,6 +2119,8 @@ impl Database {
             space_files: d.space_files.len(),
             space_memories: d.space_memories.len(),
             snippets: d.snippets.len(),
+            snippet_variables: d.snippet_variables.len(),
+            snippet_fill_values: d.snippet_fill_values.len(),
             mcp_servers: d.mcp_servers.len(),
             settings: d.settings.len(),
         };
@@ -1608,6 +2174,11 @@ impl Database {
 
     fn wipe_user_data_locked(conn: &mut Connection) -> Result<()> {
         let tx = conn.transaction()?;
+        // `snippet_fill_values` and `snippet_variables` are user-authored
+        // content too — `wipe_user_data` is the "drop everything I made,
+        // keep my settings" path, so they belong here. Without these two
+        // DELETEs a wipe used to leave ghost variables behind that then
+        // resurfaced on the next snippet run.
         tx.execute_batch(
             r#"
             DELETE FROM messages;
@@ -1615,6 +2186,8 @@ impl Database {
             DELETE FROM space_memories;
             DELETE FROM sessions;
             DELETE FROM spaces;
+            DELETE FROM snippet_fill_values;
+            DELETE FROM snippet_variables;
             DELETE FROM snippets;
             DELETE FROM mcp_servers;
             "#,
@@ -1652,6 +2225,8 @@ impl Database {
             DELETE FROM space_memories;
             DELETE FROM sessions;
             DELETE FROM spaces;
+            DELETE FROM snippet_fill_values;
+            DELETE FROM snippet_variables;
             DELETE FROM snippets;
             DELETE FROM mcp_servers;
             DELETE FROM settings;
@@ -1683,6 +2258,13 @@ pub struct SnapshotData {
     #[serde(default)]
     pub space_memories: Vec<SpaceMemory>,
     pub snippets: Vec<Snippet>,
+    /// User-defined `{{KEY}}` global variables. Defaults to empty on older
+    /// exports that predate the feature so loading them stays a no-op.
+    #[serde(default)]
+    pub snippet_variables: Vec<SnippetVariable>,
+    /// Per-snippet prompt-on-use recall. Empty on older exports.
+    #[serde(default)]
+    pub snippet_fill_values: Vec<SnippetFillValue>,
     pub mcp_servers: Vec<McpServer>,
     /// Key/value settings as stored in the `settings` table. A plain list
     /// (not a map) so round-trip order is stable.
@@ -1698,6 +2280,8 @@ pub struct ImportStats {
     pub space_files: usize,
     pub space_memories: usize,
     pub snippets: usize,
+    pub snippet_variables: usize,
+    pub snippet_fill_values: usize,
     pub mcp_servers: usize,
     pub settings: usize,
 }

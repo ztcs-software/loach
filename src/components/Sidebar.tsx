@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import {
   Archive,
   Cpu,
+  GitFork,
   Layers,
   Loader2,
   MoreHorizontal,
@@ -23,6 +24,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { useConfirm } from "@/components/ConfirmDialog";
 import { useChatStore } from "@/stores/chatStore";
 import { useModelsStore } from "@/stores/modelsStore";
 import { useSpaceStore } from "@/stores/spaceStore";
@@ -246,15 +248,11 @@ function Quicklink({
   label,
   onClick,
   active = false,
-  kbd,
 }: {
   icon: React.ReactNode;
   label: string;
   onClick: () => void;
   active?: boolean;
-  /** Optional keyboard shortcut hint shown right-aligned. Cosmetic — the
-   *  actual shortcut is owned by whichever component implements it. */
-  kbd?: string;
 }) {
   return (
     <button
@@ -271,11 +269,6 @@ function Quicklink({
         {icon}
       </span>
       <span className="min-w-0 flex-1 truncate text-left">{label}</span>
-      {kbd && (
-        <span className="font-mono text-[10px] tracking-tight text-foreground/35">
-          {kbd}
-        </span>
-      )}
     </button>
   );
 }
@@ -396,6 +389,7 @@ function SessionRow({
   const pinChat = useChatStore((s) => s.pin);
   const archiveChat = useChatStore((s) => s.archive);
   const remove = useChatStore((s) => s.remove);
+  const { confirm } = useConfirm();
   // Per-row activity flags. `generating` is true if this session has the
   // running stream OR is parked in the queue waiting for it. `unread` is
   // a sticky flag set by the store when an assistant turn finishes on a
@@ -455,9 +449,17 @@ function SessionRow({
         {session.pinned_at && (
           <Pin className="mr-1.5 h-3 w-3 shrink-0 text-foreground/35" />
         )}
-        {session.space_id && !session.pinned_at && (
-          <Layers className="mr-1.5 h-3 w-3 shrink-0 text-foreground/35" />
+        {session.forked_from_session_id && !session.pinned_at && (
+          <GitFork
+            className="mr-1.5 h-3 w-3 shrink-0 text-foreground/35"
+            aria-label="Forked chat"
+          />
         )}
+        {session.space_id &&
+          !session.pinned_at &&
+          !session.forked_from_session_id && (
+            <Layers className="mr-1.5 h-3 w-3 shrink-0 text-foreground/35" />
+          )}
         <span className="min-w-0 flex-1 truncate">{session.title}</span>
 
         {/* Activity indicator — shares the right-side slot with the kebab.
@@ -503,7 +505,11 @@ function SessionRow({
                 menuOpen ? "opacity-100" : "opacity-0 group-hover/row:opacity-100",
               )}
               onClick={(e) => e.stopPropagation()}
-              aria-label="Chat actions"
+              // Distinguish from the chat-header kebab which carries the
+              // same icon and lives on the same page. Screen readers
+              // otherwise hear three "Chat actions" buttons (two sidebar
+              // rows + the header) with no way to tell which one's which.
+              aria-label={`Actions for chat: ${session.title || "Untitled"}`}
             >
               <MoreHorizontal className="h-4 w-4" />
             </button>
@@ -526,10 +532,20 @@ function SessionRow({
             </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem onSelect={() => void archiveChat(session.id, true)}>
-              <Archive className="h-4 w-4" /> Move to Archive
+              <Archive className="h-4 w-4" /> Move to archive
             </DropdownMenuItem>
             <DropdownMenuItem
-              onSelect={() => remove(session.id)}
+              onSelect={() =>
+                void (async () => {
+                  const ok = await confirm({
+                    title: "Delete this chat?",
+                    body: `“${session.title || "Untitled"}” and all its messages will be permanently deleted. This cannot be undone.`,
+                    confirmLabel: "Delete",
+                    destructive: true,
+                  });
+                  if (ok) await remove(session.id);
+                })()
+              }
               className="text-destructive focus:text-destructive"
             >
               <Trash2 className="h-4 w-4" /> Delete

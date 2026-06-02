@@ -1,6 +1,6 @@
 [package]
 name = "loach"
-version = "1.1.1"
+version = "1.2.0"
 description = "Native local LLM chat client (Ollama + OpenAI-compatible)."
 authors = ["Loach"]
 license = "MIT"
@@ -47,8 +47,11 @@ argon2 = "0.5"
 rand_core = { version = "0.6", features = ["getrandom"] }
 
 # Utilities
-uuid = { version = "1", features = ["v4", "serde"] }
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
+# IANA timezone database for the built-in `datetime` tool (DST-aware
+# tz conversions, "47 business days from today"-style arithmetic).
+chrono-tz = "0.10"
 base64 = "0.22"
 anyhow = "1"
 thiserror = "1"
@@ -57,6 +60,26 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 once_cell = "1"
 dashmap = "6"
 parking_lot = "0.12"
+
+# Math expression evaluator for the built-in `calculate` tool. Local models
+# are unreliable at arithmetic; this gives the model a way to off-load it
+# without the user having to wire up an MCP server for a single function.
+meval = "0.2"
+
+# Backing crates for the rest of the built-in tools. Each is small,
+# pure-Rust, and pulled in only because the model can't do the task
+# reliably itself (hash digests, IP arithmetic, natural sort, line diffs).
+sha2 = "0.10"
+similar = "2"
+natord = "1"
+ipnet = "2"
+
+# PDF generation for the built-in `pdf` tool. printpdf builds documents
+# from a structured spec and subsets a bundled Liberation Sans TTF (see
+# src-tauri/assets/fonts) into each file, so output supports Unicode —
+# Latin, European accents, common symbols — not just ASCII. Glyphs the
+# font lacks (e.g. CJK, emoji) fall back to `?` at render time.
+printpdf = "0.9"
 
 [dev-dependencies]
 # Only used by the db.rs test suite, which opens a fresh database in a

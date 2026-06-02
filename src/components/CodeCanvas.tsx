@@ -1,25 +1,32 @@
 import { useMemo, useState } from "react";
 import { Check, Copy, Download, X } from "lucide-react";
-import hljs from "highlight.js/lib/common";
 import { Button } from "@/components/ui/button";
-import { useCanvasStore } from "@/stores/canvasStore";
+import { CodeView } from "./CodeView";
+import {
+  useCanvasStore,
+  clampCanvasWidth,
+  CANVAS_MIN_WIDTH,
+} from "@/stores/canvasStore";
+import { useChatStore } from "@/stores/chatStore";
+import { useToastStore } from "@/stores/toastStore";
+import { lastCodeBlock } from "@/lib/codeBlocks";
+import { preprocessTex } from "./Markdown";
+import { openInVscode } from "@/lib/tauri";
 import { saveCodeToFile, defaultFilename } from "@/lib/codeExport";
 import { cn } from "@/lib/utils";
 
 /**
  * Right-side code canvas — opens via "Open in canvas" on any inline
- * `CodeBlock`. Read-only for now: title, copy, export, syntax-highlighted
- * body with a left gutter of line numbers.
+ * `CodeBlock`, or from an attachment chip.
  *
- * Sizing rule: occupy a meaningful chunk of the right side without crushing
- * the chat. We use `clamp(360px, 42vw, 720px)` so the canvas grows on wide
- * monitors but stays compact on narrow ones — close to ChatGPT's behaviour
- * without going full-screen.
+ * Two behaviours layered on the original read-only viewer:
+ *  - horizontally resizable via a left-edge drag handle (width persisted in
+ *    `canvasStore`);
+ *  - live: when opened on a still-streaming code block it mirrors that block
+ *    as it generates, by re-deriving from the bound message in `chatStore`.
  *
  * Mutually exclusive with `ParameterPanel` (App.tsx swaps which one renders
- * in the right slot). Reopening the params drawer requires closing the
- * canvas first; the alternative — stacking both — would either need a tab
- * UI or two side rails, neither of which is worth the complexity yet.
+ * in the right slot).
  */
 export function CodeCanvas() {
   const isOpen = useCanvasStore((s) => s.isOpen);
@@ -27,56 +34,57 @@ export function CodeCanvas() {
   const language = useCanvasStore((s) => s.language);
   const title = useCanvasStore((s) => s.title);
   const name = useCanvasStore((s) => s.name);
+  const binding = useCanvasStore((s) => s.binding);
+  const width = useCanvasStore((s) => s.width);
   const close = useCanvasStore((s) => s.close);
+  const setWidth = useCanvasStore((s) => s.setWidth);
+
+  // Live source: the bound message's current content (null when not bound or
+  // the message is gone). A primitive selector so we only re-render when the
+  // text actually changes.
+  const liveContent = useChatStore((s) =>
+    binding
+      ? s.messages[binding.sessionId]?.find((m) => m.id === binding.messageId)
+          ?.content ?? null
+      : null,
+  );
 
   const [copied, setCopied] = useState(false);
+  // Transient width while dragging the resize handle — committed (and
+  // persisted) to the store on pointer-up so we don't write localStorage on
+  // every move.
+  const [dragWidth, setDragWidth] = useState<number | null>(null);
 
-  const lineCount = useMemo(() => {
-    if (!code) return 1;
-    // Trailing newlines on the snippet would otherwise add a phantom blank
-    // line at the bottom; trim them off the line count specifically (the
-    // original `code` is preserved for copy / export).
-    return code.replace(/\n+$/, "").split("\n").length;
-  }, [code]);
-
-  const highlighted = useMemo(() => {
-    if (!code) return "";
-    if (language) {
-      const known = hljs.getLanguage(language);
-      if (known) {
-        try {
-          return hljs.highlight(code, { language, ignoreIllegals: true }).value;
-        } catch {
-          /* fall through to auto */
-        }
-      }
-    }
-    try {
-      return hljs.highlightAuto(code).value;
-    } catch {
-      return escapeHtml(code);
-    }
-  }, [code, language]);
+  // When bound to a live message, re-extract its last fenced block so the
+  // canvas tracks the streaming code. Falls back to the snapshot the canvas
+  // was opened with (attachments, completed blocks, or a deleted source).
+  const live = useMemo(
+    () =>
+      binding && liveContent != null
+        ? lastCodeBlock(preprocessTex(liveContent))
+        : null,
+    [binding, liveContent],
+  );
+  const displayCode = live ? live.code : code;
+  const displayLanguage = live ? live.language : language;
 
   if (!isOpen) return null;
 
   // Plain text and "no language" both render as the text variant — same as
-  // the inline code block toolbar already does. The fenced `text`/`plain`
-  // markdown hints come through verbatim from rehype-highlight, so we
-  // collapse them here rather than at the call site.
+  // the inline code block toolbar already does.
   const isText =
-    !language ||
-    language === "text" ||
-    language === "plain" ||
-    language === "plaintext" ||
-    language === "txt";
+    !displayLanguage ||
+    displayLanguage === "text" ||
+    displayLanguage === "plain" ||
+    displayLanguage === "plaintext" ||
+    displayLanguage === "txt";
 
   const heading = title?.trim() || (isText ? "Text canvas" : "Code Canvas");
-  const badgeLabel = isText ? "Text" : language;
+  const badgeLabel = isText ? "Text" : displayLanguage;
 
   const onCopy = async () => {
     try {
-      await navigator.clipboard.writeText(code);
+      await navigator.clipboard.writeText(displayCode);
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1500);
     } catch {
@@ -85,38 +93,76 @@ export function CodeCanvas() {
   };
 
   const onExport = () => {
-    // When the canvas was opened from an attachment chip the original
-    // filename is the friendliest default (`notes.md`, `report.pdf.txt`).
-    // Code blocks pushed in from a model reply have no filename, so we
-    // fall back to the generic `snippet.<ext>` from `defaultFilename`.
-    void saveCodeToFile(code, language, name ?? defaultFilename(language));
+    void saveCodeToFile(
+      displayCode,
+      displayLanguage,
+      name ?? defaultFilename(displayLanguage),
+    );
+  };
+
+  const onOpenInVscode = async () => {
+    try {
+      await openInVscode(displayCode, name ?? defaultFilename(displayLanguage));
+    } catch (e) {
+      // The Rust command rejects with a ready-to-show string (e.g. `code`
+      // not on PATH); fall back to a generic line for anything unexpected.
+      useToastStore.getState().push({
+        kind: "error",
+        title: "Couldn't open in VS Code",
+        body: typeof e === "string" ? e : "Something went wrong launching VS Code.",
+      });
+    }
+  };
+
+  const onResizeStart = (e: React.PointerEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startWidth = width;
+    const handle = e.currentTarget;
+    handle.setPointerCapture(e.pointerId);
+    let current = startWidth;
+    const onMove = (ev: PointerEvent) => {
+      // Canvas hugs the right edge, so dragging the handle left widens it.
+      current = clampCanvasWidth(startWidth + (startX - ev.clientX));
+      setDragWidth(current);
+    };
+    const onUp = () => {
+      handle.removeEventListener("pointermove", onMove);
+      handle.removeEventListener("pointerup", onUp);
+      // Commit once (persists to localStorage); drop the transient width.
+      setWidth(current);
+      setDragWidth(null);
+    };
+    handle.addEventListener("pointermove", onMove);
+    handle.addEventListener("pointerup", onUp);
   };
 
   return (
     <aside
+      style={{ width: dragWidth ?? width, minWidth: CANVAS_MIN_WIDTH }}
       className={cn(
         "relative flex h-full flex-col overflow-hidden border-l border-foreground/[0.06]",
-        // Solid theme-aware fill instead of the translucent `glass-subtle`
-        // we use elsewhere — the gradient mesh bleeding through under the
-        // syntax-highlighted code (which itself ships its own dark slab via
-        // `github-dark.css`) made the canvas look like two stacked surfaces.
-        // A flat `bg-background` keeps the whole panel a single colour;
-        // `[&_.hljs]:bg-transparent` then drops highlight.js's nested fill so
-        // the code blends into the canvas instead of nesting another box.
+        // Solid theme-aware fill — see the original note: a flat surface keeps
+        // the canvas from reading as two stacked panels under the dark
+        // syntax-highlight slab.
         "bg-background",
-        // github-dark.css ships `pre code.hljs { padding: 1em }` which
-        // would push the highlighted source down by one line relative to
-        // the gutter (phantom "blank line 1" + last line falling past the
-        // last number). The inline `CodeBlock` neutralises this via the
-        // `.prose pre code.hljs` rule in globals.css; the canvas isn't
-        // inside `.prose`, so we override here. Same for the dark slab
-        // background — the canvas already paints its own surface.
+        // Neutralise github-dark.css's nested padding/background on the code so
+        // the gutter lines up and the code blends into the canvas surface.
         "[&_.hljs]:bg-transparent [&_pre_code.hljs]:bg-transparent [&_pre_code.hljs]:p-0",
-        // Sized to roughly mirror ChatGPT's canvas — generous on wide
-        // displays, tight (but usable) on narrow ones.
-        "w-[clamp(360px,42vw,720px)]",
       )}
     >
+      {/* Left-edge resize handle. A hairline that thickens on hover; the wide
+          hit area makes it easy to grab without a visible bar. */}
+      <div
+        onPointerDown={onResizeStart}
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize canvas"
+        className="group absolute left-0 top-0 z-30 h-full w-1.5 -translate-x-1/2 cursor-col-resize"
+      >
+        <div className="mx-auto h-full w-px bg-transparent transition-colors group-hover:bg-primary/40" />
+      </div>
+
       <header className="flex h-12 shrink-0 items-center justify-between gap-2 border-b border-foreground/[0.06] px-3">
         <div className="flex min-w-0 items-center gap-2">
           <Button
@@ -140,6 +186,15 @@ export function CodeCanvas() {
           <Button
             variant="ghost"
             size="sm"
+            onClick={() => void onOpenInVscode()}
+            className="h-7 gap-1 rounded-md px-2 text-[11px] text-foreground/65 hover:bg-foreground/10 hover:text-foreground"
+            title="Open in VS Code"
+          >
+            <VsCodeIcon className="h-3.5 w-3.5" /> VS Code
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
             onClick={() => void onCopy()}
             className="h-7 gap-1 rounded-md px-2 text-[11px] text-foreground/65 hover:bg-foreground/10 hover:text-foreground"
             title="Copy code"
@@ -159,54 +214,31 @@ export function CodeCanvas() {
             size="sm"
             onClick={onExport}
             className="h-7 gap-1 rounded-md px-2 text-[11px] text-foreground/65 hover:bg-foreground/10 hover:text-foreground"
-            title={`Export to .${language ?? "txt"} file`}
+            title={`Export to .${displayLanguage ?? "txt"} file`}
           >
             <Download className="h-3.5 w-3.5" /> Export
           </Button>
         </div>
       </header>
 
-      {/*
-        The outer container owns BOTH axes of scrolling so the horizontal
-        scrollbar lands at the bottom of the visible viewport. Putting
-        `overflow-x-auto` on the inner code `<pre>` instead pins the
-        scrollbar to the bottom of the snippet itself — invisible whenever
-        the snippet is taller than the canvas, which is the common case.
-
-        `w-max min-w-full` on the inner flex row lets it grow to the
-        widest line so the outer scrollbar actually engages, while still
-        filling the viewport when content is narrower.
-      */}
-      <div className="flex-1 overflow-auto">
-        <div className="flex w-max min-w-full font-mono text-[12.5px] leading-[1.65]">
-          <pre
-            aria-hidden
-            className="sticky left-0 z-10 select-none bg-background px-3 py-3 text-right tabular-nums text-foreground/30"
-          >
-            {Array.from({ length: lineCount }, (_, i) => i + 1).join("\n")}
-          </pre>
-          <pre className="px-3 py-3 text-foreground/95">
-            <code
-              className={
-                language ? `hljs language-${language}` : "hljs"
-              }
-              // Highlight.js produces inline span markup we render straight
-              // through. The HTML comes from `hljs.highlight()` which only
-              // emits its own classed spans — never user-controlled tags.
-              dangerouslySetInnerHTML={{ __html: highlighted }}
-            />
-          </pre>
-        </div>
-      </div>
+      <CodeView code={displayCode} language={displayLanguage} />
     </aside>
   );
 }
 
-function escapeHtml(s: string): string {
-  return s
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
+/** The official VS Code logo mark (single-path silhouette), rendered in the
+ *  brand blue so the action reads unmistakably as VS Code rather than a
+ *  generic editor glyph. Sizing comes from the caller via `className`. */
+function VsCodeIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      className={className}
+      fill="#0098FF"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <path d="M23.15 2.587L18.21.21a1.494 1.494 0 0 0-1.705.29l-9.46 8.63-4.12-3.128a.999.999 0 0 0-1.276.057L.327 7.261A1 1 0 0 0 .326 8.74L3.899 12 .326 15.26a1 1 0 0 0 .001 1.479L1.65 17.94a.999.999 0 0 0 1.276.057l4.12-3.128 9.46 8.63a1.492 1.492 0 0 0 1.704.29l4.942-2.377A1.5 1.5 0 0 0 24 20.06V3.939a1.5 1.5 0 0 0-.85-1.352zm-5.146 14.861L10.826 12l7.178-5.448v10.896z" />
+    </svg>
+  );
 }

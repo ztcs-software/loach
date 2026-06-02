@@ -80,7 +80,12 @@ export function parseImportContext(text: string): ParsedImport {
 
   // ---- Markdown branch --------------------------------------------------
 
-  if (/^##\s+(You|Assistant|System)\b/m.test(trimmed)) {
+  // Detector regex must use the SAME anchoring as `parseMarkdownSections`
+  // below (header is the whole line, trailing whitespace tolerated).
+  // A looser detector here would route header-ish prose like
+  // `## Assistant said:` into the markdown branch only for the parser to
+  // find nothing, silently falling through to the plain-text path.
+  if (/^##\s+(You|Assistant|System)\s*$/m.test(trimmed)) {
     const messages = parseMarkdownSections(trimmed);
     if (messages.length > 0) {
       return { format: "markdown", messages };
@@ -119,14 +124,21 @@ function normalizeMessage(raw: unknown): ImportedMessage | null {
   const m = raw as Record<string, unknown>;
   const rawRole =
     typeof m.role === "string" ? m.role.toLowerCase().trim() : "";
+  // Imported `system`/`developer` turns become USER turns: the chat-history
+  // builder (chatStore.chatHistory) drops every role:"system" row because
+  // Loach sends the system prompt via a dedicated field, not as a turn — so
+  // an imported system row would be stored and shown but never reach the
+  // model, contradicting the import dialog's "sent to the model" promise.
   const role: ImportRole | null =
-    rawRole === "user" || rawRole === "assistant" || rawRole === "system"
+    rawRole === "user" || rawRole === "assistant"
       ? (rawRole as ImportRole)
       : rawRole === "you"
         ? "user"
         : rawRole === "ai" || rawRole === "bot" || rawRole === "model"
           ? "assistant"
-          : null;
+          : rawRole === "system" || rawRole === "developer"
+            ? "user"
+            : null;
   if (!role) return null;
 
   let content = "";
@@ -163,8 +175,11 @@ function parseMarkdownSections(md: string): ImportedMessage[] {
 
   let m: RegExpExecArray | null;
   while ((m = headerRe.exec(md)) !== null) {
+    // `## System` imports as a user turn for the same reason as the JSON
+    // branch above: system rows are stripped from chat history, so they'd
+    // never reach the model. "You" and "System" both become user turns.
     const role: ImportRole =
-      m[1] === "You" ? "user" : m[1] === "Assistant" ? "assistant" : "system";
+      m[1] === "Assistant" ? "assistant" : "user";
     headers.push({ role, start: m.index, end: m.index + m[0].length });
   }
 

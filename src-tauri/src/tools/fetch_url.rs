@@ -121,6 +121,13 @@ pub async fn fetch(_shared_http: &reqwest::Client, raw_url: &str) -> Result<Fetc
     // `resolve_safe_addrs` + `build_pinned_client` fresh on every hop.
     let mut url = initial_url.clone();
     let mut resp_opt: Option<reqwest::Response> = None;
+    // Single wall-clock budget shared across the whole redirect chain. Each
+    // hop builds a fresh client and would otherwise get its own full
+    // `FETCH_TIMEOUT`, so a chain of slow-but-not-timing-out hops could run
+    // up to MAX_REDIRECTS × FETCH_TIMEOUT — far past the "30 s total per
+    // fetch" the module docs promise. Shrinking each hop's timeout to the
+    // remaining budget keeps the whole fetch bounded.
+    let deadline = Instant::now() + FETCH_TIMEOUT;
     for hop in 0..=MAX_REDIRECTS {
         // Scheme allowlist (re-checked per hop in case a redirect tries to
         // jump to `file:` / `ftp:` / etc.).
@@ -140,9 +147,16 @@ pub async fn fetch(_shared_http: &reqwest::Client, raw_url: &str) -> Result<Fetc
         let resolved = resolve_safe_addrs(&url).await?;
         let http = build_pinned_client(&url, &resolved)?;
 
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(format!(
+                "Fetch exceeded its {}s time budget",
+                FETCH_TIMEOUT.as_secs()
+            ));
+        }
         let resp = http
             .get(url.clone())
-            .timeout(FETCH_TIMEOUT)
+            .timeout(remaining)
             .header(reqwest::header::ACCEPT, "text/html,text/plain,*/*;q=0.8")
             .send()
             .await
@@ -179,7 +193,8 @@ pub async fn fetch(_shared_http: &reqwest::Client, raw_url: &str) -> Result<Fetc
         break;
     }
 
-    let resp = resp_opt.expect("redirect loop exited without a response");
+    let resp = resp_opt
+        .ok_or_else(|| "redirect loop exited without a response".to_string())?;
     let final_url = resp.url().clone();
 
     let content_type = resp
@@ -349,6 +364,11 @@ pub fn is_public_ip(ip: &IpAddr) -> bool {
             if oct[0] == 198 && (oct[1] == 18 || oct[1] == 19) {
                 return false;
             }
+            // 240.0.0.0/4 reserved (Class E). 255.255.255.255 is already
+            // caught by `is_broadcast()` above; the rest is non-routable.
+            if oct[0] >= 240 {
+                return false;
+            }
             true
         }
         IpAddr::V6(v6) => {
@@ -367,6 +387,16 @@ pub fn is_public_ip(ip: &IpAddr) -> bool {
             if (segs[0] & 0xffc0) == 0xfe80 {
                 return false;
             }
+            // Helper: rebuild the embedded IPv4 from the low 32 bits and run
+            // it back through the v4 screen.
+            let embedded_v4 = |segs: &[u16; 8]| {
+                std::net::Ipv4Addr::new(
+                    (segs[6] >> 8) as u8,
+                    (segs[6] & 0xff) as u8,
+                    (segs[7] >> 8) as u8,
+                    (segs[7] & 0xff) as u8,
+                )
+            };
             // ::ffff:0:0/96 — IPv4-mapped: delegate to the v4 check.
             if segs[0] == 0
                 && segs[1] == 0
@@ -375,13 +405,34 @@ pub fn is_public_ip(ip: &IpAddr) -> bool {
                 && segs[4] == 0
                 && segs[5] == 0xffff
             {
-                let mapped = std::net::Ipv4Addr::new(
-                    (segs[6] >> 8) as u8,
-                    (segs[6] & 0xff) as u8,
-                    (segs[7] >> 8) as u8,
-                    (segs[7] & 0xff) as u8,
-                );
-                return is_public_ip(&IpAddr::V4(mapped));
+                return is_public_ip(&IpAddr::V4(embedded_v4(&segs)));
+            }
+            // 64:ff9b::/96 — NAT64 well-known prefix. A host whose AAAA record
+            // is `64:ff9b::7f00:1` routes to 127.0.0.1 through a NAT64
+            // gateway, so decode the embedded v4 and screen it the same way
+            // as the IPv4-mapped case. Without this it fell through to the
+            // `true` fallthrough below and bypassed the SSRF guard.
+            if segs[0] == 0x0064
+                && segs[1] == 0xff9b
+                && segs[2] == 0
+                && segs[3] == 0
+                && segs[4] == 0
+                && segs[5] == 0
+            {
+                return is_public_ip(&IpAddr::V4(embedded_v4(&segs)));
+            }
+            // ::a.b.c.d — deprecated IPv4-compatible addresses (high 96 bits
+            // zero, low 32 the v4). Loopback (::1) and unspecified (::) are
+            // already handled above, so a remaining all-zero-prefix address
+            // with a non-zero tail is an embedded v4 — screen it too.
+            if segs[0] == 0
+                && segs[1] == 0
+                && segs[2] == 0
+                && segs[3] == 0
+                && segs[4] == 0
+                && segs[5] == 0
+            {
+                return is_public_ip(&IpAddr::V4(embedded_v4(&segs)));
             }
             true
         }
@@ -794,5 +845,33 @@ mod tests {
         assert!(!is_public_ip(&"fc00::1".parse().unwrap()));
         assert!(!is_public_ip(&"fe80::1".parse().unwrap()));
         assert!(is_public_ip(&"2606:4700:4700::1111".parse().unwrap()));
+    }
+
+    #[test]
+    fn rejects_ipv4_mapped_private() {
+        // ::ffff:a.b.c.d must inherit the v4 screen.
+        assert!(!is_public_ip(&"::ffff:127.0.0.1".parse().unwrap()));
+        assert!(!is_public_ip(&"::ffff:169.254.169.254".parse().unwrap()));
+        assert!(!is_public_ip(&"::ffff:10.0.0.1".parse().unwrap()));
+        assert!(is_public_ip(&"::ffff:8.8.8.8".parse().unwrap()));
+    }
+
+    #[test]
+    fn rejects_nat64_embedded_private() {
+        // 64:ff9b::/96 — the embedded v4 must be screened, not waved through.
+        // 0x7f000001 = 127.0.0.1, 0xa9fea9fe = 169.254.169.254 (metadata).
+        assert!(!is_public_ip(&"64:ff9b::7f00:1".parse().unwrap()));
+        assert!(!is_public_ip(&"64:ff9b::a9fe:a9fe".parse().unwrap()));
+        // 0x08080808 = 8.8.8.8 — a public embedded v4 still passes.
+        assert!(is_public_ip(&"64:ff9b::808:808".parse().unwrap()));
+    }
+
+    #[test]
+    fn rejects_ipv4_compatible_private() {
+        // ::a.b.c.d (deprecated IPv4-compatible). ::1 is loopback and handled
+        // separately, so a non-trivial embedded v4 is what we screen here.
+        assert!(!is_public_ip(&"::7f00:1".parse().unwrap())); // 127.0.0.1
+        assert!(!is_public_ip(&"::a9fe:a9fe".parse().unwrap())); // 169.254.169.254
+        assert!(is_public_ip(&"::808:808".parse().unwrap())); // 8.8.8.8
     }
 }

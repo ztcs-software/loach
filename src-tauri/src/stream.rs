@@ -87,10 +87,18 @@ pub enum StreamEvent {
     /// resource for non-text content). On a transport failure we still
     /// emit ToolResult with `is_error: true` and the error message in
     /// `content` so the model can see the failure and react.
+    ///
+    /// `attachments` carries any files the tool produced (today only the
+    /// built-in `pdf` tool fills this — MCP servers leave it empty). The
+    /// frontend appends them to the running assistant message so they
+    /// render as file cards in the chat; they're **not** fed back to the
+    /// model as part of the next turn's context.
     ToolResult {
         id: String,
         content: String,
         is_error: bool,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<crate::mcp::Attachment>,
     },
 }
 
