@@ -747,7 +747,7 @@ function ImportedContextGroup({
           type="button"
           onClick={onRemove}
           title="Remove imported context"
-          className="inline-flex items-center rounded-full p-1 text-foreground/40 transition-colors hover:bg-destructive/10 hover:text-destructive"
+          className="inline-flex items-center rounded-full p-1.5 text-foreground/40 transition-colors hover:bg-destructive/10 hover:text-destructive"
         >
           <Trash2 className="h-3 w-3" />
         </button>

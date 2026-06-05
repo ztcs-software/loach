@@ -1009,7 +1009,7 @@ function PersonaChip({
   const Icon = persona.icon;
   return (
     <div
-      className="inline-flex items-center gap-1.5 rounded-full border border-orange-400/30 bg-orange-500/10 px-2.5 py-1 text-xs text-orange-200"
+      className="inline-flex items-center gap-1.5 rounded-full border border-orange-400/30 bg-orange-500/10 px-2.5 py-1 text-xs text-orange-700 dark:text-orange-200"
       title={persona.description}
     >
       <Icon className="h-3.5 w-3.5" />
@@ -1018,9 +1018,9 @@ function PersonaChip({
         type="button"
         onClick={onRemove}
         aria-label={`Remove ${persona.label} persona`}
-        className="ml-0.5 -mr-1 grid h-4 w-4 place-items-center rounded-full text-orange-200/70 hover:bg-orange-500/20 hover:text-orange-100"
+        className="ml-0.5 -my-1 -mr-1 grid h-6 w-6 place-items-center rounded-full text-orange-700/80 hover:bg-orange-500/20 hover:text-orange-900 dark:text-orange-200/70 dark:hover:text-orange-100"
       >
-        <X className="h-3 w-3" />
+        <X className="h-3.5 w-3.5" />
       </button>
     </div>
   );
