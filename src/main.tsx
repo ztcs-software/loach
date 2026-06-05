@@ -2,6 +2,8 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
 import { ErrorBoundary } from "./components/ErrorBoundary";
+import { useToastStore } from "./stores/toastStore";
+import { logger } from "./lib/logger";
 import "./styles/globals.css";
 
 // Suppress the WebView's native context menu globally, EXCEPT inside form
@@ -50,6 +52,21 @@ window.addEventListener(
   },
   { capture: true },
 );
+
+// Last-resort safety net for promise rejections that nothing caught. The
+// mutating store actions now surface their own failures via toast; this only
+// fires for anything that still slips through (a future fire-and-forget
+// caller, an unexpected throw) so a failure is never completely invisible.
+// No `preventDefault()` — devs still get the console trace in dev builds.
+window.addEventListener("unhandledrejection", (e) => {
+  const reason = e.reason;
+  logger.error("unhandledrejection", reason);
+  useToastStore.getState().push({
+    kind: "error",
+    title: "Something went wrong",
+    body: reason instanceof Error ? reason.message : String(reason),
+  });
+});
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>

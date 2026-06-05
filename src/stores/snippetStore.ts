@@ -6,6 +6,7 @@ import {
   listSnippets,
   updateSnippet,
 } from "@/lib/tauri";
+import { useToastStore } from "./toastStore";
 import type { Attachment, ProviderId, Snippet } from "@/types";
 
 /** Open a fresh snippet dialog with the prompt textarea pre-filled. */
@@ -83,7 +84,16 @@ export const useSnippetStore = create<SnippetState>((set) => ({
   },
 
   remove: async (id) => {
-    await deleteSnippet(id);
+    try {
+      await deleteSnippet(id);
+    } catch (e) {
+      useToastStore.getState().push({
+        kind: "error",
+        title: "Couldn't delete snippet",
+        body: e instanceof Error ? e.message : String(e),
+      });
+      return;
+    }
     set((s) => ({ snippets: s.snippets.filter((sn) => sn.id !== id) }));
   },
 
