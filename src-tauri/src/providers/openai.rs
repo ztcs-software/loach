@@ -56,8 +56,14 @@ pub async fn list_models(http: &Client, base_url: &str) -> Result<Vec<ModelInfo>
         .map_err(|e| anyhow!(e))?;
     let url = format!("{}/models", base_url.trim_end_matches('/'));
     let mut req = http.get(url).timeout(ADMIN_TIMEOUT);
+    // Gate the bearer on transport safety exactly as the chat-stream path
+    // does (`is_safe_for_bearer`): attach the key only over https or
+    // http-to-loopback. Without this, pointing the OpenAI-compatible
+    // provider at an `http://` LAN host — or a corrupted / imported
+    // `openai_base_url` — would ship the key in cleartext on every
+    // model-list refresh, the exact leak the chat path already prevents.
     if let Some(key) = secrets::get_openai_key()? {
-        if !key.is_empty() {
+        if !key.is_empty() && is_safe_for_bearer(base_url) {
             req = req.bearer_auth(key);
         }
     }
