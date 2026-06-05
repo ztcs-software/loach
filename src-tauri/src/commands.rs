@@ -1957,15 +1957,40 @@ pub fn open_in_vscode(code: String, filename: String) -> Result<(), String> {
 
     // Honour only the basename — never directory components the renderer may
     // have sent — so the write can't escape the temp dir.
-    let safe_name = std::path::Path::new(&filename)
+    //
+    // Then reduce that basename to a conservative charset. On Windows the
+    // path is handed to `cmd /C code <path>`, and a Windows filename may
+    // legally contain shell metacharacters (`&`, `^`, `(`, `)`, spaces) that
+    // `cmd` parses — e.g. a renderer-supplied name like `a&calc&b.txt` would
+    // execute `calc`. `std::process::Command` only quotes args containing
+    // spaces, so a no-space metacharacter slips through unquoted. Replacing
+    // anything outside `[A-Za-z0-9._-]` with `_` makes the name inert as a
+    // shell token while preserving the extension VS Code reads to pick a
+    // language mode. The filename is only a cosmetic label on a throwaway
+    // temp file, so this is lossless in practice.
+    let raw_name = std::path::Path::new(&filename)
         .file_name()
         .and_then(|n| n.to_str())
-        .filter(|n| !n.is_empty())
-        .unwrap_or("snippet.txt");
+        .unwrap_or("");
+    let mut safe_name: String = raw_name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    // Reject empty / dots-only results (`""`, `.`, `..`, `...`) which aren't
+    // a usable file name once the metacharacters are stripped.
+    if safe_name.trim_matches('.').is_empty() {
+        safe_name = "snippet.txt".to_string();
+    }
 
     let dir = std::env::temp_dir().join("loach-canvas");
     std::fs::create_dir_all(&dir).map_err(|e| format!("Couldn't create the temp folder: {e}"))?;
-    let path = dir.join(safe_name);
+    let path = dir.join(&safe_name);
     std::fs::File::create(&path)
         .and_then(|mut f| f.write_all(code.as_bytes()))
         .map_err(|e| format!("Couldn't write the temp file: {e}"))?;

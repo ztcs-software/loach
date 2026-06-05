@@ -11,6 +11,7 @@ import {
   makeRequestId,
 } from "@/lib/tauri";
 import { useSettingsStore } from "./settingsStore";
+import { useToastStore } from "./toastStore";
 import { parseModelParameters } from "@/lib/modelParams";
 import {
   DEFAULT_SETTINGS,
@@ -221,7 +222,16 @@ export const useModelsStore = create<ModelsState>((set, get) => ({
 
   deleteModel: async (name) => {
     const base = useSettingsStore.getState().ollama_base_url;
-    await ollamaDeleteModel(base, name);
+    try {
+      await ollamaDeleteModel(base, name);
+    } catch (e) {
+      useToastStore.getState().push({
+        kind: "error",
+        title: "Couldn't delete model",
+        body: e instanceof Error ? e.message : String(e),
+      });
+      return;
+    }
     // If the user was viewing the model they just deleted, drop the editor
     // view so we don't leave them staring at a stale form.
     if (get().viewingModel === name) set({ viewingModel: null });
@@ -230,7 +240,16 @@ export const useModelsStore = create<ModelsState>((set, get) => ({
 
   copyModel: async (source, destination) => {
     const base = useSettingsStore.getState().ollama_base_url;
-    await ollamaCopyModel({ base_url: base, source, destination });
+    try {
+      await ollamaCopyModel({ base_url: base, source, destination });
+    } catch (e) {
+      useToastStore.getState().push({
+        kind: "error",
+        title: "Couldn't duplicate model",
+        body: e instanceof Error ? e.message : String(e),
+      });
+      return;
+    }
     await get().refresh();
   },
 
