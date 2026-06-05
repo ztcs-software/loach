@@ -35,6 +35,24 @@ const MAX_TOOL_TURNS: u32 = 10;
 /// constant in `providers::ollama` for the full rationale.
 const MAX_TOOL_RESULT_BYTES: usize = 32 * 1024;
 
+/// Ceiling on the number of parallel tool-call slots a single streamed turn
+/// may allocate. The OpenAI wire protocol indexes parallel calls from 0; a
+/// real turn issues a handful. The `index` is taken verbatim from the
+/// (untrusted) server, and a single delta carrying e.g. `index: 2_000_000_000`
+/// would otherwise drive `accum.resize_with(idx + 1, …)` into a multi-GB
+/// allocation that aborts the whole process. Cap it so one hostile or buggy
+/// frame can't turn into an OOM.
+const MAX_TOOL_CALLS: usize = 256;
+
+/// Ceiling on the total bytes accumulated into streamed tool-call names +
+/// arguments across all slots in a turn. OpenAI streams the JSON arguments
+/// string in deltas we concatenate; the per-frame `MAX_FRAME_BYTES` guard
+/// resets every time a delimiter drains the buffer, so a server emitting an
+/// unbounded run of small, well-formed frames could grow `accum` without
+/// limit. 4 MiB is far above any realistic tool-call payload while keeping
+/// the accumulation bounded.
+const MAX_TOOL_CALL_BYTES: usize = 4 * 1024 * 1024;
+
 #[derive(Debug, Deserialize)]
 struct ModelsResponse {
     data: Vec<OpenAIModel>,
@@ -522,6 +540,10 @@ async fn run_one_turn(
     let mut buf: Vec<u8> = Vec::new();
     let mut scan_offset: usize = 0;
     let mut accum: Vec<AccumTool> = Vec::new();
+    // Running total of bytes accumulated into streamed tool-call names +
+    // arguments. Bounded by `MAX_TOOL_CALL_BYTES` in the loop so an untrusted
+    // server can't grow `accum` without limit via a flood of small frames.
+    let mut tool_call_bytes: usize = 0;
 
     loop {
         select! {
@@ -626,6 +648,17 @@ async fn run_one_turn(
                                                     continue;
                                                 };
                                                 let idx = idx_raw as usize;
+                                                // `index` is untrusted server
+                                                // input — cap it so a single
+                                                // frame can't drive `resize_with`
+                                                // into a process-aborting OOM.
+                                                if idx >= MAX_TOOL_CALLS {
+                                                    tracing::warn!(
+                                                        "openai stream: tool_call index {idx} exceeds \
+                                                         the {MAX_TOOL_CALLS}-slot cap; skipping"
+                                                    );
+                                                    continue;
+                                                }
                                                 if accum.len() <= idx {
                                                     accum.resize_with(idx + 1, || AccumTool {
                                                         id: None,
@@ -639,11 +672,33 @@ async fn run_one_turn(
                                                 }
                                                 if let Some(f) = tc.function {
                                                     if let Some(n) = f.name {
+                                                        tool_call_bytes += n.len();
                                                         slot.name.push_str(&n);
                                                     }
                                                     if let Some(a) = f.arguments {
+                                                        tool_call_bytes += a.len();
                                                         slot.arguments.push_str(&a);
                                                     }
+                                                }
+                                                // Bound the total accumulated
+                                                // tool-call payload across every
+                                                // slot — the per-frame guard
+                                                // doesn't catch a flood of small
+                                                // well-formed frames. Abort the
+                                                // turn the same way an oversized
+                                                // frame does.
+                                                if tool_call_bytes > MAX_TOOL_CALL_BYTES {
+                                                    let _ = app.emit(
+                                                        channel,
+                                                        StreamEvent::Error {
+                                                            message: format!(
+                                                                "tool-call arguments exceeded {} bytes — aborting",
+                                                                MAX_TOOL_CALL_BYTES
+                                                            ),
+                                                        },
+                                                    );
+                                                    registry.finish(stream_id);
+                                                    return Err(anyhow!("openai tool-call payload too large"));
                                                 }
                                             }
                                         }
