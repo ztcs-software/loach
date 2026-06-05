@@ -15,6 +15,7 @@ import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { useMcpStore, type McpServerView } from "@/stores/mcpStore";
+import { useToastStore } from "@/stores/toastStore";
 import type { McpServerInput, McpTestResult } from "@/types";
 
 /**
@@ -179,6 +180,15 @@ function ServerRow({
           setToggling(true);
           try {
             await onToggle(next);
+          } catch (e) {
+            // The Switch is controlled by `server.enabled`; because `save`
+            // threw before `refresh()` ran, it snaps back to its prior
+            // position — so without this toast the revert looks like a ghost.
+            useToastStore.getState().push({
+              kind: "error",
+              title: "Couldn't update server",
+              body: e instanceof Error ? e.message : String(e),
+            });
           } finally {
             setToggling(false);
           }

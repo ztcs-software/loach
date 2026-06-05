@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { mcpDelete, mcpList, mcpSave, mcpTest } from "@/lib/tauri";
+import { useToastStore } from "./toastStore";
 import type {
   McpServer,
   McpServerInput,
@@ -89,7 +90,16 @@ export const useMcpStore = create<McpState>((set, get) => ({
   },
 
   remove: async (id) => {
-    await mcpDelete(id);
+    try {
+      await mcpDelete(id);
+    } catch (e) {
+      useToastStore.getState().push({
+        kind: "error",
+        title: "Couldn't delete server",
+        body: e instanceof Error ? e.message : String(e),
+      });
+      return;
+    }
     await get().refresh();
   },
 

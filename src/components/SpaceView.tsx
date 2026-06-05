@@ -45,6 +45,7 @@ import { useConfirm } from "@/components/ConfirmDialog";
 import { useChatStore } from "@/stores/chatStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useSpaceStore } from "@/stores/spaceStore";
+import { useToastStore } from "@/stores/toastStore";
 import { useUIStore } from "@/stores/uiStore";
 import { fileToAttachment, SPACE_BYTES_CAP } from "@/lib/files";
 import {
@@ -138,6 +139,22 @@ export function SpaceView() {
     });
   };
 
+  // The inline tab savers (instructions blur-save, memory toggle, model
+  // defaults) fire-and-forget, so route them through this wrapper to surface
+  // failures. EditSpaceDialog uses `doUpdate` directly because it renders its
+  // own inline error — toasting here too would double up.
+  const doUpdateNotify = async (fields: Parameters<typeof doUpdate>[1]) => {
+    try {
+      await doUpdate(space.id, fields);
+    } catch (e) {
+      useToastStore.getState().push({
+        kind: "error",
+        title: "Couldn't save space",
+        body: e instanceof Error ? e.message : String(e),
+      });
+    }
+  };
+
   const handleDeleteSpace = async () => {
     const ok = await confirm({
       title: `Delete space “${space.name}”?`,
@@ -146,8 +163,8 @@ export function SpaceView() {
       destructive: true,
     });
     if (ok) {
-      void doDeleteSpace(space.id).then(() => {
-        setSidebarTab("spaces");
+      void doDeleteSpace(space.id).then((deleted) => {
+        if (deleted) setSidebarTab("spaces");
       });
     }
   };
@@ -296,7 +313,7 @@ export function SpaceView() {
                 <InstructionsTab
                   space={space}
                   onSave={(instructions) =>
-                    doUpdate(space.id, {
+                    doUpdateNotify({
                       name: space.name,
                       description: space.description,
                       instructions,
@@ -330,7 +347,7 @@ export function SpaceView() {
                   space={space}
                   memories={memories}
                   onToggle={(enabled) =>
-                    doUpdate(space.id, {
+                    doUpdateNotify({
                       name: space.name,
                       description: space.description,
                       instructions: space.instructions,
@@ -343,7 +360,15 @@ export function SpaceView() {
                   onUpdate={(id, content) =>
                     doUpdateMemory(id, space.id, content)
                   }
-                  onRemove={(id) => doRemoveMemory(id, space.id)}
+                  onRemove={(id) =>
+                    doRemoveMemory(id, space.id).catch((e) => {
+                      useToastStore.getState().push({
+                        kind: "error",
+                        title: "Couldn't remove memory",
+                        body: e instanceof Error ? e.message : String(e),
+                      });
+                    })
+                  }
                 />
               </TabsContent>
 
@@ -351,7 +376,7 @@ export function SpaceView() {
                 <ModelsTab
                   space={space}
                   onSave={(patch) =>
-                    doUpdate(space.id, {
+                    doUpdateNotify({
                       name: space.name,
                       description: space.description,
                       instructions: space.instructions,

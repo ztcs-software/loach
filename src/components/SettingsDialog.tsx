@@ -348,6 +348,14 @@ export function SettingsDialog() {
                           await settings.setOpenAIKey(pendingKey);
                           setPendingKey("");
                           if (openaiTest.kind !== "idle") setOpenaiTest({ kind: "idle" });
+                        } catch (e) {
+                          // Keep `pendingKey` (it's only cleared on success
+                          // above) so the user can retry without retyping.
+                          useToastStore.getState().push({
+                            kind: "error",
+                            title: "Couldn't save API key",
+                            body: e instanceof Error ? e.message : String(e),
+                          });
                         } finally {
                           setBusy(false);
                         }
@@ -364,6 +372,12 @@ export function SettingsDialog() {
                           try {
                             await settings.clearOpenAIKey();
                             if (openaiTest.kind !== "idle") setOpenaiTest({ kind: "idle" });
+                          } catch (e) {
+                            useToastStore.getState().push({
+                              kind: "error",
+                              title: "Couldn't clear API key",
+                              body: e instanceof Error ? e.message : String(e),
+                            });
                           } finally {
                             setBusy(false);
                           }

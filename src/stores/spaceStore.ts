@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { logger } from "@/lib/logger";
+import { useToastStore } from "./toastStore";
 import {
   addSpaceFile,
   addSpaceMemory,
@@ -47,7 +48,10 @@ interface SpaceState {
       memory_enabled?: boolean | null;
     },
   ) => Promise<void>;
-  deleteSpace: (id: string) => Promise<void>;
+  /** Resolves `true` when the row was deleted, `false` when the delete
+   *  failed (a toast is shown in that case). Callers that navigate on
+   *  success — e.g. SpaceView returning to the library — should gate on it. */
+  deleteSpace: (id: string) => Promise<boolean>;
   setSpaceFormOpen: (open: boolean) => void;
   setViewingSpace: (id: string | null) => void;
 
@@ -162,7 +166,16 @@ export const useSpaceStore = create<SpaceState>((set, get) => ({
   },
 
   deleteSpace: async (id) => {
-    await deleteSpace(id);
+    try {
+      await deleteSpace(id);
+    } catch (e) {
+      useToastStore.getState().push({
+        kind: "error",
+        title: "Couldn't delete space",
+        body: e instanceof Error ? e.message : String(e),
+      });
+      return false;
+    }
     set((s) => {
       const spaces = s.spaces.filter((sp) => sp.id !== id);
       const files = { ...s.spaceFiles };
@@ -176,6 +189,7 @@ export const useSpaceStore = create<SpaceState>((set, get) => ({
         activeSpaceId: s.activeSpaceId === id ? null : s.activeSpaceId,
       };
     });
+    return true;
   },
 
   setSpaceFormOpen: (open) => set({ spaceFormOpen: open }),
@@ -214,7 +228,16 @@ export const useSpaceStore = create<SpaceState>((set, get) => ({
   },
 
   removeFile: async (fileId, spaceId) => {
-    await removeSpaceFile(fileId);
+    try {
+      await removeSpaceFile(fileId);
+    } catch (e) {
+      useToastStore.getState().push({
+        kind: "error",
+        title: "Couldn't remove file",
+        body: e instanceof Error ? e.message : String(e),
+      });
+      return;
+    }
     set((s) => ({
       spaceFiles: {
         ...s.spaceFiles,
@@ -254,6 +277,10 @@ export const useSpaceStore = create<SpaceState>((set, get) => ({
     }));
   },
 
+  // Unlike the other delete/remove actions this one does NOT toast on failure
+  // and instead propagates — the slash-command layer (`removeMemory` via a
+  // chat command) awaits it and reports failures through the command-result
+  // panel. The SpaceView UI caller attaches its own toast on the rejection.
   removeMemory: async (id, spaceId) => {
     await removeSpaceMemory({ id, space_id: spaceId });
     set((s) => ({

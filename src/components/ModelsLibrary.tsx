@@ -477,7 +477,7 @@ function RunChip({
         <button
           type="button"
           onClick={terminal === null ? onCancel : onDismiss}
-          className="text-foreground/45 hover:text-foreground"
+          className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded text-foreground/45 transition-colors hover:bg-foreground/10 hover:text-foreground"
           aria-label={terminal === null ? "Cancel" : "Dismiss"}
         >
           ✕
