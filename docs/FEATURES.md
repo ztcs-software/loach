@@ -797,8 +797,18 @@ verification happens before the binary is replaced.
 
 ## 19. Keyboard reference
 
+Press `Cmd/Ctrl + /` at any time to see these shortcuts as an in-app cheat
+sheet.
+
 - `Cmd/Ctrl + K` — global search palette.
+- `Cmd/Ctrl + N` — start a new chat.
 - `Cmd/Ctrl + F` — find within the current chat transcript.
+- `Cmd/Ctrl + U` — attach files to the current chat (opens the file picker).
+- `Cmd/Ctrl + Shift + Backspace` (or `Delete`) — delete the current chat,
+  after a confirmation.
+- `Cmd/Ctrl + Shift + S` — show / hide the left sidebar.
+- `Cmd/Ctrl + Shift + P` — show / hide the parameters panel.
+- `Cmd/Ctrl + /` — open the keyboard-shortcuts cheat sheet.
 - `/` (start of the composer) — open the slash-command palette.
 - `Enter` — send the composer, or run the typed slash command.
 - `Shift + Enter` — newline in the composer.
