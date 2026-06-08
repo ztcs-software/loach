@@ -290,6 +290,54 @@ pub(crate) async fn resolve_safe_addrs(url: &Url) -> Result<Vec<SocketAddr>, Str
     Ok(addrs)
 }
 
+/// Resolve `url`'s host the same way [`resolve_safe_addrs`] does — returning
+/// the screened `SocketAddr`s so the caller can DNS-pin them — but apply the
+/// looser MCP policy: only **link-local** addresses (the cloud-metadata range,
+/// 169.254.0.0/16 and fe80::/10) are refused. Loopback and private / RFC1918 /
+/// CGNAT LAN addresses pass.
+///
+/// This mirrors how the LLM-provider path already treats user-configured
+/// endpoints (`providers::refuse_link_local_host`). MCP server URLs are typed
+/// by the user in Settings — not model-driven like the web-fetch tool — so a
+/// self-hosted server on `192.168.x.x` or `127.0.0.1` is a legitimate
+/// destination, while 169.254.169.254 never is. Pinning the returned addresses
+/// still closes the DNS-rebinding window.
+pub(crate) async fn resolve_lan_addrs(url: &Url) -> Result<Vec<SocketAddr>, String> {
+    let host = url
+        .host_str()
+        .ok_or_else(|| "URL has no host".to_string())?;
+    let port = url.port_or_known_default().unwrap_or(80);
+
+    // Literal IP: skip DNS, just screen the address.
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        if is_link_local(&ip) {
+            return Err(format!(
+                "Refusing to connect to link-local address {ip} (cloud-metadata range)"
+            ));
+        }
+        return Ok(vec![SocketAddr::new(ip, port)]);
+    }
+
+    // Hostname: DNS-resolve and screen every returned address. No localhost
+    // special-case — `localhost` resolves to loopback, which is allowed here.
+    let addrs: Vec<SocketAddr> = lookup_host((host, port))
+        .await
+        .map_err(|e| format!("DNS lookup failed for `{host}`: {e}"))?
+        .collect();
+    if addrs.is_empty() {
+        return Err(format!("DNS returned no addresses for `{host}`"));
+    }
+    for addr in &addrs {
+        let ip = addr.ip();
+        if is_link_local(&ip) {
+            return Err(format!(
+                "Refusing to connect to `{host}` — resolves to link-local address {ip} (cloud-metadata range)"
+            ));
+        }
+    }
+    Ok(addrs)
+}
+
 /// Build a one-shot reqwest::Client whose DNS table maps the requested host
 /// to the SocketAddrs we already screened. With this in place, reqwest will
 /// NOT call the system resolver again before dialing — so a DNS-rebinding
@@ -330,9 +378,10 @@ pub(crate) fn build_pinned_client(url: &Url, addrs: &[SocketAddr]) -> Result<req
 /// unspecified, and other special-purpose ranges. Only "globally routable"
 /// unicast addresses pass.
 ///
-/// Exposed `pub` so the MCP-input validator (`commands::validate_mcp_input`)
-/// can share the same private-range classifier — we want one source of truth
-/// for "this IP isn't safe to send credentials to".
+/// This is the strict screen used by the model-driven web-fetch tool
+/// ([`resolve_safe_addrs`]). The user-driven MCP path is deliberately looser —
+/// it screens with [`is_link_local`] so self-hosted LAN servers work — so the
+/// two classifiers are kept distinct.
 pub fn is_public_ip(ip: &IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
@@ -435,6 +484,64 @@ pub fn is_public_ip(ip: &IpAddr) -> bool {
                 return is_public_ip(&IpAddr::V4(embedded_v4(&segs)));
             }
             true
+        }
+    }
+}
+
+/// Returns `true` only for link-local addresses — IPv4 169.254.0.0/16, IPv6
+/// fe80::/10, and the IPv4-mapped / NAT64 / IPv4-compatible IPv6 forms that
+/// smuggle a link-local IPv4 (e.g. `::ffff:169.254.169.254`). This is the
+/// narrow "cloud-metadata" screen shared by the MCP resolver
+/// ([`resolve_lan_addrs`]) and the LLM-provider guard
+/// (`providers::refuse_link_local_host`) — one source of truth, distinct from
+/// the all-private-ranges screen in [`is_public_ip`].
+pub(crate) fn is_link_local(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => v4.is_link_local(),
+        IpAddr::V6(v6) => {
+            let segs = v6.segments();
+            // Native IPv6 link-local: fe80::/10.
+            if (segs[0] & 0xffc0) == 0xfe80 {
+                return true;
+            }
+            // An attacker-controlled AAAA record can smuggle a link-local
+            // IPv4 (169.254.169.254 is cloud metadata) inside an IPv6 address
+            // — IPv4-mapped (`::ffff:a9fe:a9fe`), NAT64 (`64:ff9b::a9fe:a9fe`),
+            // or deprecated IPv4-compatible (`::a9fe:a9fe`) — which the host
+            // then routes to 169.254.x.x. Decode the embedded IPv4 and screen
+            // it too, the same way `is_public_ip` screens these forms. Without
+            // this the bare `fe80::/10` check above let those forms slip past.
+            let is_v4_mapped = segs[0] == 0
+                && segs[1] == 0
+                && segs[2] == 0
+                && segs[3] == 0
+                && segs[4] == 0
+                && segs[5] == 0xffff;
+            let is_nat64 = segs[0] == 0x0064
+                && segs[1] == 0xff9b
+                && segs[2] == 0
+                && segs[3] == 0
+                && segs[4] == 0
+                && segs[5] == 0;
+            // ::a.b.c.d — high 96 bits zero. Loopback (::1) / unspecified (::)
+            // have a zero tail and aren't link-local, so they harmlessly fall
+            // through the embedded check below.
+            let is_v4_compat = segs[0] == 0
+                && segs[1] == 0
+                && segs[2] == 0
+                && segs[3] == 0
+                && segs[4] == 0
+                && segs[5] == 0;
+            if is_v4_mapped || is_nat64 || is_v4_compat {
+                let embedded = std::net::Ipv4Addr::new(
+                    (segs[6] >> 8) as u8,
+                    (segs[6] & 0xff) as u8,
+                    (segs[7] >> 8) as u8,
+                    (segs[7] & 0xff) as u8,
+                );
+                return embedded.is_link_local();
+            }
+            false
         }
     }
 }
@@ -873,5 +980,44 @@ mod tests {
         assert!(!is_public_ip(&"::7f00:1".parse().unwrap())); // 127.0.0.1
         assert!(!is_public_ip(&"::a9fe:a9fe".parse().unwrap())); // 169.254.169.254
         assert!(is_public_ip(&"::808:808".parse().unwrap())); // 8.8.8.8
+    }
+
+    #[test]
+    fn is_link_local_flags_only_link_local() {
+        // Link-local / cloud-metadata — flagged (the MCP screen refuses these).
+        assert!(is_link_local(&"169.254.169.254".parse().unwrap()));
+        assert!(is_link_local(&"fe80::1".parse().unwrap()));
+        assert!(is_link_local(&"::ffff:169.254.169.254".parse().unwrap()));
+        assert!(is_link_local(&"64:ff9b::a9fe:a9fe".parse().unwrap()));
+        // Loopback / private LAN / CGNAT / public — NOT flagged (MCP allows).
+        assert!(!is_link_local(&"127.0.0.1".parse().unwrap()));
+        assert!(!is_link_local(&"10.0.0.1".parse().unwrap()));
+        assert!(!is_link_local(&"192.168.3.125".parse().unwrap()));
+        assert!(!is_link_local(&"100.64.0.1".parse().unwrap()));
+        assert!(!is_link_local(&"::1".parse().unwrap()));
+        assert!(!is_link_local(&"fc00::1".parse().unwrap()));
+        assert!(!is_link_local(&"8.8.8.8".parse().unwrap()));
+    }
+
+    #[tokio::test]
+    async fn resolve_lan_addrs_allows_lan_blocks_link_local() {
+        // The homelab case from issue #33: a private LAN IP must resolve, not
+        // be rejected the way the strict web-fetch screen would.
+        let url = Url::parse("http://192.168.3.125:3010/mcp").unwrap();
+        let addrs = resolve_lan_addrs(&url)
+            .await
+            .expect("RFC1918 LAN address must be allowed for MCP");
+        assert_eq!(addrs, vec!["192.168.3.125:3010".parse().unwrap()]);
+
+        // Loopback is allowed too.
+        assert!(resolve_lan_addrs(&Url::parse("http://127.0.0.1:3010").unwrap())
+            .await
+            .is_ok());
+
+        // Cloud-metadata (link-local) is still refused.
+        let err = resolve_lan_addrs(&Url::parse("http://169.254.169.254/").unwrap())
+            .await
+            .expect_err("link-local must be refused");
+        assert!(err.contains("169.254.169.254"), "{err}");
     }
 }
