@@ -36,7 +36,7 @@ Behind a calm, beautifully crafted UI sits a rich feature set - ready when you n
 
 ## ✨ Features
 
-<!-- Providers & models -->
+#### Providers & models
 - **Provider selection** - switch between Ollama local models and any OpenAI-compatible endpoint (OpenAI API, llama.cpp, LM Studio etc.) from the chat header.
 - **Local model management** - pull, copy, customize and delete local models from inside the app. 
 - **Default model selector** - pick a model new chats open with, per provider - no need to re-select on each fresh conversation.
@@ -44,7 +44,7 @@ Behind a calm, beautifully crafted UI sits a rich feature set - ready when you n
 - **Per-chat parameters** - set temperature, top_k, top_p, min_p, max tokens, context length, per-chat system prompts and more. Layered over Modelfile and per-model defaults.
 - **Low VRAM mode** - global or per-chat toggle that sends Ollama's `low_vram` flag to every request. Useful on lower-spec devices. 
 
-<!-- Organizing chats & content -->
+#### Organizing chats & content
 - **Spaces** - group chats around a project, with shared instructions, reference files and memory. 
 - **Snippets** - save reusable prompts with an optional pinned model and click `Run` to start a fresh chat pre-filled and ready to send.
 - **Custom snippet variables** - parameterize snippets with static globals and prompt-on-use placeholders that fill in when you run them.
@@ -53,24 +53,24 @@ Behind a calm, beautifully crafted UI sits a rich feature set - ready when you n
 - **Chat archive** - move chats out of the sidebar without deleting them; restore or delete them from dedicated archive view.
 - **Search** - search across chats, spaces and snippets, plus a browser-style in-chat finder with phrase highlighting.
 
-<!-- Composing & steering a chat -->
+#### Composing & steering a chat
 - **Slash commands** - type `/` in the composer for a command palette: `/fork`, `/regenerate`, `/compact`, `/private`, `/model`, `/persona`, `/snippet`, `/remember` and more.
 - **Personas and Tones** - pick a role (Code Reviewer, Translator, ELI5...) and delivery style (Formal, Casual, Direct, Detailed...).
 - **Context management** - a live bar under the composer shows how full the context window is, with one-click compaction that summarizes older turns to free space.
 - **Import / export context** - export chat context to JSON or Markdown, optionally summarized to compact it, and paste exported data - or any text - back to any chat's context.
 
-<!-- Model tools & capabilities -->
+#### Model tools & capabilities
 - **Tools** - let models call local tools including calculate, date/time, count, hash, UUID, base64, JSON, unit convert, text diff, sort, IP math and PDF generation. 
 - **PDF generation** - the built-in pdf tool turns a model's structured spec (headings, lists, tables, page breaks) into a real PDF attached to the reply.
 - **MCP support** - register Model Context Protocol servers (Streamable HTTP), test the handshake and inspect the tools they provide. 
 - **Web fetch** - add URLs to messages and they will be fetched, sanitized and inlined to context. 
 - **Temporal awareness** - inject current date, time, weekday and timezone into the system prompt so models can answer to "what day is it today?".
 
-<!-- Viewing content -->
+#### Viewing content
 - **Code canvas** - open any code block in a wider view that's resizable and updates live as the model streams, with copy, export and Open in VS Code actions.
 - **Attachment previews** - click an attachment to open the right viewer: image lightbox, multi-page PDF preview, code canvas, or a file-info card with Save.
 
-<!-- App, data & updates -->
+#### App, data & updates 
 - **Data management** - make backups of your content to JSON file, restore data or permanently delete it with a few clicks. 
 - **App lock** - optional PIN, password or PIN + password gate at launch; credentials are hashed and stored in OS credential manager.
 - **Themes** - glassy, gradient Aurora or flat Solid, both available in Dark and Light variants.
