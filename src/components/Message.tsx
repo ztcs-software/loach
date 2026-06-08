@@ -32,26 +32,11 @@ import type {
   ToolCallRecord,
 } from "@/types";
 import { cn } from "@/lib/utils";
-import { stripInlinedAttachments } from "@/lib/files";
+import { safeImageMime, stripInlinedAttachments } from "@/lib/files";
 import { Bookmark } from "lucide-react";
 import { useChatStore } from "@/stores/chatStore";
 import { useSnippetStore } from "@/stores/snippetStore";
 import { useToastStore } from "@/stores/toastStore";
-
-// Image attachments on assistant turns can originate from an MCP tool result,
-// whose `mime` is fully server-controlled. Constrain it to a known raster
-// image type before we ask the webview to decode it as a `data:` URL. React
-// escapes the attribute so this isn't an injection fix — it's defense-in-depth
-// against a malicious server picking the MIME the browser decodes.
-const SAFE_IMAGE_MIMES = new Set([
-  "image/png",
-  "image/jpeg",
-  "image/gif",
-  "image/webp",
-]);
-function safeImageMime(mime: string): string {
-  return SAFE_IMAGE_MIMES.has(mime.toLowerCase().trim()) ? mime : "image/png";
-}
 
 interface MessageProps {
   message: ChatMessage;

@@ -446,7 +446,22 @@ fn diff_unit(from: DateTime<Utc>, to: DateTime<Utc>, unit: &str) -> Result<i64, 
         "hours" => Ok(to.signed_duration_since(from).num_hours()),
         "minutes" => Ok(to.signed_duration_since(from).num_minutes()),
         "seconds" => Ok(to.signed_duration_since(from).num_seconds()),
-        "business_days" => Ok(business_days_between(from.date_naive(), to.date_naive())),
+        "business_days" => {
+            let from_date = from.date_naive();
+            let to_date = to.date_naive();
+            // Mirror the magnitude cap `op_add` / `op_business_days_from`
+            // enforce: `business_days_between` walks the span one day at a
+            // time, so an uncapped diff between two far-apart (but individually
+            // valid) dates would spin through millions of iterations. Reject an
+            // over-cap span up front rather than walk it.
+            let span = (to_date - from_date).num_days().unsigned_abs();
+            if span > MAX_AMOUNT_ABS as u64 {
+                return Err(format!(
+                    "date span of {span} days exceeds cap of {MAX_AMOUNT_ABS}"
+                ));
+            }
+            Ok(business_days_between(from_date, to_date))
+        }
         other => Err(format!("unknown unit `{other}`")),
     }
 }

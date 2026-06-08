@@ -19,10 +19,12 @@
 //!     tool calls back to the right server.
 //!
 //! Every outbound HTTP request goes through a DNS-pinned reqwest client
-//! built from [`crate::tools::fetch_url::resolve_safe_addrs`] +
+//! built from [`crate::tools::fetch_url::resolve_lan_addrs`] +
 //! [`crate::tools::fetch_url::build_pinned_client`], so a malicious or
-//! misconfigured MCP server URL can't be aimed at the cloud metadata
-//! service or an internal admin endpoint.
+//! misconfigured MCP server URL can't be aimed at the cloud-metadata
+//! service. Self-hosted servers on loopback or the local network are
+//! allowed — that's the common MCP deployment — only link-local
+//! (cloud-metadata) addresses are refused.
 
 pub mod client;
 pub mod types;
@@ -37,8 +39,9 @@ use serde_json::Value;
 use crate::db::{Database, McpServer};
 
 /// Build a DNS-pinned reqwest client for a single MCP server URL. Fails
-/// if the URL is malformed, the scheme isn't http/https, or every
-/// resolved address falls inside a private / loopback / link-local range.
+/// if the URL is malformed, the scheme isn't http/https, or any resolved
+/// address is link-local (the cloud-metadata range). Loopback and private
+/// LAN addresses are allowed.
 async fn pin_client_for(server: &McpServer) -> Result<(reqwest::Client, Url)> {
     let raw = server.url.trim();
     if raw.is_empty() {
@@ -52,7 +55,7 @@ async fn pin_client_for(server: &McpServer) -> Result<(reqwest::Client, Url)> {
             server.name
         ),
     }
-    let addrs = crate::tools::fetch_url::resolve_safe_addrs(&url)
+    let addrs = crate::tools::fetch_url::resolve_lan_addrs(&url)
         .await
         .map_err(|e| anyhow!("MCP server `{}` URL rejected: {e}", server.name))?;
     let http = crate::tools::fetch_url::build_pinned_client(&url, &addrs)

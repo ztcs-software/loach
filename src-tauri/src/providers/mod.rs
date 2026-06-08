@@ -160,7 +160,7 @@ pub(super) async fn refuse_link_local_host(base_url: &str) -> Result<(), String>
         .and_then(|s| s.strip_suffix(']'))
         .unwrap_or(host);
     let check = |ip: IpAddr| -> Result<(), String> {
-        if is_link_local(&ip) {
+        if crate::tools::fetch_url::is_link_local(&ip) {
             return Err(format!(
                 "Refusing to connect to {ip}: link-local addresses host \
                  cloud-metadata services that should not receive LLM traffic."
@@ -181,57 +181,6 @@ pub(super) async fn refuse_link_local_host(base_url: &str) -> Result<(), String>
         }
     }
     Ok(())
-}
-
-fn is_link_local(ip: &std::net::IpAddr) -> bool {
-    match ip {
-        std::net::IpAddr::V4(v4) => v4.is_link_local(),
-        std::net::IpAddr::V6(v6) => {
-            let segs = v6.segments();
-            // Native IPv6 link-local: fe80::/10.
-            if (segs[0] & 0xffc0) == 0xfe80 {
-                return true;
-            }
-            // An attacker-controlled AAAA record can smuggle a link-local
-            // IPv4 (169.254.169.254 is cloud metadata) inside an IPv6 address
-            // — IPv4-mapped (`::ffff:a9fe:a9fe`), NAT64 (`64:ff9b::a9fe:a9fe`),
-            // or deprecated IPv4-compatible (`::a9fe:a9fe`) — which the host
-            // then routes to 169.254.x.x. Decode the embedded IPv4 and screen
-            // it too, mirroring `fetch_url::is_public_ip`. Without this the
-            // bare `fe80::/10` check above let those forms slip straight past.
-            let is_v4_mapped = segs[0] == 0
-                && segs[1] == 0
-                && segs[2] == 0
-                && segs[3] == 0
-                && segs[4] == 0
-                && segs[5] == 0xffff;
-            let is_nat64 = segs[0] == 0x0064
-                && segs[1] == 0xff9b
-                && segs[2] == 0
-                && segs[3] == 0
-                && segs[4] == 0
-                && segs[5] == 0;
-            // ::a.b.c.d — high 96 bits zero. Loopback (::1) / unspecified (::)
-            // have a zero tail and aren't link-local, so they harmlessly fall
-            // through the embedded check below.
-            let is_v4_compat = segs[0] == 0
-                && segs[1] == 0
-                && segs[2] == 0
-                && segs[3] == 0
-                && segs[4] == 0
-                && segs[5] == 0;
-            if is_v4_mapped || is_nat64 || is_v4_compat {
-                let embedded = std::net::Ipv4Addr::new(
-                    (segs[6] >> 8) as u8,
-                    (segs[6] & 0xff) as u8,
-                    (segs[7] >> 8) as u8,
-                    (segs[7] & 0xff) as u8,
-                );
-                return embedded.is_link_local();
-            }
-            false
-        }
-    }
 }
 
 #[cfg(test)]
