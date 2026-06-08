@@ -3,6 +3,7 @@ import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { Download, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { saveBinaryToFile } from "@/lib/tauri";
+import { safeImageMime } from "@/lib/files";
 import { useToastStore } from "@/stores/toastStore";
 
 interface ImagePreviewProps {
@@ -69,7 +70,7 @@ export function ImagePreview({ open, onOpenChange, data, mime, name }: ImagePrev
         >
           <DialogPrimitive.Title className="sr-only">{name}</DialogPrimitive.Title>
           <img
-            src={`data:${mime};base64,${data}`}
+            src={`data:${safeImageMime(mime)};base64,${data}`}
             alt={name}
             className="max-h-[calc(100vh-10rem)] max-w-[calc(100vw-3rem)] rounded-lg object-contain shadow-2xl"
           />

@@ -41,6 +41,18 @@ const TEXT_EXTENSIONS = new Set([
 
 const IMAGE_MIMES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
 
+/**
+ * Constrain a possibly-untrusted image MIME to a known raster type before it
+ * is handed to the webview as a `data:` URL. Image attachments can originate
+ * from an MCP tool result, whose `mime` is fully server-controlled. React
+ * escapes the attribute so this isn't an injection fix — it's defense-in-depth
+ * against a malicious server choosing the MIME the browser decodes (e.g.
+ * `image/svg+xml`). Falls back to PNG for anything unrecognised.
+ */
+export function safeImageMime(mime: string): string {
+  return IMAGE_MIMES.has(mime.toLowerCase().trim()) ? mime : "image/png";
+}
+
 const PDF_MIME = "application/pdf";
 const DOCX_MIME =
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document";

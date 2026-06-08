@@ -538,9 +538,11 @@ For each server:
   endpoint without persisting and reports the server name, protocol
   version, and tool list.
 
-URLs are validated, headers go through size and character checks, and per-
-request bodies are capped at 4 MiB so a misconfigured endpoint can't OOM
-the app. Per-request timeout is 30 s.
+URLs are validated (the scheme must be `http`/`https`, and link-local
+cloud-metadata addresses are refused; `localhost` and private LAN addresses
+are allowed, since self-hosted MCP servers commonly live there). Headers go
+through size and character checks, and per-request bodies are capped at 4 MiB
+so a misconfigured endpoint can't OOM the app. Per-request timeout is 30 s.
 
 ### 8.3 Built-in tools
 

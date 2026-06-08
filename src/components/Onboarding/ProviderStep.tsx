@@ -70,6 +70,7 @@ const OLLAMA_CATALOG: {
     variants: [
       { tag: "gemma4:e2b", label: "E2B", size: "~7.2 GB" },
       { tag: "gemma4:e4b", label: "E4B", size: "~9.6 GB" },
+      { tag: "gemma4:12b", label: "12B", size: "~7.6 GB" },
       { tag: "gemma4:26b", label: "26B (MoE)", size: "~18 GB" },
       { tag: "gemma4:31b", label: "31B", size: "~20 GB" },
     ],

@@ -880,7 +880,12 @@ fn sniff_image_mime(b64: &str) -> &'static str {
     } else if trimmed.starts_with("R0lGOD") {
         "image/gif"
     } else if trimmed.starts_with("UklGR") && trimmed.len() >= 24 {
-        if trimmed[12..24].contains("V0VC") {
+        // `b64` is untrusted (frontend-supplied, not guaranteed valid base64),
+        // so use `get(12..24)` rather than `[12..24]` — a multi-byte UTF-8
+        // sequence straddling either index would otherwise panic. A genuine
+        // WebP base64 header is pure ASCII; a non-boundary slice means it
+        // isn't one, so `None` correctly falls through to the default.
+        if trimmed.get(12..24).is_some_and(|w| w.contains("V0VC")) {
             "image/webp"
         } else {
             "image/png"

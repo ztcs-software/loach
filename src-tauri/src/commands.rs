@@ -1326,11 +1326,12 @@ async fn validate_mcp_input(
     }
 
     // Scheme + host validation. We refuse anything that isn't http/https and
-    // anything that resolves to a private / loopback / link-local address. A
-    // misconfigured server can still expose secrets, but at least a header
-    // smuggled in by a compromised renderer can't be aimed at an internal
-    // service the user wouldn't otherwise reach (cloud metadata service,
-    // internal admin endpoints, etc.).
+    // anything that resolves to a link-local address (the cloud-metadata
+    // range). Loopback and private / RFC1918 LAN addresses are allowed: MCP
+    // servers are user-configured in Settings and are often self-hosted on the
+    // local network, matching how the LLM-provider path treats endpoints. A
+    // header smuggled in by a compromised renderer still can't be aimed at the
+    // cloud-metadata service.
     let parsed = reqwest::Url::parse(raw_url)
         .map_err(|e| format!("Invalid MCP server URL: {e}"))?;
     match parsed.scheme() {
@@ -1338,12 +1339,12 @@ async fn validate_mcp_input(
         other => return Err(format!("MCP server URL must be http or https (got `{other}`)")),
     }
 
-    // Defer to the same resolver `fetch_url` uses: literal IPs are
-    // rejected if non-public, hostnames are DNS-resolved and every
-    // returned address screened. Returning the addresses lets the caller
-    // pin them into a per-request client at connect time so a malicious
-    // DNS server can't flip the answer between validate and dial.
-    let resolved = crate::tools::fetch_url::resolve_safe_addrs(&parsed)
+    // Resolve + screen the host: literal IPs are rejected only if link-local,
+    // hostnames are DNS-resolved and every returned address screened the same
+    // way. Returning the addresses lets the caller pin them into a per-request
+    // client at connect time so a malicious DNS server can't flip the answer
+    // from public to link-local between validate and dial.
+    let resolved = crate::tools::fetch_url::resolve_lan_addrs(&parsed)
         .await
         .map_err(|e| format!("MCP server URL rejected: {e}"))?;
 
@@ -1803,11 +1804,11 @@ pub async fn import_data_with_dialog(
     // Stage 2 — re-validate every MCP server row before letting it back
     // into the DB. The `mcp_save` path runs through `validate_mcp_input`,
     // but the snapshot bypasses that — a hand-edited or maliciously
-    // crafted export could otherwise smuggle in rows pointing at
-    // localhost, RFC1918 ranges, or hosts that resolve to internal IPs.
-    // We re-screen each here using the same async validator (DNS lookup
-    // + headers structural check) so the user can't shoot themselves in
-    // the foot by importing a tampered file.
+    // crafted export could otherwise smuggle in rows pointing at the
+    // cloud-metadata service or other link-local addresses. We re-screen
+    // each here using the same async validator (DNS lookup + headers
+    // structural check) so the user can't shoot themselves in the foot by
+    // importing a tampered file.
     for (idx, row) in snap.data.mcp_servers.iter().enumerate() {
         let parsed_headers: Option<std::collections::HashMap<String, String>> =
             match row.headers_json.as_deref() {
