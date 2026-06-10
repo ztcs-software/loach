@@ -1002,6 +1002,14 @@ async function startTask(task: QueueTask, get: Getter, set: Setter) {
         params: task.request.params,
       },
       (ev) => {
+        // Drop events from a stream whose task is no longer the running one.
+        // A cancel during the connect window (or a superseding task) clears or
+        // replaces `runningTask` and the module-level `runningBuffers` before
+        // this stream's backend run has been told to stop — without this
+        // identity check a late token from the old stream would be written
+        // into the NEW task's buffer, and an old `done`/`error` would tear the
+        // new task down mid-stream.
+        if (get().runningTask?.id !== task.id) return;
         const buf = runningBuffers;
         if (!buf) return; // cancelled between events
         if (ev.kind === "thinking") {
@@ -1087,9 +1095,27 @@ async function startTask(task: QueueTask, get: Getter, set: Setter) {
         }
       },
     );
-    set({ activeStream: { stop: handle.stop, unlisten: handle.unlisten } });
+    if (get().runningTask?.id === task.id) {
+      set({ activeStream: { stop: handle.stop, unlisten: handle.unlisten } });
+    } else {
+      // Cancelled or superseded during the connect window: the backend stream
+      // is live but orphaned. Tear it down rather than installing a handle
+      // that would leak this stream and could clobber a successor task's
+      // `activeStream` (leaving the new stream uncancellable).
+      try {
+        handle.unlisten();
+      } catch {
+        /* ignore */
+      }
+      void handle.stop();
+    }
   } catch (e) {
     logger.error("startChatStream failed", e);
+    // If this task is no longer the running one, a cancel/supersede during the
+    // connect window already tore it down (and another task may now own the
+    // streaming state). Bail before patching an error bubble or resetting
+    // state we no longer own.
+    if (get().runningTask?.id !== task.id) return;
     // The placeholder assistant row was created above so the bubble could
     // show "thinking…" while we connected. Now that the connection itself
     // failed, replace its contents with a visible error message instead of
