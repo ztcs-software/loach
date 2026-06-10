@@ -1174,6 +1174,15 @@ async function startTask(task: QueueTask, get: Getter, set: Setter) {
 }
 
 /**
+ * Internal seam exposed ONLY for the streaming-race unit tests
+ * (`chatStore.streamRace.test.ts`). `startTask` is module-private — nothing
+ * outside the store should start a task directly — but the tests need to drive
+ * it against a controllable `startChatStream` mock to reproduce the
+ * connect-window cancel race deterministically. Not part of the public API.
+ */
+export const __testing = { startTask };
+
+/**
  * Resolve the user's "Default model" preference into a concrete
  * (provider, model) pair for a brand-new chat.
  *
