@@ -640,28 +640,45 @@ fn strip_blocks_with_lower(
         .map(|(o, c)| (o.to_ascii_lowercase(), c.to_ascii_lowercase(), c.len()))
         .collect();
 
+    // Per-block byte position of the next opener at or after the cursor
+    // (`None` once a block type has no further opener). Seeded with one full
+    // scan each, then refreshed lazily — only when a cached hit falls behind
+    // the cursor. The previous version re-ran `lower[i..].find(opener)` for
+    // every block on every iteration, so an opener that never appears (the
+    // common case: a page full of `</p>` but no `<script>`) was re-scanned
+    // over the whole remaining body once per consumed block — O(n²) on
+    // adversarial input. Searching each absent opener exactly once makes the
+    // whole pass O(n·k).
+    let mut next_open: Vec<Option<usize>> = blocks_l
+        .iter()
+        .map(|(open_l, _, _)| lower.find(open_l.as_str()))
+        .collect();
+
     let mut out = String::with_capacity(hay.len());
     let mut i = 0usize;
     while i < hay.len() {
-        // Find the earliest opener (across all blocks) starting at or
-        // after `i`. We pick the closest one so blocks in source order
-        // are stripped in source order.
-        let next_open = blocks_l
-            .iter()
-            .filter_map(|(open_l, close_l, close_byte_len)| {
-                lower[i..].find(open_l.as_str()).map(|rel| {
-                    (i + rel, close_l.as_str(), *close_byte_len)
-                })
-            })
-            .min_by_key(|&(pos, _, _)| pos);
+        // Earliest opener at or after `i`, refreshing any stale cached hit
+        // (one the cursor has advanced past) before comparing. Ties resolve
+        // to the first block in source order, matching the old `min_by_key`.
+        let mut best: Option<(usize, usize)> = None; // (opener_pos, block index)
+        for (idx, (open_l, _, _)) in blocks_l.iter().enumerate() {
+            if matches!(next_open[idx], Some(pos) if pos < i) {
+                next_open[idx] = lower[i..].find(open_l.as_str()).map(|rel| i + rel);
+            }
+            if let Some(pos) = next_open[idx] {
+                if best.map_or(true, |(bp, _)| pos < bp) {
+                    best = Some((pos, idx));
+                }
+            }
+        }
 
-        match next_open {
-            Some((open_at, close_l, close_byte_len)) => {
+        match best {
+            Some((open_at, idx)) => {
+                let (_, close_l, close_byte_len) = &blocks_l[idx];
                 out.push_str(&hay[i..open_at]);
-                match lower[open_at..].find(close_l) {
+                match lower[open_at..].find(close_l.as_str()) {
                     Some(rel_close) => {
-                        let close_at = open_at + rel_close + close_byte_len;
-                        i = close_at;
+                        i = open_at + rel_close + close_byte_len;
                     }
                     None => {
                         // Unterminated — drop the rest.
@@ -687,22 +704,38 @@ fn replace_many_ci(hay: &str, needles: &[&str], repl: &str) -> String {
         .iter()
         .map(|n| (n.to_ascii_lowercase(), n.len()))
         .collect();
+    // Per-needle next-match position, seeded once and refreshed lazily (see
+    // `strip_blocks_with_lower` for the rationale). Without the cache, a
+    // needle absent from the body — or one matched far ahead — was re-scanned
+    // over the whole remaining string on every output position, turning a
+    // body of N identical entities into an O(n²) walk.
+    let mut next_pos: Vec<Option<usize>> = needles_l
+        .iter()
+        .map(|(needle_l, _)| lower.find(needle_l.as_str()))
+        .collect();
     let mut out = String::with_capacity(hay.len());
     let mut i = 0usize;
     while i < hay.len() {
-        // Find the earliest needle hit starting at or after `i`.
-        let next_hit = needles_l
-            .iter()
-            .filter_map(|(needle_l, len)| {
-                lower[i..].find(needle_l.as_str()).map(|rel| (i + rel, *len))
-            })
-            .min_by_key(|&(pos, _)| pos);
+        // Earliest needle hit at or after `i`, refreshing stale cached hits.
+        // Ties resolve to the first needle in `needles`, matching the old
+        // `min_by_key`.
+        let mut best: Option<(usize, usize)> = None; // (hit_pos, needle index)
+        for (idx, (needle_l, _)) in needles_l.iter().enumerate() {
+            if matches!(next_pos[idx], Some(pos) if pos < i) {
+                next_pos[idx] = lower[i..].find(needle_l.as_str()).map(|rel| i + rel);
+            }
+            if let Some(pos) = next_pos[idx] {
+                if best.map_or(true, |(bp, _)| pos < bp) {
+                    best = Some((pos, idx));
+                }
+            }
+        }
 
-        match next_hit {
-            Some((at, len)) => {
+        match best {
+            Some((at, idx)) => {
                 out.push_str(&hay[i..at]);
                 out.push_str(repl);
-                i = at + len;
+                i = at + needles_l[idx].1;
             }
             None => {
                 out.push_str(&hay[i..]);
@@ -856,7 +889,16 @@ fn truncate(s: &str, max_chars: usize) -> (String, bool) {
     if end_byte == 0 {
         end_byte = s.len();
     }
-    let scan_start = end_byte.saturating_sub(200);
+    // Back off ~200 bytes, then snap DOWN to a char boundary. `end_byte` is
+    // already a boundary (it came from `char_indices`), but the raw
+    // subtraction can land inside a multi-byte codepoint — slicing there
+    // panics (`byte index … is not a char boundary`). Walking left to the
+    // nearest boundary keeps the window valid UTF-8; it may end up a few
+    // bytes wider than 200, which is harmless for a whitespace heuristic.
+    let mut scan_start = end_byte.saturating_sub(200);
+    while scan_start > 0 && !s.is_char_boundary(scan_start) {
+        scan_start -= 1;
+    }
     let window = &s[scan_start..end_byte];
     if let Some(last_ws) = window.rfind(char::is_whitespace) {
         end_byte = scan_start + last_ws;
@@ -1019,5 +1061,63 @@ mod tests {
             .await
             .expect_err("link-local must be refused");
         assert!(err.contains("169.254.169.254"), "{err}");
+    }
+
+    #[test]
+    fn truncate_breaks_on_multibyte_boundary() {
+        // Regression: the whitespace-backoff window used raw byte arithmetic
+        // (`end_byte - 200`), which could land inside a multi-byte codepoint
+        // and panic when sliced. A long run of 3-byte glyphs past the budget
+        // must truncate cleanly, not crash.
+        let s = "あ".repeat(20_000);
+        let (out, truncated) = truncate(&s, MAX_TEXT_CHARS);
+        assert!(truncated);
+        assert!(out.ends_with("[Content truncated]"));
+        // The kept prefix is whole 'あ' chars — i.e. valid, un-severed UTF-8.
+        let prefix = out.trim_end_matches("[Content truncated]").trim_end();
+        assert!(!prefix.is_empty());
+        assert!(prefix.chars().all(|c| c == 'あ'), "prefix severed a codepoint");
+    }
+
+    #[test]
+    fn replace_many_ci_handles_absent_and_repeated_needles() {
+        // One needle matches many times; another never matches. The absent
+        // needle must not change the output (and, with the position cache,
+        // is scanned once rather than re-scanned per match).
+        let out = replace_many_ci("a&amp;b&amp;c&amp;d", &["&amp;", "&zwnj;"], "+");
+        assert_eq!(out, "a+b+c+d");
+    }
+
+    #[test]
+    fn replace_many_ci_picks_earliest_then_first_needle() {
+        // Overlapping needles at the same position: the first needle in the
+        // list wins, preserving the previous `min_by_key` tie-break.
+        assert_eq!(replace_many_ci("xabcy", &["ab", "abc"], "_"), "x_cy");
+        assert_eq!(replace_many_ci("xabcy", &["abc", "ab"], "_"), "x_y");
+    }
+
+    #[test]
+    fn strip_blocks_drops_repeated_blocks_keeps_prose() {
+        // Multiple blocks of one type, with another block type entirely
+        // absent — the prose between/around the blocks survives intact.
+        let html = "A<style>x{}</style>B<style>y{}</style>C";
+        let lower = html.to_ascii_lowercase();
+        let out = strip_blocks_with_lower(
+            html,
+            &lower,
+            &[("<style", "</style>"), ("<script", "</script>")],
+        );
+        assert_eq!(out, "ABC");
+    }
+
+    #[test]
+    fn html_to_text_handles_adversarial_repeated_tag_body() {
+        // Guard against the O(n²) regression: a body that is almost entirely
+        // one closing tag (a match) plus block openers that never appear used
+        // to take minutes. With the position cache it returns instantly; all
+        // the `</p>` collapse to nothing, so the extracted text is empty.
+        let body = format!("<body>{}</body>", "</p>".repeat(20_000));
+        let (_title, text) = html_to_text(&body);
+        assert!(text.is_empty(), "got: {text:?}");
     }
 }
