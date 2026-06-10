@@ -11,6 +11,8 @@ export default defineConfig({
     alias: { "@": path.resolve(__dirname, "./src") },
   },
   test: {
-    include: ["src/**/*.test.ts"],
+    // `tests/` holds repo-level invariants (e.g. the release version
+    // agreement check) that don't belong next to any src module.
+    include: ["src/**/*.test.ts", "tests/**/*.test.ts"],
   },
 });

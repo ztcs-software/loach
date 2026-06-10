@@ -297,6 +297,38 @@ mod tests {
     }
 
     #[test]
+    fn cap_tool_text_passes_short_results_through_untouched() {
+        assert_eq!(cap_tool_text("short result", 1024), "short result");
+        // Exactly at the cap is still untouched (the guard is `<=`).
+        assert_eq!(cap_tool_text("12345678", 8), "12345678");
+    }
+
+    #[test]
+    fn cap_tool_text_clips_and_appends_the_truncation_note() {
+        let out = cap_tool_text(&"x".repeat(100), 10);
+        assert!(out.starts_with("xxxxxxxxxx\n"), "clip lands at the cap: {out:?}");
+        assert!(
+            out.contains("truncated by Loach at 10 bytes; original was 100 bytes"),
+            "note carries both byte counts: {out:?}"
+        );
+    }
+
+    #[test]
+    fn cap_tool_text_lands_on_utf8_boundaries() {
+        // The reason this helper exists: naive `&s[..max_bytes]` panics when
+        // the cap lands inside a multi-byte sequence. 5 × "é" is 10 bytes
+        // with char starts at 0,2,4,…; a 3-byte cap must clip to "é", not
+        // panic, and the output must stay valid UTF-8 (guaranteed by the
+        // type, so merely returning is the assertion).
+        let out = cap_tool_text(&"é".repeat(5), 3);
+        assert!(out.starts_with("é\n"), "{out:?}");
+
+        // 4-byte scalar (emoji): a cap of 5 keeps exactly one.
+        let out = cap_tool_text(&"🦀".repeat(3), 5);
+        assert!(out.starts_with("🦀\n"), "{out:?}");
+    }
+
+    #[test]
     fn bound_messages_payload_leaves_short_tool_messages_alone() {
         // Even when the array is over the cap, short tool messages stay —
         // dropping a 30-byte content for a 30-byte stub buys nothing and

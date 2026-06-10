@@ -1,0 +1,68 @@
+name: CI
+
+# Runs the checks the release checklist expects to be green — the TypeScript
+# build, the Vitest suite (which includes the release version-agreement
+# gate in tests/versions.test.ts), and the Rust unit tests. Releases are
+# handled by release.yml; this workflow never publishes anything.
+#
+# Triggers on every push so dev branches get feedback without a PR, and on
+# PRs to main so the merge gate sees a check. The push to main after a merge
+# re-validates the exact merged tree right before release.yml's gate looks
+# at it.
+
+on:
+  push:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  js:
+    name: tsc + vite build + vitest
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+
+  rust:
+    name: cargo test
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # Same link-time deps as release.yml, minus the packaging-only tools
+      # (patchelf, rpm) — cargo test compiles the Tauri app but bundles
+      # nothing.
+      - name: Install Linux build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev
+
+      # Pinned to the same toolchain as release.yml so a surprise rustc
+      # release can't make CI and the release build disagree. Bump both
+      # together.
+      - uses: dtolnay/rust-toolchain@1.88.0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # --locked: a Cargo.lock that drifted from Cargo.toml is a release
+      # blocker (release.yml builds from the lockfile) — fail here instead.
+      - run: cargo test --locked
+        working-directory: src-tauri

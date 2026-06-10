@@ -8,7 +8,7 @@
 // and self-reference still terminate.
 
 import { describe, it, expect } from "vitest";
-import { expandKnownVars } from "./snippetVars";
+import { applyFillValues, expandKnownVars } from "./snippetVars";
 
 const NOW = new Date("2026-06-10T12:00:00Z");
 // Minimal SnippetVariable shape — only key/value are read here.
@@ -76,5 +76,45 @@ describe("expandKnownVars", () => {
     const r = expandKnownVars("{{X}}", [g("X", "{{X}} {{X}}")], "Ada", NOW);
     expect(r.resolved).toBe("{{X}} {{X}}");
     expect(r.unresolved).toEqual(["X"]);
+  });
+
+  it("tolerates whitespace inside the braces", () => {
+    const r = expandKnownVars("Hi {{ USER_NAME }}", [], "Ada", NOW);
+    expect(r.resolved).toBe("Hi Ada");
+  });
+
+  it("reports unresolved keys deduplicated in first-appearance order", () => {
+    // The fill dialog renders one input per key, top-down in prompt order.
+    const r = expandKnownVars("{{ZED}} then {{ALPHA}} then {{ZED}}", [], "Ada", NOW);
+    expect(r.unresolved).toEqual(["ZED", "ALPHA"]);
+  });
+
+  it("does not let a custom global shadow a built-in", () => {
+    // Server-side validation already rejects reserved keys; this pins the
+    // client-side defense in depth (built-ins enter the table first).
+    const r = expandKnownVars("{{USER_NAME}}", [g("USER_NAME", "EVIL")], "Ada", NOW);
+    expect(r.resolved).toBe("Ada");
+  });
+
+  it("ignores text that only looks like a placeholder", () => {
+    // The regex is intentionally narrow (uppercase identifier) so prose and
+    // code like `{{foo}}` or `{ x }` is neither expanded nor flagged.
+    const prompt = "code {{foo}} and { X } and {{TWO WORDS}} stay literal";
+    const r = expandKnownVars(prompt, [], "Ada", NOW);
+    expect(r.resolved).toBe(prompt);
+    expect(r.unresolved).toEqual([]);
+  });
+});
+
+describe("applyFillValues", () => {
+  it("applies provided fills and leaves missing keys literal", () => {
+    // Missing keys surviving as `{{KEY}}` is the safety net for a bypassed
+    // fill dialog — the model sees the placeholder, not silent emptiness.
+    const out = applyFillValues("dear {{ NAME }}, re: {{SUBJECT}}", { NAME: "Ada" });
+    expect(out).toBe("dear Ada, re: {{SUBJECT}}");
+  });
+
+  it("substitutes empty-string fills rather than skipping them", () => {
+    expect(applyFillValues("a{{GAP}}b", { GAP: "" })).toBe("ab");
   });
 });
