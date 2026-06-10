@@ -16,7 +16,7 @@ import {
   Wrench,
 } from "lucide-react";
 import { AttachmentActions } from "./AttachmentActions";
-import { Markdown, preprocessTex } from "./Markdown";
+import { Markdown } from "./Markdown";
 import { MarkdownSourceProvider } from "./markdownSource";
 import { lastCodeBlock } from "@/lib/codeBlocks";
 import {
@@ -485,13 +485,13 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
 
   // Source binding for the Code Canvas. We only need the LAST fenced block's
   // raw text (the one that grows mid-stream) so "Open in canvas" can tell
-  // whether the clicked block is the streaming tail. Pre-process the content
-  // the same way `Markdown` does so the comparison matches the `raw` a
-  // `CodeBlock` actually renders. Skipped entirely for user bubbles and once
-  // streaming stops (there's nothing live to track then).
+  // whether the clicked block is the streaming tail. Extracted verbatim —
+  // `CodeBlock`'s `raw` is verbatim too (the TeX fallback never touches code),
+  // so the comparison still matches. Skipped entirely for user bubbles and
+  // once streaming stops (there's nothing live to track then).
   const lastBlockRaw = useMemo(() => {
     if (isUser || !isStreaming) return null;
-    return lastCodeBlock(preprocessTex(message.content))?.code ?? null;
+    return lastCodeBlock(message.content)?.code ?? null;
   }, [isUser, isStreaming, message.content]);
 
   return (
