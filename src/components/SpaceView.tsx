@@ -164,7 +164,13 @@ export function SpaceView() {
     });
     if (ok) {
       void doDeleteSpace(space.id).then((deleted) => {
-        if (deleted) setSidebarTab("spaces");
+        if (deleted) {
+          // Stop viewing the now-deleted space first — App routes on
+          // `viewingSpaceId` before the sidebar tab, so without this SpaceView
+          // stays mounted and renders null for the missing space (blank canvas).
+          setViewingSpace(null);
+          setSidebarTab("spaces");
+        }
       });
     }
   };

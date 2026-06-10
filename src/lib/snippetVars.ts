@@ -84,49 +84,36 @@ export function expandKnownVars(
     if (!table.has(v.key)) table.set(v.key, v.value);
   }
 
-  // Track unresolved keys in first-appearance order so the fill-dialog
-  // input list reads top-down through the prompt. A plain Set would lose
-  // insertion order on re-discovery; we de-dup against the running list.
+  // Expand each `{{KEY}}` to its value, recursively — a value may itself
+  // contain placeholders. The visited set is per-expansion-PATH (the chain of
+  // keys currently being resolved), NOT global: a key appearing twice in the
+  // prompt expands at BOTH sites. The previous global `expanded` set capped
+  // each key to its first occurrence, so a second `{{USER_NAME}}` survived as
+  // a literal and was then wrongly reported unresolved (the fill dialog would
+  // ask for a variable that already had a value). Per-path tracking still
+  // terminates cycles (`A → {{B}}`, `B → {{A}}`) and self-reference
+  // (`FOO → "{{FOO}}"`) by leaving the offending placeholder literal, without
+  // the exponential blow-up that simply dropping the guard would allow.
   //
-  // A variable's value may itself contain `{{KEY}}` placeholders, so we
-  // expand to a fixed point rather than in a single pass — otherwise a
-  // value like `"Hello {{NAME}}"` would leave a literal `{{NAME}}` in the
-  // output AND never report it as unresolved (the old single-pass code did
-  // exactly that). The `expanded` set caps each key to one substitution,
-  // which both bounds the work and makes cycles (`A → {{B}}`, `B → {{A}}`)
-  // and self-reference (`FOO → "{{FOO}}"`) terminate; anything still
-  // present after the loop is reported as unresolved so the caller can
-  // prompt for it rather than leaking the literal to the model.
-  //
-  // Note an EMPTY global value still substitutes (to ""), NOT treated as
-  // unresolved: a global explicitly saved empty means "expand to nothing"
-  // (the variables panel renders that as a valid "(empty)" state). Only a
-  // *missing* key — no global and no built-in — is unresolved and routed to
-  // the fill dialog. `table.get` returns undefined for missing vs "" for an
-  // empty global, so the two stay distinct.
-  const MAX_PASSES = 8;
-  const unresolved: string[] = [];
-  const expanded = new Set<string>();
-  let resolved = prompt;
-  for (let pass = 0; pass < MAX_PASSES; pass++) {
-    let substituted = false;
-    resolved = resolved.replace(PLACEHOLDER_RE, (_match, key: string) => {
-      if (expanded.has(key)) return `{{${key}}}`;
+  // An EMPTY global value still substitutes (to ""), NOT treated as
+  // unresolved: `table.get` returns undefined for a missing key but "" for an
+  // explicitly-empty global, so the two stay distinct.
+  const expand = (text: string, path: Set<string>): string =>
+    text.replace(PLACEHOLDER_RE, (whole, key: string) => {
+      if (path.has(key)) return whole; // cycle / self-reference — leave literal
       const value = table.get(key);
-      if (value !== undefined) {
-        expanded.add(key);
-        substituted = true;
-        return value;
-      }
-      // Unknown key → leave the placeholder for the fill dialog.
-      return `{{${key}}}`;
+      if (value === undefined) return whole; // unknown — leave for the fill dialog
+      const next = new Set(path);
+      next.add(key);
+      return expand(value, next);
     });
-    if (!substituted) break;
-  }
-  // Record whatever is still unresolved after the fixed-point loop, in
-  // first-appearance order. Re-scanning the final string (rather than
-  // collecting during substitution) means a key only counts as unresolved
-  // if it actually survives all passes.
+  const resolved = expand(prompt, new Set<string>());
+
+  // Record whatever is still unresolved, in first-appearance order so the fill
+  // dialog's inputs read top-down. Re-scanning the final string (rather than
+  // collecting during substitution) means a key only counts as unresolved if
+  // it actually survives expansion.
+  const unresolved: string[] = [];
   for (const m of resolved.matchAll(PLACEHOLDER_RE)) {
     const key = m[1];
     if (!unresolved.includes(key)) unresolved.push(key);

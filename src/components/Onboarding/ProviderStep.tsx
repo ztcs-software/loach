@@ -721,6 +721,7 @@ function OpenAIPath({
   const keySet = useSettingsStore((s) => s.openai_key_set);
   const update = useSettingsStore((s) => s.update);
   const setOpenAIKey = useSettingsStore((s) => s.setOpenAIKey);
+  const clearOpenAIKey = useSettingsStore((s) => s.clearOpenAIKey);
   const setProviderDefault = useSettingsStore((s) => s.setProviderDefault);
   const refreshModels = useModelsStore((s) => s.refresh);
 
@@ -730,6 +731,16 @@ function OpenAIPath({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [verified, setVerified] = useState(keySet);
+
+  // If a verified key is already stored (the user set it, advanced, then
+  // navigated back), the parent's `provisioned` flag has reset but there's
+  // nothing left to do — mark provisioned so Continue re-enables without
+  // forcing a full re-type. Safe because a stored key is always a verified
+  // one: a failed probe rolls the key back (see handleSave), so `keySet`
+  // can't report a known-bad key.
+  useEffect(() => {
+    if (keySet) onProvisioned();
+  }, [keySet, onProvisioned]);
 
   const handleSave = async () => {
     setError(null);
@@ -743,15 +754,23 @@ function OpenAIPath({
       if (urlDraft.trim() && urlDraft.trim() !== baseUrl) {
         await update("openai_base_url", urlDraft.trim());
       }
+      // The probe reads the key from the keyring, so it must be stored first.
+      // If the probe then fails, roll the key back below — leaving a known-bad
+      // key stored would flip `keySet` true and auto-provision it on re-entry.
       await setOpenAIKey(key.trim());
-      // Probe — a key that isn't valid will surface here as a 401.
-      const list = await openaiListModels(urlDraft.trim() || baseUrl);
-      if (list.length > 0) {
-        // Pin a sensible default (first model returned). The user can
-        // change later from Settings.
-        await setProviderDefault("openai", list[0].id);
+      try {
+        // Probe — a key that isn't valid will surface here as a 401.
+        const list = await openaiListModels(urlDraft.trim() || baseUrl);
+        if (list.length > 0) {
+          // Pin a sensible default (first model returned). The user can
+          // change later from Settings.
+          await setProviderDefault("openai", list[0].id);
+        }
+        await refreshModels();
+      } catch (probeErr) {
+        await clearOpenAIKey().catch(() => {});
+        throw probeErr;
       }
-      await refreshModels();
       setVerified(true);
       setKey("");
       onProvisioned();

@@ -138,10 +138,17 @@ export function ModelsView() {
     }
     setSaving(true);
     try {
-      await createModel(targetName, modelfile);
-      // Land the user on the freshly-created model so they can immediately
-      // iterate on it or try it in a new chat.
-      setViewingModel(targetName);
+      const run = await createModel(targetName, modelfile);
+      if (run?.finished === "ok") {
+        // Land the user on the freshly-created model so they can immediately
+        // iterate on it or try it in a new chat.
+        setViewingModel(targetName);
+      } else if (run?.finished === "error") {
+        // The create reached a terminal error — surface the real reason
+        // instead of navigating to a model that was never created.
+        setSaveError(run.error ?? "Couldn't create the model.");
+      }
+      // `cancelled` → the user aborted; stay on the form with no error.
     } catch (e) {
       setSaveError(e instanceof Error ? e.message : String(e));
     } finally {
