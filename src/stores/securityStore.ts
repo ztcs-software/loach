@@ -8,6 +8,7 @@ import {
   type LockStatus,
   type SecuritySetupArgs,
 } from "@/lib/tauri";
+import { logger } from "@/lib/logger";
 
 interface SecurityState {
   /** Latest snapshot from the backend. `configured: false` until hydrate(). */
@@ -51,15 +52,29 @@ export const useSecurityStore = create<SecurityState>((set, get) => ({
   unlocked: true,
 
   hydrate: async () => {
-    const status = await securityStatus();
-    set({
-      status,
-      hydrated: true,
-      // First boot: if a lock is configured, the user has to unlock before
-      // the main UI mounts. Re-hydrating after a setup keeps `unlocked` as
-      // it was — the user just authenticated, no need to lock them out.
-      unlocked: status.configured ? get().unlocked : true,
-    });
+    try {
+      const status = await securityStatus();
+      set({
+        status,
+        hydrated: true,
+        // First boot: if a lock is configured, the user has to unlock before
+        // the main UI mounts. Re-hydrating after a setup keeps `unlocked` as
+        // it was — the user just authenticated, no need to lock them out.
+        unlocked: status.configured ? get().unlocked : true,
+      });
+    } catch (e) {
+      // The status probe failed — e.g. no Secret Service / keyring backend on
+      // a Linux box. Fail OPEN: mark hydration done and treat the app as
+      // unlocked + unconfigured rather than stranding the user on the probing
+      // screen forever. App.tsx's hydration gate waits on `hydrated`, so a
+      // never-resolving probe would otherwise hang the entire app. The
+      // app-lock is a render-gate over plaintext local data, not a
+      // confidentiality boundary, so failing open costs no real secrecy —
+      // whereas failing closed would lock the owner out of their own machine
+      // with no recovery path (unlock also needs the keyring).
+      logger.error("security status probe failed; continuing unlocked", e);
+      set({ status: EMPTY_STATUS, hydrated: true, unlocked: true });
+    }
   },
 
   setup: async (args) => {
