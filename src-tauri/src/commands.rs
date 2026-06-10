@@ -1549,6 +1549,22 @@ pub async fn chat_stream(
             }
             other => {
                 tracing::warn!("unknown provider {other}");
+                // No provider ran, so nothing emitted a terminal frame or
+                // released the registry entry. Without this the frontend's
+                // stream listener never sees Done/Error/Cancelled — the
+                // bubble stays stuck "generating" forever — and the cancel
+                // Notify leaks. Emit an Error (which the UI treats as a
+                // terminal event) and finish the registry entry, mirroring
+                // what the provider paths do internally.
+                let _ = app.emit(
+                    &channel,
+                    crate::stream::StreamEvent::Error {
+                        message: format!(
+                            "Unknown provider \"{other}\". Pick a model again to repair this chat."
+                        ),
+                    },
+                );
+                registry.finish(&request.stream_id);
                 Ok(())
             }
         };

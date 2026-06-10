@@ -136,8 +136,18 @@ pub fn run() {
             //     because the chat stream's body has no client-side cap.
             //   - `tcp_keepalive` keeps idle pooled connections alive so a
             //     burst of admin calls reuses the same socket.
+            //   - `redirect(none)` is a deliberate SSRF guard. Providers call
+            //     `refuse_link_local_host` on the *configured* base URL, but
+            //     that check can't see a 30x redirect — a hosted (or
+            //     compromised) endpoint could otherwise bounce a request to
+            //     `http://169.254.169.254/…` (cloud metadata) and reqwest
+            //     would follow it by default. No real LLM API redirects its
+            //     endpoints, so refusing outright is safe; the MCP and
+            //     web-fetch paths already disable redirects on their own
+            //     pinned clients (`build_pinned_client`).
             let http = match reqwest::Client::builder()
                 .user_agent("Loach/0.1")
+                .redirect(reqwest::redirect::Policy::none())
                 .connect_timeout(std::time::Duration::from_secs(10))
                 .tcp_keepalive(Some(std::time::Duration::from_secs(30)))
                 .pool_max_idle_per_host(8)
