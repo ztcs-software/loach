@@ -29,18 +29,59 @@ interface ToastState {
 // against a now-empty toast list, leaking a closure per dismissed toast.
 const dismissTimers = new Map<string, number>();
 
-export const useToastStore = create<ToastState>((set) => ({
+/** Most toasts visible at once. A burst of failures (e.g. the global
+ *  rejection net catching a sweep of rejected mutations) evicts oldest-first
+ *  instead of shingling the whole viewport in 4-second chips. */
+const MAX_TOASTS = 5;
+
+function startDismissTimer(
+  id: string,
+  set: (fn: (s: ToastState) => Partial<ToastState>) => void,
+) {
+  // Auto-dismiss after 4s — long enough for a glance, short enough to
+  // not pile up if the extractor saves a stack of memories at once.
+  const timerId = window.setTimeout(() => {
+    dismissTimers.delete(id);
+    set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) }));
+  }, 4000);
+  dismissTimers.set(id, timerId);
+}
+
+export const useToastStore = create<ToastState>((set, get) => ({
   toasts: [],
   push: (toast) => {
+    // Coalesce exact duplicates: re-pushing an identical toast restarts its
+    // timer instead of stacking a copy, so a source failing repeatedly (a
+    // retry loop, N identical rejections in one burst) shows one chip.
+    const dup = get().toasts.find(
+      (t) =>
+        t.kind === toast.kind &&
+        t.title === toast.title &&
+        t.body === toast.body,
+    );
+    if (dup) {
+      const timer = dismissTimers.get(dup.id);
+      if (timer !== undefined) window.clearTimeout(timer);
+      startDismissTimer(dup.id, set);
+      return dup.id;
+    }
+
     const id = `t_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-    set((s) => ({ toasts: [...s.toasts, { id, ...toast }] }));
-    // Auto-dismiss after 4s — long enough for a glance, short enough to
-    // not pile up if the extractor saves a stack of memories at once.
-    const timerId = window.setTimeout(() => {
-      dismissTimers.delete(id);
-      set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) }));
-    }, 4000);
-    dismissTimers.set(id, timerId);
+    // Evict oldest beyond the cap, cancelling their pending sweeps so the
+    // timers don't fire against the already-removed entries.
+    const overflow = get().toasts.length + 1 - MAX_TOASTS;
+    const evicted = new Set(
+      overflow > 0 ? get().toasts.slice(0, overflow).map((t) => t.id) : [],
+    );
+    for (const evictedId of evicted) {
+      const timer = dismissTimers.get(evictedId);
+      if (timer !== undefined) window.clearTimeout(timer);
+      dismissTimers.delete(evictedId);
+    }
+    set((s) => ({
+      toasts: [...s.toasts.filter((t) => !evicted.has(t.id)), { id, ...toast }],
+    }));
+    startDismissTimer(id, set);
     return id;
   },
   dismiss: (id) => {

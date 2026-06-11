@@ -78,6 +78,21 @@ describe("expandKnownVars", () => {
     expect(r.unresolved).toEqual(["X"]);
   });
 
+  it("caps runaway expansion from chained self-multiplying globals", () => {
+    // V1..V30 each double the previous WITHOUT revisiting a key on any one
+    // path, so the per-path cycle guard never fires — uncapped, expanding
+    // {{V30}} composes 2^30 characters and freezes the renderer. The budget
+    // must stop substitution, leaving the overflow literal (which then
+    // routes to the fill dialog instead of hanging the app).
+    const globals = [g("V0", "x")];
+    for (let i = 1; i <= 30; i++) {
+      globals.push(g(`V${i}`, `{{V${i - 1}}}{{V${i - 1}}}`));
+    }
+    const r = expandKnownVars("{{V30}}", globals, "Ada", NOW);
+    // 64 KiB budget + at most one value of overshoot.
+    expect(r.resolved.length).toBeLessThan(80 * 1024);
+  });
+
   it("tolerates whitespace inside the braces", () => {
     const r = expandKnownVars("Hi {{ USER_NAME }}", [], "Ada", NOW);
     expect(r.resolved).toBe("Hi Ada");

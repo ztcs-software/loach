@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import {
   Archive,
   Cpu,
@@ -407,13 +407,17 @@ function SessionRow({
   const [draft, setDraft] = useState(session.title);
   const [menuOpen, setMenuOpen] = useState(false);
 
-  // Re-seed the draft from the live title whenever editing begins. Rows mount
-  // before a new chat is auto-titled, so the initial `useState(session.title)`
-  // ("New chat") would otherwise be committed on a click-away the user never
-  // meant as a rename — silently reverting the auto-title.
-  useEffect(() => {
-    if (editing) setDraft(session.title);
-  }, [editing, session.title]);
+  // Seed the draft from the live title at the moment editing begins. Rows
+  // mount before a new chat is auto-titled, so the initial
+  // `useState(session.title)` ("New chat") would otherwise be committed on a
+  // click-away the user never meant as a rename — silently reverting the
+  // auto-title. Done in the trigger (not an effect on `session.title`) so an
+  // auto-title or a rename from another surface landing MID-edit can't
+  // clobber a half-typed draft.
+  const beginRename = () => {
+    setDraft(session.title);
+    setEditing(true);
+  };
 
   if (editing) {
     return (
@@ -535,7 +539,7 @@ function SessionRow({
                 </>
               )}
             </DropdownMenuItem>
-            <DropdownMenuItem onSelect={() => setEditing(true)}>
+            <DropdownMenuItem onSelect={beginRename}>
               <Pencil className="h-4 w-4" /> Rename
             </DropdownMenuItem>
             <DropdownMenuSeparator />

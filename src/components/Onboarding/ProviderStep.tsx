@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertCircle,
   ArrowRight,
@@ -735,12 +735,16 @@ function OpenAIPath({
   // If a verified key is already stored (the user set it, advanced, then
   // navigated back), the parent's `provisioned` flag has reset but there's
   // nothing left to do — mark provisioned so Continue re-enables without
-  // forcing a full re-type. Safe because a stored key is always a verified
-  // one: a failed probe rolls the key back (see handleSave), so `keySet`
-  // can't report a known-bad key.
+  // forcing a full re-type. Snapshot the flag at MOUNT rather than
+  // subscribing to it: `setOpenAIKey` flips `openai_key_set` true before
+  // the probe validates the key, so a live subscription would fire
+  // mid-save and enable Continue — and a failed probe only rolls the key
+  // back, never the parent's `provisioned` flag. At mount no save can be
+  // in flight, so a stored key here really is a verified one.
+  const keySetAtMount = useRef(useSettingsStore.getState().openai_key_set);
   useEffect(() => {
-    if (keySet) onProvisioned();
-  }, [keySet, onProvisioned]);
+    if (keySetAtMount.current) onProvisioned();
+  }, [onProvisioned]);
 
   const handleSave = async () => {
     setError(null);

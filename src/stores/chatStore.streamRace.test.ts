@@ -24,6 +24,10 @@ const mocks = vi.hoisted(() => {
     reject: (e: unknown) => void;
     stopped: boolean;
     unlistened: boolean;
+    /** Set by a test BEFORE stop() is called to park the cancel IPC until
+     *  `releaseStop` fires — models a slow `chat_cancel` round-trip. */
+    holdStop?: boolean;
+    releaseStop?: () => void;
   }
   const streams: FakeStream[] = [];
   return { streams };
@@ -49,8 +53,21 @@ vi.mock("@/lib/tauri", async (importOriginal) => {
           entry.resolve = () =>
             res({
               streamId: entry.streamId,
-              stop: async () => {
+              stop: () => {
                 entry.stopped = true;
+                // Fidelity with the real backend: `chat_cancel` makes the
+                // stream emit a terminal Cancelled event — but only a still-
+                // attached listener sees it. The store unlistens BEFORE
+                // stopping precisely so this event can't re-enter teardown.
+                // (Tests injecting LATE events call `entry.onEvent` directly,
+                // bypassing this gate on purpose.)
+                if (!entry.unlistened) entry.onEvent({ kind: "cancelled" });
+                if (entry.holdStop) {
+                  return new Promise<void>((resolveStop) => {
+                    entry.releaseStop = resolveStop;
+                  });
+                }
+                return Promise.resolve();
               },
               unlisten: () => {
                 entry.unlistened = true;
@@ -104,6 +121,9 @@ function lastMsg(sessionId: string) {
 
 beforeEach(() => {
   mocks.streams.length = 0;
+  // Module-level dispatch/buffer state isn't reachable through setState —
+  // clear it so one failing test can't cascade into its neighbours.
+  __testing.resetForTests();
   useChatStore.setState({
     sessions: [],
     activeSessionId: "sess-A",

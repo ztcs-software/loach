@@ -24,6 +24,10 @@ const mocks = vi.hoisted(() => {
     reject: (e: unknown) => void;
     stopped: boolean;
     unlistened: boolean;
+    /** Set by a test BEFORE stop() is called to park the cancel IPC until
+     *  `releaseStop` fires — models a slow `chat_cancel` round-trip. */
+    holdStop?: boolean;
+    releaseStop?: () => void;
   }
   const streams: FakeStream[] = [];
   return { streams };
@@ -45,8 +49,21 @@ vi.mock("@/lib/tauri", async (importOriginal) => {
           entry.resolve = () =>
             res({
               streamId: entry.streamId,
-              stop: async () => {
+              stop: () => {
                 entry.stopped = true;
+                // Fidelity with the real backend: `chat_cancel` makes the
+                // stream emit a terminal Cancelled event — but only a still-
+                // attached listener sees it. The store unlistens BEFORE
+                // stopping precisely so this event can't re-enter teardown.
+                // (Tests injecting LATE events call `entry.onEvent` directly,
+                // bypassing this gate on purpose.)
+                if (!entry.unlistened) entry.onEvent({ kind: "cancelled" });
+                if (entry.holdStop) {
+                  return new Promise<void>((resolveStop) => {
+                    entry.releaseStop = resolveStop;
+                  });
+                }
+                return Promise.resolve();
               },
               unlisten: () => {
                 entry.unlistened = true;
@@ -92,6 +109,11 @@ function makeTask(sessionId: string, suffix: string) {
   } as unknown as Parameters<typeof __testing.startTask>[0];
 }
 
+function lastMsg(sessionId: string) {
+  const list = get().messages[sessionId] ?? [];
+  return list[list.length - 1];
+}
+
 /** Boilerplate: get task A running with its stream connected + installed. */
 async function startRunning(suffix = "A") {
   const p = __testing.startTask(makeTask(`sess-${suffix}`, suffix), get, set);
@@ -105,6 +127,9 @@ async function startRunning(suffix = "A") {
 
 beforeEach(() => {
   mocks.streams.length = 0;
+  // Module-level dispatch/buffer state isn't reachable through setState —
+  // clear it so one failing test can't cascade into its neighbours.
+  __testing.resetForTests();
   useChatStore.setState({
     sessions: [],
     activeSessionId: "sess-A",
@@ -233,5 +258,44 @@ describe("chat queue promotion", () => {
     await tick();
     expect(get().runningTask).toBeNull();
     expect(get().isStreaming).toBe(false);
+  });
+
+  it("a second Stop during a slow cancel doesn't tear down the promoted successor", async () => {
+    // `finishRunning` ownership-guard regression: the first Stop unlistens A
+    // and parks on the `chat_cancel` IPC; a second Stop (activeStream already
+    // null) tears A down immediately and promotes B. When the slow cancel
+    // finally resolves, its late `finishRunning` must bail — without the
+    // guard it would unlisten B's LIVE stream and clear B's running state,
+    // freezing B's bubble while the backend keeps generating unlistened.
+    await startRunning("A");
+    useChatStore.setState({ queue: [makeTask("sess-B", "B")] } as never);
+    mocks.streams[0].holdStop = true;
+
+    const firstStop = get().cancelForSession("sess-A"); // parks awaiting chat_cancel
+    await get().cancelForSession("sess-A"); // immediate teardown + promote
+    await tick();
+    expect(get().runningTask?.id).toBe("task-B");
+
+    // B connects and installs its handle before the slow cancel returns.
+    mocks.streams[1].resolve();
+    await tick();
+    expect(get().activeStream).not.toBeNull();
+
+    mocks.streams[0].releaseStop!();
+    await tick();
+    await firstStop;
+
+    // The late teardown owned task-A only — B must be untouched.
+    expect(get().runningTask?.id).toBe("task-B");
+    expect(get().isStreaming).toBe(true);
+    expect(get().activeStream).not.toBeNull();
+    expect(mocks.streams[1].unlistened).toBe(false);
+
+    // B streams to completion so module-level dispatch state ends clean.
+    mocks.streams[1].onEvent({ kind: "token", delta: "ok" });
+    mocks.streams[1].onEvent({ kind: "done" });
+    await tick();
+    expect(get().runningTask).toBeNull();
+    expect(lastMsg("sess-B").content).toBe("ok");
   });
 });

@@ -6,9 +6,13 @@ name: CI
 # handled by release.yml; this workflow never publishes anything.
 #
 # Triggers on every push so dev branches get feedback without a PR, and on
-# PRs to main so the merge gate sees a check. The push to main after a merge
-# re-validates the exact merged tree right before release.yml's gate looks
-# at it.
+# PRs to main so the merge gate sees a check. NOTE: this workflow does NOT
+# gate release.yml — both fire on the same push-to-main event and run in
+# parallel, and release.yml drafts its release without waiting for CI (the
+# draft still needs a manual publish, which is the human backstop). The
+# actual merge gate is branch protection: mark this file's two job names
+# ("tsc + vite build + vitest", "cargo test") as required status checks
+# on `main`.
 
 on:
   push:
@@ -16,9 +20,13 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# One in-flight run per event+ref: a new push to a PR branch obsoletes the
+# previous run, so cancel it. On main itself, never cancel — a superseded
+# main run that gets cancelled would leave that (possibly released) merge
+# commit with no completed CI verdict.
 concurrency:
   group: ci-${{ github.event_name }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   js:

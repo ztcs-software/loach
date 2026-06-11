@@ -42,6 +42,17 @@ export const RESERVED_VAR_KEYS: readonly string[] = [
   "CURRENT_TIMEZONE",
 ];
 
+/** Hard ceiling on the total text substitution may insert. The per-path
+ *  visited set bounds recursion DEPTH but not BREADTH: a chain of
+ *  self-multiplying globals (`V1 = "{{V0}}{{V0}}"`, `V2 = "{{V1}}{{V1}}"`, …)
+ *  doubles per level without ever revisiting a key on one path, so 30 rows
+ *  would compose a gigabyte string and freeze the renderer. Only the user's
+ *  own variable table can trigger this, but it's a one-keystroke footgun.
+ *  Past the budget, placeholders stay literal — they then surface through the
+ *  fill dialog rather than hanging the app. 64 KiB is far beyond any sane
+ *  snippet. */
+const MAX_EXPANSION_CHARS = 64 * 1024;
+
 export interface SubstitutionResult {
   /** The prompt with every resolvable placeholder substituted. */
   resolved: string;
@@ -98,11 +109,17 @@ export function expandKnownVars(
   // An EMPTY global value still substitutes (to ""), NOT treated as
   // unresolved: `table.get` returns undefined for a missing key but "" for an
   // explicitly-empty global, so the two stay distinct.
+  let budget = MAX_EXPANSION_CHARS;
   const expand = (text: string, path: Set<string>): string =>
     text.replace(PLACEHOLDER_RE, (whole, key: string) => {
       if (path.has(key)) return whole; // cycle / self-reference — leave literal
       const value = table.get(key);
       if (value === undefined) return whole; // unknown — leave for the fill dialog
+      if (budget <= 0) return whole; // over MAX_EXPANSION_CHARS — stop substituting
+      // Charge for the inserted text BEFORE recursing into it, so the
+      // total work (every inserted segment is scanned exactly once) stays
+      // proportional to the budget regardless of how the table fans out.
+      budget -= value.length;
       const next = new Set(path);
       next.add(key);
       return expand(value, next);

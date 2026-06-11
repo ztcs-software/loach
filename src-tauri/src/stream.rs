@@ -28,7 +28,13 @@ impl StreamRegistry {
             tracing::warn!(
                 "stream registry: overwriting existing handle for `{id}` — cancelling the previous waiter"
             );
-            old.notify_waiters();
+            // `notify_one` (stores a permit), NOT `notify_waiters` (wakes only
+            // currently-parked waiters), for the same reason as `cancel()`: if
+            // the collision lands while the old task is still in its connect
+            // window — registered but not yet awaiting `notified()` — the
+            // stored permit is consumed by its first poll instead of the wake
+            // being lost, which would leave the old task running unstoppable.
+            old.notify_one();
         }
         n
     }
@@ -168,8 +174,8 @@ mod tests {
     async fn register_collision_cancels_the_previous_waiter() {
         let reg = StreamRegistry::new();
         let old = reg.register("dup".into());
-        // Park interest the way a live provider task would (the overwrite
-        // path uses `notify_waiters`, which only wakes *registered* waiters).
+        // Park interest the way a mid-stream provider task would — already
+        // awaiting when the overwrite lands.
         let notified = old.notified();
         tokio::pin!(notified);
         notified.as_mut().enable();
@@ -178,6 +184,21 @@ mod tests {
         timeout(Duration::from_secs(1), notified)
             .await
             .expect("the overwritten waiter must be woken");
+    }
+
+    /// Collision variant of the register-window race above: the overwrite
+    /// lands BEFORE the old task first awaits `notified()`. `notify_one`
+    /// stores a permit the first poll consumes; with `notify_waiters` the
+    /// wake would be lost and the orphaned task would run to completion
+    /// with no cancel handle pointing at it.
+    #[tokio::test]
+    async fn register_collision_in_the_register_window_is_not_lost() {
+        let reg = StreamRegistry::new();
+        let old = reg.register("dup2".into());
+        let _new = reg.register("dup2".into()); // collide before any await
+        timeout(Duration::from_secs(1), old.notified())
+            .await
+            .expect("the stored permit must wake the first poll");
     }
 
     /// `finish()` retires the id. A cancel arriving after that (e.g. a Stop

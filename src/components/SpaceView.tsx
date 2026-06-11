@@ -361,10 +361,28 @@ export function SpaceView() {
                     })
                   }
                   onAdd={(content) =>
-                    doAddMemory({ space_id: space.id, content })
+                    doAddMemory({ space_id: space.id, content }).catch((e) => {
+                      useToastStore.getState().push({
+                        kind: "error",
+                        title: "Couldn't add memory",
+                        body: e instanceof Error ? e.message : String(e),
+                      });
+                      // Rethrow so MemoryTab keeps the typed draft instead
+                      // of clearing it as if the add had landed.
+                      throw e;
+                    })
                   }
                   onUpdate={(id, content) =>
-                    doUpdateMemory(id, space.id, content)
+                    doUpdateMemory(id, space.id, content).catch((e) => {
+                      useToastStore.getState().push({
+                        kind: "error",
+                        title: "Couldn't update memory",
+                        body: e instanceof Error ? e.message : String(e),
+                      });
+                      // Rethrow so MemoryTab stays in edit mode with the
+                      // draft intact rather than discarding the edit.
+                      throw e;
+                    })
                   }
                   onRemove={(id) =>
                     doRemoveMemory(id, space.id).catch((e) => {
@@ -1129,6 +1147,10 @@ function MemoryTab({
     try {
       await onAdd(trimmed);
       setDraft("");
+    } catch {
+      // Already surfaced via the call-site toast. Swallow here (so the
+      // rejection doesn't double-report through the global net) and keep
+      // the draft so the text the user typed isn't lost with the failure.
     } finally {
       setAdding(false);
     }
@@ -1144,7 +1166,14 @@ function MemoryTab({
     const trimmed = editVal.trim();
     const original = memories.find((m) => m.id === editingId);
     if (trimmed && original && trimmed !== original.content) {
-      await onUpdate(editingId, trimmed);
+      try {
+        await onUpdate(editingId, trimmed);
+      } catch {
+        // Already surfaced via the call-site toast. Stay in edit mode with
+        // the draft intact so the user can retry (or Escape to discard) —
+        // exiting here would silently throw the edit away.
+        return;
+      }
     }
     setEditingId(null);
     setEditVal("");

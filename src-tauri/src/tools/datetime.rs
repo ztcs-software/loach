@@ -701,6 +701,22 @@ mod tests {
     }
 
     #[test]
+    fn diff_business_days_rejects_over_cap_span() {
+        // `business_days_between` walks the span one day at a time, so the
+        // `diff` arm must refuse an over-cap span up front instead of walking
+        // it. Years beyond 9999 need an explicit sign for chrono's `%Y` —
+        // these two parse fine and sit ~190M days apart, over the 100M cap.
+        let r = dispatch(&json!({
+            "op": "diff",
+            "from": "-260000-01-01",
+            "to": "+260000-01-01",
+            "unit": "business_days",
+        }));
+        assert!(r.is_error, "got: {}", r.content_text);
+        assert!(r.content_text.contains("exceeds cap"), "got: {}", r.content_text);
+    }
+
+    #[test]
     fn business_days_between_same_week() {
         // Monday → Friday is 4 business days apart.
         assert_eq!(

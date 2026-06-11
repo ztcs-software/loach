@@ -32,6 +32,11 @@
       "@/*": ["./src/*"]
     }
   },
-  "include": ["src"],
-  "exclude": ["src/**/*.test.ts"]
+  // `tests/` (repo-level invariants) and the in-src *.test.ts files are part
+  // of the project on purpose: `tsc --noEmit` emits nothing and vite bundles
+  // only what index.html imports, so including tests here costs nothing at
+  // build time but gives them type-checking (vitest transpiles via esbuild
+  // WITHOUT checking types) and gives the editor the `@/*` path mapping
+  // inside test files.
+  "include": ["src", "tests"]
 }

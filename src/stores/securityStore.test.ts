@@ -60,6 +60,26 @@ describe("securityStore hydration", () => {
     expect(s.status.configured).toBe(false);
   });
 
+  it("fails open when the status probe hangs", async () => {
+    // A wedged IPC call that never settles — rejection is covered above;
+    // this pins the timeout path (`PROBE_TIMEOUT_MS` race in hydrate()).
+    vi.useFakeTimers();
+    try {
+      lockUntilHydrated();
+      probe.mockReturnValueOnce(new Promise<never>(() => {}));
+      const hydration = useSecurityStore.getState().hydrate();
+      await vi.advanceTimersByTimeAsync(5000);
+      await hydration;
+
+      const s = useSecurityStore.getState();
+      expect(s.hydrated).toBe(true);
+      expect(s.unlocked).toBe(true);
+      expect(s.status.configured).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("stays locked on cold start when a lock is configured", async () => {
     // Fail-open must not leak into the success path: a configured lock on
     // first boot keeps the pessimistic `unlocked: false`.
