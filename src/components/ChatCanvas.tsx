@@ -234,11 +234,24 @@ export function ChatCanvas() {
     // bubble per token when there's nothing to find.
     if (!searchOpen && !hasMarksRef.current) return;
 
+    // Never touch the streaming message's DOM. The highlighter mutates text
+    // nodes via replaceChild; the streaming bubble re-renders every token, so
+    // React would reconcile against our detached nodes — freezing the text or
+    // throwing NotFoundError into the chat ErrorBoundary. Skip it in BOTH the
+    // strip and highlight passes; it gets highlighted normally once it stops
+    // streaming (this effect re-runs when `streamingHere` flips). The
+    // streaming bubble is always the last message in the streaming session.
+    const streamingMsgId =
+      streamingHere && messages.length > 0
+        ? messages[messages.length - 1].id
+        : null;
+
     if (hasMarksRef.current) {
       // Strip stale highlights — covers query changes, search close, message
       // updates, and the case where a previously-matching message no longer
       // matches.
-      for (const el of messageRefs.current.values()) {
+      for (const [id, el] of messageRefs.current.entries()) {
+        if (id === streamingMsgId) continue;
         el
           .querySelectorAll<HTMLElement>("[data-loach-match]")
           .forEach(unwrapMark);
@@ -251,13 +264,14 @@ export function ChatCanvas() {
     const lowerQ = q.toLowerCase();
     const currentId = matchIds[matchCursor];
     for (const m of messages) {
+      if (m.id === streamingMsgId) continue;
       if (!m.content.toLowerCase().includes(lowerQ)) continue;
       const el = messageRefs.current.get(m.id);
       if (!el) continue;
       highlightTextNodes(el, q, m.id === currentId);
       hasMarksRef.current = true;
     }
-  }, [searchOpen, searchQuery, matchIds, matchCursor, messages]);
+  }, [searchOpen, searchQuery, matchIds, matchCursor, messages, streamingHere]);
 
   const closeSearch = () => {
     setSearchOpen(false);

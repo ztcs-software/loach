@@ -334,6 +334,12 @@ function PrivateChatBody() {
   const scrollerRef = useRef<HTMLDivElement>(null);
   const stickToBottom = useRef(true);
 
+  // The scroller div only exists once there's a message to render (the
+  // empty-state branch below has no `scrollerRef`), so attach the scroll
+  // listener when emptiness flips rather than on mount — an empty-deps effect
+  // would attach it never, leaving `stickToBottom` pinned true so every token
+  // yanks the view to the bottom and the user can't scroll up mid-reply.
+  const isEmpty = messages.length === 0;
   useEffect(() => {
     const el = scrollerRef.current;
     if (!el) return;
@@ -343,7 +349,7 @@ function PrivateChatBody() {
     };
     el.addEventListener("scroll", onScroll, { passive: true });
     return () => el.removeEventListener("scroll", onScroll);
-  }, []);
+  }, [isEmpty]);
 
   useEffect(() => {
     if (!stickToBottom.current) return;
@@ -351,7 +357,7 @@ function PrivateChatBody() {
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages, isStreaming]);
 
-  if (messages.length === 0) {
+  if (isEmpty) {
     return (
       <div className="flex flex-1 items-center justify-center px-6">
         <div className="max-w-md text-center">

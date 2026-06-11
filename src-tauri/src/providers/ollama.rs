@@ -1118,3 +1118,68 @@ fn resolve_qualified<'a>(
     Some((def, def.name.clone()))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- normalise_args -------------------------------------------------------
+    // Ollama mainline hands `arguments` as a parsed object, but some builds
+    // and the OpenAI-compat passes hand a stringified JSON. The dispatcher
+    // must see one shape regardless of which fork the user runs.
+
+    #[test]
+    fn normalise_args_passes_objects_through() {
+        let v = json!({"city": "Oslo"});
+        assert_eq!(normalise_args(&v), v);
+    }
+
+    #[test]
+    fn normalise_args_parses_stringified_json() {
+        let v = Value::String(r#"{"city":"Oslo","n":2}"#.into());
+        assert_eq!(normalise_args(&v), json!({"city": "Oslo", "n": 2}));
+    }
+
+    #[test]
+    fn normalise_args_forwards_unparseable_strings_raw() {
+        // Malformed model output still reaches the tool (which replies with
+        // an error the model can react to) instead of killing the call.
+        let v = Value::String("{city: Oslo}".into());
+        assert_eq!(normalise_args(&v), v);
+    }
+
+    #[test]
+    fn normalise_args_maps_null_to_empty_object() {
+        assert_eq!(normalise_args(&Value::Null), json!({}));
+    }
+
+    // --- serialise_tool_call ----------------------------------------------------
+
+    #[test]
+    fn serialise_tool_call_round_trips_into_history_shape() {
+        // The echo of the model's own call that we put back into the
+        // transcript must carry normalised arguments — feeding the
+        // stringified variant back verbatim confuses follow-up turns.
+        let call = OllamaToolCall {
+            function: Some(OllamaToolFn {
+                name: "get_weather".into(),
+                arguments: Value::String(r#"{"city":"Oslo"}"#.into()),
+            }),
+        };
+        assert_eq!(
+            serialise_tool_call(&call),
+            json!({ "function": { "name": "get_weather", "arguments": { "city": "Oslo" } } })
+        );
+    }
+
+    #[test]
+    fn serialise_tool_call_tolerates_missing_function() {
+        // A `tool_calls` entry with no `function` body (seen from forks
+        // mid-stream) serialises to an empty shell rather than panicking.
+        let call = OllamaToolCall { function: None };
+        assert_eq!(
+            serialise_tool_call(&call),
+            json!({ "function": { "name": "", "arguments": {} } })
+        );
+    }
+}
+

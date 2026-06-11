@@ -28,7 +28,13 @@ impl StreamRegistry {
             tracing::warn!(
                 "stream registry: overwriting existing handle for `{id}` — cancelling the previous waiter"
             );
-            old.notify_waiters();
+            // `notify_one` (stores a permit), NOT `notify_waiters` (wakes only
+            // currently-parked waiters), for the same reason as `cancel()`: if
+            // the collision lands while the old task is still in its connect
+            // window — registered but not yet awaiting `notified()` — the
+            // stored permit is consumed by its first poll instead of the wake
+            // being lost, which would leave the old task running unstoppable.
+            old.notify_one();
         }
         n
     }
@@ -138,4 +144,74 @@ pub enum AdminEvent {
     Error {
         message: String,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+    use tokio::time::timeout;
+
+    /// The backend twin of the frontend's connect-window race: a cancel
+    /// issued between `register()` returning and the provider task first
+    /// awaiting `notified()` must be observed by that first poll. `cancel`
+    /// uses `notify_one` (stores a permit) rather than `notify_waiters`
+    /// (wakes only current waiters) for exactly this reason.
+    #[tokio::test]
+    async fn cancel_in_the_register_window_is_not_lost() {
+        let reg = StreamRegistry::new();
+        let cancel = reg.register("s1".into());
+        reg.cancel("s1"); // lands before anyone awaits
+        timeout(Duration::from_secs(1), cancel.notified())
+            .await
+            .expect("the stored permit must wake the first poll");
+    }
+
+    /// A stream-id collision overwrites the old handle — the old waiter
+    /// must be cancelled at that moment, or it keeps running orphaned with
+    /// no cancel handle pointing at it.
+    #[tokio::test]
+    async fn register_collision_cancels_the_previous_waiter() {
+        let reg = StreamRegistry::new();
+        let old = reg.register("dup".into());
+        // Park interest the way a mid-stream provider task would — already
+        // awaiting when the overwrite lands.
+        let notified = old.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+
+        let _new = reg.register("dup".into());
+        timeout(Duration::from_secs(1), notified)
+            .await
+            .expect("the overwritten waiter must be woken");
+    }
+
+    /// Collision variant of the register-window race above: the overwrite
+    /// lands BEFORE the old task first awaits `notified()`. `notify_one`
+    /// stores a permit the first poll consumes; with `notify_waiters` the
+    /// wake would be lost and the orphaned task would run to completion
+    /// with no cancel handle pointing at it.
+    #[tokio::test]
+    async fn register_collision_in_the_register_window_is_not_lost() {
+        let reg = StreamRegistry::new();
+        let old = reg.register("dup2".into());
+        let _new = reg.register("dup2".into()); // collide before any await
+        timeout(Duration::from_secs(1), old.notified())
+            .await
+            .expect("the stored permit must wake the first poll");
+    }
+
+    /// `finish()` retires the id. A cancel arriving after that (e.g. a Stop
+    /// click racing the final Done) must find nothing — in particular it
+    /// must not park a permit that a future stream reusing the id would
+    /// consume as a phantom cancel.
+    #[tokio::test]
+    async fn cancel_after_finish_is_a_noop() {
+        let reg = StreamRegistry::new();
+        let n = reg.register("s2".into());
+        reg.finish("s2");
+        reg.cancel("s2");
+        let woke = timeout(Duration::from_millis(50), n.notified()).await;
+        assert!(woke.is_err(), "no permit should exist after finish()");
+    }
 }

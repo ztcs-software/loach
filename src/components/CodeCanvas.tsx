@@ -10,7 +10,6 @@ import {
 import { useChatStore } from "@/stores/chatStore";
 import { useToastStore } from "@/stores/toastStore";
 import { lastCodeBlock } from "@/lib/codeBlocks";
-import { preprocessTex } from "./Markdown";
 import { openInVscode } from "@/lib/tauri";
 import { saveCodeToFile, defaultFilename } from "@/lib/codeExport";
 import { cn } from "@/lib/utils";
@@ -56,12 +55,13 @@ export function CodeCanvas() {
   const [dragWidth, setDragWidth] = useState<number | null>(null);
 
   // When bound to a live message, re-extract its last fenced block so the
-  // canvas tracks the streaming code. Falls back to the snapshot the canvas
-  // was opened with (attachments, completed blocks, or a deleted source).
+  // canvas tracks the streaming code — verbatim, since code is never
+  // TeX-rewritten. Falls back to the snapshot the canvas was opened with
+  // (attachments, completed blocks, or a deleted source).
   const live = useMemo(
     () =>
       binding && liveContent != null
-        ? lastCodeBlock(preprocessTex(liveContent))
+        ? lastCodeBlock(liveContent)
         : null,
     [binding, liveContent],
   );

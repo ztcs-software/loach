@@ -1,10 +1,11 @@
-import { memo, useMemo, type ReactNode } from "react";
+import { memo, type ReactNode } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import "highlight.js/styles/github-dark.css";
 import { CodeBlock } from "./CodeBlock";
 import { cn } from "@/lib/utils";
+import { isTauri } from "@/lib/tauri";
 
 interface MarkdownProps {
   content: string;
@@ -142,7 +143,7 @@ const TEX_SYMBOLS: Record<string, string> = {
 const TEX_INLINE_RE = /\$\\([a-zA-Z]+)\s*\$/g;
 const TEX_BARE_RE = /\\([a-zA-Z]+)(?![a-zA-Z])/g;
 
-export function preprocessTex(input: string): string {
+function texReplace(input: string): string {
   return input
     .replace(TEX_INLINE_RE, (whole, name: string) => {
       const sym = TEX_SYMBOLS[name];
@@ -152,6 +153,37 @@ export function preprocessTex(input: string): string {
       const sym = TEX_SYMBOLS[name];
       return sym ?? whole;
     });
+}
+
+// Apply the TeX→Unicode fallback as a rehype pass over text nodes ONLY,
+// skipping anything inside `<code>` / `<pre>`. The previous version rewrote
+// the whole message string *before* parsing, which mangled code: `cd path\to`
+// became `cd path→`, and `\alpha` / `\sum` inside a fenced block were rewritten
+// too — and because `CodeBlock`'s `raw` is read back out of the parsed tree,
+// the corruption leaked into Copy / Export / the canvas, not just the on-screen
+// render. Operating on the hast tree leaves every code node's text intact.
+function rehypeTexFallback() {
+  return (tree: unknown) => {
+    const visit = (node: unknown, inCode: boolean): void => {
+      if (!node || typeof node !== "object") return;
+      const n = node as {
+        type?: string;
+        tagName?: string;
+        value?: string;
+        children?: unknown[];
+      };
+      if (n.type === "text" && !inCode && typeof n.value === "string") {
+        n.value = texReplace(n.value);
+        return;
+      }
+      const entersCode =
+        n.type === "element" && (n.tagName === "code" || n.tagName === "pre");
+      if (Array.isArray(n.children)) {
+        for (const child of n.children) visit(child, inCode || entersCode);
+      }
+    };
+    visit(tree, false);
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -179,7 +211,35 @@ function extractRaw(node: ReactNode): string {
 // nothing else changed — measurable per-token cost on the streaming
 // bubble where this component re-renders thousands of times.
 const MARKDOWN_PLUGINS_REMARK = [remarkGfm];
-const MARKDOWN_PLUGINS_REHYPE = [rehypeHighlight];
+const MARKDOWN_PLUGINS_REHYPE = [rehypeTexFallback, rehypeHighlight];
+
+// Open a link from rendered (untrusted) markdown through the OS browser / mail
+// client. Mirrors the helper used by Settings / Onboarding / Updates; the
+// scheme allow-listing happens at the call site in the `a` component below.
+async function openExternal(url: string): Promise<void> {
+  if (isTauri) {
+    const { open } = await import("@tauri-apps/plugin-shell");
+    await open(url);
+  } else {
+    window.open(url, "_blank", "noopener,noreferrer");
+  }
+}
+
+// Decide whether a markdown link href is safe to hand to the OS handler. Model
+// output is untrusted: allow only absolute http / https / mailto URLs — the
+// schemes `shell:allow-open` grants — and reject javascript:, file:, data:,
+// etc. Relative / fragment hrefs don't parse as absolute URLs and return false
+// (there's nowhere to navigate inside the chat anyway).
+function shouldOpenExternally(href: string | undefined): href is string {
+  if (!href) return false;
+  let scheme: string;
+  try {
+    scheme = new URL(href).protocol;
+  } catch {
+    return false;
+  }
+  return scheme === "http:" || scheme === "https:" || scheme === "mailto:";
+}
 
 const MARKDOWN_COMPONENTS: Components = {
   pre({ children }) {
@@ -200,7 +260,18 @@ const MARKDOWN_COMPONENTS: Components = {
   },
   a({ children, href, node: _node, ...props }) {
     return (
-      <a href={href} target="_blank" rel="noreferrer noopener" {...props}>
+      <a
+        href={href}
+        rel="noreferrer noopener"
+        onClick={(e) => {
+          // Model output is untrusted — never let the webview navigate. Open
+          // only allow-listed schemes through the OS handler (see
+          // `shouldOpenExternally`); ignore everything else.
+          e.preventDefault();
+          if (shouldOpenExternally(href)) void openExternal(href);
+        }}
+        {...props}
+      >
         {children}
       </a>
     );
@@ -210,16 +281,12 @@ const MARKDOWN_COMPONENTS: Components = {
 // `memo` so non-streaming messages skip the entire react-markdown
 // re-parse when their parent re-renders for unrelated reasons. The
 // streaming bubble still re-renders per token (content does change),
-// but at least the `preprocessTex` walk and the components-object
-// allocation no longer happen each tick.
+// but at least the components-object allocation no longer happens each
+// tick.
 export const Markdown = memo(function Markdown({
   content,
   className,
 }: MarkdownProps) {
-  // `preprocessTex` walks `content` twice with regexes — small on a
-  // sentence, meaningful on a 4 KB streamed reply at 60 tokens/s. Cache
-  // on content so we only re-run when the upstream string changes.
-  const prepared = useMemo(() => preprocessTex(content), [content]);
   return (
     <div
       className={cn(
@@ -239,8 +306,13 @@ export const Markdown = memo(function Markdown({
         rehypePlugins={MARKDOWN_PLUGINS_REHYPE}
         components={MARKDOWN_COMPONENTS}
       >
-        {prepared}
+        {content}
       </ReactMarkdown>
     </div>
   );
 });
+
+// Exposed for unit tests only (`Markdown.test.ts`). These are the security-
+// sensitive pure helpers behind H5 (TeX fallback must never touch code) and
+// H8 (link scheme allow-list); not part of the public API.
+export const __testing = { texReplace, rehypeTexFallback, shouldOpenExternally };

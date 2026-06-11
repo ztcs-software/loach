@@ -750,25 +750,39 @@ type Setter = (
  *  half-written turn. */
 type FinishReason = "done" | "cancelled" | "error";
 
-/** Called when a stream ends (done event, manual cancel, error, or
- *  startup error). Persists the partial assistant reply, tears down the
- *  active stream handle, clears running state, and kicks the next
- *  waiting task. Safe to call more than once — subsequent calls are
- *  no-ops because `runningTask` is null.
+/** Called when a stream ends (done event, manual cancel, or error).
+ *  Persists the partial assistant reply, tears down the active stream
+ *  handle, clears running state, and kicks the next waiting task.
  *
- *  `reason` defaults to `"done"` for backwards compatibility with the
- *  startup-error path (which always emitted Done in the old shape).
+ *  `forTask` is the id of the task this teardown was issued for. Safe to
+ *  call more than once for the same task — only the call that still owns
+ *  `runningTask` proceeds. The guard matters because teardown can arrive
+ *  late: a second Stop click runs the full teardown immediately (the first
+ *  click already nulled `activeStream`), and when the first click's
+ *  `stream.stop()` IPC finally resolves, the queue may have promoted a
+ *  successor — an unguarded late call would then persist/unlisten the
+ *  SUCCESSOR's live stream and clear its running state, freezing its
+ *  bubble while the backend keeps generating with no listener.
+ *
  *  Callers that know they're handling a cancel pass `"cancelled"` so
  *  we can skip the memory-extraction + unread-dot side-effects that
  *  would otherwise lie about an interrupted turn. */
-function finishRunning(get: Getter, set: Setter, reason: FinishReason = "done") {
+function finishRunning(
+  get: Getter,
+  set: Setter,
+  reason: FinishReason,
+  forTask: string,
+) {
   // Sync-flush any pending rAF before teardown so the final tokens are
   // visible in the UI before we null out `runningBuffers` / clear the
   // streaming state. Persistence reads from `runningBuffers` directly
   // (not from store state), so this is purely for the UI bubble — but a
   // missing flush would leave the last frame of tokens invisible until
-  // the next reload of the chat.
+  // the next reload of the chat. Runs before the ownership guard: a stale
+  // call flushing the current task's pending frame just renders it a tick
+  // early, which is harmless.
   flushPendingFrame(get, set);
+  if (get().runningTask?.id !== forTask) return;
   const running = get().runningTask;
   const buf = runningBuffers;
   if (running && buf) {
@@ -915,6 +929,36 @@ function promoteQueueHead(get: Getter, set: Setter) {
   });
 }
 
+/** Direct-start path shared by `sendUserMessage` / `regenerateLast` /
+ *  `promoteSession` for the nothing-running case. Claims the dispatch lock
+ *  BEFORE `startTask`'s first await: `startTask` only sets `runningTask`
+ *  after its `appendMessage` round-trip, so without the lock a second
+ *  dispatcher landing in that window (a queue promotion mid-start, or a
+ *  send in another chat) would direct-start too — both streams would run,
+ *  and the loser's just-persisted assistant placeholder would sit in the
+ *  transcript forever with no reply and no error. Returns false without
+ *  starting when something is already running or mid-start; callers park
+ *  the task in the queue instead, and the lock holder's trailing re-promote
+ *  (or the running task's `finishRunning`) picks it up. */
+async function tryDirectStart(
+  task: QueueTask,
+  get: Getter,
+  set: Setter,
+): Promise<boolean> {
+  if (get().runningTask || dispatching) return false;
+  dispatching = true;
+  try {
+    await startTask(task, get, set);
+  } finally {
+    dispatching = false;
+  }
+  // Same nudge as the queued path: a startup failure cleared `runningTask`
+  // inside `startTask`, so re-check the queue for anything parked while the
+  // lock was held. On success the promote's inner guards bail immediately.
+  promoteQueueHead(get, set);
+  return true;
+}
+
 /** Starts a QueueTask: creates the assistant placeholder, opens the stream,
  *  wires event handlers. On any startup error, tears down and tries the
  *  next waiter so one broken task can't stall the whole queue. */
@@ -1002,6 +1046,14 @@ async function startTask(task: QueueTask, get: Getter, set: Setter) {
         params: task.request.params,
       },
       (ev) => {
+        // Drop events from a stream whose task is no longer the running one.
+        // A cancel during the connect window (or a superseding task) clears or
+        // replaces `runningTask` and the module-level `runningBuffers` before
+        // this stream's backend run has been told to stop — without this
+        // identity check a late token from the old stream would be written
+        // into the NEW task's buffer, and an old `done`/`error` would tear the
+        // new task down mid-stream.
+        if (get().runningTask?.id !== task.id) return;
         const buf = runningBuffers;
         if (!buf) return; // cancelled between events
         if (ev.kind === "thinking") {
@@ -1077,19 +1129,37 @@ async function startTask(task: QueueTask, get: Getter, set: Setter) {
           // Providers emit Error and then stop without a trailing Done, so
           // the streaming state would otherwise stay set forever and freeze
           // the input box in "Replying…" mode.
-          finishRunning(get, set, "error");
+          finishRunning(get, set, "error", task.id);
         } else if (ev.kind === "cancelled") {
           // User-initiated stop. Same teardown as done, but flagged so
           // `finishRunning` skips the memory + unread side-effects.
-          finishRunning(get, set, "cancelled");
+          finishRunning(get, set, "cancelled", task.id);
         } else if (ev.kind === "done") {
-          finishRunning(get, set, "done");
+          finishRunning(get, set, "done", task.id);
         }
       },
     );
-    set({ activeStream: { stop: handle.stop, unlisten: handle.unlisten } });
+    if (get().runningTask?.id === task.id) {
+      set({ activeStream: { stop: handle.stop, unlisten: handle.unlisten } });
+    } else {
+      // Cancelled or superseded during the connect window: the backend stream
+      // is live but orphaned. Tear it down rather than installing a handle
+      // that would leak this stream and could clobber a successor task's
+      // `activeStream` (leaving the new stream uncancellable).
+      try {
+        handle.unlisten();
+      } catch {
+        /* ignore */
+      }
+      void handle.stop();
+    }
   } catch (e) {
     logger.error("startChatStream failed", e);
+    // If this task is no longer the running one, a cancel/supersede during the
+    // connect window already tore it down (and another task may now own the
+    // streaming state). Bail before patching an error bubble or resetting
+    // state we no longer own.
+    if (get().runningTask?.id !== task.id) return;
     // The placeholder assistant row was created above so the bubble could
     // show "thinking…" while we connected. Now that the connection itself
     // failed, replace its contents with a visible error message instead of
@@ -1146,6 +1216,32 @@ async function startTask(task: QueueTask, get: Getter, set: Setter) {
     // call would silently bail.
   }
 }
+
+/**
+ * Internal seams exposed ONLY for the streaming/queue unit tests
+ * (`chatStore.streamRace.test.ts`, `chatStore.queue.test.ts`). `startTask` is
+ * module-private — nothing outside the store should start a task directly —
+ * but the tests need to drive it against a controllable `startChatStream`
+ * mock to reproduce the connect-window cancel race deterministically.
+ * `resetForTests` clears the module-level dispatch/buffer state the store's
+ * `setState` can't reach; without it, a mid-test assertion failure could leak
+ * `dispatching = true` or a live buffer into the next test in the file and
+ * cascade-fail it. Not part of the public API.
+ */
+function resetForTests() {
+  dispatching = false;
+  runningBuffers = null;
+  if (pendingFrame !== null) {
+    cancelAnimationFrame(pendingFrame);
+    pendingFrame = null;
+  }
+  pendingDirty.content = false;
+  pendingDirty.thinking = false;
+  pendingDirty.metrics = false;
+  pendingDirty.toolCalls = false;
+  pendingDirty.attachments = false;
+}
+export const __testing = { startTask, resetForTests };
 
 /**
  * Resolve the user's "Default model" preference into a concrete
@@ -1739,19 +1835,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
       preToolCalls: fetchToolRecords.length > 0 ? fetchToolRecords : undefined,
     };
 
-    // 3. Dispatch. If nothing is running globally, start immediately.
-    //    Otherwise park in the waiting queue and let the runner pick us
-    //    up when the current task ends. The trailing `promoteQueueHead`
-    //    on the direct-start branch covers the case where startTask
-    //    failed synchronously: it nulls `runningTask` in its catch but
-    //    won't re-promote on its own (the `.finally` re-promote in
-    //    `promoteQueueHead` only fires when a task was dispatched from
-    //    there). Without this nudge, a synchronous startup failure
-    //    would strand any tasks queued in the meantime.
-    if (!get().runningTask) {
-      await startTask(task, get, set);
-      promoteQueueHead(get, set);
-    } else {
+    // 3. Dispatch. If nothing is running (or mid-start) globally, start
+    //    immediately. Otherwise park in the waiting queue and let the
+    //    runner pick us up when the current task ends — `tryDirectStart`
+    //    owns the dispatch-lock claim and the trailing re-promote nudge.
+    if (!(await tryDirectStart(task, get, set))) {
       set((s) => ({ queue: [...s.queue, task] }));
     }
   },
@@ -1837,10 +1925,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       request,
     };
 
-    if (!get().runningTask) {
-      await startTask(task, get, set);
-      promoteQueueHead(get, set);
-    } else {
+    if (!(await tryDirectStart(task, get, set))) {
       set((s) => ({ queue: [...s.queue, task] }));
     }
   },
@@ -1867,7 +1952,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           logger.error("stream stop failed", e);
         }
       }
-      finishRunning(get, set, "cancelled");
+      finishRunning(get, set, "cancelled", running.id);
       return;
     }
 
@@ -1882,15 +1967,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
   promoteSession: async (sessionId) => {
     const state = get();
 
-    // Nothing running → treat promote like a direct start. Same nudge
-    // pattern as in `submit`: a synchronous startup failure would
-    // otherwise leave the queue stalled.
+    // Nothing running → treat promote like a direct start. If another
+    // dispatcher is mid-start (lock claimed, `runningTask` not set yet),
+    // park back at the HEAD instead: it runs right after the starter, and
+    // promoting again once that stream is live takes the cancel path below.
     if (!state.runningTask) {
       const task = state.queue.find((t) => t.sessionId === sessionId);
       if (!task) return;
       set((s) => ({ queue: s.queue.filter((t) => t.id !== task.id) }));
-      await startTask(task, get, set);
-      promoteQueueHead(get, set);
+      if (!(await tryDirectStart(task, get, set))) {
+        set((s) => ({ queue: [task, ...s.queue] }));
+      }
       return;
     }
 
@@ -1900,6 +1987,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // Move the target task to queue[0], then cancel the current runner.
     // `finishRunning` inside that cancel path promotes the (now-first)
     // task of the queue, which is ours.
+    const runnerId = state.runningTask.id;
     const task = state.queue.find((t) => t.sessionId === sessionId);
     if (!task) return;
     const others = state.queue.filter((t) => t.id !== task.id);
@@ -1919,7 +2007,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         logger.error("stream stop failed", e);
       }
     }
-    finishRunning(get, set, "cancelled");
+    finishRunning(get, set, "cancelled", runnerId);
   },
 
   compactContext: async (sessionId) => {

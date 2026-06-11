@@ -8,6 +8,7 @@ import {
   type LockStatus,
   type SecuritySetupArgs,
 } from "@/lib/tauri";
+import { logger } from "@/lib/logger";
 
 interface SecurityState {
   /** Latest snapshot from the backend. `configured: false` until hydrate(). */
@@ -43,6 +44,14 @@ const EMPTY_STATUS: LockStatus = {
   has_hint: false,
 };
 
+/** How long `hydrate` waits for the status probe before failing open. The
+ *  probe is a single keyring read — normally milliseconds — so this only
+ *  exists for a WEDGED call that never settles (a rejected one already takes
+ *  the catch below). `hydrated` gates the entire UI in App.tsx, so a hung
+ *  probe without a timeout would strand the user on the probing screen
+ *  forever. */
+const PROBE_TIMEOUT_MS = 5000;
+
 export const useSecurityStore = create<SecurityState>((set, get) => ({
   status: EMPTY_STATUS,
   hydrated: false,
@@ -51,15 +60,44 @@ export const useSecurityStore = create<SecurityState>((set, get) => ({
   unlocked: true,
 
   hydrate: async () => {
-    const status = await securityStatus();
-    set({
-      status,
-      hydrated: true,
-      // First boot: if a lock is configured, the user has to unlock before
-      // the main UI mounts. Re-hydrating after a setup keeps `unlocked` as
-      // it was — the user just authenticated, no need to lock them out.
-      unlocked: status.configured ? get().unlocked : true,
+    // The timeout RESOLVES a sentinel rather than rejecting: a rejecting
+    // loser would surface as an unhandled rejection (nothing awaits it once
+    // the race settles) and trip the global toast net in main.tsx.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = new Promise<"timed-out">((resolve) => {
+      timer = setTimeout(() => resolve("timed-out"), PROBE_TIMEOUT_MS);
     });
+    try {
+      const status = await Promise.race([securityStatus(), timedOut]);
+      if (status === "timed-out") {
+        throw new Error(
+          `security status probe still pending after ${PROBE_TIMEOUT_MS}ms`,
+        );
+      }
+      set({
+        status,
+        hydrated: true,
+        // First boot: if a lock is configured, the user has to unlock before
+        // the main UI mounts. Re-hydrating after a setup keeps `unlocked` as
+        // it was — the user just authenticated, no need to lock them out.
+        unlocked: status.configured ? get().unlocked : true,
+      });
+    } catch (e) {
+      // The status probe failed (e.g. no Secret Service / keyring backend on
+      // a Linux box) or timed out (a wedged IPC call, routed here via the
+      // race above). Fail OPEN: mark hydration done and treat the app as
+      // unlocked + unconfigured rather than stranding the user on the probing
+      // screen forever. App.tsx's hydration gate waits on `hydrated`, so a
+      // never-settling probe would otherwise hang the entire app. The
+      // app-lock is a render-gate over plaintext local data, not a
+      // confidentiality boundary, so failing open costs no real secrecy —
+      // whereas failing closed would lock the owner out of their own machine
+      // with no recovery path (unlock also needs the keyring).
+      logger.error("security status probe failed; continuing unlocked", e);
+      set({ status: EMPTY_STATUS, hydrated: true, unlocked: true });
+    } finally {
+      clearTimeout(timer);
+    }
   },
 
   setup: async (args) => {

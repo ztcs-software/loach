@@ -104,7 +104,10 @@ interface ModelsState {
   /** Start a pull; resolves once the stream *ends* (done or error). */
   pullModel: (name: string) => Promise<void>;
   /** Start a create; resolves once the stream ends. */
-  createModel: (name: string, modelfile: string) => Promise<void>;
+  /** Resolves with the run's terminal state (`finished`/`error`) so callers
+   *  can tell success from a daemon-side failure. `runAdminStream` resolves on
+   *  ANY terminal state and never rejects, so a bare `await` can't. */
+  createModel: (name: string, modelfile: string) => Promise<AdminProgress | null>;
   /** Cancel a running admin stream by id. */
   cancelRun: (streamId: string) => Promise<void>;
   /** Remove a terminal (done / error) run from the tracker. */
@@ -315,6 +318,11 @@ export const useModelsStore = create<ModelsState>((set, get) => ({
         await get().refresh();
       },
     );
+
+    // Surface the terminal outcome — runAdminStream resolves on ANY terminal
+    // state (done / error / cancelled) and never rejects, so without this a
+    // failed create looks like success to the caller.
+    return get().runs[streamId] ?? null;
   },
 
   cancelRun: async (streamId) => {
