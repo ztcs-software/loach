@@ -862,6 +862,14 @@ fn is_safe_for_bearer(base_url: &str) -> bool {
             {
                 return true;
             }
+            // `Url::host_str` keeps the `[ ]` brackets on IPv6 addresses —
+            // strip them before parsing or `http://[::1]` is never
+            // recognised as loopback and silently loses its auth header
+            // (same dance as `refuse_link_local_host` in providers/mod.rs).
+            let host = host
+                .strip_prefix('[')
+                .and_then(|s| s.strip_suffix(']'))
+                .unwrap_or(host);
             if let Ok(ip) = host.parse::<std::net::IpAddr>() {
                 return ip.is_loopback();
             }
@@ -914,4 +922,152 @@ fn find_frame_end_with_len(buf: &[u8]) -> Option<(usize, usize)> {
 
 fn find_frame_end(buf: &[u8]) -> Option<usize> {
     find_frame_end_with_len(buf).map(|(pos, _)| pos)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- is_safe_for_bearer -------------------------------------------------
+    // A regression here silently leaks the user's API key over cleartext
+    // HTTP, so pin both directions of the decision table.
+
+    #[test]
+    fn bearer_allowed_on_https_anywhere() {
+        assert!(is_safe_for_bearer("https://api.openai.com/v1"));
+        assert!(is_safe_for_bearer("https://192.168.1.50:8080"));
+    }
+
+    #[test]
+    fn bearer_allowed_on_http_loopback_only() {
+        assert!(is_safe_for_bearer("http://localhost:8080/v1"));
+        assert!(is_safe_for_bearer("http://LOCALHOST:8080")); // case-insensitive
+        assert!(is_safe_for_bearer("http://ip6-localhost:8080"));
+        assert!(is_safe_for_bearer("http://127.0.0.1:1234"));
+        assert!(is_safe_for_bearer("http://[::1]:8080"));
+    }
+
+    #[test]
+    fn bearer_dropped_on_http_to_non_loopback() {
+        // LAN hosts are still cleartext transport — a sniffer on the local
+        // network reads the key. Only loopback is exempt.
+        assert!(!is_safe_for_bearer("http://192.168.1.50:8080"));
+        assert!(!is_safe_for_bearer("http://api.example.com/v1"));
+        assert!(!is_safe_for_bearer("http://10.0.0.5:11434"));
+    }
+
+    #[test]
+    fn bearer_dropped_on_unparseable_or_odd_schemes() {
+        assert!(!is_safe_for_bearer("not a url"));
+        assert!(!is_safe_for_bearer(""));
+        assert!(!is_safe_for_bearer("ftp://127.0.0.1/"));
+    }
+
+    // --- sniff_image_mime ---------------------------------------------------
+
+    #[test]
+    fn sniff_detects_common_formats() {
+        assert_eq!(sniff_image_mime("iVBORw0KGgo="), "image/png");
+        assert_eq!(sniff_image_mime("/9j/4AAQSkZJRg=="), "image/jpeg");
+        assert_eq!(sniff_image_mime("R0lGODlhAQ=="), "image/gif");
+        // Leading whitespace is tolerated (trim_start).
+        assert_eq!(sniff_image_mime("  iVBORw0KGgo="), "image/png");
+        // Unknown content falls back to png.
+        assert_eq!(sniff_image_mime("QUJDREVG"), "image/png");
+    }
+
+    #[test]
+    fn sniff_detects_webp_via_inner_window() {
+        // "UklGR" (RIFF) + filler to index 12 + "V0VC" (WEBP) inside 12..24.
+        assert_eq!(sniff_image_mime("UklGRAAAAAAAV0VCAAAAAAAA"), "image/webp");
+        // RIFF prefix without the WEBP marker is not WebP.
+        assert_eq!(sniff_image_mime(&format!("UklGR{}", "A".repeat(19))), "image/png");
+    }
+
+    #[test]
+    fn sniff_survives_non_boundary_utf8() {
+        // Regression for the `[12..24]` byte-slice panic: `b64` is
+        // frontend-supplied and not guaranteed valid base64, so a multi-byte
+        // char straddling index 12 or 24 must fall through, not panic.
+        // "UklGR" is 5 bytes; each "é" is 2, so chars start at 5,7,9,11,13…
+        // and byte 12 lands mid-char.
+        let evil = format!("UklGR{}", "é".repeat(12));
+        assert_eq!(sniff_image_mime(&evil), "image/png");
+    }
+
+    // --- find_frame_end_with_len --------------------------------------------
+
+    #[test]
+    fn frame_end_handles_lf_frames() {
+        assert_eq!(find_frame_end_with_len(b"data: x\n\nrest"), Some((7, 2)));
+    }
+
+    #[test]
+    fn frame_end_reports_4_byte_length_for_crlf_frames() {
+        // \r\n\r\n contains no adjacent \n\n pair, so only the CRLF detector
+        // fires — and the caller must learn the 4-byte terminator length or
+        // it would leave \r\n debris at the head of the next frame.
+        assert_eq!(find_frame_end_with_len(b"data: x\r\n\r\nrest"), Some((7, 4)));
+    }
+
+    #[test]
+    fn frame_end_picks_earliest_terminator_when_both_present() {
+        // LF frame first, CRLF junk later: the LF frame wins.
+        assert_eq!(find_frame_end_with_len(b"a\n\nb\r\n\r\n"), Some((1, 2)));
+        // CRLF frame first, LF frame later: the CRLF frame wins.
+        assert_eq!(find_frame_end_with_len(b"a\r\n\r\nb\n\n"), Some((1, 4)));
+    }
+
+    #[test]
+    fn frame_end_none_when_no_terminator_yet() {
+        assert_eq!(find_frame_end_with_len(b"data: partial"), None);
+        assert_eq!(find_frame_end_with_len(b""), None);
+        // A lone \r\n (mid-frame line break) is not a frame end.
+        assert_eq!(find_frame_end_with_len(b"data: x\r\ny"), None);
+    }
+
+    // --- parse_args -----------------------------------------------------------
+
+    #[test]
+    fn parse_args_empty_means_no_arguments() {
+        assert_eq!(parse_args(""), json!({}));
+        assert_eq!(parse_args("   "), json!({}));
+    }
+
+    #[test]
+    fn parse_args_valid_json_parses() {
+        assert_eq!(parse_args(r#"{"city":"Oslo","n":2}"#), json!({"city": "Oslo", "n": 2}));
+    }
+
+    #[test]
+    fn parse_args_malformed_json_forwarded_as_raw_string() {
+        // Models occasionally emit unquoted keys / Python None; the call must
+        // stay alive with the raw text, not be dropped.
+        let v = parse_args("{city: Oslo}");
+        assert_eq!(v, Value::String("{city: Oslo}".into()));
+    }
+
+    // --- decide_outcome -------------------------------------------------------
+
+    #[test]
+    fn decide_outcome_drops_half_formed_tool_calls() {
+        // Streamed deltas with index N can leave earlier slots name-less.
+        // Those are debris and would error on dispatch — only named calls
+        // survive, and an all-debris turn is Done, not Tools([]).
+        let accum = vec![
+            AccumTool { id: None, name: String::new(), arguments: String::new() },
+            AccumTool { id: Some("call_1".into()), name: "get_weather".into(), arguments: "{}".into() },
+        ];
+        match decide_outcome(accum) {
+            TurnOutcome::Tools(valid) => {
+                assert_eq!(valid.len(), 1);
+                assert_eq!(valid[0].name, "get_weather");
+            }
+            TurnOutcome::Done => panic!("named call must survive"),
+        }
+
+        let debris = vec![AccumTool { id: None, name: String::new(), arguments: "{}".into() }];
+        assert!(matches!(decide_outcome(debris), TurnOutcome::Done));
+        assert!(matches!(decide_outcome(vec![]), TurnOutcome::Done));
+    }
 }

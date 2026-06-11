@@ -102,7 +102,15 @@ export default function App() {
   // model's cold-load into VRAM (often the single biggest chunk of
   // time-to-first-token) off the path the user actually waits on.
   useEffect(() => {
-    if (!unlocked) return;
+    // Wait for BOTH the security probe to land AND the user to be unlocked.
+    // Gating only on `unlocked` was a leak: this effect's closure captured the
+    // store's optimistic initial `unlocked: true` from the first render
+    // (phase 1's `lockUntilHydrated()` can't retroactively change an
+    // already-captured closure value), so every store hydrated beneath the
+    // lock screen. `hydrated` is false on first render and only flips true in
+    // the same atomic update that sets the correct `unlocked`, so gating on it
+    // closes that window.
+    if (!securityHydrated || !unlocked) return;
 
     const settingsP = hydrateSettings();
     const chatsP = hydrateChats();
@@ -135,6 +143,7 @@ export default function App() {
       }
     });
   }, [
+    securityHydrated,
     unlocked,
     hydrateSettings,
     hydrateSpaces,

@@ -1,6 +1,12 @@
 import { useMemo } from "react";
 import hljs from "highlight.js/lib/common";
 
+// Above this many characters, skip syntax highlighting and render escaped
+// plain text. `highlightAuto` runs every grammar over the whole string on the
+// main thread (and re-runs per rAF flush in the canvas's live mode), so a huge
+// block would freeze the UI; plain text is instant.
+const MAX_HIGHLIGHT_CHARS = 50_000;
+
 /**
  * Shared syntax-highlighted code body — a left gutter of line numbers next to
  * the highlighted source, with both axes of scrolling owned by the outer
@@ -24,6 +30,7 @@ export function CodeView({
 
   const highlighted = useMemo(() => {
     if (!code) return "";
+    if (code.length > MAX_HIGHLIGHT_CHARS) return escapeHtml(code);
     if (language) {
       const known = hljs.getLanguage(language);
       if (known) {

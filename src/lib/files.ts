@@ -47,10 +47,13 @@ const IMAGE_MIMES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif
  * from an MCP tool result, whose `mime` is fully server-controlled. React
  * escapes the attribute so this isn't an injection fix — it's defense-in-depth
  * against a malicious server choosing the MIME the browser decodes (e.g.
- * `image/svg+xml`). Falls back to PNG for anything unrecognised.
+ * `image/svg+xml`). Falls back to PNG for anything unrecognised. Returns the
+ * normalised form, not the input — `" IMAGE/PNG "` passes the allowlist but
+ * would produce an invalid `data:` mediatype if echoed back verbatim.
  */
 export function safeImageMime(mime: string): string {
-  return IMAGE_MIMES.has(mime.toLowerCase().trim()) ? mime : "image/png";
+  const normalised = mime.toLowerCase().trim();
+  return IMAGE_MIMES.has(normalised) ? normalised : "image/png";
 }
 
 const PDF_MIME = "application/pdf";

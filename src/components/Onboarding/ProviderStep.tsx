@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertCircle,
   ArrowRight,
@@ -721,6 +721,7 @@ function OpenAIPath({
   const keySet = useSettingsStore((s) => s.openai_key_set);
   const update = useSettingsStore((s) => s.update);
   const setOpenAIKey = useSettingsStore((s) => s.setOpenAIKey);
+  const clearOpenAIKey = useSettingsStore((s) => s.clearOpenAIKey);
   const setProviderDefault = useSettingsStore((s) => s.setProviderDefault);
   const refreshModels = useModelsStore((s) => s.refresh);
 
@@ -730,6 +731,20 @@ function OpenAIPath({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [verified, setVerified] = useState(keySet);
+
+  // If a verified key is already stored (the user set it, advanced, then
+  // navigated back), the parent's `provisioned` flag has reset but there's
+  // nothing left to do — mark provisioned so Continue re-enables without
+  // forcing a full re-type. Snapshot the flag at MOUNT rather than
+  // subscribing to it: `setOpenAIKey` flips `openai_key_set` true before
+  // the probe validates the key, so a live subscription would fire
+  // mid-save and enable Continue — and a failed probe only rolls the key
+  // back, never the parent's `provisioned` flag. At mount no save can be
+  // in flight, so a stored key here really is a verified one.
+  const keySetAtMount = useRef(useSettingsStore.getState().openai_key_set);
+  useEffect(() => {
+    if (keySetAtMount.current) onProvisioned();
+  }, [onProvisioned]);
 
   const handleSave = async () => {
     setError(null);
@@ -743,15 +758,23 @@ function OpenAIPath({
       if (urlDraft.trim() && urlDraft.trim() !== baseUrl) {
         await update("openai_base_url", urlDraft.trim());
       }
+      // The probe reads the key from the keyring, so it must be stored first.
+      // If the probe then fails, roll the key back below — leaving a known-bad
+      // key stored would flip `keySet` true and auto-provision it on re-entry.
       await setOpenAIKey(key.trim());
-      // Probe — a key that isn't valid will surface here as a 401.
-      const list = await openaiListModels(urlDraft.trim() || baseUrl);
-      if (list.length > 0) {
-        // Pin a sensible default (first model returned). The user can
-        // change later from Settings.
-        await setProviderDefault("openai", list[0].id);
+      try {
+        // Probe — a key that isn't valid will surface here as a 401.
+        const list = await openaiListModels(urlDraft.trim() || baseUrl);
+        if (list.length > 0) {
+          // Pin a sensible default (first model returned). The user can
+          // change later from Settings.
+          await setProviderDefault("openai", list[0].id);
+        }
+        await refreshModels();
+      } catch (probeErr) {
+        await clearOpenAIKey().catch(() => {});
+        throw probeErr;
       }
-      await refreshModels();
       setVerified(true);
       setKey("");
       onProvisioned();
