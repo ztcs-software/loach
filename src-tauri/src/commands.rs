@@ -2086,8 +2086,11 @@ pub fn open_in_vscode(code: String, filename: String) -> Result<(), String> {
 // ---------- updater support ----------
 //
 // The Tauri updater can replace a Windows NSIS install or a Linux AppImage in
-// place, but it cannot upgrade a `.deb`/`.rpm` install — that has to go
-// through the system package manager. On macOS the updater patches the `.app`
+// place. Since updater plugin 2.10 it can also upgrade `.deb`/`.rpm` installs:
+// it downloads the signed package advertised by the format-specific
+// `latest.json` key (`linux-x86_64-deb` / `-rpm`) and elevates via pkexec
+// (falling back to zenity/kdialog + sudo) to run `dpkg -i` / `rpm -U`, so the
+// package database stays consistent. On macOS the updater patches the `.app`
 // bundle in place; that works even though we don't sign with Apple, because
 // the updater's integrity check uses our own Ed25519 signature (separate from
 // Apple notarization). We expose this so the UI can hide the "Check for
@@ -2102,10 +2105,14 @@ pub fn updater_supported() -> bool {
     #[cfg(target_os = "linux")]
     {
         // AppImage runtimes set $APPIMAGE to the absolute path of the running
-        // bundle; nothing else does. Absence of the var means we're running
-        // from a `.deb`, a dev build, or `cargo run` — none of which the
-        // updater plugin can patch.
+        // bundle; nothing else does. For `.deb`/`.rpm` we read the bundle-type
+        // marker the bundler patches into the binary at build time — the same
+        // marker the updater plugin keys its install path off, so this gate
+        // can't disagree with what the plugin would actually do. Dev builds
+        // and `cargo run` have no marker and report unsupported, as before.
+        use tauri::utils::{config::BundleType, platform::bundle_type};
         std::env::var("APPIMAGE").is_ok()
+            || matches!(bundle_type(), Some(BundleType::Deb | BundleType::Rpm))
     }
     #[cfg(target_os = "macos")]
     {

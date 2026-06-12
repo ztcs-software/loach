@@ -46,7 +46,7 @@ export function UpdatesPanel() {
     void isUpdaterSupported().then(setSupported);
   }, []);
 
-  // Unsupported install (Linux .deb, dev build, etc.) — show a friendly
+  // Unsupported install (dev build, plain binary, etc.) — show a friendly
   // fallback that points users at the GitHub release page instead of
   // letting them click into a guaranteed failure.
   if (supported === false) {
