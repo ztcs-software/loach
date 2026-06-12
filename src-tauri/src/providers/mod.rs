@@ -171,6 +171,15 @@ pub(super) async fn refuse_link_local_host(base_url: &str) -> Result<(), String>
     if let Ok(ip) = host_for_ip.parse::<IpAddr>() {
         return check(ip);
     }
+    // `localhost` is loopback by definition, and the guard explicitly allows
+    // loopback — so skip the OS resolution reqwest is about to repeat anyway.
+    // This guard runs on the TTFT path of every send (and every admin call).
+    // Only the bare literal is short-circuited; every other hostname still flows
+    // through the resolver + link-local screen below, so there's no DNS-rebind
+    // window for arbitrary names.
+    if host.eq_ignore_ascii_case("localhost") {
+        return Ok(());
+    }
     // Hostname: resolve through the OS. If resolution fails, leave the
     // request alone — the subsequent `reqwest::send` will produce a more
     // accurate error than we could synthesize here.
@@ -216,6 +225,15 @@ mod tests {
     async fn refuse_link_local_allows_public() {
         assert!(refuse_link_local_host("https://api.openai.com").await.is_ok());
         assert!(refuse_link_local_host("http://8.8.8.8/").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn refuse_link_local_short_circuits_localhost() {
+        // `localhost` is loopback by definition — the guard returns Ok without
+        // an OS resolution (which reqwest repeats anyway), case-insensitively.
+        assert!(refuse_link_local_host("http://localhost:11434").await.is_ok());
+        assert!(refuse_link_local_host("http://localhost").await.is_ok());
+        assert!(refuse_link_local_host("https://LocalHost:1234").await.is_ok());
     }
 
     #[test]

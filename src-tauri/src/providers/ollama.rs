@@ -508,6 +508,13 @@ struct OllamaChunk {
     /// tokens — which happens routinely on faster local models.
     #[serde(default)]
     eval_count: Option<u32>,
+    /// Pure decode time in nanoseconds from the final `done: true` chunk
+    /// (`eval_duration`). Paired with `eval_count` it gives the true generation
+    /// rate — unlike wall-clock, which also folds in model load, prompt
+    /// evaluation, and tool round-trips. `None` on intermediate chunks and on
+    /// builds that don't report it.
+    #[serde(default)]
+    eval_duration: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -617,6 +624,9 @@ pub async fn chat_stream(
     // (`eval_count`). Preferred over the per-chunk approximation —
     // faster local models routinely batch several tokens per chunk.
     let mut reported_tokens: Option<u32> = None;
+    // Accumulated decode time (eval_duration, ns) across turns, paired with
+    // reported_tokens to compute an accurate generation rate at the end.
+    let mut reported_eval_ns: Option<u64> = None;
 
     for turn in 0..MAX_TOOL_TURNS {
         // Keep the running history under the soft cap before each turn.
@@ -649,6 +659,7 @@ pub async fn chat_stream(
             &mut body,
             &mut total_tokens,
             &mut reported_tokens,
+            &mut reported_eval_ns,
             &mut think_already_drop,
             &req.stream_id,
             &registry,
@@ -663,7 +674,7 @@ pub async fn chat_stream(
         match outcome {
             TurnOutcome::Done => {
                 let tokens_for_metrics = reported_tokens.unwrap_or(total_tokens);
-                emit_metrics(&app, &channel, tokens_for_metrics, start);
+                emit_metrics(&app, &channel, tokens_for_metrics, reported_eval_ns, start);
                 let _ = app.emit(&channel, StreamEvent::Done);
                 registry.finish(&req.stream_id);
                 return Ok(());
@@ -816,6 +827,7 @@ async fn run_one_turn(
     body: &mut Value,
     total_tokens: &mut u32,
     reported_tokens: &mut Option<u32>,
+    reported_eval_ns: &mut Option<u64>,
     think_already_drop: &mut bool,
     stream_id: &str,
     registry: &StreamRegistry,
@@ -899,6 +911,7 @@ async fn run_one_turn(
     // and a forked build's intermediate emissions don't inflate the
     // count either.
     let mut turn_eval: Option<u32> = None;
+    let mut turn_eval_duration: Option<u64> = None;
 
     loop {
         select! {
@@ -938,6 +951,9 @@ async fn run_one_turn(
                                 Ok(parsed) => {
                                     if let Some(n) = parsed.eval_count {
                                         turn_eval = Some(n);
+                                    }
+                                    if let Some(d) = parsed.eval_duration {
+                                        turn_eval_duration = Some(d);
                                     }
                                     if let Some(msg) = parsed.message {
                                         if let Some(think) = msg.thinking {
@@ -988,6 +1004,10 @@ async fn run_one_turn(
                                 *reported_tokens =
                                     Some(reported_tokens.unwrap_or(0).saturating_add(n));
                             }
+                            if let Some(d) = turn_eval_duration {
+                                *reported_eval_ns =
+                                    Some(reported_eval_ns.unwrap_or(0).saturating_add(d));
+                            }
                             return Ok(Some(decide_outcome(pending_tool_calls)));
                         }
                     }
@@ -1002,10 +1022,14 @@ async fn run_one_turn(
                     None => {
                         // EOF without an explicit `done: true` — treat as a
                         // natural terminator and let the caller emit Done.
-                        // Still fold any partial turn_eval we got.
+                        // Still fold any partial turn_eval / eval_duration.
                         if let Some(n) = turn_eval {
                             *reported_tokens =
                                 Some(reported_tokens.unwrap_or(0).saturating_add(n));
+                        }
+                        if let Some(d) = turn_eval_duration {
+                            *reported_eval_ns =
+                                Some(reported_eval_ns.unwrap_or(0).saturating_add(d));
                         }
                         return Ok(Some(decide_outcome(pending_tool_calls)));
                     }
@@ -1023,12 +1047,26 @@ fn decide_outcome(calls: Vec<OllamaToolCall>) -> TurnOutcome {
     }
 }
 
-fn emit_metrics(app: &AppHandle, channel: &str, tokens: u32, start: Instant) {
+fn emit_metrics(
+    app: &AppHandle,
+    channel: &str,
+    tokens: u32,
+    eval_ns: Option<u64>,
+    start: Instant,
+) {
     let elapsed = start.elapsed().as_millis() as u64;
-    let tps = if elapsed > 0 {
-        (tokens as f64) * 1000.0 / (elapsed as f64)
-    } else {
-        0.0
+    // Prefer Ollama's own `eval_duration` (pure decode time) so the rate
+    // reflects generation speed, not the wall clock — which also folds in model
+    // load, prompt evaluation, and any tool round-trips, understating tok/s
+    // (badly so after a cold load). Fall back to wall-clock when the server
+    // didn't report it (older builds) or nothing was generated. `elapsed_ms`
+    // stays the full turn wall-clock — still useful, and unchanged on the wire.
+    let tps = match eval_ns {
+        Some(ns) if ns > 0 && tokens > 0 => {
+            (tokens as f64) * 1_000_000_000.0 / (ns as f64)
+        }
+        _ if elapsed > 0 => (tokens as f64) * 1000.0 / (elapsed as f64),
+        _ => 0.0,
     };
     let _ = app.emit(
         channel,

@@ -174,6 +174,42 @@ streaming starts; subsequent replies are instant.
 launch, turn on **Settings → General → Default model preload**. The first
 chat will start fast, at the cost of pinning VRAM as soon as Loach opens.
 
+### Making Ollama generate faster
+
+**Problem.** Generation is slower than you'd expect, or you want to squeeze
+more tokens/sec out of your hardware.
+
+**Solution.** These are environment variables on the **Ollama server** (not
+Loach settings) — set them where `ollama serve` runs, then restart it. As of
+Ollama 0.5+:
+
+- **`OLLAMA_FLASH_ATTENTION=1`** — enables flash attention, which lowers memory
+  bandwidth and usually speeds up generation, especially at longer contexts.
+  Newer builds enable it by default for some models on the new engine; setting
+  it explicitly is harmless.
+- **`OLLAMA_KV_CACHE_TYPE=q8_0`** — quantizes the KV cache to 8-bit, roughly
+  halving its memory so you can run a bigger context (or a bigger model) in the
+  same VRAM. Only takes effect **with flash attention enabled**. `q4_0` is
+  smaller but lossier; `f16` (the default) is highest quality.
+- **`OLLAMA_KEEP_ALIVE=30m`** (or `-1` for "until unloaded") — how long Ollama
+  keeps a model resident after a request, so a reply after a pause skips the
+  cold reload. Loach also exposes this under **Settings → Providers → Keep
+  model loaded**, which is sent with every request and overrides the env
+  default.
+- **`OLLAMA_NUM_PARALLEL=1`** — caps concurrent requests per model. The default
+  splits VRAM across parallel slots; pinning it to 1 gives a single chat the
+  whole budget (and the largest usable context).
+- **`OLLAMA_MAX_LOADED_MODELS=1`** — keeps only one model resident at a time.
+  Useful on a single-GPU machine where a second model would evict the first or
+  spill to system RAM.
+
+Setting environment variables for Ollama: on Windows, use **System Properties →
+Environment Variables** (or `setx OLLAMA_FLASH_ATTENTION 1`) and restart the
+Ollama tray app. On Linux with systemd, `systemctl edit ollama` (add an
+`[Service]` block of `Environment="OLLAMA_…=…"` lines) then
+`systemctl restart ollama`. On macOS, `launchctl setenv OLLAMA_FLASH_ATTENTION 1`
+and relaunch the Ollama app.
+
 ---
 
 ## 4. Attachments
