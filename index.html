@@ -9,8 +9,15 @@
          globals.css; this inline <style> is allowed by the window CSP's
          `style-src 'unsafe-inline'` (no inline script, so script-src is
          untouched). Light-theme users still transition to light after hydration
-         — same as before, just without the preceding white frame. -->
-    <style>html{background:#06070f}</style>
+         — same as before, just without the preceding white frame.
+
+         MUST target `body`, NOT `html`: the Aurora gradient is a `-z-10` fixed
+         div (`.app-mesh`). The body→canvas background propagation that lets a
+         negative-z-index element show through only happens while `<html>` has
+         NO background of its own. Giving `<html>` a background disables that
+         propagation, so the opaque `body` background then paints OVER the mesh
+         and Aurora collapses to a flat fill (looks like the Solid theme). -->
+    <style>body{background:#06070f}</style>
   </head>
   <body class="bg-background text-foreground antialiased">
     <div id="root"></div>
