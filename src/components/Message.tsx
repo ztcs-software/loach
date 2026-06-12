@@ -471,10 +471,23 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
   }
 
   const isUser = message.role === "user";
-  const persistedMetrics = parseMetrics(message.metrics_json);
+  // Memoise the JSON parses on their source strings. chatStore only swaps these
+  // strings when their dirty flags fire, so during a content-only streaming
+  // flush they stay reference-equal and the parse is skipped — otherwise the
+  // streaming bubble re-ran all three JSON.parse calls every animation frame.
+  const persistedMetrics = useMemo(
+    () => parseMetrics(message.metrics_json),
+    [message.metrics_json],
+  );
   const showMetrics = metrics ?? persistedMetrics;
-  const toolCalls = !isUser ? parseToolCalls(message.tool_calls_json) : [];
-  const attachments = parseAttachments(message.attachments_json);
+  const toolCalls = useMemo(
+    () => (!isUser ? parseToolCalls(message.tool_calls_json) : []),
+    [isUser, message.tool_calls_json],
+  );
+  const attachments = useMemo(
+    () => parseAttachments(message.attachments_json),
+    [message.attachments_json],
+  );
   // Images can come from a user upload or, on an assistant turn, from an
   // MCP tool result (mapped to an image attachment in mcp/client.rs).
   const images = attachments.filter((a) => a.kind === "image");

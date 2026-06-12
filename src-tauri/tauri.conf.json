@@ -26,7 +26,8 @@
         "center": true,
         "visible": true,
         "shadow": true,
-        "dragDropEnabled": false
+        "dragDropEnabled": false,
+        "backgroundColor": "#06070f"
       }
     ],
     "security": {

@@ -91,3 +91,20 @@ tempfile = "3"
 # this feature is used for production builds or when a dev server is not specified
 # DO NOT REMOVE!!
 custom-protocol = ["tauri/custom-protocol"]
+
+[profile.release]
+# Smaller binary → smaller NSIS installer + updater `.nsis.zip` download for
+# every user on every release, and a faster cold start (Windows cold-start cost
+# is roughly proportional to bytes read + Defender-scanned). `lto = "thin"`
+# captures most of full LTO's size win for a fraction of the link time;
+# `codegen-units = 1` lets the optimizer see the whole crate; `strip` drops the
+# symbol table (a real win on the Linux/macOS artifacts — on Windows MSVC the
+# symbols already live in a separate, unshipped PDB).
+#
+# Intentionally NOT set: `panic = "abort"` (Tauri commands rely on unwinding a
+# panic and catching it — abort would turn any command panic into a full-app
+# crash) and `opt-level = "s"` (would measurably slow the token-streaming serde
+# hot path; the default opt-level = 3 stays).
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

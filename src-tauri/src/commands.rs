@@ -632,6 +632,9 @@ pub async fn ollama_preload_model(
     state: State<'_, AppState>,
     base_url: String,
     model: String,
+    num_ctx: Option<u32>,
+    low_vram: Option<bool>,
+    num_gpu: Option<u32>,
 ) -> Result<(), String> {
     let keep_alive = state
         .db
@@ -640,7 +643,8 @@ pub async fn ollama_preload_model(
         .flatten()
         .as_deref()
         .and_then(providers::ollama::keep_alive_value);
-    providers::ollama::preload_model(&state.http, &base_url, &model, keep_alive)
+    let options = providers::ollama::preload_options(num_ctx, low_vram, num_gpu);
+    providers::ollama::preload_model(&state.http, &base_url, &model, keep_alive, options)
         .await
         .map_err(err)
 }

@@ -687,6 +687,14 @@ function SliderRow({
 }) {
   const usingStops = stops && stops.length > 0;
 
+  // Local drag position so dragging updates the thumb + readout live WITHOUT
+  // persisting on every pointermove. `onChange` (which clones the sessions
+  // array and writes to SQLite over IPC) now fires only on `onValueCommit` —
+  // pointer-up or a key press — so a one-second drag is a single write, not
+  // the 60-120 it used to spray. `null` = not dragging; fall back to the
+  // prop-derived position.
+  const [drag, setDrag] = useState<number | null>(null);
+
   // Find the stop index closest to the current value so a pre-existing
   // legacy value (e.g. 6144 from before the stops migration) lands sensibly.
   const stopIdx = usingStops
@@ -703,7 +711,10 @@ function SliderRow({
         return best;
       })()
     : 0;
-  const displayValue = usingStops ? stops![stopIdx] : value;
+  // Live slider position: the in-flight drag value while dragging, else derived
+  // from props (`stopIdx` for stops, the raw `value` for continuous).
+  const pos = drag ?? (usingStops ? stopIdx : value);
+  const displayValue = usingStops ? stops![pos] : pos;
   const displayText = format
     ? format(displayValue)
     : displayValue.toFixed(precision);
@@ -720,19 +731,27 @@ function SliderRow({
       </div>
       {usingStops ? (
         <Slider
-          value={[stopIdx]}
+          value={[pos]}
           min={0}
           max={stops!.length - 1}
           step={1}
-          onValueChange={(v) => onChange(stops![v[0]])}
+          onValueChange={(v) => setDrag(v[0])}
+          onValueCommit={(v) => {
+            onChange(stops![v[0]]);
+            setDrag(null);
+          }}
         />
       ) : (
         <Slider
-          value={[value]}
+          value={[pos]}
           min={min}
           max={max}
           step={step}
-          onValueChange={(v) => onChange(v[0])}
+          onValueChange={(v) => setDrag(v[0])}
+          onValueCommit={(v) => {
+            onChange(v[0]);
+            setDrag(null);
+          }}
         />
       )}
       {hint && (

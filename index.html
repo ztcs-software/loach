@@ -4,6 +4,13 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Loach</title>
+    <!-- Paint the app's dark base immediately so there's no white flash while
+         the bundle's CSS loads on a cold start. Matches `.dark .app-mesh` in
+         globals.css; this inline <style> is allowed by the window CSP's
+         `style-src 'unsafe-inline'` (no inline script, so script-src is
+         untouched). Light-theme users still transition to light after hydration
+         — same as before, just without the preceding white frame. -->
+    <style>html{background:#06070f}</style>
   </head>
   <body class="bg-background text-foreground antialiased">
     <div id="root"></div>

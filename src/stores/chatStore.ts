@@ -30,7 +30,7 @@ import {
   imagesFromAttachments,
   inlineTextAttachments,
 } from "@/lib/files";
-import { extractMemories } from "@/lib/memory";
+import { extractMemories, cancelMemoryExtraction } from "@/lib/memory";
 import { buildCompactedMarkdown } from "@/lib/export";
 import {
   extractSummary,
@@ -42,6 +42,10 @@ import { formatProviderError } from "@/lib/providerErrors";
 import { getPersona } from "@/lib/personas";
 import { getTone } from "@/lib/tones";
 import { applyTemporalAwareness } from "@/lib/temporal";
+import {
+  getCachedSpaceContext,
+  setCachedSpaceContext,
+} from "@/lib/spaceContextCache";
 import {
   buildFetchToolRecords,
   extractUrls,
@@ -633,7 +637,15 @@ async function buildTaskRequest(
   const spaceImages: string[] = [];
   if (session.space_id) {
     try {
-      const ctx = await getSpaceContext(session.space_id);
+      // Serve the space context from the per-space cache when warm, so repeat
+      // sends in a Space don't re-ship every reference file across IPC. The
+      // cache is invalidated by every spaceStore mutation that can change a
+      // space's instructions / files / memories (see spaceContextCache.ts).
+      let ctx = getCachedSpaceContext(session.space_id);
+      if (!ctx) {
+        ctx = await getSpaceContext(session.space_id);
+        setCachedSpaceContext(session.space_id, ctx);
+      }
       const spaceInstructions = ctx.space.instructions.trim();
       let filesBlock = "";
       const textFiles = ctx.files.filter((f) => f.kind === "text");
@@ -891,9 +903,21 @@ function finishRunning(
   // promoted so the user's next message starts streaming without waiting on
   // us; failures are logged inside the extractor and never bubble up.
   if (memorySnapshot) {
-    void extractMemories(memorySnapshot).catch((e) => {
-      logger.warn("memory extraction failed", e);
-    });
+    // Skip extraction when the chat has more work pending — a queued message
+    // (still in `queue` here; `promoteQueueHead` only shifts it on the next
+    // microtask) or something already running. The extractor is a second full
+    // LLM generation against the same model, so firing it now would make it
+    // compete with the user's visible turn for the generation slot and inflate
+    // that turn's time-to-first-token. Extraction is best-effort, so dropping
+    // this turn's is acceptable.
+    const busy = get().queue.length > 0 || get().runningTask !== null;
+    if (busy) {
+      logger.debug("memory extraction skipped — chat busy");
+    } else {
+      void extractMemories(memorySnapshot).catch((e) => {
+        logger.warn("memory extraction failed", e);
+      });
+    }
   }
 }
 
@@ -1723,6 +1747,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   sendUserMessage: async (rawContent, attachments) => {
+    // Abort any in-flight memory extraction so it stops competing with this
+    // turn for the model's generation slot (best-effort; no-op when idle).
+    cancelMemoryExtraction();
     // If viewing a space, exit the space view and create a session in that space
     const spaceStore = useSpaceStore.getState();
     const viewingSpaceId = spaceStore.viewingSpaceId;

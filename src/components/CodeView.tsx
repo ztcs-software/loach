@@ -17,9 +17,13 @@ const MAX_HIGHLIGHT_CHARS = 50_000;
 export function CodeView({
   code,
   language,
+  isLive,
 }: {
   code: string;
   language: string | null;
+  /** True while the canvas mirrors a still-streaming block. Suppresses
+   *  syntax highlighting (see `highlighted` below) until the block settles. */
+  isLive?: boolean;
 }) {
   const lineCount = useMemo(() => {
     if (!code) return 1;
@@ -30,6 +34,13 @@ export function CodeView({
 
   const highlighted = useMemo(() => {
     if (!code) return "";
+    // While the canvas mirrors a still-streaming block, skip highlighting
+    // entirely: re-running the highlighter — worst case `highlightAuto` over
+    // every grammar for an as-yet-unknown language — on each token flush is the
+    // canvas's dominant streaming cost. Plain escaped text is instant; the full
+    // highlight lands the moment streaming stops (isLive flips false and this
+    // recomputes).
+    if (isLive) return escapeHtml(code);
     if (code.length > MAX_HIGHLIGHT_CHARS) return escapeHtml(code);
     if (language) {
       const known = hljs.getLanguage(language);
@@ -46,7 +57,7 @@ export function CodeView({
     } catch {
       return escapeHtml(code);
     }
-  }, [code, language]);
+  }, [code, language, isLive]);
 
   return (
     <div className="flex-1 overflow-auto">

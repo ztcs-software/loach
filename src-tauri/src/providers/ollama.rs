@@ -461,6 +461,7 @@ pub async fn preload_model(
     base_url: &str,
     model: &str,
     keep_alive: Option<Value>,
+    options: Option<Value>,
 ) -> Result<()> {
     super::refuse_link_local_host(base_url)
         .await
@@ -473,6 +474,12 @@ pub async fn preload_model(
     });
     if let Some(ka) = keep_alive {
         body["keep_alive"] = ka;
+    }
+    // Warm the runner with the same options the first real request will send
+    // (num_ctx above all) so Ollama doesn't have to reallocate the KV cache —
+    // i.e. reload the model — on that first message.
+    if let Some(opts) = options {
+        body["options"] = opts;
     }
     // Preload can legitimately take longer than ADMIN_TIMEOUT for large
     // models (a 70 B model cold-loading from disk easily exceeds 30 s),
@@ -1031,6 +1038,42 @@ fn emit_metrics(app: &AppHandle, channel: &str, tokens: u32, start: Instant) {
             tokens_per_second: tps,
         },
     );
+}
+
+/// App-default context window, mirrored from `DEFAULT_PARAMS.num_ctx` in
+/// `src/types.ts`. The startup preload (in `preload.rs`) can't resolve a
+/// model's Modelfile defaults the way the frontend does, so it warms with this
+/// value — the size the first real message most commonly asks for. The
+/// post-unlock JS preload re-fires with the precisely-resolved params, so any
+/// mismatch here is corrected before the user's first send. Keep in sync with
+/// the TS default.
+pub const DEFAULT_NUM_CTX: u32 = 8192;
+
+/// Build the Ollama `options` object for a preload so the warmed runner is
+/// sized like the one the first real chat request will ask for. `num_ctx` is
+/// the load-bearing one (a mismatch forces a KV-cache realloc, i.e. a reload);
+/// `low_vram` / `num_gpu` matter on memory-constrained setups. Returns `None`
+/// when nothing is set so the request body omits `options` entirely.
+pub fn preload_options(
+    num_ctx: Option<u32>,
+    low_vram: Option<bool>,
+    num_gpu: Option<u32>,
+) -> Option<Value> {
+    let mut o = serde_json::Map::new();
+    if let Some(v) = num_ctx {
+        o.insert("num_ctx".into(), json!(v));
+    }
+    if let Some(v) = low_vram {
+        o.insert("low_vram".into(), json!(v));
+    }
+    if let Some(v) = num_gpu {
+        o.insert("num_gpu".into(), json!(v));
+    }
+    if o.is_empty() {
+        None
+    } else {
+        Some(Value::Object(o))
+    }
 }
 
 /// Translate the stored `ollama_keep_alive` setting string into the JSON

@@ -155,10 +155,24 @@ pub fn try_warm_default_model(db: Arc<Database>, http: reqwest::Client) {
             .get("ollama_keep_alive")
             .map(String::as_str)
             .and_then(crate::providers::ollama::keep_alive_value);
+        // Size the warmed runner like the first real request will. We can't
+        // read the model's Modelfile defaults from here (no /api/show plumbing
+        // on the startup path), so we use the app default num_ctx + the global
+        // low-VRAM pin; the post-unlock JS preload re-fires with the precisely
+        // resolved params and corrects any mismatch before the user sends.
+        let low_vram_global = settings.get("low_vram_global").map(String::as_str) == Some("true");
+        let options = crate::providers::ollama::preload_options(
+            Some(crate::providers::ollama::DEFAULT_NUM_CTX),
+            if low_vram_global { Some(true) } else { None },
+            None,
+        );
         // `preload_model` swallows its own transport errors (timeout,
         // connection refused, 4xx model-not-found) and returns Ok(()).
         // The `let _ =` is belt-and-braces for any future signature change.
-        let _ = crate::providers::ollama::preload_model(&http, &base_url, &model, keep_alive).await;
+        let _ = crate::providers::ollama::preload_model(
+            &http, &base_url, &model, keep_alive, options,
+        )
+        .await;
     });
 }
 

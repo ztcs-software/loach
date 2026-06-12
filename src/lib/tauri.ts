@@ -416,9 +416,23 @@ export function ollamaUnloadModel(baseUrl: string, model: string): Promise<void>
   return invoke("ollama_unload_model", { baseUrl, model });
 }
 
-export function ollamaPreloadModel(baseUrl: string, model: string): Promise<void> {
+export function ollamaPreloadModel(
+  baseUrl: string,
+  model: string,
+  numCtx?: number,
+  lowVram?: boolean,
+  numGpu?: number,
+): Promise<void> {
   if (!isTauri) return notInTauri(undefined);
-  return invoke("ollama_preload_model", { baseUrl, model });
+  // Pass the runner-affecting params the first real request will send so the
+  // warmed model isn't immediately reloaded. Undefined → null → Rust None.
+  return invoke("ollama_preload_model", {
+    baseUrl,
+    model,
+    numCtx: numCtx ?? null,
+    lowVram: lowVram ?? null,
+    numGpu: numGpu ?? null,
+  });
 }
 
 export function openaiListModels(baseUrl: string): Promise<ModelInfo[]> {
