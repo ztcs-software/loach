@@ -16,7 +16,7 @@ import {
   Wrench,
 } from "lucide-react";
 import { AttachmentActions } from "./AttachmentActions";
-import { Markdown } from "./Markdown";
+import { Markdown, StreamingMarkdown } from "./Markdown";
 import { MarkdownSourceProvider } from "./markdownSource";
 import { lastCodeBlock } from "@/lib/codeBlocks";
 import {
@@ -690,7 +690,15 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
                 lastBlockRaw,
               }}
             >
-              <Markdown content={message.content} />
+              {/* While streaming, only the trailing block re-parses per flush
+                  (and skips highlighting) — completed blocks render once. Once
+                  done, fall back to the plain whole-message render so the
+                  settled view (and its full highlighting) is unchanged. */}
+              {isStreaming ? (
+                <StreamingMarkdown content={message.content} />
+              ) : (
+                <Markdown content={message.content} />
+              )}
             </MarkdownSourceProvider>
           </div>
         )}

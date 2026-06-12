@@ -913,6 +913,24 @@ impl Database {
         })
     }
 
+    /// Per-session message counts in one indexed pass — `SELECT session_id,
+    /// COUNT(*) ... GROUP BY session_id`, covered by `idx_messages_session`.
+    /// Lets the frontend's startup empty-session cull learn which chats are
+    /// empty without loading every session's full transcript (with inlined
+    /// attachments) over IPC. Sessions with zero messages don't appear in the
+    /// map (GROUP BY emits only sessions that have rows), so a missing key
+    /// means count 0.
+    pub fn session_message_counts(&self) -> Result<std::collections::HashMap<String, i64>> {
+        self.with_read(|conn| {
+            let mut stmt =
+                conn.prepare("SELECT session_id, COUNT(*) FROM messages GROUP BY session_id")?;
+            let map = stmt
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
+                .collect::<Result<std::collections::HashMap<String, i64>, _>>()?;
+            Ok(map)
+        })
+    }
+
     pub fn append_message(
         &self,
         session_id: &str,
@@ -2386,6 +2404,29 @@ mod tests {
         // child rows. A regression here would silently retain orphan messages
         // pinned to nothing — visible only in DB inspection.
         assert!(db.list_messages(&s.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn session_message_counts_groups_by_session_and_omits_empty() {
+        let (db, _dir) = fresh_db();
+        let a = db.create_session("a", "ollama", "llama3", None, None).unwrap();
+        let b = db.create_session("b", "ollama", "llama3", None, None).unwrap();
+        // `c` stays empty — it must be ABSENT from the map (GROUP BY emits only
+        // sessions that have rows). The startup cull relies on a missing key
+        // meaning "0 messages"; if this query ever started emitting a 0 row for
+        // empty sessions the cull would still work, but the absence is the
+        // contract the frontend's `counts[id] ?? 0` is written against.
+        let c = db.create_session("c", "ollama", "llama3", None, None).unwrap();
+
+        db.append_message(&a.id, "user", "hi", None).unwrap();
+        db.append_message(&a.id, "assistant", "yo", None).unwrap();
+        db.append_message(&b.id, "user", "solo", None).unwrap();
+
+        let counts = db.session_message_counts().unwrap();
+        assert_eq!(counts.get(&a.id), Some(&2));
+        assert_eq!(counts.get(&b.id), Some(&1));
+        assert_eq!(counts.get(&c.id), None);
+        assert_eq!(counts.len(), 2);
     }
 
     #[test]

@@ -449,21 +449,31 @@ pub async fn unload_model(http: &Client, base_url: &str, model: &str) -> Result<
     Ok(())
 }
 
-/// Preload a model into VRAM by sending an empty chat. The default Ollama
-/// keep_alive (5m) takes over after the load completes, so the model stays
-/// resident long enough for the user's first real request to skip the cold
-/// load. Errors are swallowed — preload is best-effort and must never block
-/// app startup if Ollama is unreachable or the model is missing.
-pub async fn preload_model(http: &Client, base_url: &str, model: &str) -> Result<()> {
+/// Preload a model into VRAM by sending an empty chat. `keep_alive` controls
+/// how long Ollama keeps it resident after the warm completes — pass the
+/// user's configured value so the model survives until their first real
+/// request even if that's more than Ollama's built-in 5-minute default away
+/// (`None` falls back to that default). Errors are swallowed — preload is
+/// best-effort and must never block app startup if Ollama is unreachable or
+/// the model is missing.
+pub async fn preload_model(
+    http: &Client,
+    base_url: &str,
+    model: &str,
+    keep_alive: Option<Value>,
+) -> Result<()> {
     super::refuse_link_local_host(base_url)
         .await
         .map_err(|e| anyhow!(e))?;
     let url = format!("{}/api/chat", base_url.trim_end_matches('/'));
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "model": model,
         "messages": [],
         "stream": false,
     });
+    if let Some(ka) = keep_alive {
+        body["keep_alive"] = ka;
+    }
     // Preload can legitimately take longer than ADMIN_TIMEOUT for large
     // models (a 70 B model cold-loading from disk easily exceeds 30 s),
     // so give it a more generous ceiling. Still bounded so a wedged
@@ -582,6 +592,17 @@ pub async fn chat_stream(
             .collect::<Vec<_>>()))
     };
 
+    // How long Ollama should keep this model resident after the request.
+    // Read once per stream from the global setting and sent on every turn so
+    // each round-trip resets the idle timer. Unset → omit the field and let
+    // Ollama apply its 5-minute default (Loach's pre-setting behaviour).
+    let keep_alive: Option<Value> = db
+        .get_setting("ollama_keep_alive")
+        .ok()
+        .flatten()
+        .as_deref()
+        .and_then(keep_alive_value);
+
     let start = Instant::now();
     let mut total_tokens: u32 = 0;
     let mut think_already_drop: bool = false; // sticky retry guard across turns
@@ -600,6 +621,9 @@ pub async fn chat_stream(
             "stream": true,
             "options": build_options(&req),
         });
+        if let Some(ka) = keep_alive.as_ref() {
+            body["keep_alive"] = ka.clone();
+        }
         if let Some(t) = req.params.think {
             if !think_already_drop {
                 body["think"] = json!(t);
@@ -1007,6 +1031,26 @@ fn emit_metrics(app: &AppHandle, channel: &str, tokens: u32, start: Instant) {
             tokens_per_second: tps,
         },
     );
+}
+
+/// Translate the stored `ollama_keep_alive` setting string into the JSON
+/// value Ollama's `keep_alive` field expects. Ollama accepts either a Go
+/// duration string ("5m", "30m", "1h") or an integer number of seconds,
+/// where a negative value means "keep the model resident until it is
+/// explicitly unloaded". We send the until-unloaded sentinel as a JSON
+/// number (`-1`) rather than the string `"-1"` because Go's
+/// `time.ParseDuration` rejects a unit-less string. An empty / unset value
+/// yields `None`, letting Ollama apply its built-in 5-minute idle default —
+/// exactly the behaviour Loach had before this setting existed.
+pub fn keep_alive_value(setting: &str) -> Option<Value> {
+    let s = setting.trim();
+    if s.is_empty() {
+        return None;
+    }
+    match s.parse::<i64>() {
+        Ok(n) => Some(json!(n)),
+        Err(_) => Some(json!(s)),
+    }
 }
 
 fn build_options(req: &ChatRequest) -> Value {

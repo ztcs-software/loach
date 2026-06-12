@@ -148,10 +148,17 @@ pub fn try_warm_default_model(db: Arc<Database>, http: reqwest::Client) {
         }
 
         tracing::info!("preload: warming {model} via {base_url}");
+        // Warm with the user's configured keep_alive so the model doesn't
+        // evaporate before their first message if they picked a longer
+        // residency than Ollama's 5-minute default.
+        let keep_alive = settings
+            .get("ollama_keep_alive")
+            .map(String::as_str)
+            .and_then(crate::providers::ollama::keep_alive_value);
         // `preload_model` swallows its own transport errors (timeout,
         // connection refused, 4xx model-not-found) and returns Ok(()).
         // The `let _ =` is belt-and-braces for any future signature change.
-        let _ = crate::providers::ollama::preload_model(&http, &base_url, &model).await;
+        let _ = crate::providers::ollama::preload_model(&http, &base_url, &model, keep_alive).await;
     });
 }
 

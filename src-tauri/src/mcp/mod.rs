@@ -35,6 +35,8 @@ pub use types::{Attachment, McpCallResult, McpTestResult, McpToolDef};
 use anyhow::{anyhow, bail, Context, Result};
 use reqwest::Url;
 use serde_json::Value;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::db::{Database, McpServer};
 
@@ -121,6 +123,78 @@ pub async fn aggregate_tools(
         }
     }
     (defs, errors)
+}
+
+/// How long a cached tool catalogue stays fresh before the next chat send
+/// re-probes every enabled server. Config edits (add / edit / delete /
+/// enable-toggle) and snapshot restores invalidate the cache eagerly via
+/// [`invalidate_tools_cache`], so this TTL only bounds how long a server's
+/// *own* tool-list change (rare) — or a transient reachability change —
+/// stays reflected. Chosen long enough to cover a normal read-then-reply
+/// chat cadence (where a 60 s TTL would expire between messages and defeat
+/// the purpose) while keeping staleness modest.
+const TOOLS_CACHE_TTL: Duration = Duration::from_secs(300);
+
+/// One cached [`aggregate_tools`] result plus the wall-clock instant it was
+/// filled, so callers can age it out against [`TOOLS_CACHE_TTL`].
+#[derive(Clone)]
+pub struct CachedTools {
+    cached_at: Instant,
+    tools: Vec<McpToolDef>,
+    errors: Vec<(String, String)>,
+}
+
+/// Process-lifetime cache of the aggregated MCP tool catalogue, parked on
+/// `AppState`. `None` = empty/invalidated, so the next read repopulates it.
+pub type ToolsCache = Arc<tokio::sync::Mutex<Option<CachedTools>>>;
+
+/// Construct a fresh, empty tool cache for `AppState`.
+pub fn new_tools_cache() -> ToolsCache {
+    Arc::new(tokio::sync::Mutex::new(None))
+}
+
+/// [`aggregate_tools`] for the chat hot path, served from `cache` when the
+/// entry is still within [`TOOLS_CACHE_TTL`]. On a miss (or expiry) it runs
+/// the live probe — DNS-pin + initialize + tools/list per enabled server —
+/// and stores the result so subsequent sends in the same conversation skip
+/// that whole round-trip. Returned shape is identical to `aggregate_tools`
+/// so the caller (and its cancel-aware `select!`) is unchanged; a cache hit
+/// simply resolves near-instantly.
+///
+/// No single-flight guard: two simultaneous misses may both probe and the
+/// last writer wins — acceptable for a desktop app where concurrent sends to
+/// the same MCP set are rare, and far simpler than coordinating a barrier.
+pub async fn aggregate_tools_cached(
+    db: &Database,
+    cache: &ToolsCache,
+) -> (Vec<McpToolDef>, Vec<(String, String)>) {
+    {
+        let guard = cache.lock().await;
+        if let Some(entry) = guard.as_ref() {
+            if entry.cached_at.elapsed() < TOOLS_CACHE_TTL {
+                return (entry.tools.clone(), entry.errors.clone());
+            }
+        }
+    }
+    let (tools, errors) = aggregate_tools(db).await;
+    {
+        let mut guard = cache.lock().await;
+        *guard = Some(CachedTools {
+            cached_at: Instant::now(),
+            tools: tools.clone(),
+            errors: errors.clone(),
+        });
+    }
+    (tools, errors)
+}
+
+/// Drop any cached catalogue so the next chat send re-probes the servers.
+/// Must be called after every mutation of the `mcp_servers` table (add /
+/// edit / delete / enable-toggle) and after a snapshot restore, or the model
+/// would keep seeing the pre-change tool set (including stale slugs, which
+/// derive from server names) for up to [`TOOLS_CACHE_TTL`].
+pub async fn invalidate_tools_cache(cache: &ToolsCache) {
+    *cache.lock().await = None;
 }
 
 async fn collect_one(server: &McpServer, slug: &str) -> Result<Vec<McpToolDef>> {

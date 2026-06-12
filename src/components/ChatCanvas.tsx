@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ArrowDown, ChevronDown, ChevronUp, Hourglass, Import, Search, Sparkles, Trash2, Zap, X } from "lucide-react";
 import { MessageItem } from "./Message";
 import { Button } from "@/components/ui/button";
@@ -9,6 +9,13 @@ import { cn } from "@/lib/utils";
 import type { Message } from "@/types";
 
 const EMPTY_MESSAGES: Message[] = [];
+
+/** How many trailing render items mount when a chat opens. Older items reveal
+ *  on demand via the "Show earlier messages" control. Opening a long chat used
+ *  to mount (and markdown-parse + highlight) every message synchronously;
+ *  windowing bounds that to the last screenful-plus. Counted in render items
+ *  (a folded import batch is one item), which is what actually mounts. */
+const WINDOW_SIZE = 50;
 
 /** A transcript row to render: either a single normal message or a *hidden*
  *  imported batch (a run of rows sharing one `import_group`) folded into one
@@ -135,6 +142,14 @@ export function ChatCanvas() {
   // to re-render when this flips, which a ref alone can't trigger. Kept in
   // sync via the same scroll handler that updates `stickToBottom`.
   const [showScrollButton, setShowScrollButton] = useState(false);
+
+  // Transcript windowing (see WINDOW_SIZE). Only the last `visibleCount` render
+  // items mount on open; `visibleCount` only ever GROWS within a session view
+  // (so revealing older rows never re-collapses and jolts the scroll) and
+  // resets on chat switch via the effect below. `prependAnchor` lets the layout
+  // effect keep the viewport pinned when a reveal prepends rows above the fold.
+  const [visibleCount, setVisibleCount] = useState(WINDOW_SIZE);
+  const prependAnchor = useRef<{ height: number; top: number } | null>(null);
 
   // ---------------- Search-in-chat ----------------
   // A browser-style "find on page" overlay scoped to the current chat's
@@ -331,12 +346,46 @@ export function ChatCanvas() {
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages, isStreaming, waitingHere]);
 
+  // Reset the window when switching chats — the new transcript opens at its own
+  // tail, not the depth the previous chat happened to be revealed to.
+  useEffect(() => {
+    setVisibleCount(WINDOW_SIZE);
+  }, [sessionId]);
+
+  // Searching needs every matching row mounted: jump-to-match and the inline
+  // highlighter both reach messages through per-message DOM refs, which only
+  // exist for mounted rows. Expand fully while the finder is open. The
+  // expansion sticks (visibleCount only grows) so closing search never
+  // re-collapses the list and yanks the scroll position.
+  useEffect(() => {
+    if (searchOpen) setVisibleCount(Number.MAX_SAFE_INTEGER);
+  }, [searchOpen]);
+
+  // After a reveal prepends older rows above the fold, shift scrollTop by the
+  // height those rows added so the rows the user was reading stay put.
+  useLayoutEffect(() => {
+    const anchor = prependAnchor.current;
+    if (!anchor) return;
+    prependAnchor.current = null;
+    const el = scrollerRef.current;
+    if (!el) return;
+    el.scrollTop = anchor.top + (el.scrollHeight - anchor.height);
+  }, [visibleCount]);
+
   const scrollToBottom = () => {
     const el = scrollerRef.current;
     if (!el) return;
     el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
     stickToBottom.current = true;
     setShowScrollButton(false);
+  };
+
+  // Reveal the next batch of older rows. Snapshot the scroller geometry first
+  // so the layout effect above can re-anchor once the prepended rows mount.
+  const showEarlierMessages = () => {
+    const el = scrollerRef.current;
+    if (el) prependAnchor.current = { height: el.scrollHeight, top: el.scrollTop };
+    setVisibleCount((c) => c + WINDOW_SIZE);
   };
 
   if (!sessionId) {
@@ -354,11 +403,41 @@ export function ChatCanvas() {
     );
   }
 
+  // Only the trailing window mounts. Items keep their original `index` /
+  // `startIndex` (computed against the full `messages` array), so the
+  // compaction-divider placement and `isLast` checks below stay correct on the
+  // slice. `hiddenBefore` is how many messages sit above the window.
+  const visibleItems =
+    renderItems.length > visibleCount
+      ? renderItems.slice(renderItems.length - visibleCount)
+      : renderItems;
+  const firstVisible = visibleItems[0];
+  const hiddenBefore = firstVisible
+    ? firstVisible.kind === "message"
+      ? firstVisible.index
+      : firstVisible.startIndex
+    : 0;
+
   return (
     <div className="relative flex-1 overflow-hidden">
       <div ref={scrollerRef} className="h-full overflow-y-auto">
         <div className="mx-auto w-full max-w-3xl px-4">
-          {renderItems.map((item) => {
+          {hiddenBefore > 0 && (
+            <div className="flex justify-center py-4">
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={showEarlierMessages}
+                className="h-7 gap-1.5 rounded-full bg-foreground/[0.04] px-3 text-[11px] font-medium text-foreground/60 hover:bg-foreground/10 hover:text-foreground"
+                title="Reveal older messages in this chat"
+              >
+                <ChevronUp className="h-3 w-3" />
+                Show earlier messages ({hiddenBefore})
+              </Button>
+            </div>
+          )}
+          {visibleItems.map((item) => {
             // The compaction divider sits before whichever render item holds
             // the first still-active (uncompacted) message. For an import
             // card that's a range check, since the card spans several rows.

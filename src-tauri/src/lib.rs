@@ -48,6 +48,9 @@ pub struct AppState {
     pub db: Arc<Database>,
     pub http: reqwest::Client,
     pub streams: StreamRegistry,
+    /// Cached MCP tool catalogue so each chat send doesn't re-handshake
+    /// every enabled server. Invalidated on MCP config changes and restores.
+    pub mcp_tools_cache: crate::mcp::ToolsCache,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -174,6 +177,7 @@ pub fn run() {
                 db,
                 http,
                 streams: StreamRegistry::new(),
+                mcp_tools_cache: crate::mcp::new_tools_cache(),
             };
             app.manage(state);
 
@@ -266,6 +270,7 @@ pub fn run() {
             commands::update_session_params,
             commands::export_session,
             commands::list_messages,
+            commands::session_message_counts,
             commands::append_message,
             commands::import_messages,
             commands::delete_import_group,

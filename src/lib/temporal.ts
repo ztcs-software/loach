@@ -1,10 +1,12 @@
 /**
  * Temporal awareness helpers.
  *
- * Models have no clock of their own, so we inject the current date / time
- * into the system prompt of every request. Compatible with Open WebUI's
- * `{{CURRENT_DATE}}` / `{{CURRENT_TIME}}` / `{{CURRENT_WEEKDAY}}` template
- * syntax — authors who want precise placement can drop the placeholders
+ * Models have no clock of their own, so we inject the current date /
+ * weekday / timezone into the system prompt of every request. Compatible
+ * with Open WebUI's `{{CURRENT_DATE}}` / `{{CURRENT_TIME}}` /
+ * `{{CURRENT_WEEKDAY}}` template syntax — authors who want precise
+ * placement (including the minute-precision time, which the auto preamble
+ * deliberately omits — see `temporalPreamble`) can drop the placeholders
  * directly into their system prompt. Everyone else gets a short preamble
  * auto-prepended.
  *
@@ -95,9 +97,18 @@ export function promptUsesTemporalVars(prompt: string): boolean {
 /**
  * Short stand-alone preamble suitable for prepending to any system prompt.
  * Kept deliberately terse so it doesn't dominate small context windows.
+ *
+ * Carries only date / weekday / timezone — values that change at most once
+ * a day. Minute-precision time is intentionally NOT included: this preamble
+ * sits at the very front of the system prompt, i.e. the head of the model's
+ * KV-cache prefix, so a per-minute timestamp here would invalidate Ollama's
+ * cached prefix on nearly every follow-up message and force a full
+ * re-evaluation of the whole conversation. Users who need the exact wall
+ * time can place `{{CURRENT_TIME}}` explicitly (accepting that trade-off) or
+ * enable the datetime built-in tool, which the model can call on demand.
  */
 export function temporalPreamble(vars: TemporalVars): string {
-  return `Current date: ${vars.CURRENT_DATE} (${vars.CURRENT_WEEKDAY}). Current local time: ${vars.CURRENT_TIME} (${vars.CURRENT_TIMEZONE}).`;
+  return `Current date: ${vars.CURRENT_DATE} (${vars.CURRENT_WEEKDAY}, ${vars.CURRENT_TIMEZONE}).`;
 }
 
 /**

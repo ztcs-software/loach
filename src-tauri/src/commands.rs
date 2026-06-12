@@ -243,6 +243,15 @@ pub async fn list_messages(
     state.db.list_messages(&session_id).map_err(err)
 }
 
+/// Per-session message counts (`{ session_id: count }`). Lets the frontend
+/// cull empty sessions at startup without loading every transcript over IPC.
+#[tauri::command]
+pub async fn session_message_counts(
+    state: State<'_, AppState>,
+) -> Result<std::collections::HashMap<String, i64>, String> {
+    state.db.session_message_counts().map_err(err)
+}
+
 #[derive(Debug, Deserialize)]
 pub struct AppendMessageArgs {
     pub session_id: String,
@@ -624,7 +633,14 @@ pub async fn ollama_preload_model(
     base_url: String,
     model: String,
 ) -> Result<(), String> {
-    providers::ollama::preload_model(&state.http, &base_url, &model)
+    let keep_alive = state
+        .db
+        .get_setting("ollama_keep_alive")
+        .ok()
+        .flatten()
+        .as_deref()
+        .and_then(providers::ollama::keep_alive_value);
+    providers::ollama::preload_model(&state.http, &base_url, &model, keep_alive)
         .await
         .map_err(err)
 }
@@ -1398,7 +1414,7 @@ pub async fn mcp_save(
         .map(|m| serde_json::to_string(m).map_err(err))
         .transpose()?;
 
-    state
+    let saved = state
         .db
         .upsert_mcp_server(
             input.id.as_deref(),
@@ -1407,12 +1423,18 @@ pub async fn mcp_save(
             headers_json.as_deref(),
             input.enabled.unwrap_or(true),
         )
-        .map_err(err)
+        .map_err(err)?;
+    // The cached tool catalogue (and the slugs derived from server names) is
+    // now stale — drop it so the next send re-aggregates with this change.
+    crate::mcp::invalidate_tools_cache(&state.mcp_tools_cache).await;
+    Ok(saved)
 }
 
 #[tauri::command]
 pub async fn mcp_delete(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    state.db.delete_mcp_server(&id).map_err(err)
+    state.db.delete_mcp_server(&id).map_err(err)?;
+    crate::mcp::invalidate_tools_cache(&state.mcp_tools_cache).await;
+    Ok(())
 }
 
 /// Probe the given MCP server config (handshake + list tools). Accepts the
@@ -1456,6 +1478,7 @@ pub async fn chat_stream(
     let registry = state.streams.clone();
     let provider = request.provider.clone();
     let db = state.db.clone();
+    let mcp_cache = state.mcp_tools_cache.clone();
 
     // Register the cancel Notify SYNCHRONOUSLY here — before we spawn the
     // worker — so a `chat_cancel(stream_id)` arriving while we're still
@@ -1481,7 +1504,7 @@ pub async fn chat_stream(
         let (tools, errors) = if request.private {
             (Vec::new(), Vec::new())
         } else {
-            let agg_fut = crate::mcp::aggregate_tools(&db);
+            let agg_fut = crate::mcp::aggregate_tools_cached(&db, &mcp_cache);
             tokio::select! {
                 biased;
                 _ = cancel.notified() => {
@@ -1882,6 +1905,8 @@ pub async fn import_data_with_dialog(
     .await
     .map_err(|e| format!("import restore task panicked: {e}"))??;
 
+    // The restore rewrote the mcp_servers table — drop any cached catalogue.
+    crate::mcp::invalidate_tools_cache(&state.mcp_tools_cache).await;
     Ok(Some(stats))
 }
 

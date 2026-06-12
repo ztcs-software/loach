@@ -169,6 +169,14 @@ export function listMessages(sessionId: string): Promise<Message[]> {
   return invoke("list_messages", { sessionId });
 }
 
+/** Per-session message counts (`{ sessionId: count }`). A session with zero
+ *  messages is absent from the map — callers treat a missing key as 0. Used
+ *  for the startup empty-session cull without loading every transcript. */
+export function sessionMessageCounts(): Promise<Record<string, number>> {
+  if (!isTauri) return notInTauri<Record<string, number>>({});
+  return invoke("session_message_counts", {});
+}
+
 export function appendMessage(args: {
   session_id: string;
   role: "user" | "assistant" | "system";
