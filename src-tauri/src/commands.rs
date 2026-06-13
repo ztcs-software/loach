@@ -2070,7 +2070,26 @@ pub fn open_in_vscode(code: String, filename: String) -> Result<(), String> {
             .spawn()
             .map_err(|e| format!("Couldn't launch VS Code: {e}"))?;
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        // GUI apps launched from Finder/Dock inherit a minimal PATH
+        // (/usr/bin:/bin:/usr/sbin:/sbin) that excludes /usr/local/bin (Intel)
+        // and /opt/homebrew/bin (Apple Silicon) where VS Code's `code` shim
+        // lives, so spawning `code` directly fails even when it works from a
+        // terminal. `open` is always at /usr/bin/open and resolves the app
+        // through LaunchServices, which doesn't depend on PATH. `.status()`
+        // returns as soon as `open` hands off (fast) and is non-zero when the
+        // app can't be found, so we can still surface the `not_found` hint.
+        let status = Command::new("open")
+            .args(["-a", "Visual Studio Code"])
+            .arg(&path)
+            .status()
+            .map_err(|e| format!("Couldn't launch VS Code: {e}"))?;
+        if !status.success() {
+            return Err(not_found);
+        }
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
     {
         Command::new("code").arg(&path).spawn().map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
