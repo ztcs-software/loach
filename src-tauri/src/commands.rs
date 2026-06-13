@@ -444,6 +444,7 @@ const WRITABLE_SETTING_KEYS: &[&str] = &[
     "temporal_awareness",
     "web_fetch_enabled",
     "low_vram_global",
+    "ollama_keep_alive",
     "thinking_default",
     "default_tone_id",
     "onboarding_completed",
