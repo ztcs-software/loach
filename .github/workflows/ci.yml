@@ -5,8 +5,9 @@ name: CI
 # gate in tests/versions.test.ts), and the Rust unit tests. Releases are
 # handled by release.yml; this workflow never publishes anything.
 #
-# Triggers on every push so dev branches get feedback without a PR, and on
-# PRs to main so the merge gate sees a check. NOTE: this workflow does NOT
+# Triggers on pushes to main so each merge commit gets its own verdict, and
+# on PRs to main so the merge gate sees a check before merge. Dev branches
+# get CI once they open a PR. NOTE: this workflow does NOT
 # gate release.yml — both fire on the same push-to-main event and run in
 # parallel, and release.yml drafts its release without waiting for CI (the
 # draft still needs a manual publish, which is the human backstop). The
@@ -16,6 +17,7 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
     branches: [main]
   workflow_dispatch:
