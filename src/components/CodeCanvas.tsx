@@ -68,6 +68,17 @@ export function CodeCanvas() {
   const displayCode = live ? live.code : code;
   const displayLanguage = live ? live.language : language;
 
+  // True only while the bound message is ACTIVELY streaming (not merely still
+  // bound after it finished). Gates CodeView's syntax highlighting: we render
+  // plain text while the block grows and apply the full highlight once it
+  // settles — re-highlighting every flush is the canvas's main streaming cost.
+  const bindingStreaming = useChatStore((s) => {
+    if (!binding || s.streamingSessionId !== binding.sessionId) return false;
+    const msgs = s.messages[binding.sessionId];
+    const last = msgs && msgs.length > 0 ? msgs[msgs.length - 1] : null;
+    return !!last && last.id === binding.messageId;
+  });
+
   if (!isOpen) return null;
 
   // Plain text and "no language" both render as the text variant — same as
@@ -221,7 +232,11 @@ export function CodeCanvas() {
         </div>
       </header>
 
-      <CodeView code={displayCode} language={displayLanguage} />
+      <CodeView
+        code={displayCode}
+        language={displayLanguage}
+        isLive={bindingStreaming}
+      />
     </aside>
   );
 }

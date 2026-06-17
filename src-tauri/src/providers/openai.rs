@@ -80,7 +80,8 @@ pub async fn list_models(http: &Client, base_url: &str) -> Result<Vec<ModelInfo>
     // provider at an `http://` LAN host — or a corrupted / imported
     // `openai_base_url` — would ship the key in cleartext on every
     // model-list refresh, the exact leak the chat path already prevents.
-    if let Some(key) = secrets::get_openai_key()? {
+    // Off the runtime — blocking OS-keyring read (see chat_stream's note).
+    if let Some(key) = tokio::task::spawn_blocking(secrets::get_openai_key).await?? {
         if !key.is_empty() && is_safe_for_bearer(base_url) {
             req = req.bearer_auth(key);
         }
@@ -250,6 +251,19 @@ pub async fn chat_stream(
             .collect::<Vec<_>>()))
     };
 
+    // Read the OpenAI key ONCE for the whole stream, off the runtime.
+    // `get_openai_key` is a blocking OS-keyring call (the commands.rs call
+    // sites all wrap it in spawn_blocking); previously the provider read it
+    // inline inside `run_one_turn`, i.e. once per tool-loop turn, on a tokio
+    // worker that was concurrently pumping other streams' events. The key
+    // can't legitimately change mid-conversation, so a single read is correct
+    // and keeps that blocking call off the per-turn TTFT path.
+    let api_key: Option<String> =
+        tokio::task::spawn_blocking(|| secrets::get_openai_key().ok().flatten())
+            .await
+            .ok()
+            .flatten();
+
     let start = Instant::now();
     let mut total_tokens: u32 = 0;
     // Authoritative token count from `usage.completion_tokens` if the
@@ -303,6 +317,7 @@ pub async fn chat_stream(
             &req.base_url,
             &channel,
             &cancel,
+            api_key.as_deref(),
             body,
             &mut total_tokens,
             &mut reported_tokens,
@@ -464,6 +479,7 @@ async fn run_one_turn(
     base_url: &str,
     channel: &str,
     cancel: &Arc<tokio::sync::Notify>,
+    api_key: Option<&str>,
     body: Value,
     total_tokens: &mut u32,
     reported_tokens: &mut Option<u32>,
@@ -480,7 +496,7 @@ async fn run_one_turn(
     // so we keep firing the request unauthenticated; only the
     // genuinely-auth-required path benefits from the augmented message.
     let mut bearer_withheld = false;
-    if let Some(key) = secrets::get_openai_key().ok().flatten() {
+    if let Some(key) = api_key {
         if !key.is_empty() {
             if is_safe_for_bearer(base_url) {
                 http_req = http_req.bearer_auth(key);

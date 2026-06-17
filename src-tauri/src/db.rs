@@ -295,6 +295,16 @@ impl Database {
         });
         let read_pool = Pool::builder()
             .max_size(4)
+            // Don't block startup opening all 4 reader connections eagerly:
+            // r2d2's `min_idle` defaults to `max_size`, so `build()` would open
+            // and pragma-init every one (each runs the mmap_size pragma) on the
+            // setup thread before first paint. Open them lazily on first SELECT
+            // — which only happens post-unlock anyway. Trade-off: a reader that
+            // fails to open then surfaces as a per-query "acquire read
+            // connection" error rather than the friendly boot dialog, but the
+            // writer open of the same file already catches the fatal cases at
+            // startup.
+            .min_idle(Some(0))
             .build(manager)
             .context("build read pool")?;
 
@@ -806,16 +816,6 @@ impl Database {
         Ok(())
     }
 
-    pub fn touch_session(&self, id: &str) -> Result<()> {
-        let now = Utc::now().timestamp_millis();
-        let conn = self.conn.lock();
-        conn.execute(
-            "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
-            params![now, id],
-        )?;
-        Ok(())
-    }
-
     pub fn pin_session(&self, id: &str, pinned: bool) -> Result<()> {
         let conn = self.conn.lock();
         let now = Utc::now().timestamp_millis();
@@ -913,6 +913,24 @@ impl Database {
         })
     }
 
+    /// Per-session message counts in one indexed pass — `SELECT session_id,
+    /// COUNT(*) ... GROUP BY session_id`, covered by `idx_messages_session`.
+    /// Lets the frontend's startup empty-session cull learn which chats are
+    /// empty without loading every session's full transcript (with inlined
+    /// attachments) over IPC. Sessions with zero messages don't appear in the
+    /// map (GROUP BY emits only sessions that have rows), so a missing key
+    /// means count 0.
+    pub fn session_message_counts(&self) -> Result<std::collections::HashMap<String, i64>> {
+        self.with_read(|conn| {
+            let mut stmt =
+                conn.prepare("SELECT session_id, COUNT(*) FROM messages GROUP BY session_id")?;
+            let map = stmt
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
+                .collect::<Result<std::collections::HashMap<String, i64>, _>>()?;
+            Ok(map)
+        })
+    }
+
     pub fn append_message(
         &self,
         session_id: &str,
@@ -923,14 +941,25 @@ impl Database {
         let id = Uuid::new_v4().to_string();
         let now = Utc::now().timestamp_millis();
         {
-            let conn = self.conn.lock();
-            conn.execute(
+            // Insert the message and bump the session's sort timestamp in ONE
+            // transaction: a single lock acquisition + a single WAL commit
+            // rather than two (the old shape dropped the lock, then
+            // `touch_session` reacquired it for a separate implicit commit).
+            // Also tightens crash atomicity — a message can't land with its
+            // session's updated_at left un-bumped.
+            let mut conn = self.conn.lock();
+            let tx = conn.transaction()?;
+            tx.execute(
                 "INSERT INTO messages (id, session_id, role, content, thinking, attachments_json, metrics_json, tool_calls_json, compacted_at, created_at, import_group, import_hidden)
                  VALUES (?1, ?2, ?3, ?4, NULL, ?5, NULL, NULL, NULL, ?6, NULL, 0)",
                 params![id, session_id, role, content, attachments_json, now],
             )?;
+            tx.execute(
+                "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
+                params![now, session_id],
+            )?;
+            tx.commit()?;
         }
-        self.touch_session(session_id)?;
         Ok(Message {
             id,
             session_id: session_id.to_string(),
@@ -995,9 +1024,14 @@ impl Database {
                     });
                 }
             }
+            // Bump the session's sort timestamp in the same transaction so the
+            // import is one commit, not two (matches append_message).
+            tx.execute(
+                "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
+                params![base, session_id],
+            )?;
             tx.commit()?;
         }
-        self.touch_session(session_id)?;
         Ok(out)
     }
 
@@ -1143,12 +1177,13 @@ impl Database {
     }
 
     pub fn all_settings(&self) -> Result<Vec<(String, String)>> {
-        let conn = self.conn.lock();
-        let mut stmt = conn.prepare("SELECT key, value FROM settings")?;
-        let rows = stmt
-            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(rows)
+        self.with_read(|conn| {
+            let mut stmt = conn.prepare("SELECT key, value FROM settings")?;
+            let rows = stmt
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
     }
 
     // ------------ spaces ------------
@@ -1457,27 +1492,28 @@ impl Database {
     // ------------ snippets ------------
 
     pub fn list_snippets(&self) -> Result<Vec<Snippet>> {
-        let conn = self.conn.lock();
-        let mut stmt = conn.prepare(
-            "SELECT id, title, prompt, attachments_json, provider, model,
-                    created_at, updated_at
-             FROM snippets ORDER BY updated_at DESC",
-        )?;
-        let rows = stmt
-            .query_map([], |r| {
-                Ok(Snippet {
-                    id: r.get(0)?,
-                    title: r.get(1)?,
-                    prompt: r.get(2)?,
-                    attachments_json: r.get(3)?,
-                    provider: r.get(4)?,
-                    model: r.get(5)?,
-                    created_at: r.get(6)?,
-                    updated_at: r.get(7)?,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(rows)
+        self.with_read(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, title, prompt, attachments_json, provider, model,
+                        created_at, updated_at
+                 FROM snippets ORDER BY updated_at DESC",
+            )?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok(Snippet {
+                        id: r.get(0)?,
+                        title: r.get(1)?,
+                        prompt: r.get(2)?,
+                        attachments_json: r.get(3)?,
+                        provider: r.get(4)?,
+                        model: r.get(5)?,
+                        created_at: r.get(6)?,
+                        updated_at: r.get(7)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
     }
 
     pub fn create_snippet(
@@ -1688,25 +1724,26 @@ impl Database {
     // legacy stdio-flavoured columns stay NULL.
 
     pub fn list_mcp_servers(&self) -> Result<Vec<McpServer>> {
-        let conn = self.conn.lock();
-        let mut stmt = conn.prepare(
-            "SELECT id, name, url, headers_json, enabled, created_at, updated_at
-             FROM mcp_servers ORDER BY name ASC",
-        )?;
-        let rows = stmt
-            .query_map([], |r| {
-                Ok(McpServer {
-                    id: r.get(0)?,
-                    name: r.get(1)?,
-                    url: r.get::<_, Option<String>>(2)?.unwrap_or_default(),
-                    headers_json: r.get(3)?,
-                    enabled: r.get::<_, i64>(4)? != 0,
-                    created_at: r.get(5)?,
-                    updated_at: r.get(6)?,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(rows)
+        self.with_read(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, name, url, headers_json, enabled, created_at, updated_at
+                 FROM mcp_servers ORDER BY name ASC",
+            )?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok(McpServer {
+                        id: r.get(0)?,
+                        name: r.get(1)?,
+                        url: r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                        headers_json: r.get(3)?,
+                        enabled: r.get::<_, i64>(4)? != 0,
+                        created_at: r.get(5)?,
+                        updated_at: r.get(6)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
     }
 
     /// Upsert: create a new row if `id` is empty, otherwise update the
@@ -2386,6 +2423,29 @@ mod tests {
         // child rows. A regression here would silently retain orphan messages
         // pinned to nothing — visible only in DB inspection.
         assert!(db.list_messages(&s.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn session_message_counts_groups_by_session_and_omits_empty() {
+        let (db, _dir) = fresh_db();
+        let a = db.create_session("a", "ollama", "llama3", None, None).unwrap();
+        let b = db.create_session("b", "ollama", "llama3", None, None).unwrap();
+        // `c` stays empty — it must be ABSENT from the map (GROUP BY emits only
+        // sessions that have rows). The startup cull relies on a missing key
+        // meaning "0 messages"; if this query ever started emitting a 0 row for
+        // empty sessions the cull would still work, but the absence is the
+        // contract the frontend's `counts[id] ?? 0` is written against.
+        let c = db.create_session("c", "ollama", "llama3", None, None).unwrap();
+
+        db.append_message(&a.id, "user", "hi", None).unwrap();
+        db.append_message(&a.id, "assistant", "yo", None).unwrap();
+        db.append_message(&b.id, "user", "solo", None).unwrap();
+
+        let counts = db.session_message_counts().unwrap();
+        assert_eq!(counts.get(&a.id), Some(&2));
+        assert_eq!(counts.get(&b.id), Some(&1));
+        assert_eq!(counts.get(&c.id), None);
+        assert_eq!(counts.len(), 2);
     }
 
     #[test]

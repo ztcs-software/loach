@@ -1,15 +1,19 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { Gauge, Loader2, Maximize2, Sparkles, X } from "lucide-react";
 import { useChatStore } from "@/stores/chatStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useModelsStore } from "@/stores/modelsStore";
 import { useSpaceStore } from "@/stores/spaceStore";
-import { DEFAULT_PARAMS, type GenerationParams } from "@/types";
+import { DEFAULT_PARAMS, type GenerationParams, type Message } from "@/types";
 import {
   computeContextUsage,
   formatTokens,
 } from "@/lib/contextUsage";
 import { cn } from "@/lib/utils";
+
+// Stable empty array so the messages selector's no-messages branch keeps a
+// constant reference (a fresh `[]` would re-fire the selector every render).
+const EMPTY_MESSAGES: Message[] = [];
 
 /**
  * Layer the same set of GenerationParams the chat send path uses, just
@@ -53,7 +57,9 @@ export function ContextUsageBar() {
       : undefined,
   );
   const messages = useChatStore((s) =>
-    s.activeSessionId ? s.messages[s.activeSessionId] ?? [] : [],
+    s.activeSessionId
+      ? s.messages[s.activeSessionId] ?? EMPTY_MESSAGES
+      : EMPTY_MESSAGES,
   );
   const globalSystemPrompt = useSettingsStore((s) => s.global_system_prompt);
   const modelDefaults = useModelsStore((s) =>
@@ -115,9 +121,15 @@ export function ContextUsageBar() {
       ? session.system_prompt
       : globalSystemPrompt || "";
 
+  // Defer the recompute: `messages` changes identity on every streaming flush
+  // and computeContextUsage rescans the whole transcript. useDeferredValue lets
+  // React skip intermediate values during a burst and recompute when idle —
+  // and it always catches up to the final value once streaming stops, so the
+  // bar can't end stale (the failure mode a leading-edge timer throttle has).
+  const deferredMessages = useDeferredValue(messages);
   const usage = useMemo(
-    () => computeContextUsage(messages, effectiveSystemPrompt, params),
-    [messages, effectiveSystemPrompt, params],
+    () => computeContextUsage(deferredMessages, effectiveSystemPrompt, params),
+    [deferredMessages, effectiveSystemPrompt, params],
   );
 
   // Don't show the bar before the user has any conversation to measure —

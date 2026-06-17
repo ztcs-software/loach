@@ -169,6 +169,14 @@ export function listMessages(sessionId: string): Promise<Message[]> {
   return invoke("list_messages", { sessionId });
 }
 
+/** Per-session message counts (`{ sessionId: count }`). A session with zero
+ *  messages is absent from the map — callers treat a missing key as 0. Used
+ *  for the startup empty-session cull without loading every transcript. */
+export function sessionMessageCounts(): Promise<Record<string, number>> {
+  if (!isTauri) return notInTauri<Record<string, number>>({});
+  return invoke("session_message_counts", {});
+}
+
 export function appendMessage(args: {
   session_id: string;
   role: "user" | "assistant" | "system";
@@ -408,9 +416,23 @@ export function ollamaUnloadModel(baseUrl: string, model: string): Promise<void>
   return invoke("ollama_unload_model", { baseUrl, model });
 }
 
-export function ollamaPreloadModel(baseUrl: string, model: string): Promise<void> {
+export function ollamaPreloadModel(
+  baseUrl: string,
+  model: string,
+  numCtx?: number,
+  lowVram?: boolean,
+  numGpu?: number,
+): Promise<void> {
   if (!isTauri) return notInTauri(undefined);
-  return invoke("ollama_preload_model", { baseUrl, model });
+  // Pass the runner-affecting params the first real request will send so the
+  // warmed model isn't immediately reloaded. Undefined → null → Rust None.
+  return invoke("ollama_preload_model", {
+    baseUrl,
+    model,
+    numCtx: numCtx ?? null,
+    lowVram: lowVram ?? null,
+    numGpu: numGpu ?? null,
+  });
 }
 
 export function openaiListModels(baseUrl: string): Promise<ModelInfo[]> {
@@ -1003,11 +1025,12 @@ export function factoryReset(auth?: DestructiveAuth): Promise<void> {
 // ------------ updater ------------
 
 /** Whether the running binary's bundle format supports in-app updates.
- *  Returns true on Windows (NSIS), and on Linux only when running inside
- *  an AppImage (`.deb` / `.rpm` installs are stuck with whatever the
- *  system package manager last installed). Wrapped here so callers don't
- *  have to construct a raw `invoke("updater_supported")` and stay
- *  consistent with the rest of the IPC layer. */
+ *  Returns true on Windows (NSIS), on macOS, and on Linux for AppImage,
+ *  `.deb`, and `.rpm` installs (deb/rpm updates install through pkexec +
+ *  the system package manager, so they prompt for the user's password;
+ *  dev builds report false). Wrapped here so callers don't have to
+ *  construct a raw `invoke("updater_supported")` and stay consistent
+ *  with the rest of the IPC layer. */
 export function updaterSupported(): Promise<boolean> {
   if (!isTauri) return notInTauri(false);
   return invoke<boolean>("updater_supported");

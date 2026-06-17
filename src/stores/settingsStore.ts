@@ -32,7 +32,15 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
 
   hydrate: async () => {
     try {
-      const rows = await getSettings();
+      // Fire the settings read and the OpenAI-key keyring probe concurrently:
+      // they're independent, and the probe (a spawn_blocking keyring read on
+      // the Rust side) otherwise serialized a whole round-trip after the SQLite
+      // read. getSettings rejecting still hits the outer catch; the key probe
+      // keeps its own fallback so a keyring failure never blocks hydration.
+      const [rows, hasKey] = await Promise.all([
+        getSettings(),
+        getOpenAIKeyStatus().catch(() => false),
+      ]);
       const merged: Settings = { ...DEFAULT_SETTINGS };
       // Settings live in a string-keyed KV table; coerce each value back into
       // the type implied by DEFAULT_SETTINGS so booleans don't arrive as the
@@ -47,7 +55,6 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
           (merged as unknown as Record<string, unknown>)[k as string] = v;
         }
       });
-      const hasKey = await getOpenAIKeyStatus().catch(() => false);
       set({ ...merged, openai_key_set: hasKey, hydrated: true });
       applyTheme(merged.theme);
       applyFontSize(merged.font_size);

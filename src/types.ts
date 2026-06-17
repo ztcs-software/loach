@@ -309,6 +309,13 @@ export type ThemeChoice = "light" | "dark" | "system";
 export type BackgroundStyle = "gradient" | "solid";
 export type FontSize = "small" | "normal" | "large";
 
+/** How long Ollama keeps a model resident in VRAM after a request. Maps to
+ *  the `keep_alive` field on `/api/chat`: a Go duration string, or `"-1"`
+ *  (sent as the integer -1) to keep it loaded until explicitly unloaded.
+ *  `"5m"` matches Ollama's own default — the value Loach effectively used
+ *  before this setting existed. */
+export type OllamaKeepAlive = "5m" | "30m" | "1h" | "-1";
+
 export interface Settings {
   theme: ThemeChoice;
   background_style: BackgroundStyle;
@@ -388,6 +395,13 @@ export interface Settings {
    *  hardware where you'd otherwise have to remember to flip the per-chat
    *  toggle. Off by default. Ignored by OpenAI providers. */
   low_vram_global: boolean;
+  /** How long Ollama keeps the resolved model resident in VRAM after each
+   *  request (the `keep_alive` field). The default `"5m"` matches Ollama's
+   *  own idle-unload timeout; longer values (or `"-1"` = until unloaded)
+   *  stop the model being evicted between messages, so a reply after a pause
+   *  skips the multi-second cold reload — at the cost of pinned VRAM.
+   *  Ignored by OpenAI providers. */
+  ollama_keep_alive: OllamaKeepAlive;
   /** Default value for the per-chat Thinking toggle. Applied as a baseline
    *  in `readSessionParams` so new chats (and chats that haven't touched
    *  the slider) inherit it. The per-chat Thinking switch in the parameter
@@ -433,6 +447,7 @@ export const DEFAULT_SETTINGS: Settings = {
   ip_tool_enabled: false,
   pdf_tool_enabled: false,
   low_vram_global: false,
+  ollama_keep_alive: "5m",
   thinking_default: true,
   default_tone_id: "default",
   onboarding_completed: false,

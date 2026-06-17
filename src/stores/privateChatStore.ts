@@ -115,6 +115,67 @@ function composeSystemPrompt(args: {
   return out.length > 0 ? out : null;
 }
 
+// rAF-batched flush for the streaming assistant message, mirroring chatStore:
+// the provider emits 100+ token events/sec and a per-event `set()` + full
+// `messages.map()` re-renders the whole overlay each time. We accumulate deltas
+// into this module-level buffer and write to the store at most once per frame.
+//
+// Invariants (privacy-load-bearing for the overlay):
+//   - Terminal paths (done / cancelled / error / user cancel) MUST sync-flush
+//     before teardown so the last tokens stay visible.
+//   - `pcReset` clears the pending frame AND the buffer — every teardown and
+//     `wipe()` calls it so a stale rAF can never write into a torn-down (or
+//     wiped) overlay, which would otherwise resurrect private content.
+let pcPendingFrame: number | null = null;
+let pcBuffer:
+  | {
+      id: string;
+      content: string;
+      thinking: string;
+      contentDirty: boolean;
+      thinkingDirty: boolean;
+    }
+  | null = null;
+
+function pcFlush() {
+  if (pcPendingFrame !== null) {
+    cancelAnimationFrame(pcPendingFrame);
+    pcPendingFrame = null;
+  }
+  const buf = pcBuffer;
+  if (!buf || (!buf.contentDirty && !buf.thinkingDirty)) return;
+  const { id, content, thinking, contentDirty, thinkingDirty } = buf;
+  buf.contentDirty = false;
+  buf.thinkingDirty = false;
+  usePrivateChatStore.setState((s) => ({
+    messages: s.messages.map((m) =>
+      m.id === id
+        ? {
+            ...m,
+            ...(contentDirty ? { content } : {}),
+            ...(thinkingDirty ? { thinking } : {}),
+          }
+        : m,
+    ),
+  }));
+}
+
+function pcSchedule() {
+  if (pcPendingFrame !== null) return;
+  pcPendingFrame = requestAnimationFrame(() => {
+    pcPendingFrame = null;
+    pcFlush();
+  });
+}
+
+function pcReset() {
+  if (pcPendingFrame !== null) {
+    cancelAnimationFrame(pcPendingFrame);
+    pcPendingFrame = null;
+  }
+  pcBuffer = null;
+}
+
 export const usePrivateChatStore = create<PrivateChatState>((set, get) => ({
   open: false,
   messages: [],
@@ -190,6 +251,17 @@ export const usePrivateChatStore = create<PrivateChatState>((set, get) => ({
     const streamId = makeRequestId();
     const assistantId = assistantMsg.id;
 
+    // Start a fresh rAF-batched buffer for this assistant message (drop any
+    // stale one from a prior stream first).
+    pcReset();
+    pcBuffer = {
+      id: assistantId,
+      content: "",
+      thinking: "",
+      contentDirty: false,
+      thinkingDirty: false,
+    };
+
     // Apply the global Low-VRAM pin (Settings → Features) when the user
     // hasn't set anything in the per-chat panel. Per-chat override wins —
     // toggling Low VRAM off in the Private Chat sidebar stores `undefined`,
@@ -215,6 +287,9 @@ export const usePrivateChatStore = create<PrivateChatState>((set, get) => ({
     };
 
     const teardown = () => {
+      // Drop any pending flush + buffer so a stale rAF can't write into the
+      // torn-down overlay. Callers flush first when the final frame matters.
+      pcReset();
       const handle = get().activeStream;
       if (handle) {
         try {
@@ -249,12 +324,20 @@ export const usePrivateChatStore = create<PrivateChatState>((set, get) => ({
         },
         (ev) => {
           if (ev.kind === "token") {
-            patchAssistant((m) => ({ content: (m.content ?? "") + ev.delta }));
+            if (pcBuffer) {
+              pcBuffer.content += ev.delta;
+              pcBuffer.contentDirty = true;
+              pcSchedule();
+            }
           } else if (ev.kind === "thinking") {
-            patchAssistant((m) => ({
-              thinking: (m.thinking ?? "") + ev.delta,
-            }));
+            if (pcBuffer) {
+              pcBuffer.thinking += ev.delta;
+              pcBuffer.thinkingDirty = true;
+              pcSchedule();
+            }
           } else if (ev.kind === "metrics") {
+            // Metrics arrive once near the end — apply immediately. They don't
+            // touch content, so they don't race the content buffer.
             patchAssistant(() => ({
               metrics: {
                 tokens: ev.tokens,
@@ -263,11 +346,18 @@ export const usePrivateChatStore = create<PrivateChatState>((set, get) => ({
               },
             }));
           } else if (ev.kind === "error") {
-            patchAssistant((m) => ({
-              content: (m.content ?? "") + `\n\n_⚠ ${ev.message}_`,
-            }));
+            // Fold the notice into the buffered content and flush once so the
+            // partial reply + error land together before teardown.
+            if (pcBuffer) {
+              pcBuffer.content += `\n\n_⚠ ${ev.message}_`;
+              pcBuffer.contentDirty = true;
+            }
+            pcFlush();
             teardown();
           } else if (ev.kind === "cancelled" || ev.kind === "done") {
+            // Sync-flush the last buffered tokens before tearing down so the
+            // final frame of the reply doesn't vanish.
+            pcFlush();
             teardown();
           }
         },
@@ -284,6 +374,11 @@ export const usePrivateChatStore = create<PrivateChatState>((set, get) => ({
   cancel: async () => {
     const stream = get().activeStream;
     if (!stream) return;
+    // Land any buffered tokens so the partial reply stays visible, then drop
+    // the buffer — this path unlistens, so the stream's own Cancelled event
+    // never re-enters the handler to flush for us.
+    pcFlush();
+    pcReset();
     try {
       stream.unlisten();
     } catch {
@@ -302,6 +397,9 @@ export const usePrivateChatStore = create<PrivateChatState>((set, get) => ({
   },
 
   wipe: () => {
+    // Drop any pending streaming flush + buffered tokens FIRST so a queued rAF
+    // can't write private content back into the overlay we're about to clear.
+    pcReset();
     const stream = get().activeStream;
     if (stream) {
       try {

@@ -1,4 +1,4 @@
-import { memo, type ReactNode } from "react";
+import { memo, useMemo, type ReactNode } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
@@ -212,6 +212,14 @@ function extractRaw(node: ReactNode): string {
 // bubble where this component re-renders thousands of times.
 const MARKDOWN_PLUGINS_REMARK = [remarkGfm];
 const MARKDOWN_PLUGINS_REHYPE = [rehypeTexFallback, rehypeHighlight];
+// Same pipeline minus syntax highlighting, used for the still-streaming tail
+// of a message. Re-highlighting a growing block on every animation-frame flush
+// is the dominant per-token render cost (worst case `highlightAuto` runs every
+// grammar for an as-yet-unknown language); skipping it while the block is live
+// — then re-rendering the whole message *with* highlighting once streaming
+// stops — keeps streaming cheap without changing the settled view. The TeX
+// fallback stays (cheap, and keeps inline symbols consistent across the split).
+const MARKDOWN_PLUGINS_REHYPE_NOHL = [rehypeTexFallback];
 
 // Open a link from rendered (untrusted) markdown through the OS browser / mail
 // client. Mirrors the helper used by Settings / Onboarding / Updates; the
@@ -278,36 +286,110 @@ const MARKDOWN_COMPONENTS: Components = {
   },
 };
 
-// `memo` so non-streaming messages skip the entire react-markdown
-// re-parse when their parent re-renders for unrelated reasons. The
-// streaming bubble still re-renders per token (content does change),
-// but at least the components-object allocation no longer happens each
-// tick.
+// `prose-sm` is our base — chat reads in chunks, not articles, so we want
+// compact rhythm. The custom theme in tailwind.config.ts dials line-height
+// back up and rewires colours / borders to fit the glass surface. The
+// first/last resets stop a leading/trailing block adding stray margin (the
+// bubble already provides padding).
+const PROSE_CLASS = cn(
+  "prose prose-sm prose-invert max-w-none",
+  "prose-p:first:mt-0 prose-p:last:mb-0",
+);
+
+// The bare react-markdown invocation, memoised so an unchanged `content` (+
+// `highlight`) skips the whole remark/rehype re-parse when a parent re-renders.
+// Renders no wrapper element, so several can sit inside one `prose` container
+// and have block margins collapse normally across the boundary — that's what
+// lets `StreamingMarkdown` split a message without a visible spacing seam.
+const MarkdownBody = memo(function MarkdownBody({
+  content,
+  highlight,
+}: {
+  content: string;
+  highlight: boolean;
+}) {
+  return (
+    <ReactMarkdown
+      remarkPlugins={MARKDOWN_PLUGINS_REMARK}
+      rehypePlugins={highlight ? MARKDOWN_PLUGINS_REHYPE : MARKDOWN_PLUGINS_REHYPE_NOHL}
+      components={MARKDOWN_COMPONENTS}
+    >
+      {content}
+    </ReactMarkdown>
+  );
+});
+
+// `memo` so non-streaming messages skip the entire react-markdown re-parse when
+// their parent re-renders for unrelated reasons.
 export const Markdown = memo(function Markdown({
   content,
   className,
 }: MarkdownProps) {
   return (
-    <div
-      className={cn(
-        // `prose-sm` is our base — chat reads in chunks, not articles, so
-        // we want compact rhythm. The custom theme in tailwind.config.ts
-        // dials line-height back up and rewires colours / borders to fit
-        // the glass surface.
-        "prose prose-sm prose-invert max-w-none",
-        // Make sure first / last block don't add stray top / bottom margin
-        // — the message bubble already provides padding.
-        "prose-p:first:mt-0 prose-p:last:mb-0",
-        className,
-      )}
-    >
-      <ReactMarkdown
-        remarkPlugins={MARKDOWN_PLUGINS_REMARK}
-        rehypePlugins={MARKDOWN_PLUGINS_REHYPE}
-        components={MARKDOWN_COMPONENTS}
-      >
-        {content}
-      </ReactMarkdown>
+    <div className={cn(PROSE_CLASS, className)}>
+      <MarkdownBody content={content} highlight />
+    </div>
+  );
+});
+
+// Where to split a still-streaming message into a stable prefix (already-
+// complete blocks) and the live tail (the block currently being typed). We cut
+// at the last blank line sitting at the TOP level — not inside an open code
+// fence — because a blank line there is always a CommonMark block boundary, so
+// the prefix renders identically whether or not the tail is appended. Returns
+// the prefix length; 0 when there's no safe split yet.
+//
+// Fence tracking matters two ways: a blank line *inside* a ``` block isn't a
+// boundary, and a long code block streams as one growing tail — which the
+// no-highlight tail renderer keeps cheap until its closing fence lands and it
+// folds into the highlighted, memoised prefix.
+export function stableSplit(content: string): number {
+  const lines = content.split("\n");
+  let inFence = false;
+  let fenceChar = "";
+  let offset = 0;
+  let boundary = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const fence = /^\s{0,3}(`{3,}|~{3,})/.exec(line);
+    if (fence) {
+      const ch = fence[1][0];
+      if (!inFence) {
+        inFence = true;
+        fenceChar = ch;
+      } else if (ch === fenceChar) {
+        inFence = false;
+      }
+    }
+    offset += line.length + 1; // +1 for the "\n" that split() consumed
+    // A top-level blank line closes the preceding block. Never treat the very
+    // last line as a boundary — the tail must keep the trailing block so a
+    // message ending in "\n\n" doesn't render an empty tail.
+    if (!inFence && line.trim() === "" && i < lines.length - 1) {
+      boundary = offset;
+    }
+  }
+  return boundary;
+}
+
+// Streaming variant of `Markdown`: only the trailing, still-growing block is
+// re-parsed per flush; completed blocks render once through the memoised
+// `MarkdownBody`, and the live tail skips syntax highlighting. Both halves
+// render inside ONE prose container so block spacing across the split matches a
+// single document. Once streaming ends, callers swap back to `Markdown`, which
+// re-renders the whole message with highlighting — so the settled view is
+// identical to what it was before this optimisation.
+export const StreamingMarkdown = memo(function StreamingMarkdown({
+  content,
+  className,
+}: MarkdownProps) {
+  const splitAt = useMemo(() => stableSplit(content), [content]);
+  const stable = content.slice(0, splitAt);
+  const tail = content.slice(splitAt);
+  return (
+    <div className={cn(PROSE_CLASS, className)}>
+      {stable.length > 0 && <MarkdownBody content={stable} highlight />}
+      <MarkdownBody content={tail} highlight={false} />
     </div>
   );
 });

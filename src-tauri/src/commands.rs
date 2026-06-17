@@ -243,6 +243,15 @@ pub async fn list_messages(
     state.db.list_messages(&session_id).map_err(err)
 }
 
+/// Per-session message counts (`{ session_id: count }`). Lets the frontend
+/// cull empty sessions at startup without loading every transcript over IPC.
+#[tauri::command]
+pub async fn session_message_counts(
+    state: State<'_, AppState>,
+) -> Result<std::collections::HashMap<String, i64>, String> {
+    state.db.session_message_counts().map_err(err)
+}
+
 #[derive(Debug, Deserialize)]
 pub struct AppendMessageArgs {
     pub session_id: String,
@@ -435,6 +444,7 @@ const WRITABLE_SETTING_KEYS: &[&str] = &[
     "temporal_awareness",
     "web_fetch_enabled",
     "low_vram_global",
+    "ollama_keep_alive",
     "thinking_default",
     "default_tone_id",
     "onboarding_completed",
@@ -623,8 +633,19 @@ pub async fn ollama_preload_model(
     state: State<'_, AppState>,
     base_url: String,
     model: String,
+    num_ctx: Option<u32>,
+    low_vram: Option<bool>,
+    num_gpu: Option<u32>,
 ) -> Result<(), String> {
-    providers::ollama::preload_model(&state.http, &base_url, &model)
+    let keep_alive = state
+        .db
+        .get_setting("ollama_keep_alive")
+        .ok()
+        .flatten()
+        .as_deref()
+        .and_then(providers::ollama::keep_alive_value);
+    let options = providers::ollama::preload_options(num_ctx, low_vram, num_gpu);
+    providers::ollama::preload_model(&state.http, &base_url, &model, keep_alive, options)
         .await
         .map_err(err)
 }
@@ -1398,7 +1419,7 @@ pub async fn mcp_save(
         .map(|m| serde_json::to_string(m).map_err(err))
         .transpose()?;
 
-    state
+    let saved = state
         .db
         .upsert_mcp_server(
             input.id.as_deref(),
@@ -1407,12 +1428,18 @@ pub async fn mcp_save(
             headers_json.as_deref(),
             input.enabled.unwrap_or(true),
         )
-        .map_err(err)
+        .map_err(err)?;
+    // The cached tool catalogue (and the slugs derived from server names) is
+    // now stale — drop it so the next send re-aggregates with this change.
+    crate::mcp::invalidate_tools_cache(&state.mcp_tools_cache).await;
+    Ok(saved)
 }
 
 #[tauri::command]
 pub async fn mcp_delete(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    state.db.delete_mcp_server(&id).map_err(err)
+    state.db.delete_mcp_server(&id).map_err(err)?;
+    crate::mcp::invalidate_tools_cache(&state.mcp_tools_cache).await;
+    Ok(())
 }
 
 /// Probe the given MCP server config (handshake + list tools). Accepts the
@@ -1456,6 +1483,7 @@ pub async fn chat_stream(
     let registry = state.streams.clone();
     let provider = request.provider.clone();
     let db = state.db.clone();
+    let mcp_cache = state.mcp_tools_cache.clone();
 
     // Register the cancel Notify SYNCHRONOUSLY here — before we spawn the
     // worker — so a `chat_cancel(stream_id)` arriving while we're still
@@ -1481,7 +1509,7 @@ pub async fn chat_stream(
         let (tools, errors) = if request.private {
             (Vec::new(), Vec::new())
         } else {
-            let agg_fut = crate::mcp::aggregate_tools(&db);
+            let agg_fut = crate::mcp::aggregate_tools_cached(&db, &mcp_cache);
             tokio::select! {
                 biased;
                 _ = cancel.notified() => {
@@ -1882,6 +1910,8 @@ pub async fn import_data_with_dialog(
     .await
     .map_err(|e| format!("import restore task panicked: {e}"))??;
 
+    // The restore rewrote the mcp_servers table — drop any cached catalogue.
+    crate::mcp::invalidate_tools_cache(&state.mcp_tools_cache).await;
     Ok(Some(stats))
 }
 
@@ -2040,7 +2070,26 @@ pub fn open_in_vscode(code: String, filename: String) -> Result<(), String> {
             .spawn()
             .map_err(|e| format!("Couldn't launch VS Code: {e}"))?;
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        // GUI apps launched from Finder/Dock inherit a minimal PATH
+        // (/usr/bin:/bin:/usr/sbin:/sbin) that excludes /usr/local/bin (Intel)
+        // and /opt/homebrew/bin (Apple Silicon) where VS Code's `code` shim
+        // lives, so spawning `code` directly fails even when it works from a
+        // terminal. `open` is always at /usr/bin/open and resolves the app
+        // through LaunchServices, which doesn't depend on PATH. `.status()`
+        // returns as soon as `open` hands off (fast) and is non-zero when the
+        // app can't be found, so we can still surface the `not_found` hint.
+        let status = Command::new("open")
+            .args(["-a", "Visual Studio Code"])
+            .arg(&path)
+            .status()
+            .map_err(|e| format!("Couldn't launch VS Code: {e}"))?;
+        if !status.success() {
+            return Err(not_found);
+        }
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
     {
         Command::new("code").arg(&path).spawn().map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
@@ -2057,8 +2106,11 @@ pub fn open_in_vscode(code: String, filename: String) -> Result<(), String> {
 // ---------- updater support ----------
 //
 // The Tauri updater can replace a Windows NSIS install or a Linux AppImage in
-// place, but it cannot upgrade a `.deb`/`.rpm` install — that has to go
-// through the system package manager. On macOS the updater patches the `.app`
+// place. Since updater plugin 2.10 it can also upgrade `.deb`/`.rpm` installs:
+// it downloads the signed package advertised by the format-specific
+// `latest.json` key (`linux-x86_64-deb` / `-rpm`) and elevates via pkexec
+// (falling back to zenity/kdialog + sudo) to run `dpkg -i` / `rpm -U`, so the
+// package database stays consistent. On macOS the updater patches the `.app`
 // bundle in place; that works even though we don't sign with Apple, because
 // the updater's integrity check uses our own Ed25519 signature (separate from
 // Apple notarization). We expose this so the UI can hide the "Check for
@@ -2073,10 +2125,14 @@ pub fn updater_supported() -> bool {
     #[cfg(target_os = "linux")]
     {
         // AppImage runtimes set $APPIMAGE to the absolute path of the running
-        // bundle; nothing else does. Absence of the var means we're running
-        // from a `.deb`, a dev build, or `cargo run` — none of which the
-        // updater plugin can patch.
+        // bundle; nothing else does. For `.deb`/`.rpm` we read the bundle-type
+        // marker the bundler patches into the binary at build time — the same
+        // marker the updater plugin keys its install path off, so this gate
+        // can't disagree with what the plugin would actually do. Dev builds
+        // and `cargo run` have no marker and report unsupported, as before.
+        use tauri::utils::{config::BundleType, platform::bundle_type};
         std::env::var("APPIMAGE").is_ok()
+            || matches!(bundle_type(), Some(BundleType::Deb | BundleType::Rpm))
     }
     #[cfg(target_os = "macos")]
     {

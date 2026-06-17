@@ -144,33 +144,45 @@ export const useModelsStore = create<ModelsState>((set, get) => ({
   refresh: async () => {
     set({ loading: true, error: null });
     const s = useSettingsStore.getState();
-    const out: ModelInfo[] = [];
-    let err: string | null = null;
-
-    try {
-      const ollama = await ollamaListModels(s.ollama_base_url);
-      out.push(...ollama);
-    } catch (e) {
-      // Ollama being unreachable is a common "not running" state rather
-      // than a hard failure — surface it as a soft error so the panel can
-      // show a "start ollama serve" hint without hiding the OpenAI list.
-      err = e instanceof Error ? e.message : String(e);
-    }
 
     // Try the OpenAI-compatible listing if either a key is stored or the base
     // URL has been pointed away from the public default — local/proxy servers
     // (llama-server, LM Studio, vLLM, LiteLLM) don't require auth, so gating
     // purely on `openai_key_set` would hide their models from the picker.
     const baseChanged = s.openai_base_url !== DEFAULT_SETTINGS.openai_base_url;
-    if (s.openai_key_set || baseChanged) {
-      try {
-        const openai = await openaiListModels(s.openai_base_url);
-        out.push(...openai);
-      } catch (e) {
-        // Don't clobber a more meaningful Ollama error with a minor OpenAI
-        // listing hiccup; only set if nothing failed yet.
-        if (!err) err = e instanceof Error ? e.message : String(e);
-      }
+    const wantOpenai = s.openai_key_set || baseChanged;
+
+    // Fire both listings concurrently — a slow or unreachable Ollama (connect
+    // timeout) used to block the cloud list behind its sequential await.
+    // `allSettled` so one failing never rejects the other.
+    const [ollamaRes, openaiRes] = await Promise.allSettled([
+      ollamaListModels(s.ollama_base_url),
+      wantOpenai ? openaiListModels(s.openai_base_url) : Promise.resolve([]),
+    ]);
+
+    // Assemble in fixed order (Ollama first) and preserve the error priority:
+    // a real Ollama failure wins, OpenAI only fills in if nothing failed yet.
+    const out: ModelInfo[] = [];
+    let err: string | null = null;
+    if (ollamaRes.status === "fulfilled") {
+      out.push(...ollamaRes.value);
+    } else {
+      // Ollama unreachable is a common "not running" state — surface it as a
+      // soft error (the panel shows a "start ollama serve" hint) without
+      // hiding the OpenAI list.
+      err =
+        ollamaRes.reason instanceof Error
+          ? ollamaRes.reason.message
+          : String(ollamaRes.reason);
+    }
+    if (openaiRes.status === "fulfilled") {
+      out.push(...openaiRes.value);
+    } else if (!err) {
+      // Don't clobber a more meaningful Ollama error with a minor OpenAI hiccup.
+      err =
+        openaiRes.reason instanceof Error
+          ? openaiRes.reason.message
+          : String(openaiRes.reason);
     }
 
     set({ models: out, loading: false, error: err });

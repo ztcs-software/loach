@@ -13,6 +13,7 @@ import {
   getSpaceContext,
   listMessages,
   listSessions,
+  sessionMessageCounts,
   makeRequestId,
   markMessagesCompacted,
   ollamaUnloadModel,
@@ -29,7 +30,7 @@ import {
   imagesFromAttachments,
   inlineTextAttachments,
 } from "@/lib/files";
-import { extractMemories } from "@/lib/memory";
+import { extractMemories, cancelMemoryExtraction } from "@/lib/memory";
 import { buildCompactedMarkdown } from "@/lib/export";
 import {
   extractSummary,
@@ -41,6 +42,10 @@ import { formatProviderError } from "@/lib/providerErrors";
 import { getPersona } from "@/lib/personas";
 import { getTone } from "@/lib/tones";
 import { applyTemporalAwareness } from "@/lib/temporal";
+import {
+  getCachedSpaceContext,
+  setCachedSpaceContext,
+} from "@/lib/spaceContextCache";
 import {
   buildFetchToolRecords,
   extractUrls,
@@ -632,7 +637,15 @@ async function buildTaskRequest(
   const spaceImages: string[] = [];
   if (session.space_id) {
     try {
-      const ctx = await getSpaceContext(session.space_id);
+      // Serve the space context from the per-space cache when warm, so repeat
+      // sends in a Space don't re-ship every reference file across IPC. The
+      // cache is invalidated by every spaceStore mutation that can change a
+      // space's instructions / files / memories (see spaceContextCache.ts).
+      let ctx = getCachedSpaceContext(session.space_id);
+      if (!ctx) {
+        ctx = await getSpaceContext(session.space_id);
+        setCachedSpaceContext(session.space_id, ctx);
+      }
       const spaceInstructions = ctx.space.instructions.trim();
       let filesBlock = "";
       const textFiles = ctx.files.filter((f) => f.kind === "text");
@@ -890,9 +903,21 @@ function finishRunning(
   // promoted so the user's next message starts streaming without waiting on
   // us; failures are logged inside the extractor and never bubble up.
   if (memorySnapshot) {
-    void extractMemories(memorySnapshot).catch((e) => {
-      logger.warn("memory extraction failed", e);
-    });
+    // Skip extraction when the chat has more work pending — a queued message
+    // (still in `queue` here; `promoteQueueHead` only shifts it on the next
+    // microtask) or something already running. The extractor is a second full
+    // LLM generation against the same model, so firing it now would make it
+    // compete with the user's visible turn for the generation slot and inflate
+    // that turn's time-to-first-token. Extraction is best-effort, so dropping
+    // this turn's is acceptable.
+    const busy = get().queue.length > 0 || get().runningTask !== null;
+    if (busy) {
+      logger.debug("memory extraction skipped — chat busy");
+    } else {
+      void extractMemories(memorySnapshot).catch((e) => {
+        logger.warn("memory extraction failed", e);
+      });
+    }
   }
 }
 
@@ -1320,24 +1345,22 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // Archived sessions are left alone even if empty — the user explicitly
       // moved them to the archive and shouldn't have them silently culled.
       //
-      // Fan out the per-session message reads in parallel — they're
-      // independent IPC calls and the prior sequential await was the dominant
-      // cost of `hydrate()` for users with many chats.
-      const loaded = await Promise.all(
-        sessions.map((s) => listMessages(s.id).then((msgs) => ({ s, msgs }))),
+      // We only need to know which sessions are EMPTY, not their contents, so
+      // fetch per-session counts in one indexed query instead of loading every
+      // transcript. The prior approach eagerly pulled every message of every
+      // session (with inlined base64 attachments) across IPC before first
+      // paint — the dominant cost of `hydrate()`, scaling unboundedly with the
+      // chat corpus. Transcripts now load lazily: the landing session via
+      // `selectSession` below, every other session on first open or first send
+      // (see the guard in `sendUserMessage`).
+      const counts = await sessionMessageCounts();
+      const emptySessions: Session[] = sessions.filter(
+        (s) => !s.archived_at && (counts[s.id] ?? 0) === 0,
       );
-      const messageMap: Record<string, Message[]> = {};
-      const emptySessions: Session[] = [];
-      for (const { s, msgs } of loaded) {
-        messageMap[s.id] = msgs;
-        if (msgs.length === 0 && !s.archived_at) emptySessions.push(s);
-      }
-      set((st) => ({ messages: { ...st.messages, ...messageMap } }));
 
       // Delete all empty sessions except the first (most recent).
-      // `emptySessions` preserves the iteration order of `loaded`, which
-      // preserves the order of `sessions`, which is what `list_sessions`
-      // returned. The Rust query is
+      // `emptySessions` preserves the order of `sessions`, which is what
+      // `list_sessions` returned. The Rust query is
       //   SELECT … FROM sessions ORDER BY updated_at DESC
       // (see `db::list_sessions`) so `emptySessions[0]` is the most-
       // recently-touched empty chat. If that ORDER BY ever changes,
@@ -1355,11 +1378,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
       // Pick a session to land on: prefer the surviving empty chat (so a
       // half-typed welcome screen is preserved across restarts), otherwise
-      // fall back to the most recent non-archived chat. If neither exists
-      // we leave activeSessionId null and let the NoChatState CTA take
-      // over — the user explicitly emptied their sidebar and we shouldn't
-      // silently re-create a chat behind their back. Onboarding still
-      // creates the very first chat from `onboardingStore.complete()`.
+      // fall back to the most recent non-archived chat. `selectSession` loads
+      // that one session's transcript lazily. If neither exists we leave
+      // activeSessionId null and let the NoChatState CTA take over — the user
+      // explicitly emptied their sidebar and we shouldn't silently re-create a
+      // chat behind their back. Onboarding still creates the very first chat
+      // from `onboardingStore.complete()`.
       if (emptySessions.length > 0) {
         await get().selectSession(emptySessions[0].id);
       } else {
@@ -1409,13 +1433,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   newSession: async (opts) => {
-    // Remove all existing empty sessions (no messages) before creating a new one.
+    // Remove all existing empty sessions (no messages) before creating a new
+    // one. Use per-session counts rather than N sequential transcript loads —
+    // under lazy hydration most sessions' messages aren't resident, so the old
+    // `messages[s.id] ?? await listMessages(s.id)` would re-import the exact
+    // cost hydrate was changed to avoid. In-memory length wins when present
+    // (it reflects just-sent messages the counts query might predate).
     const { sessions, messages } = get();
+    const counts = await sessionMessageCounts();
     const emptyIds: string[] = [];
     for (const s of sessions) {
       if (s.archived_at) continue; // leave archived chats untouched
-      const msgs = messages[s.id] ?? await listMessages(s.id);
-      if (msgs.length === 0) emptyIds.push(s.id);
+      const count = messages[s.id]?.length ?? counts[s.id] ?? 0;
+      if (count === 0) emptyIds.push(s.id);
     }
     for (const id of emptyIds) {
       await deleteSession(id);
@@ -1717,6 +1747,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   sendUserMessage: async (rawContent, attachments) => {
+    // Abort any in-flight memory extraction so it stops competing with this
+    // turn for the model's generation slot (best-effort; no-op when idle).
+    cancelMemoryExtraction();
     // If viewing a space, exit the space view and create a session in that space
     const spaceStore = useSpaceStore.getState();
     const viewingSpaceId = spaceStore.viewingSpaceId;
@@ -1741,6 +1774,29 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const session = get().sessions.find((s) => s.id === sessionId)!;
     if (!session.model) {
       throw new Error("No model selected. Pick one from the model dropdown.");
+    }
+
+    // Lazy hydration: a session other than the one loaded at startup only
+    // fetches its transcript when opened. A send can race that load (the user
+    // hits Enter the instant they switch chats), so make sure the full history
+    // is resident before appending the user message below — otherwise the
+    // `?? []` fallbacks when building the request would start from an empty
+    // transcript and silently drop the conversation's context. A freshly
+    // created session is already seeded with `[]` in newSession, so this only
+    // fetches for existing chats opened-then-sent before their load settled.
+    if (!get().messages[sessionId!]) {
+      try {
+        const msgs = await listMessages(sessionId!);
+        set((s) => ({ messages: { ...s.messages, [sessionId!]: msgs } }));
+      } catch (e) {
+        logger.error("failed to load chat history before send", e);
+        useToastStore.getState().push({
+          kind: "error",
+          title: "Couldn't open chat",
+          body: e instanceof Error ? e.message : String(e),
+        });
+        return;
+      }
     }
 
     // Hard cap: at most one in-flight task per chat. If this session is

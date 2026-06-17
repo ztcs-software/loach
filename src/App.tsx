@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { TitleBar } from "@/components/TitleBar";
 import { Sidebar } from "@/components/Sidebar";
 import { ChatHeader } from "@/components/ChatHeader";
@@ -10,17 +10,36 @@ import { HelpDialog } from "@/components/HelpDialog";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { SwitchVariantProvider } from "@/components/ui/switch";
 import { SpaceForm } from "@/components/SpaceForm";
-import { SpaceView } from "@/components/SpaceView";
-import { SpacesLibrary } from "@/components/SpacesLibrary";
+// Lazily loaded surfaces — each renders only when the user navigates to it
+// (a space/model view, a sidebar library, the code canvas, onboarding), so
+// splitting them out keeps their code (and deps) out of the initial bundle
+// that the chat path pays to parse on every cold start. They each already sit
+// behind a render condition below, so the chunk loads exactly when first shown.
+const SpaceView = lazy(() =>
+  import("@/components/SpaceView").then((m) => ({ default: m.SpaceView })),
+);
+const SpacesLibrary = lazy(() =>
+  import("@/components/SpacesLibrary").then((m) => ({ default: m.SpacesLibrary })),
+);
 import { SnippetDialog } from "@/components/SnippetDialog";
 import { SnippetVariableDialog } from "@/components/SnippetVariableDialog";
 import { SnippetVariableFillDialog } from "@/components/SnippetVariableFillDialog";
-import { SnippetsLibrary } from "@/components/SnippetsLibrary";
-import { ModelsView } from "@/components/ModelsView";
-import { ModelsLibrary } from "@/components/ModelsLibrary";
+const SnippetsLibrary = lazy(() =>
+  import("@/components/SnippetsLibrary").then((m) => ({ default: m.SnippetsLibrary })),
+);
+const ModelsView = lazy(() =>
+  import("@/components/ModelsView").then((m) => ({ default: m.ModelsView })),
+);
+const ModelsLibrary = lazy(() =>
+  import("@/components/ModelsLibrary").then((m) => ({ default: m.ModelsLibrary })),
+);
 import { LockScreen } from "@/components/LockScreen";
-import { Onboarding } from "@/components/Onboarding";
-import { CodeCanvas } from "@/components/CodeCanvas";
+const Onboarding = lazy(() =>
+  import("@/components/Onboarding").then((m) => ({ default: m.Onboarding })),
+);
+const CodeCanvas = lazy(() =>
+  import("@/components/CodeCanvas").then((m) => ({ default: m.CodeCanvas })),
+);
 import { SearchBar } from "@/components/SearchBar";
 import { PrivateChat } from "@/components/PrivateChat";
 import { KeyboardShortcuts } from "@/components/KeyboardShortcuts";
@@ -40,9 +59,7 @@ import { useSecurityStore, lockUntilHydrated } from "@/stores/securityStore";
 import { useUIStore } from "@/stores/uiStore";
 import { useCanvasStore } from "@/stores/canvasStore";
 import { cn } from "@/lib/utils";
-import type { Message } from "@/types";
-
-const EMPTY_MESSAGES: Message[] = [];
+import { DEFAULT_PARAMS } from "@/types";
 
 export default function App() {
   const hydrateSettings = useSettingsStore((s) => s.hydrate);
@@ -67,10 +84,15 @@ export default function App() {
   const session = useChatStore((s) =>
     s.activeSessionId ? s.sessions.find((x) => x.id === s.activeSessionId) : undefined,
   );
-  const messages = useChatStore((s) =>
-    s.activeSessionId ? s.messages[s.activeSessionId] ?? EMPTY_MESSAGES : EMPTY_MESSAGES,
+  // Subscribe to a boolean, NOT the messages array: the array's identity
+  // changes on every streaming flush, so selecting the array here re-rendered
+  // the whole App shell ~60×/s mid-stream even though only `.length > 0` is
+  // ever read. Returning the primitive lets zustand's Object.is bail.
+  const hasMessages = useChatStore((s) =>
+    s.activeSessionId
+      ? (s.messages[s.activeSessionId]?.length ?? 0) > 0
+      : false,
   );
-  const hasMessages = messages.length > 0;
   // True only during the post-unlock hydrate window. Lets us swap the
   // "No chat open" CTA for a loading skeleton so users with chats on disk
   // don't briefly see an empty-state message that tells them to create one.
@@ -137,9 +159,23 @@ export default function App() {
         useChatStore.getState().sessions,
       );
       if (resolved.provider === "ollama" && resolved.model) {
-        void ollamaPreloadModel(s.ollama_base_url, resolved.model).catch(
-          () => {},
-        );
+        // Resolve the runner-affecting params a fresh chat with this model
+        // would send (num_ctx from the Modelfile defaults, else the app
+        // default; plus the global low-VRAM pin) so the warmed model isn't
+        // reloaded the instant the user sends their first message.
+        void useModelsStore
+          .getState()
+          .loadModelDefaults(resolved.model)
+          .then((md) => {
+            void ollamaPreloadModel(
+              s.ollama_base_url,
+              resolved.model,
+              md.num_ctx ?? DEFAULT_PARAMS.num_ctx,
+              s.low_vram_global ? true : md.low_vram,
+              md.num_gpu,
+            ).catch(() => {});
+          })
+          .catch(() => {});
       }
     });
   }, [
@@ -213,23 +249,33 @@ export default function App() {
           <Sidebar />
           {viewingSpaceId ? (
             <ErrorBoundary name="Space">
-              <SpaceView />
+              <Suspense fallback={null}>
+                <SpaceView />
+              </Suspense>
             </ErrorBoundary>
           ) : viewingModel ? (
             <ErrorBoundary name="Model details">
-              <ModelsView />
+              <Suspense fallback={null}>
+                <ModelsView />
+              </Suspense>
             </ErrorBoundary>
           ) : sidebarTab === "spaces" ? (
             <ErrorBoundary name="Spaces library">
-              <SpacesLibrary />
+              <Suspense fallback={null}>
+                <SpacesLibrary />
+              </Suspense>
             </ErrorBoundary>
           ) : sidebarTab === "snippets" ? (
             <ErrorBoundary name="Snippets library">
-              <SnippetsLibrary />
+              <Suspense fallback={null}>
+                <SnippetsLibrary />
+              </Suspense>
             </ErrorBoundary>
           ) : sidebarTab === "models" ? (
             <ErrorBoundary name="Models library">
-              <ModelsLibrary />
+              <Suspense fallback={null}>
+                <ModelsLibrary />
+              </Suspense>
             </ErrorBoundary>
           ) : (
             <>
@@ -263,7 +309,13 @@ export default function App() {
                   this swap, so the user's snippet is still there if they
                   toggle params back. */}
               <ErrorBoundary name={canvasOpen ? "Code canvas" : "Parameters"}>
-                {canvasOpen ? <CodeCanvas /> : <ParameterPanel session={session} />}
+                {canvasOpen ? (
+                  <Suspense fallback={null}>
+                    <CodeCanvas />
+                  </Suspense>
+                ) : (
+                  <ParameterPanel session={session} />
+                )}
               </ErrorBoundary>
             </>
           )}
@@ -291,7 +343,9 @@ export default function App() {
         </ErrorBoundary>
         {showOnboarding && (
           <ErrorBoundary name="Onboarding">
-            <Onboarding />
+            <Suspense fallback={null}>
+              <Onboarding />
+            </Suspense>
           </ErrorBoundary>
         )}
       </div>

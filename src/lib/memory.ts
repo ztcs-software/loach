@@ -139,6 +139,24 @@ export async function extractMemories(args: {
   }
 }
 
+// Handle to the in-flight extractor stream's `stop()` (which routes through
+// chat_cancel on the Rust side), or null when no extraction is running. Lets a
+// new user send abort a still-running extractor so it stops competing for the
+// model's generation slot. See `cancelMemoryExtraction`.
+let memoryStopFn: (() => Promise<void>) | null = null;
+
+/** Abort any in-flight memory extraction. Called when the user sends a new
+ *  message so the extractor — a second full generation against the same model
+ *  — doesn't keep hogging the generation slot and inflating the new turn's
+ *  time-to-first-token. No-op when nothing is running. Best-effort: the Rust
+ *  stream is told to cancel and the extractor promise settles empty (its
+ *  partial output is never parsed). */
+export function cancelMemoryExtraction(): void {
+  const stop = memoryStopFn;
+  memoryStopFn = null;
+  if (stop) void stop().catch(() => {});
+}
+
 /**
  * Issue a single non-streaming chat call against the user-selected model
  * and resolve to the concatenated assistant text. We re-use
@@ -148,7 +166,8 @@ export async function extractMemories(args: {
  *
  * Concurrent with the user's next chat: yes, but Ollama serialises
  * generation per-model and the extractor finishes quickly given the small
- * prompt + tight max_tokens.
+ * prompt + tight max_tokens. A new user send aborts it via
+ * `cancelMemoryExtraction` so it never delays the visible turn.
  */
 async function runOneShotStream(args: {
   provider: ProviderId;
@@ -178,6 +197,7 @@ async function runOneShotStream(args: {
         /* already unlistened — harmless */
       }
       unlistenFn = null;
+      memoryStopFn = null;
     };
 
     // Hard ceiling on extractor wall-clock. If a model goes off the rails
@@ -221,6 +241,13 @@ async function runOneShotStream(args: {
           window.clearTimeout(timeoutId);
           cleanup();
           reject(new Error(ev.message));
+        } else if (ev.kind === "cancelled") {
+          // Aborted by a new user send (cancelMemoryExtraction). Resolve EMPTY
+          // — never parse the partial output — so the caller saves no memories
+          // and logs no failure.
+          window.clearTimeout(timeoutId);
+          cleanup();
+          resolve("");
         }
       },
     )
@@ -238,6 +265,7 @@ async function runOneShotStream(args: {
           return;
         }
         unlistenFn = handle.unlisten;
+        memoryStopFn = handle.stop;
       })
       .catch((e) => {
         window.clearTimeout(timeoutId);

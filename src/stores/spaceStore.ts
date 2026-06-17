@@ -15,6 +15,10 @@ import {
   updateSpaceMemory,
 } from "@/lib/tauri";
 import { SPACE_BYTES_CAP } from "@/lib/files";
+import {
+  invalidateSpaceContext,
+  invalidateAllSpaceContext,
+} from "@/lib/spaceContextCache";
 import type { Space, SpaceFile, SpaceMemory } from "@/types";
 
 interface SpaceState {
@@ -92,6 +96,9 @@ export const useSpaceStore = create<SpaceState>((set, get) => ({
     try {
       const spaces = await listSpaces();
       set({ spaces });
+      // A fresh hydrate (startup, or after a data import rewrote the spaces
+      // tables) means any previously-cached context may be stale.
+      invalidateAllSpaceContext();
     } catch (e) {
       logger.error("space hydrate failed", e);
     }
@@ -138,6 +145,7 @@ export const useSpaceStore = create<SpaceState>((set, get) => ({
         fields.memory_enabled !== undefined ? fields.memory_enabled : undefined,
     };
     await updateSpace({ id, ...next });
+    invalidateSpaceContext(id);
     set((s) => ({
       spaces: s.spaces.map((sp) =>
         sp.id === id
@@ -168,6 +176,7 @@ export const useSpaceStore = create<SpaceState>((set, get) => ({
   deleteSpace: async (id) => {
     try {
       await deleteSpace(id);
+      invalidateSpaceContext(id);
     } catch (e) {
       useToastStore.getState().push({
         kind: "error",
@@ -218,6 +227,7 @@ export const useSpaceStore = create<SpaceState>((set, get) => ({
       size,
       position: existing.length,
     });
+    invalidateSpaceContext(spaceId);
     set((s) => ({
       spaceFiles: {
         ...s.spaceFiles,
@@ -230,6 +240,7 @@ export const useSpaceStore = create<SpaceState>((set, get) => ({
   removeFile: async (fileId, spaceId) => {
     try {
       await removeSpaceFile(fileId);
+      invalidateSpaceContext(spaceId);
     } catch (e) {
       useToastStore.getState().push({
         kind: "error",
@@ -254,6 +265,7 @@ export const useSpaceStore = create<SpaceState>((set, get) => ({
 
   addMemory: async (args) => {
     const memory = await addSpaceMemory(args);
+    invalidateSpaceContext(args.space_id);
     set((s) => ({
       spaceMemories: {
         ...s.spaceMemories,
@@ -266,6 +278,7 @@ export const useSpaceStore = create<SpaceState>((set, get) => ({
   updateMemory: async (id, spaceId, content) => {
     const trimmed = content.trim();
     await updateSpaceMemory({ id, space_id: spaceId, content: trimmed });
+    invalidateSpaceContext(spaceId);
     const now = Date.now();
     set((s) => ({
       spaceMemories: {
@@ -283,6 +296,7 @@ export const useSpaceStore = create<SpaceState>((set, get) => ({
   // panel. The SpaceView UI caller attaches its own toast on the rejection.
   removeMemory: async (id, spaceId) => {
     await removeSpaceMemory({ id, space_id: spaceId });
+    invalidateSpaceContext(spaceId);
     set((s) => ({
       spaceMemories: {
         ...s.spaceMemories,

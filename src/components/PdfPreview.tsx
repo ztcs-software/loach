@@ -166,11 +166,14 @@ function PdfPreviewBody({ open, onOpenChange, attachment }: PdfPreviewProps) {
 }
 
 /**
- * One PDF page, lazy-rendered. We start as a placeholder sized to the page's
- * natural aspect ratio (cheap to compute — `getPage()` is fast, only the
- * raster step is expensive) and trigger the actual `page.render()` once the
- * placeholder enters the viewport. This keeps a 500-page legal PDF from
- * pinning the renderer for seconds on open.
+ * One PDF page, lazy-rendered. The placeholder starts at a default
+ * letter-paper aspect and resolves its TRUE aspect — together with the actual
+ * `page.render()` raster — only once it nears the viewport (via the
+ * IntersectionObserver below). Resolving dimensions lazily, instead of eagerly
+ * calling `getPage()` for every page on open, keeps a 500-page legal PDF from
+ * issuing hundreds of page parses (and pinning the worker) the instant it
+ * opens. Mixed-size PDFs show the default aspect until a page is scrolled near,
+ * then settle to their real proportions.
  */
 function PdfPage({ doc, pageNumber }: { doc: PDFDocumentProxy; pageNumber: number }) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -178,26 +181,6 @@ function PdfPage({ doc, pageNumber }: { doc: PDFDocumentProxy; pageNumber: numbe
   const [dims, setDims] = useState<{ width: number; height: number } | null>(null);
   const [visible, setVisible] = useState(false);
   const [rendered, setRendered] = useState(false);
-
-  // Compute the page's natural pixel dimensions immediately so the placeholder
-  // takes the right amount of space — otherwise every page would be a zero-
-  // height div and IntersectionObserver would fire for all of them at once.
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      const page = await doc.getPage(pageNumber);
-      // 1.5× scale is a good readability default — sharp on standard
-      // monitors without making A4 pages overflow on common laptop widths.
-      const viewport = page.getViewport({ scale: 1.5 });
-      if (!cancelled) {
-        setDims({ width: viewport.width, height: viewport.height });
-      }
-      page.cleanup();
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [doc, pageNumber]);
 
   // IntersectionObserver flips `visible` once the placeholder enters (or
   // gets near) the viewport. `rootMargin` extends the trigger zone so pages
@@ -240,6 +223,13 @@ function PdfPage({ doc, pageNumber }: { doc: PDFDocumentProxy; pageNumber: numbe
       // 100-page PDF).
       const dpr = Math.min(window.devicePixelRatio || 1, 2);
       const viewport = page.getViewport({ scale: 2 * dpr });
+      // Resolve this page's true aspect now, lazily (deferred from open). The
+      // ratio is scale-invariant, so the raster viewport doubles as the
+      // dimensions source; the placeholder used the letter-paper default until
+      // this point.
+      if (!cancelled) {
+        setDims({ width: viewport.width, height: viewport.height });
+      }
       const canvas = canvasRef.current;
       if (!canvas || cancelled) {
         page.cleanup();

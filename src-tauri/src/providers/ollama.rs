@@ -449,21 +449,38 @@ pub async fn unload_model(http: &Client, base_url: &str, model: &str) -> Result<
     Ok(())
 }
 
-/// Preload a model into VRAM by sending an empty chat. The default Ollama
-/// keep_alive (5m) takes over after the load completes, so the model stays
-/// resident long enough for the user's first real request to skip the cold
-/// load. Errors are swallowed — preload is best-effort and must never block
-/// app startup if Ollama is unreachable or the model is missing.
-pub async fn preload_model(http: &Client, base_url: &str, model: &str) -> Result<()> {
+/// Preload a model into VRAM by sending an empty chat. `keep_alive` controls
+/// how long Ollama keeps it resident after the warm completes — pass the
+/// user's configured value so the model survives until their first real
+/// request even if that's more than Ollama's built-in 5-minute default away
+/// (`None` falls back to that default). Errors are swallowed — preload is
+/// best-effort and must never block app startup if Ollama is unreachable or
+/// the model is missing.
+pub async fn preload_model(
+    http: &Client,
+    base_url: &str,
+    model: &str,
+    keep_alive: Option<Value>,
+    options: Option<Value>,
+) -> Result<()> {
     super::refuse_link_local_host(base_url)
         .await
         .map_err(|e| anyhow!(e))?;
     let url = format!("{}/api/chat", base_url.trim_end_matches('/'));
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "model": model,
         "messages": [],
         "stream": false,
     });
+    if let Some(ka) = keep_alive {
+        body["keep_alive"] = ka;
+    }
+    // Warm the runner with the same options the first real request will send
+    // (num_ctx above all) so Ollama doesn't have to reallocate the KV cache —
+    // i.e. reload the model — on that first message.
+    if let Some(opts) = options {
+        body["options"] = opts;
+    }
     // Preload can legitimately take longer than ADMIN_TIMEOUT for large
     // models (a 70 B model cold-loading from disk easily exceeds 30 s),
     // so give it a more generous ceiling. Still bounded so a wedged
@@ -491,6 +508,13 @@ struct OllamaChunk {
     /// tokens — which happens routinely on faster local models.
     #[serde(default)]
     eval_count: Option<u32>,
+    /// Pure decode time in nanoseconds from the final `done: true` chunk
+    /// (`eval_duration`). Paired with `eval_count` it gives the true generation
+    /// rate — unlike wall-clock, which also folds in model load, prompt
+    /// evaluation, and tool round-trips. `None` on intermediate chunks and on
+    /// builds that don't report it.
+    #[serde(default)]
+    eval_duration: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -582,6 +606,17 @@ pub async fn chat_stream(
             .collect::<Vec<_>>()))
     };
 
+    // How long Ollama should keep this model resident after the request.
+    // Read once per stream from the global setting and sent on every turn so
+    // each round-trip resets the idle timer. Unset → omit the field and let
+    // Ollama apply its 5-minute default (Loach's pre-setting behaviour).
+    let keep_alive: Option<Value> = db
+        .get_setting("ollama_keep_alive")
+        .ok()
+        .flatten()
+        .as_deref()
+        .and_then(keep_alive_value);
+
     let start = Instant::now();
     let mut total_tokens: u32 = 0;
     let mut think_already_drop: bool = false; // sticky retry guard across turns
@@ -589,6 +624,9 @@ pub async fn chat_stream(
     // (`eval_count`). Preferred over the per-chunk approximation —
     // faster local models routinely batch several tokens per chunk.
     let mut reported_tokens: Option<u32> = None;
+    // Accumulated decode time (eval_duration, ns) across turns, paired with
+    // reported_tokens to compute an accurate generation rate at the end.
+    let mut reported_eval_ns: Option<u64> = None;
 
     for turn in 0..MAX_TOOL_TURNS {
         // Keep the running history under the soft cap before each turn.
@@ -600,6 +638,9 @@ pub async fn chat_stream(
             "stream": true,
             "options": build_options(&req),
         });
+        if let Some(ka) = keep_alive.as_ref() {
+            body["keep_alive"] = ka.clone();
+        }
         if let Some(t) = req.params.think {
             if !think_already_drop {
                 body["think"] = json!(t);
@@ -618,6 +659,7 @@ pub async fn chat_stream(
             &mut body,
             &mut total_tokens,
             &mut reported_tokens,
+            &mut reported_eval_ns,
             &mut think_already_drop,
             &req.stream_id,
             &registry,
@@ -632,7 +674,7 @@ pub async fn chat_stream(
         match outcome {
             TurnOutcome::Done => {
                 let tokens_for_metrics = reported_tokens.unwrap_or(total_tokens);
-                emit_metrics(&app, &channel, tokens_for_metrics, start);
+                emit_metrics(&app, &channel, tokens_for_metrics, reported_eval_ns, start);
                 let _ = app.emit(&channel, StreamEvent::Done);
                 registry.finish(&req.stream_id);
                 return Ok(());
@@ -785,6 +827,7 @@ async fn run_one_turn(
     body: &mut Value,
     total_tokens: &mut u32,
     reported_tokens: &mut Option<u32>,
+    reported_eval_ns: &mut Option<u64>,
     think_already_drop: &mut bool,
     stream_id: &str,
     registry: &StreamRegistry,
@@ -868,6 +911,7 @@ async fn run_one_turn(
     // and a forked build's intermediate emissions don't inflate the
     // count either.
     let mut turn_eval: Option<u32> = None;
+    let mut turn_eval_duration: Option<u64> = None;
 
     loop {
         select! {
@@ -907,6 +951,9 @@ async fn run_one_turn(
                                 Ok(parsed) => {
                                     if let Some(n) = parsed.eval_count {
                                         turn_eval = Some(n);
+                                    }
+                                    if let Some(d) = parsed.eval_duration {
+                                        turn_eval_duration = Some(d);
                                     }
                                     if let Some(msg) = parsed.message {
                                         if let Some(think) = msg.thinking {
@@ -957,6 +1004,10 @@ async fn run_one_turn(
                                 *reported_tokens =
                                     Some(reported_tokens.unwrap_or(0).saturating_add(n));
                             }
+                            if let Some(d) = turn_eval_duration {
+                                *reported_eval_ns =
+                                    Some(reported_eval_ns.unwrap_or(0).saturating_add(d));
+                            }
                             return Ok(Some(decide_outcome(pending_tool_calls)));
                         }
                     }
@@ -971,10 +1022,14 @@ async fn run_one_turn(
                     None => {
                         // EOF without an explicit `done: true` — treat as a
                         // natural terminator and let the caller emit Done.
-                        // Still fold any partial turn_eval we got.
+                        // Still fold any partial turn_eval / eval_duration.
                         if let Some(n) = turn_eval {
                             *reported_tokens =
                                 Some(reported_tokens.unwrap_or(0).saturating_add(n));
+                        }
+                        if let Some(d) = turn_eval_duration {
+                            *reported_eval_ns =
+                                Some(reported_eval_ns.unwrap_or(0).saturating_add(d));
                         }
                         return Ok(Some(decide_outcome(pending_tool_calls)));
                     }
@@ -992,12 +1047,26 @@ fn decide_outcome(calls: Vec<OllamaToolCall>) -> TurnOutcome {
     }
 }
 
-fn emit_metrics(app: &AppHandle, channel: &str, tokens: u32, start: Instant) {
+fn emit_metrics(
+    app: &AppHandle,
+    channel: &str,
+    tokens: u32,
+    eval_ns: Option<u64>,
+    start: Instant,
+) {
     let elapsed = start.elapsed().as_millis() as u64;
-    let tps = if elapsed > 0 {
-        (tokens as f64) * 1000.0 / (elapsed as f64)
-    } else {
-        0.0
+    // Prefer Ollama's own `eval_duration` (pure decode time) so the rate
+    // reflects generation speed, not the wall clock — which also folds in model
+    // load, prompt evaluation, and any tool round-trips, understating tok/s
+    // (badly so after a cold load). Fall back to wall-clock when the server
+    // didn't report it (older builds) or nothing was generated. `elapsed_ms`
+    // stays the full turn wall-clock — still useful, and unchanged on the wire.
+    let tps = match eval_ns {
+        Some(ns) if ns > 0 && tokens > 0 => {
+            (tokens as f64) * 1_000_000_000.0 / (ns as f64)
+        }
+        _ if elapsed > 0 => (tokens as f64) * 1000.0 / (elapsed as f64),
+        _ => 0.0,
     };
     let _ = app.emit(
         channel,
@@ -1007,6 +1076,62 @@ fn emit_metrics(app: &AppHandle, channel: &str, tokens: u32, start: Instant) {
             tokens_per_second: tps,
         },
     );
+}
+
+/// App-default context window, mirrored from `DEFAULT_PARAMS.num_ctx` in
+/// `src/types.ts`. The startup preload (in `preload.rs`) can't resolve a
+/// model's Modelfile defaults the way the frontend does, so it warms with this
+/// value — the size the first real message most commonly asks for. The
+/// post-unlock JS preload re-fires with the precisely-resolved params, so any
+/// mismatch here is corrected before the user's first send. Keep in sync with
+/// the TS default.
+pub const DEFAULT_NUM_CTX: u32 = 8192;
+
+/// Build the Ollama `options` object for a preload so the warmed runner is
+/// sized like the one the first real chat request will ask for. `num_ctx` is
+/// the load-bearing one (a mismatch forces a KV-cache realloc, i.e. a reload);
+/// `low_vram` / `num_gpu` matter on memory-constrained setups. Returns `None`
+/// when nothing is set so the request body omits `options` entirely.
+pub fn preload_options(
+    num_ctx: Option<u32>,
+    low_vram: Option<bool>,
+    num_gpu: Option<u32>,
+) -> Option<Value> {
+    let mut o = serde_json::Map::new();
+    if let Some(v) = num_ctx {
+        o.insert("num_ctx".into(), json!(v));
+    }
+    if let Some(v) = low_vram {
+        o.insert("low_vram".into(), json!(v));
+    }
+    if let Some(v) = num_gpu {
+        o.insert("num_gpu".into(), json!(v));
+    }
+    if o.is_empty() {
+        None
+    } else {
+        Some(Value::Object(o))
+    }
+}
+
+/// Translate the stored `ollama_keep_alive` setting string into the JSON
+/// value Ollama's `keep_alive` field expects. Ollama accepts either a Go
+/// duration string ("5m", "30m", "1h") or an integer number of seconds,
+/// where a negative value means "keep the model resident until it is
+/// explicitly unloaded". We send the until-unloaded sentinel as a JSON
+/// number (`-1`) rather than the string `"-1"` because Go's
+/// `time.ParseDuration` rejects a unit-less string. An empty / unset value
+/// yields `None`, letting Ollama apply its built-in 5-minute idle default —
+/// exactly the behaviour Loach had before this setting existed.
+pub fn keep_alive_value(setting: &str) -> Option<Value> {
+    let s = setting.trim();
+    if s.is_empty() {
+        return None;
+    }
+    match s.parse::<i64>() {
+        Ok(n) => Some(json!(n)),
+        Err(_) => Some(json!(s)),
+    }
 }
 
 fn build_options(req: &ChatRequest) -> Value {

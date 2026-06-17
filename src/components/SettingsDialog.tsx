@@ -90,7 +90,14 @@ import {
 import { useSecurityStore } from "@/stores/securityStore";
 import { cn } from "@/lib/utils";
 import { DEFAULT_TONE_ID, TONES } from "@/lib/tones";
-import type { FontSize, ImportStats, ModelInfo, ProviderId, Session } from "@/types";
+import type {
+  FontSize,
+  ImportStats,
+  ModelInfo,
+  OllamaKeepAlive,
+  ProviderId,
+  Session,
+} from "@/types";
 import pkg from "../../package.json";
 
 type ConnTestState =
@@ -669,6 +676,31 @@ export function SettingsDialog() {
                       }
                     />
                   </div>
+                </div>
+
+                <Separator />
+
+                <div>
+                  <Label className="flex items-center gap-1.5">
+                    <Clock className="h-3.5 w-3.5 text-foreground/60" />
+                    Keep model loaded
+                  </Label>
+                  <p className="mt-1 text-[11px] text-foreground/50">
+                    How long Ollama keeps the model in VRAM after a reply.
+                    Longer means the next message skips the multi-second cold
+                    reload, at the cost of pinning VRAM while idle.{" "}
+                    <span className="font-medium text-foreground/70">
+                      Always
+                    </span>{" "}
+                    keeps it resident until you unload it or quit Ollama.
+                    Ignored by OpenAI API providers.
+                  </p>
+                  <KeepAliveSwitch
+                    value={settings.ollama_keep_alive}
+                    onChange={(next) =>
+                      settings.update("ollama_keep_alive", next)
+                    }
+                  />
                 </div>
               </TabsContent>
 
@@ -1603,6 +1635,50 @@ const FONT_SIZE_OPTIONS: { value: FontSize; label: string; previewPx: number }[]
   { value: "normal", label: "Normal", previewPx: 14 },
   { value: "large",  label: "Large",  previewPx: 16 },
 ];
+
+const KEEP_ALIVE_OPTIONS: { value: OllamaKeepAlive; label: string }[] = [
+  { value: "5m", label: "5 min" },
+  { value: "30m", label: "30 min" },
+  { value: "1h", label: "1 hour" },
+  { value: "-1", label: "Always" },
+];
+
+function KeepAliveSwitch({
+  value,
+  onChange,
+}: {
+  value: OllamaKeepAlive;
+  onChange: (next: OllamaKeepAlive) => void;
+}) {
+  return (
+    <div
+      role="radiogroup"
+      aria-label="Keep model loaded"
+      className="mt-3 grid grid-cols-4 gap-2 rounded-2xl border border-foreground/10 bg-foreground/[0.03] p-1"
+    >
+      {KEEP_ALIVE_OPTIONS.map((opt) => {
+        const selected = value === opt.value;
+        return (
+          <button
+            key={opt.value}
+            type="button"
+            role="radio"
+            aria-checked={selected}
+            onClick={() => onChange(opt.value)}
+            className={cn(
+              "flex items-center justify-center rounded-xl px-3 py-2 text-[12px] font-medium transition-colors",
+              selected
+                ? "bg-primary/10 text-foreground shadow-[0_1px_0_0_rgba(255,255,255,0.06)_inset]"
+                : "text-foreground/70 hover:bg-foreground/[0.05] hover:text-foreground",
+            )}
+          >
+            {opt.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
 
 function FontSizeSwitch({
   value,
