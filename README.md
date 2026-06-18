@@ -8,7 +8,7 @@ Run local LLMs with [Ollama](https://ollama.com) or connect any OpenAI-compatibl
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-[![Latest release](https://img.shields.io/github/v/release/ztcs-software/loach?include_prereleases&label=release)](https://github.com/ztcs-software/loach/releases)
+[![Latest release](https://img.shields.io/github/v/release/ztcs-software/loach?label=release)](https://github.com/ztcs-software/loach/releases)
 [![Release build](https://github.com/ztcs-software/loach/actions/workflows/release.yml/badge.svg)](https://github.com/ztcs-software/loach/actions/workflows/release.yml)
 
 ![Tauri 2](https://img.shields.io/badge/Tauri-2-FFC131?logo=tauri&logoColor=white)
