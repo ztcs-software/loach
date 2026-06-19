@@ -970,24 +970,30 @@ function ModelsTab({
   const [ollamaUp, setOllamaUp] = useState<boolean | null>(null);
   const [loading, setLoading] = useState(false);
 
+  const reqId = useRef(0);
   const refresh = useMemo(
     () => async () => {
+      const id = ++reqId.current;
       setLoading(true);
       try {
         const probe = await ollamaProbe(ollamaBaseUrl).catch(() => false);
+        if (id !== reqId.current) return;
         setOllamaUp(probe);
         if (probe) {
           const m = await ollamaListModels(ollamaBaseUrl).catch(() => []);
+          if (id !== reqId.current) return;
           setOllamaModels(m);
         } else {
           setOllamaModels([]);
         }
         if (openaiKeySet) {
           const m = await openaiListModels(openaiBaseUrl).catch(() => []);
+          if (id !== reqId.current) return;
           setOpenaiModels(m);
         }
       } finally {
-        setLoading(false);
+        // Only the latest-initiated run owns the loading flag.
+        if (id === reqId.current) setLoading(false);
       }
     },
     [ollamaBaseUrl, openaiBaseUrl, openaiKeySet],

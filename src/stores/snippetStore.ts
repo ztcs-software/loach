@@ -20,6 +20,11 @@ interface SnippetState {
    *  create mode; when a `NewSnippetSeed`, opens in create mode with the
    *  prompt pre-filled. `null` keeps the dialog closed. */
   dialogTarget: Snippet | "new" | NewSnippetSeed | null;
+  /** True once `hydrate()` has run (success or failure) so the library can tell
+   *  "still loading" apart from "genuinely empty". */
+  hydrated: boolean;
+  /** Non-null when the last hydrate failed — drives the library's retry UI. */
+  error: string | null;
 
   hydrate: () => Promise<void>;
   create: (
@@ -43,13 +48,19 @@ interface SnippetState {
 export const useSnippetStore = create<SnippetState>((set) => ({
   snippets: [],
   dialogTarget: null,
+  hydrated: false,
+  error: null,
 
   hydrate: async () => {
     try {
       const snippets = await listSnippets();
-      set({ snippets });
+      set({ snippets, hydrated: true, error: null });
     } catch (e) {
       logger.error("snippet hydrate failed", e);
+      set({
+        hydrated: true,
+        error: e instanceof Error ? e.message : String(e),
+      });
     }
   },
 

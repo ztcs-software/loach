@@ -167,7 +167,7 @@ function ToolCallItem({ call }: { call: ToolCallRecord }) {
                 className={cn(
                   "max-h-64 overflow-auto rounded border px-2 py-1.5 font-mono text-[11px] leading-snug whitespace-pre-wrap break-words",
                   failed
-                    ? "border-red-500/30 bg-red-500/[0.06] text-red-200"
+                    ? "border-red-500/30 bg-red-500/[0.06] text-red-700 dark:text-red-200"
                     : "border-foreground/10 bg-foreground/[0.04] text-foreground/80",
                 )}
               >
@@ -637,7 +637,7 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
               // image preview, the placeholder dialog, and the Code Canvas
               // path all share one dispatcher.
               <AttachmentActions
-                key={i}
+                key={`${img.name}-${i}`}
                 attachment={img}
                 className="rounded-lg focus-visible:ring-2 focus-visible:ring-ring/40"
               >
@@ -658,7 +658,7 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
           <div className="mb-2 flex flex-wrap gap-1.5">
             {files.map((f, i) => (
               <AttachmentActions
-                key={i}
+                key={`${f.name}-${i}`}
                 attachment={f}
                 className="gap-1.5 rounded-lg border border-foreground/10 bg-foreground/[0.05] px-2.5 py-1 text-xs text-foreground/70"
               >
@@ -719,7 +719,7 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
           <div className="mt-2 flex flex-wrap gap-1.5">
             {images.map((img, i) => (
               <AttachmentActions
-                key={i}
+                key={`${img.name}-${i}`}
                 attachment={img}
                 className="rounded-lg focus-visible:ring-2 focus-visible:ring-ring/40"
               >
@@ -740,7 +740,7 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
           <div className="mt-2 flex flex-wrap gap-1.5">
             {files.map((f, i) => (
               <AttachmentActions
-                key={i}
+                key={`${f.name}-${i}`}
                 attachment={f}
                 className="gap-1.5 rounded-lg border border-foreground/10 bg-foreground/[0.05] px-2.5 py-1 text-xs text-foreground/70"
               >

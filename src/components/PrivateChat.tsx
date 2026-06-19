@@ -167,14 +167,18 @@ function ModelPicker() {
   const [up, setUp] = useState<boolean | null>(null);
   const [loading, setLoading] = useState(false);
 
+  const reqId = useRef(0);
   const refresh = useMemo(
     () => async () => {
+      const id = ++reqId.current;
       setLoading(true);
       try {
         const probe = await ollamaProbe(ollamaBaseUrl).catch(() => false);
+        if (id !== reqId.current) return;
         setUp(probe);
         if (probe) {
           const m = await ollamaListModels(ollamaBaseUrl).catch(() => []);
+          if (id !== reqId.current) return;
           setModels(m);
           // Auto-pick a default model if none chosen yet — the user shouldn't
           // have to open the dropdown just to send their first message. Prefer

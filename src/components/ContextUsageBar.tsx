@@ -154,9 +154,9 @@ export function ContextUsageBar() {
 
   const labelTint =
     tone === "danger"
-      ? "text-rose-300"
+      ? "text-rose-700 dark:text-rose-300"
       : tone === "warn"
-        ? "text-amber-300"
+        ? "text-amber-700 dark:text-amber-300"
         : "text-foreground/55";
 
   return (

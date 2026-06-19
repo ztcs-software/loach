@@ -28,7 +28,7 @@ export function FileChip({
         // is larger than what reaches the model. Tooltip carries the detail.
         <span
           title="Document exceeded the per-attachment extraction limit; only a leading slice will be sent to the model."
-          className="rounded-sm border border-amber-500/30 bg-amber-500/10 px-1 text-[10px] font-medium uppercase tracking-wide text-amber-600 dark:text-amber-400"
+          className="rounded-sm border border-amber-500/30 bg-amber-500/10 px-1 text-[10px] font-medium uppercase tracking-wide text-amber-700 dark:text-amber-400"
         >
           truncated
         </span>

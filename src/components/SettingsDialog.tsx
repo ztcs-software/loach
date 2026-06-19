@@ -1374,7 +1374,7 @@ function ConnTestResult({
         className,
       )}
     >
-      <div className="flex items-center gap-1.5 font-medium text-emerald-500">
+      <div className="flex items-center gap-1.5 font-medium text-emerald-700 dark:text-emerald-400">
         <CheckCircle2 className="h-4 w-4" />
         Connected
       </div>

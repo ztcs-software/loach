@@ -21,6 +21,12 @@ import {
   type OllamaShowResponse,
 } from "@/types";
 
+// Monotonic token guarding `refresh()` against overlapping runs — a base-URL /
+// key change or rapid Refresh clicks can start a second listing before the
+// first resolves. Only the latest-initiated run commits its result, so a slow
+// earlier response can't clobber a newer catalog (or clear `loading` early).
+let refreshSeq = 0;
+
 /** Progress snapshot for an in-flight pull / create. Either field can be
  *  zero while the daemon is still figuring out what to download, so the UI
  *  shows an indeterminate bar until `total` becomes positive. */
@@ -142,6 +148,7 @@ export const useModelsStore = create<ModelsState>((set, get) => ({
   },
 
   refresh: async () => {
+    const seq = ++refreshSeq;
     set({ loading: true, error: null });
     const s = useSettingsStore.getState();
 
@@ -185,7 +192,12 @@ export const useModelsStore = create<ModelsState>((set, get) => ({
           : String(openaiRes.reason);
     }
 
-    set({ models: out, loading: false, error: err });
+    // Drop the result if a newer refresh superseded this run — otherwise a
+    // slow earlier listing could overwrite the fresher one (and clear
+    // `loading` while the newer run is still in flight).
+    if (seq === refreshSeq) {
+      set({ models: out, loading: false, error: err });
+    }
   },
 
   setViewingModel: (name) => set({ viewingModel: name }),

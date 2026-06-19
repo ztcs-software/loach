@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { memo, useCallback, useMemo, useState } from "react";
 import {
   Archive,
   Cpu,
@@ -310,12 +310,15 @@ function ChatList() {
     };
   }, [visible]);
 
-  const handleSelect = (id: string) => {
-    setViewingSpace(null);
-    setViewingModel(null);
-    setSidebarTab("chats");
-    void select(id);
-  };
+  const handleSelect = useCallback(
+    (id: string) => {
+      setViewingSpace(null);
+      setViewingModel(null);
+      setSidebarTab("chats");
+      void select(id);
+    },
+    [setViewingSpace, setViewingModel, setSidebarTab, select],
+  );
 
   if (empty) {
     return (
@@ -376,7 +379,7 @@ function Group({
   );
 }
 
-function SessionRow({
+const SessionRow = memo(function SessionRowImpl({
   session,
   active,
   onSelect,
@@ -567,7 +570,7 @@ function SessionRow({
       </div>
     </li>
   );
-}
+});
 
 // ---------------------------------------------------------------------------
 // Footer — Settings only. Profile/account isn't a concept in Loach (it's a

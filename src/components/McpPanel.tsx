@@ -426,7 +426,7 @@ function TestResultCard({ result }: { result: McpTestResult }) {
   }
   return (
     <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-3 text-[13px]">
-      <div className="flex items-center gap-1.5 font-medium text-emerald-500">
+      <div className="flex items-center gap-1.5 font-medium text-emerald-700 dark:text-emerald-400">
         <CheckCircle2 className="h-4 w-4" />
         Connected
       </div>
