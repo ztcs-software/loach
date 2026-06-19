@@ -969,6 +969,14 @@ function PrivateChatComposer() {
     el.style.height = `${Math.min(el.scrollHeight, 220)}px`;
   }, [text]);
 
+  // Move focus into the composer when Private Chat opens (the whole overlay
+  // subtree mounts on open). Otherwise focus stays on whatever opened the
+  // overlay, leaving keyboard / screen-reader users outside the modal. We
+  // focus rather than trap — the OS TitleBar is intentionally kept reachable.
+  useEffect(() => {
+    textareaRef.current?.focus();
+  }, []);
+
   const ingest = async (files: File[]) => {
     setError(null);
     const next: Attachment[] = [];

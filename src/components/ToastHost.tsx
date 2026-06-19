@@ -29,7 +29,8 @@ function ToastItem({ toast, onDismiss }: { toast: Toast; onDismiss: () => void }
   const isError = toast.kind === "error";
   return (
     <div
-      role="status"
+      role={isError ? "alert" : "status"}
+      aria-live={isError ? "assertive" : "polite"}
       onClick={toast.onClick}
       className={cn(
         "pointer-events-auto flex max-w-sm items-start gap-2.5 rounded-2xl border px-3.5 py-2.5 text-sm shadow-lg backdrop-blur-md",

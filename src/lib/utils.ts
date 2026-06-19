@@ -44,3 +44,14 @@ export function relativeTime(ts: number): string {
   if (days < 365) return `${Math.floor(days / 30)}mo ago`;
   return `${Math.floor(days / 365)}y ago`;
 }
+
+/** True when the OS "reduce motion" accessibility setting is on. Use it to
+ *  swap `behavior: "smooth"` for `"auto"` on programmatic scrolls — the CSS
+ *  reduced-motion reset (globals.css) can't reach JS-specified scroll
+ *  behaviors. */
+export function prefersReducedMotion(): boolean {
+  return (
+    typeof window !== "undefined" &&
+    window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true
+  );
+}

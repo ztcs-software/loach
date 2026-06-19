@@ -519,3 +519,23 @@ html:not(.dark) .hljs-emphasis                   { color: #24292e; font-style: i
 html:not(.dark) .hljs-strong                     { color: #24292e; font-weight: bold; }
 html:not(.dark) .hljs-addition                   { color: #22863a; background-color: #f0fff4; }
 html:not(.dark) .hljs-deletion                   { color: #b31d28; background-color: #ffeef0; }
+
+/* =========================================================================
+   Reduced motion (WCAG 2.3.3)
+   -------------------------------------------------------------------------
+   Honor the OS "reduce motion" setting: neutralize the app's animations (the
+   pulsing skeletons, the drop-bar breathe, spinners, Radix enter/exit) and
+   CSS smooth-scroll. JS-driven `scrollIntoView({behavior:"smooth"})` can't be
+   reached from CSS, so those calls are gated separately via
+   `prefersReducedMotion()` in code.
+   ========================================================================= */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

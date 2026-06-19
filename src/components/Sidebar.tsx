@@ -451,11 +451,26 @@ const SessionRow = memo(function SessionRowImpl({
   return (
     <li>
       <div
+        role="button"
+        tabIndex={0}
+        aria-label={`Open chat: ${session.title || "Untitled"}`}
         className={cn(
           "group/row relative flex items-center rounded-lg px-3 py-2 text-[13px] text-foreground/75 cursor-pointer transition-colors hover:bg-foreground/[0.07] hover:text-foreground overflow-hidden",
+          "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
           active && "bg-foreground/[0.10] text-foreground",
         )}
         onClick={() => onSelect(session.id)}
+        onKeyDown={(e) => {
+          // Only when the row itself is focused — not when Enter/Space bubbles
+          // up from the nested kebab trigger (Radix activates it on those keys).
+          if (
+            e.target === e.currentTarget &&
+            (e.key === "Enter" || e.key === " ")
+          ) {
+            e.preventDefault();
+            onSelect(session.id);
+          }
+        }}
         onContextMenu={(e) => {
           e.preventDefault();
           setMenuOpen(true);
