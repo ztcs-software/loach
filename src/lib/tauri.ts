@@ -5,6 +5,7 @@ import type {
   ChatLabel,
   ChatRequest,
   FetchedPage,
+  Folder,
   ImportStats,
   McpServer,
   McpServerInput,
@@ -73,6 +74,7 @@ export function createSession(args: {
       archived_at: null,
       forked_from_session_id: null,
       label: null,
+      folder_id: null,
       created_at: now,
       updated_at: now,
     });
@@ -102,6 +104,7 @@ export function forkSession(args: {
       archived_at: null,
       forked_from_session_id: args.source_session_id,
       label: null,
+      folder_id: null,
       created_at: now,
       updated_at: now,
     });
@@ -169,9 +172,49 @@ export function updateSessionLabel(args: {
   return invoke("update_session_label", { args });
 }
 
+/** File a chat under a folder, or pull it back out with `null`. */
+export function setSessionFolder(args: {
+  id: string;
+  folder_id: string | null;
+}): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("set_session_folder", { args });
+}
+
 export function exportSession(id: string, format: "json" | "md"): Promise<string> {
   if (!isTauri) return notInTauri("");
   return invoke("export_session", { id, format });
+}
+
+// ------------ folders ------------
+
+export function listFolders(): Promise<Folder[]> {
+  if (!isTauri) return notInTauri([]);
+  return invoke("list_folders");
+}
+
+export function createFolder(name: string): Promise<Folder> {
+  if (!isTauri) {
+    const now = Date.now();
+    return notInTauri<Folder>({
+      id: mockId("mock-folder"),
+      name,
+      created_at: now,
+      updated_at: now,
+    });
+  }
+  return invoke("create_folder", { name });
+}
+
+export function renameFolder(id: string, name: string): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("rename_folder", { id, name });
+}
+
+/** Delete a folder. Its chats survive and return to the date-grouped list. */
+export function deleteFolder(id: string): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("delete_folder", { id });
 }
 
 // ------------ messages ------------

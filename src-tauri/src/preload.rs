@@ -331,6 +331,7 @@ mod tests {
             archived_at: None,
             forked_from_session_id: None,
             label: None,
+            folder_id: None,
             created_at: 0,
             updated_at,
         }

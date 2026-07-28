@@ -29,6 +29,22 @@ export interface Session {
   /** Colour marker, rendered as a dot at the very start of the chat row.
    *  Null → unlabelled, which is the default for every new chat. */
   label: ChatLabel | null;
+  /** Folder the chat is filed under, or null for a loose chat. Deleting a
+   *  folder clears this (ON DELETE SET NULL) rather than deleting the chat.
+   *  A dangling id — only reachable via a hand-edited snapshot — renders as
+   *  a loose chat; see `Sidebar.tsx`'s grouping. */
+  folder_id: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+/** A user-named bucket of chats, shown as its own collapsible section in the
+ *  sidebar between "Pinned" and the date groups. Created by dragging one chat
+ *  onto another. Flat — folders never contain other folders — and carries no
+ *  prompt/model/context of its own; that's what a `Space` is for. */
+export interface Folder {
+  id: string;
+  name: string;
   created_at: number;
   updated_at: number;
 }
@@ -618,6 +634,7 @@ export interface McpTestResult {
  *  Powers the post-import toast ("Imported 12 chats · 145 messages · …"). */
 export interface ImportStats {
   sessions: number;
+  folders: number;
   messages: number;
   spaces: number;
   space_files: number;

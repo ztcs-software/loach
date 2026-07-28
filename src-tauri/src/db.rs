@@ -63,6 +63,23 @@ pub struct Session {
     /// without a data migration. Nothing keys off it — it's purely visual.
     #[serde(default)]
     pub label: Option<String>,
+    /// Folder this chat is filed under, or null for a loose chat. FK uses
+    /// ON DELETE SET NULL so deleting a folder returns its chats to the
+    /// date-grouped list instead of taking them with it.
+    #[serde(default)]
+    pub folder_id: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// A user-named bucket of chats, created by dragging one sidebar chat onto
+/// another. Purely an organisational container — it carries no prompt,
+/// model, or context of its own (that's what a `Space` is for), so the only
+/// thing stored is the name.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct Folder {
+    pub id: String,
+    pub name: String,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -348,6 +365,15 @@ impl Database {
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL
             );
+            -- Chat folders. Created by dropping one sidebar chat onto
+            -- another; membership lives in `sessions.folder_id`. Flat by
+            -- design — there's no parent_id, so folders never nest.
+            CREATE TABLE IF NOT EXISTS folders (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS messages (
                 id TEXT PRIMARY KEY,
                 session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
@@ -524,6 +550,18 @@ impl Database {
             )?;
         }
 
+        // Which folder a chat is filed under. Null = a loose chat, which is
+        // every row on an existing database. ON DELETE SET NULL means
+        // deleting a folder hands its chats back to the date-grouped list
+        // rather than deleting them — the sidebar's "Delete folder" relies
+        // on that, so it never has to null the column itself.
+        if !has_column(&conn, "sessions", "folder_id")? {
+            conn.execute_batch(
+                "ALTER TABLE sessions ADD COLUMN folder_id TEXT REFERENCES folders(id) ON DELETE SET NULL;
+                 CREATE INDEX IF NOT EXISTS idx_sessions_folder ON sessions(folder_id);",
+            )?;
+        }
+
         // Add per-space default model + params columns if missing. Null =
         // "inherit from General Settings" — see the Space struct for the
         // full layering story.
@@ -605,7 +643,7 @@ impl Database {
     pub fn list_sessions(&self) -> Result<Vec<Session>> {
         self.with_read(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, title, provider, model, system_prompt, params_json, space_id, pinned_at, archived_at, forked_from_session_id, label, created_at, updated_at
+                "SELECT id, title, provider, model, system_prompt, params_json, space_id, pinned_at, archived_at, forked_from_session_id, label, folder_id, created_at, updated_at
                  FROM sessions ORDER BY updated_at DESC",
             )?;
             let rows = stmt
@@ -622,8 +660,9 @@ impl Database {
                         archived_at: r.get(8)?,
                         forked_from_session_id: r.get(9)?,
                         label: r.get(10)?,
-                        created_at: r.get(11)?,
-                        updated_at: r.get(12)?,
+                        folder_id: r.get(11)?,
+                        created_at: r.get(12)?,
+                        updated_at: r.get(13)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -659,6 +698,7 @@ impl Database {
             archived_at: None,
             forked_from_session_id: None,
             label: None,
+            folder_id: None,
             created_at: now,
             updated_at: now,
         })
@@ -716,8 +756,8 @@ impl Database {
         tx.execute(
             "INSERT INTO sessions (id, title, provider, model, system_prompt, params_json,
                                    space_id, pinned_at, archived_at, forked_from_session_id,
-                                   created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, ?8, ?9, ?9)",
+                                   folder_id, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, ?8, ?9, ?10, ?10)",
             params![
                 new_id,
                 source.title,
@@ -727,6 +767,7 @@ impl Database {
                 source.params_json,
                 source.space_id,
                 source.id,
+                source.folder_id,
                 now,
             ],
         )?;
@@ -771,6 +812,11 @@ impl Database {
             // a manual mark on one chat, and the branch hasn't been triaged
             // yet. The INSERT above omits the column, so the row agrees.
             label: None,
+            // The folder, unlike the label, IS inherited — for the same
+            // reason `space_id` is. A folder is where the user filed this
+            // conversation, and a branch of it belongs in the same drawer;
+            // dropping the fork back into "Today" would make it look lost.
+            folder_id: source.folder_id,
             created_at: now,
             updated_at: now,
         })
@@ -862,6 +908,20 @@ impl Database {
         Ok(())
     }
 
+    /// File the chat under `folder_id`, or pull it back out to the loose
+    /// list with `None`. Like `update_session_label` and unlike
+    /// `pin_session`, this deliberately leaves `updated_at` alone: chats
+    /// inside a folder are still ordered by it, and filing a chat is not a
+    /// reason to shuffle it to the top of its new drawer.
+    pub fn set_session_folder(&self, id: &str, folder_id: Option<&str>) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "UPDATE sessions SET folder_id = ?1 WHERE id = ?2",
+            params![folder_id, id],
+        )?;
+        Ok(())
+    }
+
     pub fn archive_session(&self, id: &str, archived: bool) -> Result<()> {
         let conn = self.conn.lock();
         let now = Utc::now().timestamp_millis();
@@ -889,7 +949,7 @@ impl Database {
     pub fn get_session(&self, id: &str) -> Result<Option<Session>> {
         self.with_read(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, title, provider, model, system_prompt, params_json, space_id, pinned_at, archived_at, forked_from_session_id, label, created_at, updated_at
+                "SELECT id, title, provider, model, system_prompt, params_json, space_id, pinned_at, archived_at, forked_from_session_id, label, folder_id, created_at, updated_at
                  FROM sessions WHERE id = ?1",
             )?;
             let mut rows = stmt.query(params![id])?;
@@ -906,13 +966,76 @@ impl Database {
                     archived_at: r.get(8)?,
                     forked_from_session_id: r.get(9)?,
                     label: r.get(10)?,
-                    created_at: r.get(11)?,
-                    updated_at: r.get(12)?,
+                    folder_id: r.get(11)?,
+                    created_at: r.get(12)?,
+                    updated_at: r.get(13)?,
                 }))
             } else {
                 Ok(None)
             }
         })
+    }
+
+    // ------------ folders ------------
+
+    /// Every folder, ordered by name so the sidebar section reads like a
+    /// filing cabinet. `COLLATE NOCASE` keeps "archive" and "Archive"
+    /// adjacent instead of splitting on ASCII case.
+    pub fn list_folders(&self) -> Result<Vec<Folder>> {
+        self.with_read(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, name, created_at, updated_at
+                 FROM folders ORDER BY name COLLATE NOCASE ASC",
+            )?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok(Folder {
+                        id: r.get(0)?,
+                        name: r.get(1)?,
+                        created_at: r.get(2)?,
+                        updated_at: r.get(3)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+    }
+
+    /// Names are not unique — two folders may share one. Enforcing
+    /// uniqueness would mean rejecting the drag mid-gesture, and the user
+    /// already sees both rows in the sidebar if they do it by accident.
+    pub fn create_folder(&self, name: &str) -> Result<Folder> {
+        let id = Uuid::new_v4().to_string();
+        let now = Utc::now().timestamp_millis();
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO folders (id, name, created_at, updated_at) VALUES (?1, ?2, ?3, ?3)",
+            params![id, name, now],
+        )?;
+        Ok(Folder {
+            id,
+            name: name.to_string(),
+            created_at: now,
+            updated_at: now,
+        })
+    }
+
+    pub fn rename_folder(&self, id: &str, name: &str) -> Result<()> {
+        let now = Utc::now().timestamp_millis();
+        let conn = self.conn.lock();
+        conn.execute(
+            "UPDATE folders SET name = ?1, updated_at = ?2 WHERE id = ?3",
+            params![name, now, id],
+        )?;
+        Ok(())
+    }
+
+    /// Drop the folder. Member chats survive — `sessions.folder_id` is
+    /// ON DELETE SET NULL, so they fall back into the date-grouped list.
+    pub fn delete_folder(&self, id: &str) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute("DELETE FROM folders WHERE id = ?1", params![id])?;
+        Ok(())
     }
 
     // ------------ messages ------------
@@ -1953,6 +2076,7 @@ impl Database {
             loach_version: env!("CARGO_PKG_VERSION").to_string(),
             data: SnapshotData {
                 sessions: self.list_sessions()?,
+                folders: self.list_folders()?,
                 messages: self.all_messages()?,
                 spaces: self.list_spaces()?,
                 space_files: self.all_space_files()?,
@@ -2002,6 +2126,7 @@ impl Database {
             DELETE FROM space_files;
             DELETE FROM space_memories;
             DELETE FROM sessions;
+            DELETE FROM folders;
             DELETE FROM spaces;
             DELETE FROM snippet_fill_values;
             DELETE FROM snippet_variables;
@@ -2013,12 +2138,24 @@ impl Database {
 
         let d = &snap.data;
 
+        // Folders first so the sessions that follow point at rows that
+        // exist. FK enforcement is off for this transaction, so this is
+        // about the database being sane afterwards, not about the INSERT
+        // succeeding.
+        for f in &d.folders {
+            tx.execute(
+                "INSERT INTO folders (id, name, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![f.id, f.name, f.created_at, f.updated_at],
+            )?;
+        }
+
         for s in &d.sessions {
             tx.execute(
                 "INSERT INTO sessions (id, title, provider, model, system_prompt, params_json,
                                        space_id, pinned_at, archived_at, forked_from_session_id,
-                                       label, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                                       label, folder_id, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
                 params![
                     s.id,
                     s.title,
@@ -2031,6 +2168,7 @@ impl Database {
                     s.archived_at,
                     s.forked_from_session_id,
                     s.label,
+                    s.folder_id,
                     s.created_at,
                     s.updated_at,
                 ],
@@ -2184,6 +2322,7 @@ impl Database {
 
         let stats = ImportStats {
             sessions: d.sessions.len(),
+            folders: d.folders.len(),
             messages: d.messages.len(),
             spaces: d.spaces.len(),
             space_files: d.space_files.len(),
@@ -2255,6 +2394,7 @@ impl Database {
             DELETE FROM space_files;
             DELETE FROM space_memories;
             DELETE FROM sessions;
+            DELETE FROM folders;
             DELETE FROM spaces;
             DELETE FROM snippet_fill_values;
             DELETE FROM snippet_variables;
@@ -2294,6 +2434,7 @@ impl Database {
             DELETE FROM space_files;
             DELETE FROM space_memories;
             DELETE FROM sessions;
+            DELETE FROM folders;
             DELETE FROM spaces;
             DELETE FROM snippet_fill_values;
             DELETE FROM snippet_variables;
@@ -2320,6 +2461,10 @@ pub struct DatabaseSnapshot {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SnapshotData {
     pub sessions: Vec<Session>,
+    /// Chat folders. Empty on exports that predate the feature, in which
+    /// case every restored session's `folder_id` is already NULL too.
+    #[serde(default)]
+    pub folders: Vec<Folder>,
     pub messages: Vec<Message>,
     pub spaces: Vec<Space>,
     pub space_files: Vec<SpaceFile>,
@@ -2345,6 +2490,7 @@ pub struct SnapshotData {
 #[derive(Debug, Serialize)]
 pub struct ImportStats {
     pub sessions: usize,
+    pub folders: usize,
     pub messages: usize,
     pub spaces: usize,
     pub space_files: usize,
@@ -2459,6 +2605,33 @@ mod tests {
 
         db.update_session_label(&s.id, None).expect("clear");
         assert_eq!(db.get_session(&s.id).unwrap().unwrap().label, None);
+    }
+
+    #[test]
+    fn deleting_folder_releases_its_chats_instead_of_deleting_them() {
+        let (db, _dir) = fresh_db();
+        let s = db
+            .create_session("t", "ollama", "llama3", None, None)
+            .expect("create");
+        assert_eq!(s.folder_id, None, "new chats start outside any folder");
+
+        let f = db.create_folder("Research").expect("create folder");
+        db.set_session_folder(&s.id, Some(&f.id)).expect("file");
+        let listed = db.list_sessions().unwrap();
+        assert_eq!(listed[0].folder_id.as_deref(), Some(f.id.as_str()));
+        assert_eq!(
+            listed[0].updated_at, s.updated_at,
+            "filing a chat must not re-sort the list the way pinning does",
+        );
+
+        // ON DELETE SET NULL: the folder goes, the chat stays and falls
+        // back into the date-grouped list. A regression here would delete
+        // the user's conversations along with the folder.
+        db.delete_folder(&f.id).expect("delete folder");
+        assert!(db.list_folders().unwrap().is_empty());
+        let after = db.list_sessions().unwrap();
+        assert_eq!(after.len(), 1, "the chat survives its folder");
+        assert_eq!(after[0].folder_id, None);
     }
 
     #[test]

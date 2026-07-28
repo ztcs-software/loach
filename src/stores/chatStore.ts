@@ -3,12 +3,17 @@ import { logger } from "@/lib/logger";
 import {
   appendMessage,
   archiveSession,
+  createFolder,
   createSession,
   deleteArchivedSessions,
+  deleteFolder,
   deleteImportGroup,
   deleteMessage,
   deleteSession,
   forkSession,
+  listFolders,
+  renameFolder as persistFolderName,
+  setSessionFolder,
   importMessages as tauriImportMessages,
   getSpaceContext,
   listMessages,
@@ -59,6 +64,7 @@ import {
   type Attachment,
   type ChatLabel,
   type ChatMessageIn,
+  type Folder,
   type GenerationParams,
   type Message,
   type MessageMetrics,
@@ -110,6 +116,9 @@ interface QueueTask {
 
 interface ChatState {
   sessions: Session[];
+  /** Chat folders, ordered by name (the backend sorts). Membership lives on
+   *  each session's `folder_id`, not here — a folder never holds a list. */
+  folders: Folder[];
   activeSessionId: string | null;
   /** True after `hydrate()` finishes (whether it succeeded or fell into the
    *  catch). Used by `App.tsx` to render a skeleton while chats are loading
@@ -160,6 +169,16 @@ interface ChatState {
   pin: (id: string, pinned: boolean) => Promise<void>;
   /** Set the chat's colour label, or clear it with `null`. */
   setLabel: (id: string, label: ChatLabel | null) => Promise<void>;
+  /** File a chat under a folder, or pull it out with `null`. */
+  moveToFolder: (id: string, folderId: string | null) => Promise<void>;
+  /** Create a named folder and move `sessionIds` into it in one go. This is
+   *  the drag-one-chat-onto-another gesture: both chats land in the new
+   *  folder. Returns the folder. */
+  createFolderWith: (name: string, sessionIds: string[]) => Promise<Folder>;
+  renameFolder: (id: string, name: string) => Promise<void>;
+  /** Delete a folder. Member chats survive and return to the date groups —
+   *  the backend's ON DELETE SET NULL does the release. */
+  removeFolder: (id: string) => Promise<void>;
   archive: (id: string, archived: boolean) => Promise<void>;
   /** Permanently delete every archived chat. Returns the number removed
    *  so the caller can show a toast. */
@@ -1328,6 +1347,7 @@ export function resolveDefaultModelChoice(
 
 export const useChatStore = create<ChatState>((set, get) => ({
   sessions: [],
+  folders: [],
   activeSessionId: null,
   hydrated: false,
   messages: {},
@@ -1342,8 +1362,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   hydrate: async () => {
     try {
-      const sessions = await listSessions();
-      set({ sessions });
+      const [sessions, folders] = await Promise.all([
+        listSessions(),
+        listFolders(),
+      ]);
+      set({ sessions, folders });
 
       // Remove all empty sessions (no messages) on startup, keep at most one.
       // Archived sessions are left alone even if empty — the user explicitly
@@ -1553,6 +1576,58 @@ export const useChatStore = create<ChatState>((set, get) => ({
     await updateSessionLabel({ id, label });
     set((s) => ({
       sessions: s.sessions.map((x) => (x.id === id ? { ...x, label } : x)),
+    }));
+  },
+
+  moveToFolder: async (id, folderId) => {
+    await setSessionFolder({ id, folder_id: folderId });
+    set((s) => ({
+      sessions: s.sessions.map((x) =>
+        x.id === id ? { ...x, folder_id: folderId } : x,
+      ),
+    }));
+  },
+
+  createFolderWith: async (name, sessionIds) => {
+    const folder = await createFolder(name);
+    // Sequential rather than Promise.all: these are single-row UPDATEs
+    // behind one write mutex, and a partial failure should leave the
+    // already-moved chats in the folder rather than racing.
+    for (const id of sessionIds) {
+      await setSessionFolder({ id, folder_id: folder.id });
+    }
+    const moved = new Set(sessionIds);
+    set((s) => ({
+      folders: [...s.folders, folder].sort((a, b) =>
+        a.name.localeCompare(b.name, undefined, { sensitivity: "base" }),
+      ),
+      sessions: s.sessions.map((x) =>
+        moved.has(x.id) ? { ...x, folder_id: folder.id } : x,
+      ),
+    }));
+    return folder;
+  },
+
+  renameFolder: async (id, name) => {
+    await persistFolderName(id, name);
+    set((s) => ({
+      folders: s.folders
+        .map((f) => (f.id === id ? { ...f, name } : f))
+        .sort((a, b) =>
+          a.name.localeCompare(b.name, undefined, { sensitivity: "base" }),
+        ),
+    }));
+  },
+
+  removeFolder: async (id) => {
+    await deleteFolder(id);
+    // Mirror the backend's ON DELETE SET NULL locally so the member chats
+    // reappear in the date groups without a re-fetch.
+    set((s) => ({
+      folders: s.folders.filter((f) => f.id !== id),
+      sessions: s.sessions.map((x) =>
+        x.folder_id === id ? { ...x, folder_id: null } : x,
+      ),
     }));
   },
 

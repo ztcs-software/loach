@@ -5,7 +5,7 @@ use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
 
 use crate::db::{
-    DatabaseSnapshot, ImportStats, McpServer, Message, Session, Snippet, SnippetFillValue,
+    DatabaseSnapshot, Folder, ImportStats, McpServer, Message, Session, Snippet, SnippetFillValue,
     SnippetVariable, Space, SpaceFile, SpaceMemory,
 };
 use crate::mcp::{self, McpTestResult};
@@ -189,6 +189,58 @@ pub async fn update_session_label(
         .db
         .update_session_label(&args.id, args.label.as_deref())
         .map_err(err)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetSessionFolderArgs {
+    pub id: String,
+    /// Folder to file the chat under. `None` pulls it back out into the
+    /// loose, date-grouped list. Not checked against the folders table —
+    /// a dangling id renders as a loose chat rather than breaking the row.
+    #[serde(default)]
+    pub folder_id: Option<String>,
+}
+
+/// Move a chat into a folder, or out of whatever folder it's in.
+#[tauri::command]
+pub async fn set_session_folder(
+    state: State<'_, AppState>,
+    args: SetSessionFolderArgs,
+) -> Result<(), String> {
+    state
+        .db
+        .set_session_folder(&args.id, args.folder_id.as_deref())
+        .map_err(err)
+}
+
+// ---------- folders ----------
+
+#[tauri::command]
+pub async fn list_folders(state: State<'_, AppState>) -> Result<Vec<Folder>, String> {
+    state.db.list_folders().map_err(err)
+}
+
+/// Create a folder. The caller (the sidebar's drag-to-group gesture) is
+/// responsible for moving chats into it afterwards.
+#[tauri::command]
+pub async fn create_folder(state: State<'_, AppState>, name: String) -> Result<Folder, String> {
+    state.db.create_folder(&name).map_err(err)
+}
+
+#[tauri::command]
+pub async fn rename_folder(
+    state: State<'_, AppState>,
+    id: String,
+    name: String,
+) -> Result<(), String> {
+    state.db.rename_folder(&id, &name).map_err(err)
+}
+
+/// Delete a folder. Its chats survive and fall back into the date-grouped
+/// list — `sessions.folder_id` is ON DELETE SET NULL.
+#[tauri::command]
+pub async fn delete_folder(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    state.db.delete_folder(&id).map_err(err)
 }
 
 #[tauri::command]
