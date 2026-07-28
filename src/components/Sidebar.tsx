@@ -22,9 +22,11 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { ChatLabelDot, ChatLabelSubmenu } from "@/components/ChatLabelMenu";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useConfirm } from "@/components/ConfirmDialog";
+import { findChatLabel } from "@/lib/labels";
 import { useChatStore } from "@/stores/chatStore";
 import { useModelsStore } from "@/stores/modelsStore";
 import { useSpaceStore } from "@/stores/spaceStore";
@@ -390,6 +392,8 @@ const SessionRow = memo(function SessionRowImpl({
 }) {
   const rename = useChatStore((s) => s.rename);
   const pinChat = useChatStore((s) => s.pin);
+  const setLabel = useChatStore((s) => s.setLabel);
+  const labelDef = findChatLabel(session.label);
   const archiveChat = useChatStore((s) => s.archive);
   const remove = useChatStore((s) => s.remove);
   const { confirm } = useConfirm();
@@ -453,7 +457,12 @@ const SessionRow = memo(function SessionRowImpl({
       <div
         role="button"
         tabIndex={0}
-        aria-label={`Open chat: ${session.title || "Untitled"}`}
+        // The dot's own `role="img"` label never reaches a screen reader
+        // here — an explicit aria-label on a role="button" replaces its
+        // contents — so the colour has to be spelled out in this string.
+        aria-label={`Open chat: ${session.title || "Untitled"}${
+          labelDef ? ` (${labelDef.name} label)` : ""
+        }`}
         className={cn(
           "group/row relative flex items-center rounded-lg px-3 py-2 text-[13px] text-foreground/75 cursor-pointer transition-colors hover:bg-foreground/[0.07] hover:text-foreground overflow-hidden",
           "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
@@ -476,6 +485,7 @@ const SessionRow = memo(function SessionRowImpl({
           setMenuOpen(true);
         }}
       >
+        <ChatLabelDot label={session.label} className="mr-1.5" />
         {session.pinned_at && (
           <Pin className="mr-1.5 h-3 w-3 shrink-0 text-foreground/35" />
         )}
@@ -557,6 +567,10 @@ const SessionRow = memo(function SessionRowImpl({
                 </>
               )}
             </DropdownMenuItem>
+            <ChatLabelSubmenu
+              value={session.label}
+              onSelect={(label) => void setLabel(session.id, label)}
+            />
             <DropdownMenuItem onSelect={beginRename}>
               <Pencil className="h-4 w-4" /> Rename
             </DropdownMenuItem>

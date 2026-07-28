@@ -1,5 +1,15 @@
 export type ProviderId = "ollama" | "openai";
 
+/** Colour a chat can be marked with. The id is what's persisted — the actual
+ *  swatch colours live in `src/lib/labels.ts`. */
+export type ChatLabel =
+  | "red"
+  | "amber"
+  | "green"
+  | "blue"
+  | "purple"
+  | "pink";
+
 export interface Session {
   id: string;
   title: string;
@@ -16,6 +26,9 @@ export interface Session {
    *  back. ON DELETE SET NULL on the FK clears this if the source is
    *  deleted — the fork survives, the badge just falls off. */
   forked_from_session_id: string | null;
+  /** Colour marker, rendered as a dot at the very start of the chat row.
+   *  Null → unlabelled, which is the default for every new chat. */
+  label: ChatLabel | null;
   created_at: number;
   updated_at: number;
 }

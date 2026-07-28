@@ -40,6 +40,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { ChatLabelSubmenu } from "@/components/ChatLabelMenu";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { useChatStore } from "@/stores/chatStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -67,6 +68,7 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
   // truthful without our help.
   const renameSession = useChatStore((s) => s.rename);
   const pinSession = useChatStore((s) => s.pin);
+  const setChatLabel = useChatStore((s) => s.setLabel);
   const archiveSession = useChatStore((s) => s.archive);
   const removeSession = useChatStore((s) => s.remove);
   const forkChat = useChatStore((s) => s.fork);
@@ -546,6 +548,13 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
                 </>
               )}
             </DropdownMenuItem>
+            <ChatLabelSubmenu
+              value={session?.label ?? null}
+              onSelect={(label) => {
+                if (session) void setChatLabel(session.id, label);
+              }}
+              iconClassName="mr-2 h-4 w-4"
+            />
             <DropdownMenuItem onSelect={startRename}>
               <Pencil className="mr-2 h-4 w-4" />
               Rename

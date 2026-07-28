@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   AdminEvent,
+  ChatLabel,
   ChatRequest,
   FetchedPage,
   ImportStats,
@@ -71,6 +72,7 @@ export function createSession(args: {
       pinned_at: null,
       archived_at: null,
       forked_from_session_id: null,
+      label: null,
       created_at: now,
       updated_at: now,
     });
@@ -99,6 +101,7 @@ export function forkSession(args: {
       pinned_at: null,
       archived_at: null,
       forked_from_session_id: args.source_session_id,
+      label: null,
       created_at: now,
       updated_at: now,
     });
@@ -155,6 +158,15 @@ export function updateSessionParams(args: {
 }): Promise<void> {
   if (!isTauri) return notInTauri(undefined);
   return invoke("update_session_params", { args });
+}
+
+/** Persist the chat's colour label. Pass `null` to clear it. */
+export function updateSessionLabel(args: {
+  id: string;
+  label: ChatLabel | null;
+}): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("update_session_label", { args });
 }
 
 export function exportSession(id: string, format: "json" | "md"): Promise<string> {

@@ -268,6 +268,7 @@ pub fn run() {
             commands::update_session_model,
             commands::update_session_system_prompt,
             commands::update_session_params,
+            commands::update_session_label,
             commands::export_session,
             commands::list_messages,
             commands::session_message_counts,

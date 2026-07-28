@@ -57,6 +57,12 @@ pub struct Session {
     /// source clears the link so the fork survives on its own.
     #[serde(default)]
     pub forked_from_session_id: Option<String>,
+    /// Colour marker shown as a dot at the start of the chat row. Null = no
+    /// label. Stores the palette *id* (`"red"`, `"blue"`, …) defined in
+    /// `src/lib/labels.ts`, not a colour, so the palette can be retuned
+    /// without a data migration. Nothing keys off it — it's purely visual.
+    #[serde(default)]
+    pub label: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -439,6 +445,12 @@ impl Database {
             )?;
         }
 
+        if !has_column(&conn, "sessions", "label")? {
+            conn.execute_batch(
+                "ALTER TABLE sessions ADD COLUMN label TEXT;",
+            )?;
+        }
+
         if !has_column(&conn, "messages", "thinking")? {
             conn.execute_batch(
                 "ALTER TABLE messages ADD COLUMN thinking TEXT;",
@@ -593,7 +605,7 @@ impl Database {
     pub fn list_sessions(&self) -> Result<Vec<Session>> {
         self.with_read(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, title, provider, model, system_prompt, params_json, space_id, pinned_at, archived_at, forked_from_session_id, created_at, updated_at
+                "SELECT id, title, provider, model, system_prompt, params_json, space_id, pinned_at, archived_at, forked_from_session_id, label, created_at, updated_at
                  FROM sessions ORDER BY updated_at DESC",
             )?;
             let rows = stmt
@@ -609,8 +621,9 @@ impl Database {
                         pinned_at: r.get(7)?,
                         archived_at: r.get(8)?,
                         forked_from_session_id: r.get(9)?,
-                        created_at: r.get(10)?,
-                        updated_at: r.get(11)?,
+                        label: r.get(10)?,
+                        created_at: r.get(11)?,
+                        updated_at: r.get(12)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -645,6 +658,7 @@ impl Database {
             pinned_at: None,
             archived_at: None,
             forked_from_session_id: None,
+            label: None,
             created_at: now,
             updated_at: now,
         })
@@ -753,6 +767,10 @@ impl Database {
             pinned_at: None,
             archived_at: None,
             forked_from_session_id: Some(source.id),
+            // A fork starts unlabelled, like it starts unpinned: the label is
+            // a manual mark on one chat, and the branch hasn't been triaged
+            // yet. The INSERT above omits the column, so the row agrees.
+            label: None,
             created_at: now,
             updated_at: now,
         })
@@ -831,6 +849,19 @@ impl Database {
         Ok(())
     }
 
+    /// Set the chat's colour label, or clear it with `None`. Deliberately
+    /// does NOT bump `updated_at` the way `pin_session` does: the sidebar is
+    /// ordered by it, and yanking a chat to the top of "Today" is the point
+    /// of pinning but not of marking it a colour.
+    pub fn update_session_label(&self, id: &str, label: Option<&str>) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "UPDATE sessions SET label = ?1 WHERE id = ?2",
+            params![label, id],
+        )?;
+        Ok(())
+    }
+
     pub fn archive_session(&self, id: &str, archived: bool) -> Result<()> {
         let conn = self.conn.lock();
         let now = Utc::now().timestamp_millis();
@@ -858,7 +889,7 @@ impl Database {
     pub fn get_session(&self, id: &str) -> Result<Option<Session>> {
         self.with_read(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, title, provider, model, system_prompt, params_json, space_id, pinned_at, archived_at, forked_from_session_id, created_at, updated_at
+                "SELECT id, title, provider, model, system_prompt, params_json, space_id, pinned_at, archived_at, forked_from_session_id, label, created_at, updated_at
                  FROM sessions WHERE id = ?1",
             )?;
             let mut rows = stmt.query(params![id])?;
@@ -874,8 +905,9 @@ impl Database {
                     pinned_at: r.get(7)?,
                     archived_at: r.get(8)?,
                     forked_from_session_id: r.get(9)?,
-                    created_at: r.get(10)?,
-                    updated_at: r.get(11)?,
+                    label: r.get(10)?,
+                    created_at: r.get(11)?,
+                    updated_at: r.get(12)?,
                 }))
             } else {
                 Ok(None)
@@ -1985,8 +2017,8 @@ impl Database {
             tx.execute(
                 "INSERT INTO sessions (id, title, provider, model, system_prompt, params_json,
                                        space_id, pinned_at, archived_at, forked_from_session_id,
-                                       created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                                       label, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                 params![
                     s.id,
                     s.title,
@@ -1998,6 +2030,7 @@ impl Database {
                     s.pinned_at,
                     s.archived_at,
                     s.forked_from_session_id,
+                    s.label,
                     s.created_at,
                     s.updated_at,
                 ],
@@ -2406,6 +2439,26 @@ mod tests {
 
         db.delete_session(&s.id).expect("delete");
         assert!(db.list_sessions().unwrap().is_empty());
+    }
+
+    #[test]
+    fn session_label_roundtrips_and_leaves_updated_at_alone() {
+        let (db, _dir) = fresh_db();
+        let s = db
+            .create_session("t", "ollama", "llama3", None, None)
+            .expect("create");
+        assert_eq!(s.label, None, "new chats start unlabelled");
+
+        db.update_session_label(&s.id, Some("blue")).expect("set");
+        let listed = db.list_sessions().unwrap();
+        assert_eq!(listed[0].label.as_deref(), Some("blue"));
+        assert_eq!(
+            listed[0].updated_at, s.updated_at,
+            "labelling must not re-sort the chat list the way pinning does",
+        );
+
+        db.update_session_label(&s.id, None).expect("clear");
+        assert_eq!(db.get_session(&s.id).unwrap().unwrap().label, None);
     }
 
     #[test]

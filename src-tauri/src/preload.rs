@@ -330,6 +330,7 @@ mod tests {
             pinned_at: None,
             archived_at: None,
             forked_from_session_id: None,
+            label: None,
             created_at: 0,
             updated_at,
         }

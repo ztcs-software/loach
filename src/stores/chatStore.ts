@@ -21,6 +21,7 @@ import {
   renameSession,
   startChatStream,
   updateMessage,
+  updateSessionLabel,
   updateSessionModel as persistSessionModel,
   updateSessionParams as persistSessionParams,
   updateSessionSystemPrompt as persistSessionSystemPrompt,
@@ -56,6 +57,7 @@ import {
 import {
   DEFAULT_PARAMS,
   type Attachment,
+  type ChatLabel,
   type ChatMessageIn,
   type GenerationParams,
   type Message,
@@ -156,6 +158,8 @@ interface ChatState {
   }) => Promise<Session>;
   rename: (id: string, title: string) => Promise<void>;
   pin: (id: string, pinned: boolean) => Promise<void>;
+  /** Set the chat's colour label, or clear it with `null`. */
+  setLabel: (id: string, label: ChatLabel | null) => Promise<void>;
   archive: (id: string, archived: boolean) => Promise<void>;
   /** Permanently delete every archived chat. Returns the number removed
    *  so the caller can show a toast. */
@@ -1542,6 +1546,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
       sessions: s.sessions.map((x) =>
         x.id === id ? { ...x, pinned_at } : x,
       ),
+    }));
+  },
+
+  setLabel: async (id, label) => {
+    await updateSessionLabel({ id, label });
+    set((s) => ({
+      sessions: s.sessions.map((x) => (x.id === id ? { ...x, label } : x)),
     }));
   },
 

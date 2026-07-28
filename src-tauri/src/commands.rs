@@ -168,6 +168,29 @@ pub async fn update_session_params(
         .map_err(err)
 }
 
+#[derive(Debug, Deserialize)]
+pub struct UpdateSessionLabelArgs {
+    pub id: String,
+    /// Palette id from `src/lib/labels.ts` (`"red"`, `"blue"`, …). `None`
+    /// clears the label. Not validated against the palette here — an id we
+    /// don't ship (only reachable via a hand-edited snapshot import) renders
+    /// as no label rather than breaking the row.
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+/// Set or clear the chat's colour label.
+#[tauri::command]
+pub async fn update_session_label(
+    state: State<'_, AppState>,
+    args: UpdateSessionLabelArgs,
+) -> Result<(), String> {
+    state
+        .db
+        .update_session_label(&args.id, args.label.as_deref())
+        .map_err(err)
+}
+
 #[tauri::command]
 pub async fn export_session(
     state: State<'_, AppState>,

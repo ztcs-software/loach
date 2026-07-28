@@ -41,6 +41,7 @@ import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { ChatInput } from "@/components/ChatInput";
+import { ChatLabelDot, ChatLabelSubmenu } from "@/components/ChatLabelMenu";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { useChatStore } from "@/stores/chatStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -55,6 +56,7 @@ import {
 } from "@/lib/tauri";
 import { cn, relativeDay } from "@/lib/utils";
 import {
+  type ChatLabel,
   type ModelInfo,
   type ProviderId,
   type Session,
@@ -89,6 +91,7 @@ export function SpaceView() {
   const selectSession = useChatStore((s) => s.selectSession);
   const renameChat = useChatStore((s) => s.rename);
   const pinChat = useChatStore((s) => s.pin);
+  const setChatLabel = useChatStore((s) => s.setLabel);
   const archiveChat = useChatStore((s) => s.archive);
   const removeChat = useChatStore((s) => s.remove);
   const setSidebarTab = useUIStore((s) => s.setSidebarTab);
@@ -310,6 +313,7 @@ export function SpaceView() {
                   onOpen={openChat}
                   onRename={(id, title) => void renameChat(id, title)}
                   onPin={(id, pinned) => void pinChat(id, pinned)}
+                  onSetLabel={(id, label) => void setChatLabel(id, label)}
                   onArchive={(id) => void archiveChat(id, true)}
                   onDelete={(id) => void removeChat(id)}
                 />
@@ -553,6 +557,7 @@ interface ChatsTabProps {
   onOpen: (id: string) => void;
   onRename: (id: string, title: string) => void;
   onPin: (id: string, pinned: boolean) => void;
+  onSetLabel: (id: string, label: ChatLabel | null) => void;
   onArchive: (id: string) => void;
   onDelete: (id: string) => void;
 }
@@ -562,6 +567,7 @@ function ChatsTab({
   onOpen,
   onRename,
   onPin,
+  onSetLabel,
   onArchive,
   onDelete,
 }: ChatsTabProps) {
@@ -618,6 +624,7 @@ function ChatsTab({
                 onCancelRename={() => setRenamingId(null)}
                 onOpen={() => onOpen(s.id)}
                 onPin={() => onPin(s.id, !s.pinned_at)}
+                onSetLabel={(label) => onSetLabel(s.id, label)}
                 onArchive={() => onArchive(s.id)}
                 onDelete={async () => {
                   const ok = await confirm({
@@ -649,6 +656,7 @@ interface ChatRowProps {
   onCancelRename: () => void;
   onOpen: () => void;
   onPin: () => void;
+  onSetLabel: (label: ChatLabel | null) => void;
   onArchive: () => void;
   onDelete: () => void;
 }
@@ -661,6 +669,7 @@ function ChatRow({
   onCancelRename,
   onOpen,
   onPin,
+  onSetLabel,
   onArchive,
   onDelete,
 }: ChatRowProps) {
@@ -720,6 +729,7 @@ function ChatRow({
         }}
         className="group relative flex cursor-pointer items-center gap-3 rounded-xl px-3 py-2.5 text-sm transition-colors hover:bg-foreground/[0.06] focus-visible:bg-foreground/[0.06] focus-visible:outline-none"
       >
+        <ChatLabelDot label={session.label} />
         <MessageSquare className="h-4 w-4 shrink-0 text-foreground/40 group-hover:text-foreground/65" />
         <span className="min-w-0 flex-1 truncate text-foreground/80 group-hover:text-foreground">
           {session.title || "Untitled"}
@@ -765,6 +775,11 @@ function ChatRow({
                 </>
               )}
             </DropdownMenuItem>
+            <ChatLabelSubmenu
+              value={session.label}
+              onSelect={onSetLabel}
+              iconClassName="mr-2 h-4 w-4"
+            />
             <DropdownMenuItem onSelect={onStartRename}>
               <Pencil className="mr-2 h-4 w-4" />
               Rename
