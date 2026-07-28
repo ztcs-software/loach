@@ -249,6 +249,20 @@
   ::-webkit-scrollbar-thumb:hover {
     background: hsl(var(--foreground) / 0.22);
   }
+
+  /* Radix ScrollArea (sidebar chat list, etc.) draws its own overlay
+     scrollbar, so its viewport must show no native bar. Radix injects
+     `scrollbar-width:none` + `::-webkit-scrollbar{display:none}` for this,
+     but the global `::-webkit-scrollbar{width:10px}` above forces the
+     viewport onto WebView2's legacy custom-scrollbar path, where
+     `display:none` alone is unreliable — the native bar then renders
+     *alongside* Radix's overlay (two scrollbars on hover). An explicit zero
+     width, at higher specificity than the global rule, collapses it. */
+  [data-radix-scroll-area-viewport]::-webkit-scrollbar {
+    width: 0;
+    height: 0;
+    display: none;
+  }
 }
 
 @layer components {
