@@ -5,6 +5,7 @@ import {
   Pencil,
   Play,
   Plus,
+  RefreshCw,
   SquareTerminal,
   Trash2,
 } from "lucide-react";
@@ -41,6 +42,9 @@ export function SnippetsLibrary() {
   const snippets = useSnippetStore((s) => s.snippets);
   const openDialog = useSnippetStore((s) => s.openDialog);
   const remove = useSnippetStore((s) => s.remove);
+  const hydrated = useSnippetStore((s) => s.hydrated);
+  const loadError = useSnippetStore((s) => s.error);
+  const hydrate = useSnippetStore((s) => s.hydrate);
   const newSession = useChatStore((s) => s.newSession);
   const setViewingSpace = useSpaceStore((s) => s.setViewingSpace);
   const setSidebarTab = useUIStore((s) => s.setSidebarTab);
@@ -105,7 +109,11 @@ export function SnippetsLibrary() {
 
           <SnippetVariablesPanel />
 
-          {snippets.length === 0 ? (
+          {!hydrated ? (
+            <LibraryLoading />
+          ) : loadError ? (
+            <LibraryError message={loadError} onRetry={() => void hydrate()} />
+          ) : snippets.length === 0 ? (
             <EmptyLibraryState
               icon={<SquareTerminal className="h-7 w-7 text-foreground/45" />}
               title="No snippets yet"
@@ -265,6 +273,49 @@ function SnippetCard({
 // Shared empty state — reused by SpacesLibrary too via plain shape parity, but
 // kept local for now to avoid a tiny shared file.
 // ---------------------------------------------------------------------------
+
+function LibraryLoading() {
+  return (
+    <div
+      className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3"
+      aria-busy
+      aria-label="Loading"
+    >
+      {Array.from({ length: 6 }).map((_, i) => (
+        <div
+          key={i}
+          className="h-32 animate-pulse rounded-2xl border border-foreground/10 bg-foreground/[0.03]"
+        />
+      ))}
+    </div>
+  );
+}
+
+function LibraryError({
+  message,
+  onRetry,
+}: {
+  message: string;
+  onRetry: () => void;
+}) {
+  return (
+    <div className="mx-auto mt-10 flex max-w-md flex-col items-center justify-center rounded-3xl border border-dashed border-destructive/25 bg-destructive/[0.04] px-8 py-14 text-center">
+      <h2 className="text-base font-semibold text-foreground/85">
+        Couldn't load
+      </h2>
+      <p className="mt-2 text-sm leading-relaxed text-foreground/55">{message}</p>
+      <Button
+        onClick={onRetry}
+        variant="outline"
+        size="sm"
+        className="mt-5 gap-1.5"
+      >
+        <RefreshCw className="h-3.5 w-3.5" />
+        Retry
+      </Button>
+    </div>
+  );
+}
 
 function EmptyLibraryState({
   icon,

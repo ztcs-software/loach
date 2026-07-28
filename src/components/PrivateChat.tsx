@@ -167,14 +167,18 @@ function ModelPicker() {
   const [up, setUp] = useState<boolean | null>(null);
   const [loading, setLoading] = useState(false);
 
+  const reqId = useRef(0);
   const refresh = useMemo(
     () => async () => {
+      const id = ++reqId.current;
       setLoading(true);
       try {
         const probe = await ollamaProbe(ollamaBaseUrl).catch(() => false);
+        if (id !== reqId.current) return;
         setUp(probe);
         if (probe) {
           const m = await ollamaListModels(ollamaBaseUrl).catch(() => []);
+          if (id !== reqId.current) return;
           setModels(m);
           // Auto-pick a default model if none chosen yet — the user shouldn't
           // have to open the dropdown just to send their first message. Prefer
@@ -964,6 +968,14 @@ function PrivateChatComposer() {
     el.style.height = "0px";
     el.style.height = `${Math.min(el.scrollHeight, 220)}px`;
   }, [text]);
+
+  // Move focus into the composer when Private Chat opens (the whole overlay
+  // subtree mounts on open). Otherwise focus stays on whatever opened the
+  // overlay, leaving keyboard / screen-reader users outside the modal. We
+  // focus rather than trap — the OS TitleBar is intentionally kept reachable.
+  useEffect(() => {
+    textareaRef.current?.focus();
+  }, []);
 
   const ingest = async (files: File[]) => {
     setError(null);

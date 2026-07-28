@@ -32,6 +32,11 @@ interface SpaceState {
    *  new row so the Memory tab reflects writes without a re-fetch. */
   spaceMemories: Record<string, SpaceMemory[]>;
   spaceFormOpen: boolean;
+  /** Set true once `hydrate()` has run (success or failure) so the library can
+   *  distinguish "still loading" from "genuinely empty". */
+  hydrated: boolean;
+  /** Non-null when the last hydrate failed — drives the library's retry UI. */
+  error: string | null;
 
   hydrate: () => Promise<void>;
   selectSpace: (id: string | null) => void;
@@ -91,16 +96,22 @@ export const useSpaceStore = create<SpaceState>((set, get) => ({
   spaceFiles: {},
   spaceMemories: {},
   spaceFormOpen: false,
+  hydrated: false,
+  error: null,
 
   hydrate: async () => {
     try {
       const spaces = await listSpaces();
-      set({ spaces });
+      set({ spaces, hydrated: true, error: null });
       // A fresh hydrate (startup, or after a data import rewrote the spaces
       // tables) means any previously-cached context may be stale.
       invalidateAllSpaceContext();
     } catch (e) {
       logger.error("space hydrate failed", e);
+      set({
+        hydrated: true,
+        error: e instanceof Error ? e.message : String(e),
+      });
     }
   },
 

@@ -265,7 +265,7 @@ export function ModelsLibrary() {
                   hint="Read-only catalog from your OpenAI-compatible endpoint"
                 />
               </div>
-              <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+              <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
                 {openaiModels.map((m) => (
                   <div
                     key={`openai-${m.id}`}

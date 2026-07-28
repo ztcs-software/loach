@@ -126,8 +126,9 @@ export function LockScreen() {
         >
           {usesPin && (
             <div>
-              <Label>PIN</Label>
+              <Label htmlFor="lock-pin">PIN</Label>
               <Input
+                id="lock-pin"
                 ref={pinRef}
                 className="mt-1.5 text-center text-lg tracking-[0.5em]"
                 type="password"
@@ -154,8 +155,9 @@ export function LockScreen() {
 
           {usesPassword && (
             <div>
-              <Label>Password</Label>
+              <Label htmlFor="lock-password">Password</Label>
               <Input
+                id="lock-password"
                 ref={passwordRef}
                 className="mt-1.5"
                 type="password"

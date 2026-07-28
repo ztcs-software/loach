@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { useChatStore } from "@/stores/chatStore";
 import { extractSummary } from "@/lib/contextUsage";
-import { cn } from "@/lib/utils";
+import { cn, prefersReducedMotion } from "@/lib/utils";
 import type { Message } from "@/types";
 
 const EMPTY_MESSAGES: Message[] = [];
@@ -94,6 +94,28 @@ export function ChatCanvas() {
   const cancelForSession = useChatStore((s) => s.cancelForSession);
   const removeImportGroup = useChatStore((s) => s.removeImportGroup);
   const { confirm } = useConfirm();
+
+  // Visually-hidden polite live region: announce stream start/finish for the
+  // active chat so screen-reader users know a reply is arriving / done without
+  // narrating every token. Gated on session id so navigating away from a
+  // still-streaming chat doesn't announce a misleading "complete".
+  const [liveStatus, setLiveStatus] = useState("");
+  const wasStreamingRef = useRef(false);
+  const liveSessionRef = useRef(sessionId);
+  useEffect(() => {
+    if (liveSessionRef.current !== sessionId) {
+      liveSessionRef.current = sessionId;
+      wasStreamingRef.current = streamingHere;
+      setLiveStatus("");
+      return;
+    }
+    if (streamingHere && !wasStreamingRef.current) {
+      setLiveStatus("Assistant is responding…");
+    } else if (!streamingHere && wasStreamingRef.current) {
+      setLiveStatus("Response complete.");
+    }
+    wasStreamingRef.current = streamingHere;
+  }, [streamingHere, sessionId]);
   // Auto-summary text from the active session's system_prompt, if any.
   // Drives the "context was compacted here" divider that sits between
   // the rolled-up history and the still-active turns. Falls out as null
@@ -220,7 +242,10 @@ export function ChatCanvas() {
     if (!id) return;
     const el = messageRefs.current.get(id);
     if (el) {
-      el.scrollIntoView({ behavior: "smooth", block: "center" });
+      el.scrollIntoView({
+        behavior: prefersReducedMotion() ? "auto" : "smooth",
+        block: "center",
+      });
     }
   }, [matchCursor, matchIds, searchOpen]);
 
@@ -375,7 +400,10 @@ export function ChatCanvas() {
   const scrollToBottom = () => {
     const el = scrollerRef.current;
     if (!el) return;
-    el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+    el.scrollTo({
+      top: el.scrollHeight,
+      behavior: prefersReducedMotion() ? "auto" : "smooth",
+    });
     stickToBottom.current = true;
     setShowScrollButton(false);
   };
@@ -420,6 +448,10 @@ export function ChatCanvas() {
 
   return (
     <div className="relative flex-1 overflow-hidden">
+      {/* Polite live region for stream lifecycle — visually hidden (3.4). */}
+      <div aria-live="polite" className="sr-only">
+        {liveStatus}
+      </div>
       <div ref={scrollerRef} className="h-full overflow-y-auto">
         <div className="mx-auto w-full max-w-3xl px-4">
           {hiddenBefore > 0 && (
