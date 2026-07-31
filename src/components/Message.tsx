@@ -632,22 +632,6 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
                 <TextSelect className="h-4 w-4 text-foreground/60" />
                 Select all
               </DropdownMenuItem>
-              <DropdownMenuItem
-                onSelect={togglePin}
-                className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
-              >
-                {isPinned ? (
-                  <>
-                    <PinOff className="h-4 w-4 text-foreground/60" />
-                    Unpin this response
-                  </>
-                ) : (
-                  <>
-                    <Pin className="h-4 w-4 text-foreground/60" />
-                    Pin this response
-                  </>
-                )}
-              </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
         )}
@@ -831,7 +815,7 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
           <div className="mt-1.5 flex items-center gap-2">
             {isPinned && (
               <span
-                title="Pinned — right-click the response to unpin"
+                title="Pinned — unpin from the ⋯ menu"
                 className="inline-flex items-center gap-1 rounded-full bg-foreground/[0.07] px-2 py-0.5 text-[10.5px] font-medium text-foreground/60"
               >
                 <Pin className="h-3 w-3" />
@@ -876,6 +860,22 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
                 >
                   <Copy className="h-4 w-4 text-foreground/60" />
                   Copy message
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  onSelect={togglePin}
+                  className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
+                >
+                  {isPinned ? (
+                    <>
+                      <PinOff className="h-4 w-4 text-foreground/60" />
+                      Unpin this response
+                    </>
+                  ) : (
+                    <>
+                      <Pin className="h-4 w-4 text-foreground/60" />
+                      Pin this response
+                    </>
+                  )}
                 </DropdownMenuItem>
                 {canRegenerate && (
                   <DropdownMenuItem

@@ -716,7 +716,7 @@ function pinPreview(content: string): string {
  * Bar of pinned responses, sitting directly under the chat header. Each pin
  * is collapsed to one truncated line; clicking it scrolls that response into
  * view and flashes a highlight on it. Unpinning happens from the response's
- * own right-click menu, so the chips stay a pure navigation surface.
+ * own ⋯ menu, so the chips stay a pure navigation surface.
  */
 function PinnedBar({
   pinned,
