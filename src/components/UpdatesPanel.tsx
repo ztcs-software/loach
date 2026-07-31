@@ -1,8 +1,11 @@
 import { useEffect, useState } from "react";
 import { CheckCircle2, Download, ExternalLink, Loader2, RefreshCw, XCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
+import { Switch } from "@/components/ui/switch";
 import { Markdown } from "@/components/Markdown";
+import { UpdateProgressBar } from "@/components/UpdateProgress";
 import {
   checkForUpdate,
   installPendingUpdate,
@@ -11,6 +14,7 @@ import {
   type UpdateInfo,
 } from "@/lib/updater";
 import { isTauri } from "@/lib/tauri";
+import { useSettingsStore } from "@/stores/settingsStore";
 import pkg from "../../package.json";
 
 const GITHUB_RELEASES_URL = "https://github.com/ztcs-software/loach/releases/latest";
@@ -32,15 +36,11 @@ async function openExternal(url: string) {
   }
 }
 
-function formatBytes(n: number): string {
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
-}
-
 export function UpdatesPanel() {
   const [supported, setSupported] = useState<boolean | null>(null);
   const [state, setState] = useState<State>({ kind: "idle" });
+  const autoCheck = useSettingsStore((s) => s.auto_check_updates);
+  const updateSetting = useSettingsStore((s) => s.update);
 
   useEffect(() => {
     void isUpdaterSupported().then(setSupported);
@@ -165,7 +165,7 @@ export function UpdatesPanel() {
             <Loader2 className="h-4 w-4 animate-spin" />
             Downloading Loach v{state.info.version}…
           </div>
-          <ProgressBar progress={state.progress} />
+          <UpdateProgressBar progress={state.progress} />
           <p className="text-[11px] text-foreground/55">
             The app will restart automatically once the update is installed.
           </p>
@@ -184,25 +184,31 @@ export function UpdatesPanel() {
           </Button>
         </div>
       )}
-    </div>
-  );
-}
 
-function ProgressBar({ progress }: { progress: DownloadProgress }) {
-  const { downloaded, total } = progress;
-  const pct = total ? Math.min(100, (downloaded / total) * 100) : null;
-  return (
-    <div className="space-y-1.5">
-      <div className="h-1.5 w-full overflow-hidden rounded-full bg-foreground/10">
-        <div
-          className="h-full bg-primary transition-[width] duration-150 ease-out"
-          style={{ width: pct === null ? "30%" : `${pct}%` }}
+      <Separator />
+
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0">
+          <Label className="flex items-center gap-1.5">
+            <RefreshCw className="h-3.5 w-3.5 text-foreground/60" />
+            Auto-check for updates
+          </Label>
+          <p className="mt-1 text-[11px] text-foreground/50">
+            Check for a newer release once each time Loach starts, and show a
+            notice when one is available. Nothing is downloaded or installed
+            until you confirm.
+          </p>
+        </div>
+        <Switch
+          checked={autoCheck}
+          onCheckedChange={(next) => updateSetting("auto_check_updates", next)}
+          className="shrink-0"
+          aria-label={
+            autoCheck
+              ? "Disable auto-check for updates"
+              : "Enable auto-check for updates"
+          }
         />
-      </div>
-      <div className="text-[11px] tabular-nums text-foreground/55">
-        {pct === null
-          ? `${formatBytes(downloaded)} downloaded`
-          : `${formatBytes(downloaded)} / ${formatBytes(total!)} (${pct.toFixed(0)}%)`}
       </div>
     </div>
   );

@@ -41,6 +41,7 @@ const CodeCanvas = lazy(() =>
   import("@/components/CodeCanvas").then((m) => ({ default: m.CodeCanvas })),
 );
 import { SearchBar } from "@/components/SearchBar";
+import { UpdateAvailableDialog } from "@/components/UpdateAvailableDialog";
 import { PrivateChat } from "@/components/PrivateChat";
 import { KeyboardShortcuts } from "@/components/KeyboardShortcuts";
 import { ToastHost } from "@/components/ToastHost";
@@ -371,6 +372,16 @@ export default function App() {
           title bar; opening it is also what cancels any running regular
           chat (see TitleBar.openPrivateChat). */}
       {!showLock && !showOnboarding && <PrivateChat />}
+      {/* Launch-time "Update available" notice. Behind the same gates as the
+          surfaces above — a modal about updates shouldn't land on top of the
+          lock screen or interrupt first-run onboarding. Renders nothing
+          unless the `auto_check_updates` setting is on AND the check finds a
+          newer release. */}
+      {!showLock && !showOnboarding && (
+        <ErrorBoundary name="Update notice">
+          <UpdateAvailableDialog />
+        </ErrorBoundary>
+      )}
       {/* Global toast host. Mounted unconditionally so messages from any
           surface (including the lock screen path, in the future) land in a
           predictable spot. Renders nothing when no toasts are queued. */}

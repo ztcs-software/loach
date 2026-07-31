@@ -447,6 +447,12 @@ export interface Settings {
    *  that `factory_reset` truncates, so a reset naturally re-fires the
    *  onboarding flow on next launch. */
   onboarding_completed: boolean;
+  /** When true, Loach asks the update server once per launch whether a newer
+   *  release exists and pops the "Update available" dialog if so. Off by
+   *  default — the check is a network round-trip, and Loach stays
+   *  offline-first unless the user opts in. Ignored on installs where the
+   *  updater isn't supported (dev builds, plain binaries). */
+  auto_check_updates: boolean;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -480,6 +486,7 @@ export const DEFAULT_SETTINGS: Settings = {
   thinking_default: true,
   default_tone_id: "default",
   onboarding_completed: false,
+  auto_check_updates: false,
 };
 
 /** Shape returned by the Rust `fetch_url` command. Kept in sync with

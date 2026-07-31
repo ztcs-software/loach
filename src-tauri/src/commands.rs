@@ -523,6 +523,7 @@ const WRITABLE_SETTING_KEYS: &[&str] = &[
     "thinking_default",
     "default_tone_id",
     "onboarding_completed",
+    "auto_check_updates",
 ];
 
 /// Whether `key` is a setting the app is allowed to write. Built-in tool
