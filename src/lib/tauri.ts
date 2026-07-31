@@ -251,6 +251,7 @@ export function appendMessage(args: {
       compacted_at: null,
       import_group: null,
       import_hidden: false,
+      pinned_at: null,
       created_at: Date.now(),
     });
   }
@@ -282,6 +283,7 @@ export function importMessages(args: {
         compacted_at: null,
         import_group: group,
         import_hidden: args.hidden,
+        pinned_at: null,
         created_at: base + i,
       })),
     );
@@ -328,6 +330,17 @@ export function updateMessage(args: {
 export function deleteMessage(id: string, sessionId: string): Promise<void> {
   if (!isTauri) return notInTauri(undefined);
   return invoke("delete_message", { id, sessionId });
+}
+
+/** Pin or unpin one assistant response. Pinned rows surface in the bar
+ *  under the chat header. Scoped by `session_id` like `deleteMessage`. */
+export function pinMessage(
+  id: string,
+  sessionId: string,
+  pinned: boolean,
+): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("pin_message", { id, sessionId, pinned });
 }
 
 /** Delete every message in a session in one transactional call. Backs the

@@ -457,6 +457,19 @@ pub async fn delete_message(
     state.db.delete_message(&id, &session_id).map_err(err)
 }
 
+/// Pin or unpin one assistant response. Pinned rows are listed in the bar
+/// under the chat header so the user can jump back to them. Display only —
+/// pinning doesn't change what reaches the model.
+#[tauri::command]
+pub async fn pin_message(
+    state: State<'_, AppState>,
+    id: String,
+    session_id: String,
+    pinned: bool,
+) -> Result<(), String> {
+    state.db.pin_message(&id, &session_id, pinned).map_err(err)
+}
+
 #[tauri::command]
 pub async fn clear_session_messages(
     state: State<'_, AppState>,

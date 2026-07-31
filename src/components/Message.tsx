@@ -11,6 +11,8 @@ import {
   GitFork,
   Loader2,
   MoreHorizontal,
+  Pin,
+  PinOff,
   RefreshCw,
   TextSelect,
   Wrench,
@@ -333,6 +335,7 @@ function ThinkingBlock({ text, isStreaming }: { text: string; isStreaming?: bool
 function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: MessageProps) {
   const regenerateLast = useChatStore((s) => s.regenerateLast);
   const forkChat = useChatStore((s) => s.fork);
+  const pinMessage = useChatStore((s) => s.pinMessage);
   const [menuOpen, setMenuOpen] = useState(false);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   // Separate state for the keyboard-accessible kebab below the user
@@ -471,6 +474,9 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
   }
 
   const isUser = message.role === "user";
+  const isPinned = message.pinned_at != null;
+  const togglePin = () =>
+    void pinMessage(message.session_id, message.id, !isPinned);
   // Memoise the JSON parses on their source strings. chatStore only swaps these
   // strings when their dirty flags fire, so during a content-only streaming
   // flush they stay reference-equal and the parse is skipped — otherwise the
@@ -625,6 +631,22 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
               >
                 <TextSelect className="h-4 w-4 text-foreground/60" />
                 Select all
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                onSelect={togglePin}
+                className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
+              >
+                {isPinned ? (
+                  <>
+                    <PinOff className="h-4 w-4 text-foreground/60" />
+                    Unpin this response
+                  </>
+                ) : (
+                  <>
+                    <Pin className="h-4 w-4 text-foreground/60" />
+                    Pin this response
+                  </>
+                )}
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
@@ -807,6 +829,15 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
         )}
         {!isUser && message.content.length > 0 && (
           <div className="mt-1.5 flex items-center gap-2">
+            {isPinned && (
+              <span
+                title="Pinned — right-click the response to unpin"
+                className="inline-flex items-center gap-1 rounded-full bg-foreground/[0.07] px-2 py-0.5 text-[10.5px] font-medium text-foreground/60"
+              >
+                <Pin className="h-3 w-3" />
+                Pinned
+              </span>
+            )}
             {showMetrics && (
               <span className="text-[11px] font-mono text-muted-foreground">
                 ⏱ {showMetrics.tokens_per_second.toFixed(1)} tok/s ·{" "}

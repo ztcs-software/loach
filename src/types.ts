@@ -199,6 +199,11 @@ export interface Message {
    *  keep the imported batch folded out of the transcript. It still reaches
    *  the model like any other import — this flag governs display only. */
   import_hidden: boolean;
+  /** Non-null ms-timestamp = the user pinned this response from its
+   *  right-click menu. Pinned responses are listed in a bar under the chat
+   *  header that scrolls back to them. Display only — a pinned message is
+   *  sent to the model exactly like any other. */
+  pinned_at: number | null;
   created_at: number;
 }
 

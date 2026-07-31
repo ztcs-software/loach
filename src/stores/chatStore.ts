@@ -22,6 +22,7 @@ import {
   makeRequestId,
   markMessagesCompacted,
   ollamaUnloadModel,
+  pinMessage as persistMessagePin,
   pinSession,
   renameSession,
   startChatStream,
@@ -212,6 +213,14 @@ interface ChatState {
    *  in the DB and the in-memory transcript. Used by the Remove control on
    *  the imported-context card. */
   removeImportGroup: (id: string, group: string) => Promise<void>;
+  /** Pin or unpin one assistant response. Pinned rows are listed in the bar
+   *  under the chat header, which scrolls back to them on click. Display
+   *  only — pinning doesn't change what's sent to the model. */
+  pinMessage: (
+    sessionId: string,
+    messageId: string,
+    pinned: boolean,
+  ) => Promise<void>;
 
   sendUserMessage: (content: string, attachments: Attachment[]) => Promise<void>;
   /** Drop the trailing assistant message in `sessionId` and re-stream a
@@ -1828,6 +1837,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
       messages: {
         ...s.messages,
         [id]: (s.messages[id] ?? []).filter((m) => m.import_group !== group),
+      },
+    }));
+  },
+
+  pinMessage: async (sessionId, messageId, pinned) => {
+    await persistMessagePin(messageId, sessionId, pinned);
+    const pinned_at = pinned ? Date.now() : null;
+    set((s) => ({
+      messages: {
+        ...s.messages,
+        [sessionId]: (s.messages[sessionId] ?? []).map((m) =>
+          m.id === messageId ? { ...m, pinned_at } : m,
+        ),
       },
     }));
   },

@@ -265,6 +265,12 @@ pub struct Message {
     /// display only.
     #[serde(default)]
     pub import_hidden: bool,
+    /// Non-null = the user pinned this response at this ms-timestamp. Pinned
+    /// assistant messages are listed in a bar under the chat header so they
+    /// can be jumped back to. Display only — a pinned message reaches the
+    /// model exactly like any other.
+    #[serde(default)]
+    pub pinned_at: Option<i64>,
     pub created_at: i64,
 }
 
@@ -518,6 +524,16 @@ impl Database {
             conn.execute_batch(
                 "ALTER TABLE messages ADD COLUMN import_group TEXT;
                  ALTER TABLE messages ADD COLUMN import_hidden INTEGER NOT NULL DEFAULT 0;",
+            )?;
+        }
+
+        // `pinned_at`: ms-timestamp set when the user pins an assistant
+        // response from its right-click menu. Drives the pinned bar under
+        // the chat header. Null on every pre-existing row — nothing is
+        // pinned until the user says so.
+        if !has_column(&conn, "messages", "pinned_at")? {
+            conn.execute_batch(
+                "ALTER TABLE messages ADD COLUMN pinned_at INTEGER;",
             )?;
         }
 
@@ -776,8 +792,8 @@ impl Database {
             let msg_id = Uuid::new_v4().to_string();
             tx.execute(
                 "INSERT INTO messages (id, session_id, role, content, thinking,
-                                       attachments_json, metrics_json, tool_calls_json, compacted_at, created_at, import_group, import_hidden)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                                       attachments_json, metrics_json, tool_calls_json, compacted_at, created_at, import_group, import_hidden, pinned_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                 params![
                     msg_id,
                     new_id,
@@ -791,6 +807,7 @@ impl Database {
                     m.created_at,
                     m.import_group,
                     m.import_hidden,
+                    m.pinned_at,
                 ],
             )?;
         }
@@ -1043,7 +1060,7 @@ impl Database {
     pub fn list_messages(&self, session_id: &str) -> Result<Vec<Message>> {
         self.with_read(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, session_id, role, content, thinking, attachments_json, metrics_json, tool_calls_json, compacted_at, created_at, import_group, import_hidden
+                "SELECT id, session_id, role, content, thinking, attachments_json, metrics_json, tool_calls_json, compacted_at, created_at, import_group, import_hidden, pinned_at
                  FROM messages WHERE session_id = ?1 ORDER BY created_at ASC",
             )?;
             let rows = stmt
@@ -1061,6 +1078,7 @@ impl Database {
                         created_at: r.get(9)?,
                         import_group: r.get(10)?,
                         import_hidden: r.get(11)?,
+                        pinned_at: r.get(12)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -1105,8 +1123,8 @@ impl Database {
             let mut conn = self.conn.lock();
             let tx = conn.transaction()?;
             tx.execute(
-                "INSERT INTO messages (id, session_id, role, content, thinking, attachments_json, metrics_json, tool_calls_json, compacted_at, created_at, import_group, import_hidden)
-                 VALUES (?1, ?2, ?3, ?4, NULL, ?5, NULL, NULL, NULL, ?6, NULL, 0)",
+                "INSERT INTO messages (id, session_id, role, content, thinking, attachments_json, metrics_json, tool_calls_json, compacted_at, created_at, import_group, import_hidden, pinned_at)
+                 VALUES (?1, ?2, ?3, ?4, NULL, ?5, NULL, NULL, NULL, ?6, NULL, 0, NULL)",
                 params![id, session_id, role, content, attachments_json, now],
             )?;
             tx.execute(
@@ -1128,6 +1146,7 @@ impl Database {
             created_at: now,
             import_group: None,
             import_hidden: false,
+            pinned_at: None,
         })
     }
 
@@ -1156,8 +1175,8 @@ impl Database {
             let tx = conn.transaction()?;
             {
                 let mut stmt = tx.prepare(
-                    "INSERT INTO messages (id, session_id, role, content, thinking, attachments_json, metrics_json, tool_calls_json, compacted_at, created_at, import_group, import_hidden)
-                     VALUES (?1, ?2, ?3, ?4, NULL, NULL, NULL, NULL, NULL, ?5, ?6, ?7)",
+                    "INSERT INTO messages (id, session_id, role, content, thinking, attachments_json, metrics_json, tool_calls_json, compacted_at, created_at, import_group, import_hidden, pinned_at)
+                     VALUES (?1, ?2, ?3, ?4, NULL, NULL, NULL, NULL, NULL, ?5, ?6, ?7, NULL)",
                 )?;
                 for (i, (role, content)) in items.iter().enumerate() {
                     let id = Uuid::new_v4().to_string();
@@ -1176,6 +1195,7 @@ impl Database {
                         created_at,
                         import_group: Some(group.clone()),
                         import_hidden: hidden,
+                        pinned_at: None,
                     });
                 }
             }
@@ -1232,6 +1252,25 @@ impl Database {
             }
         }
         tx.commit()?;
+        Ok(())
+    }
+
+    /// Pin or unpin a single message — sets `pinned_at` to now, or clears
+    /// it. Scoped by `session_id` like the other single-message writes so a
+    /// leaked id can't reach across sessions. Deliberately leaves the
+    /// session's `updated_at` alone: pinning a response is a bookmark, not
+    /// activity worth reshuffling the sidebar for.
+    pub fn pin_message(&self, id: &str, session_id: &str, pinned: bool) -> Result<()> {
+        let conn = self.conn.lock();
+        let pinned_at: Option<i64> = if pinned {
+            Some(Utc::now().timestamp_millis())
+        } else {
+            None
+        };
+        conn.execute(
+            "UPDATE messages SET pinned_at = ?1 WHERE id = ?2 AND session_id = ?3",
+            params![pinned_at, id, session_id],
+        )?;
         Ok(())
     }
 
@@ -1998,7 +2037,7 @@ impl Database {
     pub fn all_messages(&self) -> Result<Vec<Message>> {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(
-            "SELECT id, session_id, role, content, thinking, attachments_json, metrics_json, tool_calls_json, compacted_at, created_at, import_group, import_hidden
+            "SELECT id, session_id, role, content, thinking, attachments_json, metrics_json, tool_calls_json, compacted_at, created_at, import_group, import_hidden, pinned_at
              FROM messages ORDER BY session_id, created_at",
         )?;
         let rows = stmt
@@ -2016,6 +2055,7 @@ impl Database {
                     created_at: r.get(9)?,
                     import_group: r.get(10)?,
                     import_hidden: r.get(11)?,
+                    pinned_at: r.get(12)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -2178,8 +2218,8 @@ impl Database {
         for m in &d.messages {
             tx.execute(
                 "INSERT INTO messages (id, session_id, role, content, thinking,
-                                       attachments_json, metrics_json, tool_calls_json, compacted_at, created_at, import_group, import_hidden)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                                       attachments_json, metrics_json, tool_calls_json, compacted_at, created_at, import_group, import_hidden, pinned_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                 params![
                     m.id,
                     m.session_id,
@@ -2193,6 +2233,7 @@ impl Database {
                     m.created_at,
                     m.import_group,
                     m.import_hidden,
+                    m.pinned_at,
                 ],
             )?;
         }
