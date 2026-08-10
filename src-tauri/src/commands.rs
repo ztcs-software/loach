@@ -522,6 +522,7 @@ const WRITABLE_SETTING_KEYS: &[&str] = &[
     "background_style",
     "font_size",
     "ollama_base_url",
+    "ollama_auto_launch",
     "openai_base_url",
     "global_system_prompt",
     "default_provider",
@@ -694,6 +695,14 @@ pub async fn security_clear(args: Option<SecurityClearArgs>) -> Result<(), Strin
 #[tauri::command]
 pub async fn ollama_probe(state: State<'_, AppState>, base_url: String) -> Result<bool, String> {
     Ok(providers::ollama::probe(&state.http, &base_url).await)
+}
+
+/// Make sure a local Ollama is running, launching `ollama serve` if it
+/// isn't. Resolves once the server answers; the error string is written to
+/// be shown to the user verbatim.
+#[tauri::command]
+pub async fn ollama_start(state: State<'_, AppState>, base_url: String) -> Result<(), String> {
+    crate::ollama_launch::start(&state.http, &base_url).await
 }
 
 #[tauri::command]

@@ -52,7 +52,8 @@ import { SquarePen } from "lucide-react";
 import { resolveDefaultModelChoice, useChatStore } from "@/stores/chatStore";
 import { useModelsStore } from "@/stores/modelsStore";
 import { useSettingsStore } from "@/stores/settingsStore";
-import { ollamaPreloadModel } from "@/lib/tauri";
+import { ollamaPreloadModel, ollamaStart } from "@/lib/tauri";
+import { logger } from "@/lib/logger";
 import { useSnippetStore } from "@/stores/snippetStore";
 import { useSnippetVarStore } from "@/stores/snippetVarStore";
 import { useSpaceStore } from "@/stores/spaceStore";
@@ -144,13 +145,38 @@ export default function App() {
     // so its latency never blocks anything the user sees.
     void hydrateModels();
 
+    // Optional Ollama auto-launch. Starts `ollama serve` if nothing is
+    // answering, so a user who lives in Loach doesn't have to keep the
+    // daemon running themselves. Resolves in the same tick when the setting
+    // is off, so nobody who hasn't opted in pays for the extra probe.
+    //
+    // Failures stay in the log rather than a startup toast: the model picker
+    // already shows "Not running" with a Start Ollama button that surfaces
+    // the same error on demand, which is a better place to see it than a
+    // banner over a cold app.
+    const ollamaReady = settingsP.then(async () => {
+      const s = useSettingsStore.getState();
+      if (!s.ollama_auto_launch) return;
+      try {
+        await ollamaStart(s.ollama_base_url);
+      } catch (e) {
+        logger.warn("ollama auto-launch failed", e);
+        return;
+      }
+      // `hydrateModels` above raced the launch and listed an empty catalog.
+      // Redo it now that there's a server to ask.
+      void useModelsStore.getState().refresh();
+    });
+
     // Optional default-model preload. Resolves the same encoded choice
     // that "New chat" would use, then warms the model into VRAM with an
     // empty Ollama chat so the first real request skips the cold load.
     // Cloud providers have no local load step, so we only fire for Ollama.
     // Fully fire-and-forget — Ollama may be unreachable or the model
-    // missing; we never want this to surface as an error.
-    void Promise.all([settingsP, chatsP]).then(() => {
+    // missing; we never want this to surface as an error. Waits on
+    // `ollamaReady` so an auto-launched server is up before we try to warm
+    // a model in it; that promise is a no-op when auto-launch is off.
+    void Promise.all([settingsP, chatsP, ollamaReady]).then(() => {
       const s = useSettingsStore.getState();
       if (!s.default_model_preload) return;
       const resolved = resolveDefaultModelChoice(

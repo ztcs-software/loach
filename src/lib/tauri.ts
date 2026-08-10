@@ -474,6 +474,14 @@ export function ollamaProbe(baseUrl: string): Promise<boolean> {
   return invoke("ollama_probe", { baseUrl });
 }
 
+/** Start a local `ollama serve` if nothing is answering at `baseUrl`, and
+ *  resolve once it does. Rejects with a user-facing message when Ollama
+ *  can't be found, the URL isn't local, or the server never comes up. */
+export function ollamaStart(baseUrl: string): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("ollama_start", { baseUrl });
+}
+
 export function ollamaListModels(baseUrl: string): Promise<ModelInfo[]> {
   if (!isTauri) return notInTauri([]);
   return invoke("ollama_list_models", { baseUrl });

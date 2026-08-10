@@ -1,6 +1,7 @@
 mod commands;
 mod db;
 mod mcp;
+mod ollama_launch;
 mod preload;
 mod providers;
 mod secrets;
@@ -297,6 +298,7 @@ pub fn run() {
             commands::security_clear,
             commands::ollama_list_models,
             commands::ollama_probe,
+            commands::ollama_start,
             commands::openai_list_models,
             commands::chat_stream,
             commands::chat_cancel,

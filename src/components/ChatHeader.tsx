@@ -11,11 +11,13 @@ import {
   Copy,
   FileText,
   GitFork,
+  Loader2,
   MessageSquare,
   MoreHorizontal,
   Pencil,
   Pin,
   PinOff,
+  Play,
   RefreshCw,
   Search,
   Sliders,
@@ -43,6 +45,7 @@ import {
 import { ChatLabelSubmenu } from "@/components/ChatLabelMenu";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { useChatStore } from "@/stores/chatStore";
+import { useModelsStore } from "@/stores/modelsStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useUIStore } from "@/stores/uiStore";
@@ -51,6 +54,7 @@ import {
   exportSession,
   ollamaListModels,
   ollamaProbe,
+  ollamaStart,
   openaiListModels,
 } from "@/lib/tauri";
 import { EyeOff, Layers } from "lucide-react";
@@ -355,6 +359,31 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
     refresh();
   }, [settingsHydrated, refresh]);
 
+  /** Launch a local Ollama from the picker. Independent of the
+   *  `ollama_auto_launch` setting — that one only governs whether we do this
+   *  unprompted at startup. `ollamaStart` resolves once the server actually
+   *  answers, so by the time we re-`refresh()` the model list is there.
+   *  Failures (no Ollama installed, remote base URL) land inline under the
+   *  button rather than in a toast, since the menu is already open and open
+   *  menus swallow the toast's z-order anyway. */
+  const [starting, setStarting] = useState(false);
+  const [startError, setStartError] = useState<string | null>(null);
+  const startOllama = async () => {
+    setStarting(true);
+    setStartError(null);
+    try {
+      await ollamaStart(ollamaBaseUrl);
+      await refresh();
+      // The Models panel keeps its own catalog; without this it would still
+      // be showing the "Ollama unreachable" error from before the launch.
+      void useModelsStore.getState().refresh();
+    } catch (e) {
+      setStartError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setStarting(false);
+    }
+  };
+
   // Display provider name in its canonical brand-cased form; the underlying
   // `session.provider` value is the lower-case id.
   const providerLabel = session?.provider === "openai" ? "OpenAI" : "Ollama";
@@ -465,6 +494,34 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
               <DropdownMenuItem disabled>
                 {ollamaUp ? "No models installed" : "Not running"}
               </DropdownMenuItem>
+            )}
+            {/* `=== false` rather than `!ollamaUp`: the probe starts as null
+                and we don't want the button flickering in before we know. */}
+            {ollamaUp === false && (
+              <>
+                <DropdownMenuItem
+                  disabled={starting}
+                  // Keep the menu open across the launch so the user sees the
+                  // spinner turn into their model list (or an error).
+                  onSelect={(e) => {
+                    e.preventDefault();
+                    void startOllama();
+                  }}
+                  className="gap-1.5"
+                >
+                  {starting ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Play className="h-3.5 w-3.5" />
+                  )}
+                  {starting ? "Starting Ollama…" : "Start Ollama"}
+                </DropdownMenuItem>
+                {startError && (
+                  <p className="px-2 pb-1 text-[11px] text-destructive">
+                    {startError}
+                  </p>
+                )}
+              </>
             )}
             {ollamaModels.map((m) => (
               <DropdownMenuItem key={`ollama:${m.id}`} onSelect={() => select("ollama", m.id)}>

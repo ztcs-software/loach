@@ -358,6 +358,13 @@ export interface Settings {
    *  text sizes via the `--font-scale` variable. */
   font_size: FontSize;
   ollama_base_url: string;
+  /** When true, Loach starts `ollama serve` at launch if nothing is already
+   *  answering at `ollama_base_url`. Off by default — starting a background
+   *  service on someone's machine is an opt-in. Only applies to a loopback
+   *  base URL; a remote Ollama isn't ours to start. The "Start Ollama"
+   *  button in the model picker does the same thing on demand and ignores
+   *  this setting. */
+  ollama_auto_launch: boolean;
   openai_base_url: string;
   /** Free-text instructions injected as the system prompt of every new chat.
    *  Keyed `global_system_prompt` for backwards compat with the on-disk KV
@@ -465,6 +472,7 @@ export const DEFAULT_SETTINGS: Settings = {
   background_style: "gradient",
   font_size: "normal",
   ollama_base_url: "http://localhost:11434",
+  ollama_auto_launch: false,
   openai_base_url: "https://api.openai.com/v1",
   global_system_prompt: "",
   default_provider: "ollama",
