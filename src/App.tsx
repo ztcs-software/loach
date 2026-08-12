@@ -21,6 +21,7 @@ const SpaceView = lazy(() =>
 const SpacesLibrary = lazy(() =>
   import("@/components/SpacesLibrary").then((m) => ({ default: m.SpacesLibrary })),
 );
+import { ShareDialog } from "@/components/ShareDialog";
 import { SnippetDialog } from "@/components/SnippetDialog";
 import { SnippetVariableDialog } from "@/components/SnippetVariableDialog";
 import { SnippetVariableFillDialog } from "@/components/SnippetVariableFillDialog";
@@ -361,6 +362,9 @@ export default function App() {
         </ErrorBoundary>
         <ErrorBoundary name="Snippet editor">
           <SnippetDialog />
+        </ErrorBoundary>
+        <ErrorBoundary name="Share message">
+          <ShareDialog />
         </ErrorBoundary>
         <ErrorBoundary name="Snippet variable editor">
           <SnippetVariableDialog />

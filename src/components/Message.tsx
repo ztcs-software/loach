@@ -14,6 +14,7 @@ import {
   Pin,
   PinOff,
   RefreshCw,
+  Share2,
   TextSelect,
   Wrench,
 } from "lucide-react";
@@ -37,6 +38,7 @@ import { cn } from "@/lib/utils";
 import { safeImageMime, stripInlinedAttachments } from "@/lib/files";
 import { Bookmark } from "lucide-react";
 import { useChatStore } from "@/stores/chatStore";
+import { useShareStore } from "@/stores/shareStore";
 import { useSnippetStore } from "@/stores/snippetStore";
 import { useToastStore } from "@/stores/toastStore";
 
@@ -361,6 +363,7 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
   // metrics and the "Show more" toggle stay outside the highlight.
   const bodyRef = useRef<HTMLDivElement>(null);
   const openSnippetDialog = useSnippetStore((s) => s.openDialog);
+  const openShareDialog = useShareStore((s) => s.open);
 
   // Single funnel for every clipboard write the message component does.
   // The Tauri webview can refuse `navigator.clipboard.writeText` in narrow
@@ -774,9 +777,10 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
                   // Tell screen-reader users what's behind the kebab —
                   // a generic "Message actions" reads the same for the
                   // user and assistant menus despite their action sets
-                  // differing. This one carries Copy + Save as Snippet,
-                  // which only make sense for the user's own message.
-                  aria-label="Copy or save this message"
+                  // differing. This one carries Copy + Share + Save as
+                  // Snippet, which only make sense for the user's own
+                  // message.
+                  aria-label="Copy, share or save this message"
                   className={cn(
                     "inline-flex h-7 w-7 items-center justify-center rounded-full text-foreground/55 transition-opacity hover:bg-foreground/10 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
                     userKebabOpen
@@ -797,6 +801,15 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
                 >
                   <Copy className="h-4 w-4 text-foreground/60" />
                   Copy message
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  onSelect={() =>
+                    openShareDialog({ role: "user", content: displayContent })
+                  }
+                  className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
+                >
+                  <Share2 className="h-4 w-4 text-foreground/60" />
+                  Share
                 </DropdownMenuItem>
                 <DropdownMenuItem
                   onSelect={() =>
@@ -860,6 +873,18 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
                 >
                   <Copy className="h-4 w-4 text-foreground/60" />
                   Copy message
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  onSelect={() =>
+                    openShareDialog({
+                      role: "assistant",
+                      content: message.content,
+                    })
+                  }
+                  className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
+                >
+                  <Share2 className="h-4 w-4 text-foreground/60" />
+                  Share
                 </DropdownMenuItem>
                 <DropdownMenuItem
                   onSelect={togglePin}
