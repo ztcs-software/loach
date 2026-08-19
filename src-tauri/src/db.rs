@@ -464,10 +464,22 @@ impl Database {
         // and on a false negative triggers a duplicate `ADD COLUMN` that
         // hard-fails the whole migrate. `table_info` returns rows we can
         // search authoritatively.
+        // Every column below is probed and added INDIVIDUALLY, and the
+        // indexes are created unconditionally afterwards.
+        //
+        // Batching several `ALTER TABLE ... ADD COLUMN` statements behind one
+        // column's probe was a latent brick: `execute_batch` runs each DDL in
+        // its own autocommit, so a crash (or a full disk) between two ALTERs
+        // left the schema half-applied. Depending on which column the probe
+        // watched, the next boot then either skipped the rest forever — and
+        // every SELECT naming the missing column failed at runtime — or
+        // re-ran the batch into `duplicate column name`, which fails
+        // `migrate()` on every launch with no way out but manual surgery.
+        // One probe per column makes each step independently idempotent, so
+        // an interrupted migration simply finishes on the next launch.
         if !has_column(&conn, "sessions", "space_id")? {
             conn.execute_batch(
-                "ALTER TABLE sessions ADD COLUMN space_id TEXT REFERENCES spaces(id) ON DELETE SET NULL;
-                 CREATE INDEX IF NOT EXISTS idx_sessions_space ON sessions(space_id);",
+                "ALTER TABLE sessions ADD COLUMN space_id TEXT REFERENCES spaces(id) ON DELETE SET NULL;",
             )?;
         }
 
@@ -521,9 +533,11 @@ impl Database {
         // so probing one is enough. Existing rows default to "not imported"
         // (NULL group, 0 hidden).
         if !has_column(&conn, "messages", "import_group")? {
+            conn.execute_batch("ALTER TABLE messages ADD COLUMN import_group TEXT;")?;
+        }
+        if !has_column(&conn, "messages", "import_hidden")? {
             conn.execute_batch(
-                "ALTER TABLE messages ADD COLUMN import_group TEXT;
-                 ALTER TABLE messages ADD COLUMN import_hidden INTEGER NOT NULL DEFAULT 0;",
+                "ALTER TABLE messages ADD COLUMN import_hidden INTEGER NOT NULL DEFAULT 0;",
             )?;
         }
 
@@ -540,19 +554,16 @@ impl Database {
         // Add provider + model columns to snippets if missing (for pinning a
         // default model to a snippet).
         if !has_column(&conn, "snippets", "provider")? {
-            conn.execute_batch(
-                "ALTER TABLE snippets ADD COLUMN provider TEXT;
-                 ALTER TABLE snippets ADD COLUMN model TEXT;",
-            )?;
+            conn.execute_batch("ALTER TABLE snippets ADD COLUMN provider TEXT;")?;
+        }
+        if !has_column(&conn, "snippets", "model")? {
+            conn.execute_batch("ALTER TABLE snippets ADD COLUMN model TEXT;")?;
         }
 
         // Add archived_at column to sessions if missing. Null = live chat;
         // otherwise the ms-timestamp the session was archived.
         if !has_column(&conn, "sessions", "archived_at")? {
-            conn.execute_batch(
-                "ALTER TABLE sessions ADD COLUMN archived_at INTEGER;
-                 CREATE INDEX IF NOT EXISTS idx_sessions_archived ON sessions(archived_at);",
-            )?;
+            conn.execute_batch("ALTER TABLE sessions ADD COLUMN archived_at INTEGER;")?;
         }
 
         // Track which chat a session was forked from. Null = a normal chat
@@ -573,20 +584,38 @@ impl Database {
         // on that, so it never has to null the column itself.
         if !has_column(&conn, "sessions", "folder_id")? {
             conn.execute_batch(
-                "ALTER TABLE sessions ADD COLUMN folder_id TEXT REFERENCES folders(id) ON DELETE SET NULL;
-                 CREATE INDEX IF NOT EXISTS idx_sessions_folder ON sessions(folder_id);",
+                "ALTER TABLE sessions ADD COLUMN folder_id TEXT REFERENCES folders(id) ON DELETE SET NULL;",
             )?;
         }
+
+        // Indexes for the columns added above. Created unconditionally rather
+        // than inside each column's probe: `IF NOT EXISTS` makes them cheap
+        // no-ops once present, and pairing them with the probe meant a crash
+        // landing between the ALTER and the CREATE INDEX left the index
+        // missing forever (the column now exists, so the guard never opens
+        // again). Runs after every `ALTER`, so the columns are all there.
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_sessions_space ON sessions(space_id);
+             CREATE INDEX IF NOT EXISTS idx_sessions_archived ON sessions(archived_at);
+             CREATE INDEX IF NOT EXISTS idx_sessions_folder ON sessions(folder_id);",
+        )?;
 
         // Add per-space default model + params columns if missing. Null =
         // "inherit from General Settings" — see the Space struct for the
         // full layering story.
+        // The probe used to sit on `default_model` while `default_provider`
+        // was added first — so an interruption between the two left a
+        // database that failed `migrate()` with `duplicate column name:
+        // default_provider` on every subsequent launch. Per-column probes
+        // repair exactly that state instead of tripping over it.
+        if !has_column(&conn, "spaces", "default_provider")? {
+            conn.execute_batch("ALTER TABLE spaces ADD COLUMN default_provider TEXT;")?;
+        }
         if !has_column(&conn, "spaces", "default_model")? {
-            conn.execute_batch(
-                "ALTER TABLE spaces ADD COLUMN default_provider TEXT;
-                 ALTER TABLE spaces ADD COLUMN default_model TEXT;
-                 ALTER TABLE spaces ADD COLUMN default_params_json TEXT;",
-            )?;
+            conn.execute_batch("ALTER TABLE spaces ADD COLUMN default_model TEXT;")?;
+        }
+        if !has_column(&conn, "spaces", "default_params_json")? {
+            conn.execute_batch("ALTER TABLE spaces ADD COLUMN default_params_json TEXT;")?;
         }
 
         // Add memory_enabled column to spaces if missing. Default ON so
@@ -2608,6 +2637,63 @@ mod tests {
         let (db, _dir) = fresh_db();
         db.migrate().expect("second migrate");
         db.migrate().expect("third migrate");
+    }
+
+    /// A migration interrupted part-way through must be finishable on the
+    /// next launch, not fatal forever.
+    ///
+    /// `execute_batch` runs each `ALTER TABLE` in its own autocommit, so a
+    /// crash between two of them left the schema half-applied. When several
+    /// ALTERs sat behind ONE column's probe, the next boot either skipped the
+    /// rest permanently (and every SELECT naming the missing column failed)
+    /// or re-ran the batch into `duplicate column name`, failing `migrate()`
+    /// on every subsequent launch — an install with no recovery path short of
+    /// hand-editing the database. The `spaces` trio was the live example: it
+    /// probed `default_model` while adding `default_provider` first.
+    #[test]
+    fn migrate_repairs_a_half_applied_column_batch() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("loach.db");
+
+        {
+            let db = Database::open(&path).expect("open");
+            db.migrate().expect("initial migrate");
+            // Simulate the crash: rebuild `spaces` carrying only the FIRST
+            // column of the trio, exactly the state an interrupted batch
+            // leaves behind. (SQLite predating DROP COLUMN is why this goes
+            // the long way round.)
+            let conn = db.conn.lock();
+            conn.execute_batch(
+                r#"
+                DROP TABLE spaces;
+                CREATE TABLE spaces (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    description TEXT NOT NULL DEFAULT '',
+                    instructions TEXT NOT NULL DEFAULT '',
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    default_provider TEXT
+                );
+                "#,
+            )
+            .expect("simulate interrupted batch");
+        }
+
+        // The next launch must finish the job rather than trip over it.
+        let db = Database::open(&path).expect("reopen");
+        db.migrate().expect("migrate must repair a half-applied batch");
+
+        let conn = db.conn.lock();
+        for col in ["default_provider", "default_model", "default_params_json"] {
+            assert!(
+                has_column(&conn, "spaces", col).expect("probe"),
+                "`spaces.{col}` missing after repair",
+            );
+        }
+        drop(conn);
+        // And still idempotent afterwards.
+        db.migrate().expect("migrate again after repair");
     }
 
     #[test]

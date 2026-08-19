@@ -79,7 +79,7 @@ pub fn dispatch(arguments: &Value) -> McpCallResult {
             trimmed.chars().count()
         ));
     }
-    match meval::eval_str(trimmed) {
+    match meval::eval_str_with_context(trimmed, calc_context()) {
         Ok(value) => McpCallResult {
             content_text: format_result(value),
             is_error: false,
@@ -87,6 +87,19 @@ pub fn dispatch(arguments: &Value) -> McpCallResult {
         },
         Err(e) => err(format!("could not evaluate `{trimmed}`: {e}")),
     }
+}
+
+/// meval's default context plus the two logarithms the tool catalogue has
+/// always advertised. `Context::new()` ships `ln` but neither `log` nor
+/// `log10`, so a model taking the description at its word got "unknown
+/// function" on `log10(100)` — one of the most common things it would reach
+/// for this tool to do. `log` is base-e (an alias for `ln`), matching how
+/// the description documents it.
+fn calc_context() -> meval::Context<'static> {
+    let mut ctx = meval::Context::new();
+    ctx.func("log10", f64::log10);
+    ctx.func("log", f64::ln);
+    ctx
 }
 
 fn err(msg: impl Into<String>) -> McpCallResult {
@@ -138,6 +151,26 @@ fn format_result(value: f64) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// The catalogue advertises `log` and `log10`; meval's default context
+    /// provides neither, so before `calc_context` these returned "unknown
+    /// function" to a model that had simply believed the tool description.
+    #[test]
+    fn advertised_logarithms_are_available() {
+        let r = dispatch(&json!({"expression": "log10(100)"}));
+        assert!(!r.is_error, "{}", r.content_text);
+        assert_eq!(r.content_text, "2");
+
+        // `log` is documented as base e — same as `ln`.
+        let r = dispatch(&json!({"expression": "log(e)"}));
+        assert!(!r.is_error, "{}", r.content_text);
+        assert_eq!(r.content_text, "1");
+
+        // The builtin the default context DID have still works.
+        let r = dispatch(&json!({"expression": "ln(1)"}));
+        assert!(!r.is_error, "{}", r.content_text);
+        assert_eq!(r.content_text, "0");
+    }
 
     #[test]
     fn evaluates_basic_arithmetic() {

@@ -819,10 +819,23 @@ pub async fn ollama_pull_model(
     let http = state.http.clone();
     let registry = state.streams.clone();
     let sid = stream_id.clone();
+    // Register the cancel Notify SYNCHRONOUSLY, before spawning — same
+    // reasoning as `chat_stream`. Registering inside the worker meant an
+    // `admin_cancel` arriving during task scheduling or the pre-flight DNS
+    // resolution hit an empty registry and was silently discarded, leaving
+    // the pull running with no way to stop it.
+    let cancel = registry.register(sid.clone());
     tauri::async_runtime::spawn(async move {
-        if let Err(e) =
-            providers::ollama::pull_model(app, http, registry, &args.base_url, &args.name, sid)
-                .await
+        if let Err(e) = providers::ollama::pull_model(
+            app,
+            http,
+            registry,
+            &args.base_url,
+            &args.name,
+            sid,
+            cancel,
+        )
+        .await
         {
             tracing::warn!("ollama pull ended with error: {e:?}");
         }
@@ -852,6 +865,8 @@ pub async fn ollama_create_model(
     let http = state.http.clone();
     let registry = state.streams.clone();
     let sid = stream_id.clone();
+    // Registered before the spawn for the same reason as `ollama_pull_model`.
+    let cancel = registry.register(sid.clone());
     tauri::async_runtime::spawn(async move {
         if let Err(e) = providers::ollama::create_model(
             app,
@@ -861,6 +876,7 @@ pub async fn ollama_create_model(
             &args.name,
             &args.modelfile,
             sid,
+            cancel,
         )
         .await
         {
@@ -1433,15 +1449,42 @@ fn is_valid_header_value(value: &str) -> bool {
 /// previous version only checked literal IPs, so `evil.example.com` →
 /// `10.0.0.1` slipped through and the request was sent against the
 /// internal address with whatever auth headers the user configured.
+/// Why a server row failed validation. Everything except an unanswerable
+/// DNS query is a `Rejected`; the split exists so snapshot import can keep a
+/// backup that merely references an unreachable host (see stage 2 of
+/// `import_data_with_dialog`) while still refusing a tampered one.
+/// `Display` — and the `From` below, which keeps `?` working in the
+/// `Result<_, String>` commands — reproduce the original messages verbatim.
+#[derive(Debug)]
+pub(crate) enum McpImportRejection {
+    Rejected(String),
+    Unscreenable(String),
+}
+
+impl std::fmt::Display for McpImportRejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Rejected(m) | Self::Unscreenable(m) => f.write_str(m),
+        }
+    }
+}
+
+impl From<McpImportRejection> for String {
+    fn from(e: McpImportRejection) -> Self {
+        e.to_string()
+    }
+}
+
 async fn validate_mcp_input(
     input: &McpServerInput,
-) -> Result<Vec<std::net::SocketAddr>, String> {
+) -> Result<Vec<std::net::SocketAddr>, McpImportRejection> {
+    use McpImportRejection::{Rejected, Unscreenable};
     if input.name.trim().is_empty() {
-        return Err("server name is required".into());
+        return Err(Rejected("server name is required".into()));
     }
     let raw_url = input.url.trim();
     if raw_url.is_empty() {
-        return Err("server URL is required".into());
+        return Err(Rejected("server URL is required".into()));
     }
 
     // Scheme + host validation. We refuse anything that isn't http/https and
@@ -1452,10 +1495,14 @@ async fn validate_mcp_input(
     // header smuggled in by a compromised renderer still can't be aimed at the
     // cloud-metadata service.
     let parsed = reqwest::Url::parse(raw_url)
-        .map_err(|e| format!("Invalid MCP server URL: {e}"))?;
+        .map_err(|e| Rejected(format!("Invalid MCP server URL: {e}")))?;
     match parsed.scheme() {
         "http" | "https" => {}
-        other => return Err(format!("MCP server URL must be http or https (got `{other}`)")),
+        other => {
+            return Err(Rejected(format!(
+                "MCP server URL must be http or https (got `{other}`)"
+            )))
+        }
     }
 
     // Resolve + screen the host: literal IPs are rejected only if link-local,
@@ -1465,7 +1512,14 @@ async fn validate_mcp_input(
     // from public to link-local between validate and dial.
     let resolved = crate::tools::fetch_url::resolve_lan_addrs(&parsed)
         .await
-        .map_err(|e| format!("MCP server URL rejected: {e}"))?;
+        .map_err(|e| {
+            let msg = format!("MCP server URL rejected: {e}");
+            match e {
+                // DNS didn't answer, so the host was never actually screened.
+                crate::tools::fetch_url::HostScreenError::Unresolvable(_) => Unscreenable(msg),
+                _ => Rejected(msg),
+            }
+        })?;
 
     // Header k/v validation. We do NOT call out to the network here, so the
     // only protection we can offer is structural: reject names / values
@@ -1474,21 +1528,21 @@ async fn validate_mcp_input(
     if let Some(headers) = input.headers.as_ref() {
         const MAX_HEADERS: usize = 16;
         if headers.len() > MAX_HEADERS {
-            return Err(format!(
+            return Err(Rejected(format!(
                 "Too many MCP server headers ({}); max {MAX_HEADERS}.",
                 headers.len()
-            ));
+            )));
         }
         for (k, v) in headers.iter() {
             if !is_valid_header_name(k) {
-                return Err(format!(
+                return Err(Rejected(format!(
                     "Invalid MCP header name `{k}`. Allowed: letters, digits, and `!#$%&'*+-.^_`|~`."
-                ));
+                )));
             }
             if !is_valid_header_value(v) {
-                return Err(format!(
+                return Err(Rejected(format!(
                     "Invalid value for header `{k}`. Header values must be printable ASCII without CR/LF and ≤4096 bytes."
-                ));
+                )));
             }
         }
     }
@@ -1951,7 +2005,8 @@ pub async fn import_data_with_dialog(
     // each here using the same async validator (DNS lookup + headers
     // structural check) so the user can't shoot themselves in the foot by
     // importing a tampered file.
-    for (idx, row) in snap.data.mcp_servers.iter().enumerate() {
+    let mut quarantined: Vec<String> = Vec::new();
+    for (idx, row) in snap.data.mcp_servers.iter_mut().enumerate() {
         let parsed_headers: Option<std::collections::HashMap<String, String>> =
             match row.headers_json.as_deref() {
                 Some(s) if !s.trim().is_empty() => serde_json::from_str(s).map_err(|e| {
@@ -1970,13 +2025,38 @@ pub async fn import_data_with_dialog(
             headers: parsed_headers,
             enabled: Some(row.enabled),
         };
-        validate_mcp_input(&synthetic).await.map_err(|e| {
-            format!(
-                "import rejected: MCP server #{} ({}): {e}",
-                idx + 1,
-                row.name
-            )
-        })?;
+        match validate_mcp_input(&synthetic).await {
+            Ok(_) => {}
+            // The host couldn't be screened because DNS didn't answer — the
+            // machine is offline, off the VPN, or the box has since been
+            // decommissioned. That says nothing about whether the row is
+            // hostile, and refusing the whole snapshot over it meant one
+            // stale integration could cost the user every chat, space and
+            // snippet in their backup. Keep the row but force it disabled:
+            // nothing connects to it until the user re-saves it, which runs
+            // the full validator on the normal path.
+            Err(McpImportRejection::Unscreenable(msg)) => {
+                row.enabled = false;
+                quarantined.push(format!("{} ({msg})", row.name));
+            }
+            // Positively identified as link-local, or structurally bad.
+            // Still a hard reject: this is the tampered-export case the
+            // re-validation exists to catch.
+            Err(McpImportRejection::Rejected(msg)) => {
+                return Err(format!(
+                    "import rejected: MCP server #{} ({}): {msg}",
+                    idx + 1,
+                    row.name
+                ));
+            }
+        }
+    }
+    if !quarantined.is_empty() {
+        tracing::warn!(
+            "import: {} MCP server(s) could not be screened and were imported disabled: {}",
+            quarantined.len(),
+            quarantined.join(", ")
+        );
     }
 
     // Stage 2.5 — filter imported settings through the SAME allowlist

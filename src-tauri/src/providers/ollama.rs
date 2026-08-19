@@ -189,11 +189,28 @@ async fn drive_progress_stream(
     url: String,
     body: serde_json::Value,
     http: Client,
+    cancel: Arc<tokio::sync::Notify>,
 ) -> Result<()> {
-    let cancel = registry.register(stream_id.clone());
+    // `cancel` is registered by the command BEFORE it spawns us — see
+    // `ollama_pull_model`. Registering here (as this function used to) left
+    // a window covering task scheduling plus `refuse_link_local_host`'s DNS
+    // resolution during which `admin_cancel` found an empty registry and was
+    // silently dropped, so the download ran on regardless.
     let channel = admin_channel(&stream_id);
 
-    let resp = match http.post(&url).json(&body).send().await {
+    // Race the request against a cancel the same way the byte pump below
+    // does. Without this, a Stop pressed while Ollama is still deciding to
+    // answer does nothing until headers arrive.
+    let resp = tokio::select! {
+        biased;
+        _ = cancel.notified() => {
+            let _ = app.emit(&channel, AdminEvent::Cancelled);
+            registry.finish(&stream_id);
+            return Ok(());
+        }
+        r = http.post(&url).json(&body).send() => r,
+    };
+    let resp = match resp {
         Ok(r) => r,
         Err(e) => {
             let _ = app.emit(
@@ -326,6 +343,7 @@ pub async fn pull_model(
     base_url: &str,
     name: &str,
     stream_id: String,
+    cancel: Arc<tokio::sync::Notify>,
 ) -> Result<()> {
     if let Err(e) = super::refuse_link_local_host(base_url).await {
         // Mirror the shape of an in-flight admin failure: emit an Error
@@ -340,7 +358,7 @@ pub async fn pull_model(
     }
     let url = format!("{}/api/pull", base_url.trim_end_matches('/'));
     let body = serde_json::json!({ "name": name, "stream": true });
-    drive_progress_stream(app, registry, stream_id, url, body, http).await
+    drive_progress_stream(app, registry, stream_id, url, body, http, cancel).await
 }
 
 pub async fn create_model(
@@ -351,6 +369,7 @@ pub async fn create_model(
     name: &str,
     modelfile: &str,
     stream_id: String,
+    cancel: Arc<tokio::sync::Notify>,
 ) -> Result<()> {
     if let Err(e) = super::refuse_link_local_host(base_url).await {
         let _ = app.emit(
@@ -369,7 +388,7 @@ pub async fn create_model(
         "modelfile": modelfile,
         "stream": true,
     });
-    drive_progress_stream(app, registry, stream_id, url, body, http).await
+    drive_progress_stream(app, registry, stream_id, url, body, http, cancel).await
 }
 
 #[derive(Debug, Deserialize)]
@@ -833,7 +852,23 @@ async fn run_one_turn(
     registry: &StreamRegistry,
 ) -> Result<Option<TurnOutcome>> {
     let url = format!("{}/api/chat", base_url.trim_end_matches('/'));
-    let mut resp = match http.post(&url).json(body).send().await {
+    // Race the request against a cancel. Ollama withholds response headers
+    // until the model is loaded — routinely 30–120 s for a large cold model —
+    // and the chat client deliberately carries no request timeout, so
+    // awaiting `send()` bare made Stop a no-op for that entire window: the
+    // permit sat in the registry, the UI kept spinning, and the server
+    // carried on loading and generating. Dropping the in-flight future
+    // closes the connection immediately.
+    let sent = select! {
+        biased;
+        _ = cancel.notified() => {
+            let _ = app.emit(channel, StreamEvent::Cancelled);
+            registry.finish(stream_id);
+            return Ok(None);
+        }
+        r = http.post(&url).json(body).send() => r,
+    };
+    let mut resp = match sent {
         Ok(r) => r,
         Err(e) => {
             let _ = app.emit(

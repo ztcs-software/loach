@@ -440,24 +440,126 @@ async fn post_rpc_raw(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string();
-    let text = read_capped_text(resp)
-        .await
-        .context("read MCP server response")?;
-
     if !status.is_success() {
+        let text = read_capped_text(resp)
+            .await
+            .context("read MCP server response")?;
         bail!("server responded with HTTP {}: {}", status, truncate(&text));
     }
 
-    // Streamable HTTP may push its JSON inside the first `data:` frame of an
-    // SSE stream. Pull it out if we spot the event-stream MIME.
+    // Streamable HTTP may push its JSON inside a `data:` frame of an SSE
+    // stream. Read those incrementally rather than to EOF — see
+    // `read_sse_rpc_response`.
     let payload = if content_type.contains("text/event-stream") {
-        extract_first_sse_data(&text)
-            .ok_or_else(|| anyhow!("event-stream response contained no data frame"))?
+        read_sse_rpc_response(resp).await?
     } else {
-        text
+        read_capped_text(resp)
+            .await
+            .context("read MCP server response")?
     };
 
     Ok((payload, sid))
+}
+
+/// Pull the JSON-RPC *response* out of an SSE body, returning as soon as it
+/// arrives instead of draining the stream first.
+///
+/// Two things went wrong with read-to-EOF-then-parse. The spec only *SHOULD*
+/// close the stream after the response, so a server that legitimately holds
+/// it open stalled every call until the 30 s request timeout — the reply had
+/// been sitting in our buffer the whole time. And a server may send
+/// notifications (progress updates, logging) on the same stream *before* the
+/// response, which `extract_first_sse_data` would hand back as if it were
+/// the answer, failing with "response missing both result and error".
+///
+/// So: parse frames as they complete, skip anything that is a notification
+/// (a JSON-RPC message with `method` and no `id`), and return the first
+/// frame carrying `result` or `error`. Dropping the response afterwards
+/// closes the connection.
+async fn read_sse_rpc_response(resp: reqwest::Response) -> Result<String> {
+    let mut buf: Vec<u8> = Vec::new();
+    let mut scanned = 0usize;
+    let mut stream = resp.bytes_stream();
+
+    loop {
+        // Frames are separated by a blank line. Parse every complete one we
+        // have before asking for more bytes.
+        while let Some((end, delim_len)) = find_frame_end(&buf[scanned..]) {
+            let frame_end = scanned + end;
+            let frame = String::from_utf8_lossy(&buf[..frame_end]).into_owned();
+            // Drop the frame AND its full delimiter, then rescan from the
+            // start of what's left.
+            let consumed = (frame_end + delim_len).min(buf.len());
+            buf.drain(..consumed);
+            scanned = 0;
+
+            if let Some(data) = extract_first_sse_data(&frame) {
+                if !is_jsonrpc_notification(&data) {
+                    return Ok(data);
+                }
+                // A notification — legal to receive here. Keep reading for
+                // the response the caller is actually waiting on.
+            }
+        }
+        // No complete frame yet. Resume the next scan a few bytes back from
+        // the end rather than at it: the longest delimiter is 4 bytes, so a
+        // `\r\n\r\n` split across two chunks would be missed entirely if we
+        // restarted past its first byte.
+        scanned = buf.len().saturating_sub(3);
+
+        match stream.next().await {
+            Some(chunk) => {
+                let chunk = chunk.context("reading MCP server response body")?;
+                if buf.len() + chunk.len() > MAX_RESPONSE_BYTES {
+                    bail!(
+                        "MCP server response exceeded {MAX_RESPONSE_BYTES} bytes — refusing to buffer further"
+                    );
+                }
+                buf.extend_from_slice(&chunk);
+            }
+            // Stream ended. Anything left is a final frame without its
+            // terminating blank line — accept it if it parses.
+            None => {
+                let tail = String::from_utf8_lossy(&buf).into_owned();
+                return extract_first_sse_data(&tail)
+                    .filter(|d| !is_jsonrpc_notification(d))
+                    .ok_or_else(|| anyhow!("event-stream response contained no data frame"));
+            }
+        }
+    }
+}
+
+/// Position and length of the blank line ending the first frame in `buf`.
+/// Returns the delimiter length too so the caller consumes all of it —
+/// dropping only 2 bytes of a `\r\n\r\n` would leave a stray `\r\n` glued to
+/// the front of the next frame. When both forms match at overlapping
+/// offsets the earlier one wins, and a CRLF pair is reported at its `\r` so
+/// the frame text excludes it.
+fn find_frame_end(buf: &[u8]) -> Option<(usize, usize)> {
+    let lf = buf.windows(2).position(|w| w == b"\n\n");
+    let crlf = buf.windows(4).position(|w| w == b"\r\n\r\n");
+    match (lf, crlf) {
+        (Some(a), Some(b)) => {
+            if a <= b {
+                Some((a, 2))
+            } else {
+                Some((b, 4))
+            }
+        }
+        (Some(a), None) => Some((a, 2)),
+        (None, Some(b)) => Some((b, 4)),
+        (None, None) => None,
+    }
+}
+
+/// Whether `data` is a JSON-RPC notification rather than the response we're
+/// waiting for. Notifications carry `method` and no `id`; responses carry an
+/// `id` plus `result` or `error`. Unparseable payloads are treated as
+/// non-notifications so the existing error path reports them.
+fn is_jsonrpc_notification(data: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(data)
+        .ok()
+        .is_some_and(|v| v.get("method").is_some() && v.get("id").is_none())
 }
 
 /// Read a reqwest response body as text with a hard `MAX_RESPONSE_BYTES`

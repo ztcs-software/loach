@@ -511,7 +511,21 @@ async fn run_one_turn(
         }
     }
 
-    let resp = match http_req.send().await {
+    // Race the request against a cancel, exactly as the byte pump below
+    // does. Awaiting `send()` bare left Stop inert for the whole connect +
+    // header window — which on a queued or cold-starting endpoint can run to
+    // tens of seconds — so the UI showed a stopped stream while the server
+    // kept generating. Dropping the future closes the connection.
+    let sent = select! {
+        biased;
+        _ = cancel.notified() => {
+            let _ = app.emit(channel, StreamEvent::Cancelled);
+            registry.finish(stream_id);
+            return Ok(None);
+        }
+        r = http_req.send() => r,
+    };
+    let resp = match sent {
         Ok(r) => r,
         Err(e) => {
             let _ = app.emit(
@@ -903,13 +917,24 @@ fn sniff_image_mime(b64: &str) -> &'static str {
         "image/jpeg"
     } else if trimmed.starts_with("R0lGOD") {
         "image/gif"
-    } else if trimmed.starts_with("UklGR") && trimmed.len() >= 24 {
-        // `b64` is untrusted (frontend-supplied, not guaranteed valid base64),
-        // so use `get(12..24)` rather than `[12..24]` — a multi-byte UTF-8
-        // sequence straddling either index would otherwise panic. A genuine
-        // WebP base64 header is pure ASCII; a non-boundary slice means it
-        // isn't one, so `None` correctly falls through to the default.
-        if trimmed.get(12..24).is_some_and(|w| w.contains("V0VC")) {
+    } else if trimmed.starts_with("UklGR") && trimmed.len() >= 16 {
+        // RIFF layout: "RIFF" at bytes 0..4, the little-endian size at 4..8,
+        // "WEBP" at 8..12. Base64 packs 3 bytes into 4 chars, so chars 12..16
+        // always encode bytes 9..12 — "EBP" — which is invariant across file
+        // sizes and encodes to exactly "RUJQ".
+        //
+        // The previous check looked for "V0VC" (base64 of "WEB") anywhere in
+        // chars 12..24, which no real WebP can contain: "WEB" starts at byte
+        // 8, and 8 % 3 == 2, so it never lands on a base64 group boundary.
+        // Every genuine WebP therefore fell through and was announced to the
+        // provider as `image/png`.
+        //
+        // `b64` is untrusted (frontend-supplied, not guaranteed valid
+        // base64), so `get(..)` rather than `[..]` — a multi-byte UTF-8
+        // sequence straddling an index would otherwise panic. A real WebP
+        // header is pure ASCII, so a non-boundary slice means it isn't one
+        // and `None` correctly falls through.
+        if trimmed.get(12..16) == Some("RUJQ") {
             "image/webp"
         } else {
             "image/png"
@@ -992,21 +1017,59 @@ mod tests {
         assert_eq!(sniff_image_mime("QUJDREVG"), "image/png");
     }
 
+    /// Built from real RIFF/WebP bytes rather than a hand-written base64
+    /// string. The previous version of this test asserted against
+    /// "UklGRAAAAAAAV0VCAAAAAAAA" — a string no encoder can produce — which
+    /// is why it kept passing while every actual WebP was announced as PNG.
     #[test]
-    fn sniff_detects_webp_via_inner_window() {
-        // "UklGR" (RIFF) + filler to index 12 + "V0VC" (WEBP) inside 12..24.
-        assert_eq!(sniff_image_mime("UklGRAAAAAAAV0VCAAAAAAAA"), "image/webp");
-        // RIFF prefix without the WEBP marker is not WebP.
+    fn sniff_detects_real_webp_headers() {
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+
+        let webp_header = |size: u32, fourcc: &[u8; 4]| {
+            let mut bytes = Vec::new();
+            bytes.extend_from_slice(b"RIFF");
+            bytes.extend_from_slice(&size.to_le_bytes());
+            bytes.extend_from_slice(b"WEBP");
+            bytes.extend_from_slice(fourcc);
+            bytes.extend_from_slice(&[0u8; 8]);
+            STANDARD.encode(bytes)
+        };
+
+        // The declared size occupies bytes 4..8 and so varies per file; the
+        // detector must not depend on it. Same for the codec fourcc.
+        for size in [0u32, 26, 1024, 4_000_000, u32::MAX] {
+            for fourcc in [b"VP8 ", b"VP8L", b"VP8X"] {
+                let b64 = webp_header(size, fourcc);
+                assert_eq!(
+                    sniff_image_mime(&b64),
+                    "image/webp",
+                    "size={size} fourcc={} b64={b64}",
+                    String::from_utf8_lossy(fourcc),
+                );
+            }
+        }
+
+        // A RIFF container that is NOT WebP (e.g. a WAV) must not claim to be.
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&36u32.to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&[0u8; 8]);
+        assert_eq!(sniff_image_mime(&STANDARD.encode(wav)), "image/png");
+
+        // RIFF prefix with no usable header at all.
         assert_eq!(sniff_image_mime(&format!("UklGR{}", "A".repeat(19))), "image/png");
+        // Too short to carry a fourcc.
+        assert_eq!(sniff_image_mime("UklGRAAA"), "image/png");
     }
 
     #[test]
     fn sniff_survives_non_boundary_utf8() {
-        // Regression for the `[12..24]` byte-slice panic: `b64` is
-        // frontend-supplied and not guaranteed valid base64, so a multi-byte
-        // char straddling index 12 or 24 must fall through, not panic.
-        // "UklGR" is 5 bytes; each "é" is 2, so chars start at 5,7,9,11,13…
-        // and byte 12 lands mid-char.
+        // Regression for the byte-slice panic: `b64` is frontend-supplied
+        // and not guaranteed valid base64, so a multi-byte char straddling
+        // index 12 or 16 must fall through, not panic. "UklGR" is 5 bytes;
+        // each "é" is 2, so chars start at 5,7,9,11,13… and byte 12 lands
+        // mid-char.
         let evil = format!("UklGR{}", "é".repeat(12));
         assert_eq!(sniff_image_mime(&evil), "image/png");
     }
