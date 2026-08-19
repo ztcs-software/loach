@@ -1004,6 +1004,11 @@ function PrivateChatComposer() {
     const trimmed = text.trim();
     if (!trimmed && attachments.length === 0) return;
     if (isStreaming) return;
+    // The Send button is disabled without a model, but Enter reaches here
+    // too — and `send` throws before appending anything, so without this
+    // guard the clear below would destroy the user's text and attachments
+    // to show an error. The placeholder already explains the state.
+    if (!model) return;
     setError(null);
     setText("");
     const toSend = attachments;

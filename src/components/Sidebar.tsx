@@ -313,8 +313,17 @@ function useChatDrop(
 ) {
   const [over, setOver] = useState(false);
 
-  const resolve = (): Session | null => {
-    if (!draggedChatId) return null;
+  const resolve = (e: React.DragEvent): Session | null => {
+    // The MIME type is the authority on "is this our drag?", not
+    // `draggedChatId` alone. If the source row unmounts mid-drag (it
+    // regroups the moment its store write lands), the native `dragend`
+    // fires on a detached node and never reaches React's delegated
+    // listener, so the module flag can outlive its drag — and a later
+    // FILE drop onto a chat row would otherwise resolve that stale
+    // session and silently file it into a folder.
+    if (!draggedChatId || !e.dataTransfer.types.includes(CHAT_DRAG_MIME)) {
+      return null;
+    }
     const dragged = useChatStore
       .getState()
       .sessions.find((s) => s.id === draggedChatId);
@@ -325,7 +334,7 @@ function useChatDrop(
     over,
     dropProps: {
       onDragOver: (e: React.DragEvent) => {
-        if (!resolve()) return;
+        if (!resolve(e)) return;
         // preventDefault is what makes this a valid drop target at all;
         // stopPropagation keeps an enclosing target (the folder block, a
         // date group) from claiming the same drop underneath us.
@@ -343,7 +352,7 @@ function useChatDrop(
       },
       onDrop: (e: React.DragEvent) => {
         setOver(false);
-        const dragged = resolve();
+        const dragged = resolve(e);
         if (!dragged) return;
         e.preventDefault();
         e.stopPropagation();
@@ -921,6 +930,18 @@ const SessionRow = memo(function SessionRowImpl({
         onDragStart={(e) => {
           draggedChatId = session.id;
           setDragging(true);
+          // Backstop for the row's own `onDragEnd`: this row may unmount
+          // mid-drag (it regroups as soon as the move persists), and React's
+          // delegated handler never fires for a detached node. The window
+          // listener outlives the row, so the module flag can't be stranded
+          // into the next drag.
+          window.addEventListener(
+            "dragend",
+            () => {
+              draggedChatId = null;
+            },
+            { once: true, capture: true },
+          );
           // The payload is never read back (see `draggedChatId`), but a
           // drag needs *some* data to start, and this custom type keeps
           // the composer's textarea from accepting the row as text.

@@ -150,8 +150,13 @@ export function ChatCanvas() {
   // Responses the user pinned, in transcript order — the bar under the chat
   // header lists these. Kept in transcript order rather than pin order so
   // the bar reads the same way the conversation does.
+  //
+  // Hidden imported rows are excluded: they live inside a collapsed card and
+  // only register a DOM ref while it's open, so their chip would scroll
+  // nowhere. `Message` also withholds Pin on those rows, so this filter only
+  // catches pins made before that gate existed.
   const pinned = useMemo(
-    () => messages.filter((m) => m.pinned_at != null),
+    () => messages.filter((m) => m.pinned_at != null && !m.import_hidden),
     [messages],
   );
 
@@ -434,10 +439,14 @@ export function ChatCanvas() {
   );
 
   const jumpToMessage = (id: string) => {
-    // `visibleCount` only ever grows, so this is a no-op when the target is
-    // already mounted — and both updates batch into one render, meaning the
-    // effect below runs after the revealed rows have committed their refs.
-    setVisibleCount(Number.MAX_SAFE_INTEGER);
+    // Only reach past the window when the target actually sits above it.
+    // Expanding unconditionally would mount (and markdown-parse) the whole
+    // transcript on every chip click — and because `visibleCount` only ever
+    // grows, a single click on a chip pointing at a *visible* response would
+    // permanently disable windowing for this chat.
+    if (!messageRefs.current.has(id)) setVisibleCount(Number.MAX_SAFE_INTEGER);
+    // Both updates batch into one render, so the effect below runs after any
+    // revealed rows have committed their refs.
     setJumpTarget(id);
   };
 

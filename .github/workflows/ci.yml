@@ -11,9 +11,9 @@ name: CI
 # gate release.yml — both fire on the same push-to-main event and run in
 # parallel, and release.yml drafts its release without waiting for CI (the
 # draft still needs a manual publish, which is the human backstop). The
-# actual merge gate is branch protection: mark this file's two job names
-# ("tsc + vite build + vitest", "cargo test") as required status checks
-# on `main`.
+# actual merge gate is branch protection: mark this file's three job names
+# ("tsc + vite build + vitest", "cargo test", "cargo check (windows)") as
+# required status checks on `main`.
 
 on:
   push:
@@ -75,4 +75,27 @@ jobs:
       # --locked: a Cargo.lock that drifted from Cargo.toml is a release
       # blocker (release.yml builds from the lockfile) — fail here instead.
       - run: cargo test --locked
+        working-directory: src-tauri
+
+  # Windows-only compile check. The `rust` job above runs on Linux, which
+  # never compiles the `#[cfg(windows)]` arms — e.g. the CREATE_NO_WINDOW
+  # flag in src/ollama_launch.rs. A mistake in one of those would pass every
+  # PR check and first fail inside release.yml's build matrix, potentially
+  # after another platform's job has already pushed the tag (which then
+  # forces the delete-tag-and-draft recovery dance). `check` rather than
+  # `test`: the point is that the platform's code compiles, and the tests
+  # themselves are platform-independent.
+  rust-windows:
+    name: cargo check (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.88.0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: cargo check --locked --all-targets
         working-directory: src-tauri

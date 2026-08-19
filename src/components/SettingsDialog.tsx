@@ -2229,12 +2229,8 @@ function DataPanel() {
   };
   useEffect(
     () => () => {
-      // On unmount: cancel everything we armed. We deliberately do NOT
-      // cancel the destructive-action reload during normal close — the
-      // reload is the right behaviour after a wipe — but cancelling it
-      // here means a user who somehow tears down the dialog in the
-      // 900 ms window (e.g. via process signal or hot reload) isn't
-      // hit by a stale page reload.
+      // On unmount: cancel the cosmetic timers we armed (the `flash`
+      // auto-clears) so their closures don't outlive the dialog.
       for (const id of pendingTimers.current) {
         window.clearTimeout(id);
       }
@@ -2242,6 +2238,18 @@ function DataPanel() {
     },
     [],
   );
+
+  /** Post-wipe / post-import reload. Deliberately NOT routed through
+   *  `scheduleTimer`: this panel unmounts on any Settings tab switch and on
+   *  Escape, both of which are reachable inside the 900 ms window — and a
+   *  cancelled reload leaves every store holding pre-wipe data over a DB
+   *  that has been emptied or replaced. The small delay only exists so the
+   *  success message is visible first. */
+  const reloadAfterDestructiveAction = () => {
+    window.setTimeout(() => {
+      window.location.reload();
+    }, 900);
+  };
 
   // A tiny toast-lite: the feedback message auto-clears after 5s so long-
   // running exports don't leave stale success chips behind when the user
@@ -2301,9 +2309,7 @@ function DataPanel() {
         return;
       }
       flash("info", formatImportSummary(stats));
-      scheduleTimer(() => {
-        window.location.reload();
-      }, 900);
+      reloadAfterDestructiveAction();
     } catch (e) {
       flash("error", e instanceof Error ? e.message : String(e));
       setBusy(null);
@@ -2475,12 +2481,8 @@ function DataPanel() {
         onDone={(text) => {
           flash("info", text);
           // Full reload so every zustand store re-hydrates from the now-
-          // empty DB. Small delay so the success state is visible first.
-          // Scheduled via `scheduleTimer` so it's cancellable if the
-          // dialog tears down before the 900 ms window elapses.
-          scheduleTimer(() => {
-            window.location.reload();
-          }, 900);
+          // empty DB.
+          reloadAfterDestructiveAction();
         }}
       />
 

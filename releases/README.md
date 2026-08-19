@@ -26,10 +26,23 @@ The macOS install / Gatekeeper-bypass instructions live in the top-level
 3. The workflow detects the new version + matching notes file and starts the
    build. If either is missing, the workflow silently skips — normal merges
    don't trigger anything.
-4. When the build finishes, inspect the **draft** release on GitHub. Verify
-   `latest.json` references `*.nsis.zip` (Windows), `*.AppImage` (Linux)
-   and `*.app.tar.gz` (macOS) and that each entry has a non-empty
-   signature.
+4. When the build finishes, inspect the **draft** release on GitHub. Open
+   `latest.json` from the assets and check every platform entry points at the
+   right artifact, each with a non-empty base64 `signature`:
+
+   | key | artifact |
+   | --- | --- |
+   | `windows-x86_64`, `windows-x86_64-nsis` | `*-setup.exe` |
+   | `linux-x86_64`, `linux-x86_64-appimage` | `*.AppImage` |
+   | `linux-x86_64-deb` | `*.deb` |
+   | `linux-x86_64-rpm` | `*.rpm` |
+   | `darwin-aarch64`, `darwin-aarch64-app` | `*.app.tar.gz` |
+
+   The plain `linux-x86_64` key **must** be the AppImage, never the `.deb` or
+   `.rpm`: installs running updater plugin < 2.10 only look up that key, and
+   handing them a package file breaks their in-place update. The `.dmg`
+   uploads for manual install only — the updater can't patch it, so it never
+   appears in `latest.json`. (v1.2.3 is the reference shape to diff against.)
 5. Click **Publish release**. The in-app updater picks it up on next check.
 
 ## Style

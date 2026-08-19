@@ -1674,15 +1674,28 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // session that still exists in the DB.
     await get().cancelForSession(id);
     await deleteSession(id);
+    const wasActive = get().activeSessionId === id;
     set((s) => {
       const sessions = s.sessions.filter((x) => x.id !== id);
       const messages = { ...s.messages };
       delete messages[id];
       const queue = s.queue.filter((t) => t.sessionId !== id);
+      // `sessions` is ordered by `updated_at` and includes archived rows —
+      // and `archive` bumps `updated_at` — so plain `sessions[0]` regularly
+      // lands on a chat the sidebar doesn't even show. Fall back to the
+      // first chat the user can actually see.
       const active =
-        s.activeSessionId === id ? sessions[0]?.id ?? null : s.activeSessionId;
+        s.activeSessionId === id
+          ? sessions.find((x) => !x.archived_at)?.id ?? null
+          : s.activeSessionId;
       return { sessions, messages, queue, activeSessionId: active };
     });
+    // Load the replacement's transcript. Under lazy hydration `selectSession`
+    // is the only loader, so patching `activeSessionId` alone would leave the
+    // canvas rendering the "How can I help today?" hero over a chat that has
+    // messages until the user clicked it again in the sidebar.
+    const next = wasActive ? get().activeSessionId : null;
+    if (next) await get().selectSession(next);
   },
 
   fork: async (sourceId, upToMessageId) => {

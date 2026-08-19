@@ -10,6 +10,7 @@ import { Input } from "@/components/ui/input";
 import { useChatStore } from "@/stores/chatStore";
 import { useModelsStore } from "@/stores/modelsStore";
 import { useSettingsStore } from "@/stores/settingsStore";
+import { useSpaceStore } from "@/stores/spaceStore";
 import { useUIStore } from "@/stores/uiStore";
 import {
   DEFAULT_PERSONA_ID,
@@ -92,18 +93,43 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
   );
   const hasOverrides = Object.keys(overrides).length > 0;
 
+  // Space-level defaults, subscribed by value so the panel re-merges when the
+  // Space's pinned params change under it.
+  const spaceParamsJson = useSpaceStore((s) =>
+    session?.space_id
+      ? s.spaces.find((x) => x.id === session.space_id)?.default_params_json ??
+        null
+      : null,
+  );
+  const spaceLayer = useMemo(
+    () => parseOverrides(spaceParamsJson),
+    [spaceParamsJson],
+  );
+
   // The merge order mirrors `chatStore.readSessionParams` exactly so the
   // sliders (and the Thinking toggle) show the same values the request
-  // will actually use.
+  // will actually use. The space layer matters twice over: without it the
+  // panel shows values the request won't use for any chat in a Space with
+  // pinned params, AND `update()` below snapshots what's displayed into the
+  // per-chat override — so one slider touch would quietly overwrite the
+  // Space's settings with the space-less merge.
   const initial = useMemo<GenerationParams>(
     () => ({
       ...DEFAULT_PARAMS,
       ...(session?.provider === "ollama" ? { think: thinkingDefault } : {}),
       ...(modelDefaults ?? {}),
       ...(modelThinkPref === undefined ? {} : { think: modelThinkPref }),
+      ...spaceLayer,
       ...overrides,
     }),
-    [overrides, modelDefaults, modelThinkPref, thinkingDefault, session?.provider],
+    [
+      overrides,
+      spaceLayer,
+      modelDefaults,
+      modelThinkPref,
+      thinkingDefault,
+      session?.provider,
+    ],
   );
 
   const [params, setParams] = useState<GenerationParams>(initial);
@@ -184,12 +210,14 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
     setSessionPersona(session.id, personaId);
   };
 
-  // Reset clears the override entirely so the session falls back to (model
-  // defaults + app defaults). For Ollama models that's the Modelfile values;
-  // for OpenAI it's just app defaults.
+  // Reset clears the override entirely so the session falls back to (space
+  // defaults + model defaults + app defaults). For Ollama models the model
+  // layer is the Modelfile values; for OpenAI it's just app defaults. The
+  // space layer stays because clearing a per-chat override doesn't leave the
+  // Space — displaying it without would restate the same lie `initial` fixes.
   const resetParams = () => {
     if (!session) return;
-    setParams({ ...DEFAULT_PARAMS, ...(modelDefaults ?? {}) });
+    setParams({ ...DEFAULT_PARAMS, ...(modelDefaults ?? {}), ...spaceLayer });
     setSessionParams(session.id, null);
   };
 

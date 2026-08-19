@@ -886,22 +886,27 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
                   <Share2 className="h-4 w-4 text-foreground/60" />
                   Share
                 </DropdownMenuItem>
-                <DropdownMenuItem
-                  onSelect={togglePin}
-                  className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
-                >
-                  {isPinned ? (
-                    <>
-                      <PinOff className="h-4 w-4 text-foreground/60" />
-                      Unpin this response
-                    </>
-                  ) : (
-                    <>
-                      <Pin className="h-4 w-4 text-foreground/60" />
-                      Pin this response
-                    </>
-                  )}
-                </DropdownMenuItem>
+                {/* Not offered for hidden imported rows: they render inside a
+                    collapsed card, so a pin chip for one would scroll nowhere
+                    when the card is shut. */}
+                {!message.import_hidden && (
+                  <DropdownMenuItem
+                    onSelect={togglePin}
+                    className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
+                  >
+                    {isPinned ? (
+                      <>
+                        <PinOff className="h-4 w-4 text-foreground/60" />
+                        Unpin this response
+                      </>
+                    ) : (
+                      <>
+                        <Pin className="h-4 w-4 text-foreground/60" />
+                        Pin this response
+                      </>
+                    )}
+                  </DropdownMenuItem>
+                )}
                 {canRegenerate && (
                   <DropdownMenuItem
                     onSelect={() => void regenerateLast(message.session_id)}

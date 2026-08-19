@@ -20,6 +20,13 @@ permissions:
 
 jobs:
   prepare:
+    # Releases only ever come from main. The push trigger already guarantees
+    # that, but `workflow_dispatch` lets you pick any ref — and the documented
+    # flow stages the version bump + notes file on a dev branch BEFORE merge,
+    # which is exactly the state the gate below says "ship it" to. Without
+    # this guard a stray manual run on that branch would tag and draft-release
+    # unmerged code.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-22.04
     outputs:
       version: ${{ steps.gate.outputs.version }}
