@@ -18,6 +18,20 @@ on:
 permissions:
   contents: write
 
+# One release run at a time. The gate below decides whether to ship by
+# checking that the `v$PKG` tag does NOT exist yet — a read that happens
+# before any run creates it. Two pushes landing on main close together would
+# therefore both read "no tag", both answer `should_release=true`, and race
+# two full build matrices into the same tag and release: duplicate asset
+# uploads fail one of them and leave a half-populated draft behind.
+#
+# `cancel-in-progress: false` on purpose — never kill a release mid-build.
+# The queued run starts only after the first finishes, by which point the tag
+# exists and its own gate soft-skips, which is exactly the desired outcome.
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
 jobs:
   prepare:
     # Releases only ever come from main. The push trigger already guarantees
