@@ -125,6 +125,36 @@ interface ModelsState {
  *  make state non-serialisable for devtools). */
 const activeRuns = new Map<string, AdminRun>();
 
+/** In-flight `loadModelDefaults` calls, keyed by model id. Lets concurrent
+ *  callers share one `/api/show` round-trip instead of each issuing their
+ *  own — the cache below only de-duplicates once a load has *finished*. */
+const pendingDefaults = new Map<string, Promise<Partial<GenerationParams>>>();
+
+/** Drop what we've *derived* from one model's Modelfile.
+ *
+ *  These two caches were filled once and never invalidated, so editing a
+ *  model (the Models editor saves by re-creating the same tag) or deleting
+ *  one left `readSessionParams`, the parameter panel and the context bar
+ *  layering the OLD temperature / num_ctx into every request until the app
+ *  restarted.
+ *
+ *  `modelThinkPrefs` is deliberately NOT cleared: it isn't derived from the
+ *  Modelfile, it's the user's own per-model Thinking choice, and dropping it
+ *  here would silently discard a setting they made. */
+function forgetModel(
+  set: (fn: (s: ModelsState) => Partial<ModelsState>) => void,
+  name: string,
+) {
+  pendingDefaults.delete(name);
+  set((s) => {
+    const modelDefaults = { ...s.modelDefaults };
+    const modelCapabilities = { ...s.modelCapabilities };
+    delete modelDefaults[name];
+    delete modelCapabilities[name];
+    return { modelDefaults, modelCapabilities };
+  });
+}
+
 export const useModelsStore = create<ModelsState>((set, get) => ({
   models: [],
   loading: false,
@@ -211,6 +241,12 @@ export const useModelsStore = create<ModelsState>((set, get) => ({
     if (!modelId) return {};
     const cached = get().modelDefaults[modelId];
     if (cached) return cached;
+    // De-dupe concurrent loads. `newSession`'s warm-up, the parameter panel
+    // and the first send all reach for the same model at once on a cold
+    // open; keyed on the *promise* rather than the result, each extra caller
+    // joins the in-flight `/api/show` instead of firing its own.
+    const inFlight = pendingDefaults.get(modelId);
+    if (inFlight) return inFlight;
 
     // OpenAI catalog: the listing endpoint doesn't return Modelfile-style
     // parameters, so we cache an empty patch and move on. Identifying it
@@ -227,24 +263,32 @@ export const useModelsStore = create<ModelsState>((set, get) => ({
     }
 
     const base = useSettingsStore.getState().ollama_base_url;
-    let patch: Partial<GenerationParams> = {};
-    let caps: string[] = [];
+    const load = (async () => {
+      let patch: Partial<GenerationParams> = {};
+      let caps: string[] = [];
+      try {
+        const resp = await ollamaShowModel(base, modelId);
+        patch = parseModelParameters(resp.parameters);
+        caps = resp.capabilities ?? [];
+      } catch {
+        // Network / 404 — cache empty so we don't retry on every render.
+        // The user will still see app defaults; it's the same behaviour as
+        // before this feature landed.
+        patch = {};
+        caps = [];
+      }
+      set((s) => ({
+        modelDefaults: { ...s.modelDefaults, [modelId]: patch },
+        modelCapabilities: { ...s.modelCapabilities, [modelId]: caps },
+      }));
+      return patch;
+    })();
+    pendingDefaults.set(modelId, load);
     try {
-      const resp = await ollamaShowModel(base, modelId);
-      patch = parseModelParameters(resp.parameters);
-      caps = resp.capabilities ?? [];
-    } catch {
-      // Network / 404 — cache empty so we don't retry on every render.
-      // The user will still see app defaults; it's the same behaviour as
-      // before this feature landed.
-      patch = {};
-      caps = [];
+      return await load;
+    } finally {
+      pendingDefaults.delete(modelId);
     }
-    set((s) => ({
-      modelDefaults: { ...s.modelDefaults, [modelId]: patch },
-      modelCapabilities: { ...s.modelCapabilities, [modelId]: caps },
-    }));
-    return patch;
   },
 
   deleteModel: async (name) => {
@@ -262,6 +306,7 @@ export const useModelsStore = create<ModelsState>((set, get) => ({
     // If the user was viewing the model they just deleted, drop the editor
     // view so we don't leave them staring at a stale form.
     if (get().viewingModel === name) set({ viewingModel: null });
+    forgetModel(set, name);
     await get().refresh();
   },
 
@@ -339,6 +384,11 @@ export const useModelsStore = create<ModelsState>((set, get) => ({
           (ev) => handleAdminEvent(set, streamId, ev),
         ),
       async () => {
+        // The Models editor saves edits by re-creating the SAME tag, so the
+        // cached Modelfile params and capabilities for `name` are now stale.
+        // Without this they kept being layered into every request (and shown
+        // in the parameter panel) until the app restarted.
+        forgetModel(set, name);
         await get().refresh();
       },
     );

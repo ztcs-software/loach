@@ -550,6 +550,18 @@ const COMPACT_MIN_TOTAL = 6;
  * empty summary so each caller can surface its own message. Does not touch
  * store state — callers own any persistence.
  */
+/** Sessions with a `sendUserMessage` in flight but not yet reflected in
+ *  `runningTask` / `queue`. The gap between the busy check and the dispatch
+ *  spans several awaits (history hydration, web fetch, message persist,
+ *  auto-title, request build), and the composer re-enables as soon as it
+ *  optimistically clears — so without this claim a fast second Enter slipped
+ *  through both guards and dispatched a duplicate task. */
+const sendingSessions = new Set<string>();
+
+/** Wall-clock ceiling for one compaction round-trip. See the timer in
+ *  `generateSummary` for why this exists at all. */
+const COMPACT_TIMEOUT_MS = 180_000;
+
 async function generateSummary(
   session: Session,
   toSummarize: Message[],
@@ -585,9 +597,23 @@ ${transcript}
 
   let summary = "";
   let streamErr: string | null = null;
-  const unlistenHolder: { fn: (() => void) | null } = { fn: null };
+  const handleHolder: { stop: (() => Promise<void>) | null; unlisten: (() => void) | null } = {
+    stop: null,
+    unlisten: null,
+  };
+  let timeoutId: number | null = null;
   try {
     await new Promise<void>((resolve, reject) => {
+      // Hard ceiling on wall-clock, mirroring the memory extractor. Without
+      // it a provider that never emits a terminal frame left this promise
+      // pending forever — and with it `compactingSessionId`, which gates
+      // EVERY future compaction. The user's only recovery was restarting the
+      // app. Generous next to the extractor's 60 s because this summarises a
+      // whole transcript rather than a single turn.
+      timeoutId = window.setTimeout(() => {
+        reject(new Error("Compaction timed out — the model never finished the summary."));
+      }, COMPACT_TIMEOUT_MS);
+
       startChatStream(
         {
           stream_id: makeRequestId(),
@@ -610,21 +636,27 @@ ${transcript}
         },
       )
         .then((handle) => {
-          unlistenHolder.fn = handle.unlisten;
+          handleHolder.stop = handle.stop;
+          handleHolder.unlisten = handle.unlisten;
         })
         .catch(reject);
     });
   } catch (e) {
     streamErr = e instanceof Error ? e.message : String(e);
   } finally {
-    const fn = unlistenHolder.fn;
-    if (fn) {
+    if (timeoutId !== null) window.clearTimeout(timeoutId);
+    const { stop, unlisten } = handleHolder;
+    if (unlisten) {
       try {
-        fn();
+        unlisten();
       } catch {
         /* ignore */
       }
     }
+    // Tell the backend to stop generating too. On the timeout path the
+    // stream is still live, so dropping only the listener would leave the
+    // model burning a generation slot with nobody reading it.
+    if (stop) void stop().catch(() => undefined);
   }
 
   const cleanSummary = summary.trim();
@@ -1287,6 +1319,7 @@ async function startTask(task: QueueTask, get: Getter, set: Setter) {
  */
 function resetForTests() {
   dispatching = false;
+  sendingSessions.clear();
   runningBuffers = null;
   if (pendingFrame !== null) {
     cancelAnimationFrame(pendingFrame);
@@ -1923,101 +1956,119 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // Hard cap: at most one in-flight task per chat. If this session is
     // already the runner or already has a waiter, drop this submit. The UI
     // disables the send button in this state too — belt-and-suspenders.
+    //
+    // `runningTask` / `queue` only start reflecting this send at step 3,
+    // several awaits away (web-fetch alone allows 15 s per URL), and the
+    // composer re-enables the moment it optimistically clears. So a second
+    // Enter inside that window passed BOTH this check and the composer's,
+    // and dispatched a duplicate task whose history snapshot was missing the
+    // first one's reply. `sendingSessions` closes the window by claiming the
+    // session synchronously, right here, and releasing it in the `finally`
+    // once the task is queued (or the send has failed).
     const snap = get();
     const alreadyBusy =
       snap.runningTask?.sessionId === sessionId ||
-      snap.queue.some((t) => t.sessionId === sessionId);
+      snap.queue.some((t) => t.sessionId === sessionId) ||
+      sendingSessions.has(sessionId);
     if (alreadyBusy) return;
+    sendingSessions.add(sessionId);
+    try {
 
-    let inlinedContent = inlineTextAttachments(rawContent, attachments);
-    const images = imagesFromAttachments(attachments);
-    const attachmentsJson = JSON.stringify(
-      attachments.map((a) => ({
-        kind: a.kind,
-        name: a.name,
-        mime: a.mime,
-        data: a.data,
-      })),
-    );
+      let inlinedContent = inlineTextAttachments(rawContent, attachments);
+      const images = imagesFromAttachments(attachments);
+      const attachmentsJson = JSON.stringify(
+        attachments.map((a) => ({
+          kind: a.kind,
+          name: a.name,
+          mime: a.mime,
+          data: a.data,
+        })),
+      );
 
-    // Optional web-fetch step: pull plain-text bodies for any http(s) URLs in
-    // the user's raw prompt and append them as fenced blocks so the model has
-    // the page content as prompt context. Silent on failure — a dead link
-    // should never block the send. Off by default; opt-in in Settings.
-    //
-    // `fetchOutcomes` survives the block so the chip persistence below can
-    // build a `ToolCallRecord[]` from it and attach the same call/result
-    // chip UX the calculator and MCP tools get. Without that, web fetch
-    // was the only "tool" that ran silently — no indication in the UI
-    // that the user's prompt had been augmented with page content.
-    let fetchOutcomes: FetchOutcome[] = [];
-    {
-      const s = useSettingsStore.getState();
-      if (s.web_fetch_enabled) {
-        const urls = extractUrls(rawContent);
-        if (urls.length > 0) {
-          try {
-            fetchOutcomes = await fetchAll(urls);
-            inlinedContent = inlineFetchedPages(inlinedContent, fetchOutcomes);
-          } catch (e) {
-            // fetchAll itself never throws, but be defensive — a thrown
-            // exception here would eat the whole submit, and we'd rather
-            // send the prompt without the fetched context than not at all.
-            logger.warn("web fetch step failed", e);
+      // Optional web-fetch step: pull plain-text bodies for any http(s) URLs in
+      // the user's raw prompt and append them as fenced blocks so the model has
+      // the page content as prompt context. Silent on failure — a dead link
+      // should never block the send. Off by default; opt-in in Settings.
+      //
+      // `fetchOutcomes` survives the block so the chip persistence below can
+      // build a `ToolCallRecord[]` from it and attach the same call/result
+      // chip UX the calculator and MCP tools get. Without that, web fetch
+      // was the only "tool" that ran silently — no indication in the UI
+      // that the user's prompt had been augmented with page content.
+      let fetchOutcomes: FetchOutcome[] = [];
+      {
+        const s = useSettingsStore.getState();
+        if (s.web_fetch_enabled) {
+          const urls = extractUrls(rawContent);
+          if (urls.length > 0) {
+            try {
+              fetchOutcomes = await fetchAll(urls);
+              inlinedContent = inlineFetchedPages(inlinedContent, fetchOutcomes);
+            } catch (e) {
+              // fetchAll itself never throws, but be defensive — a thrown
+              // exception here would eat the whole submit, and we'd rather
+              // send the prompt without the fetched context than not at all.
+              logger.warn("web fetch step failed", e);
+            }
           }
         }
       }
-    }
-    const fetchToolRecords =
-      fetchOutcomes.length > 0 ? buildFetchToolRecords(fetchOutcomes) : [];
+      const fetchToolRecords =
+        fetchOutcomes.length > 0 ? buildFetchToolRecords(fetchOutcomes) : [];
 
-    // 1. Persist user message.
-    const userMsg = await appendMessage({
-      session_id: sessionId,
-      role: "user",
-      content: inlinedContent,
-      attachments_json: attachmentsJson,
-    });
-    set((s) => ({
-      messages: {
-        ...s.messages,
-        [sessionId!]: [...(s.messages[sessionId!] ?? []), userMsg],
-      },
-    }));
+      // 1. Persist user message.
+      const userMsg = await appendMessage({
+        session_id: sessionId,
+        role: "user",
+        content: inlinedContent,
+        attachments_json: attachmentsJson,
+      });
+      set((s) => ({
+        messages: {
+          ...s.messages,
+          [sessionId!]: [...(s.messages[sessionId!] ?? []), userMsg],
+        },
+      }));
 
-    // Auto-title from first user message.
-    await maybeAutoTitle(get, (p) => set(p), sessionId, rawContent);
+      // Auto-title from first user message.
+      await maybeAutoTitle(get, (p) => set(p), sessionId, rawContent);
 
-    // 2. Build the ChatRequest snapshot NOW, even if this task is going to
-    //    wait. Snapshotting at submit time freezes the prompt/history the
-    //    model will see — later edits to other messages in the session
-    //    can't retroactively change a queued request.
-    const history = get().messages[sessionId] ?? [];
-    // Drop the just-inserted user message from the ambient history; we'll
-    // re-add it as the trailing chat message so `images` is attached.
-    const trimmed = history.filter((m) => m.id !== userMsg.id);
-    const request = await buildTaskRequest(
-      session,
-      sessionId,
-      trimmed,
-      inlinedContent,
-      images,
-    );
+      // 2. Build the ChatRequest snapshot NOW, even if this task is going to
+      //    wait. Snapshotting at submit time freezes the prompt/history the
+      //    model will see — later edits to other messages in the session
+      //    can't retroactively change a queued request.
+      const history = get().messages[sessionId] ?? [];
+      // Drop the just-inserted user message from the ambient history; we'll
+      // re-add it as the trailing chat message so `images` is attached.
+      const trimmed = history.filter((m) => m.id !== userMsg.id);
+      const request = await buildTaskRequest(
+        session,
+        sessionId,
+        trimmed,
+        inlinedContent,
+        images,
+      );
 
-    const task: QueueTask = {
-      id: `t_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-      sessionId,
-      userMsgId: userMsg.id,
-      request,
-      preToolCalls: fetchToolRecords.length > 0 ? fetchToolRecords : undefined,
-    };
+      const task: QueueTask = {
+        id: `t_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        sessionId,
+        userMsgId: userMsg.id,
+        request,
+        preToolCalls: fetchToolRecords.length > 0 ? fetchToolRecords : undefined,
+      };
 
-    // 3. Dispatch. If nothing is running (or mid-start) globally, start
-    //    immediately. Otherwise park in the waiting queue and let the
-    //    runner pick us up when the current task ends — `tryDirectStart`
-    //    owns the dispatch-lock claim and the trailing re-promote nudge.
-    if (!(await tryDirectStart(task, get, set))) {
-      set((s) => ({ queue: [...s.queue, task] }));
+      // 3. Dispatch. If nothing is running (or mid-start) globally, start
+      //    immediately. Otherwise park in the waiting queue and let the
+      //    runner pick us up when the current task ends — `tryDirectStart`
+      //    owns the dispatch-lock claim and the trailing re-promote nudge.
+        if (!(await tryDirectStart(task, get, set))) {
+          set((s) => ({ queue: [...s.queue, task] }));
+        }
+    } finally {
+      // Released only once the task is visible in `runningTask`/`queue` (or
+      // the send bailed), so there is never a gap where neither the
+      // reservation nor the queue accounts for this session.
+      sendingSessions.delete(sessionId);
     }
   },
 

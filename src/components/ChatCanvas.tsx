@@ -384,11 +384,30 @@ export function ChatCanvas() {
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages, isStreaming, waitingHere]);
 
-  // Reset the window when switching chats — the new transcript opens at its own
-  // tail, not the depth the previous chat happened to be revealed to.
-  useEffect(() => {
+  // Reset the window when switching chats — the new transcript opens at its
+  // own tail, not the depth the previous chat happened to be revealed to.
+  //
+  // Adjusted during render rather than in an effect. As an effect this ran a
+  // commit LATE: the first render of the new chat still used the outgoing
+  // chat's `visibleCount`, so switching away from a fully-expanded transcript
+  // (search or a pin-jump pushes it to MAX, and it only ever grows) mounted
+  // and markdown-parsed the entire new conversation for one frame before
+  // throwing nearly all of it away — exactly the cost windowing exists to
+  // avoid. React re-runs this render pass immediately with the new state and
+  // discards the abandoned output; nothing below observes the stale value.
+  const [windowedSessionId, setWindowedSessionId] = useState(sessionId);
+  if (windowedSessionId !== sessionId) {
+    setWindowedSessionId(sessionId);
     setVisibleCount(WINDOW_SIZE);
-  }, [sessionId]);
+    // A chat opens at its tail. `stickToBottom` is otherwise only ever
+    // written by the scroll handler, so without this the incoming chat
+    // inherited whatever the outgoing one was left at: scroll up in chat A,
+    // open chat B, and B rendered at A's pixel offset with the auto-stick
+    // effect correctly declining to fix it. Setting the flag here hands the
+    // work to that same effect, which runs on the `messages` change this
+    // switch causes.
+    stickToBottom.current = true;
+  }
 
   // Searching needs every matching row mounted: jump-to-match and the inline
   // highlighter both reach messages through per-message DOM refs, which only

@@ -66,6 +66,11 @@ import {
 
 type TabId = "chats" | "instructions" | "files" | "memory" | "models";
 
+/** Stable empties for the "not loaded yet" case — a fresh `[]` per render
+ *  would churn every memo and effect keyed on these. */
+const EMPTY_FILES: SpaceFile[] = [];
+const EMPTY_MEMORIES: SpaceMemory[] = [];
+
 export function SpaceView() {
   const { confirm } = useConfirm();
   const viewingSpaceId = useSpaceStore((s) => s.viewingSpaceId);
@@ -100,8 +105,14 @@ export function SpaceView() {
 
   const [editDialogOpen, setEditDialogOpen] = useState(false);
   const [tab, setTab] = useState<TabId>("chats");
-  const [files, setFiles] = useState<SpaceFile[]>([]);
-  const [memories, setMemories] = useState<SpaceMemory[]>([]);
+  // Read straight from the store rather than mirroring into local state.
+  // The mirror only ever copied `stored*` forward, and its effect was
+  // guarded on truthiness — so switching to a space whose rows weren't
+  // cached yet (`undefined`) left the PREVIOUS space's files, memories and
+  // Meta-strip counts on screen until the new load resolved, or forever if
+  // it failed.
+  const files = storedFiles ?? EMPTY_FILES;
+  const memories = storedMemories ?? EMPTY_MEMORIES;
 
   useEffect(() => {
     if (space) {
@@ -110,14 +121,6 @@ export function SpaceView() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [space?.id]);
-
-  useEffect(() => {
-    if (storedFiles) setFiles(storedFiles);
-  }, [storedFiles]);
-
-  useEffect(() => {
-    if (storedMemories) setMemories(storedMemories);
-  }, [storedMemories]);
 
   const spaceSessions = useMemo(
     () =>

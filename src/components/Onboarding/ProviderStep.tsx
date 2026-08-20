@@ -459,6 +459,12 @@ function ModelCatalog({ onPulled }: { onPulled: () => void }) {
 
   const startPull = async (tag: string) => {
     if (!tag.trim()) return;
+    // Don't stack a second pull of the same tag on top of a live one — the
+    // Retry button is reachable while the previous attempt is still running.
+    const live = Object.values(useModelsStore.getState().runs).some(
+      (r) => r.kind === "pull" && r.target === tag && r.finished === null,
+    );
+    if (live) return;
     // Pin as default and unblock Continue immediately — the pull
     // streams in the background, and the user can keep onboarding
     // while it finishes. Progress remains visible on the Models tab
@@ -467,13 +473,18 @@ function ModelCatalog({ onPulled }: { onPulled: () => void }) {
     await setProviderDefault("ollama", tag);
     onPulled();
     void pullModel(tag);
-    // The store generates a stream id internally, so we can't pre-bind
-    // it. Instead, after a tick, find the most recent run with this tag
-    // and remember its id for progress display.
+    // The store generates a stream id internally, so we can't pre-bind it.
+    // Instead, after a tick, find this tag's run and remember its id for
+    // progress display.
+    //
+    // Crucially this looks for an UNFINISHED run. Failed runs are never
+    // dismissed during onboarding, so plain `find` returned the first
+    // (already errored) one — Retry re-bound the row to the dead run and
+    // appeared to do nothing while the new pull streamed invisibly.
     window.setTimeout(() => {
       const all = useModelsStore.getState().runs;
       const match = Object.entries(all).find(
-        ([, r]) => r.kind === "pull" && r.target === tag,
+        ([, r]) => r.kind === "pull" && r.target === tag && r.finished === null,
       );
       if (match) setPulledTags((t) => ({ ...t, [tag]: match[0] }));
     }, 50);

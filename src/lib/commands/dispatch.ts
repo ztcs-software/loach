@@ -803,6 +803,16 @@ function formatMs(ms: number): string {
 }
 
 async function runPrivate(): Promise<CommandResult> {
+  // Same orchestration the TitleBar trigger performs: per the "pause regular
+  // while private" decision, stop whichever regular chat is streaming before
+  // handing the screen over. `privateChatStore` is deliberately agnostic of
+  // `chatStore`, so every entry point owns this — and this one used to skip
+  // it, leaving the regular stream writing into the SQLite transcript behind
+  // the overlay while both generations competed for the same model slot.
+  const chat = useChatStore.getState();
+  if (chat.streamingSessionId) {
+    void chat.cancelForSession(chat.streamingSessionId);
+  }
   usePrivateChatStore.getState().setOpen(true);
   return { kind: "noop" };
 }

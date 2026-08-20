@@ -52,6 +52,20 @@ export async function checkForUpdate(): Promise<UpdateInfo | null> {
   };
 }
 
+/** True while `installPendingUpdate` is downloading/installing.
+ *
+ *  A plain module flag rather than store state because the only consumers
+ *  are event callbacks (`onOpenChange`, `onValueChange`), which read it at
+ *  call time and don't need to re-render on it. Once a download is under way
+ *  it cannot be stopped, and the app restarts itself when it finishes — so
+ *  any surface that could otherwise be dismissed mid-install has to refuse,
+ *  or the restart lands on a user who believes they cancelled. */
+let installing = false;
+
+export function isUpdateInstalling(): boolean {
+  return installing;
+}
+
 export async function installPendingUpdate(
   onProgress?: (p: DownloadProgress) => void,
 ): Promise<void> {
@@ -60,18 +74,27 @@ export async function installPendingUpdate(
   }
   let downloaded = 0;
   let total: number | undefined;
-  await pendingUpdate.downloadAndInstall((event: unknown) => {
-    const e = event as { event: string; data?: { contentLength?: number; chunkLength?: number } };
-    if (e.event === "Started") {
-      total = e.data?.contentLength;
-      onProgress?.({ downloaded: 0, total });
-    } else if (e.event === "Progress") {
-      downloaded += e.data?.chunkLength ?? 0;
-      onProgress?.({ downloaded, total });
-    } else if (e.event === "Finished") {
-      onProgress?.({ downloaded: total ?? downloaded, total });
-    }
-  });
+  installing = true;
+  try {
+    await pendingUpdate.downloadAndInstall((event: unknown) => {
+      const e = event as { event: string; data?: { contentLength?: number; chunkLength?: number } };
+      if (e.event === "Started") {
+        total = e.data?.contentLength;
+        onProgress?.({ downloaded: 0, total });
+      } else if (e.event === "Progress") {
+        downloaded += e.data?.chunkLength ?? 0;
+        onProgress?.({ downloaded, total });
+      } else if (e.event === "Finished") {
+        onProgress?.({ downloaded: total ?? downloaded, total });
+      }
+    });
+  } catch (e) {
+    // Only clear on failure: on success the relaunch below tears the process
+    // down, and leaving the flag set keeps every dismissal guard closed for
+    // the moments between "download finished" and the window disappearing.
+    installing = false;
+    throw e;
+  }
   const { relaunch } = await import("@tauri-apps/plugin-process");
   await relaunch();
 }
