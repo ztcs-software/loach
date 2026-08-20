@@ -408,11 +408,12 @@ function ChatList() {
 
   const [openFolders, setOpenFolders] = useState<Set<string>>(readOpenFolders);
   useEffect(() => {
-    window.localStorage.setItem(
-      OPEN_FOLDERS_KEY,
-      JSON.stringify([...openFolders]),
-    );
-  }, [openFolders]);
+    // Persist only ids that still name a folder. `removeFolder` never took
+    // its id out of this set, so deleted folders accumulated in localStorage
+    // for the lifetime of the install.
+    const live = [...openFolders].filter((id) => folders.some((f) => f.id === id));
+    window.localStorage.setItem(OPEN_FOLDERS_KEY, JSON.stringify(live));
+  }, [openFolders, folders]);
 
   const visible = useMemo(
     () => sessions.filter((s) => !s.archived_at),
@@ -799,7 +800,7 @@ function FolderRow({
                     title: "Delete this folder?",
                     body:
                       sessions.length > 0
-                        ? `“${folder.name}” will be removed. The ${count} inside are kept — they move back to the main list.`
+                        ? `“${folder.name}” will be removed. The ${count} inside ${sessions.length === 1 ? "is" : "are"} kept — ${sessions.length === 1 ? "it moves" : "they move"} back to the main list.`
                         : `“${folder.name}” is empty and will be removed.`,
                     confirmLabel: "Delete folder",
                     destructive: true,
@@ -957,7 +958,7 @@ const SessionRow = memo(function SessionRowImpl({
         // contents — so the colour has to be spelled out in this string.
         aria-label={`Open chat: ${session.title || "Untitled"}${
           labelDef ? ` (${labelDef.name} label)` : ""
-        }`}
+        }${generating ? " — generating reply" : unread ? " — unread reply" : ""}`}
         className={cn(
           "group/row relative flex items-center rounded-lg px-3 py-2 text-[13px] text-foreground/75 cursor-pointer transition-colors hover:bg-foreground/[0.07] hover:text-foreground overflow-hidden",
           "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
@@ -1006,10 +1007,11 @@ const SessionRow = memo(function SessionRowImpl({
             takes the slot and the indicator fades out. */}
         {(generating || unread) && (
           <span
+            // `aria-hidden` wins over `aria-label`, so the label here was
+            // dead code and the state never reached assistive tech at all.
+            // It's folded into the row's own `aria-label` instead — see
+            // the `role="button"` above.
             aria-hidden
-            aria-label={
-              generating ? "Generating reply" : "Unread assistant reply"
-            }
             className={cn(
               "pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 transition-opacity",
               menuOpen

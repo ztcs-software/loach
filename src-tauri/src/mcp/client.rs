@@ -266,10 +266,27 @@ fn assemble_call_result(content: Vec<CallToolContent>, is_error: bool) -> McpCal
                     truncated |= append_capped(&mut text, "[resource]");
                 }
             }
+            CallToolContent::Audio { mime_type } => {
+                let label = mime_type
+                    .as_deref()
+                    .map(|m| format!("[audio: {m}]"))
+                    .unwrap_or_else(|| "[audio]".to_string());
+                truncated |= append_capped(&mut text, &label);
+            }
+            CallToolContent::ResourceLink { uri, name } => {
+                let label = match (name.as_deref(), uri.as_deref()) {
+                    (Some(n), Some(u)) => format!("[resource: {n} — {u}]"),
+                    (Some(n), None) => format!("[resource: {n}]"),
+                    (None, Some(u)) => format!("[resource: {u}]"),
+                    (None, None) => "[resource]".to_string(),
+                };
+                truncated |= append_capped(&mut text, &label);
+            }
             CallToolContent::Unknown => {
-                // Drop unknown variants rather than fabricate text —
-                // the model can still react to the rest of the
-                // content array.
+                // A breadcrumb, not silence: dropping these made a result
+                // composed entirely of unhandled types look like an empty
+                // (but successful) tool call.
+                truncated |= append_capped(&mut text, "[unsupported content type]");
             }
         }
         if truncated {
@@ -400,8 +417,12 @@ async fn post_rpc(
     session: Option<&str>,
 ) -> Result<(JsonRpcResponse, Option<String>)> {
     let (raw, sid) = post_rpc_raw(http, url, headers, body, session).await?;
+    // `truncate` the body before it lands in the message: `raw` is bounded
+    // only by MAX_RESPONSE_BYTES (4 MiB), and this error string is surfaced
+    // as a ToolResult event that gets persisted into the transcript and
+    // logged in full.
     let parsed: JsonRpcResponse = serde_json::from_str(&raw)
-        .with_context(|| format!("server sent invalid JSON-RPC frame: {raw}"))?;
+        .with_context(|| format!("server sent invalid JSON-RPC frame: {}", truncate(&raw)))?;
     Ok((parsed, sid))
 }
 

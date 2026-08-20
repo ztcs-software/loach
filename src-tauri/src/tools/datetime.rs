@@ -10,6 +10,7 @@
 //! confident-but-wrong answers without the user having to wire up an
 //! MCP server for a single function.
 
+use chrono::format::{Item, StrftimeItems};
 use chrono::{
     DateTime, Datelike, Days, LocalResult, Months, NaiveDate, NaiveDateTime, TimeZone, Utc, Weekday,
 };
@@ -113,6 +114,23 @@ pub fn dispatch(args: &Value) -> McpCallResult {
 
 // ---------- operations ----------
 
+/// Reject a strftime pattern chrono can't render before we hand it over.
+///
+/// chrono turns an unknown specifier into `Item::Error`, and formatting one
+/// makes `Display` fail — which `.to_string()` answers with a panic. The
+/// built-in dispatcher catches that (so it isn't a crash), but the model
+/// just gets "internal error" with no hint that its own format string was at
+/// fault, and every occurrence dumps a panic backtrace to stderr. `%` alone,
+/// `%?` and `%🐟` all take this path.
+fn validate_strftime(pattern: &str) -> Result<(), String> {
+    if StrftimeItems::new(pattern).any(|item| item == Item::Error) {
+        return Err(format!(
+            "invalid strftime pattern `{pattern}` — check the format specifiers (e.g. %Y-%m-%d %H:%M)"
+        ));
+    }
+    Ok(())
+}
+
 fn op_now(args: &Value) -> McpCallResult {
     let tz = match resolve_tz(args.get("timezone").and_then(|v| v.as_str())) {
         Ok(tz) => tz,
@@ -120,6 +138,9 @@ fn op_now(args: &Value) -> McpCallResult {
     };
     let now = Utc::now().with_timezone(&tz);
     if let Some(fmt) = args.get("format").and_then(|v| v.as_str()) {
+        if let Err(e) = validate_strftime(fmt) {
+            return err(e);
+        }
         return ok(now.format(fmt).to_string());
     }
     ok(now.to_rfc3339())
@@ -153,6 +174,9 @@ fn op_format(args: &Value) -> McpCallResult {
         Ok(tz) => tz,
         Err(e) => return err(e),
     };
+    if let Err(e) = validate_strftime(pattern) {
+        return err(e);
+    }
     match parse_input(input, &tz) {
         Ok(dt) => ok(dt.with_timezone(&tz).format(pattern).to_string()),
         Err(e) => err(e),

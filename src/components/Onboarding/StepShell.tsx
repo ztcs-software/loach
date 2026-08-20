@@ -112,10 +112,12 @@ export function StepShell({
         </div>
       </div>
 
-      {/* Bottom action bar — only when the step exposes a primary
-          button. Welcome / Final hide it because their bodies own the
-          single hero CTA. */}
-      {primaryLabel !== null && (
+      {/* Bottom action bar. Rendered when the step has a primary button OR
+          asks for Back — gating the whole bar on `primaryLabel` meant the
+          final step's `canGoBack` was dead code and that screen had no way
+          back at all. Welcome / Final still hide the bar entirely when they
+          want neither, because their bodies own the single hero CTA. */}
+      {(primaryLabel !== null || canGoBack) && (
         <div className="flex items-center justify-between gap-3 border-t border-foreground/[0.06] px-6 py-4">
           <div className="flex items-center gap-1">
             {canGoBack && (

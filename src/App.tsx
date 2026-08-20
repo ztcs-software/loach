@@ -96,6 +96,16 @@ export default function App() {
       ? (s.messages[s.activeSessionId]?.length ?? 0) > 0
       : false,
   );
+  // "Not loaded yet" is NOT the same as "empty". Under lazy hydration a
+  // chat's transcript is `undefined` until `selectSession` fetches it, and
+  // collapsing that into `hasMessages === false` rendered the new-chat hero
+  // over a conversation that has messages — for the whole load on an
+  // attachment-heavy chat, and permanently whenever something activates a
+  // session without loading it. A primitive again, so the selector still
+  // bails on identity.
+  const transcriptLoaded = useChatStore((s) =>
+    s.activeSessionId ? s.messages[s.activeSessionId] !== undefined : true,
+  );
   // True only during the post-unlock hydrate window. Lets us swap the
   // "No chat open" CTA for a loading skeleton so users with chats on disk
   // don't briefly see an empty-state message that tells them to create one.
@@ -320,6 +330,9 @@ export default function App() {
                     // haven't loaded yet. The skeleton avoids telling them
                     // they have no chats when they actually do.
                     chatsHydrated ? <NoChatState /> : <ChatLoadingSkeleton />
+                  ) : !transcriptLoaded ? (
+                    // Session picked, transcript still in flight.
+                    <ChatLoadingSkeleton />
                   ) : hasMessages ? (
                     <>
                       <ChatCanvas />

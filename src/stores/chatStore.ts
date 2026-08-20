@@ -113,6 +113,12 @@ interface QueueTask {
    *  flush / finish paths persist them on the assistant row without
    *  any extra DB write. */
   preToolCalls?: ToolCallRecord[];
+  /** Carry the pin forward. Set by `regenerateLast` when the response it
+   *  replaced was pinned: the user bookmarked "the answer to this question",
+   *  and a regenerate produces a new answer to the same question — dropping
+   *  the pin silently discarded a curated mark they'd have to notice was
+   *  gone before they could restore it. */
+  carryPin?: boolean;
 }
 
 interface ChatState {
@@ -558,6 +564,18 @@ const COMPACT_MIN_TOTAL = 6;
  *  through both guards and dispatched a duplicate task. */
 const sendingSessions = new Set<string>();
 
+/** Folder ordering, matched to the backend's `ORDER BY name COLLATE NOCASE`.
+ *
+ *  `localeCompare` with `sensitivity: "base"` is accent-INsensitive, so it
+ *  ranks "Etude" and "Étude" as equal and can order non-ASCII names
+ *  differently from SQLite's ASCII-only case fold — the list then silently
+ *  reshuffled on the next launch, when `listFolders` supplied the DB order. */
+function byFolderName(a: { name: string }, b: { name: string }): number {
+  const an = a.name.toLowerCase();
+  const bn = b.name.toLowerCase();
+  return an < bn ? -1 : an > bn ? 1 : 0;
+}
+
 /** Wall-clock ceiling for one compaction round-trip. See the timer in
  *  `generateSummary` for why this exists at all. */
 const COMPACT_TIMEOUT_MS = 180_000;
@@ -908,6 +926,21 @@ function finishRunning(
   ) {
     unreadPatch = { ...get().unread, [finishedId]: true };
   }
+  // An ERROR in a background chat also deserves the dot. The gate above is
+  // deliberately `done`-only because a *cancel* shouldn't nag — the user
+  // just said they were finished. A failure is the opposite: the sidebar
+  // spinner simply vanished, the message sat unread inside a chat nobody was
+  // looking at, and the user could wait indefinitely for a reply that already
+  // failed. Content isn't required here — the error text IS the content.
+  if (reason === "error" && finishedId && finishedId !== activeId) {
+    unreadPatch = { ...(unreadPatch ?? get().unread), [finishedId]: true };
+  }
+
+  // The streaming metrics entry has served its purpose — the final numbers
+  // are persisted in the message's `metrics_json` from here on. Left in
+  // place it accumulated one entry per reply for the process's lifetime, and
+  // the whole record is cloned on every metrics flush.
+  const finishedMsgId = buf?.assistantMsgId;
 
   // Snapshot the buffer + task before we null out `runningBuffers` so the
   // memory extractor (kicked off below) can read the assistant text. The
@@ -954,12 +987,20 @@ function finishRunning(
       /* already unlistened — harmless */
     }
   }
-  set({
-    activeStream: null,
-    isStreaming: false,
-    streamingSessionId: null,
-    runningTask: null,
-    ...(unreadPatch ? { unread: unreadPatch } : {}),
+  set((s) => {
+    let streamingByMessage = s.streamingByMessage;
+    if (finishedMsgId && finishedMsgId in streamingByMessage) {
+      streamingByMessage = { ...streamingByMessage };
+      delete streamingByMessage[finishedMsgId];
+    }
+    return {
+      activeStream: null,
+      isStreaming: false,
+      streamingSessionId: null,
+      runningTask: null,
+      streamingByMessage,
+      ...(unreadPatch ? { unread: unreadPatch } : {}),
+    };
   });
   promoteQueueHead(get, set);
 
@@ -1111,6 +1152,24 @@ async function startTask(task: QueueTask, get: Getter, set: Setter) {
     streamingSessionId: sessionId,
     runningTask: task,
   }));
+
+  // Re-pin the replacement when the row we regenerated over was pinned.
+  // Fire-and-forget: a failed pin is a lost bookmark, not a lost reply, and
+  // must never hold up the stream.
+  if (task.carryPin) {
+    const pinnedAt = Date.now();
+    void persistMessagePin(assistantMsg.id, sessionId, true).catch((e) =>
+      logger.warn("couldn't carry the pin to the regenerated response", e),
+    );
+    set((s) => ({
+      messages: {
+        ...s.messages,
+        [sessionId]: (s.messages[sessionId] ?? []).map((m) =>
+          m.id === assistantMsg.id ? { ...m, pinned_at: pinnedAt } : m,
+        ),
+      },
+    }));
+  }
 
   runningBuffers = {
     assistantMsgId: assistantMsg.id,
@@ -1640,9 +1699,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
     const moved = new Set(sessionIds);
     set((s) => ({
-      folders: [...s.folders, folder].sort((a, b) =>
-        a.name.localeCompare(b.name, undefined, { sensitivity: "base" }),
-      ),
+      folders: [...s.folders, folder].sort(byFolderName),
       sessions: s.sessions.map((x) =>
         moved.has(x.id) ? { ...x, folder_id: folder.id } : x,
       ),
@@ -1655,9 +1712,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((s) => ({
       folders: s.folders
         .map((f) => (f.id === id ? { ...f, name } : f))
-        .sort((a, b) =>
-          a.name.localeCompare(b.name, undefined, { sensitivity: "base" }),
-        ),
+        .sort(byFolderName),
     }));
   },
 
@@ -1712,6 +1767,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const sessions = s.sessions.filter((x) => x.id !== id);
       const messages = { ...s.messages };
       delete messages[id];
+      // Only `selectSession` cleared this, so a deleted chat left its flag
+      // behind forever.
+      const unread = { ...s.unread };
+      delete unread[id];
       const queue = s.queue.filter((t) => t.sessionId !== id);
       // `sessions` is ordered by `updated_at` and includes archived rows —
       // and `archive` bumps `updated_at` — so plain `sessions[0]` regularly
@@ -1721,7 +1780,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         s.activeSessionId === id
           ? sessions.find((x) => !x.archived_at)?.id ?? null
           : s.activeSessionId;
-      return { sessions, messages, queue, activeSessionId: active };
+      return { sessions, messages, queue, unread, activeSessionId: active };
     });
     // Load the replacement's transcript. Under lazy hydration `selectSession`
     // is the only loader, so patching `activeSessionId` alone would leave the
@@ -2151,6 +2210,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       sessionId,
       userMsgId: userMsg.id,
       request,
+      // The row we just deleted may have been pinned; `startTask` restores
+      // the mark on its replacement rather than silently dropping it.
+      carryPin: last.pinned_at != null,
     };
 
     if (!(await tryDirectStart(task, get, set))) {

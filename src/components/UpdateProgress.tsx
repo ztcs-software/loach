@@ -1,4 +1,5 @@
 import type { DownloadProgress } from "@/lib/updater";
+import { cn } from "@/lib/utils";
 
 function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -15,9 +16,21 @@ export function UpdateProgressBar({ progress }: { progress: DownloadProgress }) 
   const pct = total ? Math.min(100, (downloaded / total) * 100) : null;
   return (
     <div className="space-y-1.5">
-      <div className="h-1.5 w-full overflow-hidden rounded-full bg-foreground/10">
+      <div
+        role="progressbar"
+        aria-label="Update download progress"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        {...(pct === null ? {} : { "aria-valuenow": Math.round(pct) })}
+        className="h-1.5 w-full overflow-hidden rounded-full bg-foreground/10"
+      >
         <div
-          className="h-full bg-primary transition-[width] duration-150 ease-out"
+          className={cn(
+            "h-full bg-primary transition-[width] duration-150 ease-out",
+            // No content-length: a motionless 30% bar reads as stuck, so
+            // pulse it the way ProviderStep does for the same case.
+            pct === null && "animate-pulse",
+          )}
           style={{ width: pct === null ? "30%" : `${pct}%` }}
         />
       </div>

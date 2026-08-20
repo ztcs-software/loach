@@ -601,7 +601,10 @@ function PrivateParamsPanel() {
 
           <Section title="Thinking">
             <ThinkingRow
-              checked={effectiveThinking ?? supportsThinking}
+              // Disabled rows always read OFF, so the switch never shows an "on"
+              // state next to a "doesn't support a thinking step" caption. The
+              // regular ParameterPanel does the same; this surface disagreed.
+              checked={supportsThinking && (effectiveThinking ?? true)}
               disabled={!supportsThinking}
               disabledHint={
                 modelCapabilities === undefined && model

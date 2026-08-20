@@ -140,12 +140,18 @@ export function CodeCanvas() {
     const onUp = () => {
       handle.removeEventListener("pointermove", onMove);
       handle.removeEventListener("pointerup", onUp);
+      handle.removeEventListener("pointercancel", onUp);
       // Commit once (persists to localStorage); drop the transient width.
       setWidth(current);
       setDragWidth(null);
     };
     handle.addEventListener("pointermove", onMove);
     handle.addEventListener("pointerup", onUp);
+    // A cancelled pointer (touch cancel, an OS gesture, lost capture) never
+    // fires `pointerup`. Without this the listeners stayed attached and
+    // `dragWidth` froze at its transient value — so the NEXT drag ran two
+    // sets of handlers with conflicting `startWidth`s and the panel jumped.
+    handle.addEventListener("pointercancel", onUp);
   };
 
   return (

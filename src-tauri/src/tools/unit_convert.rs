@@ -327,11 +327,14 @@ fn format_number(v: f64) -> String {
     }
     let s = format!("{v:.12}");
     let trimmed = s.trim_end_matches('0').trim_end_matches('.');
-    if trimmed.is_empty() || trimmed == "-" {
-        "0".to_string()
-    } else {
-        trimmed.to_string()
+    // `v` is non-zero here (an exact zero took the integer branch above), so
+    // a result that rounds away at 12 decimals — 0.0001 mg in tonnes, say —
+    // must not be reported as a flat "0"/"-0". Surface those in scientific
+    // notation, the same guard `calculate::format_result` already carries.
+    if trimmed.is_empty() || trimmed == "-" || trimmed == "0" || trimmed == "-0" {
+        return format!("{v:e}");
     }
+    trimmed.to_string()
 }
 
 fn err(msg: impl Into<String>) -> McpCallResult {

@@ -308,6 +308,17 @@ pub(crate) async fn resolve_lan_addrs(url: &Url) -> Result<Vec<SocketAddr>, Host
         .ok_or_else(|| HostScreenError::Invalid("URL has no host".to_string()))?;
     let port = url.port_or_known_default().unwrap_or(80);
 
+    // `host_str` keeps the brackets on an IPv6 literal (`[2606:4700::1111]`),
+    // which `IpAddr::parse` rejects — so a perfectly good public IPv6 URL fell
+    // through to `lookup_host`, which can't resolve a bracketed literal either,
+    // and failed with "DNS lookup failed". (Fails closed, so this was never an
+    // SSRF hole — just an unusable address family.) `refuse_link_local_host`
+    // in providers/mod.rs does the same strip.
+    let host = host
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(host);
+
     // Literal IP: skip DNS, just screen the address.
     if let Ok(ip) = host.parse::<IpAddr>() {
         if is_link_local(&ip) {
@@ -374,7 +385,7 @@ pub(crate) fn build_pinned_client(url: &Url, addrs: &[SocketAddr]) -> Result<req
         .host_str()
         .ok_or_else(|| "URL has no host".to_string())?;
     let mut builder = reqwest::Client::builder()
-        .user_agent("Loach/0.1 (fetch_url)")
+        .user_agent(concat!("Loach/", env!("CARGO_PKG_VERSION"), " (fetch_url)"))
         // Bound the TCP connect phase. The per-request `.timeout()` only
         // covers the response, so without this a SYN to a black-holed
         // address waits for the OS retransmit budget — minutes on some

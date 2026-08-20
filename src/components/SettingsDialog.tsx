@@ -230,6 +230,19 @@ export function SettingsDialog() {
   const [templateVarsOpen, setTemplateVarsOpen] = useState(false);
   const [tonesInfoOpen, setTonesInfoOpen] = useState(false);
 
+  // Clear transient state when the dialog closes. Radix unmounts only the
+  // CONTENT, so these live on for the app's lifetime: a typed-but-never-saved
+  // API key stayed in memory and re-rendered into the password field on every
+  // future open, and days-old connection-test cards reappeared as if fresh.
+  useEffect(() => {
+    if (open) return;
+    setPendingKey("");
+    setOllamaTest({ kind: "idle" });
+    setOpenaiTest({ kind: "idle" });
+    setTemplateVarsOpen(false);
+    setTonesInfoOpen(false);
+  }, [open]);
+
   // Free-text settings are buffered locally and persisted on a pause / blur
   // / unmount rather than on every keystroke — see `useBufferedSetting`.
   const ollamaUrlField = useBufferedSetting(

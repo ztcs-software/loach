@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ArrowDown, ChevronDown, ChevronUp, Hourglass, Import, Pin, Search, Sparkles, Trash2, Zap, X } from "lucide-react";
 import { MessageItem } from "./Message";
 import { Button } from "@/components/ui/button";
@@ -6,9 +6,18 @@ import { useConfirm } from "@/components/ConfirmDialog";
 import { useChatStore } from "@/stores/chatStore";
 import { extractSummary } from "@/lib/contextUsage";
 import { cn, prefersReducedMotion } from "@/lib/utils";
+import { stripInlinedAttachments } from "@/lib/files";
 import type { Message } from "@/types";
 
 const EMPTY_MESSAGES: Message[] = [];
+
+/** The text a message actually RENDERS. User bubbles strip the inlined
+ *  attachment tail before display, so searching raw `content` produced
+ *  matches with nothing on screen to highlight — the finder scrolled to the
+ *  bubble and the DOM walker found no occurrence to mark. */
+function displayedText(m: Message): string {
+  return m.role === "user" ? stripInlinedAttachments(m.content) : m.content;
+}
 
 /** How many trailing render items mount when a chat opens. Older items reveal
  *  on demand via the "Show earlier messages" control. Opening a long chat used
@@ -208,13 +217,21 @@ export function ChatCanvas() {
     const q = searchQuery.trim().toLowerCase();
     if (!q) return [] as string[];
     return messages
-      .filter((m) => m.content.toLowerCase().includes(q))
+      .filter((m) => displayedText(m).toLowerCase().includes(q))
       .map((m) => m.id);
   }, [messages, searchQuery]);
 
   useEffect(() => {
     setMatchCursor(0);
   }, [searchQuery, sessionId]);
+
+  // Clamp when the result set SHRINKS under a stale cursor — an import batch
+  // removed, `/clear`, a regenerate. The reset above only fires on a query or
+  // chat change, so the counter could render "9/3" (and the scroll effect
+  // silently no-op) until the next keypress re-modulo'd it.
+  useEffect(() => {
+    setMatchCursor((i) => (i < matchIds.length ? i : Math.max(0, matchIds.length - 1)));
+  }, [matchIds.length]);
 
   // Switching chats while the finder is open is jarring — the matches
   // belonged to the previous chat. Close the overlay so the user re-opens
@@ -318,7 +335,12 @@ export function ChatCanvas() {
     const currentId = matchIds[matchCursor];
     for (const m of messages) {
       if (m.id === streamingMsgId) continue;
-      if (!m.content.toLowerCase().includes(lowerQ)) continue;
+      // Match the DISPLAYED text. User bubbles render
+      // `stripInlinedAttachments(content)`, so matching raw content counted
+      // hits inside an inlined attachment body — the finder then scrolled to
+      // a bubble and highlighted nothing, because the DOM walker can't find
+      // text that was never rendered.
+      if (!displayedText(m).toLowerCase().includes(lowerQ)) continue;
       const el = messageRefs.current.get(m.id);
       if (!el) continue;
       highlightTextNodes(el, q, m.id === currentId);
@@ -497,20 +519,11 @@ export function ChatCanvas() {
     setVisibleCount((c) => c + WINDOW_SIZE);
   };
 
-  if (!sessionId) {
-    return (
-      <div className="flex flex-1 items-center justify-center text-center">
-        <div>
-          <p className="bg-gradient-to-br from-foreground via-foreground/90 to-orange-500/80 bg-clip-text text-3xl font-medium tracking-tight text-transparent">
-            Welcome to Loach
-          </p>
-          <p className="mt-2 text-sm text-foreground/55">
-            Create a new chat from the sidebar to get started.
-          </p>
-        </div>
-      </div>
-    );
-  }
+  // Unreachable in practice — App only mounts ChatCanvas once a session
+  // exists AND has messages; the no-session states render `NoChatState` /
+  // `ChatLoadingSkeleton` instead. Kept as a cheap guard rather than the
+  // duplicate welcome screen that used to live here.
+  if (!sessionId) return null;
 
   // Only the trailing window mounts. Items keep their original `index` /
   // `startIndex` (computed against the full `messages` array), so the
@@ -746,6 +759,32 @@ function pinPreview(content: string): string {
  * view and flashes a highlight on it. Unpinning happens from the response's
  * own ⋯ menu, so the chips stay a pure navigation surface.
  */
+/** One chip. Memoised on the message object so the three-regex `pinPreview`
+ *  doesn't re-run for every pin on every streaming flush — `messages` gets a
+ *  new array identity per RAF flush, and only the streaming row's object
+ *  actually changes, so non-streaming pins hit the memo. */
+const PinnedChip = memo(function PinnedChipImpl({
+  message,
+  onJump,
+}: {
+  message: Message;
+  onJump: (id: string) => void;
+}) {
+  const preview = useMemo(() => pinPreview(message.content), [message.content]);
+  return (
+    <button
+      type="button"
+      onClick={() => onJump(message.id)}
+      // The chip is a one-line summary; the tooltip gives enough of the
+      // response to tell two similar pins apart before clicking.
+      title={preview.slice(0, 300)}
+      className="block max-w-[240px] shrink-0 truncate rounded-full border border-foreground/10 bg-foreground/[0.05] px-2.5 py-0.5 text-[11.5px] text-foreground/70 transition-colors hover:border-foreground/20 hover:bg-foreground/10 hover:text-foreground"
+    >
+      {preview || "Response"}
+    </button>
+  );
+});
+
 function PinnedBar({
   pinned,
   onJump,
@@ -760,22 +799,9 @@ function PinnedBar({
         Pinned
       </span>
       <div className="scrollbar-hidden flex min-w-0 flex-1 gap-1.5 overflow-x-auto">
-        {pinned.map((m) => {
-          const preview = pinPreview(m.content);
-          return (
-            <button
-              key={m.id}
-              type="button"
-              onClick={() => onJump(m.id)}
-              // The chip is a one-line summary; the tooltip gives enough of
-              // the response to tell two similar pins apart before clicking.
-              title={preview.slice(0, 300)}
-              className="block max-w-[240px] shrink-0 truncate rounded-full border border-foreground/10 bg-foreground/[0.05] px-2.5 py-0.5 text-[11.5px] text-foreground/70 transition-colors hover:border-foreground/20 hover:bg-foreground/10 hover:text-foreground"
-            >
-              {preview || "Response"}
-            </button>
-          );
-        })}
+        {pinned.map((m) => (
+          <PinnedChip key={m.id} message={m} onJump={onJump} />
+        ))}
       </div>
     </div>
   );

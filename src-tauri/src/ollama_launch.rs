@@ -53,13 +53,31 @@ pub async fn start(http: &Client, base_url: &str) -> Result<(), String> {
     })?;
 
     tracing::info!("starting ollama: {}", bin.display());
-    spawn_serve(&bin).map_err(|e| format!("Couldn't start Ollama: {e}"))?;
+    let mut child = spawn_serve(&bin).map_err(|e| format!("Couldn't start Ollama: {e}"))?;
 
     let deadline = Instant::now() + STARTUP_TIMEOUT;
     loop {
         tokio::time::sleep(POLL_INTERVAL).await;
         if crate::providers::ollama::probe(http, base_url).await {
             return Ok(());
+        }
+        // Notice a server that died on the spot — a port already bound by
+        // something else, a broken install, a missing runtime DLL. Without
+        // this the loop burned the full 20 s and then reported a generic
+        // "didn't respond in time", with the real cause gone to /dev/null.
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return Err(match status.code() {
+                    Some(code) => format!(
+                        "Ollama exited immediately (code {code}). Something else may already be                          listening on that port — try `ollama serve` in a terminal to see why."
+                    ),
+                    None => "Ollama was terminated immediately after starting.".to_string(),
+                });
+            }
+            Ok(None) => {}
+            // Can't query the child — fall through to the timeout path rather
+            // than failing a launch that may still be coming up.
+            Err(e) => tracing::warn!("couldn't poll the ollama child: {e}"),
         }
         if Instant::now() >= deadline {
             return Err(format!(
@@ -166,10 +184,13 @@ fn fallback_paths() -> Vec<PathBuf> {
     out
 }
 
-/// Spawn `ollama serve` and let it go. We never wait on the child: tokio
-/// reaps orphans in the background, so a server that exits immediately
-/// (port already bound by another Ollama) doesn't leave a zombie behind.
-fn spawn_serve(bin: &Path) -> std::io::Result<()> {
+/// Spawn `ollama serve` and hand back the child.
+///
+/// The handle is kept only to notice an *immediate* exit — see `start`. The
+/// server itself still outlives Loach: dropping a `tokio::process::Child`
+/// detaches rather than kills (we never set `kill_on_drop`), and tokio reaps
+/// the orphan, so a server that dies on a bound port leaves no zombie.
+fn spawn_serve(bin: &Path) -> std::io::Result<tokio::process::Child> {
     let mut cmd = tokio::process::Command::new(bin);
     cmd.arg("serve")
         .stdin(Stdio::null())
@@ -184,7 +205,7 @@ fn spawn_serve(bin: &Path) -> std::io::Result<()> {
         cmd.creation_flags(0x0800_0000);
     }
 
-    cmd.spawn().map(|_| ())
+    cmd.spawn()
 }
 
 #[cfg(test)]

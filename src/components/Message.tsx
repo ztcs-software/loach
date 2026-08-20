@@ -468,14 +468,6 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
     });
   };
 
-  if (message.role === "system") {
-    return (
-      <div className="mx-auto my-3 max-w-2xl rounded-md border border-dashed border-border/60 bg-muted/30 px-3 py-2 text-center text-xs text-muted-foreground">
-        {message.content}
-      </div>
-    );
-  }
-
   const isUser = message.role === "user";
   const isPinned = message.pinned_at != null;
   const togglePin = () =>
@@ -515,6 +507,18 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
     if (isUser || !isStreaming) return null;
     return lastCodeBlock(message.content)?.code ?? null;
   }, [isUser, isStreaming, message.content]);
+
+  // Below every hook, deliberately. This used to sit above four `useMemo`
+  // calls, which breaks the rules of hooks — safe only because a row's role
+  // never changes under its `key`, and a trap for any future refactor that
+  // reuses an instance across roles.
+  if (message.role === "system") {
+    return (
+      <div className="mx-auto my-3 max-w-2xl rounded-md border border-dashed border-border/60 bg-muted/30 px-3 py-2 text-center text-xs text-muted-foreground">
+        {message.content}
+      </div>
+    );
+  }
 
   return (
     <div

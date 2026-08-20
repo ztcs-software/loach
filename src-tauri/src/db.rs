@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::time::Duration;
 // `parking_lot::Mutex` instead of `std::sync::Mutex` for two reasons:
 //   1. No `PoisonError` to ignore on every lock — a panic inside one
 //      command (e.g. an OOM during a query) shouldn't make every
@@ -18,6 +19,14 @@ use chrono::Utc;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::{params, Connection, OptionalExtension};
+
+/// How long a connection waits for a competing writer before returning
+/// SQLITE_BUSY. Nothing prevents a second Loach process opening the same
+/// file, and SQLite defaults to no busy handler at all — so without this a
+/// concurrent write fails instantly, which at boot means `migrate()` errors
+/// into the fatal-setup dialog over a collision that would have cleared in
+/// milliseconds.
+const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -294,6 +303,12 @@ impl Database {
         // opens its first connection.
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
+        // SQLite's default busy handler is *none*: a second Loach process
+        // (nothing stops one — there's no single-instance plugin) writing
+        // concurrently gets SQLITE_BUSY instantly rather than waiting. At
+        // boot that surfaces as the fatal "migration failed" dialog for what
+        // is really a transient collision.
+        conn.busy_timeout(BUSY_TIMEOUT)?;
         // Performance pragmas. All are durability-safe in combination with
         // WAL: `synchronous=NORMAL` keeps crash safety for the database (only
         // weakens the guarantee about the very last commit on power loss),
@@ -315,6 +330,9 @@ impl Database {
         // concurrency, and each connection holds its own mmap window.
         let manager = SqliteConnectionManager::file(path).with_init(|c| {
             apply_perf_pragmas(c);
+            // Readers wait for a writer's commit instead of erroring out —
+            // same reasoning as the writer connection above.
+            let _ = c.busy_timeout(BUSY_TIMEOUT);
             // Must run AFTER the perf pragmas. Pragmas like cache_size /
             // mmap_size aren't "writes" so query_only doesn't reject them,
             // but applying them first keeps the call order obvious if a
@@ -1090,7 +1108,7 @@ impl Database {
         self.with_read(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT id, session_id, role, content, thinking, attachments_json, metrics_json, tool_calls_json, compacted_at, created_at, import_group, import_hidden, pinned_at
-                 FROM messages WHERE session_id = ?1 ORDER BY created_at ASC",
+                 FROM messages WHERE session_id = ?1 ORDER BY created_at ASC, rowid ASC",
             )?;
             let rows = stmt
                 .query_map(params![session_id], |r| {
@@ -1690,7 +1708,7 @@ impl Database {
 
     /// Read every memory across every space — used by the export path.
     pub fn all_space_memories(&self) -> Result<Vec<SpaceMemory>> {
-        let conn = self.conn.lock();
+        let conn = self.read_pool.get().context("acquire read connection")?;
         let mut stmt = conn.prepare(
             "SELECT id, space_id, content, source_session_id, source_message_id,
                     created_at, updated_at
@@ -1984,7 +2002,7 @@ impl Database {
 
         match id {
             Some(id) if !id.is_empty() => {
-                conn.execute(
+                let affected = conn.execute(
                     "UPDATE mcp_servers SET name = ?1, url = ?2, headers_json = ?3,
                                              enabled = ?4, updated_at = ?5
                      WHERE id = ?6",
@@ -1997,6 +2015,16 @@ impl Database {
                         id,
                     ],
                 )?;
+                if affected == 0 {
+                    // The row is gone — deleted in another window, or the id
+                    // came from a hand-edited import. Without this check the
+                    // UPDATE quietly changed nothing and the SELECT below
+                    // failed with rusqlite's bare "Query returned no rows",
+                    // which is what the user saw as their save error.
+                    return Err(anyhow::anyhow!(
+                        "MCP server `{name}` no longer exists — it may have been deleted in another window. Add it again."
+                    ));
+                }
                 let mut stmt =
                     conn.prepare("SELECT created_at FROM mcp_servers WHERE id = ?1")?;
                 let created_at: i64 = stmt.query_row(params![id], |r| r.get(0))?;
@@ -2064,10 +2092,10 @@ impl Database {
     /// Read every message across every session. Used by the export path —
     /// callers normally fetch messages per-session.
     pub fn all_messages(&self) -> Result<Vec<Message>> {
-        let conn = self.conn.lock();
+        let conn = self.read_pool.get().context("acquire read connection")?;
         let mut stmt = conn.prepare(
             "SELECT id, session_id, role, content, thinking, attachments_json, metrics_json, tool_calls_json, compacted_at, created_at, import_group, import_hidden, pinned_at
-             FROM messages ORDER BY session_id, created_at",
+             FROM messages ORDER BY session_id, created_at, rowid",
         )?;
         let rows = stmt
             .query_map([], |r| {
@@ -2093,7 +2121,7 @@ impl Database {
 
     /// Read every space file across every space.
     pub fn all_space_files(&self) -> Result<Vec<SpaceFile>> {
-        let conn = self.conn.lock();
+        let conn = self.read_pool.get().context("acquire read connection")?;
         let mut stmt = conn.prepare(
             "SELECT id, space_id, name, mime, kind, data, size, position, created_at
              FROM space_files ORDER BY space_id, position",
@@ -2131,6 +2159,19 @@ impl Database {
     /// a NULL `headers_json` already (an MCP server with no auth headers
     /// is a valid configuration), so the round-trip remains valid.
     pub fn snapshot(&self) -> Result<DatabaseSnapshot> {
+        // Freeze writers for the duration. The export is assembled from
+        // eleven separate reads, and with the lock released between them a
+        // streaming flush or a session create could commit halfway through —
+        // producing a file whose `messages` reference a session absent from
+        // `sessions`. FK enforcement is off during restore, so those orphans
+        // then import silently as rows nothing displays.
+        //
+        // Every read below goes through the pool, and no pooled read takes
+        // this lock, so holding it here freezes the database without
+        // deadlocking. Export is a rare, explicit action already running on
+        // the blocking pool, so stalling writers briefly is the cheap half of
+        // the trade.
+        let _writer_frozen = self.conn.lock();
         let mcp_servers: Vec<McpServer> = self
             .list_mcp_servers()?
             .into_iter()

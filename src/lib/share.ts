@@ -21,7 +21,14 @@ const REDDIT_TITLE_LIMIT = 300;
 
 export function truncate(text: string, max: number): string {
   const t = text.trim();
-  return t.length <= max ? t : `${t.slice(0, max - 1).trimEnd()}…`;
+  if (t.length <= max) return t;
+  // Slice by code POINT, not code unit: cutting mid-surrogate leaves a lone
+  // half that renders as the replacement glyph right before the ellipsis.
+  // `Array.from` iterates code points, so an astral character (emoji, many
+  // CJK extensions) is kept or dropped whole.
+  const chars = Array.from(t);
+  const kept = chars.length <= max - 1 ? chars : chars.slice(0, max - 1);
+  return `${kept.join("").trimEnd()}…`;
 }
 
 /**

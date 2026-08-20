@@ -68,6 +68,21 @@ type TabId = "chats" | "instructions" | "files" | "memory" | "models";
 
 /** Stable empties for the "not loaded yet" case — a fresh `[]` per render
  *  would churn every memo and effect keyed on these. */
+/** Surface a failed chat-row action instead of letting it fall through to
+ *  main.tsx's global unhandled-rejection net, which says only "Something
+ *  went wrong" with no hint as to which action failed. The store actions
+ *  don't catch, so without this every rename / pin / label / archive / delete
+ *  in this view shared the vaguest error path in the file. */
+function notifyOnFail(p: Promise<unknown>, action: string): void {
+  void p.catch((e) => {
+    useToastStore.getState().push({
+      kind: "error",
+      title: `Couldn't ${action}`,
+      body: e instanceof Error ? e.message : String(e),
+    });
+  });
+}
+
 const EMPTY_FILES: SpaceFile[] = [];
 const EMPTY_MEMORIES: SpaceMemory[] = [];
 
@@ -314,11 +329,11 @@ export function SpaceView() {
                 <ChatsTab
                   sessions={spaceSessions}
                   onOpen={openChat}
-                  onRename={(id, title) => void renameChat(id, title)}
-                  onPin={(id, pinned) => void pinChat(id, pinned)}
-                  onSetLabel={(id, label) => void setChatLabel(id, label)}
-                  onArchive={(id) => void archiveChat(id, true)}
-                  onDelete={(id) => void removeChat(id)}
+                  onRename={(id, title) => notifyOnFail(renameChat(id, title), "rename this chat")}
+                  onPin={(id, pinned) => notifyOnFail(pinChat(id, pinned), "pin this chat")}
+                  onSetLabel={(id, label) => notifyOnFail(setChatLabel(id, label), "label this chat")}
+                  onArchive={(id) => notifyOnFail(archiveChat(id, true), "archive this chat")}
+                  onDelete={(id) => notifyOnFail(removeChat(id), "delete this chat")}
                 />
               </TabsContent>
 

@@ -47,6 +47,7 @@ import { useConfirm } from "@/components/ConfirmDialog";
 import { useChatStore } from "@/stores/chatStore";
 import { useModelsStore } from "@/stores/modelsStore";
 import { useSettingsStore } from "@/stores/settingsStore";
+import { useToastStore } from "@/stores/toastStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useUIStore } from "@/stores/uiStore";
 import { cn } from "@/lib/utils";
@@ -321,7 +322,16 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
       // can copy again if needed without reopening the dialog.
       window.setTimeout(() => setCopied(false), 1500);
     } catch (e) {
+      // Don't swallow it. The message kebab's `writeClipboard` was built to
+      // toast on exactly this failure — "the user pressed Copy, nothing
+      // happened, no feedback" — and this dialog quietly reintroduced the
+      // pattern that fix removed.
       logger.warn("clipboard write failed", e);
+      useToastStore.getState().push({
+        kind: "error",
+        title: "Couldn't copy",
+        body: "Clipboard isn't available in this window.",
+      });
     }
   };
 

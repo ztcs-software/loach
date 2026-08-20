@@ -279,6 +279,12 @@ pub async fn export_session(
                 }
             }
             for m in &messages {
+            // Hidden imported rows are deliberately folded out of the
+            // transcript; a user sharing an export shouldn't unknowingly
+            // publish context they believe is tucked away.
+            if m.import_hidden {
+                continue;
+            }
                 let role = match m.role.as_str() {
                     "user" => "You",
                     "assistant" => "Assistant",
@@ -1929,8 +1935,19 @@ pub async fn save_binary_to_file(
 /// forward-compat knob — `import_data_with_dialog` rejects anything else.
 #[tauri::command]
 pub async fn export_data_json(state: State<'_, AppState>) -> Result<String, String> {
-    let snap = state.db.snapshot().map_err(err)?;
-    serde_json::to_string_pretty(&snap).map_err(err)
+    // `snapshot()` reads every table (messages and space files carry inlined
+    // base64 bodies) under the DB lock, and the pretty-print doubles that in
+    // memory — both CPU-bound and both blocking. The import counterpart is
+    // already on the blocking pool for exactly this reason; the export half
+    // wasn't, so a large attachment-heavy database stalled a runtime worker
+    // and queued every other command behind it.
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || -> Result<String, String> {
+        let snap = db.snapshot().map_err(err)?;
+        serde_json::to_string_pretty(&snap).map_err(err)
+    })
+    .await
+    .map_err(|e| format!("export task panicked: {e}"))?
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -1957,8 +1974,20 @@ pub async fn import_data_with_dialog(
     use tauri_plugin_dialog::DialogExt;
 
     let auth = auth.unwrap_or_default();
-    security::require_unlocked(auth.pin.as_deref(), auth.password.as_deref())
+    // argon2id at m=64 MiB / t=3 plus a keyring read — 100-250 ms of pinned
+    // CPU and a possible DBus round-trip. The `security_*` commands offload
+    // this for the stated reason that "a slow unlock attempt can stall every
+    // other in-flight command"; the destructive paths were the exception.
+    {
+        let pin = auth.pin.clone();
+        let password = auth.password.clone();
+        tokio::task::spawn_blocking(move || {
+            security::require_unlocked(pin.as_deref(), password.as_deref())
+        })
+        .await
+        .map_err(|e| format!("unlock check panicked: {e}"))?
         .map_err(err)?;
+    }
 
     let path_opt = tauri::async_runtime::spawn_blocking(move || {
         app.dialog()
@@ -2051,6 +2080,27 @@ pub async fn import_data_with_dialog(
             }
         }
     }
+    // Stage 2.6 — screen message roles and session providers. `append_message`
+    // and `import_messages` both run `validate_role`, precisely so a crafted
+    // row can't store an arbitrary role that the chat-history builder then
+    // forwards to the provider — but `restore_snapshot` inserts `m.role`
+    // verbatim, which re-opens exactly that door for a hand-edited export.
+    for (idx, m) in snap.data.messages.iter().enumerate() {
+        validate_role(&m.role).map_err(|e| {
+            format!("import rejected: message #{} ({}): {e}", idx + 1, m.id)
+        })?;
+    }
+    for (idx, s) in snap.data.sessions.iter().enumerate() {
+        if s.provider != "ollama" && s.provider != "openai" {
+            return Err(format!(
+                "import rejected: chat #{} ({}) has unknown provider `{}`",
+                idx + 1,
+                s.title,
+                s.provider
+            ));
+        }
+    }
+
     if !quarantined.is_empty() {
         tracing::warn!(
             "import: {} MCP server(s) could not be screened and were imported disabled: {}",
@@ -2131,8 +2181,20 @@ pub async fn wipe_user_data(
     auth: Option<DestructiveAuthArgs>,
 ) -> Result<(), String> {
     let auth = auth.unwrap_or_default();
-    security::require_unlocked(auth.pin.as_deref(), auth.password.as_deref())
+    // argon2id at m=64 MiB / t=3 plus a keyring read — 100-250 ms of pinned
+    // CPU and a possible DBus round-trip. The `security_*` commands offload
+    // this for the stated reason that "a slow unlock attempt can stall every
+    // other in-flight command"; the destructive paths were the exception.
+    {
+        let pin = auth.pin.clone();
+        let password = auth.password.clone();
+        tokio::task::spawn_blocking(move || {
+            security::require_unlocked(pin.as_deref(), password.as_deref())
+        })
+        .await
+        .map_err(|e| format!("unlock check panicked: {e}"))?
         .map_err(err)?;
+    }
     state.db.wipe_user_data().map_err(err)
 }
 
@@ -2151,18 +2213,34 @@ pub async fn factory_reset(
     auth: Option<DestructiveAuthArgs>,
 ) -> Result<(), String> {
     let auth = auth.unwrap_or_default();
-    security::require_unlocked(auth.pin.as_deref(), auth.password.as_deref())
+    // argon2id at m=64 MiB / t=3 plus a keyring read — 100-250 ms of pinned
+    // CPU and a possible DBus round-trip. The `security_*` commands offload
+    // this for the stated reason that "a slow unlock attempt can stall every
+    // other in-flight command"; the destructive paths were the exception.
+    {
+        let pin = auth.pin.clone();
+        let password = auth.password.clone();
+        tokio::task::spawn_blocking(move || {
+            security::require_unlocked(pin.as_deref(), password.as_deref())
+        })
+        .await
+        .map_err(|e| format!("unlock check panicked: {e}"))?
         .map_err(err)?;
+    }
     state.db.wipe_all().map_err(err)?;
     // Best-effort: if the user never had a key we silently ignore the
     // NoEntry branch inside `clear_openai_key`. A hard failure here
-    // (keyring daemon dead, etc.) shouldn't undo the DB wipe.
-    if let Err(e) = secrets::clear_openai_key() {
-        tracing::warn!("clear_openai_key during factory_reset failed: {e:?}");
-    }
-    if let Err(e) = security::clear() {
-        tracing::warn!("security::clear during factory_reset failed: {e:?}");
-    }
+    // (keyring daemon dead, etc.) shouldn't undo the DB wipe. Both are
+    // blocking keyring calls, so they go to the blocking pool too.
+    let _ = tokio::task::spawn_blocking(|| {
+        if let Err(e) = secrets::clear_openai_key() {
+            tracing::warn!("clear_openai_key during factory_reset failed: {e:?}");
+        }
+        if let Err(e) = security::clear() {
+            tracing::warn!("security::clear during factory_reset failed: {e:?}");
+        }
+    })
+    .await;
     Ok(())
 }
 
@@ -2176,7 +2254,17 @@ pub async fn factory_reset(
 // keeps generating.
 
 #[tauri::command]
-pub fn open_in_vscode(code: String, filename: String) -> Result<(), String> {
+pub async fn open_in_vscode(code: String, filename: String) -> Result<(), String> {
+    // Everything below is blocking — `create_dir_all`, a file write, and on
+    // Windows a spawn-and-wait `where code` PATH scan. Running it inline on
+    // the main thread visibly hitched the UI for as long as a cold PATH scan
+    // took.
+    tokio::task::spawn_blocking(move || open_in_vscode_blocking(code, filename))
+        .await
+        .map_err(|e| format!("editor task panicked: {e}"))?
+}
+
+fn open_in_vscode_blocking(code: String, filename: String) -> Result<(), String> {
     use std::io::Write;
     use std::process::Command;
 

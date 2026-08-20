@@ -98,7 +98,9 @@ export function UpdateAvailableDialog() {
         if (!open && !installing) setState({ kind: "hidden" });
       }}
     >
-      <DialogContent className="max-w-lg">
+      {/* Dismissal is already blocked while installing; hide the X too so the
+          user isn't clicking a control that does nothing. */}
+      <DialogContent className="max-w-lg" hideClose={installing}>
         <DialogHeader>
           <DialogTitle>Update available</DialogTitle>
           <DialogDescription>

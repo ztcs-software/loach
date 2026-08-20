@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowLeft,
   Brain,
@@ -87,21 +87,32 @@ export function ModelsView() {
   // Pull fresh details on mount / model change. Prefill the form with the
   // existing values so hitting Save without any edits rebuilds the same
   // model under a new tag (the safe identity transform).
+  const detailReq = useRef(0);
   useEffect(() => {
     if (!viewingModel) return;
     setLoading(true);
     setLoadError(null);
     setSaveError(null);
     setDetails(null);
+    // Monotonic token so a response that lost the race is ignored.
+    // `setViewingModel` can switch targets mid-flight (Save-as does exactly
+    // that), and the slower reply would otherwise land last and prefill the
+    // form — including `name` and `from` — for the wrong model. The sibling
+    // pickers in ModelsTab and PrivateChat already guard this way.
+    const req = ++detailReq.current;
     void showModel(viewingModel)
       .then((d) => {
+        if (req !== detailReq.current) return;
         setDetails(d);
         setForm(formFromDetails(viewingModel, d));
       })
-      .catch((e) =>
-        setLoadError(e instanceof Error ? e.message : String(e)),
-      )
-      .finally(() => setLoading(false));
+      .catch((e) => {
+        if (req !== detailReq.current) return;
+        setLoadError(e instanceof Error ? e.message : String(e));
+      })
+      .finally(() => {
+        if (req === detailReq.current) setLoading(false);
+      });
   }, [viewingModel, showModel]);
 
   if (!viewingModel) return null;

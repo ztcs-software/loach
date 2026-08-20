@@ -60,15 +60,21 @@ export function ShareDialog() {
   const [imageError, setImageError] = useState(false);
   const [copied, setCopied] = useState(false);
 
-  // Fresh dialog, fresh state — the previous message's PNG must not flash
-  // in while the new one renders.
-  useEffect(() => {
-    if (!target) return;
+  // Fresh dialog, fresh state — the previous message's PNG must not flash in
+  // while the new one renders.
+  //
+  // Adjusted during render rather than in an effect: as an effect this ran
+  // AFTER paint, so reopening on a different message committed one frame
+  // still showing the old target's mode and image. React re-runs the render
+  // immediately with the corrected state and discards the abandoned output.
+  const [renderedTarget, setRenderedTarget] = useState(target);
+  if (renderedTarget !== target) {
+    setRenderedTarget(target);
     setMode("text");
     setImage(null);
     setImageError(false);
     setCopied(false);
-  }, [target]);
+  }
 
   // Render on demand (and once per message) rather than on open, so sharing
   // as text never pays for the canvas work.

@@ -150,7 +150,7 @@ pub fn run() {
             //     web-fetch paths already disable redirects on their own
             //     pinned clients (`build_pinned_client`).
             let http = match reqwest::Client::builder()
-                .user_agent("Loach/0.1")
+                .user_agent(concat!("Loach/", env!("CARGO_PKG_VERSION")))
                 .redirect(reqwest::redirect::Policy::none())
                 .connect_timeout(std::time::Duration::from_secs(10))
                 .tcp_keepalive(Some(std::time::Duration::from_secs(30)))

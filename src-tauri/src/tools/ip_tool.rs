@@ -101,15 +101,20 @@ fn op_subnet_info(cidr: IpNet) -> McpCallResult {
     // we treat every address in the range as usable (RFC 3021 for /31,
     // and IPv6 has no broadcast). For other IPv4 prefixes, skip the
     // network and broadcast addresses.
-    let (first, last, hosts) = match cidr {
+    // `hosts` is a u128 across both arms so the IPv6 count can be reported
+    // exactly. `hosts_exact` is false only for `::/0`, whose 2^128 addresses
+    // genuinely don't fit — the one case where the printed figure is a floor
+    // rather than the answer, and the output says so.
+    let (first, last, hosts, hosts_exact) = match cidr {
         IpNet::V4(net) => {
             let prefix = net.prefix_len();
-            let total: u64 = 1u64 << (32 - prefix as u64);
+            let total: u128 = 1u128 << (32 - prefix as u32);
             if prefix >= 31 {
                 (
                     IpAddr::V4(net.network()),
                     IpAddr::V4(net.broadcast()),
                     total,
+                    true,
                 )
             } else {
                 let network_u32 = u32::from(net.network());
@@ -118,14 +123,15 @@ fn op_subnet_info(cidr: IpNet) -> McpCallResult {
                     IpAddr::V4(std::net::Ipv4Addr::from(network_u32 + 1)),
                     IpAddr::V4(std::net::Ipv4Addr::from(broadcast_u32 - 1)),
                     total - 2,
+                    true,
                 )
             }
         }
         IpNet::V6(net) => {
             let prefix = net.prefix_len();
+            let exact = prefix != 0;
             let total: u128 = if prefix == 0 {
-                // 2^128 doesn't fit in u128 — saturate at the max and
-                // mention the cap when reporting.
+                // 2^128 doesn't fit in a u128 — saturate and flag it.
                 u128::MAX
             } else {
                 1u128 << (128 - prefix as u32)
@@ -133,17 +139,23 @@ fn op_subnet_info(cidr: IpNet) -> McpCallResult {
             (
                 IpAddr::V6(net.network()),
                 IpAddr::V6(net.broadcast()),
-                // We cap the displayed count at u64::MAX for compatibility
-                // with the IPv4 path; the formatter handles the limit.
-                total.min(u128::from(u64::MAX)) as u64,
+                // Reported as the exact u128. Clamping to u64::MAX printed
+                // 18446744073709551615 for a /64 — off by one from the true
+                // 2^64, and wildly wrong for anything shorter — with nothing
+                // in the output telling the model the number had been capped.
+                total,
+                exact,
             )
         }
     };
     out.push_str(&format!("first_host: {first}\n"));
     out.push_str(&format!("last_host: {last}\n"));
-    // For IPv6 we may have capped the count; the model can verify with
-    // `subnet_info` on a smaller prefix if it needs the exact figure.
-    out.push_str(&format!("host_count: {hosts}"));
+    if hosts_exact {
+        out.push_str(&format!("host_count: {hosts}"));
+    } else {
+        // Only `::/0` lands here.
+        out.push_str(&format!("host_count: {hosts} (floor — 2^128 exceeds the counter)"));
+    }
 
     McpCallResult {
         content_text: out,

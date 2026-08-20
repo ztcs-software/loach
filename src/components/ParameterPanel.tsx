@@ -217,7 +217,18 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
   // Space — displaying it without would restate the same lie `initial` fixes.
   const resetParams = () => {
     if (!session) return;
-    setParams({ ...DEFAULT_PARAMS, ...(modelDefaults ?? {}), ...spaceLayer });
+    // Same layer stack `initial` builds, minus the per-chat overrides we're
+    // clearing. Omitting the think layers made the Thinking row read ON after
+    // a reset even when the effective value was OFF (Settings default off,
+    // or a per-model preference), which `readSessionParams` would then
+    // contradict on the next send.
+    setParams({
+      ...DEFAULT_PARAMS,
+      ...(session.provider === "ollama" ? { think: thinkingDefault } : {}),
+      ...(modelDefaults ?? {}),
+      ...(modelThinkPref === undefined ? {} : { think: modelThinkPref }),
+      ...spaceLayer,
+    });
     setSessionParams(session.id, null);
   };
 

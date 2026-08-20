@@ -480,14 +480,30 @@ async fn run_one_turn(
     channel: &str,
     cancel: &Arc<tokio::sync::Notify>,
     api_key: Option<&str>,
-    body: Value,
+    mut body: Value,
     total_tokens: &mut u32,
     reported_tokens: &mut Option<u32>,
     stream_id: &str,
     registry: &StreamRegistry,
 ) -> Result<Option<TurnOutcome>> {
+    // Completion tokens reported for THIS turn. Folded into the caller's
+    // running `reported_tokens` once, at every exit path below, so a server
+    // that re-reports cumulative usage per chunk can't inflate the total.
+    let mut turn_tokens: Option<u32> = None;
     let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
-    let mut http_req = http.post(&url).json(&body);
+    // Built through a closure so the `stream_options` retry below can issue a
+    // second, identically-authenticated request without duplicating the
+    // bearer logic.
+    let build_req = |b: &Value| {
+        let mut r = http.post(&url).json(b);
+        if let Some(key) = api_key {
+            if !key.is_empty() && is_safe_for_bearer(base_url) {
+                r = r.bearer_auth(key);
+            }
+        }
+        r
+    };
+    let http_req = build_req(&body);
     // Track whether we had a key but chose not to send it over cleartext
     // so we can fold that hint into a 401/403 response — without it, the
     // user sees "OpenAI HTTP 401: Unauthorized" and has no idea their key
@@ -497,17 +513,13 @@ async fn run_one_turn(
     // genuinely-auth-required path benefits from the augmented message.
     let mut bearer_withheld = false;
     if let Some(key) = api_key {
-        if !key.is_empty() {
-            if is_safe_for_bearer(base_url) {
-                http_req = http_req.bearer_auth(key);
-            } else {
-                bearer_withheld = true;
-                tracing::warn!(
-                    "Refusing to send OpenAI bearer token over cleartext to {} — \
-                     change the base URL to https:// or accept that requests will be unauthenticated.",
-                    base_url
-                );
-            }
+        if !key.is_empty() && !is_safe_for_bearer(base_url) {
+            bearer_withheld = true;
+            tracing::warn!(
+                "Refusing to send OpenAI bearer token over cleartext to {} — \
+                 change the base URL to https:// or accept that requests will be unauthenticated.",
+                base_url
+            );
         }
     }
 
@@ -525,7 +537,7 @@ async fn run_one_turn(
         }
         r = http_req.send() => r,
     };
-    let resp = match sent {
+    let mut resp = match sent {
         Ok(r) => r,
         Err(e) => {
             let _ = app.emit(
@@ -538,6 +550,56 @@ async fn run_one_turn(
             return Err(e.into());
         }
     };
+
+    // `stream_options` is opt-in usage telemetry, not something the chat
+    // needs. A strict gateway that rejects unknown arguments would otherwise
+    // fail the whole turn over a field the user never asked for — so on that
+    // specific rejection, drop it and retry once. Mirrors the Ollama path's
+    // `think` retry. Metrics fall back to the chunk counter afterwards.
+    if resp.status() == reqwest::StatusCode::BAD_REQUEST
+        && body.get("stream_options").is_some()
+    {
+        let text = resp.text().await.unwrap_or_default();
+        if text.contains("stream_options") {
+            tracing::warn!("server rejected `stream_options`; retrying without it");
+            if let Some(obj) = body.as_object_mut() {
+                obj.remove("stream_options");
+            }
+            let retried = select! {
+                biased;
+                _ = cancel.notified() => {
+                    let _ = app.emit(channel, StreamEvent::Cancelled);
+                    registry.finish(stream_id);
+                    return Ok(None);
+                }
+                r = build_req(&body).send() => r,
+            };
+            resp = match retried {
+                Ok(r) => r,
+                Err(e) => {
+                    let _ = app.emit(
+                        channel,
+                        StreamEvent::Error {
+                            message: format!("OpenAI request failed: {e}"),
+                        },
+                    );
+                    registry.finish(stream_id);
+                    return Err(e.into());
+                }
+            };
+        } else {
+            // A 400 about something else. The body is already consumed, so
+            // report it here rather than falling through to the block below.
+            let _ = app.emit(
+                channel,
+                StreamEvent::Error {
+                    message: format!("OpenAI HTTP 400 Bad Request: {text}"),
+                },
+            );
+            registry.finish(stream_id);
+            return Err(anyhow!("openai http error"));
+        }
+    }
 
     if !resp.status().is_success() {
         let status = resp.status();
@@ -634,15 +696,21 @@ async fn run_one_turn(
                                     // per-chunk approximation.
                                     if let Some(u) = parsed.usage {
                                         if let Some(n) = u.completion_tokens {
-                                            // Accumulate, don't overwrite —
-                                            // each /chat/completions call
-                                            // reports its own turn's
-                                            // completion_tokens, and the
-                                            // metrics footer wants the
-                                            // session total across all
-                                            // tool turns.
-                                            *reported_tokens =
-                                                Some(reported_tokens.unwrap_or(0).saturating_add(n));
+                                            // Snapshot THIS turn, overwriting
+                                            // any earlier value from the same
+                                            // response; the fold into
+                                            // `reported_tokens` happens once,
+                                            // when the turn ends.
+                                            //
+                                            // Adding here double-counted on
+                                            // servers that stream a RUNNING
+                                            // usage object across several
+                                            // chunks (vLLM with
+                                            // `continuous_usage_stats`, some
+                                            // gateways), inflating the metrics
+                                            // footer. The Ollama pump already
+                                            // works this way.
+                                            turn_tokens = Some(n);
                                         }
                                     }
                                     for c in parsed.choices {
@@ -767,6 +835,12 @@ async fn run_one_turn(
                             );
                         }
                         if finished {
+                            // Fold this turn's reported usage into the
+                            // running total exactly once.
+                            if let Some(n) = turn_tokens {
+                                *reported_tokens =
+                                    Some(reported_tokens.unwrap_or(0).saturating_add(n));
+                            }
                             return Ok(Some(decide_outcome(accum)));
                         }
                     }
@@ -779,6 +853,12 @@ async fn run_one_turn(
                         return Err(e.into());
                     }
                     None => {
+                        // Stream ended without an explicit terminator — same
+                        // fold as the `finished` path above.
+                        if let Some(n) = turn_tokens {
+                            *reported_tokens =
+                                Some(reported_tokens.unwrap_or(0).saturating_add(n));
+                        }
                         return Ok(Some(decide_outcome(accum)));
                     }
                 }

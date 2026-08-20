@@ -126,6 +126,10 @@ function composeSystemPrompt(args: {
 //   - `pcReset` clears the pending frame AND the buffer — every teardown and
 //     `wipe()` calls it so a stale rAF can never write into a torn-down (or
 //     wiped) overlay, which would otherwise resurrect private content.
+/** Monotonic token identifying the newest send. Bumped on each `send` and
+ *  on `wipe`, so a stream still resolving its connect can tell whether the
+ *  overlay it belongs to is still the current one. */
+let pcSendToken = 0;
 let pcPendingFrame: number | null = null;
 let pcBuffer:
   | {
@@ -286,6 +290,7 @@ export const usePrivateChatStore = create<PrivateChatState>((set, get) => ({
       }));
     };
 
+    const myToken = ++pcSendToken;
     const teardown = () => {
       // Drop any pending flush + buffer so a stale rAF can't write into the
       // torn-down overlay. Callers flush first when the final frame matters.
@@ -362,6 +367,21 @@ export const usePrivateChatStore = create<PrivateChatState>((set, get) => ({
           }
         },
       );
+      // Only adopt the handle if this send still owns the overlay. `wipe()`
+      // reads `activeStream`, which is still null for the whole duration of
+      // the `await` above — so a close landing in that window couldn't stop
+      // this run, and installing the handle afterwards parked a live stream
+      // on a closed overlay. Same guard `chatStore` applies to its own
+      // connect window.
+      if (pcSendToken !== myToken) {
+        try {
+          handle.unlisten();
+        } catch {
+          /* already torn down */
+        }
+        void handle.stop().catch(() => {});
+        return;
+      }
       set({ activeStream: { stop: handle.stop, unlisten: handle.unlisten } });
     } catch (e) {
       const detail = e instanceof Error ? e.message : String(e);
@@ -397,6 +417,10 @@ export const usePrivateChatStore = create<PrivateChatState>((set, get) => ({
   },
 
   wipe: () => {
+    // Invalidate any send still inside its connect window — see the guard in
+    // `send`. Without this the overlay could close, and a stream that hadn't
+    // finished connecting would install itself moments later.
+    pcSendToken++;
     // Drop any pending streaming flush + buffered tokens FIRST so a queued rAF
     // can't write private content back into the overlay we're about to clear.
     pcReset();

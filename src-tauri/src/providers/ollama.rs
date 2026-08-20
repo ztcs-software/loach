@@ -53,6 +53,10 @@ const MAX_TOOL_TURNS: u32 = 10;
 /// a different slice.
 const MAX_TOOL_RESULT_BYTES: usize = 32 * 1024;
 
+/// Hard ceiling on tool calls accumulated in a single turn. Mirrors the
+/// OpenAI path's cap, for the same reason: the model server is untrusted.
+const MAX_TOOL_CALLS: usize = 256;
+
 // ---------------------------------------------------------------------------
 // Model admin: show / delete / copy / pull / create
 // ---------------------------------------------------------------------------
@@ -464,7 +468,22 @@ pub async fn unload_model(http: &Client, base_url: &str, model: &str) -> Result<
         "stream": false,
         "keep_alive": 0,
     });
-    let _ = http.post(url).json(&body).timeout(ADMIN_TIMEOUT).send().await;
+    // Unlike `preload_model`, this is an explicit user action from the
+    // Models panel — swallowing the outcome reported success no matter what
+    // happened (connection refused, unknown model, HTTP 500), so the UI
+    // cheerfully said "unloaded" while the model stayed resident.
+    let resp = http
+        .post(url)
+        .json(&body)
+        .timeout(ADMIN_TIMEOUT)
+        .send()
+        .await
+        .map_err(|e| anyhow!("couldn't reach Ollama to unload `{model}`: {e}"))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(anyhow!("Ollama refused to unload `{model}` (HTTP {status}): {text}"));
+    }
     Ok(())
 }
 
@@ -1003,7 +1022,24 @@ async fn run_one_turn(
                                             }
                                         }
                                         if !msg.tool_calls.is_empty() {
-                                            pending_tool_calls.extend(msg.tool_calls);
+                                            // Bounded like the OpenAI path's
+                                            // MAX_TOOL_CALLS. The model server
+                                            // is untrusted input, and every
+                                            // entry here becomes a dispatched
+                                            // call — a network round-trip plus
+                                            // two events, run serially.
+                                            let room = MAX_TOOL_CALLS
+                                                .saturating_sub(pending_tool_calls.len());
+                                            if room == 0 {
+                                                tracing::warn!(
+                                                    "ollama: tool-call flood — dropping {} past the {MAX_TOOL_CALLS} cap",
+                                                    msg.tool_calls.len()
+                                                );
+                                            } else {
+                                                pending_tool_calls.extend(
+                                                    msg.tool_calls.into_iter().take(room),
+                                                );
+                                            }
                                         }
                                     }
                                     if parsed.done {
