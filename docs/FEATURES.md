@@ -29,6 +29,14 @@ The default backend. Loach talks to a local `ollama serve` process over HTTP.
 - **Test connection** — the Providers panel exposes a one-click probe that
   pings `/api/tags` and reports the daemon version and visible model count,
   so the user can confirm a custom base URL works without leaving Settings.
+- **Start Ollama** — when the daemon isn't answering, the model picker
+  shows a **Start Ollama** button that launches it on demand and swaps in
+  the model list once it responds. Errors surface in the menu itself.
+- **Auto-launch Ollama** — an opt-in switch in **Settings → Providers**
+  does the same thing at startup, if nothing is already running. Off by
+  default (starting a background service is the user's call) and limited
+  to a base URL that points at this computer — a remote Ollama isn't
+  Loach's to start. The button above works either way.
 - **Streaming**, **multimodal images**, and **thinking-mode reasoning** are
   passed through to the daemon when the chosen model supports them.
 
@@ -94,7 +102,8 @@ transcript of messages.
   deliberate full-message actions: **Copy message** on every bubble,
   **Save as Snippet** on user prompts, and **Regenerate** on the *last*
   assistant message (drops the previous reply, re-sends the preceding user
-  turn, and streams a fresh answer in place).
+  turn, and streams a fresh answer in place). **Share** (§2.12) is on every
+  bubble; **Pin this response** (§2.11) on assistant replies.
 
 ### 2.2 Composer
 
@@ -167,13 +176,29 @@ FIFO queue:
 - **Grouped by recency** — Pinned, Today, Yesterday, This week, Older.
 - **Per-row indicator** — spinner while generating, accent dot for unread
   replies that finished while you were in another chat.
-- **Per-row menu** — Pin / Unpin, Rename, Move to Archive, Delete.
+- **Per-row menu** — Pin / Unpin, Label, Rename, Move to Archive, Delete.
 - **Right-click** anywhere on the row opens the same menu.
 - **Spaces icon** marks chats that belong to a Space.
+- **Colour labels** — tag a chat Red, Amber, Green, Blue, Purple or Pink
+  from the **Label** submenu of any chat menu (sidebar row, chat header,
+  or Space view). The colour renders as a dot at the start of the row and
+  follows the chat everywhere it's listed. **No label** clears it.
+- **Folders** — drag one chat row onto another to group them. Loach asks
+  for a folder name and files both chats into a **Folders** section that
+  sits between Pinned and the date groups. Folders are flat — they never
+  nest — start collapsed, and remember which ones you left open between
+  launches.
+  - Drop a chat on a folder to file it; drop it on a date caption (Today,
+    Yesterday, …) to take it back out, or use **Remove from folder** in
+    the row menu.
+  - A filed chat leaves the date groups, but a pinned one still appears
+    under Pinned as well.
+  - The folder's own menu offers **Rename** and **Delete folder**.
+    Deleting never deletes chats — they move back to the main list.
 
 ### 2.6 Header actions (per chat)
 
-- **Rename**, **Pin/Unpin**, **Move to Archive**, **Delete**.
+- **Rename**, **Pin/Unpin**, **Label**, **Move to Archive**, **Delete**.
 - **Fork this chat** — clone the conversation into a new chat (same model
   and Space) so you can branch a tangent without disturbing the original.
   The fork carries a **"Forked from …"** badge in its header that jumps
@@ -282,6 +307,43 @@ compaction divider, but are dropped from what the model sees on the next
 turn so the freed context goes to new conversation. Compaction is only
 offered once a chat is large enough to benefit (a handful of messages and
 at least a quarter of the window in use).
+
+### 2.11 Pinned responses
+
+Any assistant reply can be pinned from its `…` menu (**Pin this response**).
+A pin is a bookmark, not an edit — the message still reaches the model
+exactly like every other turn.
+
+- A **Pinned** bar appears under the chat header listing each pin as a
+  one-line chip. Clicking a chip scrolls that response back into view and
+  flashes it.
+- Chip text is the response with its markdown stripped, so a code-only
+  answer previews as its first line of code. Hovering shows more of it,
+  which is usually enough to tell two similar pins apart.
+- The pinned reply carries a small **Pinned** badge under its bubble.
+- **Unpin this response** lives in the same `…` menu; the bar disappears
+  with the last pin.
+- Pins are stored with the chat, so they survive restarts and travel in
+  exports.
+
+### 2.12 Sharing a message
+
+**Share** in any message's `…` menu opens a dialog with two modes.
+
+- **As text** — the message as written. **Copy** puts it on the clipboard,
+  or hand it to **Facebook**, **X**, **Reddit** or **LinkedIn**: Loach
+  opens that network's composer in your browser with the text pre-filled,
+  trimmed to the length each one accepts. The clipboard always gets the
+  full text.
+- **As image** — the same message drawn as a chat-bubble PNG that follows
+  your current light/dark theme, captioned **Prompt** or **AI Response**
+  and footed with "Shared from Loach". **Copy** puts the image on the
+  clipboard; **Save** writes the PNG through the native save dialog. The
+  networks' share links carry text only, so image mode swaps them for
+  Save.
+
+Loach uploads nothing itself — sharing either hands text to your browser
+or leaves an image on your clipboard.
 
 ---
 
@@ -672,7 +734,7 @@ gate or trigger a wipe.
 **Settings → Data** is where backups, restores, and cleanups live.
 
 - **Export everything** — produces a single JSON blob with every chat,
-  message, Space, file, memory, snippet, MCP server, and setting.
+  message, folder, Space, file, memory, snippet, MCP server, and setting.
   Native save dialog through a Rust-owned write so the renderer never
   sees the chosen path.
 - **Import** — open a previously exported JSON. Reports per-table row
@@ -766,6 +828,16 @@ In-app updater for the Tauri-supported install formats:
   the downloaded `.app.tar.gz`. Works even though the build isn't
   Apple-notarized: the updater's integrity check uses our own Ed25519
   signature, separate from Apple notarization.
+
+**Auto-check for updates** — off by default. Switch it on in **Settings →
+Updates** and Loach asks the release server once per launch whether a newer
+version exists. If one does, an **Update available** dialog opens with the
+current and new version numbers, that release's notes, and **Update now** /
+**Later**; nothing is downloaded or installed until you pick Update now.
+The manual **Check for updates** button in the same panel works whether or
+not the auto-check is on. On an install the updater can't patch, the panel
+shows neither control — just a note to download the release manually and an
+**Open releases** button.
 
 **What's new** — every release includes a markdown notes file that
 populates both the GitHub release body and the in-app **Updates** panel
