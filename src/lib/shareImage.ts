@@ -182,7 +182,7 @@ export async function renderShareImage(opts: {
   ctx.font = `500 ${LABEL_SIZE}px ${FONT_STACK}`;
   ctx.fillStyle = palette.muted;
   ctx.textAlign = isUser ? "right" : "left";
-  ctx.fillText(isUser ? "You" : "Assistant", isUser ? WIDTH - PAD : PAD, labelY);
+  ctx.fillText(isUser ? "You" : "AI Response", isUser ? WIDTH - PAD : PAD, labelY);
 
   bubblePath(ctx, bubbleX, bubbleY, bubbleWidth, bubbleHeight,
     isUser ? [24, 8, 24, 24] : [8, 24, 24, 24]);
@@ -206,8 +206,8 @@ export async function renderShareImage(opts: {
 
   ctx.font = `500 ${LABEL_SIZE}px ${FONT_STACK}`;
   ctx.fillStyle = palette.muted;
-  ctx.textAlign = "left";
-  ctx.fillText("Shared from Loach", PAD, footerY);
+  ctx.textAlign = "right";
+  ctx.fillText("Shared from Loach", WIDTH - PAD, footerY);
 
   const blob = await new Promise<Blob | null>((resolve) =>
     canvas.toBlob(resolve, "image/png"),
