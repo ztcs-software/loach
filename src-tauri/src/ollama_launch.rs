@@ -32,7 +32,11 @@ const POLL_INTERVAL: Duration = Duration::from_millis(300);
 /// the server answers — including the common case where it was already up
 /// and nothing was spawned.
 pub async fn start(http: &Client, base_url: &str) -> Result<(), String> {
-    if crate::providers::ollama::probe(http, base_url).await {
+    // Everything we PROBE goes to a connectable address; everything we
+    // CONFIGURE keeps the user's own host. They differ for `0.0.0.0` — see
+    // `probe_url`.
+    let probe_url = probe_url(base_url);
+    if crate::providers::ollama::probe(http, &probe_url).await {
         return Ok(());
     }
 
@@ -53,12 +57,13 @@ pub async fn start(http: &Client, base_url: &str) -> Result<(), String> {
     })?;
 
     tracing::info!("starting ollama: {}", bin.display());
-    let mut child = spawn_serve(&bin).map_err(|e| format!("Couldn't start Ollama: {e}"))?;
+    let mut child =
+        spawn_serve(&bin, base_url).map_err(|e| format!("Couldn't start Ollama: {e}"))?;
 
     let deadline = Instant::now() + STARTUP_TIMEOUT;
     loop {
         tokio::time::sleep(POLL_INTERVAL).await;
-        if crate::providers::ollama::probe(http, base_url).await {
+        if crate::providers::ollama::probe(http, &probe_url).await {
             return Ok(());
         }
         // Notice a server that died on the spot — a port already bound by
@@ -84,6 +89,56 @@ pub async fn start(http: &Client, base_url: &str) -> Result<(), String> {
                 "Started Ollama, but it didn't respond at {base_url} in time."
             ));
         }
+    }
+}
+
+/// The address to POLL for readiness, given the user's configured base URL.
+///
+/// Identical to `base_url` except when the host is unspecified (`0.0.0.0` /
+/// `::`), where it swaps in loopback. Binding to `0.0.0.0` means "listen on
+/// every interface" and is a normal way to run Ollama — but it is not an
+/// address you can *connect* to on Windows, where `connect()` to INADDR_ANY
+/// fails with `WSAEADDRNOTAVAIL`. Probing it there could never succeed, so a
+/// user with that base URL got the full 20-second timeout and a generic
+/// "didn't respond in time" on every launch and every Start Ollama click —
+/// including when a perfectly healthy server was already running, which also
+/// meant we spawned a redundant one.
+///
+/// Only the readiness probe is rewritten. `OLLAMA_HOST` still receives the
+/// user's original host so the server binds where they asked.
+fn probe_url(base_url: &str) -> String {
+    let Ok(url) = reqwest::Url::parse(base_url) else {
+        return base_url.to_string();
+    };
+    let Some(host) = url.host_str() else {
+        return base_url.to_string();
+    };
+    let bare = host
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(host);
+    let Ok(ip) = bare.parse::<std::net::IpAddr>() else {
+        return base_url.to_string();
+    };
+    if !ip.is_unspecified() {
+        return base_url.to_string();
+    }
+    let loopback = if ip.is_ipv6() { "[::1]" } else { "127.0.0.1" };
+    let mut rewritten = url.clone();
+    if rewritten.set_host(Some(loopback)).is_err() {
+        return base_url.to_string();
+    }
+    rewritten.to_string()
+}
+
+/// `host:port` for the spawned server's `OLLAMA_HOST`, from the user's
+/// configured base URL. Returns `None` when the URL has no usable host.
+fn ollama_host_env(base_url: &str) -> Option<String> {
+    let url = reqwest::Url::parse(base_url).ok()?;
+    let host = url.host_str()?;
+    match url.port() {
+        Some(port) => Some(format!("{host}:{port}")),
+        None => Some(host.to_string()),
     }
 }
 
@@ -190,12 +245,22 @@ fn fallback_paths() -> Vec<PathBuf> {
 /// server itself still outlives Loach: dropping a `tokio::process::Child`
 /// detaches rather than kills (we never set `kill_on_drop`), and tokio reaps
 /// the orphan, so a server that dies on a bound port leaves no zombie.
-fn spawn_serve(bin: &Path) -> std::io::Result<tokio::process::Child> {
+fn spawn_serve(bin: &Path, base_url: &str) -> std::io::Result<tokio::process::Child> {
     let mut cmd = tokio::process::Command::new(bin);
     cmd.arg("serve")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+
+    // Bind where the app will actually look. The child otherwise inherits the
+    // user's own `OLLAMA_HOST`, so anyone who has set it (a common way to move
+    // Ollama off :11434) got a daemon listening on one port while Loach polled
+    // another — a guaranteed startup timeout plus an orphaned server on the
+    // wrong port. Derived from the configured base URL, not the probe URL, so
+    // `0.0.0.0` still binds every interface as asked.
+    if let Some(host) = ollama_host_env(base_url) {
+        cmd.env("OLLAMA_HOST", host);
+    }
 
     #[cfg(windows)]
     {
@@ -241,6 +306,58 @@ mod tests {
                 p.display()
             );
         }
+    }
+
+    /// `0.0.0.0` is a legal thing to configure (it means "bind everything"),
+    /// but it is not connectable on Windows — so the readiness probe has to
+    /// go to loopback or it can never succeed there.
+    #[test]
+    fn unspecified_hosts_are_probed_on_loopback() {
+        assert_eq!(probe_url("http://0.0.0.0:11434"), "http://127.0.0.1:11434/");
+        assert_eq!(probe_url("http://[::]:11434"), "http://[::1]:11434/");
+        // The port and scheme survive the rewrite.
+        assert_eq!(probe_url("https://0.0.0.0:9999"), "https://127.0.0.1:9999/");
+    }
+
+    /// Everything else is probed exactly as configured — the rewrite is for
+    /// the unspecified address only, not a general normalisation.
+    #[test]
+    fn specified_hosts_are_probed_verbatim() {
+        for url in [
+            "http://localhost:11434",
+            "http://127.0.0.1:11434",
+            "http://[::1]:11434",
+            "http://192.168.1.10:11434",
+            "https://ollama.example.com",
+        ] {
+            assert_eq!(probe_url(url), url, "{url} must not be rewritten");
+        }
+        // Unparseable input falls through untouched rather than panicking.
+        assert_eq!(probe_url("not a url"), "not a url");
+    }
+
+    /// The spawned server binds where the USER asked, which is not always
+    /// where we probe — `0.0.0.0` stays `0.0.0.0` here.
+    #[test]
+    fn ollama_host_env_preserves_the_configured_host() {
+        assert_eq!(
+            ollama_host_env("http://0.0.0.0:11434").as_deref(),
+            Some("0.0.0.0:11434")
+        );
+        assert_eq!(
+            ollama_host_env("http://127.0.0.1:11435").as_deref(),
+            Some("127.0.0.1:11435")
+        );
+        assert_eq!(
+            ollama_host_env("http://localhost:11434").as_deref(),
+            Some("localhost:11434")
+        );
+        // No explicit port — hand Ollama the bare host and let it default.
+        assert_eq!(
+            ollama_host_env("http://localhost").as_deref(),
+            Some("localhost")
+        );
+        assert_eq!(ollama_host_env("not a url"), None);
     }
 
     #[test]
