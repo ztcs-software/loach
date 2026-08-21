@@ -4,7 +4,6 @@ import { Button } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
-  DialogDescription,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
@@ -180,12 +179,9 @@ export function ShareDialog() {
 
   return (
     <Dialog open onOpenChange={(open) => !open && close()}>
-      <DialogContent className="max-w-xl">
+      <DialogContent className="max-w-xl" aria-describedby={undefined}>
         <DialogHeader>
           <DialogTitle>Share {target.role === "user" ? "message" : "response"}</DialogTitle>
-          <DialogDescription>
-            Copy it, or open a post with it ready to go.
-          </DialogDescription>
         </DialogHeader>
 
         <Tabs value={mode} onValueChange={(v) => setMode(v as "text" | "image")}>
