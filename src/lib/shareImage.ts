@@ -182,7 +182,7 @@ export async function renderShareImage(opts: {
   ctx.font = `500 ${LABEL_SIZE}px ${FONT_STACK}`;
   ctx.fillStyle = palette.muted;
   ctx.textAlign = isUser ? "right" : "left";
-  ctx.fillText(isUser ? "You" : "AI Response", isUser ? WIDTH - PAD : PAD, labelY);
+  ctx.fillText(isUser ? "Prompt" : "AI Response", isUser ? WIDTH - PAD : PAD, labelY);
 
   bubblePath(ctx, bubbleX, bubbleY, bubbleWidth, bubbleHeight,
     isUser ? [24, 8, 24, 24] : [8, 24, 24, 24]);
