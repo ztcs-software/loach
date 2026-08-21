@@ -598,7 +598,7 @@ function Group({
       <div
         {...dropProps}
         className={cn(
-          "rounded px-3 pb-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-foreground/40",
+          "rounded px-3 pb-1 select-none text-[10px] font-semibold uppercase tracking-[0.12em] text-foreground/40",
           over && DROP_RING,
         )}
       >
@@ -646,7 +646,7 @@ function FolderSection({
 }) {
   return (
     <div>
-      <div className="px-3 pb-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-foreground/40">
+      <div className="px-3 pb-1 select-none text-[10px] font-semibold uppercase tracking-[0.12em] text-foreground/40">
         Folders
       </div>
       <ul className="space-y-0.5">
