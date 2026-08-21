@@ -222,10 +222,28 @@ export function ContextUsageBar() {
           onCompact={() => void compactContext(session.id)}
           expandedSize={usage.total * 2}
           onExpand={() => {
+            // Merge into the EXISTING per-chat override, not the merged
+            // stack. `params` is DEFAULT_PARAMS + model defaults + space
+            // layer + overrides, and `setSessionParams` stringifies whatever
+            // it's handed straight into `params_json` — so writing the merged
+            // object froze the model's Modelfile values and the Space's
+            // pinned params into this chat as if the user had set them. A
+            // later Modelfile edit or Space change then silently stopped
+            // applying here. Only `num_ctx` is the user's intent.
+            let overrides: Partial<GenerationParams> = {};
+            if (session.params_json) {
+              try {
+                overrides = JSON.parse(
+                  session.params_json,
+                ) as Partial<GenerationParams>;
+              } catch {
+                /* malformed — start from an empty override */
+              }
+            }
             void setSessionParams(session.id, {
-              ...params,
+              ...overrides,
               num_ctx: usage.total * 2,
-            });
+            } as GenerationParams);
           }}
           onClose={() => setOpen(false)}
         />

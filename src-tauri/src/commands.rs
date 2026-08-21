@@ -5,7 +5,7 @@ use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
 
 use crate::db::{
-    DatabaseSnapshot, ImportStats, McpServer, Message, Session, Snippet, SnippetFillValue,
+    DatabaseSnapshot, Folder, ImportStats, McpServer, Message, Session, Snippet, SnippetFillValue,
     SnippetVariable, Space, SpaceFile, SpaceMemory,
 };
 use crate::mcp::{self, McpTestResult};
@@ -168,6 +168,81 @@ pub async fn update_session_params(
         .map_err(err)
 }
 
+#[derive(Debug, Deserialize)]
+pub struct UpdateSessionLabelArgs {
+    pub id: String,
+    /// Palette id from `src/lib/labels.ts` (`"red"`, `"blue"`, …). `None`
+    /// clears the label. Not validated against the palette here — an id we
+    /// don't ship (only reachable via a hand-edited snapshot import) renders
+    /// as no label rather than breaking the row.
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+/// Set or clear the chat's colour label.
+#[tauri::command]
+pub async fn update_session_label(
+    state: State<'_, AppState>,
+    args: UpdateSessionLabelArgs,
+) -> Result<(), String> {
+    state
+        .db
+        .update_session_label(&args.id, args.label.as_deref())
+        .map_err(err)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetSessionFolderArgs {
+    pub id: String,
+    /// Folder to file the chat under. `None` pulls it back out into the
+    /// loose, date-grouped list. Not checked against the folders table —
+    /// a dangling id renders as a loose chat rather than breaking the row.
+    #[serde(default)]
+    pub folder_id: Option<String>,
+}
+
+/// Move a chat into a folder, or out of whatever folder it's in.
+#[tauri::command]
+pub async fn set_session_folder(
+    state: State<'_, AppState>,
+    args: SetSessionFolderArgs,
+) -> Result<(), String> {
+    state
+        .db
+        .set_session_folder(&args.id, args.folder_id.as_deref())
+        .map_err(err)
+}
+
+// ---------- folders ----------
+
+#[tauri::command]
+pub async fn list_folders(state: State<'_, AppState>) -> Result<Vec<Folder>, String> {
+    state.db.list_folders().map_err(err)
+}
+
+/// Create a folder. The caller (the sidebar's drag-to-group gesture) is
+/// responsible for moving chats into it afterwards.
+#[tauri::command]
+pub async fn create_folder(state: State<'_, AppState>, name: String) -> Result<Folder, String> {
+    state.db.create_folder(&name).map_err(err)
+}
+
+#[tauri::command]
+pub async fn rename_folder(
+    state: State<'_, AppState>,
+    id: String,
+    name: String,
+) -> Result<(), String> {
+    state.db.rename_folder(&id, &name).map_err(err)
+}
+
+/// Delete a folder. Its chats survive and fall back into the date-grouped
+/// list — `sessions.folder_id` is ON DELETE SET NULL.
+#[tauri::command]
+pub async fn delete_folder(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    state.db.delete_folder(&id).map_err(err)
+}
+
 #[tauri::command]
 pub async fn export_session(
     state: State<'_, AppState>,
@@ -204,6 +279,12 @@ pub async fn export_session(
                 }
             }
             for m in &messages {
+            // Hidden imported rows are deliberately folded out of the
+            // transcript; a user sharing an export shouldn't unknowingly
+            // publish context they believe is tucked away.
+            if m.import_hidden {
+                continue;
+            }
                 let role = match m.role.as_str() {
                     "user" => "You",
                     "assistant" => "Assistant",
@@ -382,6 +463,19 @@ pub async fn delete_message(
     state.db.delete_message(&id, &session_id).map_err(err)
 }
 
+/// Pin or unpin one assistant response. Pinned rows are listed in the bar
+/// under the chat header so the user can jump back to them. Display only —
+/// pinning doesn't change what reaches the model.
+#[tauri::command]
+pub async fn pin_message(
+    state: State<'_, AppState>,
+    id: String,
+    session_id: String,
+    pinned: bool,
+) -> Result<(), String> {
+    state.db.pin_message(&id, &session_id, pinned).map_err(err)
+}
+
 #[tauri::command]
 pub async fn clear_session_messages(
     state: State<'_, AppState>,
@@ -434,6 +528,7 @@ const WRITABLE_SETTING_KEYS: &[&str] = &[
     "background_style",
     "font_size",
     "ollama_base_url",
+    "ollama_auto_launch",
     "openai_base_url",
     "global_system_prompt",
     "default_provider",
@@ -448,6 +543,7 @@ const WRITABLE_SETTING_KEYS: &[&str] = &[
     "thinking_default",
     "default_tone_id",
     "onboarding_completed",
+    "auto_check_updates",
 ];
 
 /// Whether `key` is a setting the app is allowed to write. Built-in tool
@@ -607,6 +703,14 @@ pub async fn ollama_probe(state: State<'_, AppState>, base_url: String) -> Resul
     Ok(providers::ollama::probe(&state.http, &base_url).await)
 }
 
+/// Make sure a local Ollama is running, launching `ollama serve` if it
+/// isn't. Resolves once the server answers; the error string is written to
+/// be shown to the user verbatim.
+#[tauri::command]
+pub async fn ollama_start(state: State<'_, AppState>, base_url: String) -> Result<(), String> {
+    crate::ollama_launch::start(&state.http, &base_url).await
+}
+
 #[tauri::command]
 pub async fn ollama_list_models(
     state: State<'_, AppState>,
@@ -721,10 +825,23 @@ pub async fn ollama_pull_model(
     let http = state.http.clone();
     let registry = state.streams.clone();
     let sid = stream_id.clone();
+    // Register the cancel Notify SYNCHRONOUSLY, before spawning — same
+    // reasoning as `chat_stream`. Registering inside the worker meant an
+    // `admin_cancel` arriving during task scheduling or the pre-flight DNS
+    // resolution hit an empty registry and was silently discarded, leaving
+    // the pull running with no way to stop it.
+    let cancel = registry.register(sid.clone());
     tauri::async_runtime::spawn(async move {
-        if let Err(e) =
-            providers::ollama::pull_model(app, http, registry, &args.base_url, &args.name, sid)
-                .await
+        if let Err(e) = providers::ollama::pull_model(
+            app,
+            http,
+            registry,
+            &args.base_url,
+            &args.name,
+            sid,
+            cancel,
+        )
+        .await
         {
             tracing::warn!("ollama pull ended with error: {e:?}");
         }
@@ -754,6 +871,8 @@ pub async fn ollama_create_model(
     let http = state.http.clone();
     let registry = state.streams.clone();
     let sid = stream_id.clone();
+    // Registered before the spawn for the same reason as `ollama_pull_model`.
+    let cancel = registry.register(sid.clone());
     tauri::async_runtime::spawn(async move {
         if let Err(e) = providers::ollama::create_model(
             app,
@@ -763,6 +882,7 @@ pub async fn ollama_create_model(
             &args.name,
             &args.modelfile,
             sid,
+            cancel,
         )
         .await
         {
@@ -1335,15 +1455,42 @@ fn is_valid_header_value(value: &str) -> bool {
 /// previous version only checked literal IPs, so `evil.example.com` →
 /// `10.0.0.1` slipped through and the request was sent against the
 /// internal address with whatever auth headers the user configured.
+/// Why a server row failed validation. Everything except an unanswerable
+/// DNS query is a `Rejected`; the split exists so snapshot import can keep a
+/// backup that merely references an unreachable host (see stage 2 of
+/// `import_data_with_dialog`) while still refusing a tampered one.
+/// `Display` — and the `From` below, which keeps `?` working in the
+/// `Result<_, String>` commands — reproduce the original messages verbatim.
+#[derive(Debug)]
+pub(crate) enum McpImportRejection {
+    Rejected(String),
+    Unscreenable(String),
+}
+
+impl std::fmt::Display for McpImportRejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Rejected(m) | Self::Unscreenable(m) => f.write_str(m),
+        }
+    }
+}
+
+impl From<McpImportRejection> for String {
+    fn from(e: McpImportRejection) -> Self {
+        e.to_string()
+    }
+}
+
 async fn validate_mcp_input(
     input: &McpServerInput,
-) -> Result<Vec<std::net::SocketAddr>, String> {
+) -> Result<Vec<std::net::SocketAddr>, McpImportRejection> {
+    use McpImportRejection::{Rejected, Unscreenable};
     if input.name.trim().is_empty() {
-        return Err("server name is required".into());
+        return Err(Rejected("server name is required".into()));
     }
     let raw_url = input.url.trim();
     if raw_url.is_empty() {
-        return Err("server URL is required".into());
+        return Err(Rejected("server URL is required".into()));
     }
 
     // Scheme + host validation. We refuse anything that isn't http/https and
@@ -1354,10 +1501,14 @@ async fn validate_mcp_input(
     // header smuggled in by a compromised renderer still can't be aimed at the
     // cloud-metadata service.
     let parsed = reqwest::Url::parse(raw_url)
-        .map_err(|e| format!("Invalid MCP server URL: {e}"))?;
+        .map_err(|e| Rejected(format!("Invalid MCP server URL: {e}")))?;
     match parsed.scheme() {
         "http" | "https" => {}
-        other => return Err(format!("MCP server URL must be http or https (got `{other}`)")),
+        other => {
+            return Err(Rejected(format!(
+                "MCP server URL must be http or https (got `{other}`)"
+            )))
+        }
     }
 
     // Resolve + screen the host: literal IPs are rejected only if link-local,
@@ -1367,7 +1518,14 @@ async fn validate_mcp_input(
     // from public to link-local between validate and dial.
     let resolved = crate::tools::fetch_url::resolve_lan_addrs(&parsed)
         .await
-        .map_err(|e| format!("MCP server URL rejected: {e}"))?;
+        .map_err(|e| {
+            let msg = format!("MCP server URL rejected: {e}");
+            match e {
+                // DNS didn't answer, so the host was never actually screened.
+                crate::tools::fetch_url::HostScreenError::Unresolvable(_) => Unscreenable(msg),
+                _ => Rejected(msg),
+            }
+        })?;
 
     // Header k/v validation. We do NOT call out to the network here, so the
     // only protection we can offer is structural: reject names / values
@@ -1376,21 +1534,21 @@ async fn validate_mcp_input(
     if let Some(headers) = input.headers.as_ref() {
         const MAX_HEADERS: usize = 16;
         if headers.len() > MAX_HEADERS {
-            return Err(format!(
+            return Err(Rejected(format!(
                 "Too many MCP server headers ({}); max {MAX_HEADERS}.",
                 headers.len()
-            ));
+            )));
         }
         for (k, v) in headers.iter() {
             if !is_valid_header_name(k) {
-                return Err(format!(
+                return Err(Rejected(format!(
                     "Invalid MCP header name `{k}`. Allowed: letters, digits, and `!#$%&'*+-.^_`|~`."
-                ));
+                )));
             }
             if !is_valid_header_value(v) {
-                return Err(format!(
+                return Err(Rejected(format!(
                     "Invalid value for header `{k}`. Header values must be printable ASCII without CR/LF and ≤4096 bytes."
-                ));
+                )));
             }
         }
     }
@@ -1777,8 +1935,19 @@ pub async fn save_binary_to_file(
 /// forward-compat knob — `import_data_with_dialog` rejects anything else.
 #[tauri::command]
 pub async fn export_data_json(state: State<'_, AppState>) -> Result<String, String> {
-    let snap = state.db.snapshot().map_err(err)?;
-    serde_json::to_string_pretty(&snap).map_err(err)
+    // `snapshot()` reads every table (messages and space files carry inlined
+    // base64 bodies) under the DB lock, and the pretty-print doubles that in
+    // memory — both CPU-bound and both blocking. The import counterpart is
+    // already on the blocking pool for exactly this reason; the export half
+    // wasn't, so a large attachment-heavy database stalled a runtime worker
+    // and queued every other command behind it.
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || -> Result<String, String> {
+        let snap = db.snapshot().map_err(err)?;
+        serde_json::to_string_pretty(&snap).map_err(err)
+    })
+    .await
+    .map_err(|e| format!("export task panicked: {e}"))?
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -1805,8 +1974,20 @@ pub async fn import_data_with_dialog(
     use tauri_plugin_dialog::DialogExt;
 
     let auth = auth.unwrap_or_default();
-    security::require_unlocked(auth.pin.as_deref(), auth.password.as_deref())
+    // argon2id at m=64 MiB / t=3 plus a keyring read — 100-250 ms of pinned
+    // CPU and a possible DBus round-trip. The `security_*` commands offload
+    // this for the stated reason that "a slow unlock attempt can stall every
+    // other in-flight command"; the destructive paths were the exception.
+    {
+        let pin = auth.pin.clone();
+        let password = auth.password.clone();
+        tokio::task::spawn_blocking(move || {
+            security::require_unlocked(pin.as_deref(), password.as_deref())
+        })
+        .await
+        .map_err(|e| format!("unlock check panicked: {e}"))?
         .map_err(err)?;
+    }
 
     let path_opt = tauri::async_runtime::spawn_blocking(move || {
         app.dialog()
@@ -1853,7 +2034,8 @@ pub async fn import_data_with_dialog(
     // each here using the same async validator (DNS lookup + headers
     // structural check) so the user can't shoot themselves in the foot by
     // importing a tampered file.
-    for (idx, row) in snap.data.mcp_servers.iter().enumerate() {
+    let mut quarantined: Vec<String> = Vec::new();
+    for (idx, row) in snap.data.mcp_servers.iter_mut().enumerate() {
         let parsed_headers: Option<std::collections::HashMap<String, String>> =
             match row.headers_json.as_deref() {
                 Some(s) if !s.trim().is_empty() => serde_json::from_str(s).map_err(|e| {
@@ -1872,13 +2054,59 @@ pub async fn import_data_with_dialog(
             headers: parsed_headers,
             enabled: Some(row.enabled),
         };
-        validate_mcp_input(&synthetic).await.map_err(|e| {
-            format!(
-                "import rejected: MCP server #{} ({}): {e}",
-                idx + 1,
-                row.name
-            )
+        match validate_mcp_input(&synthetic).await {
+            Ok(_) => {}
+            // The host couldn't be screened because DNS didn't answer — the
+            // machine is offline, off the VPN, or the box has since been
+            // decommissioned. That says nothing about whether the row is
+            // hostile, and refusing the whole snapshot over it meant one
+            // stale integration could cost the user every chat, space and
+            // snippet in their backup. Keep the row but force it disabled:
+            // nothing connects to it until the user re-saves it, which runs
+            // the full validator on the normal path.
+            Err(McpImportRejection::Unscreenable(msg)) => {
+                row.enabled = false;
+                quarantined.push(format!("{} ({msg})", row.name));
+            }
+            // Positively identified as link-local, or structurally bad.
+            // Still a hard reject: this is the tampered-export case the
+            // re-validation exists to catch.
+            Err(McpImportRejection::Rejected(msg)) => {
+                return Err(format!(
+                    "import rejected: MCP server #{} ({}): {msg}",
+                    idx + 1,
+                    row.name
+                ));
+            }
+        }
+    }
+    // Stage 2.6 — screen message roles and session providers. `append_message`
+    // and `import_messages` both run `validate_role`, precisely so a crafted
+    // row can't store an arbitrary role that the chat-history builder then
+    // forwards to the provider — but `restore_snapshot` inserts `m.role`
+    // verbatim, which re-opens exactly that door for a hand-edited export.
+    for (idx, m) in snap.data.messages.iter().enumerate() {
+        validate_role(&m.role).map_err(|e| {
+            format!("import rejected: message #{} ({}): {e}", idx + 1, m.id)
         })?;
+    }
+    for (idx, s) in snap.data.sessions.iter().enumerate() {
+        if s.provider != "ollama" && s.provider != "openai" {
+            return Err(format!(
+                "import rejected: chat #{} ({}) has unknown provider `{}`",
+                idx + 1,
+                s.title,
+                s.provider
+            ));
+        }
+    }
+
+    if !quarantined.is_empty() {
+        tracing::warn!(
+            "import: {} MCP server(s) could not be screened and were imported disabled: {}",
+            quarantined.len(),
+            quarantined.join(", ")
+        );
     }
 
     // Stage 2.5 — filter imported settings through the SAME allowlist
@@ -1953,8 +2181,20 @@ pub async fn wipe_user_data(
     auth: Option<DestructiveAuthArgs>,
 ) -> Result<(), String> {
     let auth = auth.unwrap_or_default();
-    security::require_unlocked(auth.pin.as_deref(), auth.password.as_deref())
+    // argon2id at m=64 MiB / t=3 plus a keyring read — 100-250 ms of pinned
+    // CPU and a possible DBus round-trip. The `security_*` commands offload
+    // this for the stated reason that "a slow unlock attempt can stall every
+    // other in-flight command"; the destructive paths were the exception.
+    {
+        let pin = auth.pin.clone();
+        let password = auth.password.clone();
+        tokio::task::spawn_blocking(move || {
+            security::require_unlocked(pin.as_deref(), password.as_deref())
+        })
+        .await
+        .map_err(|e| format!("unlock check panicked: {e}"))?
         .map_err(err)?;
+    }
     state.db.wipe_user_data().map_err(err)
 }
 
@@ -1973,18 +2213,34 @@ pub async fn factory_reset(
     auth: Option<DestructiveAuthArgs>,
 ) -> Result<(), String> {
     let auth = auth.unwrap_or_default();
-    security::require_unlocked(auth.pin.as_deref(), auth.password.as_deref())
+    // argon2id at m=64 MiB / t=3 plus a keyring read — 100-250 ms of pinned
+    // CPU and a possible DBus round-trip. The `security_*` commands offload
+    // this for the stated reason that "a slow unlock attempt can stall every
+    // other in-flight command"; the destructive paths were the exception.
+    {
+        let pin = auth.pin.clone();
+        let password = auth.password.clone();
+        tokio::task::spawn_blocking(move || {
+            security::require_unlocked(pin.as_deref(), password.as_deref())
+        })
+        .await
+        .map_err(|e| format!("unlock check panicked: {e}"))?
         .map_err(err)?;
+    }
     state.db.wipe_all().map_err(err)?;
     // Best-effort: if the user never had a key we silently ignore the
     // NoEntry branch inside `clear_openai_key`. A hard failure here
-    // (keyring daemon dead, etc.) shouldn't undo the DB wipe.
-    if let Err(e) = secrets::clear_openai_key() {
-        tracing::warn!("clear_openai_key during factory_reset failed: {e:?}");
-    }
-    if let Err(e) = security::clear() {
-        tracing::warn!("security::clear during factory_reset failed: {e:?}");
-    }
+    // (keyring daemon dead, etc.) shouldn't undo the DB wipe. Both are
+    // blocking keyring calls, so they go to the blocking pool too.
+    let _ = tokio::task::spawn_blocking(|| {
+        if let Err(e) = secrets::clear_openai_key() {
+            tracing::warn!("clear_openai_key during factory_reset failed: {e:?}");
+        }
+        if let Err(e) = security::clear() {
+            tracing::warn!("security::clear during factory_reset failed: {e:?}");
+        }
+    })
+    .await;
     Ok(())
 }
 
@@ -1998,7 +2254,17 @@ pub async fn factory_reset(
 // keeps generating.
 
 #[tauri::command]
-pub fn open_in_vscode(code: String, filename: String) -> Result<(), String> {
+pub async fn open_in_vscode(code: String, filename: String) -> Result<(), String> {
+    // Everything below is blocking — `create_dir_all`, a file write, and on
+    // Windows a spawn-and-wait `where code` PATH scan. Running it inline on
+    // the main thread visibly hitched the UI for as long as a cold PATH scan
+    // took.
+    tokio::task::spawn_blocking(move || open_in_vscode_blocking(code, filename))
+        .await
+        .map_err(|e| format!("editor task panicked: {e}"))?
+}
+
+fn open_in_vscode_blocking(code: String, filename: String) -> Result<(), String> {
     use std::io::Write;
     use std::process::Command;
 

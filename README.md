@@ -39,6 +39,7 @@ Behind a calm, beautifully crafted UI sits a rich feature set - ready when you n
 #### Providers & models
 - **Provider selection** - switch between Ollama local models and any OpenAI-compatible endpoint (OpenAI API, llama.cpp, LM Studio etc.) from the chat header.
 - **Local model management** - pull, copy, customize and delete local models from inside the app. 
+- **Start Ollama from Loach** - launch the Ollama server from the model picker when it isn't running, or have Loach start it for you at launch (opt-in).
 - **Default model selector** - pick a model new chats open with, per provider - no need to re-select on each fresh conversation.
 - **Model preloading** - optionally warm your default local model into VRAM at launch so the first message streams faster. 
 - **Per-chat parameters** - set temperature, top_k, top_p, min_p, max tokens, context length, per-chat system prompts and more. Layered over Modelfile and per-model defaults.
@@ -46,9 +47,12 @@ Behind a calm, beautifully crafted UI sits a rich feature set - ready when you n
 
 #### Organizing chats & content
 - **Spaces** - group chats around a project, with shared instructions, reference files and memory. 
+- **Chat folders** - drag one chat onto another in the sidebar to group them into a named folder.
+- **Chat labels** - tag a chat with a colour that shows as a dot in the sidebar, Space view and chat menus.
 - **Snippets** - save reusable prompts with an optional pinned model and click `Run` to start a fresh chat pre-filled and ready to send.
 - **Custom snippet variables** - parameterize snippets with static globals and prompt-on-use placeholders that fill in when you run them.
 - **Fork chats** - branch any conversation into a new copy that links back to its source.
+- **Pinned responses** - pin any reply and jump straight back to it from a bar under the chat header.
 - **Private chats** - an ephemeral chat that writes nothing to disk and wipes its transcript the moment you close it; open it from the ghost icon in the title bar.
 - **Chat archive** - move chats out of the sidebar without deleting them; restore or delete them from dedicated archive view.
 - **Search** - search across chats, spaces and snippets, plus a browser-style in-chat finder with phrase highlighting.
@@ -69,12 +73,13 @@ Behind a calm, beautifully crafted UI sits a rich feature set - ready when you n
 #### Viewing content
 - **Code canvas** - open any code block in a wider view that's resizable and updates live as the model streams, with copy, export and Open in VS Code actions.
 - **Attachment previews** - click an attachment to open the right viewer: image lightbox, multi-page PDF preview, code canvas, or a file-info card with Save.
+- **Share a message** - copy any message as text or as a rendered chat-bubble image, save the image as a PNG, or open a pre-filled post on Facebook, X, Reddit or LinkedIn.
 
 #### App, data & updates 
 - **Data management** - make backups of your content to JSON file, restore data or permanently delete it with a few clicks. 
 - **App lock** - optional PIN, password or PIN + password gate at launch; credentials are hashed and stored in OS credential manager.
 - **Themes** - glassy, gradient Aurora or flat Solid, both available in Dark and Light variants.
-- **OTA updates** - get new features, bug fixes, performance improvements and security patches directly from the app.
+- **OTA updates** - get new features, bug fixes, performance improvements and security patches directly from the app, with an opt-in check at launch that tells you when a new version is out.
 
 ...and more! 
 
@@ -168,6 +173,8 @@ ollama pull gemma4:e4b      # or any other tag
 
 Loach probes `http://localhost:11434` on launch. Pulled models appear in the chat header dropdown automatically; the **Models** library tab also lets you pull new tags and customise existing ones from inside the app.
 
+You don't have to run `ollama serve` yourself either - when nothing is answering, the model picker offers a **Start Ollama** button, and **Settings → Providers** can start it automatically every time Loach opens.
+
 ### Using with OpenAI-compatible endpoints
 
 Open **Settings → Providers**, paste your API key (stored safely in your OS credential manager), and point the base URL to any compatible endpoint:
@@ -210,7 +217,7 @@ Only one OpenAI-compatible endpoint is active at a time — switch the base URL 
 
 | What | Where |
 |---|---|
-| Chats, messages, spaces, snippets, snippet variables, MCP servers, app settings | SQLite at `<app-data-dir>/loach.db` |
+| Chats, messages, folders, spaces, snippets, snippet variables, MCP servers, app settings | SQLite at `<app-data-dir>/loach.db` |
 | OpenAI API key | OS credential manager (Windows Credential Manager / Linux Secret Service / macOS Keychain) |
 | App-lock hash + hint | OS credential manager — same store, separate entry |
 | Attached files (images, text) | Inlined into the message at send time; no separate file store |

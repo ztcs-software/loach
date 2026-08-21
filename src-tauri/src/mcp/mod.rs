@@ -296,10 +296,97 @@ pub async fn dispatch_tool_call(
     // honest outcome is the same — let the call run, and let the server
     // itself fail naturally if the operator killed the integration mid-
     // conversation.
+    // Reuse an already-initialized session for this server when we have one.
+    // Building a fresh one per call meant every `tools/call` paid a DNS
+    // resolve, a new TLS handshake, and the two-POST `initialize` dance
+    // before doing any work — up to ten turns' worth in a single tool-heavy
+    // reply — and threw away the `Mcp-Session-Id` each time, so servers that
+    // allocate per-session state accumulated orphans.
+    let slot = session_slot(&server.id);
+    let mut pooled = slot.lock().await;
+    let fingerprint = session_fingerprint(&server);
+
+    // A config edit (URL, headers) or an aged-out entry must not be reused.
+    let reusable = pooled.as_ref().is_some_and(|p| {
+        p.fingerprint == fingerprint && p.created_at.elapsed() < SESSION_TTL
+    });
+    if !reusable {
+        *pooled = None;
+    }
+
+    if let Some(p) = pooled.as_mut() {
+        match p.session.call_tool(name, arguments).await {
+            Ok(r) => return Ok(r),
+            Err(e) => {
+                // A *pooled* session failing is the expected shape of "the
+                // server expired it while we weren't looking", so rebuild
+                // and try once — the same revalidation an HTTP client does
+                // for a stale keep-alive connection. Note a tool that merely
+                // *reports* failure comes back as `Ok` with `is_error`, so
+                // this path is transport-level only and can't double-run a
+                // tool that already answered.
+                tracing::debug!(
+                    "MCP: pooled session for `{}` failed ({e:#}) — re-handshaking once",
+                    server.name
+                );
+                *pooled = None;
+            }
+        }
+    }
+
     let (http, _) = pin_client_for(&server).await?;
     let mut session = McpSession::new(http, &server)?;
     session.initialize().await?;
-    session.call_tool(name, arguments).await
+    let out = session.call_tool(name, arguments).await;
+    // Only pool a session that actually worked; a freshly built one that
+    // fails is a genuine failure and is never retried.
+    if out.is_ok() {
+        *pooled = Some(PooledSession {
+            fingerprint,
+            created_at: Instant::now(),
+            session,
+        });
+    }
+    out
+}
+
+/// How long a pooled session may be reused before we re-handshake. Servers
+/// commonly expire idle sessions on their own schedule; a ceiling well under
+/// the usual timeouts keeps the failure-and-retry path rare rather than
+/// routine.
+const SESSION_TTL: Duration = Duration::from_secs(120);
+
+struct PooledSession {
+    /// Config the session was opened against. Any change to the server's URL
+    /// or headers makes the pooled entry unusable, which also means a
+    /// `mcp_save` needs no explicit invalidation hook — the next call reads
+    /// the fresh row and sees a different fingerprint.
+    fingerprint: String,
+    created_at: Instant,
+    session: McpSession,
+}
+
+/// Per-server slot. The map lock is held only long enough to clone the
+/// `Arc`, so a slow call to one server never blocks calls to another; calls
+/// to the *same* server serialize, which is what a stateful session wants.
+type SessionSlot = Arc<tokio::sync::Mutex<Option<PooledSession>>>;
+
+static SESSION_POOL: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, SessionSlot>>,
+> = std::sync::OnceLock::new();
+
+fn session_slot(server_id: &str) -> SessionSlot {
+    let pool = SESSION_POOL.get_or_init(Default::default);
+    let mut map = pool.lock().expect("MCP session pool mutex poisoned");
+    map.entry(server_id.to_string()).or_default().clone()
+}
+
+fn session_fingerprint(server: &crate::db::McpServer) -> String {
+    format!(
+        "{}\u{1f}{}",
+        server.url.trim(),
+        server.headers_json.as_deref().unwrap_or("")
+    )
 }
 
 /// Tool names exposed to the LLM must match a fairly narrow pattern —

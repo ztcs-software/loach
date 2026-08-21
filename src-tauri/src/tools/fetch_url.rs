@@ -302,18 +302,29 @@ pub(crate) async fn resolve_safe_addrs(url: &Url) -> Result<Vec<SocketAddr>, Str
 /// self-hosted server on `192.168.x.x` or `127.0.0.1` is a legitimate
 /// destination, while 169.254.169.254 never is. Pinning the returned addresses
 /// still closes the DNS-rebinding window.
-pub(crate) async fn resolve_lan_addrs(url: &Url) -> Result<Vec<SocketAddr>, String> {
+pub(crate) async fn resolve_lan_addrs(url: &Url) -> Result<Vec<SocketAddr>, HostScreenError> {
     let host = url
         .host_str()
-        .ok_or_else(|| "URL has no host".to_string())?;
+        .ok_or_else(|| HostScreenError::Invalid("URL has no host".to_string()))?;
     let port = url.port_or_known_default().unwrap_or(80);
+
+    // `host_str` keeps the brackets on an IPv6 literal (`[2606:4700::1111]`),
+    // which `IpAddr::parse` rejects — so a perfectly good public IPv6 URL fell
+    // through to `lookup_host`, which can't resolve a bracketed literal either,
+    // and failed with "DNS lookup failed". (Fails closed, so this was never an
+    // SSRF hole — just an unusable address family.) `refuse_link_local_host`
+    // in providers/mod.rs does the same strip.
+    let host = host
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(host);
 
     // Literal IP: skip DNS, just screen the address.
     if let Ok(ip) = host.parse::<IpAddr>() {
         if is_link_local(&ip) {
-            return Err(format!(
+            return Err(HostScreenError::Blocked(format!(
                 "Refusing to connect to link-local address {ip} (cloud-metadata range)"
-            ));
+            )));
         }
         return Ok(vec![SocketAddr::new(ip, port)]);
     }
@@ -322,20 +333,47 @@ pub(crate) async fn resolve_lan_addrs(url: &Url) -> Result<Vec<SocketAddr>, Stri
     // special-case — `localhost` resolves to loopback, which is allowed here.
     let addrs: Vec<SocketAddr> = lookup_host((host, port))
         .await
-        .map_err(|e| format!("DNS lookup failed for `{host}`: {e}"))?
+        .map_err(|e| HostScreenError::Unresolvable(format!("DNS lookup failed for `{host}`: {e}")))?
         .collect();
     if addrs.is_empty() {
-        return Err(format!("DNS returned no addresses for `{host}`"));
+        return Err(HostScreenError::Unresolvable(format!(
+            "DNS returned no addresses for `{host}`"
+        )));
     }
     for addr in &addrs {
         let ip = addr.ip();
         if is_link_local(&ip) {
-            return Err(format!(
+            return Err(HostScreenError::Blocked(format!(
                 "Refusing to connect to `{host}` — resolves to link-local address {ip} (cloud-metadata range)"
-            ));
+            )));
         }
     }
     Ok(addrs)
+}
+
+/// Why a host failed the screen. Callers that only report the failure can
+/// keep formatting it as a string — `Display` reproduces the exact messages
+/// this function has always produced. The distinction exists for snapshot
+/// import, which must tell "this row is hostile" apart from "this machine
+/// currently has no DNS": the first is a reason to refuse the row, the
+/// second is not a reason to throw away the user's entire backup.
+#[derive(Debug)]
+pub(crate) enum HostScreenError {
+    /// Positively identified as link-local — refuse it.
+    Blocked(String),
+    /// DNS failed or returned nothing, so the host could not be screened
+    /// either way. Says nothing about whether the host is safe.
+    Unresolvable(String),
+    /// Structurally unusable (no host at all).
+    Invalid(String),
+}
+
+impl std::fmt::Display for HostScreenError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Blocked(m) | Self::Unresolvable(m) | Self::Invalid(m) => f.write_str(m),
+        }
+    }
 }
 
 /// Build a one-shot reqwest::Client whose DNS table maps the requested host
@@ -347,7 +385,7 @@ pub(crate) fn build_pinned_client(url: &Url, addrs: &[SocketAddr]) -> Result<req
         .host_str()
         .ok_or_else(|| "URL has no host".to_string())?;
     let mut builder = reqwest::Client::builder()
-        .user_agent("Loach/0.1 (fetch_url)")
+        .user_agent(concat!("Loach/", env!("CARGO_PKG_VERSION"), " (fetch_url)"))
         // Bound the TCP connect phase. The per-request `.timeout()` only
         // covers the response, so without this a SYN to a black-holed
         // address waits for the OS retransmit budget — minutes on some
@@ -778,6 +816,11 @@ fn strip_all_tags(s: &str) -> String {
     out
 }
 
+/// How far past an `&` we look for the closing `;`. Generous next to the
+/// longest thing `decode_entities` recognises (`&#x10FFFF;`, 9 chars after
+/// the `&`) while keeping the scan per-`&` constant instead of linear.
+const MAX_ENTITY_LEN: usize = 32;
+
 fn decode_entities(s: &str) -> String {
     // Handle the common named entities plus decimal & hex numeric references.
     // Unknown entities are left as-is.
@@ -789,10 +832,23 @@ fn decode_entities(s: &str) -> String {
     let mut iter = s.char_indices().peekable();
     while let Some((i, c)) = iter.next() {
         if c == '&' {
-            // Find the matching ';' (if any) starting from this position.
-            // `s[i..]` is a fresh subslice; both `i` and `i + rel` are valid
-            // char boundaries because they came from `char_indices`.
-            if let Some(rel) = s[i + 1..].find(';') {
+            // Find the matching ';' (if any) within a BOUNDED window.
+            //
+            // Scanning `s[i + 1..]` to its end was quadratic: a page of
+            // `&`s with no `;` made every one of them walk the whole
+            // remaining body, so a hostile 5 MB document (the body cap)
+            // pinned a worker for minutes with no timeout and no cancel
+            // path. Every entity this function decodes is short — the
+            // longest named one is `&hellip;` and the longest numeric is
+            // `&#x10FFFF;` — so anything past the window isn't an entity
+            // and the old scan was pure waste. `char_indices().take()`
+            // keeps the bound char-safe on multi-byte input.
+            if let Some(rel) = s[i + 1..]
+                .char_indices()
+                .take(MAX_ENTITY_LEN)
+                .find(|(_, ch)| *ch == ';')
+                .map(|(rel, _)| rel)
+            {
                 let end = i + 1 + rel; // index of the ';'
                 let name = &s[i + 1..end];
                 let replacement: Option<String> = match name {
@@ -1060,7 +1116,28 @@ mod tests {
         let err = resolve_lan_addrs(&Url::parse("http://169.254.169.254/").unwrap())
             .await
             .expect_err("link-local must be refused");
-        assert!(err.contains("169.254.169.254"), "{err}");
+        assert!(err.to_string().contains("169.254.169.254"), "{err}");
+        // …and classified as a positive block, not merely unscreenable —
+        // snapshot import keys off this to decide between refusing the whole
+        // backup and importing one row disabled.
+        assert!(
+            matches!(err, HostScreenError::Blocked(_)),
+            "link-local must classify as Blocked, got {err:?}"
+        );
+    }
+
+    /// A host DNS can't answer for is `Unresolvable`, NOT `Blocked`: nothing
+    /// was learned about it, so it must not be treated as evidence of a
+    /// hostile row. `.invalid` is reserved by RFC 2606 and never resolves.
+    #[tokio::test]
+    async fn unresolvable_host_is_distinguished_from_blocked() {
+        let err = resolve_lan_addrs(&Url::parse("http://nonexistent.invalid/mcp").unwrap())
+            .await
+            .expect_err("an unresolvable host cannot be screened");
+        assert!(
+            matches!(err, HostScreenError::Unresolvable(_)),
+            "expected Unresolvable, got {err:?}"
+        );
     }
 
     #[test]

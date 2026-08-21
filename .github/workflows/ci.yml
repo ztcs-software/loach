@@ -11,9 +11,9 @@ name: CI
 # gate release.yml — both fire on the same push-to-main event and run in
 # parallel, and release.yml drafts its release without waiting for CI (the
 # draft still needs a manual publish, which is the human backstop). The
-# actual merge gate is branch protection: mark this file's two job names
-# ("tsc + vite build + vitest", "cargo test") as required status checks
-# on `main`.
+# actual merge gate is branch protection: mark this file's four job names
+# ("tsc + vite build + vitest", "cargo test", "cargo check (windows)",
+# "cargo check (macos)") as required status checks on `main`.
 
 on:
   push:
@@ -75,4 +75,56 @@ jobs:
       # --locked: a Cargo.lock that drifted from Cargo.toml is a release
       # blocker (release.yml builds from the lockfile) — fail here instead.
       - run: cargo test --locked
+        working-directory: src-tauri
+
+  # Windows-only compile check. The `rust` job above runs on Linux, which
+  # never compiles the `#[cfg(windows)]` arms — e.g. the CREATE_NO_WINDOW
+  # flag in src/ollama_launch.rs. A mistake in one of those would pass every
+  # PR check and first fail inside release.yml's build matrix, potentially
+  # after another platform's job has already pushed the tag (which then
+  # forces the delete-tag-and-draft recovery dance). `check` rather than
+  # `test`: the point is that the platform's code compiles, and the tests
+  # themselves are platform-independent.
+  rust-windows:
+    name: cargo check (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.88.0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: cargo check --locked --all-targets
+        working-directory: src-tauri
+
+  # macOS-only compile check. Until this existed, the macOS target was built
+  # for the FIRST time inside release.yml's matrix — so a mistake in a
+  # `#[cfg(target_os = "macos")]` arm (the `open -a` launch path in
+  # commands.rs, the `icon_as_template` tray call in lib.rs) surfaced during
+  # a release, and if another leg of the matrix had already pushed the tag
+  # by then, recovery meant deleting the tag and the draft. Nobody on the
+  # team has a Mac to catch it locally either, which makes CI the only
+  # place it can be caught at all.
+  #
+  # `macos-14` is an M1 runner, so the host arch already IS
+  # aarch64-apple-darwin — the same target release.yml builds — and no
+  # `rustup target add` is needed. `check` rather than `test` for the same
+  # reason as the Windows job: the tests are platform-independent, and the
+  # question here is only whether the platform's code compiles.
+  rust-macos:
+    name: cargo check (macos)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.88.0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: cargo check --locked --all-targets
         working-directory: src-tauri

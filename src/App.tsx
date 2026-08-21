@@ -21,6 +21,7 @@ const SpaceView = lazy(() =>
 const SpacesLibrary = lazy(() =>
   import("@/components/SpacesLibrary").then((m) => ({ default: m.SpacesLibrary })),
 );
+import { ShareDialog } from "@/components/ShareDialog";
 import { SnippetDialog } from "@/components/SnippetDialog";
 import { SnippetVariableDialog } from "@/components/SnippetVariableDialog";
 import { SnippetVariableFillDialog } from "@/components/SnippetVariableFillDialog";
@@ -41,6 +42,7 @@ const CodeCanvas = lazy(() =>
   import("@/components/CodeCanvas").then((m) => ({ default: m.CodeCanvas })),
 );
 import { SearchBar } from "@/components/SearchBar";
+import { UpdateAvailableDialog } from "@/components/UpdateAvailableDialog";
 import { PrivateChat } from "@/components/PrivateChat";
 import { KeyboardShortcuts } from "@/components/KeyboardShortcuts";
 import { ToastHost } from "@/components/ToastHost";
@@ -51,7 +53,8 @@ import { SquarePen } from "lucide-react";
 import { resolveDefaultModelChoice, useChatStore } from "@/stores/chatStore";
 import { useModelsStore } from "@/stores/modelsStore";
 import { useSettingsStore } from "@/stores/settingsStore";
-import { ollamaPreloadModel } from "@/lib/tauri";
+import { ollamaPreloadModel, ollamaStart } from "@/lib/tauri";
+import { logger } from "@/lib/logger";
 import { useSnippetStore } from "@/stores/snippetStore";
 import { useSnippetVarStore } from "@/stores/snippetVarStore";
 import { useSpaceStore } from "@/stores/spaceStore";
@@ -92,6 +95,16 @@ export default function App() {
     s.activeSessionId
       ? (s.messages[s.activeSessionId]?.length ?? 0) > 0
       : false,
+  );
+  // "Not loaded yet" is NOT the same as "empty". Under lazy hydration a
+  // chat's transcript is `undefined` until `selectSession` fetches it, and
+  // collapsing that into `hasMessages === false` rendered the new-chat hero
+  // over a conversation that has messages — for the whole load on an
+  // attachment-heavy chat, and permanently whenever something activates a
+  // session without loading it. A primitive again, so the selector still
+  // bails on identity.
+  const transcriptLoaded = useChatStore((s) =>
+    s.activeSessionId ? s.messages[s.activeSessionId] !== undefined : true,
   );
   // True only during the post-unlock hydrate window. Lets us swap the
   // "No chat open" CTA for a loading skeleton so users with chats on disk
@@ -143,13 +156,38 @@ export default function App() {
     // so its latency never blocks anything the user sees.
     void hydrateModels();
 
+    // Optional Ollama auto-launch. Starts `ollama serve` if nothing is
+    // answering, so a user who lives in Loach doesn't have to keep the
+    // daemon running themselves. Resolves in the same tick when the setting
+    // is off, so nobody who hasn't opted in pays for the extra probe.
+    //
+    // Failures stay in the log rather than a startup toast: the model picker
+    // already shows "Not running" with a Start Ollama button that surfaces
+    // the same error on demand, which is a better place to see it than a
+    // banner over a cold app.
+    const ollamaReady = settingsP.then(async () => {
+      const s = useSettingsStore.getState();
+      if (!s.ollama_auto_launch) return;
+      try {
+        await ollamaStart(s.ollama_base_url);
+      } catch (e) {
+        logger.warn("ollama auto-launch failed", e);
+        return;
+      }
+      // `hydrateModels` above raced the launch and listed an empty catalog.
+      // Redo it now that there's a server to ask.
+      void useModelsStore.getState().refresh();
+    });
+
     // Optional default-model preload. Resolves the same encoded choice
     // that "New chat" would use, then warms the model into VRAM with an
     // empty Ollama chat so the first real request skips the cold load.
     // Cloud providers have no local load step, so we only fire for Ollama.
     // Fully fire-and-forget — Ollama may be unreachable or the model
-    // missing; we never want this to surface as an error.
-    void Promise.all([settingsP, chatsP]).then(() => {
+    // missing; we never want this to surface as an error. Waits on
+    // `ollamaReady` so an auto-launched server is up before we try to warm
+    // a model in it; that promise is a no-op when auto-launch is off.
+    void Promise.all([settingsP, chatsP, ollamaReady]).then(() => {
       const s = useSettingsStore.getState();
       if (!s.default_model_preload) return;
       const resolved = resolveDefaultModelChoice(
@@ -292,6 +330,9 @@ export default function App() {
                     // haven't loaded yet. The skeleton avoids telling them
                     // they have no chats when they actually do.
                     chatsHydrated ? <NoChatState /> : <ChatLoadingSkeleton />
+                  ) : !transcriptLoaded ? (
+                    // Session picked, transcript still in flight.
+                    <ChatLoadingSkeleton />
                   ) : hasMessages ? (
                     <>
                       <ChatCanvas />
@@ -335,6 +376,9 @@ export default function App() {
         <ErrorBoundary name="Snippet editor">
           <SnippetDialog />
         </ErrorBoundary>
+        <ErrorBoundary name="Share message">
+          <ShareDialog />
+        </ErrorBoundary>
         <ErrorBoundary name="Snippet variable editor">
           <SnippetVariableDialog />
         </ErrorBoundary>
@@ -371,6 +415,16 @@ export default function App() {
           title bar; opening it is also what cancels any running regular
           chat (see TitleBar.openPrivateChat). */}
       {!showLock && !showOnboarding && <PrivateChat />}
+      {/* Launch-time "Update available" notice. Behind the same gates as the
+          surfaces above — a modal about updates shouldn't land on top of the
+          lock screen or interrupt first-run onboarding. Renders nothing
+          unless the `auto_check_updates` setting is on AND the check finds a
+          newer release. */}
+      {!showLock && !showOnboarding && (
+        <ErrorBoundary name="Update notice">
+          <UpdateAvailableDialog />
+        </ErrorBoundary>
+      )}
       {/* Global toast host. Mounted unconditionally so messages from any
           surface (including the lock screen path, in the future) land in a
           predictable spot. Renders nothing when no toasts are queued. */}

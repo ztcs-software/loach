@@ -11,11 +11,13 @@ import {
   Copy,
   FileText,
   GitFork,
+  Loader2,
   MessageSquare,
   MoreHorizontal,
   Pencil,
   Pin,
   PinOff,
+  Play,
   RefreshCw,
   Search,
   Sliders,
@@ -40,9 +42,12 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { ChatLabelSubmenu } from "@/components/ChatLabelMenu";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { useChatStore } from "@/stores/chatStore";
+import { useModelsStore } from "@/stores/modelsStore";
 import { useSettingsStore } from "@/stores/settingsStore";
+import { useToastStore } from "@/stores/toastStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useUIStore } from "@/stores/uiStore";
 import { cn } from "@/lib/utils";
@@ -50,6 +55,7 @@ import {
   exportSession,
   ollamaListModels,
   ollamaProbe,
+  ollamaStart,
   openaiListModels,
 } from "@/lib/tauri";
 import { EyeOff, Layers } from "lucide-react";
@@ -67,6 +73,7 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
   // truthful without our help.
   const renameSession = useChatStore((s) => s.rename);
   const pinSession = useChatStore((s) => s.pin);
+  const setChatLabel = useChatStore((s) => s.setLabel);
   const archiveSession = useChatStore((s) => s.archive);
   const removeSession = useChatStore((s) => s.remove);
   const forkChat = useChatStore((s) => s.fork);
@@ -315,7 +322,16 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
       // can copy again if needed without reopening the dialog.
       window.setTimeout(() => setCopied(false), 1500);
     } catch (e) {
+      // Don't swallow it. The message kebab's `writeClipboard` was built to
+      // toast on exactly this failure — "the user pressed Copy, nothing
+      // happened, no feedback" — and this dialog quietly reintroduced the
+      // pattern that fix removed.
       logger.warn("clipboard write failed", e);
+      useToastStore.getState().push({
+        kind: "error",
+        title: "Couldn't copy",
+        body: "Clipboard isn't available in this window.",
+      });
     }
   };
 
@@ -352,6 +368,31 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
     if (!settingsHydrated) return;
     refresh();
   }, [settingsHydrated, refresh]);
+
+  /** Launch a local Ollama from the picker. Independent of the
+   *  `ollama_auto_launch` setting — that one only governs whether we do this
+   *  unprompted at startup. `ollamaStart` resolves once the server actually
+   *  answers, so by the time we re-`refresh()` the model list is there.
+   *  Failures (no Ollama installed, remote base URL) land inline under the
+   *  button rather than in a toast, since the menu is already open and open
+   *  menus swallow the toast's z-order anyway. */
+  const [starting, setStarting] = useState(false);
+  const [startError, setStartError] = useState<string | null>(null);
+  const startOllama = async () => {
+    setStarting(true);
+    setStartError(null);
+    try {
+      await ollamaStart(ollamaBaseUrl);
+      await refresh();
+      // The Models panel keeps its own catalog; without this it would still
+      // be showing the "Ollama unreachable" error from before the launch.
+      void useModelsStore.getState().refresh();
+    } catch (e) {
+      setStartError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setStarting(false);
+    }
+  };
 
   // Display provider name in its canonical brand-cased form; the underlying
   // `session.provider` value is the lower-case id.
@@ -464,6 +505,34 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
                 {ollamaUp ? "No models installed" : "Not running"}
               </DropdownMenuItem>
             )}
+            {/* `=== false` rather than `!ollamaUp`: the probe starts as null
+                and we don't want the button flickering in before we know. */}
+            {ollamaUp === false && (
+              <>
+                <DropdownMenuItem
+                  disabled={starting}
+                  // Keep the menu open across the launch so the user sees the
+                  // spinner turn into their model list (or an error).
+                  onSelect={(e) => {
+                    e.preventDefault();
+                    void startOllama();
+                  }}
+                  className="gap-1.5"
+                >
+                  {starting ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Play className="h-3.5 w-3.5" />
+                  )}
+                  {starting ? "Starting Ollama…" : "Start Ollama"}
+                </DropdownMenuItem>
+                {startError && (
+                  <p className="px-2 pb-1 text-[11px] text-destructive">
+                    {startError}
+                  </p>
+                )}
+              </>
+            )}
             {ollamaModels.map((m) => (
               <DropdownMenuItem key={`ollama:${m.id}`} onSelect={() => select("ollama", m.id)}>
                 {m.label}
@@ -546,6 +615,13 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
                 </>
               )}
             </DropdownMenuItem>
+            <ChatLabelSubmenu
+              value={session?.label ?? null}
+              onSelect={(label) => {
+                if (session) void setChatLabel(session.id, label);
+              }}
+              iconClassName="mr-2 h-4 w-4"
+            />
             <DropdownMenuItem onSelect={startRename}>
               <Pencil className="mr-2 h-4 w-4" />
               Rename

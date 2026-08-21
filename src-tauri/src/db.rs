@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::time::Duration;
 // `parking_lot::Mutex` instead of `std::sync::Mutex` for two reasons:
 //   1. No `PoisonError` to ignore on every lock — a panic inside one
 //      command (e.g. an OOM during a query) shouldn't make every
@@ -18,6 +19,14 @@ use chrono::Utc;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::{params, Connection, OptionalExtension};
+
+/// How long a connection waits for a competing writer before returning
+/// SQLITE_BUSY. Nothing prevents a second Loach process opening the same
+/// file, and SQLite defaults to no busy handler at all — so without this a
+/// concurrent write fails instantly, which at boot means `migrate()` errors
+/// into the fatal-setup dialog over a collision that would have cleared in
+/// milliseconds.
+const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -57,6 +66,29 @@ pub struct Session {
     /// source clears the link so the fork survives on its own.
     #[serde(default)]
     pub forked_from_session_id: Option<String>,
+    /// Colour marker shown as a dot at the start of the chat row. Null = no
+    /// label. Stores the palette *id* (`"red"`, `"blue"`, …) defined in
+    /// `src/lib/labels.ts`, not a colour, so the palette can be retuned
+    /// without a data migration. Nothing keys off it — it's purely visual.
+    #[serde(default)]
+    pub label: Option<String>,
+    /// Folder this chat is filed under, or null for a loose chat. FK uses
+    /// ON DELETE SET NULL so deleting a folder returns its chats to the
+    /// date-grouped list instead of taking them with it.
+    #[serde(default)]
+    pub folder_id: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// A user-named bucket of chats, created by dragging one sidebar chat onto
+/// another. Purely an organisational container — it carries no prompt,
+/// model, or context of its own (that's what a `Space` is for), so the only
+/// thing stored is the name.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct Folder {
+    pub id: String,
+    pub name: String,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -242,6 +274,12 @@ pub struct Message {
     /// display only.
     #[serde(default)]
     pub import_hidden: bool,
+    /// Non-null = the user pinned this response at this ms-timestamp. Pinned
+    /// assistant messages are listed in a bar under the chat header so they
+    /// can be jumped back to. Display only — a pinned message reaches the
+    /// model exactly like any other.
+    #[serde(default)]
+    pub pinned_at: Option<i64>,
     pub created_at: i64,
 }
 
@@ -265,6 +303,12 @@ impl Database {
         // opens its first connection.
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
+        // SQLite's default busy handler is *none*: a second Loach process
+        // (nothing stops one — there's no single-instance plugin) writing
+        // concurrently gets SQLITE_BUSY instantly rather than waiting. At
+        // boot that surfaces as the fatal "migration failed" dialog for what
+        // is really a transient collision.
+        conn.busy_timeout(BUSY_TIMEOUT)?;
         // Performance pragmas. All are durability-safe in combination with
         // WAL: `synchronous=NORMAL` keeps crash safety for the database (only
         // weakens the guarantee about the very last commit on power loss),
@@ -286,6 +330,9 @@ impl Database {
         // concurrency, and each connection holds its own mmap window.
         let manager = SqliteConnectionManager::file(path).with_init(|c| {
             apply_perf_pragmas(c);
+            // Readers wait for a writer's commit instead of erroring out —
+            // same reasoning as the writer connection above.
+            let _ = c.busy_timeout(BUSY_TIMEOUT);
             // Must run AFTER the perf pragmas. Pragmas like cache_size /
             // mmap_size aren't "writes" so query_only doesn't reject them,
             // but applying them first keeps the call order obvious if a
@@ -339,6 +386,15 @@ impl Database {
                 model TEXT NOT NULL,
                 system_prompt TEXT,
                 params_json TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            -- Chat folders. Created by dropping one sidebar chat onto
+            -- another; membership lives in `sessions.folder_id`. Flat by
+            -- design — there's no parent_id, so folders never nest.
+            CREATE TABLE IF NOT EXISTS folders (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL
             );
@@ -426,16 +482,34 @@ impl Database {
         // and on a false negative triggers a duplicate `ADD COLUMN` that
         // hard-fails the whole migrate. `table_info` returns rows we can
         // search authoritatively.
+        // Every column below is probed and added INDIVIDUALLY, and the
+        // indexes are created unconditionally afterwards.
+        //
+        // Batching several `ALTER TABLE ... ADD COLUMN` statements behind one
+        // column's probe was a latent brick: `execute_batch` runs each DDL in
+        // its own autocommit, so a crash (or a full disk) between two ALTERs
+        // left the schema half-applied. Depending on which column the probe
+        // watched, the next boot then either skipped the rest forever — and
+        // every SELECT naming the missing column failed at runtime — or
+        // re-ran the batch into `duplicate column name`, which fails
+        // `migrate()` on every launch with no way out but manual surgery.
+        // One probe per column makes each step independently idempotent, so
+        // an interrupted migration simply finishes on the next launch.
         if !has_column(&conn, "sessions", "space_id")? {
             conn.execute_batch(
-                "ALTER TABLE sessions ADD COLUMN space_id TEXT REFERENCES spaces(id) ON DELETE SET NULL;
-                 CREATE INDEX IF NOT EXISTS idx_sessions_space ON sessions(space_id);",
+                "ALTER TABLE sessions ADD COLUMN space_id TEXT REFERENCES spaces(id) ON DELETE SET NULL;",
             )?;
         }
 
         if !has_column(&conn, "sessions", "pinned_at")? {
             conn.execute_batch(
                 "ALTER TABLE sessions ADD COLUMN pinned_at INTEGER;",
+            )?;
+        }
+
+        if !has_column(&conn, "sessions", "label")? {
+            conn.execute_batch(
+                "ALTER TABLE sessions ADD COLUMN label TEXT;",
             )?;
         }
 
@@ -477,28 +551,37 @@ impl Database {
         // so probing one is enough. Existing rows default to "not imported"
         // (NULL group, 0 hidden).
         if !has_column(&conn, "messages", "import_group")? {
+            conn.execute_batch("ALTER TABLE messages ADD COLUMN import_group TEXT;")?;
+        }
+        if !has_column(&conn, "messages", "import_hidden")? {
             conn.execute_batch(
-                "ALTER TABLE messages ADD COLUMN import_group TEXT;
-                 ALTER TABLE messages ADD COLUMN import_hidden INTEGER NOT NULL DEFAULT 0;",
+                "ALTER TABLE messages ADD COLUMN import_hidden INTEGER NOT NULL DEFAULT 0;",
+            )?;
+        }
+
+        // `pinned_at`: ms-timestamp set when the user pins an assistant
+        // response from its right-click menu. Drives the pinned bar under
+        // the chat header. Null on every pre-existing row — nothing is
+        // pinned until the user says so.
+        if !has_column(&conn, "messages", "pinned_at")? {
+            conn.execute_batch(
+                "ALTER TABLE messages ADD COLUMN pinned_at INTEGER;",
             )?;
         }
 
         // Add provider + model columns to snippets if missing (for pinning a
         // default model to a snippet).
         if !has_column(&conn, "snippets", "provider")? {
-            conn.execute_batch(
-                "ALTER TABLE snippets ADD COLUMN provider TEXT;
-                 ALTER TABLE snippets ADD COLUMN model TEXT;",
-            )?;
+            conn.execute_batch("ALTER TABLE snippets ADD COLUMN provider TEXT;")?;
+        }
+        if !has_column(&conn, "snippets", "model")? {
+            conn.execute_batch("ALTER TABLE snippets ADD COLUMN model TEXT;")?;
         }
 
         // Add archived_at column to sessions if missing. Null = live chat;
         // otherwise the ms-timestamp the session was archived.
         if !has_column(&conn, "sessions", "archived_at")? {
-            conn.execute_batch(
-                "ALTER TABLE sessions ADD COLUMN archived_at INTEGER;
-                 CREATE INDEX IF NOT EXISTS idx_sessions_archived ON sessions(archived_at);",
-            )?;
+            conn.execute_batch("ALTER TABLE sessions ADD COLUMN archived_at INTEGER;")?;
         }
 
         // Track which chat a session was forked from. Null = a normal chat
@@ -512,15 +595,45 @@ impl Database {
             )?;
         }
 
+        // Which folder a chat is filed under. Null = a loose chat, which is
+        // every row on an existing database. ON DELETE SET NULL means
+        // deleting a folder hands its chats back to the date-grouped list
+        // rather than deleting them — the sidebar's "Delete folder" relies
+        // on that, so it never has to null the column itself.
+        if !has_column(&conn, "sessions", "folder_id")? {
+            conn.execute_batch(
+                "ALTER TABLE sessions ADD COLUMN folder_id TEXT REFERENCES folders(id) ON DELETE SET NULL;",
+            )?;
+        }
+
+        // Indexes for the columns added above. Created unconditionally rather
+        // than inside each column's probe: `IF NOT EXISTS` makes them cheap
+        // no-ops once present, and pairing them with the probe meant a crash
+        // landing between the ALTER and the CREATE INDEX left the index
+        // missing forever (the column now exists, so the guard never opens
+        // again). Runs after every `ALTER`, so the columns are all there.
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_sessions_space ON sessions(space_id);
+             CREATE INDEX IF NOT EXISTS idx_sessions_archived ON sessions(archived_at);
+             CREATE INDEX IF NOT EXISTS idx_sessions_folder ON sessions(folder_id);",
+        )?;
+
         // Add per-space default model + params columns if missing. Null =
         // "inherit from General Settings" — see the Space struct for the
         // full layering story.
+        // The probe used to sit on `default_model` while `default_provider`
+        // was added first — so an interruption between the two left a
+        // database that failed `migrate()` with `duplicate column name:
+        // default_provider` on every subsequent launch. Per-column probes
+        // repair exactly that state instead of tripping over it.
+        if !has_column(&conn, "spaces", "default_provider")? {
+            conn.execute_batch("ALTER TABLE spaces ADD COLUMN default_provider TEXT;")?;
+        }
         if !has_column(&conn, "spaces", "default_model")? {
-            conn.execute_batch(
-                "ALTER TABLE spaces ADD COLUMN default_provider TEXT;
-                 ALTER TABLE spaces ADD COLUMN default_model TEXT;
-                 ALTER TABLE spaces ADD COLUMN default_params_json TEXT;",
-            )?;
+            conn.execute_batch("ALTER TABLE spaces ADD COLUMN default_model TEXT;")?;
+        }
+        if !has_column(&conn, "spaces", "default_params_json")? {
+            conn.execute_batch("ALTER TABLE spaces ADD COLUMN default_params_json TEXT;")?;
         }
 
         // Add memory_enabled column to spaces if missing. Default ON so
@@ -593,7 +706,7 @@ impl Database {
     pub fn list_sessions(&self) -> Result<Vec<Session>> {
         self.with_read(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, title, provider, model, system_prompt, params_json, space_id, pinned_at, archived_at, forked_from_session_id, created_at, updated_at
+                "SELECT id, title, provider, model, system_prompt, params_json, space_id, pinned_at, archived_at, forked_from_session_id, label, folder_id, created_at, updated_at
                  FROM sessions ORDER BY updated_at DESC",
             )?;
             let rows = stmt
@@ -609,8 +722,10 @@ impl Database {
                         pinned_at: r.get(7)?,
                         archived_at: r.get(8)?,
                         forked_from_session_id: r.get(9)?,
-                        created_at: r.get(10)?,
-                        updated_at: r.get(11)?,
+                        label: r.get(10)?,
+                        folder_id: r.get(11)?,
+                        created_at: r.get(12)?,
+                        updated_at: r.get(13)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -645,6 +760,8 @@ impl Database {
             pinned_at: None,
             archived_at: None,
             forked_from_session_id: None,
+            label: None,
+            folder_id: None,
             created_at: now,
             updated_at: now,
         })
@@ -702,8 +819,8 @@ impl Database {
         tx.execute(
             "INSERT INTO sessions (id, title, provider, model, system_prompt, params_json,
                                    space_id, pinned_at, archived_at, forked_from_session_id,
-                                   created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, ?8, ?9, ?9)",
+                                   folder_id, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, ?8, ?9, ?10, ?10)",
             params![
                 new_id,
                 source.title,
@@ -713,6 +830,7 @@ impl Database {
                 source.params_json,
                 source.space_id,
                 source.id,
+                source.folder_id,
                 now,
             ],
         )?;
@@ -721,8 +839,8 @@ impl Database {
             let msg_id = Uuid::new_v4().to_string();
             tx.execute(
                 "INSERT INTO messages (id, session_id, role, content, thinking,
-                                       attachments_json, metrics_json, tool_calls_json, compacted_at, created_at, import_group, import_hidden)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                                       attachments_json, metrics_json, tool_calls_json, compacted_at, created_at, import_group, import_hidden, pinned_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                 params![
                     msg_id,
                     new_id,
@@ -736,6 +854,7 @@ impl Database {
                     m.created_at,
                     m.import_group,
                     m.import_hidden,
+                    m.pinned_at,
                 ],
             )?;
         }
@@ -753,6 +872,15 @@ impl Database {
             pinned_at: None,
             archived_at: None,
             forked_from_session_id: Some(source.id),
+            // A fork starts unlabelled, like it starts unpinned: the label is
+            // a manual mark on one chat, and the branch hasn't been triaged
+            // yet. The INSERT above omits the column, so the row agrees.
+            label: None,
+            // The folder, unlike the label, IS inherited — for the same
+            // reason `space_id` is. A folder is where the user filed this
+            // conversation, and a branch of it belongs in the same drawer;
+            // dropping the fork back into "Today" would make it look lost.
+            folder_id: source.folder_id,
             created_at: now,
             updated_at: now,
         })
@@ -831,6 +959,33 @@ impl Database {
         Ok(())
     }
 
+    /// Set the chat's colour label, or clear it with `None`. Deliberately
+    /// does NOT bump `updated_at` the way `pin_session` does: the sidebar is
+    /// ordered by it, and yanking a chat to the top of "Today" is the point
+    /// of pinning but not of marking it a colour.
+    pub fn update_session_label(&self, id: &str, label: Option<&str>) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "UPDATE sessions SET label = ?1 WHERE id = ?2",
+            params![label, id],
+        )?;
+        Ok(())
+    }
+
+    /// File the chat under `folder_id`, or pull it back out to the loose
+    /// list with `None`. Like `update_session_label` and unlike
+    /// `pin_session`, this deliberately leaves `updated_at` alone: chats
+    /// inside a folder are still ordered by it, and filing a chat is not a
+    /// reason to shuffle it to the top of its new drawer.
+    pub fn set_session_folder(&self, id: &str, folder_id: Option<&str>) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "UPDATE sessions SET folder_id = ?1 WHERE id = ?2",
+            params![folder_id, id],
+        )?;
+        Ok(())
+    }
+
     pub fn archive_session(&self, id: &str, archived: bool) -> Result<()> {
         let conn = self.conn.lock();
         let now = Utc::now().timestamp_millis();
@@ -858,7 +1013,7 @@ impl Database {
     pub fn get_session(&self, id: &str) -> Result<Option<Session>> {
         self.with_read(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, title, provider, model, system_prompt, params_json, space_id, pinned_at, archived_at, forked_from_session_id, created_at, updated_at
+                "SELECT id, title, provider, model, system_prompt, params_json, space_id, pinned_at, archived_at, forked_from_session_id, label, folder_id, created_at, updated_at
                  FROM sessions WHERE id = ?1",
             )?;
             let mut rows = stmt.query(params![id])?;
@@ -874,8 +1029,10 @@ impl Database {
                     pinned_at: r.get(7)?,
                     archived_at: r.get(8)?,
                     forked_from_session_id: r.get(9)?,
-                    created_at: r.get(10)?,
-                    updated_at: r.get(11)?,
+                    label: r.get(10)?,
+                    folder_id: r.get(11)?,
+                    created_at: r.get(12)?,
+                    updated_at: r.get(13)?,
                 }))
             } else {
                 Ok(None)
@@ -883,13 +1040,75 @@ impl Database {
         })
     }
 
+    // ------------ folders ------------
+
+    /// Every folder, ordered by name so the sidebar section reads like a
+    /// filing cabinet. `COLLATE NOCASE` keeps "archive" and "Archive"
+    /// adjacent instead of splitting on ASCII case.
+    pub fn list_folders(&self) -> Result<Vec<Folder>> {
+        self.with_read(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, name, created_at, updated_at
+                 FROM folders ORDER BY name COLLATE NOCASE ASC",
+            )?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok(Folder {
+                        id: r.get(0)?,
+                        name: r.get(1)?,
+                        created_at: r.get(2)?,
+                        updated_at: r.get(3)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+    }
+
+    /// Names are not unique — two folders may share one. Enforcing
+    /// uniqueness would mean rejecting the drag mid-gesture, and the user
+    /// already sees both rows in the sidebar if they do it by accident.
+    pub fn create_folder(&self, name: &str) -> Result<Folder> {
+        let id = Uuid::new_v4().to_string();
+        let now = Utc::now().timestamp_millis();
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO folders (id, name, created_at, updated_at) VALUES (?1, ?2, ?3, ?3)",
+            params![id, name, now],
+        )?;
+        Ok(Folder {
+            id,
+            name: name.to_string(),
+            created_at: now,
+            updated_at: now,
+        })
+    }
+
+    pub fn rename_folder(&self, id: &str, name: &str) -> Result<()> {
+        let now = Utc::now().timestamp_millis();
+        let conn = self.conn.lock();
+        conn.execute(
+            "UPDATE folders SET name = ?1, updated_at = ?2 WHERE id = ?3",
+            params![name, now, id],
+        )?;
+        Ok(())
+    }
+
+    /// Drop the folder. Member chats survive — `sessions.folder_id` is
+    /// ON DELETE SET NULL, so they fall back into the date-grouped list.
+    pub fn delete_folder(&self, id: &str) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute("DELETE FROM folders WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
     // ------------ messages ------------
 
     pub fn list_messages(&self, session_id: &str) -> Result<Vec<Message>> {
         self.with_read(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, session_id, role, content, thinking, attachments_json, metrics_json, tool_calls_json, compacted_at, created_at, import_group, import_hidden
-                 FROM messages WHERE session_id = ?1 ORDER BY created_at ASC",
+                "SELECT id, session_id, role, content, thinking, attachments_json, metrics_json, tool_calls_json, compacted_at, created_at, import_group, import_hidden, pinned_at
+                 FROM messages WHERE session_id = ?1 ORDER BY created_at ASC, rowid ASC",
             )?;
             let rows = stmt
                 .query_map(params![session_id], |r| {
@@ -906,6 +1125,7 @@ impl Database {
                         created_at: r.get(9)?,
                         import_group: r.get(10)?,
                         import_hidden: r.get(11)?,
+                        pinned_at: r.get(12)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -950,8 +1170,8 @@ impl Database {
             let mut conn = self.conn.lock();
             let tx = conn.transaction()?;
             tx.execute(
-                "INSERT INTO messages (id, session_id, role, content, thinking, attachments_json, metrics_json, tool_calls_json, compacted_at, created_at, import_group, import_hidden)
-                 VALUES (?1, ?2, ?3, ?4, NULL, ?5, NULL, NULL, NULL, ?6, NULL, 0)",
+                "INSERT INTO messages (id, session_id, role, content, thinking, attachments_json, metrics_json, tool_calls_json, compacted_at, created_at, import_group, import_hidden, pinned_at)
+                 VALUES (?1, ?2, ?3, ?4, NULL, ?5, NULL, NULL, NULL, ?6, NULL, 0, NULL)",
                 params![id, session_id, role, content, attachments_json, now],
             )?;
             tx.execute(
@@ -973,6 +1193,7 @@ impl Database {
             created_at: now,
             import_group: None,
             import_hidden: false,
+            pinned_at: None,
         })
     }
 
@@ -1001,8 +1222,8 @@ impl Database {
             let tx = conn.transaction()?;
             {
                 let mut stmt = tx.prepare(
-                    "INSERT INTO messages (id, session_id, role, content, thinking, attachments_json, metrics_json, tool_calls_json, compacted_at, created_at, import_group, import_hidden)
-                     VALUES (?1, ?2, ?3, ?4, NULL, NULL, NULL, NULL, NULL, ?5, ?6, ?7)",
+                    "INSERT INTO messages (id, session_id, role, content, thinking, attachments_json, metrics_json, tool_calls_json, compacted_at, created_at, import_group, import_hidden, pinned_at)
+                     VALUES (?1, ?2, ?3, ?4, NULL, NULL, NULL, NULL, NULL, ?5, ?6, ?7, NULL)",
                 )?;
                 for (i, (role, content)) in items.iter().enumerate() {
                     let id = Uuid::new_v4().to_string();
@@ -1021,6 +1242,7 @@ impl Database {
                         created_at,
                         import_group: Some(group.clone()),
                         import_hidden: hidden,
+                        pinned_at: None,
                     });
                 }
             }
@@ -1077,6 +1299,25 @@ impl Database {
             }
         }
         tx.commit()?;
+        Ok(())
+    }
+
+    /// Pin or unpin a single message — sets `pinned_at` to now, or clears
+    /// it. Scoped by `session_id` like the other single-message writes so a
+    /// leaked id can't reach across sessions. Deliberately leaves the
+    /// session's `updated_at` alone: pinning a response is a bookmark, not
+    /// activity worth reshuffling the sidebar for.
+    pub fn pin_message(&self, id: &str, session_id: &str, pinned: bool) -> Result<()> {
+        let conn = self.conn.lock();
+        let pinned_at: Option<i64> = if pinned {
+            Some(Utc::now().timestamp_millis())
+        } else {
+            None
+        };
+        conn.execute(
+            "UPDATE messages SET pinned_at = ?1 WHERE id = ?2 AND session_id = ?3",
+            params![pinned_at, id, session_id],
+        )?;
         Ok(())
     }
 
@@ -1467,7 +1708,7 @@ impl Database {
 
     /// Read every memory across every space — used by the export path.
     pub fn all_space_memories(&self) -> Result<Vec<SpaceMemory>> {
-        let conn = self.conn.lock();
+        let conn = self.read_pool.get().context("acquire read connection")?;
         let mut stmt = conn.prepare(
             "SELECT id, space_id, content, source_session_id, source_message_id,
                     created_at, updated_at
@@ -1761,7 +2002,7 @@ impl Database {
 
         match id {
             Some(id) if !id.is_empty() => {
-                conn.execute(
+                let affected = conn.execute(
                     "UPDATE mcp_servers SET name = ?1, url = ?2, headers_json = ?3,
                                              enabled = ?4, updated_at = ?5
                      WHERE id = ?6",
@@ -1774,6 +2015,16 @@ impl Database {
                         id,
                     ],
                 )?;
+                if affected == 0 {
+                    // The row is gone — deleted in another window, or the id
+                    // came from a hand-edited import. Without this check the
+                    // UPDATE quietly changed nothing and the SELECT below
+                    // failed with rusqlite's bare "Query returned no rows",
+                    // which is what the user saw as their save error.
+                    return Err(anyhow::anyhow!(
+                        "MCP server `{name}` no longer exists — it may have been deleted in another window. Add it again."
+                    ));
+                }
                 let mut stmt =
                     conn.prepare("SELECT created_at FROM mcp_servers WHERE id = ?1")?;
                 let created_at: i64 = stmt.query_row(params![id], |r| r.get(0))?;
@@ -1841,10 +2092,10 @@ impl Database {
     /// Read every message across every session. Used by the export path —
     /// callers normally fetch messages per-session.
     pub fn all_messages(&self) -> Result<Vec<Message>> {
-        let conn = self.conn.lock();
+        let conn = self.read_pool.get().context("acquire read connection")?;
         let mut stmt = conn.prepare(
-            "SELECT id, session_id, role, content, thinking, attachments_json, metrics_json, tool_calls_json, compacted_at, created_at, import_group, import_hidden
-             FROM messages ORDER BY session_id, created_at",
+            "SELECT id, session_id, role, content, thinking, attachments_json, metrics_json, tool_calls_json, compacted_at, created_at, import_group, import_hidden, pinned_at
+             FROM messages ORDER BY session_id, created_at, rowid",
         )?;
         let rows = stmt
             .query_map([], |r| {
@@ -1861,6 +2112,7 @@ impl Database {
                     created_at: r.get(9)?,
                     import_group: r.get(10)?,
                     import_hidden: r.get(11)?,
+                    pinned_at: r.get(12)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -1869,7 +2121,7 @@ impl Database {
 
     /// Read every space file across every space.
     pub fn all_space_files(&self) -> Result<Vec<SpaceFile>> {
-        let conn = self.conn.lock();
+        let conn = self.read_pool.get().context("acquire read connection")?;
         let mut stmt = conn.prepare(
             "SELECT id, space_id, name, mime, kind, data, size, position, created_at
              FROM space_files ORDER BY space_id, position",
@@ -1907,6 +2159,19 @@ impl Database {
     /// a NULL `headers_json` already (an MCP server with no auth headers
     /// is a valid configuration), so the round-trip remains valid.
     pub fn snapshot(&self) -> Result<DatabaseSnapshot> {
+        // Freeze writers for the duration. The export is assembled from
+        // eleven separate reads, and with the lock released between them a
+        // streaming flush or a session create could commit halfway through —
+        // producing a file whose `messages` reference a session absent from
+        // `sessions`. FK enforcement is off during restore, so those orphans
+        // then import silently as rows nothing displays.
+        //
+        // Every read below goes through the pool, and no pooled read takes
+        // this lock, so holding it here freezes the database without
+        // deadlocking. Export is a rare, explicit action already running on
+        // the blocking pool, so stalling writers briefly is the cheap half of
+        // the trade.
+        let _writer_frozen = self.conn.lock();
         let mcp_servers: Vec<McpServer> = self
             .list_mcp_servers()?
             .into_iter()
@@ -1921,6 +2186,7 @@ impl Database {
             loach_version: env!("CARGO_PKG_VERSION").to_string(),
             data: SnapshotData {
                 sessions: self.list_sessions()?,
+                folders: self.list_folders()?,
                 messages: self.all_messages()?,
                 spaces: self.list_spaces()?,
                 space_files: self.all_space_files()?,
@@ -1970,6 +2236,7 @@ impl Database {
             DELETE FROM space_files;
             DELETE FROM space_memories;
             DELETE FROM sessions;
+            DELETE FROM folders;
             DELETE FROM spaces;
             DELETE FROM snippet_fill_values;
             DELETE FROM snippet_variables;
@@ -1981,12 +2248,24 @@ impl Database {
 
         let d = &snap.data;
 
+        // Folders first so the sessions that follow point at rows that
+        // exist. FK enforcement is off for this transaction, so this is
+        // about the database being sane afterwards, not about the INSERT
+        // succeeding.
+        for f in &d.folders {
+            tx.execute(
+                "INSERT INTO folders (id, name, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![f.id, f.name, f.created_at, f.updated_at],
+            )?;
+        }
+
         for s in &d.sessions {
             tx.execute(
                 "INSERT INTO sessions (id, title, provider, model, system_prompt, params_json,
                                        space_id, pinned_at, archived_at, forked_from_session_id,
-                                       created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                                       label, folder_id, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
                 params![
                     s.id,
                     s.title,
@@ -1998,6 +2277,8 @@ impl Database {
                     s.pinned_at,
                     s.archived_at,
                     s.forked_from_session_id,
+                    s.label,
+                    s.folder_id,
                     s.created_at,
                     s.updated_at,
                 ],
@@ -2007,8 +2288,8 @@ impl Database {
         for m in &d.messages {
             tx.execute(
                 "INSERT INTO messages (id, session_id, role, content, thinking,
-                                       attachments_json, metrics_json, tool_calls_json, compacted_at, created_at, import_group, import_hidden)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                                       attachments_json, metrics_json, tool_calls_json, compacted_at, created_at, import_group, import_hidden, pinned_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                 params![
                     m.id,
                     m.session_id,
@@ -2022,6 +2303,7 @@ impl Database {
                     m.created_at,
                     m.import_group,
                     m.import_hidden,
+                    m.pinned_at,
                 ],
             )?;
         }
@@ -2151,6 +2433,7 @@ impl Database {
 
         let stats = ImportStats {
             sessions: d.sessions.len(),
+            folders: d.folders.len(),
             messages: d.messages.len(),
             spaces: d.spaces.len(),
             space_files: d.space_files.len(),
@@ -2222,6 +2505,7 @@ impl Database {
             DELETE FROM space_files;
             DELETE FROM space_memories;
             DELETE FROM sessions;
+            DELETE FROM folders;
             DELETE FROM spaces;
             DELETE FROM snippet_fill_values;
             DELETE FROM snippet_variables;
@@ -2261,6 +2545,7 @@ impl Database {
             DELETE FROM space_files;
             DELETE FROM space_memories;
             DELETE FROM sessions;
+            DELETE FROM folders;
             DELETE FROM spaces;
             DELETE FROM snippet_fill_values;
             DELETE FROM snippet_variables;
@@ -2287,6 +2572,10 @@ pub struct DatabaseSnapshot {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SnapshotData {
     pub sessions: Vec<Session>,
+    /// Chat folders. Empty on exports that predate the feature, in which
+    /// case every restored session's `folder_id` is already NULL too.
+    #[serde(default)]
+    pub folders: Vec<Folder>,
     pub messages: Vec<Message>,
     pub spaces: Vec<Space>,
     pub space_files: Vec<SpaceFile>,
@@ -2312,6 +2601,7 @@ pub struct SnapshotData {
 #[derive(Debug, Serialize)]
 pub struct ImportStats {
     pub sessions: usize,
+    pub folders: usize,
     pub messages: usize,
     pub spaces: usize,
     pub space_files: usize,
@@ -2390,6 +2680,63 @@ mod tests {
         db.migrate().expect("third migrate");
     }
 
+    /// A migration interrupted part-way through must be finishable on the
+    /// next launch, not fatal forever.
+    ///
+    /// `execute_batch` runs each `ALTER TABLE` in its own autocommit, so a
+    /// crash between two of them left the schema half-applied. When several
+    /// ALTERs sat behind ONE column's probe, the next boot either skipped the
+    /// rest permanently (and every SELECT naming the missing column failed)
+    /// or re-ran the batch into `duplicate column name`, failing `migrate()`
+    /// on every subsequent launch — an install with no recovery path short of
+    /// hand-editing the database. The `spaces` trio was the live example: it
+    /// probed `default_model` while adding `default_provider` first.
+    #[test]
+    fn migrate_repairs_a_half_applied_column_batch() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("loach.db");
+
+        {
+            let db = Database::open(&path).expect("open");
+            db.migrate().expect("initial migrate");
+            // Simulate the crash: rebuild `spaces` carrying only the FIRST
+            // column of the trio, exactly the state an interrupted batch
+            // leaves behind. (SQLite predating DROP COLUMN is why this goes
+            // the long way round.)
+            let conn = db.conn.lock();
+            conn.execute_batch(
+                r#"
+                DROP TABLE spaces;
+                CREATE TABLE spaces (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    description TEXT NOT NULL DEFAULT '',
+                    instructions TEXT NOT NULL DEFAULT '',
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    default_provider TEXT
+                );
+                "#,
+            )
+            .expect("simulate interrupted batch");
+        }
+
+        // The next launch must finish the job rather than trip over it.
+        let db = Database::open(&path).expect("reopen");
+        db.migrate().expect("migrate must repair a half-applied batch");
+
+        let conn = db.conn.lock();
+        for col in ["default_provider", "default_model", "default_params_json"] {
+            assert!(
+                has_column(&conn, "spaces", col).expect("probe"),
+                "`spaces.{col}` missing after repair",
+            );
+        }
+        drop(conn);
+        // And still idempotent afterwards.
+        db.migrate().expect("migrate again after repair");
+    }
+
     #[test]
     fn session_crud_roundtrip() {
         let (db, _dir) = fresh_db();
@@ -2406,6 +2753,53 @@ mod tests {
 
         db.delete_session(&s.id).expect("delete");
         assert!(db.list_sessions().unwrap().is_empty());
+    }
+
+    #[test]
+    fn session_label_roundtrips_and_leaves_updated_at_alone() {
+        let (db, _dir) = fresh_db();
+        let s = db
+            .create_session("t", "ollama", "llama3", None, None)
+            .expect("create");
+        assert_eq!(s.label, None, "new chats start unlabelled");
+
+        db.update_session_label(&s.id, Some("blue")).expect("set");
+        let listed = db.list_sessions().unwrap();
+        assert_eq!(listed[0].label.as_deref(), Some("blue"));
+        assert_eq!(
+            listed[0].updated_at, s.updated_at,
+            "labelling must not re-sort the chat list the way pinning does",
+        );
+
+        db.update_session_label(&s.id, None).expect("clear");
+        assert_eq!(db.get_session(&s.id).unwrap().unwrap().label, None);
+    }
+
+    #[test]
+    fn deleting_folder_releases_its_chats_instead_of_deleting_them() {
+        let (db, _dir) = fresh_db();
+        let s = db
+            .create_session("t", "ollama", "llama3", None, None)
+            .expect("create");
+        assert_eq!(s.folder_id, None, "new chats start outside any folder");
+
+        let f = db.create_folder("Research").expect("create folder");
+        db.set_session_folder(&s.id, Some(&f.id)).expect("file");
+        let listed = db.list_sessions().unwrap();
+        assert_eq!(listed[0].folder_id.as_deref(), Some(f.id.as_str()));
+        assert_eq!(
+            listed[0].updated_at, s.updated_at,
+            "filing a chat must not re-sort the list the way pinning does",
+        );
+
+        // ON DELETE SET NULL: the folder goes, the chat stays and falls
+        // back into the date-grouped list. A regression here would delete
+        // the user's conversations along with the folder.
+        db.delete_folder(&f.id).expect("delete folder");
+        assert!(db.list_folders().unwrap().is_empty());
+        let after = db.list_sessions().unwrap();
+        assert_eq!(after.len(), 1, "the chat survives its folder");
+        assert_eq!(after[0].folder_id, None);
     }
 
     #[test]

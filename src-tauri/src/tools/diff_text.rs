@@ -20,10 +20,17 @@ pub const TOOL_NAME: &str = "diff_text";
 /// the wall-clock cost; the byte cap just keeps memory reasonable.
 const MAX_INPUT_BYTES: usize = 512 * 1024;
 
-/// Wall-clock ceiling for `word`/`char` diffs. When the Myers algorithm
-/// can't finish in time, `similar` returns a best-effort (still valid, just
-/// possibly less minimal) diff instead of running to completion. Line diffs
-/// are cheap and don't need it.
+/// Wall-clock ceiling for every diff mode. When the Myers algorithm can't
+/// finish in time, `similar` returns a best-effort (still valid, just
+/// possibly less minimal) diff instead of running to completion.
+///
+/// Line mode needs this as much as word/char does. "Line diffs are cheap"
+/// holds for ordinary input, but two 512 KiB bodies of entirely distinct
+/// lines are ~260 K lines each, which drives Myers into the same O(N·D)
+/// wall — and `spawn_blocking` tasks cannot be aborted, so the 20 s
+/// `dispatch_builtin_guarded` timeout only frees the *caller*: the diff
+/// itself keeps burning a blocking-pool thread, and repeated calls stack
+/// those threads up with nothing to stop them.
 const DIFF_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub fn tool_description() -> &'static str {
@@ -102,7 +109,9 @@ pub fn dispatch(args: &Value) -> McpCallResult {
 }
 
 fn unified_lines(a: &str, b: &str, context: usize) -> String {
-    let diff = TextDiff::from_lines(a, b);
+    let diff = TextDiff::configure()
+        .timeout(DIFF_TIMEOUT)
+        .diff_lines(a, b);
     diff.unified_diff()
         .context_radius(context)
         .header("a", "b")

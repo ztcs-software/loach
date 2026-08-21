@@ -1,5 +1,15 @@
 export type ProviderId = "ollama" | "openai";
 
+/** Colour a chat can be marked with. The id is what's persisted — the actual
+ *  swatch colours live in `src/lib/labels.ts`. */
+export type ChatLabel =
+  | "red"
+  | "amber"
+  | "green"
+  | "blue"
+  | "purple"
+  | "pink";
+
 export interface Session {
   id: string;
   title: string;
@@ -16,6 +26,25 @@ export interface Session {
    *  back. ON DELETE SET NULL on the FK clears this if the source is
    *  deleted — the fork survives, the badge just falls off. */
   forked_from_session_id: string | null;
+  /** Colour marker, rendered as a dot at the very start of the chat row.
+   *  Null → unlabelled, which is the default for every new chat. */
+  label: ChatLabel | null;
+  /** Folder the chat is filed under, or null for a loose chat. Deleting a
+   *  folder clears this (ON DELETE SET NULL) rather than deleting the chat.
+   *  A dangling id — only reachable via a hand-edited snapshot — renders as
+   *  a loose chat; see `Sidebar.tsx`'s grouping. */
+  folder_id: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+/** A user-named bucket of chats, shown as its own collapsible section in the
+ *  sidebar between "Pinned" and the date groups. Created by dragging one chat
+ *  onto another. Flat — folders never contain other folders — and carries no
+ *  prompt/model/context of its own; that's what a `Space` is for. */
+export interface Folder {
+  id: string;
+  name: string;
   created_at: number;
   updated_at: number;
 }
@@ -170,6 +199,11 @@ export interface Message {
    *  keep the imported batch folded out of the transcript. It still reaches
    *  the model like any other import — this flag governs display only. */
   import_hidden: boolean;
+  /** Non-null ms-timestamp = the user pinned this response from its
+   *  right-click menu. Pinned responses are listed in a bar under the chat
+   *  header that scrolls back to them. Display only — a pinned message is
+   *  sent to the model exactly like any other. */
+  pinned_at: number | null;
   created_at: number;
 }
 
@@ -324,6 +358,13 @@ export interface Settings {
    *  text sizes via the `--font-scale` variable. */
   font_size: FontSize;
   ollama_base_url: string;
+  /** When true, Loach starts `ollama serve` at launch if nothing is already
+   *  answering at `ollama_base_url`. Off by default — starting a background
+   *  service on someone's machine is an opt-in. Only applies to a loopback
+   *  base URL; a remote Ollama isn't ours to start. The "Start Ollama"
+   *  button in the model picker does the same thing on demand and ignores
+   *  this setting. */
+  ollama_auto_launch: boolean;
   openai_base_url: string;
   /** Free-text instructions injected as the system prompt of every new chat.
    *  Keyed `global_system_prompt` for backwards compat with the on-disk KV
@@ -418,6 +459,12 @@ export interface Settings {
    *  that `factory_reset` truncates, so a reset naturally re-fires the
    *  onboarding flow on next launch. */
   onboarding_completed: boolean;
+  /** When true, Loach asks the update server once per launch whether a newer
+   *  release exists and pops the "Update available" dialog if so. Off by
+   *  default — the check is a network round-trip, and Loach stays
+   *  offline-first unless the user opts in. Ignored on installs where the
+   *  updater isn't supported (dev builds, plain binaries). */
+  auto_check_updates: boolean;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -425,6 +472,7 @@ export const DEFAULT_SETTINGS: Settings = {
   background_style: "gradient",
   font_size: "normal",
   ollama_base_url: "http://localhost:11434",
+  ollama_auto_launch: false,
   openai_base_url: "https://api.openai.com/v1",
   global_system_prompt: "",
   default_provider: "ollama",
@@ -451,6 +499,7 @@ export const DEFAULT_SETTINGS: Settings = {
   thinking_default: true,
   default_tone_id: "default",
   onboarding_completed: false,
+  auto_check_updates: false,
 };
 
 /** Shape returned by the Rust `fetch_url` command. Kept in sync with
@@ -605,6 +654,7 @@ export interface McpTestResult {
  *  Powers the post-import toast ("Imported 12 chats · 145 messages · …"). */
 export interface ImportStats {
   sessions: number;
+  folders: number;
   messages: number;
   spaces: number;
   space_files: number;

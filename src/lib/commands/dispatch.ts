@@ -202,6 +202,13 @@ async function runClear(deps: CommandDeps): Promise<CommandResult> {
     destructive: true,
   });
   if (!approved) return { kind: "noop" };
+  // Stop any stream running in THIS chat before the rows go. Without it the
+  // generation kept going headless: its target row no longer existed, so
+  // tokens rendered nowhere, the final `updateMessage` updated zero rows, and
+  // the composer stayed stuck on "Replying…" over an empty transcript until
+  // the model finished on its own. `/regenerate` and `/compact` both guard on
+  // busy; this one didn't.
+  await useChatStore.getState().cancelForSession(session.id);
   await clearSessionMessages(session.id);
   useChatStore.setState((s) => ({
     messages: { ...s.messages, [session.id]: [] },
@@ -803,6 +810,16 @@ function formatMs(ms: number): string {
 }
 
 async function runPrivate(): Promise<CommandResult> {
+  // Same orchestration the TitleBar trigger performs: per the "pause regular
+  // while private" decision, stop whichever regular chat is streaming before
+  // handing the screen over. `privateChatStore` is deliberately agnostic of
+  // `chatStore`, so every entry point owns this — and this one used to skip
+  // it, leaving the regular stream writing into the SQLite transcript behind
+  // the overlay while both generations competed for the same model slot.
+  const chat = useChatStore.getState();
+  if (chat.streamingSessionId) {
+    void chat.cancelForSession(chat.streamingSessionId);
+  }
   usePrivateChatStore.getState().setOpen(true);
   return { kind: "noop" };
 }

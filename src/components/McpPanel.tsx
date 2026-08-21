@@ -14,6 +14,7 @@ import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
+import { useConfirm } from "@/components/ConfirmDialog";
 import { useMcpStore, type McpServerView } from "@/stores/mcpStore";
 import { useToastStore } from "@/stores/toastStore";
 import type { McpServerInput, McpTestResult } from "@/types";
@@ -35,6 +36,7 @@ export function McpPanel() {
   const hydrate = useMcpStore((s) => s.hydrate);
   const remove = useMcpStore((s) => s.remove);
   const save = useMcpStore((s) => s.save);
+  const { confirm } = useConfirm();
 
   /** When non-null, the editor is open. "new" means creating; otherwise
    *  it's the id of the server being edited. */
@@ -100,7 +102,21 @@ export function McpPanel() {
               key={srv.id}
               server={srv}
               onEdit={() => setEditing(srv.id)}
-              onDelete={() => void remove(srv.id)}
+              onDelete={() =>
+                void (async () => {
+                  // Every other destructive delete in the app confirms
+                  // first, and this button sits right beside the enable
+                  // toggle — a slip permanently destroyed the URL and any
+                  // auth headers, with no undo.
+                  const ok = await confirm({
+                    title: "Delete this MCP server?",
+                    body: `“${srv.name}” will be removed, along with its URL and any auth headers. This can't be undone.`,
+                    confirmLabel: "Delete server",
+                    destructive: true,
+                  });
+                  if (ok) await remove(srv.id);
+                })()
+              }
               onToggle={async (enabled) => {
                 // Round-trip through `save` so we don't have to duplicate the
                 // (id → full input) rebuild logic. The DB upsert keeps all

@@ -209,7 +209,10 @@ export function TitleBar() {
         <TitleButton onClick={minimize} ariaLabel="Minimize">
           <Minus className="h-3.5 w-3.5" />
         </TitleButton>
-        <TitleButton onClick={toggleMax} ariaLabel="Maximize">
+        <TitleButton
+          onClick={toggleMax}
+          ariaLabel={isMaximized ? "Restore" : "Maximize"}
+        >
           {isMaximized ? (
             <Copy className="h-3.5 w-3.5 rotate-180" />
           ) : (

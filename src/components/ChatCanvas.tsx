@@ -1,14 +1,23 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ArrowDown, ChevronDown, ChevronUp, Hourglass, Import, Search, Sparkles, Trash2, Zap, X } from "lucide-react";
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { ArrowDown, ChevronDown, ChevronUp, Hourglass, Import, Pin, Search, Sparkles, Trash2, Zap, X } from "lucide-react";
 import { MessageItem } from "./Message";
 import { Button } from "@/components/ui/button";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { useChatStore } from "@/stores/chatStore";
 import { extractSummary } from "@/lib/contextUsage";
 import { cn, prefersReducedMotion } from "@/lib/utils";
+import { stripInlinedAttachments } from "@/lib/files";
 import type { Message } from "@/types";
 
 const EMPTY_MESSAGES: Message[] = [];
+
+/** The text a message actually RENDERS. User bubbles strip the inlined
+ *  attachment tail before display, so searching raw `content` produced
+ *  matches with nothing on screen to highlight — the finder scrolled to the
+ *  bubble and the DOM walker found no occurrence to mark. */
+function displayedText(m: Message): string {
+  return m.role === "user" ? stripInlinedAttachments(m.content) : m.content;
+}
 
 /** How many trailing render items mount when a chat opens. Older items reveal
  *  on demand via the "Show earlier messages" control. Opening a long chat used
@@ -147,6 +156,19 @@ export function ChatCanvas() {
   // a stream of fake turns. Normal messages pass through one-to-one.
   const renderItems = useMemo(() => buildRenderItems(messages), [messages]);
 
+  // Responses the user pinned, in transcript order — the bar under the chat
+  // header lists these. Kept in transcript order rather than pin order so
+  // the bar reads the same way the conversation does.
+  //
+  // Hidden imported rows are excluded: they live inside a collapsed card and
+  // only register a DOM ref while it's open, so their chip would scroll
+  // nowhere. `Message` also withholds Pin on those rows, so this filter only
+  // catches pins made before that gate existed.
+  const pinned = useMemo(
+    () => messages.filter((m) => m.pinned_at != null && !m.import_hidden),
+    [messages],
+  );
+
   const handleRemoveImport = async (group: string, count: number) => {
     if (!sessionId) return;
     const ok = await confirm({
@@ -195,13 +217,21 @@ export function ChatCanvas() {
     const q = searchQuery.trim().toLowerCase();
     if (!q) return [] as string[];
     return messages
-      .filter((m) => m.content.toLowerCase().includes(q))
+      .filter((m) => displayedText(m).toLowerCase().includes(q))
       .map((m) => m.id);
   }, [messages, searchQuery]);
 
   useEffect(() => {
     setMatchCursor(0);
   }, [searchQuery, sessionId]);
+
+  // Clamp when the result set SHRINKS under a stale cursor — an import batch
+  // removed, `/clear`, a regenerate. The reset above only fires on a query or
+  // chat change, so the counter could render "9/3" (and the scroll effect
+  // silently no-op) until the next keypress re-modulo'd it.
+  useEffect(() => {
+    setMatchCursor((i) => (i < matchIds.length ? i : Math.max(0, matchIds.length - 1)));
+  }, [matchIds.length]);
 
   // Switching chats while the finder is open is jarring — the matches
   // belonged to the previous chat. Close the overlay so the user re-opens
@@ -305,7 +335,12 @@ export function ChatCanvas() {
     const currentId = matchIds[matchCursor];
     for (const m of messages) {
       if (m.id === streamingMsgId) continue;
-      if (!m.content.toLowerCase().includes(lowerQ)) continue;
+      // Match the DISPLAYED text. User bubbles render
+      // `stripInlinedAttachments(content)`, so matching raw content counted
+      // hits inside an inlined attachment body — the finder then scrolled to
+      // a bubble and highlighted nothing, because the DOM walker can't find
+      // text that was never rendered.
+      if (!displayedText(m).toLowerCase().includes(lowerQ)) continue;
       const el = messageRefs.current.get(m.id);
       if (!el) continue;
       highlightTextNodes(el, q, m.id === currentId);
@@ -371,11 +406,30 @@ export function ChatCanvas() {
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages, isStreaming, waitingHere]);
 
-  // Reset the window when switching chats — the new transcript opens at its own
-  // tail, not the depth the previous chat happened to be revealed to.
-  useEffect(() => {
+  // Reset the window when switching chats — the new transcript opens at its
+  // own tail, not the depth the previous chat happened to be revealed to.
+  //
+  // Adjusted during render rather than in an effect. As an effect this ran a
+  // commit LATE: the first render of the new chat still used the outgoing
+  // chat's `visibleCount`, so switching away from a fully-expanded transcript
+  // (search or a pin-jump pushes it to MAX, and it only ever grows) mounted
+  // and markdown-parsed the entire new conversation for one frame before
+  // throwing nearly all of it away — exactly the cost windowing exists to
+  // avoid. React re-runs this render pass immediately with the new state and
+  // discards the abandoned output; nothing below observes the stale value.
+  const [windowedSessionId, setWindowedSessionId] = useState(sessionId);
+  if (windowedSessionId !== sessionId) {
+    setWindowedSessionId(sessionId);
     setVisibleCount(WINDOW_SIZE);
-  }, [sessionId]);
+    // A chat opens at its tail. `stickToBottom` is otherwise only ever
+    // written by the scroll handler, so without this the incoming chat
+    // inherited whatever the outgoing one was left at: scroll up in chat A,
+    // open chat B, and B rendered at A's pixel offset with the auto-stick
+    // effect correctly declining to fix it. Setting the flag here hands the
+    // work to that same effect, which runs on the `messages` change this
+    // switch causes.
+    stickToBottom.current = true;
+  }
 
   // Searching needs every matching row mounted: jump-to-match and the inline
   // highlighter both reach messages through per-message DOM refs, which only
@@ -408,6 +462,55 @@ export function ChatCanvas() {
     setShowScrollButton(false);
   };
 
+  // ---------------- Jump to a pinned response ----------------
+  // Clicking a chip in the pinned bar scrolls its response into view and
+  // flashes a highlight on it for a second. The row may sit above the
+  // mounted window, so the click only records the target and expands the
+  // window; the effect below does the scrolling once the row has mounted
+  // and registered its ref.
+  const [jumpTarget, setJumpTarget] = useState<string | null>(null);
+  const [highlightId, setHighlightId] = useState<string | null>(null);
+  const highlightTimer = useRef<number | null>(null);
+
+  useEffect(
+    () => () => {
+      if (highlightTimer.current) window.clearTimeout(highlightTimer.current);
+    },
+    [],
+  );
+
+  const jumpToMessage = (id: string) => {
+    // Only reach past the window when the target actually sits above it.
+    // Expanding unconditionally would mount (and markdown-parse) the whole
+    // transcript on every chip click — and because `visibleCount` only ever
+    // grows, a single click on a chip pointing at a *visible* response would
+    // permanently disable windowing for this chat.
+    if (!messageRefs.current.has(id)) setVisibleCount(Number.MAX_SAFE_INTEGER);
+    // Both updates batch into one render, so the effect below runs after any
+    // revealed rows have committed their refs.
+    setJumpTarget(id);
+  };
+
+  // Deliberately no cleanup function: clearing `jumpTarget` re-runs this
+  // effect immediately, and a cleanup would cancel the highlight timer we
+  // just started. The timer is torn down on unmount by the effect above.
+  useEffect(() => {
+    if (!jumpTarget) return;
+    setJumpTarget(null);
+    const el = messageRefs.current.get(jumpTarget);
+    if (!el) return;
+    el.scrollIntoView({
+      behavior: prefersReducedMotion() ? "auto" : "smooth",
+      block: "center",
+    });
+    if (highlightTimer.current) window.clearTimeout(highlightTimer.current);
+    setHighlightId(jumpTarget);
+    highlightTimer.current = window.setTimeout(
+      () => setHighlightId(null),
+      1000,
+    );
+  }, [jumpTarget]);
+
   // Reveal the next batch of older rows. Snapshot the scroller geometry first
   // so the layout effect above can re-anchor once the prepended rows mount.
   const showEarlierMessages = () => {
@@ -416,20 +519,11 @@ export function ChatCanvas() {
     setVisibleCount((c) => c + WINDOW_SIZE);
   };
 
-  if (!sessionId) {
-    return (
-      <div className="flex flex-1 items-center justify-center text-center">
-        <div>
-          <p className="bg-gradient-to-br from-foreground via-foreground/90 to-orange-500/80 bg-clip-text text-3xl font-medium tracking-tight text-transparent">
-            Welcome to Loach
-          </p>
-          <p className="mt-2 text-sm text-foreground/55">
-            Create a new chat from the sidebar to get started.
-          </p>
-        </div>
-      </div>
-    );
-  }
+  // Unreachable in practice — App only mounts ChatCanvas once a session
+  // exists AND has messages; the no-session states render `NoChatState` /
+  // `ChatLoadingSkeleton` instead. Kept as a cheap guard rather than the
+  // duplicate welcome screen that used to live here.
+  if (!sessionId) return null;
 
   // Only the trailing window mounts. Items keep their original `index` /
   // `startIndex` (computed against the full `messages` array), so the
@@ -447,183 +541,268 @@ export function ChatCanvas() {
     : 0;
 
   return (
-    <div className="relative flex-1 overflow-hidden">
+    <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
       {/* Polite live region for stream lifecycle — visually hidden (3.4). */}
       <div aria-live="polite" className="sr-only">
         {liveStatus}
       </div>
-      <div ref={scrollerRef} className="h-full overflow-y-auto">
-        <div className="mx-auto w-full max-w-3xl px-4">
-          {hiddenBefore > 0 && (
-            <div className="flex justify-center py-4">
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                onClick={showEarlierMessages}
-                className="h-7 gap-1.5 rounded-full bg-foreground/[0.04] px-3 text-[11px] font-medium text-foreground/60 hover:bg-foreground/10 hover:text-foreground"
-                title="Reveal older messages in this chat"
-              >
-                <ChevronUp className="h-3 w-3" />
-                Show earlier messages ({hiddenBefore})
-              </Button>
-            </div>
-          )}
-          {visibleItems.map((item) => {
-            // The compaction divider sits before whichever render item holds
-            // the first still-active (uncompacted) message. For an import
-            // card that's a range check, since the card spans several rows.
-            const markerHere =
-              compactedSummary != null &&
-              firstActiveIndex >= 0 &&
-              (item.kind === "message"
-                ? item.index === firstActiveIndex
-                : firstActiveIndex >= item.startIndex &&
-                  firstActiveIndex <= item.endIndex);
-            const marker = markerHere ? (
-              <CompactionMarker summary={compactedSummary!} />
-            ) : null;
+      {pinned.length > 0 && (
+        <PinnedBar pinned={pinned} onJump={jumpToMessage} />
+      )}
+      {/* Scroll area + its floating overlays. Positioned relative to THIS
+          wrapper rather than the canvas root so the finder bar and the
+          scroll-to-bottom pill sit inside the transcript area instead of
+          on top of the pinned bar. */}
+      <div className="relative min-h-0 flex-1">
+        <div ref={scrollerRef} className="h-full overflow-y-auto">
+          <div className="mx-auto w-full max-w-3xl px-4">
+            {hiddenBefore > 0 && (
+              <div className="flex justify-center py-4">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={showEarlierMessages}
+                  className="h-7 gap-1.5 rounded-full bg-foreground/[0.04] px-3 text-[11px] font-medium text-foreground/60 hover:bg-foreground/10 hover:text-foreground"
+                  title="Reveal older messages in this chat"
+                >
+                  <ChevronUp className="h-3 w-3" />
+                  Show earlier messages ({hiddenBefore})
+                </Button>
+              </div>
+            )}
+            {visibleItems.map((item) => {
+              // The compaction divider sits before whichever render item holds
+              // the first still-active (uncompacted) message. For an import
+              // card that's a range check, since the card spans several rows.
+              const markerHere =
+                compactedSummary != null &&
+                firstActiveIndex >= 0 &&
+                (item.kind === "message"
+                  ? item.index === firstActiveIndex
+                  : firstActiveIndex >= item.startIndex &&
+                    firstActiveIndex <= item.endIndex);
+              const marker = markerHere ? (
+                <CompactionMarker summary={compactedSummary!} />
+              ) : null;
 
-            if (item.kind === "import") {
+              if (item.kind === "import") {
+                return (
+                  <div key={`import-${item.group}`}>
+                    {marker}
+                    <ImportedContextGroup
+                      messages={item.messages}
+                      messageRefs={messageRefs}
+                      onRemove={() =>
+                        void handleRemoveImport(item.group, item.messages.length)
+                      }
+                    />
+                  </div>
+                );
+              }
+
+              const m = item.message;
+              const isLast = item.index === messages.length - 1;
               return (
-                <div key={`import-${item.group}`}>
+                <div
+                  key={m.id}
+                  // Callback ref → keeps `messageRefs` in sync as messages
+                  // mount / unmount without leaking entries. The phrase
+                  // highlighter walks each message's subtree and wraps
+                  // matches in `<mark>` tags inside the rendered content,
+                  // so search applies no bubble-level visual of its own —
+                  // the inline highlight is its only signal. The row tint
+                  // below belongs to the pinned-bar jump, which needs to
+                  // point at a whole response rather than a phrase.
+                  ref={(el) => {
+                    if (el) messageRefs.current.set(m.id, el);
+                    else messageRefs.current.delete(m.id);
+                  }}
+                  className={cn(
+                    "rounded-3xl transition-[background-color,box-shadow] duration-300",
+                    highlightId === m.id &&
+                      "bg-primary/[0.09] ring-1 ring-primary/40",
+                  )}
+                >
                   {marker}
-                  <ImportedContextGroup
-                    messages={item.messages}
-                    messageRefs={messageRefs}
-                    onRemove={() =>
-                      void handleRemoveImport(item.group, item.messages.length)
+                  <MessageItem
+                    message={m}
+                    isStreaming={isLast && streamingHere && m.role === "assistant"}
+                    metrics={streamingByMessage[m.id] ?? null}
+                    canRegenerate={
+                      isLast &&
+                      m.role === "assistant" &&
+                      !streamingHere &&
+                      !waitingHere
                     }
                   />
                 </div>
               );
-            }
-
-            const m = item.message;
-            const isLast = item.index === messages.length - 1;
-            return (
-              <div
-                key={m.id}
-                // Callback ref → keeps `messageRefs` in sync as messages
-                // mount / unmount without leaking entries. The phrase
-                // highlighter walks each message's subtree and wraps
-                // matches in `<mark>` tags inside the rendered content,
-                // so we don't apply any bubble-level visual ourselves —
-                // the inline highlight is the only signal.
-                ref={(el) => {
-                  if (el) messageRefs.current.set(m.id, el);
-                  else messageRefs.current.delete(m.id);
-                }}
-              >
-                {marker}
-                <MessageItem
-                  message={m}
-                  isStreaming={isLast && streamingHere && m.role === "assistant"}
-                  metrics={streamingByMessage[m.id] ?? null}
-                  canRegenerate={
-                    isLast &&
-                    m.role === "assistant" &&
-                    !streamingHere &&
-                    !waitingHere
-                  }
-                />
-              </div>
-            );
-          })}
-          {/* Edge case: every message is compacted (no active tail).
-              Show the marker at the very bottom so the user still sees
-              "compaction happened here". */}
-          {compactedSummary != null &&
-            messages.length > 0 &&
-            firstActiveIndex === messages.length && (
-              <CompactionMarker summary={compactedSummary} />
+            })}
+            {/* Edge case: every message is compacted (no active tail).
+                Show the marker at the very bottom so the user still sees
+                "compaction happened here". */}
+            {compactedSummary != null &&
+              messages.length > 0 &&
+              firstActiveIndex === messages.length && (
+                <CompactionMarker summary={compactedSummary} />
+              )}
+            {/* Banner shown only while THIS chat's task is parked behind another
+                chat's running task. Replaces the assistant streaming-dots bubble
+                (which would otherwise mislead the user into thinking the model
+                is thinking). */}
+            {waitingHere && sessionId && (
+              <WaitingForOtherChats
+                onRespondNow={() => void promoteSession(sessionId)}
+                onCancel={() => void cancelForSession(sessionId)}
+              />
             )}
-          {/* Banner shown only while THIS chat's task is parked behind another
-              chat's running task. Replaces the assistant streaming-dots bubble
-              (which would otherwise mislead the user into thinking the model
-              is thinking). */}
-          {waitingHere && sessionId && (
-            <WaitingForOtherChats
-              onRespondNow={() => void promoteSession(sessionId)}
-              onCancel={() => void cancelForSession(sessionId)}
-            />
-          )}
-          <div className="h-4" />
-        </div>
-      </div>
-
-      {/* Search-in-chat finder bar. Top-right, browser-style. Only renders
-          when the user opened it from the chat header menu — invisible by
-          default so the canvas isn't cluttered with chrome the user didn't
-          ask for. Match counter, prev/next, close — all in one row. */}
-      {searchOpen && (
-        <div className="absolute right-4 top-2 z-20">
-          <div className="flex items-center gap-1 rounded-lg border border-foreground/[0.14] bg-popover/90 px-1.5 py-1 shadow-lg backdrop-blur-xl">
-            <Search className="ml-1 h-3.5 w-3.5 shrink-0 text-foreground/45" aria-hidden />
-            <input
-              ref={searchInputRef}
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              onKeyDown={onSearchKeyDown}
-              placeholder="Find in this chat…"
-              spellCheck={false}
-              className="h-7 w-56 min-w-0 bg-transparent px-1 text-[12.5px] text-foreground placeholder:text-foreground/40 focus:outline-none"
-            />
-            <span className="px-1 font-mono text-[10.5px] tabular-nums text-foreground/55">
-              {matchIds.length === 0
-                ? searchQuery.trim()
-                  ? "0/0"
-                  : ""
-                : `${matchCursor + 1}/${matchIds.length}`}
-            </span>
-            <button
-              type="button"
-              onClick={() => stepMatch(-1)}
-              disabled={matchIds.length === 0}
-              aria-label="Previous match"
-              title="Previous match (Shift+Enter)"
-              className="inline-flex h-6 w-6 items-center justify-center rounded text-foreground/55 transition-colors hover:bg-foreground/10 hover:text-foreground disabled:opacity-40 disabled:hover:bg-transparent"
-            >
-              <ChevronUp className="h-3.5 w-3.5" />
-            </button>
-            <button
-              type="button"
-              onClick={() => stepMatch(1)}
-              disabled={matchIds.length === 0}
-              aria-label="Next match"
-              title="Next match (Enter)"
-              className="inline-flex h-6 w-6 items-center justify-center rounded text-foreground/55 transition-colors hover:bg-foreground/10 hover:text-foreground disabled:opacity-40 disabled:hover:bg-transparent"
-            >
-              <ChevronDown className="h-3.5 w-3.5" />
-            </button>
-            <button
-              type="button"
-              onClick={closeSearch}
-              aria-label="Close search"
-              title="Close (Esc)"
-              className="inline-flex h-6 w-6 items-center justify-center rounded text-foreground/55 transition-colors hover:bg-foreground/10 hover:text-foreground"
-            >
-              <X className="h-3.5 w-3.5" />
-            </button>
+            <div className="h-4" />
           </div>
         </div>
-      )}
 
-      {/* Floating "scroll to bottom" pill. Shown only when the user has
-          scrolled meaningfully up (~200px) — close to ChatGPT's behaviour.
-          Pinned to the bottom-center so it stays out of the way of message
-          actions on the right edge of bubbles. */}
-      {showScrollButton && (
-        <button
-          type="button"
-          onClick={scrollToBottom}
-          aria-label="Scroll to bottom"
-          title="Scroll to bottom"
-          className="absolute bottom-4 left-1/2 -translate-x-1/2 inline-flex h-8 w-8 items-center justify-center rounded-full border border-foreground/15 bg-background/90 text-foreground/70 backdrop-blur-md transition-colors hover:bg-foreground/[0.08] hover:text-foreground"
-        >
-          <ArrowDown className="h-4 w-4" />
-        </button>
-      )}
+        {/* Search-in-chat finder bar. Top-right, browser-style. Only renders
+            when the user opened it from the chat header menu — invisible by
+            default so the canvas isn't cluttered with chrome the user didn't
+            ask for. Match counter, prev/next, close — all in one row. */}
+        {searchOpen && (
+          <div className="absolute right-4 top-2 z-20">
+            <div className="flex items-center gap-1 rounded-lg border border-foreground/[0.14] bg-popover/90 px-1.5 py-1 shadow-lg backdrop-blur-xl">
+              <Search className="ml-1 h-3.5 w-3.5 shrink-0 text-foreground/45" aria-hidden />
+              <input
+                ref={searchInputRef}
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                onKeyDown={onSearchKeyDown}
+                placeholder="Find in this chat…"
+                spellCheck={false}
+                className="h-7 w-56 min-w-0 bg-transparent px-1 text-[12.5px] text-foreground placeholder:text-foreground/40 focus:outline-none"
+              />
+              <span className="px-1 font-mono text-[10.5px] tabular-nums text-foreground/55">
+                {matchIds.length === 0
+                  ? searchQuery.trim()
+                    ? "0/0"
+                    : ""
+                  : `${matchCursor + 1}/${matchIds.length}`}
+              </span>
+              <button
+                type="button"
+                onClick={() => stepMatch(-1)}
+                disabled={matchIds.length === 0}
+                aria-label="Previous match"
+                title="Previous match (Shift+Enter)"
+                className="inline-flex h-6 w-6 items-center justify-center rounded text-foreground/55 transition-colors hover:bg-foreground/10 hover:text-foreground disabled:opacity-40 disabled:hover:bg-transparent"
+              >
+                <ChevronUp className="h-3.5 w-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={() => stepMatch(1)}
+                disabled={matchIds.length === 0}
+                aria-label="Next match"
+                title="Next match (Enter)"
+                className="inline-flex h-6 w-6 items-center justify-center rounded text-foreground/55 transition-colors hover:bg-foreground/10 hover:text-foreground disabled:opacity-40 disabled:hover:bg-transparent"
+              >
+                <ChevronDown className="h-3.5 w-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={closeSearch}
+                aria-label="Close search"
+                title="Close (Esc)"
+                className="inline-flex h-6 w-6 items-center justify-center rounded text-foreground/55 transition-colors hover:bg-foreground/10 hover:text-foreground"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Floating "scroll to bottom" pill. Shown only when the user has
+            scrolled meaningfully up (~200px) — close to ChatGPT's behaviour.
+            Pinned to the bottom-center so it stays out of the way of message
+            actions on the right edge of bubbles. */}
+        {showScrollButton && (
+          <button
+            type="button"
+            onClick={scrollToBottom}
+            aria-label="Scroll to bottom"
+            title="Scroll to bottom"
+            className="absolute bottom-4 left-1/2 -translate-x-1/2 inline-flex h-8 w-8 items-center justify-center rounded-full border border-foreground/15 bg-background/90 text-foreground/70 backdrop-blur-md transition-colors hover:bg-foreground/[0.08] hover:text-foreground"
+          >
+            <ArrowDown className="h-4 w-4" />
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Flatten a response into a single line of plain prose for the pinned-bar
+ * chip. Deliberately shallow — it drops fence markers and the handful of
+ * inline markdown characters that read as noise at chip size, then collapses
+ * whitespace. It is not a renderer: a code-only response previews as its
+ * first line of code, which is the honest thing to show.
+ */
+function pinPreview(content: string): string {
+  return content
+    .replace(/^```.*$/gm, "")
+    .replace(/[*_`#>]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * Bar of pinned responses, sitting directly under the chat header. Each pin
+ * is collapsed to one truncated line; clicking it scrolls that response into
+ * view and flashes a highlight on it. Unpinning happens from the response's
+ * own ⋯ menu, so the chips stay a pure navigation surface.
+ */
+/** One chip. Memoised on the message object so the three-regex `pinPreview`
+ *  doesn't re-run for every pin on every streaming flush — `messages` gets a
+ *  new array identity per RAF flush, and only the streaming row's object
+ *  actually changes, so non-streaming pins hit the memo. */
+const PinnedChip = memo(function PinnedChipImpl({
+  message,
+  onJump,
+}: {
+  message: Message;
+  onJump: (id: string) => void;
+}) {
+  const preview = useMemo(() => pinPreview(message.content), [message.content]);
+  return (
+    <button
+      type="button"
+      onClick={() => onJump(message.id)}
+      // The chip is a one-line summary; the tooltip gives enough of the
+      // response to tell two similar pins apart before clicking.
+      title={preview.slice(0, 300)}
+      className="block max-w-[240px] shrink-0 truncate rounded-full border border-foreground/10 bg-foreground/[0.05] px-2.5 py-0.5 text-[11.5px] text-foreground/70 transition-colors hover:border-foreground/20 hover:bg-foreground/10 hover:text-foreground"
+    >
+      {preview || "Response"}
+    </button>
+  );
+});
+
+function PinnedBar({
+  pinned,
+  onJump,
+}: {
+  pinned: Message[];
+  onJump: (id: string) => void;
+}) {
+  return (
+    <div className="flex shrink-0 items-center gap-2 border-b border-foreground/5 bg-foreground/[0.04] px-4 py-1.5 backdrop-blur-xl">
+      <span className="flex shrink-0 items-center gap-1 text-[10px] font-medium uppercase tracking-wide text-foreground/45">
+        <Pin className="h-3 w-3" />
+        Pinned
+      </span>
+      <div className="scrollbar-hidden flex min-w-0 flex-1 gap-1.5 overflow-x-auto">
+        {pinned.map((m) => (
+          <PinnedChip key={m.id} message={m} onJump={onJump} />
+        ))}
+      </div>
     </div>
   );
 }

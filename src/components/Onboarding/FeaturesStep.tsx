@@ -21,9 +21,12 @@ import { StepShell } from "./StepShell";
  *   - Low VRAM: OFF by default. Hurts speed if you don't need it; the
  *     in-chat toggle is right there if a model OOMs.
  *
- * All four are committed to settings on Continue. Skip leaves the
- * recommended defaults intact (same as if the user had pressed
- * Continue without touching anything).
+ * All four are committed to settings on Continue. Skip commits too —
+ * establishing defaults is the wizard's job — but it commits what's on
+ * screen, not RECOMMENDED. Since the draft starts at RECOMMENDED, an
+ * untouched Skip behaves exactly as before; what it no longer does is
+ * flip a toggle back ON after the user deliberately turned it off (Web
+ * fetch being the one that matters — the app ships offline-first).
  */
 
 interface DraftFeatures {
@@ -70,7 +73,7 @@ export function FeaturesStep({ onClose }: { onClose: () => void }) {
       subtitle="Tune later in Settings — these are just the defaults Loach starts with."
       onPrimary={() => void commit(draft)}
       skippable
-      onSkip={() => void commit(RECOMMENDED)}
+      onSkip={() => void commit(draft)}
       canGoBack
       onBack={goBack}
       onClose={onClose}

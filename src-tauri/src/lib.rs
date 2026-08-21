@@ -1,6 +1,7 @@
 mod commands;
 mod db;
 mod mcp;
+mod ollama_launch;
 mod preload;
 mod providers;
 mod secrets;
@@ -149,7 +150,7 @@ pub fn run() {
             //     web-fetch paths already disable redirects on their own
             //     pinned clients (`build_pinned_client`).
             let http = match reqwest::Client::builder()
-                .user_agent("Loach/0.1")
+                .user_agent(concat!("Loach/", env!("CARGO_PKG_VERSION")))
                 .redirect(reqwest::redirect::Policy::none())
                 .connect_timeout(std::time::Duration::from_secs(10))
                 .tcp_keepalive(Some(std::time::Duration::from_secs(30)))
@@ -268,6 +269,12 @@ pub fn run() {
             commands::update_session_model,
             commands::update_session_system_prompt,
             commands::update_session_params,
+            commands::update_session_label,
+            commands::set_session_folder,
+            commands::list_folders,
+            commands::create_folder,
+            commands::rename_folder,
+            commands::delete_folder,
             commands::export_session,
             commands::list_messages,
             commands::session_message_counts,
@@ -276,6 +283,7 @@ pub fn run() {
             commands::delete_import_group,
             commands::update_message,
             commands::delete_message,
+            commands::pin_message,
             commands::clear_session_messages,
             commands::mark_messages_compacted,
             commands::get_settings,
@@ -290,6 +298,7 @@ pub fn run() {
             commands::security_clear,
             commands::ollama_list_models,
             commands::ollama_probe,
+            commands::ollama_start,
             commands::openai_list_models,
             commands::chat_stream,
             commands::chat_cancel,

@@ -3,12 +3,17 @@ import { logger } from "@/lib/logger";
 import {
   appendMessage,
   archiveSession,
+  createFolder,
   createSession,
   deleteArchivedSessions,
+  deleteFolder,
   deleteImportGroup,
   deleteMessage,
   deleteSession,
   forkSession,
+  listFolders,
+  renameFolder as persistFolderName,
+  setSessionFolder,
   importMessages as tauriImportMessages,
   getSpaceContext,
   listMessages,
@@ -17,10 +22,12 @@ import {
   makeRequestId,
   markMessagesCompacted,
   ollamaUnloadModel,
+  pinMessage as persistMessagePin,
   pinSession,
   renameSession,
   startChatStream,
   updateMessage,
+  updateSessionLabel,
   updateSessionModel as persistSessionModel,
   updateSessionParams as persistSessionParams,
   updateSessionSystemPrompt as persistSessionSystemPrompt,
@@ -56,7 +63,9 @@ import {
 import {
   DEFAULT_PARAMS,
   type Attachment,
+  type ChatLabel,
   type ChatMessageIn,
+  type Folder,
   type GenerationParams,
   type Message,
   type MessageMetrics,
@@ -104,10 +113,19 @@ interface QueueTask {
    *  flush / finish paths persist them on the assistant row without
    *  any extra DB write. */
   preToolCalls?: ToolCallRecord[];
+  /** Carry the pin forward. Set by `regenerateLast` when the response it
+   *  replaced was pinned: the user bookmarked "the answer to this question",
+   *  and a regenerate produces a new answer to the same question — dropping
+   *  the pin silently discarded a curated mark they'd have to notice was
+   *  gone before they could restore it. */
+  carryPin?: boolean;
 }
 
 interface ChatState {
   sessions: Session[];
+  /** Chat folders, ordered by name (the backend sorts). Membership lives on
+   *  each session's `folder_id`, not here — a folder never holds a list. */
+  folders: Folder[];
   activeSessionId: string | null;
   /** True after `hydrate()` finishes (whether it succeeded or fell into the
    *  catch). Used by `App.tsx` to render a skeleton while chats are loading
@@ -156,6 +174,18 @@ interface ChatState {
   }) => Promise<Session>;
   rename: (id: string, title: string) => Promise<void>;
   pin: (id: string, pinned: boolean) => Promise<void>;
+  /** Set the chat's colour label, or clear it with `null`. */
+  setLabel: (id: string, label: ChatLabel | null) => Promise<void>;
+  /** File a chat under a folder, or pull it out with `null`. */
+  moveToFolder: (id: string, folderId: string | null) => Promise<void>;
+  /** Create a named folder and move `sessionIds` into it in one go. This is
+   *  the drag-one-chat-onto-another gesture: both chats land in the new
+   *  folder. Returns the folder. */
+  createFolderWith: (name: string, sessionIds: string[]) => Promise<Folder>;
+  renameFolder: (id: string, name: string) => Promise<void>;
+  /** Delete a folder. Member chats survive and return to the date groups —
+   *  the backend's ON DELETE SET NULL does the release. */
+  removeFolder: (id: string) => Promise<void>;
   archive: (id: string, archived: boolean) => Promise<void>;
   /** Permanently delete every archived chat. Returns the number removed
    *  so the caller can show a toast. */
@@ -189,6 +219,14 @@ interface ChatState {
    *  in the DB and the in-memory transcript. Used by the Remove control on
    *  the imported-context card. */
   removeImportGroup: (id: string, group: string) => Promise<void>;
+  /** Pin or unpin one assistant response. Pinned rows are listed in the bar
+   *  under the chat header, which scrolls back to them on click. Display
+   *  only — pinning doesn't change what's sent to the model. */
+  pinMessage: (
+    sessionId: string,
+    messageId: string,
+    pinned: boolean,
+  ) => Promise<void>;
 
   sendUserMessage: (content: string, attachments: Attachment[]) => Promise<void>;
   /** Drop the trailing assistant message in `sessionId` and re-stream a
@@ -518,6 +556,30 @@ const COMPACT_MIN_TOTAL = 6;
  * empty summary so each caller can surface its own message. Does not touch
  * store state — callers own any persistence.
  */
+/** Sessions with a `sendUserMessage` in flight but not yet reflected in
+ *  `runningTask` / `queue`. The gap between the busy check and the dispatch
+ *  spans several awaits (history hydration, web fetch, message persist,
+ *  auto-title, request build), and the composer re-enables as soon as it
+ *  optimistically clears — so without this claim a fast second Enter slipped
+ *  through both guards and dispatched a duplicate task. */
+const sendingSessions = new Set<string>();
+
+/** Folder ordering, matched to the backend's `ORDER BY name COLLATE NOCASE`.
+ *
+ *  `localeCompare` with `sensitivity: "base"` is accent-INsensitive, so it
+ *  ranks "Etude" and "Étude" as equal and can order non-ASCII names
+ *  differently from SQLite's ASCII-only case fold — the list then silently
+ *  reshuffled on the next launch, when `listFolders` supplied the DB order. */
+function byFolderName(a: { name: string }, b: { name: string }): number {
+  const an = a.name.toLowerCase();
+  const bn = b.name.toLowerCase();
+  return an < bn ? -1 : an > bn ? 1 : 0;
+}
+
+/** Wall-clock ceiling for one compaction round-trip. See the timer in
+ *  `generateSummary` for why this exists at all. */
+const COMPACT_TIMEOUT_MS = 180_000;
+
 async function generateSummary(
   session: Session,
   toSummarize: Message[],
@@ -553,9 +615,23 @@ ${transcript}
 
   let summary = "";
   let streamErr: string | null = null;
-  const unlistenHolder: { fn: (() => void) | null } = { fn: null };
+  const handleHolder: { stop: (() => Promise<void>) | null; unlisten: (() => void) | null } = {
+    stop: null,
+    unlisten: null,
+  };
+  let timeoutId: number | null = null;
   try {
     await new Promise<void>((resolve, reject) => {
+      // Hard ceiling on wall-clock, mirroring the memory extractor. Without
+      // it a provider that never emits a terminal frame left this promise
+      // pending forever — and with it `compactingSessionId`, which gates
+      // EVERY future compaction. The user's only recovery was restarting the
+      // app. Generous next to the extractor's 60 s because this summarises a
+      // whole transcript rather than a single turn.
+      timeoutId = window.setTimeout(() => {
+        reject(new Error("Compaction timed out — the model never finished the summary."));
+      }, COMPACT_TIMEOUT_MS);
+
       startChatStream(
         {
           stream_id: makeRequestId(),
@@ -578,21 +654,27 @@ ${transcript}
         },
       )
         .then((handle) => {
-          unlistenHolder.fn = handle.unlisten;
+          handleHolder.stop = handle.stop;
+          handleHolder.unlisten = handle.unlisten;
         })
         .catch(reject);
     });
   } catch (e) {
     streamErr = e instanceof Error ? e.message : String(e);
   } finally {
-    const fn = unlistenHolder.fn;
-    if (fn) {
+    if (timeoutId !== null) window.clearTimeout(timeoutId);
+    const { stop, unlisten } = handleHolder;
+    if (unlisten) {
       try {
-        fn();
+        unlisten();
       } catch {
         /* ignore */
       }
     }
+    // Tell the backend to stop generating too. On the timeout path the
+    // stream is still live, so dropping only the listener would leave the
+    // model burning a generation slot with nobody reading it.
+    if (stop) void stop().catch(() => undefined);
   }
 
   const cleanSummary = summary.trim();
@@ -844,6 +926,21 @@ function finishRunning(
   ) {
     unreadPatch = { ...get().unread, [finishedId]: true };
   }
+  // An ERROR in a background chat also deserves the dot. The gate above is
+  // deliberately `done`-only because a *cancel* shouldn't nag — the user
+  // just said they were finished. A failure is the opposite: the sidebar
+  // spinner simply vanished, the message sat unread inside a chat nobody was
+  // looking at, and the user could wait indefinitely for a reply that already
+  // failed. Content isn't required here — the error text IS the content.
+  if (reason === "error" && finishedId && finishedId !== activeId) {
+    unreadPatch = { ...(unreadPatch ?? get().unread), [finishedId]: true };
+  }
+
+  // The streaming metrics entry has served its purpose — the final numbers
+  // are persisted in the message's `metrics_json` from here on. Left in
+  // place it accumulated one entry per reply for the process's lifetime, and
+  // the whole record is cloned on every metrics flush.
+  const finishedMsgId = buf?.assistantMsgId;
 
   // Snapshot the buffer + task before we null out `runningBuffers` so the
   // memory extractor (kicked off below) can read the assistant text. The
@@ -890,12 +987,20 @@ function finishRunning(
       /* already unlistened — harmless */
     }
   }
-  set({
-    activeStream: null,
-    isStreaming: false,
-    streamingSessionId: null,
-    runningTask: null,
-    ...(unreadPatch ? { unread: unreadPatch } : {}),
+  set((s) => {
+    let streamingByMessage = s.streamingByMessage;
+    if (finishedMsgId && finishedMsgId in streamingByMessage) {
+      streamingByMessage = { ...streamingByMessage };
+      delete streamingByMessage[finishedMsgId];
+    }
+    return {
+      activeStream: null,
+      isStreaming: false,
+      streamingSessionId: null,
+      runningTask: null,
+      streamingByMessage,
+      ...(unreadPatch ? { unread: unreadPatch } : {}),
+    };
   });
   promoteQueueHead(get, set);
 
@@ -1047,6 +1152,24 @@ async function startTask(task: QueueTask, get: Getter, set: Setter) {
     streamingSessionId: sessionId,
     runningTask: task,
   }));
+
+  // Re-pin the replacement when the row we regenerated over was pinned.
+  // Fire-and-forget: a failed pin is a lost bookmark, not a lost reply, and
+  // must never hold up the stream.
+  if (task.carryPin) {
+    const pinnedAt = Date.now();
+    void persistMessagePin(assistantMsg.id, sessionId, true).catch((e) =>
+      logger.warn("couldn't carry the pin to the regenerated response", e),
+    );
+    set((s) => ({
+      messages: {
+        ...s.messages,
+        [sessionId]: (s.messages[sessionId] ?? []).map((m) =>
+          m.id === assistantMsg.id ? { ...m, pinned_at: pinnedAt } : m,
+        ),
+      },
+    }));
+  }
 
   runningBuffers = {
     assistantMsgId: assistantMsg.id,
@@ -1255,6 +1378,7 @@ async function startTask(task: QueueTask, get: Getter, set: Setter) {
  */
 function resetForTests() {
   dispatching = false;
+  sendingSessions.clear();
   runningBuffers = null;
   if (pendingFrame !== null) {
     cancelAnimationFrame(pendingFrame);
@@ -1324,6 +1448,7 @@ export function resolveDefaultModelChoice(
 
 export const useChatStore = create<ChatState>((set, get) => ({
   sessions: [],
+  folders: [],
   activeSessionId: null,
   hydrated: false,
   messages: {},
@@ -1338,8 +1463,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   hydrate: async () => {
     try {
-      const sessions = await listSessions();
-      set({ sessions });
+      const [sessions, folders] = await Promise.all([
+        listSessions(),
+        listFolders(),
+      ]);
+      set({ sessions, folders });
 
       // Remove all empty sessions (no messages) on startup, keep at most one.
       // Archived sessions are left alone even if empty — the user explicitly
@@ -1545,6 +1673,61 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }));
   },
 
+  setLabel: async (id, label) => {
+    await updateSessionLabel({ id, label });
+    set((s) => ({
+      sessions: s.sessions.map((x) => (x.id === id ? { ...x, label } : x)),
+    }));
+  },
+
+  moveToFolder: async (id, folderId) => {
+    await setSessionFolder({ id, folder_id: folderId });
+    set((s) => ({
+      sessions: s.sessions.map((x) =>
+        x.id === id ? { ...x, folder_id: folderId } : x,
+      ),
+    }));
+  },
+
+  createFolderWith: async (name, sessionIds) => {
+    const folder = await createFolder(name);
+    // Sequential rather than Promise.all: these are single-row UPDATEs
+    // behind one write mutex, and a partial failure should leave the
+    // already-moved chats in the folder rather than racing.
+    for (const id of sessionIds) {
+      await setSessionFolder({ id, folder_id: folder.id });
+    }
+    const moved = new Set(sessionIds);
+    set((s) => ({
+      folders: [...s.folders, folder].sort(byFolderName),
+      sessions: s.sessions.map((x) =>
+        moved.has(x.id) ? { ...x, folder_id: folder.id } : x,
+      ),
+    }));
+    return folder;
+  },
+
+  renameFolder: async (id, name) => {
+    await persistFolderName(id, name);
+    set((s) => ({
+      folders: s.folders
+        .map((f) => (f.id === id ? { ...f, name } : f))
+        .sort(byFolderName),
+    }));
+  },
+
+  removeFolder: async (id) => {
+    await deleteFolder(id);
+    // Mirror the backend's ON DELETE SET NULL locally so the member chats
+    // reappear in the date groups without a re-fetch.
+    set((s) => ({
+      folders: s.folders.filter((f) => f.id !== id),
+      sessions: s.sessions.map((x) =>
+        x.folder_id === id ? { ...x, folder_id: null } : x,
+      ),
+    }));
+  },
+
   archive: async (id, archived) => {
     await archiveSession(id, archived);
     // Archiving is effectively "park this chat" — kill any in-flight or
@@ -1579,15 +1762,32 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // session that still exists in the DB.
     await get().cancelForSession(id);
     await deleteSession(id);
+    const wasActive = get().activeSessionId === id;
     set((s) => {
       const sessions = s.sessions.filter((x) => x.id !== id);
       const messages = { ...s.messages };
       delete messages[id];
+      // Only `selectSession` cleared this, so a deleted chat left its flag
+      // behind forever.
+      const unread = { ...s.unread };
+      delete unread[id];
       const queue = s.queue.filter((t) => t.sessionId !== id);
+      // `sessions` is ordered by `updated_at` and includes archived rows —
+      // and `archive` bumps `updated_at` — so plain `sessions[0]` regularly
+      // lands on a chat the sidebar doesn't even show. Fall back to the
+      // first chat the user can actually see.
       const active =
-        s.activeSessionId === id ? sessions[0]?.id ?? null : s.activeSessionId;
-      return { sessions, messages, queue, activeSessionId: active };
+        s.activeSessionId === id
+          ? sessions.find((x) => !x.archived_at)?.id ?? null
+          : s.activeSessionId;
+      return { sessions, messages, queue, unread, activeSessionId: active };
     });
+    // Load the replacement's transcript. Under lazy hydration `selectSession`
+    // is the only loader, so patching `activeSessionId` alone would leave the
+    // canvas rendering the "How can I help today?" hero over a chat that has
+    // messages until the user clicked it again in the sidebar.
+    const next = wasActive ? get().activeSessionId : null;
+    if (next) await get().selectSession(next);
   },
 
   fork: async (sourceId, upToMessageId) => {
@@ -1746,6 +1946,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }));
   },
 
+  pinMessage: async (sessionId, messageId, pinned) => {
+    await persistMessagePin(messageId, sessionId, pinned);
+    const pinned_at = pinned ? Date.now() : null;
+    set((s) => ({
+      messages: {
+        ...s.messages,
+        [sessionId]: (s.messages[sessionId] ?? []).map((m) =>
+          m.id === messageId ? { ...m, pinned_at } : m,
+        ),
+      },
+    }));
+  },
+
   sendUserMessage: async (rawContent, attachments) => {
     // Abort any in-flight memory extraction so it stops competing with this
     // turn for the model's generation slot (best-effort; no-op when idle).
@@ -1802,101 +2015,119 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // Hard cap: at most one in-flight task per chat. If this session is
     // already the runner or already has a waiter, drop this submit. The UI
     // disables the send button in this state too — belt-and-suspenders.
+    //
+    // `runningTask` / `queue` only start reflecting this send at step 3,
+    // several awaits away (web-fetch alone allows 15 s per URL), and the
+    // composer re-enables the moment it optimistically clears. So a second
+    // Enter inside that window passed BOTH this check and the composer's,
+    // and dispatched a duplicate task whose history snapshot was missing the
+    // first one's reply. `sendingSessions` closes the window by claiming the
+    // session synchronously, right here, and releasing it in the `finally`
+    // once the task is queued (or the send has failed).
     const snap = get();
     const alreadyBusy =
       snap.runningTask?.sessionId === sessionId ||
-      snap.queue.some((t) => t.sessionId === sessionId);
+      snap.queue.some((t) => t.sessionId === sessionId) ||
+      sendingSessions.has(sessionId);
     if (alreadyBusy) return;
+    sendingSessions.add(sessionId);
+    try {
 
-    let inlinedContent = inlineTextAttachments(rawContent, attachments);
-    const images = imagesFromAttachments(attachments);
-    const attachmentsJson = JSON.stringify(
-      attachments.map((a) => ({
-        kind: a.kind,
-        name: a.name,
-        mime: a.mime,
-        data: a.data,
-      })),
-    );
+      let inlinedContent = inlineTextAttachments(rawContent, attachments);
+      const images = imagesFromAttachments(attachments);
+      const attachmentsJson = JSON.stringify(
+        attachments.map((a) => ({
+          kind: a.kind,
+          name: a.name,
+          mime: a.mime,
+          data: a.data,
+        })),
+      );
 
-    // Optional web-fetch step: pull plain-text bodies for any http(s) URLs in
-    // the user's raw prompt and append them as fenced blocks so the model has
-    // the page content as prompt context. Silent on failure — a dead link
-    // should never block the send. Off by default; opt-in in Settings.
-    //
-    // `fetchOutcomes` survives the block so the chip persistence below can
-    // build a `ToolCallRecord[]` from it and attach the same call/result
-    // chip UX the calculator and MCP tools get. Without that, web fetch
-    // was the only "tool" that ran silently — no indication in the UI
-    // that the user's prompt had been augmented with page content.
-    let fetchOutcomes: FetchOutcome[] = [];
-    {
-      const s = useSettingsStore.getState();
-      if (s.web_fetch_enabled) {
-        const urls = extractUrls(rawContent);
-        if (urls.length > 0) {
-          try {
-            fetchOutcomes = await fetchAll(urls);
-            inlinedContent = inlineFetchedPages(inlinedContent, fetchOutcomes);
-          } catch (e) {
-            // fetchAll itself never throws, but be defensive — a thrown
-            // exception here would eat the whole submit, and we'd rather
-            // send the prompt without the fetched context than not at all.
-            logger.warn("web fetch step failed", e);
+      // Optional web-fetch step: pull plain-text bodies for any http(s) URLs in
+      // the user's raw prompt and append them as fenced blocks so the model has
+      // the page content as prompt context. Silent on failure — a dead link
+      // should never block the send. Off by default; opt-in in Settings.
+      //
+      // `fetchOutcomes` survives the block so the chip persistence below can
+      // build a `ToolCallRecord[]` from it and attach the same call/result
+      // chip UX the calculator and MCP tools get. Without that, web fetch
+      // was the only "tool" that ran silently — no indication in the UI
+      // that the user's prompt had been augmented with page content.
+      let fetchOutcomes: FetchOutcome[] = [];
+      {
+        const s = useSettingsStore.getState();
+        if (s.web_fetch_enabled) {
+          const urls = extractUrls(rawContent);
+          if (urls.length > 0) {
+            try {
+              fetchOutcomes = await fetchAll(urls);
+              inlinedContent = inlineFetchedPages(inlinedContent, fetchOutcomes);
+            } catch (e) {
+              // fetchAll itself never throws, but be defensive — a thrown
+              // exception here would eat the whole submit, and we'd rather
+              // send the prompt without the fetched context than not at all.
+              logger.warn("web fetch step failed", e);
+            }
           }
         }
       }
-    }
-    const fetchToolRecords =
-      fetchOutcomes.length > 0 ? buildFetchToolRecords(fetchOutcomes) : [];
+      const fetchToolRecords =
+        fetchOutcomes.length > 0 ? buildFetchToolRecords(fetchOutcomes) : [];
 
-    // 1. Persist user message.
-    const userMsg = await appendMessage({
-      session_id: sessionId,
-      role: "user",
-      content: inlinedContent,
-      attachments_json: attachmentsJson,
-    });
-    set((s) => ({
-      messages: {
-        ...s.messages,
-        [sessionId!]: [...(s.messages[sessionId!] ?? []), userMsg],
-      },
-    }));
+      // 1. Persist user message.
+      const userMsg = await appendMessage({
+        session_id: sessionId,
+        role: "user",
+        content: inlinedContent,
+        attachments_json: attachmentsJson,
+      });
+      set((s) => ({
+        messages: {
+          ...s.messages,
+          [sessionId!]: [...(s.messages[sessionId!] ?? []), userMsg],
+        },
+      }));
 
-    // Auto-title from first user message.
-    await maybeAutoTitle(get, (p) => set(p), sessionId, rawContent);
+      // Auto-title from first user message.
+      await maybeAutoTitle(get, (p) => set(p), sessionId, rawContent);
 
-    // 2. Build the ChatRequest snapshot NOW, even if this task is going to
-    //    wait. Snapshotting at submit time freezes the prompt/history the
-    //    model will see — later edits to other messages in the session
-    //    can't retroactively change a queued request.
-    const history = get().messages[sessionId] ?? [];
-    // Drop the just-inserted user message from the ambient history; we'll
-    // re-add it as the trailing chat message so `images` is attached.
-    const trimmed = history.filter((m) => m.id !== userMsg.id);
-    const request = await buildTaskRequest(
-      session,
-      sessionId,
-      trimmed,
-      inlinedContent,
-      images,
-    );
+      // 2. Build the ChatRequest snapshot NOW, even if this task is going to
+      //    wait. Snapshotting at submit time freezes the prompt/history the
+      //    model will see — later edits to other messages in the session
+      //    can't retroactively change a queued request.
+      const history = get().messages[sessionId] ?? [];
+      // Drop the just-inserted user message from the ambient history; we'll
+      // re-add it as the trailing chat message so `images` is attached.
+      const trimmed = history.filter((m) => m.id !== userMsg.id);
+      const request = await buildTaskRequest(
+        session,
+        sessionId,
+        trimmed,
+        inlinedContent,
+        images,
+      );
 
-    const task: QueueTask = {
-      id: `t_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-      sessionId,
-      userMsgId: userMsg.id,
-      request,
-      preToolCalls: fetchToolRecords.length > 0 ? fetchToolRecords : undefined,
-    };
+      const task: QueueTask = {
+        id: `t_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        sessionId,
+        userMsgId: userMsg.id,
+        request,
+        preToolCalls: fetchToolRecords.length > 0 ? fetchToolRecords : undefined,
+      };
 
-    // 3. Dispatch. If nothing is running (or mid-start) globally, start
-    //    immediately. Otherwise park in the waiting queue and let the
-    //    runner pick us up when the current task ends — `tryDirectStart`
-    //    owns the dispatch-lock claim and the trailing re-promote nudge.
-    if (!(await tryDirectStart(task, get, set))) {
-      set((s) => ({ queue: [...s.queue, task] }));
+      // 3. Dispatch. If nothing is running (or mid-start) globally, start
+      //    immediately. Otherwise park in the waiting queue and let the
+      //    runner pick us up when the current task ends — `tryDirectStart`
+      //    owns the dispatch-lock claim and the trailing re-promote nudge.
+        if (!(await tryDirectStart(task, get, set))) {
+          set((s) => ({ queue: [...s.queue, task] }));
+        }
+    } finally {
+      // Released only once the task is visible in `runningTask`/`queue` (or
+      // the send bailed), so there is never a gap where neither the
+      // reservation nor the queue accounts for this session.
+      sendingSessions.delete(sessionId);
     }
   },
 
@@ -1979,6 +2210,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       sessionId,
       userMsgId: userMsg.id,
       request,
+      // The row we just deleted may have been pinned; `startTask` restores
+      // the mark on its replacement rather than silently dropping it.
+      carryPin: last.pinned_at != null,
     };
 
     if (!(await tryDirectStart(task, get, set))) {

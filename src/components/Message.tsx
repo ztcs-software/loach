@@ -11,7 +11,10 @@ import {
   GitFork,
   Loader2,
   MoreHorizontal,
+  Pin,
+  PinOff,
   RefreshCw,
+  Share2,
   TextSelect,
   Wrench,
 } from "lucide-react";
@@ -35,6 +38,7 @@ import { cn } from "@/lib/utils";
 import { safeImageMime, stripInlinedAttachments } from "@/lib/files";
 import { Bookmark } from "lucide-react";
 import { useChatStore } from "@/stores/chatStore";
+import { useShareStore } from "@/stores/shareStore";
 import { useSnippetStore } from "@/stores/snippetStore";
 import { useToastStore } from "@/stores/toastStore";
 
@@ -333,6 +337,7 @@ function ThinkingBlock({ text, isStreaming }: { text: string; isStreaming?: bool
 function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: MessageProps) {
   const regenerateLast = useChatStore((s) => s.regenerateLast);
   const forkChat = useChatStore((s) => s.fork);
+  const pinMessage = useChatStore((s) => s.pinMessage);
   const [menuOpen, setMenuOpen] = useState(false);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   // Separate state for the keyboard-accessible kebab below the user
@@ -358,6 +363,7 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
   // metrics and the "Show more" toggle stay outside the highlight.
   const bodyRef = useRef<HTMLDivElement>(null);
   const openSnippetDialog = useSnippetStore((s) => s.openDialog);
+  const openShareDialog = useShareStore((s) => s.open);
 
   // Single funnel for every clipboard write the message component does.
   // The Tauri webview can refuse `navigator.clipboard.writeText` in narrow
@@ -462,15 +468,10 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
     });
   };
 
-  if (message.role === "system") {
-    return (
-      <div className="mx-auto my-3 max-w-2xl rounded-md border border-dashed border-border/60 bg-muted/30 px-3 py-2 text-center text-xs text-muted-foreground">
-        {message.content}
-      </div>
-    );
-  }
-
   const isUser = message.role === "user";
+  const isPinned = message.pinned_at != null;
+  const togglePin = () =>
+    void pinMessage(message.session_id, message.id, !isPinned);
   // Memoise the JSON parses on their source strings. chatStore only swaps these
   // strings when their dirty flags fire, so during a content-only streaming
   // flush they stay reference-equal and the parse is skipped — otherwise the
@@ -506,6 +507,18 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
     if (isUser || !isStreaming) return null;
     return lastCodeBlock(message.content)?.code ?? null;
   }, [isUser, isStreaming, message.content]);
+
+  // Below every hook, deliberately. This used to sit above four `useMemo`
+  // calls, which breaks the rules of hooks — safe only because a row's role
+  // never changes under its `key`, and a trap for any future refactor that
+  // reuses an instance across roles.
+  if (message.role === "system") {
+    return (
+      <div className="mx-auto my-3 max-w-2xl rounded-md border border-dashed border-border/60 bg-muted/30 px-3 py-2 text-center text-xs text-muted-foreground">
+        {message.content}
+      </div>
+    );
+  }
 
   return (
     <div
@@ -768,9 +781,10 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
                   // Tell screen-reader users what's behind the kebab —
                   // a generic "Message actions" reads the same for the
                   // user and assistant menus despite their action sets
-                  // differing. This one carries Copy + Save as Snippet,
-                  // which only make sense for the user's own message.
-                  aria-label="Copy or save this message"
+                  // differing. This one carries Copy + Share + Save as
+                  // Snippet, which only make sense for the user's own
+                  // message.
+                  aria-label="Copy, share or save this message"
                   className={cn(
                     "inline-flex h-7 w-7 items-center justify-center rounded-full text-foreground/55 transition-opacity hover:bg-foreground/10 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
                     userKebabOpen
@@ -794,6 +808,15 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
                 </DropdownMenuItem>
                 <DropdownMenuItem
                   onSelect={() =>
+                    openShareDialog({ role: "user", content: displayContent })
+                  }
+                  className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
+                >
+                  <Share2 className="h-4 w-4 text-foreground/60" />
+                  Share
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  onSelect={() =>
                     openSnippetDialog({ seedPrompt: displayContent })
                   }
                   className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
@@ -807,6 +830,15 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
         )}
         {!isUser && message.content.length > 0 && (
           <div className="mt-1.5 flex items-center gap-2">
+            {isPinned && (
+              <span
+                title="Pinned — unpin from the ⋯ menu"
+                className="inline-flex items-center gap-1 rounded-full bg-foreground/[0.07] px-2 py-0.5 text-[10.5px] font-medium text-foreground/60"
+              >
+                <Pin className="h-3 w-3" />
+                Pinned
+              </span>
+            )}
             {showMetrics && (
               <span className="text-[11px] font-mono text-muted-foreground">
                 ⏱ {showMetrics.tokens_per_second.toFixed(1)} tok/s ·{" "}
@@ -846,6 +878,39 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
                   <Copy className="h-4 w-4 text-foreground/60" />
                   Copy message
                 </DropdownMenuItem>
+                <DropdownMenuItem
+                  onSelect={() =>
+                    openShareDialog({
+                      role: "assistant",
+                      content: message.content,
+                    })
+                  }
+                  className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
+                >
+                  <Share2 className="h-4 w-4 text-foreground/60" />
+                  Share
+                </DropdownMenuItem>
+                {/* Not offered for hidden imported rows: they render inside a
+                    collapsed card, so a pin chip for one would scroll nowhere
+                    when the card is shut. */}
+                {!message.import_hidden && (
+                  <DropdownMenuItem
+                    onSelect={togglePin}
+                    className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
+                  >
+                    {isPinned ? (
+                      <>
+                        <PinOff className="h-4 w-4 text-foreground/60" />
+                        Unpin this response
+                      </>
+                    ) : (
+                      <>
+                        <Pin className="h-4 w-4 text-foreground/60" />
+                        Pin this response
+                      </>
+                    )}
+                  </DropdownMenuItem>
+                )}
                 {canRegenerate && (
                   <DropdownMenuItem
                     onSelect={() => void regenerateLast(message.session_id)}

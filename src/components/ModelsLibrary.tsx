@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import {
+  Ban,
   CircleAlert,
   Copy,
   Cpu,
@@ -470,6 +471,12 @@ function RunChip({
         )}
         {terminal === "error" && (
           <CircleAlert className="h-3.5 w-3.5 shrink-0" />
+        )}
+        {/* `AdminProgress.finished` also carries "cancelled" — the store sets
+            it explicitly so the UI can label the run cancelled rather than
+            show a green check. Without a branch here it drew no icon at all. */}
+        {terminal === "cancelled" && (
+          <Ban className="h-3.5 w-3.5 shrink-0 text-foreground/45" />
         )}
         <span className="min-w-0 flex-1 truncate font-medium">
           {verb} {run.target}

@@ -198,8 +198,22 @@ pub enum CallToolContent {
         #[serde(default)]
         resource: Option<Value>,
     },
-    /// Anything we don't recognise — keep the payload so we can stringify
-    /// it for the model rather than dropping the result silently.
+    /// Spec content types we don't render inline but must still acknowledge.
+    Audio {
+        #[serde(default, rename = "mimeType")]
+        mime_type: Option<String>,
+    },
+    #[serde(rename = "resource_link")]
+    ResourceLink {
+        #[serde(default)]
+        uri: Option<String>,
+        #[serde(default)]
+        name: Option<String>,
+    },
+    /// Anything else. A unit variant discards the payload, so the assembler
+    /// emits a breadcrumb rather than silence — a tool whose entire result is
+    /// an unhandled type used to come back as empty text with `is_error:
+    /// false`, which reads to the model as "the tool returned nothing".
     #[serde(other)]
     Unknown,
 }

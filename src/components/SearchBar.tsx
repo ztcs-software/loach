@@ -8,6 +8,7 @@ import {
 import { Search, MessageSquare, Layers, SquareTerminal, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useChatStore } from "@/stores/chatStore";
+import { usePrivateChatStore } from "@/stores/privateChatStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useSnippetStore } from "@/stores/snippetStore";
 import { useUIStore } from "@/stores/uiStore";
@@ -78,6 +79,12 @@ export function SearchBar() {
   // there's a single source of truth for "show the palette".
   useEffect(() => {
     const focus = () => {
+      // Private Chat owns the screen while it's open. The palette renders
+      // *below* that overlay, so opening it here would steal focus from the
+      // private composer into an invisible input and let Enter act on the
+      // regular app behind it — including surfacing persisted chat titles,
+      // which is exactly what the TitleBar's disabled search pill prevents.
+      if (usePrivateChatStore.getState().open) return;
       setOpen(true);
       // Defer the focus call so the input has been mounted by the time we
       // try to grab focus.

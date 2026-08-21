@@ -198,7 +198,7 @@ pub fn dispatch(args: &Value) -> McpCallResult {
     }
     let action = match args.get("action").and_then(|v| v.as_str()) {
         Some(s) => s,
-        None => return err("missing required `action` argument — use \"create\" or \"merge\""),
+        None => return err("missing required `action` argument — use \"create\""),
     };
     match action {
         "create" => do_create(args),

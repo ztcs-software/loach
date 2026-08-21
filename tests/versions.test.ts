@@ -3,10 +3,18 @@
 // when they disagree — but only after the PR has already merged to main.
 // This test moves that failure to `npm test` time, before anything ships.
 //
+// Cargo.lock is checked too. The workflow doesn't compare it, so a forgotten
+// `cargo update -p loach` slips past the version gate and instead fails much
+// later at CI's `cargo test --locked` (and at the release build, which builds
+// from the lockfile) with an error that doesn't obviously say "you bumped the
+// version and didn't refresh the lockfile".
+//
 // Parsing mirrors the workflow: package.json / tauri.conf.json are read as
 // JSON; Cargo.toml takes the first `version = "…"` line of the [package]
 // section (dependency tables use inline `{ version = "…" }`, which never
-// starts a line).
+// starts a line). Cargo.lock is matched on the `[[package]]` entry whose
+// name is `loach` — every dependency has the same shape, so anchoring on the
+// name is what keeps this from reading some crate's version instead.
 
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
@@ -23,6 +31,16 @@ describe("release version agreement", () => {
   ).version;
   const cargoToml = read("src-tauri", "Cargo.toml");
   const cargo = /^\[package\][\s\S]*?^version\s*=\s*"([^"]+)"/m.exec(cargoToml)?.[1];
+  const cargoLockText = read("src-tauri", "Cargo.lock");
+  // Line-walk rather than a multi-line regex: every dependency in the lock
+  // file has the identical `name = ` / `version = ` shape, so the anchor that
+  // matters is the name, and `version` is always the line right after it.
+  const cargoLock = (() => {
+    const lines = cargoLockText.split("\n").map((l) => l.trimEnd());
+    const i = lines.indexOf('name = "loach"');
+    if (i === -1) return undefined;
+    return /^version = "([^"]+)"$/.exec(lines[i + 1] ?? "")?.[1];
+  })();
 
   it("finds a plausible version in all three files", () => {
     // A semver-ish shape guard so a broken parse fails with a clear message
@@ -31,15 +49,16 @@ describe("release version agreement", () => {
       ["package.json", pkg],
       ["src-tauri/tauri.conf.json", tauri],
       ["src-tauri/Cargo.toml", cargo],
+      ["src-tauri/Cargo.lock", cargoLock],
     ] as const) {
       expect(v, `${name} version`).toMatch(/^\d+\.\d+\.\d+/);
     }
   });
 
-  it("package.json, tauri.conf.json, and Cargo.toml agree", () => {
+  it("package.json, tauri.conf.json, Cargo.toml, and Cargo.lock agree", () => {
     expect(
-      { tauriConf: tauri, cargoToml: cargo },
-      "the release workflow hard-fails on drift — fix the odd one out and run `cargo update -p loach`",
-    ).toEqual({ tauriConf: pkg, cargoToml: pkg });
+      { tauriConf: tauri, cargoToml: cargo, cargoLock },
+      "the release workflow hard-fails on drift — fix the odd one out, then run `cargo update -p loach` to refresh the lockfile",
+    ).toEqual({ tauriConf: pkg, cargoToml: pkg, cargoLock: pkg });
   });
 });

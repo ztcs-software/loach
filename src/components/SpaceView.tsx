@@ -41,6 +41,7 @@ import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { ChatInput } from "@/components/ChatInput";
+import { ChatLabelDot, ChatLabelSubmenu } from "@/components/ChatLabelMenu";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { useChatStore } from "@/stores/chatStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -55,6 +56,7 @@ import {
 } from "@/lib/tauri";
 import { cn, relativeDay } from "@/lib/utils";
 import {
+  type ChatLabel,
   type ModelInfo,
   type ProviderId,
   type Session,
@@ -63,6 +65,26 @@ import {
 } from "@/types";
 
 type TabId = "chats" | "instructions" | "files" | "memory" | "models";
+
+/** Stable empties for the "not loaded yet" case — a fresh `[]` per render
+ *  would churn every memo and effect keyed on these. */
+/** Surface a failed chat-row action instead of letting it fall through to
+ *  main.tsx's global unhandled-rejection net, which says only "Something
+ *  went wrong" with no hint as to which action failed. The store actions
+ *  don't catch, so without this every rename / pin / label / archive / delete
+ *  in this view shared the vaguest error path in the file. */
+function notifyOnFail(p: Promise<unknown>, action: string): void {
+  void p.catch((e) => {
+    useToastStore.getState().push({
+      kind: "error",
+      title: `Couldn't ${action}`,
+      body: e instanceof Error ? e.message : String(e),
+    });
+  });
+}
+
+const EMPTY_FILES: SpaceFile[] = [];
+const EMPTY_MEMORIES: SpaceMemory[] = [];
 
 export function SpaceView() {
   const { confirm } = useConfirm();
@@ -89,6 +111,7 @@ export function SpaceView() {
   const selectSession = useChatStore((s) => s.selectSession);
   const renameChat = useChatStore((s) => s.rename);
   const pinChat = useChatStore((s) => s.pin);
+  const setChatLabel = useChatStore((s) => s.setLabel);
   const archiveChat = useChatStore((s) => s.archive);
   const removeChat = useChatStore((s) => s.remove);
   const setSidebarTab = useUIStore((s) => s.setSidebarTab);
@@ -97,8 +120,14 @@ export function SpaceView() {
 
   const [editDialogOpen, setEditDialogOpen] = useState(false);
   const [tab, setTab] = useState<TabId>("chats");
-  const [files, setFiles] = useState<SpaceFile[]>([]);
-  const [memories, setMemories] = useState<SpaceMemory[]>([]);
+  // Read straight from the store rather than mirroring into local state.
+  // The mirror only ever copied `stored*` forward, and its effect was
+  // guarded on truthiness — so switching to a space whose rows weren't
+  // cached yet (`undefined`) left the PREVIOUS space's files, memories and
+  // Meta-strip counts on screen until the new load resolved, or forever if
+  // it failed.
+  const files = storedFiles ?? EMPTY_FILES;
+  const memories = storedMemories ?? EMPTY_MEMORIES;
 
   useEffect(() => {
     if (space) {
@@ -107,14 +136,6 @@ export function SpaceView() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [space?.id]);
-
-  useEffect(() => {
-    if (storedFiles) setFiles(storedFiles);
-  }, [storedFiles]);
-
-  useEffect(() => {
-    if (storedMemories) setMemories(storedMemories);
-  }, [storedMemories]);
 
   const spaceSessions = useMemo(
     () =>
@@ -308,10 +329,11 @@ export function SpaceView() {
                 <ChatsTab
                   sessions={spaceSessions}
                   onOpen={openChat}
-                  onRename={(id, title) => void renameChat(id, title)}
-                  onPin={(id, pinned) => void pinChat(id, pinned)}
-                  onArchive={(id) => void archiveChat(id, true)}
-                  onDelete={(id) => void removeChat(id)}
+                  onRename={(id, title) => notifyOnFail(renameChat(id, title), "rename this chat")}
+                  onPin={(id, pinned) => notifyOnFail(pinChat(id, pinned), "pin this chat")}
+                  onSetLabel={(id, label) => notifyOnFail(setChatLabel(id, label), "label this chat")}
+                  onArchive={(id) => notifyOnFail(archiveChat(id, true), "archive this chat")}
+                  onDelete={(id) => notifyOnFail(removeChat(id), "delete this chat")}
                 />
               </TabsContent>
 
@@ -553,6 +575,7 @@ interface ChatsTabProps {
   onOpen: (id: string) => void;
   onRename: (id: string, title: string) => void;
   onPin: (id: string, pinned: boolean) => void;
+  onSetLabel: (id: string, label: ChatLabel | null) => void;
   onArchive: (id: string) => void;
   onDelete: (id: string) => void;
 }
@@ -562,6 +585,7 @@ function ChatsTab({
   onOpen,
   onRename,
   onPin,
+  onSetLabel,
   onArchive,
   onDelete,
 }: ChatsTabProps) {
@@ -618,6 +642,7 @@ function ChatsTab({
                 onCancelRename={() => setRenamingId(null)}
                 onOpen={() => onOpen(s.id)}
                 onPin={() => onPin(s.id, !s.pinned_at)}
+                onSetLabel={(label) => onSetLabel(s.id, label)}
                 onArchive={() => onArchive(s.id)}
                 onDelete={async () => {
                   const ok = await confirm({
@@ -649,6 +674,7 @@ interface ChatRowProps {
   onCancelRename: () => void;
   onOpen: () => void;
   onPin: () => void;
+  onSetLabel: (label: ChatLabel | null) => void;
   onArchive: () => void;
   onDelete: () => void;
 }
@@ -661,6 +687,7 @@ function ChatRow({
   onCancelRename,
   onOpen,
   onPin,
+  onSetLabel,
   onArchive,
   onDelete,
 }: ChatRowProps) {
@@ -720,6 +747,7 @@ function ChatRow({
         }}
         className="group relative flex cursor-pointer items-center gap-3 rounded-xl px-3 py-2.5 text-sm transition-colors hover:bg-foreground/[0.06] focus-visible:bg-foreground/[0.06] focus-visible:outline-none"
       >
+        <ChatLabelDot label={session.label} />
         <MessageSquare className="h-4 w-4 shrink-0 text-foreground/40 group-hover:text-foreground/65" />
         <span className="min-w-0 flex-1 truncate text-foreground/80 group-hover:text-foreground">
           {session.title || "Untitled"}
@@ -765,6 +793,11 @@ function ChatRow({
                 </>
               )}
             </DropdownMenuItem>
+            <ChatLabelSubmenu
+              value={session.label}
+              onSelect={onSetLabel}
+              iconClassName="mr-2 h-4 w-4"
+            />
             <DropdownMenuItem onSelect={onStartRename}>
               <Pencil className="mr-2 h-4 w-4" />
               Rename

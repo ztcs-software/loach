@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   Archive,
@@ -31,6 +31,7 @@ import {
   MoreHorizontal,
   Network,
   Palette,
+  Play,
   Plug,
   Calculator,
   FileText,
@@ -68,6 +69,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useToastStore } from "@/stores/toastStore";
 import { useUIStore } from "@/stores/uiStore";
+import { isUpdateInstalling } from "@/lib/updater";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { McpPanel } from "@/components/McpPanel";
 import { SecurityPanel } from "@/components/SecurityPanel";
@@ -97,6 +99,7 @@ import type {
   OllamaKeepAlive,
   ProviderId,
   Session,
+  Settings,
 } from "@/types";
 import pkg from "../../package.json";
 
@@ -141,6 +144,78 @@ const NAV = [
   { value: "about", label: "About", icon: Info },
 ] as const;
 
+/** How long a text setting sits in local state before it's persisted. */
+const SETTING_DEBOUNCE_MS = 400;
+
+/**
+ * Buffer a free-text setting locally and persist it on a pause, on blur, and
+ * on unmount.
+ *
+ * These fields used to call `settings.update` on EVERY keystroke, so typing
+ * a base URL meant an IPC round-trip plus a SQLite write per character — and
+ * every consumer keyed on that value (the model picker's Ollama probe, for
+ * one) re-ran against each half-typed prefix. It also meant a crash
+ * mid-typing persisted a partial URL as if the user had chosen it.
+ *
+ * `dialogOpen` is what makes "type, then immediately hit Escape" safe. It is
+ * NOT enough to flush on unmount: this hook lives on `SettingsDialog`, which
+ * stays mounted for the app's lifetime — Radix only unmounts the *content* —
+ * so the cleanup never runs on close. Watching the open flag flip to false is
+ * the event that actually corresponds to the user leaving. Blur covers "type,
+ * then click Test connection"; the store's optimistic `set` is synchronous,
+ * so the button reads the new value.
+ */
+function useBufferedSetting(
+  key: "ollama_base_url" | "openai_base_url" | "user_name" | "global_system_prompt",
+  committed: string,
+  update: <K extends keyof Settings>(k: K, v: Settings[K]) => Promise<void>,
+  dialogOpen: boolean,
+) {
+  const [draft, setDraft] = useState(committed);
+  const dirty = useRef(false);
+  const latest = useRef(committed);
+  const timer = useRef<number | null>(null);
+
+  // Adopt external changes (hydration, a reset) — but never while the user
+  // has unsaved keystrokes in flight, or we'd yank the caret's text away.
+  useEffect(() => {
+    if (!dirty.current) {
+      latest.current = committed;
+      setDraft(committed);
+    }
+  }, [committed]);
+
+  const flush = useCallback(() => {
+    if (timer.current !== null) {
+      window.clearTimeout(timer.current);
+      timer.current = null;
+    }
+    if (!dirty.current) return;
+    dirty.current = false;
+    void update(key, latest.current);
+  }, [key, update]);
+
+  // Closing the dialog commits whatever is pending.
+  const wasOpen = useRef(dialogOpen);
+  useEffect(() => {
+    if (wasOpen.current && !dialogOpen) flush();
+    wasOpen.current = dialogOpen;
+  }, [dialogOpen, flush]);
+
+  // Backstop for a real unmount (hot reload, an ErrorBoundary reset).
+  useEffect(() => () => flush(), [flush]);
+
+  const onChange = (next: string) => {
+    latest.current = next;
+    dirty.current = true;
+    setDraft(next);
+    if (timer.current !== null) window.clearTimeout(timer.current);
+    timer.current = window.setTimeout(flush, SETTING_DEBOUNCE_MS);
+  };
+
+  return { value: draft, onChange, onBlur: flush };
+}
+
 export function SettingsDialog() {
   const open = useUIStore((s) => s.settingsOpen);
   const setOpen = useUIStore((s) => s.setSettingsOpen);
@@ -154,6 +229,46 @@ export function SettingsDialog() {
   const [openaiTest, setOpenaiTest] = useState<ConnTestState>({ kind: "idle" });
   const [templateVarsOpen, setTemplateVarsOpen] = useState(false);
   const [tonesInfoOpen, setTonesInfoOpen] = useState(false);
+
+  // Clear transient state when the dialog closes. Radix unmounts only the
+  // CONTENT, so these live on for the app's lifetime: a typed-but-never-saved
+  // API key stayed in memory and re-rendered into the password field on every
+  // future open, and days-old connection-test cards reappeared as if fresh.
+  useEffect(() => {
+    if (open) return;
+    setPendingKey("");
+    setOllamaTest({ kind: "idle" });
+    setOpenaiTest({ kind: "idle" });
+    setTemplateVarsOpen(false);
+    setTonesInfoOpen(false);
+  }, [open]);
+
+  // Free-text settings are buffered locally and persisted on a pause / blur
+  // / unmount rather than on every keystroke — see `useBufferedSetting`.
+  const ollamaUrlField = useBufferedSetting(
+    "ollama_base_url",
+    settings.ollama_base_url,
+    settings.update,
+    open,
+  );
+  const openaiUrlField = useBufferedSetting(
+    "openai_base_url",
+    settings.openai_base_url,
+    settings.update,
+    open,
+  );
+  const userNameField = useBufferedSetting(
+    "user_name",
+    settings.user_name,
+    settings.update,
+    open,
+  );
+  const systemPromptField = useBufferedSetting(
+    "global_system_prompt",
+    settings.global_system_prompt,
+    settings.update,
+    open,
+  );
 
   const runOllamaTest = async () => {
     setOllamaTest({ kind: "testing" });
@@ -182,7 +297,18 @@ export function SettingsDialog() {
   };
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        // Refuse to close mid-install. The download can't be stopped and the
+        // app relaunches itself when it lands, so dismissing here would hide
+        // the progress bar and then restart the app out from under someone
+        // who thought they'd cancelled — the same reason the launch-time
+        // update dialog blocks its own dismissal.
+        if (!next && isUpdateInstalling()) return;
+        setOpen(next);
+      }}
+    >
       {/* Slide-in/out from the LEFT — the Settings entry lives in the
           sidebar's bottom-left corner, so animating from the same side gives
           the click a clear sense of origin.
@@ -210,7 +336,13 @@ export function SettingsDialog() {
 
         <Tabs
           value={settingsTab}
-          onValueChange={(v) => setSettingsTab(v as typeof settingsTab)}
+          onValueChange={(v) => {
+            // Switching tabs unmounts UpdatesPanel, which would strand an
+            // in-flight install with no visible progress. Same guard as the
+            // dialog's own close.
+            if (isUpdateInstalling()) return;
+            setSettingsTab(v as typeof settingsTab);
+          }}
           orientation="vertical"
           className="flex h-[540px] max-h-[85vh]"
         >
@@ -258,11 +390,12 @@ export function SettingsDialog() {
                   <Label>Ollama base URL</Label>
                   <Input
                     className="mt-1.5"
-                    value={settings.ollama_base_url}
+                    value={ollamaUrlField.value}
                     onChange={(e) => {
-                      settings.update("ollama_base_url", e.target.value);
+                      ollamaUrlField.onChange(e.target.value);
                       if (ollamaTest.kind !== "idle") setOllamaTest({ kind: "idle" });
                     }}
+                    onBlur={ollamaUrlField.onBlur}
                     placeholder="http://localhost:11434"
                   />
                   <p className="mt-1.5 text-[11px] text-foreground/50">
@@ -289,6 +422,35 @@ export function SettingsDialog() {
                   )}
                 </div>
 
+                <div>
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="min-w-0">
+                      <Label className="flex items-center gap-1.5">
+                        <Play className="h-3.5 w-3.5 text-foreground/60" />
+                        Auto-launch Ollama
+                      </Label>
+                      <p className="mt-1 text-[11px] text-foreground/50">
+                        Start Ollama when Loach opens, if it isn't already
+                        running. Only works when the base URL above points at
+                        this computer. You can always start it by hand from the
+                        model picker.
+                      </p>
+                    </div>
+                    <Switch
+                      checked={settings.ollama_auto_launch}
+                      onCheckedChange={(next) =>
+                        settings.update("ollama_auto_launch", next)
+                      }
+                      className="shrink-0"
+                      aria-label={
+                        settings.ollama_auto_launch
+                          ? "Disable auto-launching Ollama"
+                          : "Enable auto-launching Ollama"
+                      }
+                    />
+                  </div>
+                </div>
+
                 <Separator />
 
                 <div>
@@ -296,11 +458,12 @@ export function SettingsDialog() {
                   <div className="relative mt-1.5">
                     <Input
                       className="pr-10"
-                      value={settings.openai_base_url}
+                      value={openaiUrlField.value}
                       onChange={(e) => {
-                        settings.update("openai_base_url", e.target.value);
+                        openaiUrlField.onChange(e.target.value);
                         if (openaiTest.kind !== "idle") setOpenaiTest({ kind: "idle" });
                       }}
+                      onBlur={openaiUrlField.onBlur}
                       placeholder="https://api.openai.com/v1"
                     />
                     <DropdownMenu>
@@ -438,8 +601,9 @@ export function SettingsDialog() {
                   <Label>Your name</Label>
                   <Input
                     className="mt-1.5"
-                    value={settings.user_name}
-                    onChange={(e) => settings.update("user_name", e.target.value)}
+                    value={userNameField.value}
+                    onChange={(e) => userNameField.onChange(e.target.value)}
+                    onBlur={userNameField.onBlur}
                     placeholder="Your name"
                   />
                   <p className="mt-1.5 text-[11px] text-foreground/50">
@@ -468,10 +632,9 @@ export function SettingsDialog() {
                   <Textarea
                     rows={10}
                     className="mt-1.5 resize-none"
-                    value={settings.global_system_prompt}
-                    onChange={(e) =>
-                      settings.update("global_system_prompt", e.target.value)
-                    }
+                    value={systemPromptField.value}
+                    onChange={(e) => systemPromptField.onChange(e.target.value)}
+                    onBlur={systemPromptField.onBlur}
                     placeholder="You are a helpful assistant…"
                   />
                   <p className="mt-1.5 text-[11px] text-foreground/50">
@@ -2199,12 +2362,8 @@ function DataPanel() {
   };
   useEffect(
     () => () => {
-      // On unmount: cancel everything we armed. We deliberately do NOT
-      // cancel the destructive-action reload during normal close — the
-      // reload is the right behaviour after a wipe — but cancelling it
-      // here means a user who somehow tears down the dialog in the
-      // 900 ms window (e.g. via process signal or hot reload) isn't
-      // hit by a stale page reload.
+      // On unmount: cancel the cosmetic timers we armed (the `flash`
+      // auto-clears) so their closures don't outlive the dialog.
       for (const id of pendingTimers.current) {
         window.clearTimeout(id);
       }
@@ -2212,6 +2371,18 @@ function DataPanel() {
     },
     [],
   );
+
+  /** Post-wipe / post-import reload. Deliberately NOT routed through
+   *  `scheduleTimer`: this panel unmounts on any Settings tab switch and on
+   *  Escape, both of which are reachable inside the 900 ms window — and a
+   *  cancelled reload leaves every store holding pre-wipe data over a DB
+   *  that has been emptied or replaced. The small delay only exists so the
+   *  success message is visible first. */
+  const reloadAfterDestructiveAction = () => {
+    window.setTimeout(() => {
+      window.location.reload();
+    }, 900);
+  };
 
   // A tiny toast-lite: the feedback message auto-clears after 5s so long-
   // running exports don't leave stale success chips behind when the user
@@ -2271,9 +2442,7 @@ function DataPanel() {
         return;
       }
       flash("info", formatImportSummary(stats));
-      scheduleTimer(() => {
-        window.location.reload();
-      }, 900);
+      reloadAfterDestructiveAction();
     } catch (e) {
       flash("error", e instanceof Error ? e.message : String(e));
       setBusy(null);
@@ -2445,12 +2614,8 @@ function DataPanel() {
         onDone={(text) => {
           flash("info", text);
           // Full reload so every zustand store re-hydrates from the now-
-          // empty DB. Small delay so the success state is visible first.
-          // Scheduled via `scheduleTimer` so it's cancellable if the
-          // dialog tears down before the 900 ms window elapses.
-          scheduleTimer(() => {
-            window.location.reload();
-          }, 900);
+          // empty DB.
+          reloadAfterDestructiveAction();
         }}
       />
 

@@ -2,8 +2,10 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   AdminEvent,
+  ChatLabel,
   ChatRequest,
   FetchedPage,
+  Folder,
   ImportStats,
   McpServer,
   McpServerInput,
@@ -71,6 +73,8 @@ export function createSession(args: {
       pinned_at: null,
       archived_at: null,
       forked_from_session_id: null,
+      label: null,
+      folder_id: null,
       created_at: now,
       updated_at: now,
     });
@@ -99,6 +103,8 @@ export function forkSession(args: {
       pinned_at: null,
       archived_at: null,
       forked_from_session_id: args.source_session_id,
+      label: null,
+      folder_id: null,
       created_at: now,
       updated_at: now,
     });
@@ -157,9 +163,58 @@ export function updateSessionParams(args: {
   return invoke("update_session_params", { args });
 }
 
+/** Persist the chat's colour label. Pass `null` to clear it. */
+export function updateSessionLabel(args: {
+  id: string;
+  label: ChatLabel | null;
+}): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("update_session_label", { args });
+}
+
+/** File a chat under a folder, or pull it back out with `null`. */
+export function setSessionFolder(args: {
+  id: string;
+  folder_id: string | null;
+}): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("set_session_folder", { args });
+}
+
 export function exportSession(id: string, format: "json" | "md"): Promise<string> {
   if (!isTauri) return notInTauri("");
   return invoke("export_session", { id, format });
+}
+
+// ------------ folders ------------
+
+export function listFolders(): Promise<Folder[]> {
+  if (!isTauri) return notInTauri([]);
+  return invoke("list_folders");
+}
+
+export function createFolder(name: string): Promise<Folder> {
+  if (!isTauri) {
+    const now = Date.now();
+    return notInTauri<Folder>({
+      id: mockId("mock-folder"),
+      name,
+      created_at: now,
+      updated_at: now,
+    });
+  }
+  return invoke("create_folder", { name });
+}
+
+export function renameFolder(id: string, name: string): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("rename_folder", { id, name });
+}
+
+/** Delete a folder. Its chats survive and return to the date-grouped list. */
+export function deleteFolder(id: string): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("delete_folder", { id });
 }
 
 // ------------ messages ------------
@@ -196,6 +251,7 @@ export function appendMessage(args: {
       compacted_at: null,
       import_group: null,
       import_hidden: false,
+      pinned_at: null,
       created_at: Date.now(),
     });
   }
@@ -227,6 +283,7 @@ export function importMessages(args: {
         compacted_at: null,
         import_group: group,
         import_hidden: args.hidden,
+        pinned_at: null,
         created_at: base + i,
       })),
     );
@@ -273,6 +330,17 @@ export function updateMessage(args: {
 export function deleteMessage(id: string, sessionId: string): Promise<void> {
   if (!isTauri) return notInTauri(undefined);
   return invoke("delete_message", { id, sessionId });
+}
+
+/** Pin or unpin one assistant response. Pinned rows surface in the bar
+ *  under the chat header. Scoped by `session_id` like `deleteMessage`. */
+export function pinMessage(
+  id: string,
+  sessionId: string,
+  pinned: boolean,
+): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("pin_message", { id, sessionId, pinned });
 }
 
 /** Delete every message in a session in one transactional call. Backs the
@@ -404,6 +472,14 @@ export function securityClear(args?: {
 export function ollamaProbe(baseUrl: string): Promise<boolean> {
   if (!isTauri) return notInTauri(false);
   return invoke("ollama_probe", { baseUrl });
+}
+
+/** Start a local `ollama serve` if nothing is answering at `baseUrl`, and
+ *  resolve once it does. Rejects with a user-facing message when Ollama
+ *  can't be found, the URL isn't local, or the server never comes up. */
+export function ollamaStart(baseUrl: string): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("ollama_start", { baseUrl });
 }
 
 export function ollamaListModels(baseUrl: string): Promise<ModelInfo[]> {

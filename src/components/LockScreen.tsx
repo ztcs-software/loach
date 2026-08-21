@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useSecurityStore } from "@/stores/securityStore";
+import { logger } from "@/lib/logger";
 import { cn } from "@/lib/utils";
 
 /**
@@ -93,8 +94,17 @@ export function LockScreen() {
       setShowingHint(false);
       return;
     }
-    const h = await getHint();
-    setHint(h ?? "(no hint set)");
+    try {
+      const h = await getHint();
+      setHint(h ?? "(no hint set)");
+    } catch (e) {
+      // `securityStore.getHint` passes the keyring error straight through.
+      // Unhandled, it reached main.tsx's global net and rendered a generic
+      // "Something went wrong" over the lock screen — with no answer to the
+      // question the user actually asked.
+      logger.warn("hint lookup failed", e);
+      setHint("(hint unavailable)");
+    }
     setShowingHint(true);
   };
 

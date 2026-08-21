@@ -103,21 +103,38 @@ export function ConfirmDialogHost({ children }: { children: ReactNode }) {
   const activeRef = useRef<Active | null>(null);
   activeRef.current = active;
 
+  /** Settle whatever request is on screen before a new one replaces it.
+   *
+   *  Installing a second request over a live one used to strand the first
+   *  promise forever: its `await confirm(...)` never resolved, so the caller's
+   *  continuation (and every closure it held) leaked. Reachable in practice —
+   *  a keyboard shortcut firing a confirm while another is already open. The
+   *  displaced request resolves as a dismissal, which is the safe answer for
+   *  a destructive prompt nobody answered. */
+  const settlePending = useCallback(() => {
+    const current = activeRef.current;
+    if (!current) return;
+    if (current.kind === "confirm") current.resolve(false);
+    else current.resolve(null);
+  }, []);
+
   const confirm = useCallback(
     (req: ConfirmRequest) =>
       new Promise<boolean>((resolve) => {
+        settlePending();
         setActive({ kind: "confirm", ...req, resolve });
       }),
-    [],
+    [settlePending],
   );
 
   const prompt = useCallback(
     (req: PromptRequest) =>
       new Promise<string | null>((resolve) => {
+        settlePending();
         setPromptValue(req.defaultValue ?? "");
         setActive({ kind: "prompt", ...req, resolve });
       }),
-    [],
+    [settlePending],
   );
 
   const closeWith = (value: boolean | string | null) => {

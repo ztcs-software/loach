@@ -601,7 +601,10 @@ function PrivateParamsPanel() {
 
           <Section title="Thinking">
             <ThinkingRow
-              checked={effectiveThinking ?? supportsThinking}
+              // Disabled rows always read OFF, so the switch never shows an "on"
+              // state next to a "doesn't support a thinking step" caption. The
+              // regular ParameterPanel does the same; this surface disagreed.
+              checked={supportsThinking && (effectiveThinking ?? true)}
               disabled={!supportsThinking}
               disabledHint={
                 modelCapabilities === undefined && model
@@ -1004,6 +1007,11 @@ function PrivateChatComposer() {
     const trimmed = text.trim();
     if (!trimmed && attachments.length === 0) return;
     if (isStreaming) return;
+    // The Send button is disabled without a model, but Enter reaches here
+    // too — and `send` throws before appending anything, so without this
+    // guard the clear below would destroy the user's text and attachments
+    // to show an error. The placeholder already explains the state.
+    if (!model) return;
     setError(null);
     setText("");
     const toSend = attachments;
