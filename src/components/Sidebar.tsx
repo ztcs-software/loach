@@ -598,7 +598,7 @@ function Group({
       <div
         {...dropProps}
         className={cn(
-          "rounded px-3 pb-1 select-none text-[10px] font-semibold uppercase tracking-[0.12em] text-foreground/40",
+          "-mt-1 rounded px-3 pt-1 pb-1 select-none text-[10px] font-semibold uppercase tracking-[0.12em] text-foreground/40",
           over && DROP_RING,
         )}
       >
