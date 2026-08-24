@@ -110,17 +110,30 @@ function blobToBase64(blob: Blob): Promise<string> {
   });
 }
 
-/** Lazy-loaded to keep the initial bundle small. */
-let pdfjsPromise: Promise<typeof import("pdfjs-dist")> | null = null;
+/** Lazy-loaded to keep the initial bundle small.
+ *
+ * The `legacy/` build rather than the default one. pdfjs calls
+ * `Promise.withResolvers` (Safari 17.4+) from `PDFDocumentLoadingTask`'s own
+ * class fields and `Map.prototype.getOrInsertComputed` (Chrome 145 / Safari
+ * 26.2+) on the render path, both unguarded. Our `minimumSystemVersion` of
+ * 11.0 tops out at Safari 16.6, where the default build throws a bare
+ * TypeError before reading a single byte. `legacy/` ships the core-js
+ * polyfills for both — including inside the worker, which a main-thread
+ * polyfill cannot reach, since it is a separate JS realm. Costs ~105 KB
+ * across the two files, on a path that only loads once a PDF is opened.
+ */
+let pdfjsPromise: Promise<
+  typeof import("pdfjs-dist/legacy/build/pdf.mjs")
+> | null = null;
 export async function getPdfjs() {
   if (!pdfjsPromise) {
     pdfjsPromise = (async () => {
-      const pdfjs = await import("pdfjs-dist");
+      const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
       // Vite picks this up via ?url and emits a static asset. The `.min`
       // build, because `?url` assets bypass the bundler's own minify step —
       // the unminified worker shipped as ~2.2 MB against 1.2 MB for this one.
       const workerUrl = (
-        await import("pdfjs-dist/build/pdf.worker.min.mjs?url")
+        await import("pdfjs-dist/legacy/build/pdf.worker.min.mjs?url")
       ).default;
       pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
       return pdfjs;

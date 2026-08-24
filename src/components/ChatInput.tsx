@@ -26,6 +26,7 @@ import { useChatStore } from "@/stores/chatStore";
 import { useUIStore } from "@/stores/uiStore";
 import { useToastStore } from "@/stores/toastStore";
 import { cn } from "@/lib/utils";
+import { logger } from "@/lib/logger";
 import {
   DEFAULT_PERSONA_ID,
   getPersona,
@@ -267,7 +268,13 @@ export function ChatInput({ centered = false }: ChatInputProps) {
         if (e instanceof FileTooLargeError) {
           setError(`${e.name} is larger than 20 MB.`);
         } else {
-          setError("Failed to read file");
+          // Name the file and surface the underlying reason. A bare "Failed
+          // to read file" hid genuine faults — most importantly a TypeError
+          // from pdfjs touching an API the webview lacks, which reads
+          // identically to a corrupt upload but needs a different fix.
+          logger.error("attachment read failed", f.name, e);
+          const reason = e instanceof Error ? e.message : String(e);
+          setError(`Couldn't read ${f.name}: ${reason}`);
         }
       }
     }

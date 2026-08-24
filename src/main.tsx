@@ -68,7 +68,27 @@ window.addEventListener("unhandledrejection", (e) => {
   });
 });
 
-ReactDOM.createRoot(document.getElementById("root")!).render(
+ReactDOM.createRoot(document.getElementById("root")!, {
+  // React 19 stopped re-throwing render errors: uncaught ones go to
+  // `window.reportError` and boundary-caught ones to a lone `console.error`.
+  // Nothing here listens for either, so without these two hooks a render
+  // crash is invisible outside devtools — including throws from ref
+  // callbacks and layout-effect cleanups, which no ErrorBoundary can catch.
+  // Route them through the same logger + toast path as the rejection
+  // handler above. `onCaughtError` only logs: a boundary already handled it
+  // and is rendering its own fallback, so a toast would double up.
+  onUncaughtError: (error) => {
+    logger.error("uncaught render error", error);
+    useToastStore.getState().push({
+      kind: "error",
+      title: "Something went wrong",
+      body: error instanceof Error ? error.message : String(error),
+    });
+  },
+  onCaughtError: (error) => {
+    logger.error("caught render error", error);
+  },
+}).render(
   <React.StrictMode>
     {/* Outermost safety net. Catches anything that escapes the per-panel
         boundaries inside App.tsx (or that fails before App's own boundaries

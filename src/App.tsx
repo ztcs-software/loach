@@ -40,6 +40,24 @@ const Onboarding = lazy(() =>
 const CodeCanvas = lazy(() =>
   import("@/components/CodeCanvas").then((m) => ({ default: m.CodeCanvas })),
 );
+
+// Pre-resolve those chunks once the app is idle. React 19 commits a Suspense
+// fallback more eagerly than 18 did and then throttles the retry commit by
+// ~300 ms, so a chunk that resolves from local disk in single-digit ms can
+// still leave the panel blank for a third of a second on first navigation —
+// and every boundary below uses `fallback={null}`, making that blank total.
+// Resolving ahead of time means `lazy` is already settled when the user
+// navigates, so no boundary suspends at all. Deliberately after first paint,
+// so the cold-start win these were split out for is untouched.
+function warmLazyChunks() {
+  void import("@/components/SpaceView");
+  void import("@/components/SpacesLibrary");
+  void import("@/components/SnippetsLibrary");
+  void import("@/components/ModelsView");
+  void import("@/components/ModelsLibrary");
+  void import("@/components/Onboarding");
+  void import("@/components/CodeCanvas");
+}
 import { SearchBar } from "@/components/SearchBar";
 import { UpdateAvailableDialog } from "@/components/UpdateAvailableDialog";
 import { PrivateChat } from "@/components/PrivateChat";
@@ -117,6 +135,17 @@ export default function App() {
     lockUntilHydrated();
     void hydrateSecurity();
   }, [hydrateSecurity]);
+
+  // See `warmLazyChunks`. `requestIdleCallback` is missing on the oldest
+  // webviews we support (Safari gained it in 17.4), hence the timeout path.
+  useEffect(() => {
+    if (typeof window.requestIdleCallback === "function") {
+      const id = window.requestIdleCallback(warmLazyChunks, { timeout: 3000 });
+      return () => window.cancelIdleCallback(id);
+    }
+    const t = window.setTimeout(warmLazyChunks, 1500);
+    return () => window.clearTimeout(t);
+  }, []);
 
   // Phase 2 — once we're past the lock screen, hydrate the rest of the app.
   // Doing this after unlock keeps the lock surface snappy and avoids
