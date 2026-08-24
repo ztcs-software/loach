@@ -620,11 +620,6 @@ export function listSpaces(): Promise<Space[]> {
   return invoke("list_spaces");
 }
 
-export function getSpace(id: string): Promise<Space | null> {
-  if (!isTauri) return notInTauri(null);
-  return invoke("get_space", { id });
-}
-
 export function createSpace(args: {
   name: string;
   description?: string;

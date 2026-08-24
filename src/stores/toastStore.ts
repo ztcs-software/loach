@@ -12,9 +12,6 @@ export interface Toast {
   kind: "memory" | "info" | "error";
   title: string;
   body?: string;
-  /** Optional click handler — currently unused but reserved so a
-   *  "Saved to memory" toast could deep-link to the Memory tab later. */
-  onClick?: () => void;
 }
 
 interface ToastState {

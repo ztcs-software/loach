@@ -31,7 +31,6 @@ function ToastItem({ toast, onDismiss }: { toast: Toast; onDismiss: () => void }
     <div
       role={isError ? "alert" : "status"}
       aria-live={isError ? "assertive" : "polite"}
-      onClick={toast.onClick}
       className={cn(
         "pointer-events-auto flex max-w-sm items-start gap-2.5 rounded-2xl border px-3.5 py-2.5 text-sm shadow-lg backdrop-blur-md",
         "animate-in slide-in-from-bottom-2 fade-in duration-200",
@@ -41,7 +40,6 @@ function ToastItem({ toast, onDismiss }: { toast: Toast; onDismiss: () => void }
           "border-destructive/40 bg-destructive/15 text-destructive-foreground",
         !isMemory && !isError &&
           "border-foreground/15 bg-foreground/[0.06] text-foreground/90",
-        toast.onClick && "cursor-pointer hover:bg-foreground/[0.10]",
       )}
     >
       {isMemory && (

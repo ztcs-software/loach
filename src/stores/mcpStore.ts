@@ -47,7 +47,7 @@ function parseMap(json: string | null): Record<string, string> {
 }
 
 /** Decode a raw DB row into the editor-friendly shape. */
-export function viewFromRow(row: McpServer): McpServerView {
+function viewFromRow(row: McpServer): McpServerView {
   return {
     id: row.id,
     name: row.name,

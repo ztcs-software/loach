@@ -7,7 +7,6 @@ import { ChatInput } from "@/components/ChatInput";
 import { ParameterPanel } from "@/components/ParameterPanel";
 import { SettingsDialog } from "@/components/SettingsDialog";
 import { HelpDialog } from "@/components/HelpDialog";
-import { TooltipProvider } from "@/components/ui/tooltip";
 import { SwitchVariantProvider } from "@/components/ui/switch";
 import { SpaceForm } from "@/components/SpaceForm";
 // Lazily loaded surfaces — each renders only when the user navigates to it
@@ -241,7 +240,7 @@ export default function App() {
     !showLock && !probing && settingsHydrated && !onboardingCompleted;
 
   return (
-    <TooltipProvider delayDuration={250}>
+    <>
       {/* SwitchVariantProvider tells the Switch primitive which visual
           style to use by default ("glassy" on the Aurora gradient,
           "flat" on the Solid background). Keeps the primitive
@@ -431,7 +430,7 @@ export default function App() {
       <ToastHost />
       </ConfirmDialogHost>
       </SwitchVariantProvider>
-    </TooltipProvider>
+    </>
   );
 }
 

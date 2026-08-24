@@ -14,7 +14,7 @@
 /** True when running on macOS — detected from `navigator.userAgentData`
  *  (Chromium) or the legacy `navigator.platform`. Pure cosmetic + key-label
  *  use; the shortcut matcher itself is platform-agnostic (Ctrl ≡ Cmd). */
-export const IS_MAC =
+const IS_MAC =
   typeof navigator !== "undefined" &&
   /mac/i.test(
     (navigator as Navigator & { userAgentData?: { platform?: string } })
@@ -162,13 +162,4 @@ function prettyKey(key: string): string {
     default:
       return key.length === 1 ? key.toUpperCase() : key;
   }
-}
-
-/** Look up a single spec by action — convenience for the title bar pill
- *  (which displays the Cmd-K hint) and anywhere else that wants to render
- *  a specific shortcut without iterating the whole table. */
-export function getShortcut(action: ShortcutAction): ShortcutSpec {
-  const found = SHORTCUTS.find((s) => s.action === action);
-  if (!found) throw new Error(`Unknown shortcut action: ${action}`);
-  return found;
 }

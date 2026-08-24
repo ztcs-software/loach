@@ -839,13 +839,12 @@ function LowVramRow({
   );
 }
 
+/** Stops-only slider. The private params panel has exactly one slider
+ *  (Context Length) and it snaps to `CTX_STOPS`, so the continuous
+ *  min/max/step variant this started life with was never reachable here. */
 function SliderRow({
   label,
   value,
-  min = 0,
-  max = 0,
-  step = 1,
-  precision = 2,
   onChange,
   hint,
   stops,
@@ -853,34 +852,22 @@ function SliderRow({
 }: {
   label: string;
   value: number;
-  min?: number;
-  max?: number;
-  step?: number;
-  precision?: number;
   onChange: (v: number) => void;
   hint?: string;
-  stops?: number[];
+  stops: number[];
   format?: (v: number) => string;
 }) {
-  const usingStops = stops && stops.length > 0;
-  const stopIdx = usingStops
-    ? (() => {
-        let best = 0;
-        let bestDiff = Infinity;
-        for (let i = 0; i < stops!.length; i++) {
-          const d = Math.abs(stops![i] - value);
-          if (d < bestDiff) {
-            bestDiff = d;
-            best = i;
-          }
-        }
-        return best;
-      })()
-    : 0;
-  const displayValue = usingStops ? stops![stopIdx] : value;
-  const displayText = format
-    ? format(displayValue)
-    : displayValue.toFixed(precision);
+  let stopIdx = 0;
+  let bestDiff = Infinity;
+  for (let i = 0; i < stops.length; i++) {
+    const d = Math.abs(stops[i] - value);
+    if (d < bestDiff) {
+      bestDiff = d;
+      stopIdx = i;
+    }
+  }
+  const displayValue = stops[stopIdx];
+  const displayText = format ? format(displayValue) : String(displayValue);
 
   return (
     <div>
@@ -892,23 +879,13 @@ function SliderRow({
           {displayText}
         </span>
       </div>
-      {usingStops ? (
-        <Slider
-          value={[stopIdx]}
-          min={0}
-          max={stops!.length - 1}
-          step={1}
-          onValueChange={(v) => onChange(stops![v[0]])}
-        />
-      ) : (
-        <Slider
-          value={[value]}
-          min={min}
-          max={max}
-          step={step}
-          onValueChange={(v) => onChange(v[0])}
-        />
-      )}
+      <Slider
+        value={[stopIdx]}
+        min={0}
+        max={stops.length - 1}
+        step={1}
+        onValueChange={(v) => onChange(stops[v[0]])}
+      />
       {hint && (
         <p className="mt-1.5 text-[10.5px] leading-snug text-zinc-500">
           {hint}

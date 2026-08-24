@@ -21,7 +21,7 @@ import type { FetchedPage, ToolCallRecord } from "@/types";
  *     the fetched content below it (mirrors `inlineTextAttachments`).
  */
 
-export const MAX_URLS_PER_MESSAGE = 5;
+const MAX_URLS_PER_MESSAGE = 5;
 
 /** Per-URL outcome, useful for both inlining and showing UI chips. */
 export type FetchOutcome =
@@ -113,7 +113,6 @@ export async function fetchAll(urls: string[]): Promise<FetchOutcome[]> {
 export function inlineFetchedPages(
   content: string,
   outcomes: FetchOutcome[],
-  maxTotalChars: number = MAX_INLINED_CHARS_PER_MESSAGE,
 ): string {
   if (outcomes.length === 0) return content;
   let out = content;
@@ -130,7 +129,7 @@ export function inlineFetchedPages(
         : "";
       const footer = "\n```";
       const wrapCost = header.length + upstreamTruncSuffix.length + footer.length;
-      const remaining = maxTotalChars - out.length - wrapCost;
+      const remaining = MAX_INLINED_CHARS_PER_MESSAGE - out.length - wrapCost;
 
       if (remaining <= 200) {
         skippedUrls.push(p.final_url || o.url);

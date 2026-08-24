@@ -112,7 +112,10 @@ const DropdownMenuCheckboxItem = React.forwardRef<
   <DropdownMenuPrimitive.CheckboxItem
     ref={ref}
     className={cn(
-      "relative flex cursor-default select-none items-center rounded-sm py-1.5 pl-8 pr-2 text-sm outline-none focus:bg-accent focus:text-accent-foreground",
+      // Matches DropdownMenuItem's glass styling — this one kept the stock
+      // shadcn `rounded-sm` / `focus:bg-accent` because nothing renders it
+      // yet, so it would have looked foreign the first time it was used.
+      "relative flex cursor-default select-none items-center rounded-xl py-1.5 pl-8 pr-2 text-sm outline-none transition-colors focus:bg-foreground/10 focus:text-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-40",
       className,
     )}
     checked={checked}

@@ -311,7 +311,6 @@ pub fn run() {
             commands::ollama_create_model,
             commands::admin_cancel,
             commands::list_spaces,
-            commands::get_space,
             commands::create_space,
             commands::update_space,
             commands::delete_space,

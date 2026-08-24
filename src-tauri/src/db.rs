@@ -470,8 +470,13 @@ impl Database {
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL
             );
-            CREATE INDEX IF NOT EXISTS idx_mcp_servers_updated
-                ON mcp_servers(updated_at DESC);
+            -- Retired: nothing ever ordered or filtered `mcp_servers` by
+            -- `updated_at` (the one SELECT sorts by `name`, everything else
+            -- goes by primary key), so this only cost write amplification.
+            -- Dropped rather than merely un-created so databases that already
+            -- have it get cleaned up too; `IF EXISTS` keeps it idempotent,
+            -- same as every other statement in this batch.
+            DROP INDEX IF EXISTS idx_mcp_servers_updated;
             "#,
         )?;
 

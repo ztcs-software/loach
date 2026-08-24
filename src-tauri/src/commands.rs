@@ -922,11 +922,6 @@ pub async fn list_spaces(state: State<'_, AppState>) -> Result<Vec<Space>, Strin
     state.db.list_spaces().map_err(err)
 }
 
-#[tauri::command]
-pub async fn get_space(state: State<'_, AppState>, id: String) -> Result<Option<Space>, String> {
-    state.db.get_space(&id).map_err(err)
-}
-
 #[derive(Debug, Deserialize)]
 pub struct CreateSpaceArgs {
     pub name: String,
@@ -1608,10 +1603,7 @@ pub async fn mcp_delete(state: State<'_, AppState>, id: String) -> Result<(), St
 /// Probe the given MCP server config (handshake + list tools). Accepts the
 /// *input* rather than an id so the user can try a config before saving it.
 #[tauri::command]
-pub async fn mcp_test(
-    _state: State<'_, AppState>,
-    input: McpServerInput,
-) -> Result<McpTestResult, String> {
+pub async fn mcp_test(input: McpServerInput) -> Result<McpTestResult, String> {
     let addrs = validate_mcp_input(&input).await?;
     let draft = input.to_draft();
     // Build a one-shot DNS-pinned client for the test. Using the shared
