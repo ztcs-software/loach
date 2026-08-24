@@ -83,11 +83,9 @@ pub fn dispatch(args: &Value) -> McpCallResult {
         ));
     }
     let mode = args.get("mode").and_then(|v| v.as_str()).unwrap_or("line");
-    let context = args
-        .get("context")
-        .and_then(|v| v.as_u64())
+    let context = crate::tools::lenient_i64(args, "context")
         .unwrap_or(3)
-        .min(1000) as usize;
+        .clamp(0, 1000) as usize;
     let out = match mode {
         "line" => unified_lines(a, b, context),
         "word" => inline_diff(TextDiff::configure().timeout(DIFF_TIMEOUT).diff_words(a, b)),

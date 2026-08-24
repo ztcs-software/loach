@@ -321,12 +321,21 @@ pub async fn dispatch_tool_call(
                 // A *pooled* session failing is the expected shape of "the
                 // server expired it while we weren't looking", so rebuild
                 // and try once — the same revalidation an HTTP client does
-                // for a stale keep-alive connection. Note a tool that merely
-                // *reports* failure comes back as `Ok` with `is_error`, so
-                // this path is transport-level only and can't double-run a
-                // tool that already answered.
+                // for a stale keep-alive connection.
+                //
+                // Only replay failures the transport could prove happened
+                // before dispatch (connect refused, HTTP 404 session
+                // rejected). A tool that merely *reports* failure comes back
+                // as `Ok` with `is_error` so it never lands here, but a
+                // transport error raised after delivery — a timeout, a reset
+                // mid-response — may have executed the tool already, and
+                // re-running a `send_message` or `create_issue` is worse than
+                // reporting the error.
+                if !client::is_pre_execution(&e) {
+                    return Err(e);
+                }
                 tracing::debug!(
-                    "MCP: pooled session for `{}` failed ({e:#}) — re-handshaking once",
+                    "MCP: pooled session for `{}` failed pre-dispatch ({e:#}) — re-handshaking once",
                     server.name
                 );
                 *pooled = None;

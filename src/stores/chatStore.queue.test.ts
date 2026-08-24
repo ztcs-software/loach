@@ -173,6 +173,27 @@ describe("chat queue promotion", () => {
     expect(get().isStreaming).toBe(false);
   });
 
+  it("holds the queue while Private Chat is open, and resumes on release", async () => {
+    await startRunning("A");
+    useChatStore.setState({ queue: [makeTask("sess-B", "B")] } as never);
+
+    // Private Chat is opening: it cancels the running stream, but the waiter
+    // must NOT slide into the gap and start streaming behind the overlay.
+    get().setQueueHeld(true);
+    mocks.streams[0].onEvent({ kind: "done" });
+    await tick();
+    expect(get().runningTask).toBeNull();
+    expect(get().queue.map((t) => t.id)).toEqual(["task-B"]);
+    expect(mocks.streams).toHaveLength(1);
+
+    // Closing the overlay releases the hold and the parked task runs.
+    get().setQueueHeld(false);
+    await tick();
+    expect(get().runningTask?.id).toBe("task-B");
+    expect(get().queue).toEqual([]);
+    expect(mocks.streams).toHaveLength(2);
+  });
+
   it("promotes the next waiter when the running session is cancelled", async () => {
     await startRunning("A");
     useChatStore.setState({ queue: [makeTask("sess-B", "B")] } as never);

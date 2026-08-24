@@ -31,7 +31,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Slider } from "@/components/ui/slider";
 import { FileChip } from "./FileChip";
-import { Markdown } from "./Markdown";
+import { Markdown, StreamingMarkdown } from "./Markdown";
 import { fileToAttachment, FileTooLargeError } from "@/lib/files";
 import { ollamaListModels, ollamaProbe } from "@/lib/tauri";
 import {
@@ -76,6 +76,20 @@ import { cn } from "@/lib/utils";
 export function PrivateChat() {
   const open = usePrivateChatStore((s) => s.open);
   const paramsOpen = usePrivateChatStore((s) => s.paramsOpen);
+
+  // Hold the regular chat queue for as long as the overlay is up. The entry
+  // points (TitleBar, the `/private` command) already cancel whichever chat is
+  // *streaming*, but the queue would then promote the next waiter straight
+  // into the gap and stream it into SQLite behind the overlay, competing for
+  // the same model slot. Tied to the overlay's lifetime rather than to the
+  // entry points so that every exit — the X button, an unmount into the lock
+  // screen — releases the hold.
+  useEffect(() => {
+    if (!open) return;
+    const { setQueueHeld } = useChatStore.getState();
+    setQueueHeld(true);
+    return () => setQueueHeld(false);
+  }, [open]);
 
   if (!open) return null;
 
@@ -447,6 +461,16 @@ function PrivateMessageBubble({
             <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-zinc-400 [animation-delay:160ms]" />
             <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-zinc-400 [animation-delay:320ms]" />
           </div>
+        ) : isStreaming ? (
+          // Same treatment the regular transcript gets: the store hands us a
+          // new message object every animation frame, so rendering the full
+          // `Markdown` here re-ran remark and re-highlighted the whole growing
+          // reply on each flush. `StreamingMarkdown` memoizes the stable prefix
+          // and leaves the tail unhighlighted until the block settles.
+          <StreamingMarkdown
+            content={message.content}
+            className="prose prose-invert prose-sm max-w-none text-zinc-100"
+          />
         ) : (
           <Markdown
             content={message.content}

@@ -685,7 +685,19 @@ async fn run_one_turn(
                                     finished = true;
                                     break;
                                 }
-                                if let Ok(parsed) = serde_json::from_str::<SseChunk>(data) {
+                                let parsed = serde_json::from_str::<SseChunk>(data);
+                                if let Err(e) = &parsed {
+                                    // Don't drop malformed frames silently.
+                                    // The Ollama pump logs its parse errors;
+                                    // without the same here, a compat server
+                                    // emitting a bad chunk was indistinguishable
+                                    // from a model that just stopped talking.
+                                    tracing::warn!(
+                                        "OpenAI SSE: skipping unparseable frame ({e}): {}",
+                                        data.chars().take(200).collect::<String>()
+                                    );
+                                }
+                                if let Ok(parsed) = parsed {
                                     // OpenAI (and most compat servers)
                                     // emit a final choices-empty frame
                                     // carrying `usage`. When we see it,

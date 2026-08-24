@@ -143,18 +143,25 @@ export function StepShell({
                 Skip
               </Button>
             )}
-            <Button
-              onClick={onPrimary}
-              disabled={primaryDisabled}
-              className="gap-1.5 px-5"
-            >
-              {primaryLabel}
-              {primaryIcon === "check" ? (
-                <Check className="h-4 w-4" />
-              ) : (
-                <ArrowRight className="h-4 w-4" />
-              )}
-            </Button>
+            {/* Guarded on the label too, not just the bar. The final step
+                asks for the bar (`canGoBack`) while passing
+                `primaryLabel={null}`, which rendered an enabled button with
+                no text, no accessible name, and `onClick` undefined — a
+                live-looking arrow that did nothing. */}
+            {primaryLabel !== null && (
+              <Button
+                onClick={onPrimary}
+                disabled={primaryDisabled}
+                className="gap-1.5 px-5"
+              >
+                {primaryLabel}
+                {primaryIcon === "check" ? (
+                  <Check className="h-4 w-4" />
+                ) : (
+                  <ArrowRight className="h-4 w-4" />
+                )}
+              </Button>
+            )}
           </div>
         </div>
       )}

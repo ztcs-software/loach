@@ -915,7 +915,21 @@ async fn run_one_turn(
                 obj.remove("think");
             }
             *think_already_drop = true;
-            resp = match http.post(&url).json(body).send().await {
+            // Race the retry against cancel too. This is *the* request most
+            // likely to sit for a minute-plus — it's the one that triggers a
+            // cold model load — so awaiting it bare made Stop inert for the
+            // whole window, which is exactly what the select! above exists
+            // to prevent.
+            let retried = select! {
+                biased;
+                _ = cancel.notified() => {
+                    let _ = app.emit(channel, StreamEvent::Cancelled);
+                    registry.finish(stream_id);
+                    return Ok(None);
+                }
+                r = http.post(&url).json(body).send() => r,
+            };
+            resp = match retried {
                 Ok(r) => r,
                 Err(e) => {
                     let _ = app.emit(

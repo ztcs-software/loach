@@ -266,6 +266,13 @@ interface ChatState {
    *  Read-only — nothing is persisted. Throws with a user-facing message when
    *  there's no model or fewer than COMPACT_MIN_TOTAL messages to compact. */
   exportCompactedContext: (sessionId: string) => Promise<string>;
+  /** Pause or resume queue promotion. Private Chat holds the queue while its
+   *  overlay is open: the entry points already cancel whichever regular chat
+   *  is *streaming*, but without this the next queued task from another chat
+   *  was promoted straight into the gap and streamed into SQLite behind the
+   *  overlay, competing for the same model slot — the exact thing that cancel
+   *  exists to prevent. Releasing re-nudges the queue so parked work resumes. */
+  setQueueHeld: (held: boolean) => void;
 }
 
 /** Module-level re-entry guard for the auto-dispatcher. Set synchronously
@@ -273,6 +280,11 @@ interface ChatState {
  *  start attempt resolves. Prevents two `done`/cancel events in the same
  *  tick from both trying to promote the same head. */
 let dispatching = false;
+
+/** While true, `promoteQueueHead` refuses to start the next waiter. Module
+ *  scope for the same reason as `dispatching` — it's dispatch bookkeeping, not
+ *  something the UI renders. Set via `setQueueHeld`. */
+let queueHeld = false;
 
 /** Buffers for the task currently being streamed. Held at module scope so
  *  `cancelForSession` (triggered by a button click, outside the stream
@@ -496,13 +508,13 @@ function readSessionParams(session: Session | undefined): GenerationParams {
     const space = useSpaceStore
       .getState()
       .spaces.find((s) => s.id === session.space_id);
-    if (space?.default_params_json) {
-      try {
-        spaceLayer = JSON.parse(space.default_params_json) as Partial<GenerationParams>;
-      } catch {
-        /* malformed JSON — ignore the layer */
-      }
-    }
+    // Through the same guard as the per-session layer, not a raw
+    // `JSON.parse`: a wrong-typed value here (a hand-edited or imported
+    // snapshot writing `temperature: "high"`) otherwise sailed through to
+    // the `chat_stream` invoke and failed serde deserialization on the Rust
+    // side, so every send in the space died with an opaque invoke error
+    // instead of the guard quietly dropping the bad key.
+    spaceLayer = parseOverrides(space?.default_params_json ?? null);
   }
   const merged: GenerationParams = {
     ...DEFAULT_PARAMS,
@@ -1038,6 +1050,7 @@ function finishRunning(
  *  Releasing the lock first and then re-promoting closes that window. */
 function promoteQueueHead(get: Getter, set: Setter) {
   queueMicrotask(() => {
+    if (queueHeld) return;
     if (dispatching) return;
     const q = get().queue;
     if (q.length === 0) return;
@@ -1378,6 +1391,7 @@ async function startTask(task: QueueTask, get: Getter, set: Setter) {
  */
 function resetForTests() {
   dispatching = false;
+  queueHeld = false;
   sendingSessions.clear();
   runningBuffers = null;
   if (pendingFrame !== null) {
@@ -1548,7 +1562,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // actions: log + toast so a failed read is visible and retryable.
       try {
         const msgs = await listMessages(id);
-        set((s) => ({ messages: { ...s.messages, [id]: msgs } }));
+        // Re-check inside the update: a send that started while this read was
+        // in flight may have already installed the transcript and appended the
+        // user's message. Committing unconditionally would overwrite it with
+        // the pre-send list and the bubble would vanish until reload.
+        set((s) => (s.messages[id] ? s : { messages: { ...s.messages, [id]: msgs } }));
       } catch (e) {
         logger.error("failed to load messages for session", e);
         useToastStore.getState().push({
@@ -2000,7 +2018,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (!get().messages[sessionId!]) {
       try {
         const msgs = await listMessages(sessionId!);
-        set((s) => ({ messages: { ...s.messages, [sessionId!]: msgs } }));
+        // Same guard as `select`: if the select-triggered load resolved first,
+        // keep what it installed rather than racing it back to a stale list.
+        set((s) =>
+          s.messages[sessionId!]
+            ? s
+            : { messages: { ...s.messages, [sessionId!]: msgs } },
+        );
       } catch (e) {
         logger.error("failed to load chat history before send", e);
         useToastStore.getState().push({
@@ -2371,7 +2395,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // edit the block in the Parameters panel's "Custom instructions"
     // textarea, which is intentional — compaction shouldn't be a black
     // box.
-    const existing = session.system_prompt ?? "";
+    //
+    // Read the prompt back off the store rather than reusing the snapshot
+    // taken before `generateSummary`: that call has a three-minute ceiling,
+    // and anything the user typed into Custom instructions while it ran would
+    // otherwise be overwritten by the stale copy. (If the chat was deleted
+    // meanwhile there's nothing left to write to.)
+    const fresh = get().sessions.find((s) => s.id === sessionId);
+    if (!fresh) {
+      set({ compactingSessionId: null });
+      return;
+    }
+    const existing = fresh.system_prompt ?? "";
     const stripped = stripSummaryBlock(existing);
     const block = `${SUMMARY_START_TAG}\n${cleanSummary}\n${SUMMARY_END_TAG}\n\n`;
     const newPrompt = block + stripped;
@@ -2472,5 +2507,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
     );
 
     return buildCompactedMarkdown(session, summary, []);
+  },
+
+  setQueueHeld: (held) => {
+    queueHeld = held;
+    // Releasing has to nudge the dispatcher: anything queued while the hold
+    // was in place is sitting there with nothing scheduled to pick it up.
+    if (!held) promoteQueueHead(get, set);
   },
 }));

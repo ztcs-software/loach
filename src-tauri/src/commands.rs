@@ -2,7 +2,6 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
-use uuid::Uuid;
 
 use crate::db::{
     DatabaseSnapshot, Folder, ImportStats, McpServer, Message, Session, Snippet, SnippetFillValue,
@@ -802,6 +801,20 @@ pub async fn ollama_copy_model(
         .map_err(err)
 }
 
+/// Require the caller to have named the event channel, rather than minting an
+/// id when they didn't.
+///
+/// Frames start emitting before the invoke returns, so an id invented here
+/// would be announced too late for the caller to `listen()` on — they'd
+/// silently lose the head of the stream. Every caller supplies one; this turns
+/// the never-hit fallback into a loud error instead of a partial stream.
+fn require_stream_id(id: String) -> Result<String, String> {
+    if id.trim().is_empty() {
+        return Err("stream_id is required — the caller must name the event channel".to_string());
+    }
+    Ok(id)
+}
+
 #[derive(Debug, Deserialize)]
 pub struct OllamaPullArgs {
     pub base_url: String,
@@ -817,11 +830,7 @@ pub async fn ollama_pull_model(
     state: State<'_, AppState>,
     args: OllamaPullArgs,
 ) -> Result<StreamHandle, String> {
-    let stream_id = if args.stream_id.is_empty() {
-        Uuid::new_v4().to_string()
-    } else {
-        args.stream_id
-    };
+    let stream_id = require_stream_id(args.stream_id)?;
     let http = state.http.clone();
     let registry = state.streams.clone();
     let sid = stream_id.clone();
@@ -863,11 +872,7 @@ pub async fn ollama_create_model(
     state: State<'_, AppState>,
     args: OllamaCreateArgs,
 ) -> Result<StreamHandle, String> {
-    let stream_id = if args.stream_id.is_empty() {
-        Uuid::new_v4().to_string()
-    } else {
-        args.stream_id
-    };
+    let stream_id = require_stream_id(args.stream_id)?;
     let http = state.http.clone();
     let registry = state.streams.clone();
     let sid = stream_id.clone();
@@ -1633,10 +1638,8 @@ pub async fn chat_stream(
     state: State<'_, AppState>,
     mut request: ChatRequest,
 ) -> Result<StreamHandle, String> {
-    if request.stream_id.is_empty() {
-        request.stream_id = Uuid::new_v4().to_string();
-    }
-    let stream_id = request.stream_id.clone();
+    let stream_id = require_stream_id(std::mem::take(&mut request.stream_id))?;
+    request.stream_id = stream_id.clone();
     let http = state.http.clone();
     let registry = state.streams.clone();
     let provider = request.provider.clone();
@@ -2195,7 +2198,13 @@ pub async fn wipe_user_data(
         .map_err(|e| format!("unlock check panicked: {e}"))?
         .map_err(err)?;
     }
-    state.db.wipe_user_data().map_err(err)
+    state.db.wipe_user_data().map_err(err)?;
+    // The wipe deletes every `mcp_servers` row, so the cached tool catalogue
+    // is now stale. The webview reloads afterwards but `AppState` doesn't, so
+    // without this the next chat send would still advertise the just-erased
+    // servers' tools to the model for up to the cache TTL.
+    crate::mcp::invalidate_tools_cache(&state.mcp_tools_cache).await;
+    Ok(())
 }
 
 /// Factory reset: wipe_user_data + drop all settings + clear the stored
@@ -2228,6 +2237,9 @@ pub async fn factory_reset(
         .map_err(err)?;
     }
     state.db.wipe_all().map_err(err)?;
+    // Same reason as in `wipe_user_data`: the MCP rows are gone, so the
+    // in-process tool catalogue has to go with them.
+    crate::mcp::invalidate_tools_cache(&state.mcp_tools_cache).await;
     // Best-effort: if the user never had a key we silently ignore the
     // NoEntry branch inside `clear_openai_key`. A hard failure here
     // (keyring daemon dead, etc.) shouldn't undo the DB wipe. Both are
@@ -2247,24 +2259,42 @@ pub async fn factory_reset(
 // ---------- open in external editor ----------
 //
 // The code canvas holds a snippet, not a file. "Open in VS Code" writes the
-// current snapshot to a temp file (the renderer supplies the language-derived
+// current snapshot to a scratch file (the renderer supplies the language-derived
 // filename; we own the directory and reduce the name to a bare basename so a
-// compromised renderer can't write outside the temp dir) and launches VS
-// Code's `code` CLI on it. Snapshot only — it does not stream as the block
-// keeps generating.
+// compromised renderer can't write outside it) and launches VS Code's `code`
+// CLI on it. Snapshot only — it does not stream as the block keeps generating.
 
 #[tauri::command]
-pub async fn open_in_vscode(code: String, filename: String) -> Result<(), String> {
+pub async fn open_in_vscode(
+    app: AppHandle,
+    code: String,
+    filename: String,
+) -> Result<(), String> {
+    use tauri::Manager;
+    // Deliberately the app's own cache dir rather than the shared temp root.
+    // `std::env::temp_dir()` is /tmp on Linux — world-writable, so another
+    // local user could pre-create `loach-canvas` and plant symlinks that
+    // redirect our write to a path of their choosing, with this user's
+    // privileges (CWE-379). The per-user cache dir has no such window.
+    let dir = app
+        .path()
+        .app_cache_dir()
+        .map_err(|e| format!("Couldn't resolve the app cache directory: {e}"))?
+        .join("canvas");
     // Everything below is blocking — `create_dir_all`, a file write, and on
     // Windows a spawn-and-wait `where code` PATH scan. Running it inline on
     // the main thread visibly hitched the UI for as long as a cold PATH scan
     // took.
-    tokio::task::spawn_blocking(move || open_in_vscode_blocking(code, filename))
+    tokio::task::spawn_blocking(move || open_in_vscode_blocking(dir, code, filename))
         .await
         .map_err(|e| format!("editor task panicked: {e}"))?
 }
 
-fn open_in_vscode_blocking(code: String, filename: String) -> Result<(), String> {
+fn open_in_vscode_blocking(
+    dir: std::path::PathBuf,
+    code: String,
+    filename: String,
+) -> Result<(), String> {
     use std::io::Write;
     use std::process::Command;
 
@@ -2301,8 +2331,8 @@ fn open_in_vscode_blocking(code: String, filename: String) -> Result<(), String>
         safe_name = "snippet.txt".to_string();
     }
 
-    let dir = std::env::temp_dir().join("loach-canvas");
-    std::fs::create_dir_all(&dir).map_err(|e| format!("Couldn't create the temp folder: {e}"))?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("Couldn't create the scratch folder: {e}"))?;
     let path = dir.join(&safe_name);
     std::fs::File::create(&path)
         .and_then(|mut f| f.write_all(code.as_bytes()))

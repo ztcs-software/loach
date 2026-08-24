@@ -217,7 +217,14 @@ export function ChatCanvas() {
     const q = searchQuery.trim().toLowerCase();
     if (!q) return [] as string[];
     return messages
-      .filter((m) => displayedText(m).toLowerCase().includes(q))
+      .filter(
+        (m) =>
+          // Same exclusion the pinned bar makes: a hidden imported row only
+          // registers a DOM ref while its collapsed card is open, so counting
+          // it gave the user a match they could step onto but never see —
+          // the counter advanced with no scroll and no highlight.
+          !m.import_hidden && displayedText(m).toLowerCase().includes(q),
+      )
       .map((m) => m.id);
   }, [messages, searchQuery]);
 

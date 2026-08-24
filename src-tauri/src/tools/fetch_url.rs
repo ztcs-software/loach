@@ -253,6 +253,16 @@ pub(crate) async fn resolve_safe_addrs(url: &Url) -> Result<Vec<SocketAddr>, Str
         .ok_or_else(|| "URL has no host".to_string())?;
     let port = url.port_or_known_default().unwrap_or(80);
 
+    // `host_str` keeps the brackets on an IPv6 literal — strip them before
+    // parsing, exactly as `resolve_lan_addrs` and `refuse_link_local_host` do.
+    // Without this every public IPv6-literal URL fell through to `lookup_host`,
+    // which can't resolve a bracketed literal either, and died with a
+    // misleading "DNS lookup failed".
+    let host = host
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(host);
+
     // Literal IP: skip DNS, just validate the address.
     if let Ok(ip) = host.parse::<IpAddr>() {
         if !is_public_ip(&ip) {
@@ -1124,6 +1134,25 @@ mod tests {
             matches!(err, HostScreenError::Blocked(_)),
             "link-local must classify as Blocked, got {err:?}"
         );
+    }
+
+    /// `host_str()` keeps the brackets on an IPv6 literal, so without a strip
+    /// every public IPv6 URL fell through to DNS — which can't resolve
+    /// `[2606:…]` either — and failed with a misleading "DNS lookup failed".
+    #[tokio::test]
+    async fn resolve_safe_addrs_handles_ipv6_literals() {
+        let url = Url::parse("http://[2606:4700:4700::1111]:80/").unwrap();
+        let addrs = resolve_safe_addrs(&url)
+            .await
+            .expect("a public IPv6 literal must be fetchable");
+        assert_eq!(addrs, vec!["[2606:4700:4700::1111]:80".parse().unwrap()]);
+
+        // The screen still applies to IPv6 — loopback is refused, and the
+        // bracket strip must not turn that into a DNS error.
+        let err = resolve_safe_addrs(&Url::parse("http://[::1]/").unwrap())
+            .await
+            .expect_err("IPv6 loopback must be refused");
+        assert!(err.contains("private/loopback"), "{err}");
     }
 
     /// A host DNS can't answer for is `Unresolvable`, NOT `Blocked`: nothing

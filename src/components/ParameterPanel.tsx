@@ -132,7 +132,20 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
     ],
   );
 
-  const [params, setParams] = useState<GenerationParams>(initial);
+  // Only the keys the user has actually touched in this panel session are held
+  // locally; every other value is read live off `initial`. Holding a full
+  // merged snapshot instead froze whatever the layers happened to be at mount
+  // — and `modelDefaults` is fetched fire-and-forget (cold on every app start),
+  // so that snapshot was routinely taken before the Modelfile values existed.
+  // The sliders then showed app defaults while the source label below already
+  // read "using the Modelfile's", and since `update()` persists the whole
+  // displayed set, a single slider touch wrote e.g. num_ctx 8192 over the
+  // Modelfile's 32768 for the rest of the chat's life.
+  const [touched, setTouched] = useState<Partial<GenerationParams>>({});
+  const params = useMemo<GenerationParams>(
+    () => ({ ...initial, ...touched }),
+    [initial, touched],
+  );
   const [systemPrompt, setSystemPrompt] = useState(session?.system_prompt ?? "");
   // Persisted across sessions — most users settle on one mode and don't
   // want to reselect it every time the panel opens. Stored in localStorage
@@ -150,32 +163,40 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
     window.localStorage.setItem("parameterPanel.viewMode", viewMode);
   }, [viewMode]);
 
-  // Re-seed local UI state ONLY when the panel switches sessions, not
-  // every time `initial`'s identity churns. The previous version had
-  // `initial` in the dep array, which meant:
-  //   1. user drags slider A → setParams(next) → update persists
-  //   2. store updates → params_json changes → `overrides` recomputes
-  //      → `initial` recomputes (new identity) → this effect re-fires
-  //   3. user drags slider B during the gap between (1) and the effect
-  //      → setParams({ ...params, B: y }) — but `params` here is the
-  //      mid-flight state with slider A's update
-  //   4. effect from (2) lands → setParams(initial) → REVERTS slider B
-  //      to its prior value because `initial` was snapshotted before
-  //      the user's slider-B drag was persisted.
-  // Tracking the seeded session id via a ref means we re-seed once per
-  // session swap and otherwise leave the user's in-flight edits alone.
+  // Drop this panel's edits when it switches to a different chat. Only the
+  // session id matters: `params` recomputes from `initial` on its own, so
+  // there's no snapshot to refresh and no way for a layer change to revert an
+  // in-flight drag (the failure the older full-snapshot version had, where a
+  // re-seed triggered by persisting slider A reverted an in-flight slider B).
   const seededFor = useRef<string | null>(null);
+  // What we last pushed into the textarea, so an external rewrite can be told
+  // apart from the user's own typing.
+  const seededPrompt = useRef(session?.system_prompt ?? "");
   useEffect(() => {
     const id = session?.id ?? null;
     if (seededFor.current === id) return;
     seededFor.current = id;
-    setParams(initial);
+    setTouched({});
+    seededPrompt.current = session?.system_prompt ?? "";
     setSystemPrompt(session?.system_prompt ?? "");
-    // `initial` and `session?.system_prompt` are intentionally read
-    // through the closure rather than depended on — see the comment
-    // above for why.
+    // `session?.system_prompt` is read through the closure on purpose — this
+    // effect is about switching chats, and the effect below owns adopting an
+    // external edit to the prompt of the chat we're already on.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session?.id]);
+
+  // Adopt a system prompt rewritten from outside the panel — compaction stuffs
+  // its auto-summary block in there. Without this the textarea kept its
+  // pre-compaction copy and the next blur wrote that stale text straight back,
+  // deleting the summary. Skipped while the textarea is dirty: the user's
+  // unsaved edit wins, and their blur persists it.
+  useEffect(() => {
+    const incoming = session?.system_prompt ?? "";
+    if (incoming === seededPrompt.current) return;
+    if (systemPrompt !== seededPrompt.current) return;
+    seededPrompt.current = incoming;
+    setSystemPrompt(incoming);
+  }, [session?.system_prompt, systemPrompt]);
 
   // Defensive — newSession / setSessionModel already prefetch, but the panel
   // can also be opened on a session created before this code shipped.
@@ -187,11 +208,12 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
 
   const update = (patch: Partial<GenerationParams>) => {
     if (!session) return;
+    // Built from `params`, which is the LIVE layer stack plus this panel's
+    // edits — not a snapshot taken at mount. Touching any slider still
+    // persists the whole effective set into the session's overrides, so a
+    // later model swap doesn't silently shift values the user was looking at.
     const next = { ...params, ...patch };
-    setParams(next);
-    // Touching any slider snapshots the current effective values into the
-    // session's overrides — including any model-default values the user
-    // hasn't touched, so future model swaps don't silently shift those.
+    setTouched((t) => ({ ...t, ...patch }));
     setSessionParams(session.id, next);
   };
 
@@ -217,18 +239,11 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
   // Space — displaying it without would restate the same lie `initial` fixes.
   const resetParams = () => {
     if (!session) return;
-    // Same layer stack `initial` builds, minus the per-chat overrides we're
-    // clearing. Omitting the think layers made the Thinking row read ON after
-    // a reset even when the effective value was OFF (Settings default off,
-    // or a per-model preference), which `readSessionParams` would then
-    // contradict on the next send.
-    setParams({
-      ...DEFAULT_PARAMS,
-      ...(session.provider === "ollama" ? { think: thinkingDefault } : {}),
-      ...(modelDefaults ?? {}),
-      ...(modelThinkPref === undefined ? {} : { think: modelThinkPref }),
-      ...spaceLayer,
-    });
+    // Just drop this panel's edits and the stored override — `initial`
+    // recomputes to exactly the layer stack below them, and `setSessionParams`
+    // updates the store optimistically, so the sliders land on the right
+    // values in the same render without re-deriving the merge by hand here.
+    setTouched({});
     setSessionParams(session.id, null);
   };
 
@@ -561,9 +576,15 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
                 className="mt-2 resize-none border-foreground/10 bg-foreground/[0.04] text-sm focus-visible:border-foreground/25 focus-visible:ring-0"
                 value={systemPrompt}
                 onChange={(e) => setSystemPrompt(e.target.value)}
-                onBlur={() =>
-                  session && setSessionSystemPrompt(session.id, systemPrompt)
-                }
+                onBlur={() => {
+                  if (!session) return;
+                  // The textarea is clean again once saved, so mark this as
+                  // the seeded value — otherwise the effect above would read
+                  // it as an unsaved edit forever and never adopt a later
+                  // external rewrite (e.g. compaction's summary block).
+                  seededPrompt.current = systemPrompt;
+                  setSessionSystemPrompt(session.id, systemPrompt);
+                }}
               />
               <p className="mt-1.5 text-[11px] leading-relaxed text-foreground/50">
                 Free-form per-chat instructions. Layered between persona and tone — leave empty to fall back to the global custom instructions.
