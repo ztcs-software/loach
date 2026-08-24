@@ -172,7 +172,7 @@ async function extractPdfText(buf: ArrayBuffer): Promise<ExtractionResult> {
     }
   }
   await doc.cleanup();
-  await doc.destroy();
+  await doc.loadingTask.destroy();
 
   let text = pages.join("\n\n");
   let truncated = pagesExtracted < totalPages;

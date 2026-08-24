@@ -68,7 +68,7 @@ function PdfPreviewBody({ open, onOpenChange, attachment }: PdfPreviewProps) {
         loaded = await task.promise;
         if (cancelled) {
           await loaded.cleanup();
-          await loaded.destroy();
+          await loaded.loadingTask.destroy();
           return;
         }
         setDoc(loaded);
@@ -84,7 +84,7 @@ function PdfPreviewBody({ open, onOpenChange, attachment }: PdfPreviewProps) {
       setLoadError(null);
       if (loaded) {
         void loaded.cleanup();
-        void loaded.destroy();
+        void loaded.loadingTask.destroy();
       }
     };
   }, [open, attachment]);

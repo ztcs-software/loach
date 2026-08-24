@@ -259,7 +259,7 @@ interface PopoverProps {
   onExpand: () => void;
   expandedSize: number;
   onClose: () => void;
-  popoverRef: React.RefObject<HTMLDivElement>;
+  popoverRef: React.RefObject<HTMLDivElement | null>;
 }
 
 const ContextUsagePopover = ({

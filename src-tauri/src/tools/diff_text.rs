@@ -122,7 +122,7 @@ fn unified_lines(a: &str, b: &str, context: usize) -> String {
 /// concept of "lines" doesn't translate cleanly. Render an inline,
 /// `[+added+][-removed-]` style that's still copy-pasteable. (The
 /// brackets prevent ambiguity when the change itself contains spaces.)
-fn inline_diff<'a>(diff: TextDiff<'a, 'a, 'a, str>) -> String {
+fn inline_diff<'a>(diff: TextDiff<'a, 'a, str>) -> String {
     let mut out = String::new();
     for change in diff.iter_all_changes() {
         let s = change.value();
