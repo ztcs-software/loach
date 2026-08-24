@@ -50,17 +50,12 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { useToastStore } from "@/stores/toastStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useUIStore } from "@/stores/uiStore";
+import { useProviderModels } from "@/lib/useProviderModels";
 import { cn } from "@/lib/utils";
-import {
-  exportSession,
-  ollamaListModels,
-  ollamaProbe,
-  ollamaStart,
-  openaiListModels,
-} from "@/lib/tauri";
+import { exportSession, ollamaStart } from "@/lib/tauri";
 import { EyeOff, Layers } from "lucide-react";
 import { parseImportContext, type ParsedImport } from "@/lib/importContext";
-import type { ModelInfo, ProviderId, Session } from "@/types";
+import type { ProviderId, Session } from "@/types";
 
 export function ChatHeader({ session }: { session: Session | undefined }) {
   const { confirm } = useConfirm();
@@ -96,14 +91,10 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
   // every settings change anywhere in the app — including every keystroke
   // in the SettingsDialog textareas — for no visible benefit.
   const ollamaBaseUrl = useSettingsStore((s) => s.ollama_base_url);
-  const openaiBaseUrl = useSettingsStore((s) => s.openai_base_url);
   const openaiKeySet = useSettingsStore((s) => s.openai_key_set);
-  const settingsHydrated = useSettingsStore((s) => s.hydrated);
 
-  const [ollamaModels, setOllamaModels] = useState<ModelInfo[]>([]);
-  const [openaiModels, setOpenaiModels] = useState<ModelInfo[]>([]);
-  const [ollamaUp, setOllamaUp] = useState<boolean | null>(null);
-  const [loading, setLoading] = useState(false);
+  const { ollamaModels, openaiModels, ollamaUp, loading, refresh } =
+    useProviderModels();
 
   /** Controlled open state for the model picker. Mostly self-driven, but the
    *  onboarding-finish path sets a `pendingOpenModelPicker` flag on uiStore so
@@ -334,40 +325,6 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
       });
     }
   };
-
-  const reqId = useRef(0);
-  const refresh = useMemo(
-    () => async () => {
-      const id = ++reqId.current;
-      setLoading(true);
-      try {
-        const probe = await ollamaProbe(ollamaBaseUrl).catch(() => false);
-        if (id !== reqId.current) return;
-        setOllamaUp(probe);
-        if (probe) {
-          const m = await ollamaListModels(ollamaBaseUrl).catch(() => []);
-          if (id !== reqId.current) return;
-          setOllamaModels(m);
-        } else {
-          setOllamaModels([]);
-        }
-        if (openaiKeySet) {
-          const m = await openaiListModels(openaiBaseUrl).catch(() => []);
-          if (id !== reqId.current) return;
-          setOpenaiModels(m);
-        }
-      } finally {
-        // Only the latest-initiated run owns the loading flag.
-        if (id === reqId.current) setLoading(false);
-      }
-    },
-    [ollamaBaseUrl, openaiBaseUrl, openaiKeySet],
-  );
-
-  useEffect(() => {
-    if (!settingsHydrated) return;
-    refresh();
-  }, [settingsHydrated, refresh]);
 
   /** Launch a local Ollama from the picker. Independent of the
    *  `ollama_auto_launch` setting — that one only governs whether we do this

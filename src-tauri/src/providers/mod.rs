@@ -6,6 +6,19 @@ use serde_json::{json, Value};
 
 use crate::mcp::McpToolDef;
 
+/// Map a model-supplied qualified tool name (`slug__tool`) back to its
+/// definition and the bare name the server expects.
+///
+/// Pure lookup with no transport flavour, so both providers share it rather
+/// than keeping byte-identical copies that could drift apart.
+pub(super) fn resolve_qualified<'a>(
+    tools: &'a [McpToolDef],
+    qualified: &str,
+) -> Option<(&'a McpToolDef, String)> {
+    let def = tools.iter().find(|t| t.qualified_name == qualified)?;
+    Some((def, def.name.clone()))
+}
+
 /// Truncate a tool result to `max_bytes` on a UTF-8 boundary and append a
 /// trailing note so the model knows it was clipped. Naive byte-index
 /// truncation would panic on multi-byte sequences (a single emoji at the

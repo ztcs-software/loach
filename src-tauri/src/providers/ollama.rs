@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
 use tokio::select;
 
-use super::{ChatRequest, ModelInfo};
+use super::{resolve_qualified, ChatRequest, ModelInfo};
 use crate::db::Database;
 use crate::mcp::McpToolDef;
 use crate::stream::{admin_channel, event_channel, AdminEvent, StreamEvent, StreamRegistry};
@@ -1318,14 +1318,6 @@ fn normalise_args(v: &Value) -> Value {
         Value::Null => json!({}),
         other => other.clone(),
     }
-}
-
-fn resolve_qualified<'a>(
-    tools: &'a [McpToolDef],
-    qualified: &str,
-) -> Option<(&'a McpToolDef, String)> {
-    let def = tools.iter().find(|t| t.qualified_name == qualified)?;
-    Some((def, def.name.clone()))
 }
 
 #[cfg(test)]

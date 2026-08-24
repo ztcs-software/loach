@@ -298,11 +298,9 @@ fn resolve_default_model_choice(
     if let Some(p) = choice.strip_prefix("provider:") {
         if p == "ollama" || p == "openai" {
             // sessions arrive in `updated_at DESC` order from
-            // `Database::list_sessions`, so the first match is already
-            // the most recent — no extra sort needed (the TS version
-            // re-sorts defensively because the in-memory list can drift
-            // after a model swap; the Rust preload reads straight from
-            // disk so we don't have that concern).
+            // `Database::list_sessions`, so the first match here is already
+            // the most recent. The caller re-sorts anyway rather than rely on
+            // that ordering holding across both implementations.
             if let Some(s) = sessions
                 .iter()
                 .find(|s| s.provider == p && !s.model.is_empty())

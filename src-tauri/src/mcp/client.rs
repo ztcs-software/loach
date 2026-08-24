@@ -6,6 +6,7 @@ use futures_util::StreamExt;
 use serde_json::{json, Value};
 
 use crate::db::McpServer;
+use crate::sse::find_frame_end;
 
 use super::types::{
     Attachment, CallToolContent, CallToolResult, InitializeResult, JsonRpcError, JsonRpcResponse,
@@ -596,29 +597,6 @@ async fn read_sse_rpc_response(resp: reqwest::Response) -> Result<String> {
                     .ok_or_else(|| anyhow!("event-stream response contained no data frame"));
             }
         }
-    }
-}
-
-/// Position and length of the blank line ending the first frame in `buf`.
-/// Returns the delimiter length too so the caller consumes all of it —
-/// dropping only 2 bytes of a `\r\n\r\n` would leave a stray `\r\n` glued to
-/// the front of the next frame. When both forms match at overlapping
-/// offsets the earlier one wins, and a CRLF pair is reported at its `\r` so
-/// the frame text excludes it.
-fn find_frame_end(buf: &[u8]) -> Option<(usize, usize)> {
-    let lf = buf.windows(2).position(|w| w == b"\n\n");
-    let crlf = buf.windows(4).position(|w| w == b"\r\n\r\n");
-    match (lf, crlf) {
-        (Some(a), Some(b)) => {
-            if a <= b {
-                Some((a, 2))
-            } else {
-                Some((b, 4))
-            }
-        }
-        (Some(a), None) => Some((a, 2)),
-        (None, Some(b)) => Some((b, 4)),
-        (None, None) => None,
     }
 }
 

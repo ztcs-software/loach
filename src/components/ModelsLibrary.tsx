@@ -35,8 +35,7 @@ import type { ModelInfo, ProviderId } from "@/types";
 /**
  * Full-canvas browse-and-act surface for installed models. Mirrors
  * SpacesLibrary / SnippetsLibrary in shape so all three "library" tabs feel
- * like the same place in different outfits — same header, same search bar,
- * same tile grid. Replaces the dense in-sidebar ModelsPanel.
+ * like the same place in different outfits — same header, same tile grid. Replaces the dense in-sidebar ModelsPanel.
  *
  * Reached via the "Models" quick action in the sidebar — App.tsx routes to
  * this component when `sidebarTab === "models"` and no specific model is

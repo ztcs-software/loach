@@ -397,7 +397,7 @@ export default function App() {
           above every surface (chat / library / lock screen-adjacent) and
           isn't tied to whichever main view is currently rendered. The
           component renders nothing until the user opens it via Ctrl/Cmd+K
-          or the `loach:focus-search` event the sidebar fires. */}
+          or the `loach:focus-search` event the title bar fires. */}
       {/* Suppress the search palette while onboarding owns the screen — the
           wizard is modal and Cmd+K should stay inert until the user finishes
           or dismisses. */}

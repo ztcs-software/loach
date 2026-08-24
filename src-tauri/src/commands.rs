@@ -1812,85 +1812,38 @@ pub struct DialogFilter {
 /// fill the user's disk.
 const MAX_SAVE_BYTES: usize = 256 * 1024 * 1024; // 256 MB
 
-#[tauri::command]
-pub async fn save_text_to_file(
-    app: AppHandle,
-    content: String,
-    default_path: Option<String>,
-    filters: Option<Vec<DialogFilter>>,
-) -> Result<Option<String>, String> {
-    use tauri_plugin_dialog::DialogExt;
-
-    if content.len() > MAX_SAVE_BYTES {
-        return Err(format!(
-            "save_text_to_file refused: content is {} bytes (cap {} bytes)",
-            content.len(),
-            MAX_SAVE_BYTES
-        ));
-    }
-
-    let path_opt = tauri::async_runtime::spawn_blocking(move || {
-        let mut builder = app.dialog().file();
-        if let Some(name) = default_path.as_deref() {
-            builder = builder.set_file_name(name);
-        }
-        if let Some(filters) = filters.as_ref() {
-            for f in filters {
-                let exts: Vec<&str> = f.extensions.iter().map(|s| s.as_str()).collect();
-                builder = builder.add_filter(&f.name, &exts);
-            }
-        }
-        builder.blocking_save_file()
+/// Gate a destructive command on the app-lock credentials.
+///
+/// Runs on the blocking pool: argon2id at m=64 MiB / t=3 plus a keyring read
+/// is 100-250 ms of pinned CPU and a possible DBus round-trip. The `security_*`
+/// commands offload this for the stated reason that "a slow unlock attempt can
+/// stall every other in-flight command"; the destructive paths were the
+/// exception until this was hoisted out of all three of them.
+async fn check_destructive_auth(auth: Option<DestructiveAuthArgs>) -> Result<(), String> {
+    let auth = auth.unwrap_or_default();
+    tokio::task::spawn_blocking(move || {
+        security::require_unlocked(auth.pin.as_deref(), auth.password.as_deref())
     })
     .await
-    .map_err(|e| format!("save dialog task failed: {e}"))?;
-
-    let chosen = match path_opt {
-        Some(fp) => fp,
-        None => return Ok(None),
-    };
-    let path = chosen
-        .into_path()
-        .map_err(|e| format!("invalid path returned from dialog: {e}"))?;
-
-    // The actual write needs to be on the blocking pool too. The previous
-    // version only put the dialog in `spawn_blocking`, then called
-    // `std::fs::write` back on the async runtime — a multi-MB export
-    // would park the runtime worker on synchronous I/O.
-    let returned_path = path.clone();
-    tokio::task::spawn_blocking(move || std::fs::write(&path, content))
-        .await
-        .map_err(|e| format!("save task panicked: {e}"))?
-        .map_err(|e| format!("couldn't write {}: {e}", returned_path.display()))?;
-
-    Ok(Some(returned_path.to_string_lossy().to_string()))
+    .map_err(|e| format!("unlock check panicked: {e}"))?
+    .map_err(err)
 }
 
-/// Binary sibling of `save_text_to_file` — accepts base64-encoded bytes,
-/// decodes them in Rust, and writes the raw bytes to a user-chosen path.
-/// Powers "Save image" from the in-chat preview, where the image is already
-/// held in memory as base64 on an `Attachment`.
-#[tauri::command]
-pub async fn save_binary_to_file(
+/// Shared body of `save_text_to_file` / `save_binary_to_file`: put up the
+/// save dialog, then write `bytes` to whatever the user picked. Returns
+/// `Ok(None)` when they cancel.
+///
+/// Both the dialog and the write go on the blocking pool. An earlier version
+/// offloaded only the dialog and then called `std::fs::write` back on the
+/// async runtime, which parked a runtime worker on synchronous I/O for the
+/// length of a multi-MB export.
+async fn save_bytes_via_dialog(
     app: AppHandle,
-    base64_data: String,
+    bytes: Vec<u8>,
     default_path: Option<String>,
     filters: Option<Vec<DialogFilter>>,
 ) -> Result<Option<String>, String> {
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
     use tauri_plugin_dialog::DialogExt;
-
-    if base64_data.len() > MAX_SAVE_BYTES {
-        return Err(format!(
-            "save_binary_to_file refused: payload is {} bytes (cap {} bytes)",
-            base64_data.len(),
-            MAX_SAVE_BYTES
-        ));
-    }
-
-    let bytes = STANDARD
-        .decode(base64_data.as_bytes())
-        .map_err(|e| format!("invalid base64: {e}"))?;
 
     let path_opt = tauri::async_runtime::spawn_blocking(move || {
         let mut builder = app.dialog().file();
@@ -1923,6 +1876,51 @@ pub async fn save_binary_to_file(
         .map_err(|e| format!("couldn't write {}: {e}", returned_path.display()))?;
 
     Ok(Some(returned_path.to_string_lossy().to_string()))
+}
+
+#[tauri::command]
+pub async fn save_text_to_file(
+    app: AppHandle,
+    content: String,
+    default_path: Option<String>,
+    filters: Option<Vec<DialogFilter>>,
+) -> Result<Option<String>, String> {
+    if content.len() > MAX_SAVE_BYTES {
+        return Err(format!(
+            "save_text_to_file refused: content is {} bytes (cap {} bytes)",
+            content.len(),
+            MAX_SAVE_BYTES
+        ));
+    }
+    save_bytes_via_dialog(app, content.into_bytes(), default_path, filters).await
+}
+
+/// Binary sibling of `save_text_to_file` — accepts base64-encoded bytes,
+/// decodes them in Rust, and writes the raw bytes to a user-chosen path.
+/// Powers "Save image" from the in-chat preview, where the image is already
+/// held in memory as base64 on an `Attachment`.
+#[tauri::command]
+pub async fn save_binary_to_file(
+    app: AppHandle,
+    base64_data: String,
+    default_path: Option<String>,
+    filters: Option<Vec<DialogFilter>>,
+) -> Result<Option<String>, String> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+
+    if base64_data.len() > MAX_SAVE_BYTES {
+        return Err(format!(
+            "save_binary_to_file refused: payload is {} bytes (cap {} bytes)",
+            base64_data.len(),
+            MAX_SAVE_BYTES
+        ));
+    }
+
+    let bytes = STANDARD
+        .decode(base64_data.as_bytes())
+        .map_err(|e| format!("invalid base64: {e}"))?;
+
+    save_bytes_via_dialog(app, bytes, default_path, filters).await
 }
 
 /// Serialise every table to a JSON string. Pretty-printed so users can
@@ -1968,21 +1966,7 @@ pub async fn import_data_with_dialog(
 ) -> Result<Option<ImportStats>, String> {
     use tauri_plugin_dialog::DialogExt;
 
-    let auth = auth.unwrap_or_default();
-    // argon2id at m=64 MiB / t=3 plus a keyring read — 100-250 ms of pinned
-    // CPU and a possible DBus round-trip. The `security_*` commands offload
-    // this for the stated reason that "a slow unlock attempt can stall every
-    // other in-flight command"; the destructive paths were the exception.
-    {
-        let pin = auth.pin.clone();
-        let password = auth.password.clone();
-        tokio::task::spawn_blocking(move || {
-            security::require_unlocked(pin.as_deref(), password.as_deref())
-        })
-        .await
-        .map_err(|e| format!("unlock check panicked: {e}"))?
-        .map_err(err)?;
-    }
+    check_destructive_auth(auth).await?;
 
     let path_opt = tauri::async_runtime::spawn_blocking(move || {
         app.dialog()
@@ -2175,21 +2159,7 @@ pub async fn wipe_user_data(
     state: State<'_, AppState>,
     auth: Option<DestructiveAuthArgs>,
 ) -> Result<(), String> {
-    let auth = auth.unwrap_or_default();
-    // argon2id at m=64 MiB / t=3 plus a keyring read — 100-250 ms of pinned
-    // CPU and a possible DBus round-trip. The `security_*` commands offload
-    // this for the stated reason that "a slow unlock attempt can stall every
-    // other in-flight command"; the destructive paths were the exception.
-    {
-        let pin = auth.pin.clone();
-        let password = auth.password.clone();
-        tokio::task::spawn_blocking(move || {
-            security::require_unlocked(pin.as_deref(), password.as_deref())
-        })
-        .await
-        .map_err(|e| format!("unlock check panicked: {e}"))?
-        .map_err(err)?;
-    }
+    check_destructive_auth(auth).await?;
     state.db.wipe_user_data().map_err(err)?;
     // The wipe deletes every `mcp_servers` row, so the cached tool catalogue
     // is now stale. The webview reloads afterwards but `AppState` doesn't, so
@@ -2213,21 +2183,7 @@ pub async fn factory_reset(
     state: State<'_, AppState>,
     auth: Option<DestructiveAuthArgs>,
 ) -> Result<(), String> {
-    let auth = auth.unwrap_or_default();
-    // argon2id at m=64 MiB / t=3 plus a keyring read — 100-250 ms of pinned
-    // CPU and a possible DBus round-trip. The `security_*` commands offload
-    // this for the stated reason that "a slow unlock attempt can stall every
-    // other in-flight command"; the destructive paths were the exception.
-    {
-        let pin = auth.pin.clone();
-        let password = auth.password.clone();
-        tokio::task::spawn_blocking(move || {
-            security::require_unlocked(pin.as_deref(), password.as_deref())
-        })
-        .await
-        .map_err(|e| format!("unlock check panicked: {e}"))?
-        .map_err(err)?;
-    }
+    check_destructive_auth(auth).await?;
     state.db.wipe_all().map_err(err)?;
     // Same reason as in `wipe_user_data`: the MCP rows are gone, so the
     // in-process tool catalogue has to go with them.

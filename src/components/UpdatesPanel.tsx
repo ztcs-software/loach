@@ -13,7 +13,7 @@ import {
   type DownloadProgress,
   type UpdateInfo,
 } from "@/lib/updater";
-import { isTauri } from "@/lib/tauri";
+import { openExternal } from "@/lib/tauri";
 import { useSettingsStore } from "@/stores/settingsStore";
 import pkg from "../../package.json";
 
@@ -26,15 +26,6 @@ type State =
   | { kind: "available"; info: UpdateInfo }
   | { kind: "installing"; info: UpdateInfo; progress: DownloadProgress }
   | { kind: "error"; message: string };
-
-async function openExternal(url: string) {
-  if (isTauri) {
-    const { open } = await import("@tauri-apps/plugin-shell");
-    await open(url);
-  } else {
-    window.open(url, "_blank", "noopener,noreferrer");
-  }
-}
 
 export function UpdatesPanel() {
   const [supported, setSupported] = useState<boolean | null>(null);

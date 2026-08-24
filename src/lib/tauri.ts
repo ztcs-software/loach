@@ -37,6 +37,34 @@ function notInTauri<T>(fallback: T): Promise<T> {
   return Promise.resolve(fallback);
 }
 
+/**
+ * Hand a URL to the OS browser, or to a new tab when running outside the
+ * Tauri shell.
+ *
+ * The five surfaces that link out (markdown links, Settings, Onboarding,
+ * Share, Updates) each grew their own copy of this, and they had drifted:
+ * only one guarded against an empty href, and only one fell back to
+ * `window.open` when the shell plugin threw. This is the union of the two —
+ * the safest behaviour of the set.
+ *
+ * Callers are responsible for deciding whether a URL is *allowed* to be
+ * opened; `Markdown.shouldOpenExternally` screens untrusted model output
+ * against a scheme allow-list before calling here.
+ */
+export async function openExternal(url: string): Promise<void> {
+  if (!url || url === "#") return;
+  if (isTauri) {
+    try {
+      const { open } = await import("@tauri-apps/plugin-shell");
+      await open(url);
+      return;
+    } catch {
+      /* shell plugin unavailable — fall through to the browser path */
+    }
+  }
+  window.open(url, "_blank", "noopener,noreferrer");
+}
+
 /** Mint a unique-ish id for the no-backend fallback path. `Date.now()` alone
  *  collides on rapid double-clicks (two "New chat" presses in the same
  *  millisecond ship the same id and trip React's duplicate-key warning in the

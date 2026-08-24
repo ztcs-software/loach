@@ -6,6 +6,7 @@ mod preload;
 mod providers;
 mod secrets;
 mod security;
+mod sse;
 mod stream;
 mod tools;
 

@@ -25,8 +25,8 @@ import type { Session, Snippet, Space } from "@/types";
  *
  * Trigger paths (any of):
  *   - Ctrl/Cmd + K (window-level listener)
- *   - Custom `loach:focus-search` event — fired by the sidebar's "Search"
- *     quick action so non-keyboard surfaces share the same path
+ *   - Custom `loach:focus-search` event — fired by the title bar's search
+ *     pill so non-keyboard surfaces share the same path
  *
  * Behaviour while open:
  *   - Empty query → "suggestions" mix of recent chats / spaces / snippets
@@ -75,7 +75,7 @@ export function SearchBar() {
   const inputRef = useRef<HTMLInputElement>(null);
 
   // Two open paths: Ctrl/Cmd+K and the `loach:focus-search` custom event the
-  // sidebar fires when its "Search" quicklink is clicked. Both end up here so
+  // title bar fires when its search pill is clicked. Both end up here so
   // there's a single source of truth for "show the palette".
   useEffect(() => {
     const focus = () => {

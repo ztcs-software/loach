@@ -24,7 +24,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { useModelsStore, type AdminProgress } from "@/stores/modelsStore";
 import { useOnboardingStore } from "@/stores/onboardingStore";
 import {
-  isTauri,
+  openExternal,
   ollamaListModels,
   openaiListModels,
 } from "@/lib/tauri";
@@ -106,19 +106,6 @@ const OLLAMA_CATALOG: {
     ],
   },
 ];
-
-async function openExternal(url: string) {
-  if (isTauri) {
-    try {
-      const { open } = await import("@tauri-apps/plugin-shell");
-      await open(url);
-      return;
-    } catch {
-      /* fall through */
-    }
-  }
-  window.open(url, "_blank", "noopener,noreferrer");
-}
 
 export function ProviderStep({
   onClose,

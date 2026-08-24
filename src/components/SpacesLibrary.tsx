@@ -26,8 +26,7 @@ import type { Space } from "@/types";
 
 /**
  * Full-canvas browse surface for Spaces. Mirrors SnippetsLibrary in shape so
- * the two surfaces feel like the same place — same header, same search bar,
- * same tile grid. The dominant action here is `Open` (drop into the Space's
+ * the two surfaces feel like the same place — same header, same tile grid. The dominant action here is `Open` (drop into the Space's
  * detail view), so that's the primary button on each tile.
  *
  * Reached via the "Spaces" rail tab in the sidebar — when active the sidebar

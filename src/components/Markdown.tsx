@@ -5,7 +5,7 @@ import rehypeHighlight from "rehype-highlight";
 import "highlight.js/styles/github-dark.css";
 import { CodeBlock } from "./CodeBlock";
 import { cn } from "@/lib/utils";
-import { isTauri } from "@/lib/tauri";
+import { openExternal } from "@/lib/tauri";
 
 interface MarkdownProps {
   content: string;
@@ -224,15 +224,6 @@ const MARKDOWN_PLUGINS_REHYPE_NOHL = [rehypeTexFallback];
 // Open a link from rendered (untrusted) markdown through the OS browser / mail
 // client. Mirrors the helper used by Settings / Onboarding / Updates; the
 // scheme allow-listing happens at the call site in the `a` component below.
-async function openExternal(url: string): Promise<void> {
-  if (isTauri) {
-    const { open } = await import("@tauri-apps/plugin-shell");
-    await open(url);
-  } else {
-    window.open(url, "_blank", "noopener,noreferrer");
-  }
-}
-
 // Decide whether a markdown link href is safe to hand to the OS handler. Model
 // output is untrusted: allow only absolute http / https / mailto URLs — the
 // schemes `shell:allow-open` grants — and reject javascript:, file:, data:,
