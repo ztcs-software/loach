@@ -23,9 +23,13 @@ ENV DEBIAN_FRONTEND=noninteractive \
     RUSTUP_HOME=/usr/local/rustup \
     PATH=/usr/local/cargo/bin:$PATH
 
-# Tauri's Linux system deps — same set release.yml installs on ubuntu-22.04 —
-# plus the build toolchain and the few utilities the AppImage bundler shells
-# out to (file, wget, xz).
+# Tauri's Linux system deps — the same set release.yml installs — plus the
+# build toolchain and the few utilities the AppImage bundler shells out to
+# (file, wget, xz).
+#
+# The base image stays on 22.04 while CI runs 24.04 ON PURPOSE: an AppImage
+# is only portable down to the glibc it was linked against, so building on
+# the older base widens the range of distros the local artifact runs on.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential curl ca-certificates git pkg-config \
       libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev \
@@ -33,14 +37,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       patchelf file wget xz-utils \
  && rm -rf /var/lib/apt/lists/*
 
-# Node 20 to match setup-node@v4 in CI.
-RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+# Node 22, matching `node-version` in ci.yml / release.yml. Vite 8 needs
+# 20.19+ or 22.12+, so 20.x from NodeSource is no longer a safe floor.
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
  && apt-get install -y --no-install-recommends nodejs \
  && rm -rf /var/lib/apt/lists/*
 
-# Rust stable, minimal profile (we don't need rustfmt/clippy in the build image).
+# Pinned to the toolchain CI uses (dtolnay/rust-toolchain@1.88.0) rather than
+# `stable`, for the same reason CI pins it: a surprise rustc release shouldn't
+# be able to break a build that worked yesterday. Minimal profile — the build
+# image has no use for rustfmt/clippy. Keep in step with `rust-version` in
+# src-tauri/Cargo.toml.
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-      | sh -s -- -y --default-toolchain stable --profile minimal
+      | sh -s -- -y --default-toolchain 1.88.0 --profile minimal
 
 WORKDIR /src
 

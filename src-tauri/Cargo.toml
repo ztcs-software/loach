@@ -60,10 +60,6 @@ once_cell = "1"
 dashmap = "6"
 parking_lot = "0.12"
 
-# Math expression evaluator for the built-in `calculate` tool. Local models
-# are unreliable at arithmetic; this gives the model a way to off-load it
-# without the user having to wire up an MCP server for a single function.
-meval = "0.2"
 
 # Backing crates for the rest of the built-in tools. Each is small,
 # pure-Rust, and pulled in only because the model can't do the task
@@ -86,6 +82,16 @@ ipnet = "2"
 # call site references. Re-enable `html` if the tool ever grows an
 # HTML-to-PDF path.
 printpdf = { version = "0.12", default-features = false }
+
+# Math expression evaluator for the built-in `calculate` tool. Local models
+# are unreliable at arithmetic; this gives the model a way to off-load it
+# without the user having to wire up an MCP server for a single function.
+#
+# Replaced meval (last released 2018), which pinned nom 1.2.4 — a version
+# rustc already warns "will be rejected by a future version of Rust". exmex is
+# maintained, MIT/Apache-2.0, and its own MSRV (1.80) sits under ours. See
+# `tools/calculate.rs` for the two operators we add on top of its defaults.
+exmex = "0.21"
 
 [dev-dependencies]
 # Only used by the db.rs test suite, which opens a fresh database in a

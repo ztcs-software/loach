@@ -10,18 +10,49 @@
 //! bare tool name. This file only owns the schema, the description, and
 //! the math.
 //!
-//! Safety surface is tiny: meval is pure-compute, no I/O, no allocation
+//! Safety surface is tiny: exmex is pure-compute, no I/O, no allocation
 //! patterns that scale with input size beyond the expression's own length.
 //! We still cap the input string so a runaway prompt can't ship a 10 MB
 //! expression at us.
 
+use exmex::{BinOp, Express, FlatEx, FloatOpsFactory, MakeOperators, Operator};
 use serde_json::{json, Value};
 
 use crate::mcp::McpCallResult;
 
+/// exmex's default float operators, plus the two things this tool's own
+/// description promises that they don't cover: the `%` remainder operator,
+/// and a lowercase `pi` (exmex ships `PI` and `π`, and a model reading our
+/// description writes `pi`).
+///
+/// `%` takes the same priority as `/` so `10 % 4 * 2` groups the way every
+/// other language groups it. Everything else — the trig family, sqrt/exp,
+/// `ln`, `log` (base e) and `log10`, abs/floor/ceil/round/signum, and the
+/// `e` constant — comes from the default set already.
+#[derive(Clone, Debug)]
+struct CalcOps;
+
+impl MakeOperators<f64> for CalcOps {
+    fn make<'a>() -> Vec<Operator<'a, f64>> {
+        let mut ops = FloatOpsFactory::<f64>::make();
+        ops.push(Operator::make_bin(
+            "%",
+            BinOp {
+                apply: |a, b| a % b,
+                prio: 3,
+                is_commutative: false,
+            },
+        ));
+        ops.push(Operator::make_constant("pi", std::f64::consts::PI));
+        ops
+    }
+}
+
+type CalcExpr = FlatEx<f64, CalcOps>;
+
 /// Hard cap on the expression length. Real-world calls are <100 chars;
 /// anything beyond a few hundred is almost certainly malformed or
-/// adversarial. Bounded up front so meval's parser doesn't have to walk
+/// adversarial. Bounded up front so the parser doesn't have to walk
 /// a multi-MB string.
 const MAX_EXPR_CHARS: usize = 1024;
 
@@ -79,7 +110,11 @@ pub fn dispatch(arguments: &Value) -> McpCallResult {
             trimmed.chars().count()
         ));
     }
-    match meval::eval_str_with_context(trimmed, calc_context()) {
+    // Parse and evaluate with no variables bound. A bare identifier the
+    // operator set doesn't define (`x + 1`, a mistyped function name) parses
+    // as a variable and then fails here for want of a value — which is the
+    // error we want, since this tool only ever evaluates closed expressions.
+    match CalcExpr::parse(trimmed).and_then(|expr| expr.eval(&[])) {
         Ok(value) => McpCallResult {
             content_text: format_result(value),
             is_error: false,
@@ -87,19 +122,6 @@ pub fn dispatch(arguments: &Value) -> McpCallResult {
         },
         Err(e) => err(format!("could not evaluate `{trimmed}`: {e}")),
     }
-}
-
-/// meval's default context plus the two logarithms the tool catalogue has
-/// always advertised. `Context::new()` ships `ln` but neither `log` nor
-/// `log10`, so a model taking the description at its word got "unknown
-/// function" on `log10(100)` — one of the most common things it would reach
-/// for this tool to do. `log` is base-e (an alias for `ln`), matching how
-/// the description documents it.
-fn calc_context() -> meval::Context<'static> {
-    let mut ctx = meval::Context::new();
-    ctx.func("log10", f64::log10);
-    ctx.func("log", f64::ln);
-    ctx
 }
 
 fn err(msg: impl Into<String>) -> McpCallResult {
@@ -152,9 +174,8 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// The catalogue advertises `log` and `log10`; meval's default context
-    /// provides neither, so before `calc_context` these returned "unknown
-    /// function" to a model that had simply believed the tool description.
+    /// The catalogue advertises `log` (base e) and `log10`; both must resolve
+    /// for a model that simply believed the tool description.
     #[test]
     fn advertised_logarithms_are_available() {
         let r = dispatch(&json!({"expression": "log10(100)"}));
@@ -209,12 +230,45 @@ mod tests {
 
     #[test]
     fn surfaces_parse_errors() {
-        // Unclosed paren — meval rejects this rather than recovering.
-        // (Note: `2 ++ 3` is *not* malformed in meval — the second `+` is
-        // parsed as a unary plus, so the expression evaluates to 5.)
+        // Unclosed paren — rejected rather than recovered from.
         let r = dispatch(&json!({"expression": "(2 + 3"}));
         assert!(r.is_error, "got: {}", r.content_text);
         assert!(r.content_text.contains("could not evaluate"));
+    }
+
+    /// `%` is advertised in the tool description but isn't part of exmex's
+    /// default operator set — [`CalcOps`] adds it. Priority has to match `/`
+    /// so the grouping matches every other language's.
+    #[test]
+    fn remainder_operator_is_available_and_binds_like_division() {
+        let r = dispatch(&json!({"expression": "7 % 3"}));
+        assert!(!r.is_error, "{}", r.content_text);
+        assert_eq!(r.content_text, "1");
+
+        // Left-to-right with `*` at the same tier: (10 % 4) * 2 == 4.
+        let r = dispatch(&json!({"expression": "10 % 4 * 2"}));
+        assert!(!r.is_error, "{}", r.content_text);
+        assert_eq!(r.content_text, "4");
+    }
+
+    /// Lowercase `pi` is what the description tells the model to write;
+    /// exmex only ships `PI` and `π`, so [`CalcOps`] adds it.
+    #[test]
+    fn lowercase_pi_constant_is_available() {
+        let r = dispatch(&json!({"expression": "pi"}));
+        assert!(!r.is_error, "{}", r.content_text);
+        assert!(r.content_text.starts_with("3.14159"), "got: {}", r.content_text);
+    }
+
+    /// This tool only evaluates closed expressions. A bare identifier parses
+    /// as a variable, which must surface as an error rather than silently
+    /// evaluating to something.
+    #[test]
+    fn free_variables_are_rejected() {
+        for expr in ["x + 1", "bogusfn(2)", "2 * unknown"] {
+            let r = dispatch(&json!({ "expression": expr }));
+            assert!(r.is_error, "`{expr}` should not evaluate, got: {}", r.content_text);
+        }
     }
 
     #[test]
@@ -242,7 +296,7 @@ mod tests {
     #[test]
     fn reports_division_by_zero_as_infinity() {
         let r = dispatch(&json!({"expression": "1 / 0"}));
-        // meval treats this as f64 inf; we want a model-readable hint.
+        // f64 division by zero is inf; we want a model-readable hint.
         assert!(!r.is_error);
         assert!(r.content_text.contains("Infinity"), "got: {}", r.content_text);
     }

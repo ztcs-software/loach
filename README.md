@@ -13,7 +13,7 @@ Run local LLMs with [Ollama](https://ollama.com) or connect any OpenAI-compatibl
 
 ![Tauri 2](https://img.shields.io/badge/Tauri-2-FFC131?logo=tauri&logoColor=white)
 ![React 19](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=white)
-![Rust](https://img.shields.io/badge/Rust-stable-000000?logo=rust&logoColor=white)
+![Rust 1.88+](https://img.shields.io/badge/Rust-1.88+-000000?logo=rust&logoColor=white)
 ![Vite](https://img.shields.io/badge/Vite-8-646CFF?logo=vite&logoColor=white)
 ![Tailwind CSS](https://img.shields.io/badge/Tailwind-3-38BDF8?logo=tailwindcss&logoColor=white)
 ![Ollama](https://img.shields.io/badge/Ollama-compatible-000000?logo=ollama&logoColor=white)
@@ -124,7 +124,7 @@ Auto-updates are delivered through Loach's own signed updater (independent of Ap
 #### Prerequisites
 
 - **Node.js 20.19+** (or 22.12+) and **npm** — Vite 8 won't run on older 20.x point releases.
-- **Rust** stable toolchain via [`rustup`](https://rustup.rs)
+- **Rust 1.88+** via [`rustup`](https://rustup.rs) — the dependency tree's minimum; CI builds on 1.88.0
 - Platform build tooling — install once via the official Tauri prerequisites guide: <https://tauri.app/start/prerequisites/>
   - **Windows**: Microsoft Visual Studio Build Tools, WebView2 runtime (preinstalled on Windows 11)
   - **Linux**: `webkit2gtk-4.1`, `libayatana-appindicator3-dev`, `librsvg2-dev`, `build-essential`, `libssl-dev`, `pkg-config`, `libsecret-1-dev`
@@ -207,7 +207,7 @@ Only one OpenAI-compatible endpoint is active at a time — switch the base URL 
 | HTTP | `reqwest` with streaming + `rustls-tls` |
 | Markdown | `react-markdown` + `remark-gfm` + `rehype-highlight` (highlight.js) |
 | Document parsing | `pdfjs-dist` (PDF) + `mammoth` (DOCX) |
-| PDF generation | `printpdf` 0.9 with a bundled Liberation Sans subset (Unicode-capable output) |
+| PDF generation | `printpdf` 0.12 with a bundled Liberation Sans subset (Unicode-capable output) |
 | System tray | Tauri 2 built-in (`tray-icon` feature) |
 | Bundle targets | `.exe` (NSIS) on Windows; `.deb` / `.rpm` / `.AppImage` on Linux; `.dmg` on macOS (Apple Silicon) |
 
