@@ -47,7 +47,7 @@ jobs:
       should_release: ${{ steps.gate.outputs.should_release }}
       release_body: ${{ steps.notes.outputs.body }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0  # need full history to inspect existing tags
 
@@ -123,7 +123,7 @@ jobs:
 
     runs-on: ${{ matrix.platform }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Tauri-action needs full history to compute the right tag base
           # for the auto-created tag. Matches `prepare`'s checkout.
@@ -140,9 +140,9 @@ jobs:
             patchelf \
             rpm
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       # Pin to a specific stable release rather than tracking `@stable`. A

@@ -12,9 +12,9 @@ Run local LLMs with [Ollama](https://ollama.com) or connect any OpenAI-compatibl
 [![Release build](https://github.com/ztcs-software/loach/actions/workflows/release.yml/badge.svg)](https://github.com/ztcs-software/loach/actions/workflows/release.yml)
 
 ![Tauri 2](https://img.shields.io/badge/Tauri-2-FFC131?logo=tauri&logoColor=white)
-![React 18](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=white)
+![React 19](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=white)
 ![Rust](https://img.shields.io/badge/Rust-stable-000000?logo=rust&logoColor=white)
-![Vite](https://img.shields.io/badge/Vite-7-646CFF?logo=vite&logoColor=white)
+![Vite](https://img.shields.io/badge/Vite-8-646CFF?logo=vite&logoColor=white)
 ![Tailwind CSS](https://img.shields.io/badge/Tailwind-3-38BDF8?logo=tailwindcss&logoColor=white)
 ![Ollama](https://img.shields.io/badge/Ollama-compatible-000000?logo=ollama&logoColor=white)
 
@@ -123,7 +123,7 @@ Auto-updates are delivered through Loach's own signed updater (independent of Ap
 
 #### Prerequisites
 
-- **Node.js 20.19+** (or 22.12+) and **npm** — Vite 7 won't run on older 20.x point releases.
+- **Node.js 20.19+** (or 22.12+) and **npm** — Vite 8 won't run on older 20.x point releases.
 - **Rust** stable toolchain via [`rustup`](https://rustup.rs)
 - Platform build tooling — install once via the official Tauri prerequisites guide: <https://tauri.app/start/prerequisites/>
   - **Windows**: Microsoft Visual Studio Build Tools, WebView2 runtime (preinstalled on Windows 11)
@@ -197,7 +197,7 @@ Only one OpenAI-compatible endpoint is active at a time — switch the base URL 
 | Layer | Choice |
 |---|---|
 | Desktop shell | Tauri 2.x (Rust) |
-| Frontend | React 18 + Vite 7 + TypeScript |
+| Frontend | React 19 + Vite 8 + TypeScript |
 | Styling | Tailwind CSS + shadcn/ui (Radix primitives) + `tailwindcss-animate` + `@tailwindcss/typography` |
 | Icons | `lucide-react` |
 | State | Zustand (in-memory; backed by SQLite for persistence where appropriate) |
