@@ -33,7 +33,7 @@ concurrency:
 jobs:
   js:
     name: tsc + vite build + vitest
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
 
@@ -48,7 +48,7 @@ jobs:
 
   rust:
     name: cargo test
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
 

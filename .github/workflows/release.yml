@@ -41,7 +41,7 @@ jobs:
     # this guard a stray manual run on that branch would tag and draft-release
     # unmerged code.
     if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.gate.outputs.version }}
       should_release: ${{ steps.gate.outputs.should_release }}
@@ -109,7 +109,7 @@ jobs:
         include:
           - platform: windows-latest
             args: '--bundles nsis'
-          - platform: ubuntu-22.04
+          - platform: ubuntu-24.04
             args: '--bundles deb,appimage,rpm'
           # Apple Silicon only — macos-14 is an M1 runner, so the target
           # matches the host arch and no extra `rustup target add` is needed.
@@ -130,7 +130,7 @@ jobs:
           fetch-depth: 0
 
       - name: Install Linux build deps
-        if: matrix.platform == 'ubuntu-22.04'
+        if: matrix.platform == 'ubuntu-24.04'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
