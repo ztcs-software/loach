@@ -78,7 +78,14 @@ ipnet = "2"
 # src-tauri/assets/fonts) into each file, so output supports Unicode —
 # Latin, European accents, common symbols — not just ASCII. Glyphs the
 # font lacks (e.g. CJK, emoji) fall back to `?` at render time.
-printpdf = "0.12"
+#
+# `default-features = false` drops printpdf's `html` feature, which we never
+# touch — the tool builds documents from a structured spec, not from markup.
+# It was pulling the whole azul layout engine plus hyphenation, taffy,
+# rust-fontconfig and two XML parsers: 21 crates of build time for APIs no
+# call site references. Re-enable `html` if the tool ever grows an
+# HTML-to-PDF path.
+printpdf = { version = "0.12", default-features = false }
 
 [dev-dependencies]
 # Only used by the db.rs test suite, which opens a fresh database in a

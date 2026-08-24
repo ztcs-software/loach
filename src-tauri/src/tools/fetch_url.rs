@@ -616,14 +616,6 @@ fn looks_like_html(body: &str) -> bool {
 /// Good enough for extracting prose. For JS-heavy SPAs the result will be
 /// near-empty; that's expected and correct for a zero-dep fetcher.
 fn html_to_text(html: &str) -> (Option<String>, String) {
-    let title = extract_between_ci(html, "<title", "</title>")
-        .map(|raw| {
-            // Skip past the opening tag's `>`
-            let start = raw.find('>').map(|i| i + 1).unwrap_or(0);
-            decode_entities(&raw[start..]).trim().to_string()
-        })
-        .filter(|s| !s.is_empty());
-
     // Compute the ASCII-lowercased view of the body exactly ONCE and pass
     // it through the rest of the pipeline. The previous version called
     // `strip_block_ci` + `replace_ci` 18 times in sequence, each of
@@ -631,8 +623,20 @@ fn html_to_text(html: &str) -> (Option<String>, String) {
     // body that's ~90 MB of throwaway allocation per fetch. `to_ascii_-
     // lowercase` preserves byte length so we can safely index into either
     // view interchangeably.
+    //
+    // Hoisted above the title extraction so that shares it too: the title
+    // scan used to build a second full-body copy of its own, right under a
+    // comment promising the lowercasing happened once.
     let lower = html.to_ascii_lowercase();
     debug_assert_eq!(lower.len(), html.len());
+
+    let title = extract_between_ci(html, &lower, "<title", "</title>")
+        .map(|raw| {
+            // Skip past the opening tag's `>`
+            let start = raw.find('>').map(|i| i + 1).unwrap_or(0);
+            decode_entities(&raw[start..]).trim().to_string()
+        })
+        .filter(|s| !s.is_empty());
 
     let stripped = strip_blocks_with_lower(
         html,
@@ -794,8 +798,11 @@ fn replace_many_ci(hay: &str, needles: &[&str], repl: &str) -> String {
     out
 }
 
-fn extract_between_ci(hay: &str, open: &str, close: &str) -> Option<String> {
-    let lower = hay.to_ascii_lowercase();
+/// `lower` must be `hay.to_ascii_lowercase()` — passed in rather than built
+/// here so the caller's single copy is reused. ASCII-lowercasing preserves
+/// byte length, so offsets found in `lower` index `hay` directly.
+fn extract_between_ci(hay: &str, lower: &str, open: &str, close: &str) -> Option<String> {
+    debug_assert_eq!(lower.len(), hay.len());
     let open_l = open.to_ascii_lowercase();
     let close_l = close.to_ascii_lowercase();
     let a = lower.find(&open_l)?;

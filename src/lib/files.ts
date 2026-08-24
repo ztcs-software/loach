@@ -116,9 +116,11 @@ export async function getPdfjs() {
   if (!pdfjsPromise) {
     pdfjsPromise = (async () => {
       const pdfjs = await import("pdfjs-dist");
-      // Vite picks this up via ?url and emits a static asset.
+      // Vite picks this up via ?url and emits a static asset. The `.min`
+      // build, because `?url` assets bypass the bundler's own minify step —
+      // the unminified worker shipped as ~2.2 MB against 1.2 MB for this one.
       const workerUrl = (
-        await import("pdfjs-dist/build/pdf.worker.mjs?url")
+        await import("pdfjs-dist/build/pdf.worker.min.mjs?url")
       ).default;
       pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
       return pdfjs;

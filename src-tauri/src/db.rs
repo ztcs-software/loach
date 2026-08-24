@@ -840,13 +840,17 @@ impl Database {
             ],
         )?;
 
-        for m in to_copy {
-            let msg_id = Uuid::new_v4().to_string();
-            tx.execute(
+        // One prepare for the whole copy — forking a long chat replays every
+        // message, and `tx.execute` would re-parse the INSERT each time.
+        {
+            let mut stmt = tx.prepare(
                 "INSERT INTO messages (id, session_id, role, content, thinking,
                                        attachments_json, metrics_json, tool_calls_json, compacted_at, created_at, import_group, import_hidden, pinned_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-                params![
+            )?;
+            for m in to_copy {
+                let msg_id = Uuid::new_v4().to_string();
+                stmt.execute(params![
                     msg_id,
                     new_id,
                     m.role,
@@ -860,8 +864,8 @@ impl Database {
                     m.import_group,
                     m.import_hidden,
                     m.pinned_at,
-                ],
-            )?;
+                ])?;
+            }
         }
         tx.commit()?;
         drop(conn);
@@ -2290,12 +2294,18 @@ impl Database {
             )?;
         }
 
-        for m in &d.messages {
-            tx.execute(
+        // Prepared once for the whole batch, like `import_messages` and
+        // `mark_messages_compacted` do. `tx.execute` re-parses the statement on
+        // every call, which is the dominant cost when a restore replays tens of
+        // thousands of rows.
+        {
+            let mut stmt = tx.prepare(
                 "INSERT INTO messages (id, session_id, role, content, thinking,
                                        attachments_json, metrics_json, tool_calls_json, compacted_at, created_at, import_group, import_hidden, pinned_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-                params![
+            )?;
+            for m in &d.messages {
+                stmt.execute(params![
                     m.id,
                     m.session_id,
                     m.role,
@@ -2309,8 +2319,8 @@ impl Database {
                     m.import_group,
                     m.import_hidden,
                     m.pinned_at,
-                ],
-            )?;
+                ])?;
+            }
         }
 
         for sp in &d.spaces {

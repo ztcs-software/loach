@@ -131,12 +131,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "arrayvec"
-version = "0.7.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
-
-[[package]]
 name = "async-broadcast"
 version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -337,60 +331,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
-name = "azul-core"
-version = "0.0.14"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3ee0f30230d2fa5b51241bfdd52f683e36b71d230b8113201102da63cc2c2600"
-dependencies = [
- "azul-css",
- "gl-context-loader",
- "libm",
- "rust-fontconfig",
-]
-
-[[package]]
-name = "azul-css"
-version = "0.0.14"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2c714fb48b855dc12cc59b417987db62aeeca9cd8dd2a3f8c9912c35e5a1fa7c"
-dependencies = [
- "azul-simplecss",
- "libm",
-]
-
-[[package]]
-name = "azul-layout"
-version = "0.0.14"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce0b89c88dbea5c930001141108fde71d863c4a2cf441cd949b73180e13272dc"
-dependencies = [
- "allsorts-azul",
- "azul-core",
- "azul-css",
- "base64 0.22.1",
- "hyphenation",
- "lru",
- "roxmltree",
- "rust-fontconfig",
- "serde",
- "smallvec",
- "taffy",
- "thiserror 2.0.20",
- "tinyvec",
- "unicode-bidi",
- "unicode-normalization",
- "unicode-segmentation",
- "xmlparser",
- "xmlwriter",
-]
-
-[[package]]
-name = "azul-simplecss"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1749834be7a639241b87d508ea1a5a4bf4736761af260b8148cf73bd67cf94c"
-
-[[package]]
 name = "base64"
 version = "0.21.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -413,15 +353,6 @@ name = "base64ct"
 version = "1.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
-
-[[package]]
-name = "bincode"
-version = "1.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1f45e9417d87227c7a56d22e471c6206462cba514c7590c09aff4cf6d1ddcad"
-dependencies = [
- "serde",
-]
 
 [[package]]
 name = "bit-set"
@@ -1491,12 +1422,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fst"
-version = "0.4.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7ab85b9b05e3978cc9a9cf8fea7f01b494e1a09ed3037e16ba39edc7a29eb61a"
-
-[[package]]
 name = "futures-channel"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1761,12 +1686,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "gl-context-loader"
-version = "0.1.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5ca63cb2488b847c12d1ca56034ba0f15613972c0dc0f8a957f525707567b23d"
-
-[[package]]
 name = "glib"
 version = "0.18.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1835,12 +1754,6 @@ dependencies = [
  "libc",
  "system-deps",
 ]
-
-[[package]]
-name = "grid"
-version = "1.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b40ca9252762c466af32d0b1002e91e4e1bc5398f77455e55474deb466355ff5"
 
 [[package]]
 name = "gtk"
@@ -2110,29 +2023,6 @@ dependencies = [
  "tokio",
  "tower-service",
  "tracing",
-]
-
-[[package]]
-name = "hyphenation"
-version = "0.8.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bcf4dd4c44ae85155502a52c48739c8a48185d1449fff1963cffee63c28a50f0"
-dependencies = [
- "bincode",
- "fst",
- "hyphenation_commons",
- "pocket-resources",
- "serde",
-]
-
-[[package]]
-name = "hyphenation_commons"
-version = "0.8.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5febe7a2ade5c7d98eb8b75f946c046b335324b06a14ea0998271504134c05bf"
-dependencies = [
- "fst",
- "serde",
 ]
 
 [[package]]
@@ -2616,12 +2506,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "libm"
-version = "0.2.16"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
-
-[[package]]
 name = "libredox"
 version = "0.1.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2736,12 +2620,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "lru"
-version = "0.18.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d2f2f9b4ba7e6b24d95e7e899329d35be83bcded72c8540cdd5368932d1d90a"
-
-[[package]]
 name = "lru-slab"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2833,16 +2711,6 @@ dependencies = [
  "libc",
  "wasi",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "mmapio"
-version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0204e2cac68f5b2e35b7ec8cb5d906f6e58e78dad8066a30b6ee54da99bb03dd"
-dependencies = [
- "libc",
- "winapi",
 ]
 
 [[package]]
@@ -3555,12 +3423,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pocket-resources"
-version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c135f38778ad324d9e9ee68690bac2c1a51f340fdf96ca13e2ab3914eb2e51d8"
-
-[[package]]
 name = "polling"
 version = "3.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3617,14 +3479,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e75e1f6d16f80c8f34918a4cc68743d703e8ee5016fac9508e223eb8e60445a0"
 dependencies = [
  "allsorts-azul",
- "azul-core",
- "azul-css",
- "azul-layout",
  "base64 0.22.1",
  "flate2",
  "getrandom 0.4.3",
  "lopdf",
- "rust-fontconfig",
  "serde",
  "serde_derive",
  "serde_json",
@@ -3633,7 +3491,6 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "weezl",
- "xmlparser",
 ]
 
 [[package]]
@@ -4061,15 +3918,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "roxmltree"
-version = "0.21.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1964b10c76125c36f8afe190065a4bf9a87bf324842c05701330bba9f1cacbb"
-dependencies = [
- "memchr",
-]
-
-[[package]]
 name = "rsqlite-vfs"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4092,17 +3940,6 @@ dependencies = [
  "libsqlite3-sys",
  "smallvec",
  "sqlite-wasm-rs",
-]
-
-[[package]]
-name = "rust-fontconfig"
-version = "4.4.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "87542166cd2a7b38cf2c338384d882656e2fbbdd9813017415f1d57ad35757e9"
-dependencies = [
- "allsorts-azul",
- "mmapio",
- "xmlparser",
 ]
 
 [[package]]
@@ -4652,15 +4489,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
-name = "slotmap"
-version = "1.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bdd58c3c93c3d278ca835519292445cb4b0d4dc59ccfdf7ceadaab3f8aeb4038"
-dependencies = [
- "version_check",
-]
-
-[[package]]
 name = "smallvec"
 version = "1.15.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4872,18 +4700,6 @@ dependencies = [
  "pkg-config",
  "toml 0.8.2",
  "version-compare",
-]
-
-[[package]]
-name = "taffy"
-version = "0.10.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aea22054047c16c3f34d3ac473a2170be1424b1115b2a3adcf28cfb067c88859"
-dependencies = [
- "arrayvec",
- "grid",
- "serde",
- "slotmap",
 ]
 
 [[package]]
@@ -6747,18 +6563,6 @@ dependencies = [
  "libc",
  "rustix",
 ]
-
-[[package]]
-name = "xmlparser"
-version = "0.13.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "66fee0b777b0f5ac1c69bb06d361268faafa61cd4682ae064a171c16c433e9e4"
-
-[[package]]
-name = "xmlwriter"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
 
 [[package]]
 name = "yansi"

@@ -7,7 +7,6 @@ import { usePrivateChatStore } from "@/stores/privateChatStore";
 import { useUIStore } from "@/stores/uiStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import topBarLogo from "@/assets/loach-icon.png";
-import pkg from "../../package.json";
 
 // Detect macOS so we can label the Ctrl/Cmd+K shortcut with the right
 // modifier. The keybinding itself accepts either (see SearchBar) — this
@@ -143,8 +142,8 @@ export function TitleBar() {
           className="inline-block self-center"
         />
         <span className="text-xs font-medium tracking-wide text-foreground/80">Loach</span>
-        <span className="font-mono text-[10px] text-foreground/45" aria-label={`version ${pkg.version}`}>
-          v{pkg.version}
+        <span className="font-mono text-[10px] text-foreground/45" aria-label={`version ${__APP_VERSION__}`}>
+          v{__APP_VERSION__}
         </span>
       </div>
 

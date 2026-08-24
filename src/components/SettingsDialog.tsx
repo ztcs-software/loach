@@ -64,7 +64,6 @@ import {
   ollamaListModels,
   openaiListModels,
 } from "@/lib/tauri";
-import pkg from "../../package.json";
 
 /** Keys of `Settings` whose value is a boolean — the ones a Switch can drive. */
 const API_BASE_URL_PRESETS: ReadonlyArray<{ label: string; url: string }> = [
@@ -523,7 +522,7 @@ export function SettingsDialog() {
                   <div className="flex items-baseline gap-3">
                     <h3 className="text-2xl font-semibold tracking-tight">Loach</h3>
                     <span className="font-mono text-xs text-foreground/50">
-                      v{pkg.version}
+                      v{__APP_VERSION__}
                     </span>
                   </div>
                 </div>

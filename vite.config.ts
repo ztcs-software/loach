@@ -1,12 +1,24 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import path from "node:path";
+import { createRequire } from "node:module";
+
+// Read here, in Node, so the version reaches the bundle as a bare string
+// literal. Importing `package.json` from a component instead pulled the whole
+// manifest — dependency list, scripts and all — into the production chunk,
+// because the JSON module isn't tree-shaken per key.
+const { version: appVersion } = createRequire(import.meta.url)(
+  "./package.json",
+) as { version: string };
 
 // Tauri expects a fixed port, fail if that port is not available
 const host = process.env.TAURI_DEV_HOST;
 
 export default defineConfig(async () => ({
   plugins: [react()],
+  define: {
+    __APP_VERSION__: JSON.stringify(appVersion),
+  },
   resolve: {
     alias: {
       "@": path.resolve(import.meta.dirname, "./src"),

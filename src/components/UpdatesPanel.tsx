@@ -15,7 +15,6 @@ import {
 } from "@/lib/updater";
 import { openExternal } from "@/lib/tauri";
 import { useSettingsStore } from "@/stores/settingsStore";
-import pkg from "../../package.json";
 
 const GITHUB_RELEASES_URL = "https://github.com/ztcs-software/loach/releases/latest";
 
@@ -45,7 +44,7 @@ export function UpdatesPanel() {
       <div className="space-y-4">
         <div className="flex items-baseline gap-3">
           <span className="text-sm text-foreground/70">Current version</span>
-          <span className="font-mono text-sm">v{pkg.version}</span>
+          <span className="font-mono text-sm">v{__APP_VERSION__}</span>
         </div>
         <Separator />
         <div className="rounded-xl border border-foreground/10 bg-foreground/[0.03] p-4 text-sm leading-relaxed text-foreground/75">
@@ -89,7 +88,7 @@ export function UpdatesPanel() {
     <div className="space-y-5">
       <div className="flex items-baseline gap-3">
         <span className="text-sm text-foreground/70">Current version</span>
-        <span className="font-mono text-sm">v{pkg.version}</span>
+        <span className="font-mono text-sm">v{__APP_VERSION__}</span>
       </div>
 
       <Separator />
