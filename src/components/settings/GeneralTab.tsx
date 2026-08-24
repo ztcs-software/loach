@@ -96,7 +96,7 @@ export function GeneralTab({ open }: { open: boolean }) {
                           className={cn(
                             "inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[11px] transition-colors",
                             active
-                              ? "border-foreground/70 bg-transparent font-bold text-foreground"
+                              ? "border-primary/50 bg-primary/10 font-semibold text-foreground"
                               : "border-foreground/10 bg-foreground/[0.04] font-medium text-foreground/75 hover:border-foreground/25 hover:bg-foreground/[0.08] hover:text-foreground",
                           )}
                         >

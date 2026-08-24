@@ -9,7 +9,6 @@ import {
   Scissors,
   Square,
   TextCursorInput,
-  X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -24,13 +23,16 @@ import {
 } from "@/lib/files";
 import { useChatStore } from "@/stores/chatStore";
 import { useUIStore } from "@/stores/uiStore";
+import { useSettingsStore } from "@/stores/settingsStore";
 import { useToastStore } from "@/stores/toastStore";
 import { cn } from "@/lib/utils";
 import { logger } from "@/lib/logger";
+import { ChipDivider, PersonaChip, ToneChip } from "./ComposerChip";
 import {
   DEFAULT_PERSONA_ID,
   getPersona,
 } from "@/lib/personas";
+import { DEFAULT_TONE_ID, getTone } from "@/lib/tones";
 import { dispatch as dispatchCommand } from "@/lib/commands/dispatch";
 import {
   isCommandInput,
@@ -69,6 +71,9 @@ export function ChatInput({ centered = false }: ChatInputProps) {
   const pendingPersonaId = useUIStore((s) => s.pendingPersonaId);
   const setSessionPersona = useUIStore((s) => s.setSessionPersona);
   const setPendingPersona = useUIStore((s) => s.setPendingPersona);
+  const toneIdBySession = useUIStore((s) => s.toneIdBySession);
+  const setSessionTone = useUIStore((s) => s.setSessionTone);
+  const defaultToneId = useSettingsStore((s) => s.default_tone_id);
   // Imperative confirm for destructive slash commands (/clear, /delete). The
   // dispatcher isn't a component, so it can't call the hook itself — we inject
   // the resolver into dispatch().
@@ -87,6 +92,22 @@ export function ChatInput({ centered = false }: ChatInputProps) {
     activePersonaId && activePersonaId !== DEFAULT_PERSONA_ID
       ? getPersona(activePersonaId)
       : null;
+
+  // Tone chip. Unlike persona, a tone can arrive from two places — a per-chat
+  // override or the global `default_tone_id` — and the global case is the one
+  // that used to run invisibly, so the chip keys off the *effective* tone and
+  // says which scope it came from. Scoped to a real session: the welcome
+  // composer has no chat to override yet (persona parks in `pendingPersonaId`;
+  // tone has no such slot), so the chip appears from the first send onward.
+  const sessionToneId = activeSessionId
+    ? toneIdBySession[activeSessionId]
+    : undefined;
+  const effectiveToneId = sessionToneId ?? defaultToneId ?? DEFAULT_TONE_ID;
+  const activeTone =
+    activeSessionId && effectiveToneId !== DEFAULT_TONE_ID
+      ? getTone(effectiveToneId)
+      : null;
+  const toneFromGlobal = !sessionToneId;
 
   const [text, setText] = useState(composerDraft);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -297,6 +318,14 @@ export function ChatInput({ centered = false }: ChatInputProps) {
   };
 
   const clearPersona = () => applyPersona(DEFAULT_PERSONA_ID);
+
+  // Clearing writes "default" as a per-chat override rather than unsetting
+  // the session entry — unsetting would fall straight back through to the
+  // global `default_tone_id` and the chip would reappear. The user's global
+  // setting is never touched from here.
+  const clearTone = () => {
+    if (activeSessionId) setSessionTone(activeSessionId, DEFAULT_TONE_ID);
+  };
 
   const onPick = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!e.target.files) return;
@@ -685,10 +714,23 @@ export function ChatInput({ centered = false }: ChatInputProps) {
             onDismiss={() => setCommandResult(null)}
           />
         )}
-        {(attachments.length > 0 || activePersona) && (
+        {(attachments.length > 0 || activePersona || activeTone) && (
+          // Config chips first, then payload. The divider marks the lifetime
+          // boundary — everything left of it survives the send, everything
+          // right of it goes with the message.
           <div className="mb-3 flex flex-wrap items-center gap-2">
             {activePersona && (
               <PersonaChip persona={activePersona} onRemove={clearPersona} />
+            )}
+            {activeTone && (
+              <ToneChip
+                tone={activeTone}
+                fromGlobal={toneFromGlobal}
+                onRemove={clearTone}
+              />
+            )}
+            {(activePersona || activeTone) && attachments.length > 0 && (
+              <ChipDivider />
             )}
             {attachments.map((a, i) => (
               <FileChip
@@ -997,39 +1039,6 @@ function PrimaryButton({
         />
       )}
     </button>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// PersonaChip — pill above the textarea showing the active persona, with an
-// `×` to clear. Visually distinct from FileChip (warm orange tint vs. neutral
-// glass) so the two stack types are unambiguous when both render at once.
-// ---------------------------------------------------------------------------
-
-function PersonaChip({
-  persona,
-  onRemove,
-}: {
-  persona: import("@/lib/personas").Persona;
-  onRemove: () => void;
-}) {
-  const Icon = persona.icon;
-  return (
-    <div
-      className="inline-flex items-center gap-1.5 rounded-full border border-orange-400/30 bg-orange-500/10 px-2.5 py-1 text-xs text-orange-700 dark:text-orange-200"
-      title={persona.description}
-    >
-      <Icon className="h-3.5 w-3.5" />
-      <span className="font-medium">{persona.label}</span>
-      <button
-        type="button"
-        onClick={onRemove}
-        aria-label={`Remove ${persona.label} persona`}
-        className="ml-0.5 -my-1 -mr-1 grid h-6 w-6 place-items-center rounded-full text-orange-700/80 hover:bg-orange-500/20 hover:text-orange-900 dark:text-orange-200/70 dark:hover:text-orange-100"
-      >
-        <X className="h-3.5 w-3.5" />
-      </button>
-    </div>
   );
 }
 

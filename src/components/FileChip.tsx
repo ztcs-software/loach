@@ -1,11 +1,17 @@
-import { File, FileText, Image as ImageIcon, X } from "lucide-react";
+import { File, FileText, Image as ImageIcon } from "lucide-react";
 import { AttachmentActions } from "./AttachmentActions";
+import {
+  ChipRemove,
+  composerChipClass,
+  composerChipIconClass,
+} from "./ComposerChip";
 import type { Attachment } from "@/types";
 
 function AttachmentIcon({ kind }: { kind: Attachment["kind"] }) {
-  if (kind === "image") return <ImageIcon className="h-3.5 w-3.5 text-primary" />;
-  if (kind === "text") return <FileText className="h-3.5 w-3.5 text-primary" />;
-  return <File className="h-3.5 w-3.5 text-primary" />;
+  const cls = composerChipIconClass("attachment");
+  if (kind === "image") return <ImageIcon className={cls} />;
+  if (kind === "text") return <FileText className={cls} />;
+  return <File className={cls} />;
 }
 
 export function FileChip({
@@ -18,7 +24,7 @@ export function FileChip({
   return (
     <AttachmentActions
       attachment={attachment}
-      className="gap-1.5 rounded-md border border-border/60 bg-muted/40 px-2 py-1 text-xs"
+      className={composerChipClass("attachment")}
     >
       <AttachmentIcon kind={attachment.kind} />
       <span className="max-w-[140px] truncate">{attachment.name}</span>
@@ -33,19 +39,7 @@ export function FileChip({
           truncated
         </span>
       )}
-      <button
-        type="button"
-        // Stop propagation so clicking ✕ removes the chip without also
-        // firing the wrapper's preview handler.
-        onClick={(e) => {
-          e.stopPropagation();
-          onRemove();
-        }}
-        className="rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-accent-foreground"
-        aria-label="Remove attachment"
-      >
-        <X className="h-3 w-3" />
-      </button>
+      <ChipRemove label={`Remove ${attachment.name}`} onClick={onRemove} />
     </AttachmentActions>
   );
 }

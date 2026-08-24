@@ -597,10 +597,10 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
   );
 }
 
-// Compact persona quick-pick pill. Active state uses the same warm orange
-// tint as the composer's PersonaChip so the two surfaces agree visually —
+// Compact persona quick-pick pill. The active state carries the same
+// `--primary` tint as the composer's PersonaChip so the two surfaces agree —
 // a user who picks "Code Reviewer" here and then glances at the composer
-// sees the same color carried into the chip above the textarea.
+// sees the same accent on the chip above the textarea.
 function PersonaPill({
   persona,
   active,
@@ -619,7 +619,7 @@ function PersonaPill({
       className={cn(
         "inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[11px] transition-colors",
         active
-          ? "border-foreground/70 bg-transparent font-bold text-foreground"
+          ? "border-primary/50 bg-primary/10 font-semibold text-foreground"
           : "border-foreground/10 bg-foreground/[0.04] font-medium text-foreground/75 hover:border-foreground/25 hover:bg-foreground/[0.08] hover:text-foreground",
       )}
     >
@@ -649,7 +649,7 @@ function TonePill({
       className={cn(
         "inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[11px] transition-colors",
         active
-          ? "border-foreground/70 bg-transparent font-bold text-foreground"
+          ? "border-primary/50 bg-primary/10 font-semibold text-foreground"
           : "border-foreground/10 bg-foreground/[0.04] font-medium text-foreground/75 hover:border-foreground/25 hover:bg-foreground/[0.08] hover:text-foreground",
       )}
     >

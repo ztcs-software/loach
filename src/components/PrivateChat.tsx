@@ -31,15 +31,17 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Slider } from "@/components/ui/slider";
 import { FileChip } from "./FileChip";
+import { ChipDivider, PersonaChip, ToneChip } from "./ComposerChip";
 import { Markdown, StreamingMarkdown } from "./Markdown";
 import { fileToAttachment, FileTooLargeError } from "@/lib/files";
 import { ollamaListModels, ollamaProbe } from "@/lib/tauri";
 import {
   DEFAULT_PERSONA_ID,
+  getPersona,
   PERSONAS,
   type Persona,
 } from "@/lib/personas";
-import { DEFAULT_TONE_ID, TONES, type Tone } from "@/lib/tones";
+import { DEFAULT_TONE_ID, getTone, TONES, type Tone } from "@/lib/tones";
 import { useChatStore } from "@/stores/chatStore";
 import { useModelsStore } from "@/stores/modelsStore";
 import {
@@ -715,9 +717,11 @@ function PrivateParamsPanel() {
                   key={t.id}
                   tone={t}
                   active={effectiveToneId === t.id}
-                  onClick={() =>
-                    setTone(t.id === DEFAULT_TONE_ID ? null : t.id)
-                  }
+                  // Write the literal id, "default" included. Mapping it back
+                  // to `null` would fall through to the global default again,
+                  // so picking Default (or clearing the composer's tone chip)
+                  // could never turn off an inherited tone.
+                  onClick={() => setTone(t.id)}
                 />
               ))}
             </div>
@@ -913,7 +917,7 @@ function PersonaPill({
       className={cn(
         "inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[11px] transition-colors",
         active
-          ? "border-zinc-300 bg-transparent font-bold text-zinc-50"
+          ? "border-primary/50 bg-primary/10 font-semibold text-zinc-50"
           : "border-white/10 bg-white/[0.04] font-medium text-zinc-300 hover:border-white/25 hover:bg-white/10 hover:text-zinc-50",
       )}
     >
@@ -941,7 +945,7 @@ function TonePill({
       className={cn(
         "inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[11px] transition-colors",
         active
-          ? "border-zinc-300 bg-transparent font-bold text-zinc-50"
+          ? "border-primary/50 bg-primary/10 font-semibold text-zinc-50"
           : "border-white/10 bg-white/[0.04] font-medium text-zinc-300 hover:border-white/25 hover:bg-white/10 hover:text-zinc-50",
       )}
     >
@@ -960,6 +964,19 @@ function PrivateChatComposer() {
   const cancel = usePrivateChatStore((s) => s.cancel);
   const isStreaming = usePrivateChatStore((s) => s.isStreaming);
   const model = usePrivateChatStore((s) => s.model);
+  // Same config chips as the main composer. Private Chat's persona / tone
+  // live on its own store (both nullable, both wiped on close) rather than
+  // keyed by session id, but the chip row reads identically.
+  const personaId = usePrivateChatStore((s) => s.personaId);
+  const setPersona = usePrivateChatStore((s) => s.setPersona);
+  const toneId = usePrivateChatStore((s) => s.toneId);
+  const setTone = usePrivateChatStore((s) => s.setTone);
+  const defaultToneId = useSettingsStore((s) => s.default_tone_id);
+  const activePersona =
+    personaId && personaId !== DEFAULT_PERSONA_ID ? getPersona(personaId) : null;
+  const effectiveToneId = toneId ?? defaultToneId ?? DEFAULT_TONE_ID;
+  const activeTone =
+    effectiveToneId !== DEFAULT_TONE_ID ? getTone(effectiveToneId) : null;
   const [text, setText] = useState("");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -1047,8 +1064,21 @@ function PrivateChatComposer() {
     // panel edge as it does in a normal chat.
     <div className="relative px-4 pb-5 pt-3">
       <div className="mx-auto w-full max-w-3xl">
-        {attachments.length > 0 && (
+        {(attachments.length > 0 || activePersona || activeTone) && (
           <div className="mb-3 flex flex-wrap items-center gap-2">
+            {activePersona && (
+              <PersonaChip persona={activePersona} onRemove={() => setPersona(null)} />
+            )}
+            {activeTone && (
+              <ToneChip
+                tone={activeTone}
+                fromGlobal={!toneId}
+                onRemove={() => setTone(DEFAULT_TONE_ID)}
+              />
+            )}
+            {(activePersona || activeTone) && attachments.length > 0 && (
+              <ChipDivider />
+            )}
             {attachments.map((a, i) => (
               <FileChip
                 key={`${a.name}-${i}`}
