@@ -5,10 +5,11 @@ import { useToastStore, type Toast } from "@/stores/toastStore";
 /** Renders the global toast stack in the bottom-right of the viewport.
  *  Mounted once at the App root so every store consumer can call
  *  `useToastStore.getState().push(…)` without thinking about placement.
- *  Each entry auto-dismisses after 4s (handled by the store) but the user
- *  can also click the × to dismiss early. The "memory" variant matches
- *  ChatGPT/Claude's "Saved to memory" pill — a soft indigo pill with a
- *  brain icon. */
+ *  Each entry auto-dismisses on a kind-based timer (4s info-grade, 10s
+ *  errors — handled by the store), holds while hovered or focused so the
+ *  reader can finish, and the user can also click the × to dismiss early.
+ *  The "memory" variant matches ChatGPT/Claude's "Saved to memory" pill —
+ *  a soft indigo pill with a brain icon. */
 export function ToastHost() {
   const toasts = useToastStore((s) => s.toasts);
   const dismiss = useToastStore((s) => s.dismiss);
@@ -25,12 +26,24 @@ export function ToastHost() {
 }
 
 function ToastItem({ toast, onDismiss }: { toast: Toast; onDismiss: () => void }) {
+  const pause = useToastStore((s) => s.pause);
+  const resume = useToastStore((s) => s.resume);
   const isMemory = toast.kind === "memory";
   const isError = toast.kind === "error";
   return (
     <div
       role={isError ? "alert" : "status"}
       aria-live={isError ? "assertive" : "polite"}
+      // Hold the auto-dismiss while the pointer is over the chip or focus
+      // is inside it (keyboard users tabbing to Undo / ×) — a toast should
+      // never vanish out from under someone who is engaging with it. The
+      // capture-phase focus pair fires for any focusable descendant.
+      onMouseEnter={() => pause(toast.id)}
+      onMouseLeave={() => resume(toast.id)}
+      onFocusCapture={() => pause(toast.id)}
+      onBlurCapture={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget)) resume(toast.id);
+      }}
       className={cn(
         "pointer-events-auto flex max-w-sm items-start gap-2.5 rounded-2xl border px-3.5 py-2.5 text-sm shadow-lg backdrop-blur-md",
         "animate-in slide-in-from-bottom-2 fade-in duration-200",
@@ -60,6 +73,19 @@ function ToastItem({ toast, onDismiss }: { toast: Toast; onDismiss: () => void }
           </div>
         )}
       </div>
+      {toast.action && (
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            toast.action?.onClick();
+            onDismiss();
+          }}
+          className="shrink-0 self-center rounded-md bg-foreground/10 px-2 py-1 text-xs font-semibold text-foreground transition-colors hover:bg-foreground/[0.16]"
+        >
+          {toast.action.label}
+        </button>
+      )}
       <button
         type="button"
         aria-label="Dismiss"

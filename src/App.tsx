@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { TitleBar } from "@/components/TitleBar";
 import { Sidebar } from "@/components/Sidebar";
 import { ChatHeader } from "@/components/ChatHeader";
@@ -101,6 +101,7 @@ export default function App() {
   const viewingModel = useModelsStore((s) => s.viewingModel);
   const sidebarTab = useUIStore((s) => s.sidebarTab);
   const canvasOpen = useCanvasStore((s) => s.isOpen);
+  const paramsOpen = useUIStore((s) => s.paramsOpen);
   const session = useChatStore((s) =>
     s.activeSessionId ? s.sessions.find((x) => x.id === s.activeSessionId) : undefined,
   );
@@ -254,6 +255,28 @@ export default function App() {
     hydrateChats,
     hydrateModels,
   ]);
+
+  // Narrow-window squeeze relief. At the 900 px minimum, the expanded
+  // sidebar (256 px) plus a right panel (~260 px) leave the transcript a
+  // ~310 px ribbon — so when a right panel OPENS below the breakpoint,
+  // borrow the sidebar's width by collapsing it to the icon rail, and give
+  // it back when the right slot empties again. One-shot on the open/close
+  // transition (not a continuous override) so the title-bar toggle always
+  // wins: a manual toggle clears `sidebarAutoCollapsed`, which also cancels
+  // the pending restore.
+  const rightPanelOpen = canvasOpen || paramsOpen;
+  const prevRightPanelOpen = useRef(rightPanelOpen);
+  useEffect(() => {
+    const was = prevRightPanelOpen.current;
+    prevRightPanelOpen.current = rightPanelOpen;
+    if (rightPanelOpen === was) return;
+    const ui = useUIStore.getState();
+    if (rightPanelOpen && window.innerWidth < 1080 && ui.sidebarOpen) {
+      useUIStore.setState({ sidebarOpen: false, sidebarAutoCollapsed: true });
+    } else if (!rightPanelOpen && ui.sidebarAutoCollapsed) {
+      useUIStore.setState({ sidebarOpen: true, sidebarAutoCollapsed: false });
+    }
+  }, [rightPanelOpen]);
 
   // While waiting for the security probe to land, render only the
   // background — no titlebar, no sidebar, no chat. Otherwise users would

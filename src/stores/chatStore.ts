@@ -1773,6 +1773,22 @@ export const useChatStore = create<ChatState>((set, get) => ({
         archived && s.activeSessionId === id ? null : s.activeSessionId;
       return { sessions, activeSessionId: active };
     });
+    // Archiving makes the chat vanish from the sidebar with its only way
+    // back buried in Settings → Archive — without feedback it reads as a
+    // delete to anyone who mis-clicked. Name the chat and offer an inline
+    // Undo; the window is longer than an info chip since it carries a
+    // decision, and hovering holds it open. Deliberately not mirrored on
+    // unarchive: that action's result is visible right there in the list.
+    if (archived) {
+      const title = get().sessions.find((x) => x.id === id)?.title;
+      useToastStore.getState().push({
+        kind: "info",
+        title: "Moved to archive",
+        body: title,
+        durationMs: 7000,
+        action: { label: "Undo", onClick: () => void get().archive(id, false) },
+      });
+    }
   },
 
   remove: async (id) => {

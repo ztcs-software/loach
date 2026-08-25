@@ -12,12 +12,27 @@ export interface Toast {
   kind: "memory" | "info" | "error";
   title: string;
   body?: string;
+  /** Optional action button rendered inside the chip ("Undo"). Clicking
+   *  runs the callback and dismisses the toast. */
+  action?: { label: string; onClick: () => void };
+  /** Per-toast override for the auto-dismiss window. Defaults to the
+   *  kind-based TTL below — reach for this only when the content needs a
+   *  longer read/decide window (e.g. an Undo offer). */
+  durationMs?: number;
 }
 
 interface ToastState {
   toasts: Toast[];
   push: (toast: Omit<Toast, "id">) => string;
   dismiss: (id: string) => void;
+  /** Suspend a toast's auto-dismiss (pointer hover / keyboard focus).
+   *  Pairs with `resume`; while held, duplicate pushes also won't re-arm
+   *  the timer out from under the reader. */
+  pause: (id: string) => void;
+  /** Re-arm the auto-dismiss after `pause`. Restarts the full window
+   *  rather than tracking remaining time — the user was reading, so a
+   *  fresh read window is the friendlier behaviour and far less code. */
+  resume: (id: string) => void;
   clear: () => void;
 }
 
@@ -26,21 +41,40 @@ interface ToastState {
 // against a now-empty toast list, leaking a closure per dismissed toast.
 const dismissTimers = new Map<string, number>();
 
+// Toasts currently held open by hover/focus. `startDismissTimer` refuses to
+// arm while held, so a duplicate `push` mid-hover can't sweep the chip away
+// under the cursor.
+const heldToasts = new Set<string>();
+
 /** Most toasts visible at once. A burst of failures (e.g. the global
  *  rejection net catching a sweep of rejected mutations) evicts oldest-first
  *  instead of shingling the whole viewport in 4-second chips. */
 const MAX_TOASTS = 5;
 
+/** Auto-dismiss windows by kind. Info-grade chips ("Copied", "Saved to
+ *  memory") only need a glance; errors carry a message the user has to
+ *  actually read ("Couldn't reach Ollama — connection refused on …"), so
+ *  they stay up long enough to finish the sentence. */
+const TTL_BY_KIND: Record<Toast["kind"], number> = {
+  memory: 4000,
+  info: 4000,
+  error: 10_000,
+};
+
+function ttlFor(toast: Pick<Toast, "kind" | "durationMs">): number {
+  return toast.durationMs ?? TTL_BY_KIND[toast.kind];
+}
+
 function startDismissTimer(
   id: string,
+  ms: number,
   set: (fn: (s: ToastState) => Partial<ToastState>) => void,
 ) {
-  // Auto-dismiss after 4s — long enough for a glance, short enough to
-  // not pile up if the extractor saves a stack of memories at once.
+  if (heldToasts.has(id)) return;
   const timerId = window.setTimeout(() => {
     dismissTimers.delete(id);
     set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) }));
-  }, 4000);
+  }, ms);
   dismissTimers.set(id, timerId);
 }
 
@@ -59,7 +93,7 @@ export const useToastStore = create<ToastState>((set, get) => ({
     if (dup) {
       const timer = dismissTimers.get(dup.id);
       if (timer !== undefined) window.clearTimeout(timer);
-      startDismissTimer(dup.id, set);
+      startDismissTimer(dup.id, ttlFor(dup), set);
       return dup.id;
     }
 
@@ -74,11 +108,12 @@ export const useToastStore = create<ToastState>((set, get) => ({
       const timer = dismissTimers.get(evictedId);
       if (timer !== undefined) window.clearTimeout(timer);
       dismissTimers.delete(evictedId);
+      heldToasts.delete(evictedId);
     }
     set((s) => ({
       toasts: [...s.toasts.filter((t) => !evicted.has(t.id)), { id, ...toast }],
     }));
-    startDismissTimer(id, set);
+    startDismissTimer(id, ttlFor(toast), set);
     return id;
   },
   dismiss: (id) => {
@@ -87,7 +122,21 @@ export const useToastStore = create<ToastState>((set, get) => ({
       window.clearTimeout(timer);
       dismissTimers.delete(id);
     }
+    heldToasts.delete(id);
     set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) }));
+  },
+  pause: (id) => {
+    heldToasts.add(id);
+    const timer = dismissTimers.get(id);
+    if (timer !== undefined) {
+      window.clearTimeout(timer);
+      dismissTimers.delete(id);
+    }
+  },
+  resume: (id) => {
+    heldToasts.delete(id);
+    const toast = get().toasts.find((t) => t.id === id);
+    if (toast) startDismissTimer(id, ttlFor(toast), set);
   },
   clear: () => {
     // Pull all pending timers so a `clear()` doesn't leave them firing
@@ -95,6 +144,7 @@ export const useToastStore = create<ToastState>((set, get) => ({
     // unlikely with the time-plus-random format, but cheap to be safe).
     for (const timer of dismissTimers.values()) window.clearTimeout(timer);
     dismissTimers.clear();
+    heldToasts.clear();
     set({ toasts: [] });
   },
 }));

@@ -22,6 +22,11 @@ export type SettingsTab =
 
 interface UIState {
   sidebarOpen: boolean;
+  /** True while the sidebar is collapsed because a right panel opened on a
+   *  narrow window (see App.tsx's squeeze effect), not because the user
+   *  asked. Lets the panel-close path give the sidebar back, while a manual
+   *  toggle takes ownership and cancels the pending restore. */
+  sidebarAutoCollapsed: boolean;
   paramsOpen: boolean;
   settingsOpen: boolean;
   /** Visibility of the slash-command help dialog. Toggled by `/help` and
@@ -92,6 +97,7 @@ interface UIState {
 
 export const useUIStore = create<UIState>((set, get) => ({
   sidebarOpen: true,
+  sidebarAutoCollapsed: false,
   paramsOpen: false,
   settingsOpen: false,
   helpOpen: false,
@@ -105,7 +111,8 @@ export const useUIStore = create<UIState>((set, get) => ({
   toneIdBySession: {},
   pendingOpenModelPicker: false,
   pendingOpenExport: false,
-  toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
+  toggleSidebar: () =>
+    set((s) => ({ sidebarOpen: !s.sidebarOpen, sidebarAutoCollapsed: false })),
   toggleParams: () => set((s) => ({ paramsOpen: !s.paramsOpen })),
   setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
   setHelpOpen: (helpOpen) => set({ helpOpen }),

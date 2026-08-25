@@ -520,36 +520,49 @@ function asString(v: unknown): string | null {
 // Params grid
 // ---------------------------------------------------------------------------
 
+/** Section order for the params grid. Mirrors the Parameter sidebar's
+ *  Advanced sections (Sampling / Length / Repetition / Performance /
+ *  Reproducibility) so the two surfaces read as siblings. */
+const PARAM_GROUPS = [
+  "Sampling",
+  "Length",
+  "Repetition",
+  "Performance",
+  "Reproducibility",
+] as const;
+
 /** Metadata drives the field list so we don't drift between the types and
  *  the UI. `hint` is optional — shown under the input so users know what a
- *  sensible range is without having to remember Ollama's docs. */
+ *  sensible range is without having to remember Ollama's docs. Ordered by
+ *  group (the grid renders one section per PARAM_GROUPS entry). */
 const NUMERIC_FIELDS: {
   key: Exclude<keyof ModelfileParams, "stop">;
   label: string;
+  group: (typeof PARAM_GROUPS)[number];
   step?: number;
   hint?: string;
 }[] = [
-  { key: "temperature", label: "Temperature", step: 0.05, hint: "0 – 2" },
-  { key: "top_p", label: "Top-P", step: 0.01, hint: "0 – 1" },
-  { key: "top_k", label: "Top-K", step: 1 },
-  { key: "min_p", label: "Min-P", step: 0.01, hint: "0 – 1" },
-  { key: "num_ctx", label: "Context (num_ctx)", step: 256 },
-  { key: "num_predict", label: "Max tokens (num_predict)", step: 16 },
-  { key: "num_batch", label: "Batch size (num_batch)", step: 8 },
-  { key: "num_gpu", label: "GPU layers (num_gpu)", step: 1 },
-  { key: "num_thread", label: "CPU threads (num_thread)", step: 1 },
-  { key: "repeat_penalty", label: "Repeat penalty", step: 0.05 },
-  { key: "repeat_last_n", label: "Repeat look-back", step: 8 },
-  { key: "frequency_penalty", label: "Frequency penalty", step: 0.05 },
-  { key: "presence_penalty", label: "Presence penalty", step: 0.05 },
-  { key: "tfs_z", label: "Tail-free (tfs_z)", step: 0.05 },
-  { key: "typical_p", label: "Typical-P", step: 0.01 },
-  { key: "mirostat", label: "Mirostat (0/1/2)", step: 1 },
+  { key: "temperature", label: "Temperature", group: "Sampling", step: 0.05, hint: "0 – 2" },
+  { key: "top_p", label: "Top-P", group: "Sampling", step: 0.01, hint: "0 – 1" },
+  { key: "top_k", label: "Top-K", group: "Sampling", step: 1 },
+  { key: "min_p", label: "Min-P", group: "Sampling", step: 0.01, hint: "0 – 1" },
+  { key: "tfs_z", label: "Tail-free (tfs_z)", group: "Sampling", step: 0.05 },
+  { key: "typical_p", label: "Typical-P", group: "Sampling", step: 0.01 },
+  { key: "mirostat", label: "Mirostat (0/1/2)", group: "Sampling", step: 1 },
   // "eta"/"tau" spelled out: the labels render uppercased, and capital η/τ
   // (Η/Τ) are indistinguishable from Latin H/T.
-  { key: "mirostat_eta", label: "Mirostat eta", step: 0.05 },
-  { key: "mirostat_tau", label: "Mirostat tau", step: 0.5 },
-  { key: "seed", label: "Seed (blank = random)", step: 1 },
+  { key: "mirostat_eta", label: "Mirostat eta", group: "Sampling", step: 0.05 },
+  { key: "mirostat_tau", label: "Mirostat tau", group: "Sampling", step: 0.5 },
+  { key: "num_ctx", label: "Context (num_ctx)", group: "Length", step: 256 },
+  { key: "num_predict", label: "Max tokens (num_predict)", group: "Length", step: 16 },
+  { key: "repeat_penalty", label: "Repeat penalty", group: "Repetition", step: 0.05 },
+  { key: "repeat_last_n", label: "Repeat look-back", group: "Repetition", step: 8 },
+  { key: "frequency_penalty", label: "Frequency penalty", group: "Repetition", step: 0.05 },
+  { key: "presence_penalty", label: "Presence penalty", group: "Repetition", step: 0.05 },
+  { key: "num_batch", label: "Batch size (num_batch)", group: "Performance", step: 8 },
+  { key: "num_gpu", label: "GPU layers (num_gpu)", group: "Performance", step: 1 },
+  { key: "num_thread", label: "CPU threads (num_thread)", group: "Performance", step: 1 },
+  { key: "seed", label: "Seed (blank = random)", group: "Reproducibility", step: 1 },
 ];
 
 /**
@@ -635,16 +648,28 @@ function ParamsGrid({
   onChange: (patch: Partial<ModelfileParams>) => void;
 }) {
   return (
-    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-      {NUMERIC_FIELDS.map((f) => (
-        <NumField
-          key={f.key}
-          label={f.label}
-          hint={f.hint}
-          step={f.step}
-          value={params[f.key] ?? null}
-          onChange={(v) => onChange({ [f.key]: v } as Partial<ModelfileParams>)}
-        />
+    <div className="space-y-5">
+      {PARAM_GROUPS.map((group) => (
+        <div key={group}>
+          {/* Same header treatment as the Parameter sidebar's <Section>. */}
+          <h4 className="mb-2 text-xs font-semibold uppercase tracking-[0.12em] text-foreground/70">
+            {group}
+          </h4>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            {NUMERIC_FIELDS.filter((f) => f.group === group).map((f) => (
+              <NumField
+                key={f.key}
+                label={f.label}
+                hint={f.hint}
+                step={f.step}
+                value={params[f.key] ?? null}
+                onChange={(v) =>
+                  onChange({ [f.key]: v } as Partial<ModelfileParams>)
+                }
+              />
+            ))}
+          </div>
+        </div>
       ))}
     </div>
   );
