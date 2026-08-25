@@ -68,7 +68,7 @@ export function WelcomeStep({ onClose }: { onClose: () => void }) {
           Welcome to Loach
         </h1>
         <p className="mt-3 max-w-sm text-[13.5px] leading-relaxed text-foreground/60">
-          A private, local first AI workspace.
+          A private, local-first AI workspace.
         </p>
 
         <div className="mt-9 flex flex-col items-stretch gap-2.5">

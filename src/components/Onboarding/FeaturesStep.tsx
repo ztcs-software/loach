@@ -103,7 +103,7 @@ export function FeaturesStep({ onClose }: { onClose: () => void }) {
         <FeatureRow
           icon={<MemoryStick className="h-4 w-4" />}
           title="Low VRAM mode"
-          description="Force Ollama into low-VRAM mode for every chat for smaller batches and leaner KV cache. This setting overrides per-chat Low VRAM toggle so you don't have to flip it on each new session. Ignored by OpenAI API providers."
+          description="Force Ollama into low-VRAM mode for every chat for smaller batches and leaner KV cache. This setting overrides the per-chat Low VRAM toggle so you don't have to flip it on each new session. Ignored by OpenAI API providers."
           checked={draft.low_vram_global}
           onChange={(v) => set("low_vram_global", v)}
         />

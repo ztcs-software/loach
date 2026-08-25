@@ -37,7 +37,7 @@ export function GeneralTab({ open }: { open: boolean }) {
                     placeholder="Your name"
                   />
                   <p className="mt-1.5 text-[11px] text-foreground/50">
-                    Optional. Available as{" "}
+                    Optional. Available as the{" "}
                     <span className="font-mono">{"{{USER_NAME}}"}</span> variable in custom instructions.
                   </p>
                 </div>

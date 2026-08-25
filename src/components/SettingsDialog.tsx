@@ -501,7 +501,8 @@ export function SettingsDialog() {
                 <SectionTitle>Data</SectionTitle>
                 <p className="text-[13px] text-foreground/55">
                   Back up, restore, or clear everything Loach has stored on
-                  this machine excluding API keys saved in credentials manager.
+                  this machine excluding API keys saved in your OS credential
+                  manager.
                 </p>
                 <DataPanel />
               </TabsContent>

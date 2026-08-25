@@ -66,7 +66,7 @@ export const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "compact",
-    description: "Summarise older messages to free context",
+    description: "Summarize older messages to free context",
     group: "Chat",
   },
   {

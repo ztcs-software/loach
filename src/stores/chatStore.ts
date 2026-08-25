@@ -830,7 +830,7 @@ async function maybeAutoTitle(
   if (!session) return;
   if (session.title && session.title !== "New chat") return;
   const raw = firstUserContent.trim();
-  const draft = raw.length > 28 ? raw.slice(0, 28).trimEnd() + "..." : raw;
+  const draft = raw.length > 28 ? raw.slice(0, 28).trimEnd() + "…" : raw;
   if (!draft) return;
   await renameSession(sessionId, draft);
   setStore({

@@ -38,7 +38,7 @@ export function NameStep({ onClose }: { onClose: () => void }) {
       title="What should Loach call you?"
       subtitle={
         <>
-          Optional. Available later as{" "}
+          Optional. Available later as the{" "}
           <span className="font-mono text-foreground/70">{"{{USER_NAME}}"}</span>{" "}
           variable in custom instructions.
         </>

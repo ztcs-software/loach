@@ -252,15 +252,24 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
   const isOpenAI = session?.provider === "openai";
   const hasModelDefaults =
     !!modelDefaults && Object.keys(modelDefaults).length > 0;
+  // A chat can sit on no model at all — first run before anything is pulled,
+  // or after the last model is deleted. `modelDefaults` is keyed on the model
+  // name, so it stays `undefined` forever in that state and the prefetch
+  // effect above (guarded on `session.model`) never fires to change that.
+  // Without this branch the panel showed "Loading model defaults…" as a
+  // permanent label for a request that was never going to be made.
+  const noModel = !session?.model;
   const sourceLabel = hasOverrides
     ? "Custom — adjusted for this chat."
     : isOpenAI
       ? "Using app defaults — OpenAI doesn't expose per-model defaults."
       : hasModelDefaults
         ? `Using ${session!.model}'s Modelfile defaults.`
-        : modelDefaults === undefined
-          ? "Loading model defaults…"
-          : "Using app defaults — this model lists no overrides.";
+        : noModel
+          ? "Using app defaults — no model selected yet."
+          : modelDefaults === undefined
+            ? "Loading model defaults…"
+            : "Using app defaults — this model lists no overrides.";
 
   // Context-length stops — powers of two are the grid models are trained on
   // and the granularity VRAM allocation cares about. Users shouldn't be able
@@ -348,9 +357,11 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
               disabledHint={
                 isOpenAI
                   ? "Ignored by OpenAI providers — chain-of-thought is internal to the model."
-                  : modelCapabilities === undefined
-                    ? "Loading model capabilities…"
-                    : "This model doesn't support a thinking step."
+                  : noModel
+                    ? "Pick a model to see whether it supports a thinking step."
+                    : modelCapabilities === undefined
+                      ? "Loading model capabilities…"
+                      : "This model doesn't support a thinking step."
               }
               onChange={(next) => update({ think: next })}
             />

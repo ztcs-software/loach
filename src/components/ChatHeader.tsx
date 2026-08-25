@@ -703,7 +703,7 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
               }}
               placeholder={
                 "Paste an exported chat or any text…\n\n" +
-                "Examples we recognise:\n" +
+                "Examples we recognize:\n" +
                 "  • JSON: { messages: [{ role: 'user', content: '…' }, …] }\n" +
                 "  • Markdown: ## You / ## Assistant / ## System sections\n" +
                 "  • Plain text: imported as one user message"

@@ -585,7 +585,9 @@ function PrivateParamsPanel() {
       ? `Using ${model}'s Modelfile defaults.`
       : modelDefaults === undefined && model
         ? "Loading model defaults…"
-        : "Using app defaults — this model lists no overrides.";
+        : !model
+          ? "Using app defaults — no model selected yet."
+          : "Using app defaults — this model lists no overrides.";
 
   // Effective values shown on each row mirror chatStore.readSessionParams'
   // merge order: DEFAULT_PARAMS < thinking-default < modelDefaults <
@@ -635,7 +637,9 @@ function PrivateParamsPanel() {
               disabledHint={
                 modelCapabilities === undefined && model
                   ? "Loading model capabilities…"
-                  : "This model doesn't support a thinking step."
+                  : !model
+                    ? "Pick a model to see whether it supports a thinking step."
+                    : "This model doesn't support a thinking step."
               }
               onChange={(next) => update({ think: next })}
             />

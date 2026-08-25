@@ -80,7 +80,7 @@ export function SecurityPanel() {
     <div className="space-y-5">
       <p className="text-[13px] text-foreground/55">
         Lock the access to Loach with a PIN, a password, or both. Credentials
-        are securely stored in your operating system's credentials manager.
+        are securely stored in your OS credential manager.
       </p>
 
       {status.configured ? (

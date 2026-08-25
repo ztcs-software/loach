@@ -233,11 +233,21 @@ const config: Config = {
             // Block code — the actual highlighted block is rendered by
             // CodeBlock; we just clear out prose's wrapping so it doesn't
             // double-pad.
+            //
+            // `fontSize: inherit` is load-bearing: `prose-sm` ships
+            // `pre { font-size: 0.8571429em }`, which silently re-scaled the
+            // size CodeBlock had already chosen. Its wrapper asks for
+            // 12.5px and the block rendered at ~10px — smaller than the
+            // 13px prose around it, in an app where code is a primary
+            // content type. Inheriting hands sizing back to the component.
+            // (The inline-`code` rule above keeps its own 0.875em on
+            // purpose — that one is a chip inside a sentence.)
             pre: {
               margin: 0,
               padding: 0,
               backgroundColor: "transparent",
               color: "inherit",
+              fontSize: "inherit",
             },
 
             // Blockquote — calm left-rule callout with no italic wall.
@@ -349,6 +359,20 @@ const config: Config = {
             "a:hover": {
               borderBottomColor: "hsl(var(--primary))",
             },
+          },
+        },
+
+        // Size-modifier overrides. The chat renders `prose prose-sm`, and
+        // the plugin emits `.prose-sm :where(pre)` AFTER `.prose :where(pre)`
+        // at identical specificity — so anything `prose-sm` also declares
+        // beats the DEFAULT block above and has to be repeated here.
+        sm: {
+          css: {
+            // See the `pre` note in DEFAULT: `prose-sm` sets its own
+            // `font-size: 0.857143em`, which re-scaled the size CodeBlock
+            // had already picked and rendered code at ~10px against 13px
+            // prose. Repeating the override here is what actually lands.
+            pre: { fontSize: "inherit" },
           },
         },
       }),

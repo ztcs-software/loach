@@ -26,7 +26,7 @@ export function FeaturesTab() {
                       <p className="mt-1 text-[11px] text-foreground/50">
                         Default state of the per-chat Thinking toggle for new
                         chats. Thinking switch in chat settings overrides this.
-                        Only applies to thinking-capable Ollama models - OpenAI
+                        Only applies to thinking-capable Ollama models — OpenAI
                         API providers ignore this field.
                       </p>
                     </div>
@@ -56,7 +56,7 @@ export function FeaturesTab() {
                       </Label>
                       <p className="mt-1 text-[11px] text-foreground/50">
                         Enable to inject current date, time, weekday and
-                        timezone to every chat so models can answer questions
+                        timezone into every chat so models can answer questions
                         like "What day is it today?".
                       </p>
                     </div>
@@ -117,7 +117,7 @@ export function FeaturesTab() {
                       <p className="mt-1 text-[11px] text-foreground/50">
                         Force Ollama into low-VRAM mode for every chat for
                         smaller batches and leaner KV cache. This setting
-                        overrides per-chat Low&nbsp;VRAM toggle so you don't
+                        overrides the per-chat Low&nbsp;VRAM toggle so you don't
                         have to flip it on each new session. Ignored by OpenAI
                         API providers.
                       </p>
