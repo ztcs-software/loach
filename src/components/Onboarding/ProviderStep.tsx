@@ -354,9 +354,10 @@ function OllamaPath({
 
       {editingUrl && (
         <div className="rounded-xl border border-foreground/10 bg-foreground/[0.02] p-3">
-          <Label className="text-[12px]">Ollama base URL</Label>
+          <Label htmlFor="onboarding-ollama-url" className="text-[12px]">Ollama base URL</Label>
           <div className="mt-1.5 flex gap-2">
             <Input
+              id="onboarding-ollama-url"
               value={urlDraft}
               onChange={(e) => setUrlDraft(e.target.value)}
               placeholder="http://localhost:11434"
@@ -576,7 +577,7 @@ function ModelCatalog({ onPulled }: { onPulled: () => void }) {
       </ul>
 
       <div className="rounded-xl border border-foreground/[0.08] bg-foreground/[0.015] p-3">
-        <Label className="text-[12px]">Pull a custom tag</Label>
+        <Label htmlFor="onboarding-custom-tag" className="text-[12px]">Pull a custom tag</Label>
         <p className="mt-0.5 text-[11px] text-foreground/50">
           Any tag from{" "}
           <button
@@ -591,6 +592,7 @@ function ModelCatalog({ onPulled }: { onPulled: () => void }) {
         </p>
         <div className="mt-2 flex gap-2">
           <Input
+            id="onboarding-custom-tag"
             value={customTag}
             onChange={(e) => setCustomTag(e.target.value)}
             placeholder="model:tag"
@@ -798,8 +800,9 @@ function OpenAIPath({
 
       <div className="rounded-xl border border-foreground/[0.08] bg-foreground/[0.015] p-4 space-y-4">
         <div>
-          <Label className="text-[12px]">Base URL</Label>
+          <Label htmlFor="onboarding-openai-url" className="text-[12px]">Base URL</Label>
           <Input
+            id="onboarding-openai-url"
             value={urlDraft}
             onChange={(e) => setUrlDraft(e.target.value)}
             placeholder="https://api.openai.com/v1"
@@ -812,10 +815,11 @@ function OpenAIPath({
         </div>
 
         <div>
-          <Label className="text-[12px]">API key</Label>
+          <Label htmlFor="onboarding-openai-key" className="text-[12px]">API key</Label>
           <div className="mt-1.5 flex gap-2">
             <div className="relative flex-1">
               <Input
+                id="onboarding-openai-key"
                 type={showKey ? "text" : "password"}
                 value={key}
                 onChange={(e) => setKey(e.target.value)}

@@ -159,8 +159,9 @@ function RemoveConfirm({
 
         {usesPin && (
           <div>
-            <Label>Current PIN</Label>
+            <Label htmlFor="remove-current-pin">Current PIN</Label>
             <Input
+              id="remove-current-pin"
               className="mt-1.5"
               type="password"
               inputMode="numeric"
@@ -176,8 +177,9 @@ function RemoveConfirm({
         )}
         {usesPassword && (
           <div>
-            <Label>Current password</Label>
+            <Label htmlFor="remove-current-password">Current password</Label>
             <Input
+              id="remove-current-password"
               className="mt-1.5"
               type="password"
               autoComplete="current-password"
@@ -438,8 +440,9 @@ function SetupWizard({
           </div>
           {currentUsesPin && (
             <div>
-              <Label>Current PIN</Label>
+              <Label htmlFor="setup-current-pin">Current PIN</Label>
               <Input
+                id="setup-current-pin"
                 className="mt-1.5"
                 type="password"
                 inputMode="numeric"
@@ -457,8 +460,9 @@ function SetupWizard({
           )}
           {currentUsesPassword && (
             <div>
-              <Label>Current password</Label>
+              <Label htmlFor="setup-current-password">Current password</Label>
               <Input
+                id="setup-current-password"
                 className="mt-1.5"
                 type="password"
                 autoComplete="current-password"
@@ -522,8 +526,9 @@ function SetupWizard({
 
             <div className="grid gap-3 sm:grid-cols-2">
               <div>
-                <Label>New PIN</Label>
+                <Label htmlFor="setup-new-pin">New PIN</Label>
                 <Input
+                  id="setup-new-pin"
                   className="mt-1.5"
                   type="password"
                   inputMode="numeric"
@@ -537,8 +542,9 @@ function SetupWizard({
                 />
               </div>
               <div>
-                <Label>Confirm PIN</Label>
+                <Label htmlFor="setup-confirm-pin">Confirm PIN</Label>
                 <Input
+                  id="setup-confirm-pin"
                   className="mt-1.5"
                   type="password"
                   inputMode="numeric"
@@ -562,8 +568,9 @@ function SetupWizard({
             <Separator />
             <div className="grid gap-3 sm:grid-cols-2">
               <div>
-                <Label>New password</Label>
+                <Label htmlFor="setup-new-password">New password</Label>
                 <Input
+                  id="setup-new-password"
                   className="mt-1.5"
                   type="password"
                   autoComplete="new-password"
@@ -573,8 +580,9 @@ function SetupWizard({
                 />
               </div>
               <div>
-                <Label>Confirm password</Label>
+                <Label htmlFor="setup-confirm-password">Confirm password</Label>
                 <Input
+                  id="setup-confirm-password"
                   className="mt-1.5"
                   type="password"
                   autoComplete="new-password"
@@ -590,10 +598,11 @@ function SetupWizard({
         <Separator />
 
         <div>
-          <Label>
+          <Label htmlFor="setup-hint">
             Hint <span className="text-foreground/40">(optional)</span>
           </Label>
           <Input
+            id="setup-hint"
             className="mt-1.5"
             value={hint}
             onChange={(e) => setHint(e.target.value)}

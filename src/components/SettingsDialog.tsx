@@ -251,8 +251,9 @@ export function SettingsDialog() {
                 <SectionTitle>Providers</SectionTitle>
 
                 <div>
-                  <Label>Ollama base URL</Label>
+                  <Label htmlFor="settings-ollama-url">Ollama base URL</Label>
                   <Input
+                    id="settings-ollama-url"
                     className="mt-1.5"
                     value={ollamaUrlField.value}
                     onChange={(e) => {
@@ -318,9 +319,10 @@ export function SettingsDialog() {
                 <Separator />
 
                 <div>
-                  <Label>API base URL</Label>
+                  <Label htmlFor="settings-openai-url">API base URL</Label>
                   <div className="relative mt-1.5">
                     <Input
+                      id="settings-openai-url"
                       className="pr-10"
                       value={openaiUrlField.value}
                       onChange={(e) => {
@@ -366,9 +368,10 @@ export function SettingsDialog() {
                 </div>
 
                 <div>
-                  <Label>OpenAI API key</Label>
+                  <Label htmlFor="settings-openai-key">OpenAI API key</Label>
                   <div className="mt-1.5 flex gap-2">
                     <Input
+                      id="settings-openai-key"
                       type="password"
                       placeholder={settings.openai_key_set ? "•••••••• (stored)" : "sk-…"}
                       value={pendingKey}

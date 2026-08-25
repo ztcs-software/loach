@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import {
   ArrowLeft,
   Brain,
@@ -189,7 +189,7 @@ export function ModelsView() {
   }, [form]);
 
   return (
-    <div className="flex min-w-0 flex-1 flex-col">
+    <main className="flex min-w-0 flex-1 flex-col">
       <ScrollArea className="flex-1">
         <div className="mx-auto w-full max-w-4xl px-8 py-6">
           <button
@@ -270,8 +270,9 @@ export function ModelsView() {
                 </p>
                 <div className="grid gap-3 sm:grid-cols-2">
                   <div>
-                    <Label>New model tag</Label>
+                    <Label htmlFor="modelfile-new-tag">New model tag</Label>
                     <Input
+                      id="modelfile-new-tag"
                       className="mt-1.5"
                       value={form.name}
                       onChange={(e) =>
@@ -281,8 +282,9 @@ export function ModelsView() {
                     />
                   </div>
                   <div>
-                    <Label>Base model (FROM)</Label>
+                    <Label htmlFor="modelfile-base-model">Base model (FROM)</Label>
                     <Input
+                      id="modelfile-base-model"
                       className="mt-1.5"
                       value={form.from}
                       onChange={(e) =>
@@ -331,11 +333,12 @@ export function ModelsView() {
 
               {/* System prompt */}
               <section>
-                <Label className="flex items-center gap-1.5">
+                <Label htmlFor="modelfile-system-prompt" className="flex items-center gap-1.5">
                   <Info className="h-3.5 w-3.5 text-foreground/60" />
                   System prompt
                 </Label>
                 <Textarea
+                  id="modelfile-system-prompt"
                   className="mt-1.5 min-h-32 resize-y font-mono text-xs"
                   value={form.system}
                   onChange={(e) =>
@@ -352,8 +355,9 @@ export function ModelsView() {
 
               {/* Template */}
               <section>
-                <Label>Prompt template</Label>
+                <Label htmlFor="modelfile-template">Prompt template</Label>
                 <Textarea
+                  id="modelfile-template"
                   className="mt-1.5 min-h-28 resize-y font-mono text-xs"
                   value={form.template}
                   onChange={(e) =>
@@ -452,7 +456,7 @@ export function ModelsView() {
           )}
         </div>
       </ScrollArea>
-    </div>
+    </main>
   );
 }
 
@@ -657,6 +661,8 @@ function NumField({
   step?: number;
   onChange: (v: number | null) => void;
 }) {
+  // `label` is a prop, so the id can't be a literal — one per instance.
+  const fieldId = useId();
   // Keep the raw string in local state so a user typing "0." doesn't get
   // clobbered by a premature coerce. We only push a committed number up on
   // blur or when the parse is unambiguous.
@@ -682,10 +688,11 @@ function NumField({
 
   return (
     <div>
-      <Label className="text-[11px] font-medium text-foreground/70">
+      <Label htmlFor={fieldId} className="text-[11px] font-medium text-foreground/70">
         {label}
       </Label>
       <Input
+        id={fieldId}
         type="number"
         inputMode="decimal"
         step={step}
@@ -756,6 +763,9 @@ function StopEditor({
             }
           }}
           placeholder={"<|eot|> or similar — Enter to add"}
+          // The "Stop sequences" Label heads the whole set (existing chips
+          // plus this field), so it names the group rather than this input.
+          aria-label="Add a stop sequence"
           className="h-8 font-mono text-xs"
         />
         <Button

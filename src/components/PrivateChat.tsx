@@ -741,7 +741,7 @@ function PrivateParamsPanel() {
               id="private-system-prompt"
               rows={5}
               placeholder="Extra instructions for this chat — sit between the persona and the tone…"
-              className="mt-2 resize-none border-white/10 bg-white/[0.04] text-sm focus-visible:border-white/25 focus-visible:ring-0"
+              className="mt-2 resize-none border-white/10 bg-white/[0.04] text-sm focus-visible:border-white/25"
               value={additional}
               onChange={(e) => setAdditional(e.target.value)}
             />
@@ -884,6 +884,8 @@ function SliderRow({
         </span>
       </div>
       <Slider
+        thumbLabel={label}
+        thumbValueText={displayText}
         value={[stopIdx]}
         min={0}
         max={stops.length - 1}

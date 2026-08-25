@@ -176,7 +176,15 @@ export function StepShell({
 function ProgressDots({ active }: { active: OnboardingStep }) {
   const activeIdx = ONBOARDING_STEPS.indexOf(active);
   return (
-    <div className="flex items-center justify-center gap-1.5 pb-4 pt-1">
+    // The dots themselves stay `aria-hidden` — they're a decorative
+    // rendering of the position. The position itself is not decorative,
+    // so the row carries it as text instead; without this the wizard gave
+    // assistive tech no way to tell how far along it was.
+    <div
+      className="flex items-center justify-center gap-1.5 pb-4 pt-1"
+      role="group"
+      aria-label={`Step ${activeIdx + 1} of ${ONBOARDING_STEPS.length}`}
+    >
       {ONBOARDING_STEPS.map((step, i) => {
         const done = i < activeIdx;
         const current = i === activeIdx;

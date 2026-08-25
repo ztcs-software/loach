@@ -524,8 +524,9 @@ function EraseDialog({
             </p>
             {usesPin && (
               <div>
-                <Label className="text-[12px]">Current PIN</Label>
+                <Label htmlFor="erase-verify-pin" className="text-[12px]">Current PIN</Label>
                 <Input
+                  id="erase-verify-pin"
                   className="mt-1.5"
                   type="password"
                   inputMode="numeric"
@@ -546,8 +547,9 @@ function EraseDialog({
             )}
             {usesPassword && (
               <div>
-                <Label className="text-[12px]">Current password</Label>
+                <Label htmlFor="erase-verify-password" className="text-[12px]">Current password</Label>
                 <Input
+                  id="erase-verify-password"
                   className="mt-1.5"
                   type="password"
                   autoComplete="current-password"
@@ -753,8 +755,9 @@ function ImportConfirm({
             </p>
             {usesPin && (
               <div>
-                <Label className="text-[12px]">Current PIN</Label>
+                <Label htmlFor="reset-verify-pin" className="text-[12px]">Current PIN</Label>
                 <Input
+                  id="reset-verify-pin"
                   className="mt-1.5"
                   type="password"
                   inputMode="numeric"
@@ -775,8 +778,9 @@ function ImportConfirm({
             )}
             {usesPassword && (
               <div>
-                <Label className="text-[12px]">Current password</Label>
+                <Label htmlFor="reset-verify-password" className="text-[12px]">Current password</Label>
                 <Input
+                  id="reset-verify-password"
                   className="mt-1.5"
                   type="password"
                   autoComplete="current-password"

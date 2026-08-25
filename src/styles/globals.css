@@ -38,7 +38,12 @@
     --destructive-foreground: 0 0% 98%;
     --border: 230 25% 12% / 0.12;
     --input: 230 25% 12% / 0.10;
-    --ring: 22 95% 60%;
+    /* Same darkening as `--primary-text` below, for the same reason: a
+       focus ring is a contrast affordance, and the 60%-lightness accent
+       tops out around 2.2:1 on the light surfaces even at full opacity —
+       it cannot be a visible indicator there no matter how thick it is.
+       Dark mode keeps the bright accent, which already clears 5:1. */
+    --ring: 22 95% 38%;
     --radius: 1.25rem;
 
     /* Accent for accent-COLOURED TEXT (prose links, and anywhere the accent
@@ -137,7 +142,7 @@
   .bg-solid {
     --primary: 210 100% 50%;       /* #007FFF — azure */
     --primary-glow: 0 127 255;
-    --ring: 210 100% 50%;
+    --ring: 210 100% 42%;
     --prompt-glow: 0 10px 40px -8px rgba(0, 127, 255, 0.20);
     /* Azure at 50% is 3.8:1 as text on the light background — closer than
        the orange but still short of AA. Same treatment: drop the lightness

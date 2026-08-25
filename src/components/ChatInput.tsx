@@ -790,6 +790,12 @@ export function ChatInput({ centered = false }: ChatInputProps) {
 
           <Textarea
             ref={textareaRef}
+            // Not left to the placeholder: it is the only thing naming this
+            // control, and it swaps to "Replying — press the Stop button…"
+            // mid-stream, so the composer's accessible name would change
+            // under the user. A fixed label keeps it stable; the placeholder
+            // stays as the visible status hint.
+            aria-label="Message"
             value={text}
             onChange={(e) => {
               // Mirror every keystroke into the persisted draft. ChatInput is

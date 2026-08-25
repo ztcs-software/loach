@@ -101,7 +101,7 @@ export function ModelsLibrary() {
   };
 
   return (
-    <div className="flex min-w-0 flex-1 flex-col">
+    <main className="flex min-w-0 flex-1 flex-col">
       <ScrollArea className="flex-1">
         <div className="mx-auto w-full max-w-6xl px-8 py-8">
           <header className="mb-6 flex flex-wrap items-end justify-between gap-4">
@@ -281,7 +281,7 @@ export function ModelsLibrary() {
           )}
         </div>
       </ScrollArea>
-    </div>
+    </main>
   );
 }
 

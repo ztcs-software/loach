@@ -136,9 +136,14 @@ function FeatureRow({
           {description}
         </p>
       </div>
+      {/* Named after the row's own title. Settings → Features labels the
+          same four toggles; these were the only unnamed ones, so a screen
+          reader heard four consecutive "switch, on" with nothing to tell
+          them apart. */}
       <Switch
         checked={checked}
         onCheckedChange={onChange}
+        aria-label={checked ? `Disable ${title}` : `Enable ${title}`}
         className="mt-1 shrink-0"
       />
     </div>

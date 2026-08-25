@@ -59,6 +59,7 @@ export function NameStep({ onClose }: { onClose: () => void }) {
       >
         <Input
           ref={inputRef}
+          aria-label="Your name"
           value={name}
           onChange={(e) => setName(e.target.value)}
           placeholder="Your name"

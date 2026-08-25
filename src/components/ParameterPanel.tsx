@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { Brain, ChevronRight, Dice5, Info, Layers, MemoryStick, RotateCcw, X } from "lucide-react";
 import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
@@ -573,7 +573,7 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
                 id="session-system-prompt"
                 rows={5}
                 placeholder="Extra instructions for this chat — sit between the persona and the tone…"
-                className="mt-2 resize-none border-foreground/10 bg-foreground/[0.04] text-sm focus-visible:border-foreground/25 focus-visible:ring-0"
+                className="mt-2 resize-none border-foreground/10 bg-foreground/[0.04] text-sm focus-visible:border-foreground/25"
                 value={systemPrompt}
                 onChange={(e) => setSystemPrompt(e.target.value)}
                 onBlur={() => {
@@ -791,6 +791,8 @@ function SliderRow({
       </div>
       {usingStops ? (
         <Slider
+          thumbLabel={label}
+          thumbValueText={displayText}
           value={[pos]}
           min={0}
           max={stops!.length - 1}
@@ -803,6 +805,8 @@ function SliderRow({
         />
       ) : (
         <Slider
+          thumbLabel={label}
+          thumbValueText={displayText}
           value={[pos]}
           min={min}
           max={max}
@@ -847,6 +851,9 @@ function GpuLayersRow({
   onChange: (v: number | null) => void;
   isOpenAI: boolean;
 }) {
+  // Both this panel and Private Chat's can be mounted at once, so the
+  // id has to be per-instance rather than a literal.
+  const fieldId = useId();
   const [draft, setDraft] = useState(value === null ? "" : String(value));
 
   useEffect(() => {
@@ -869,7 +876,10 @@ function GpuLayersRow({
   return (
     <div className={isOpenAI ? "opacity-55" : undefined}>
       <div className="mb-1.5 flex items-baseline justify-between">
-        <Label className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.1em] text-foreground/70">
+        <Label
+          htmlFor={fieldId}
+          className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.1em] text-foreground/70"
+        >
           <Layers className="h-3.5 w-3.5 shrink-0 text-foreground/70" />
           GPU Layers
         </Label>
@@ -879,6 +889,7 @@ function GpuLayersRow({
       </div>
       <div className="flex items-center gap-1.5">
         <Input
+          id={fieldId}
           type="text"
           inputMode="numeric"
           pattern="[0-9]*"
@@ -894,7 +905,7 @@ function GpuLayersRow({
             }
           }}
           disabled={isOpenAI}
-          className="h-8 border-foreground/10 bg-foreground/[0.04] text-sm tabular-nums focus-visible:border-foreground/25 focus-visible:ring-0"
+          className="h-8 border-foreground/10 bg-foreground/[0.04] text-sm tabular-nums focus-visible:border-foreground/25"
         />
         {value !== null && !isOpenAI && (
           <Button
@@ -977,6 +988,9 @@ function SeedRow({
   value: number | null;
   onChange: (v: number | null) => void;
 }) {
+  // Both this panel and Private Chat's can be mounted at once, so the
+  // id has to be per-instance rather than a literal.
+  const fieldId = useId();
   const [draft, setDraft] = useState(value === null ? "" : String(value));
 
   useEffect(() => {
@@ -996,7 +1010,7 @@ function SeedRow({
   return (
     <div>
       <div className="mb-1.5 flex items-baseline justify-between">
-        <Label className="text-[11px] font-semibold uppercase tracking-[0.1em] text-foreground/70">
+        <Label htmlFor={fieldId} className="text-[11px] font-semibold uppercase tracking-[0.1em] text-foreground/70">
           Seed
         </Label>
         <span className="font-mono text-[10px] text-foreground/45">
@@ -1005,6 +1019,7 @@ function SeedRow({
       </div>
       <div className="flex items-center gap-1.5">
         <Input
+          id={fieldId}
           type="text"
           inputMode="numeric"
           pattern="[0-9]*"
@@ -1019,7 +1034,7 @@ function SeedRow({
               (e.target as HTMLInputElement).blur();
             }
           }}
-          className="h-8 border-foreground/10 bg-foreground/[0.04] text-sm tabular-nums focus-visible:border-foreground/25 focus-visible:ring-0"
+          className="h-8 border-foreground/10 bg-foreground/[0.04] text-sm tabular-nums focus-visible:border-foreground/25"
         />
         <Button
           type="button"

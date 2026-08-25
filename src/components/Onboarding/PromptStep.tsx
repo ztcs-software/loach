@@ -47,6 +47,8 @@ export function PromptStep({ onClose }: { onClose: () => void }) {
     >
       <div className="space-y-3">
         <Textarea
+          id="onboarding-custom-instructions"
+          aria-label="Custom instructions"
           rows={8}
           value={value}
           onChange={(e) => setValue(e.target.value)}
@@ -58,6 +60,8 @@ export function PromptStep({ onClose }: { onClose: () => void }) {
           <button
             type="button"
             onClick={() => setExpanded((v) => !v)}
+            aria-expanded={expanded}
+            aria-controls="onboarding-prompt-example"
             className="flex w-full items-center justify-between gap-2 px-3.5 py-2.5 text-left"
           >
             <span className="flex items-center gap-2">
@@ -72,7 +76,10 @@ export function PromptStep({ onClose }: { onClose: () => void }) {
             />
           </button>
           {expanded && (
-            <div className="border-t border-foreground/[0.06] p-3.5">
+            <div
+              id="onboarding-prompt-example"
+              className="border-t border-foreground/[0.06] p-3.5"
+            >
               <p className="rounded-lg bg-foreground/[0.04] px-3 py-2.5 font-mono text-[12px] leading-relaxed text-foreground/75 whitespace-pre-wrap">
                 {EXAMPLE_PROMPT}
               </p>

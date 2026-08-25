@@ -333,8 +333,9 @@ function McpEditor({ initial, onCancel, onSaved }: EditorProps) {
       </div>
 
       <div>
-        <Label>Display name</Label>
+        <Label htmlFor="mcp-name">Display name</Label>
         <Input
+          id="mcp-name"
           className="mt-1.5"
           value={name}
           onChange={(e) => setName(e.target.value)}
@@ -345,8 +346,9 @@ function McpEditor({ initial, onCancel, onSaved }: EditorProps) {
       <Separator />
 
       <div>
-        <Label>URL</Label>
+        <Label htmlFor="mcp-url">URL</Label>
         <Input
+          id="mcp-url"
           className="mt-1.5 font-mono"
           value={url}
           onChange={(e) => setUrl(e.target.value)}
@@ -358,8 +360,9 @@ function McpEditor({ initial, onCancel, onSaved }: EditorProps) {
       </div>
 
       <div>
-        <Label>Headers (one per line)</Label>
+        <Label htmlFor="mcp-headers">Headers (one per line)</Label>
         <Textarea
+          id="mcp-headers"
           rows={3}
           className="mt-1.5 resize-none font-mono text-xs"
           value={headersText}

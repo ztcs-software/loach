@@ -73,6 +73,10 @@ export function SearchBar() {
   const [activeIndex, setActiveIndex] = useState(0);
 
   const inputRef = useRef<HTMLInputElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  // Whatever had focus when the palette opened, so closing can hand it back
+  // instead of dropping the user at the top of the document.
+  const restoreFocusTo = useRef<HTMLElement | null>(null);
 
   // Two open paths: Ctrl/Cmd+K and the `loach:focus-search` custom event the
   // title bar fires when its search pill is clicked. Both end up here so
@@ -85,6 +89,10 @@ export function SearchBar() {
       // regular app behind it — including surfacing persisted chat titles,
       // which is exactly what the TitleBar's disabled search pill prevents.
       if (usePrivateChatStore.getState().open) return;
+      restoreFocusTo.current =
+        document.activeElement instanceof HTMLElement
+          ? document.activeElement
+          : null;
       setOpen(true);
       // Defer the focus call so the input has been mounted by the time we
       // try to grab focus.
@@ -194,10 +202,60 @@ export function SearchBar() {
     setActiveIndex(0);
   }, [query, results.length]);
 
+  // Options are no longer focusable (see the listbox markup below), so the
+  // browser won't scroll them into view the way it did when each row was a
+  // real tab stop. Arrowing past the fold has to be driven manually now.
+  useEffect(() => {
+    if (!open) return;
+    panelRef.current
+      ?.querySelector(`#search-option-${activeIndex}`)
+      ?.scrollIntoView({ block: "nearest" });
+  }, [activeIndex, open]);
+
   const close = () => {
     setOpen(false);
     setQuery("");
     setActiveIndex(0);
+    // Hand focus back to the trigger. Deferred so it lands after the
+    // palette has unmounted, otherwise React restores it into a node
+    // that's about to disappear.
+    const target = restoreFocusTo.current;
+    restoreFocusTo.current = null;
+    if (target?.isConnected) window.setTimeout(() => target.focus(), 0);
+  };
+
+  /**
+   * Keep Tab inside the palette while it's open.
+   *
+   * The overlay covers the app but doesn't stop focus reaching it, so
+   * without this Tab walked straight out into the chat behind — and,
+   * because Escape is bound to the input, a user who had tabbed away
+   * could no longer close the palette from the keyboard at all. Escape is
+   * repeated here as a backstop for the same reason: the input's own
+   * handler only fires while the input holds focus.
+   */
+  const onPanelKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      if (query) setQuery("");
+      else close();
+      return;
+    }
+    if (e.key !== "Tab") return;
+    const focusables = panelRef.current?.querySelectorAll<HTMLElement>(
+      'input, button:not([tabindex="-1"]), [href], [tabindex]:not([tabindex="-1"])',
+    );
+    if (!focusables || focusables.length === 0) return;
+    const first = focusables[0];
+    const last = focusables[focusables.length - 1];
+    const activeEl = document.activeElement;
+    if (e.shiftKey && activeEl === first) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && activeEl === last) {
+      e.preventDefault();
+      first.focus();
+    }
   };
 
   const commit = async (r: Result) => {
@@ -281,6 +339,15 @@ export function SearchBar() {
           eye lands on it without it feeling like a modal dialog. Stops
           propagation so backdrop clicks INSIDE the card don't close. */}
       <div
+        ref={panelRef}
+        // The overlay behaves as a modal — it covers the app and swallows
+        // outside clicks — so it has to say so. Without `role="dialog"` /
+        // `aria-modal` a screen reader announced nothing on open and kept
+        // reading the chat underneath as if it were still live.
+        role="dialog"
+        aria-modal="true"
+        aria-label="Search"
+        onKeyDown={onPanelKeyDown}
         className="fixed left-1/2 top-[12%] z-[56] w-full max-w-xl -translate-x-1/2 px-4"
         onMouseDown={(e) => e.stopPropagation()}
       >
@@ -296,6 +363,18 @@ export function SearchBar() {
               onKeyDown={onKeyDown}
               placeholder="Search chats, spaces, snippets…"
               spellCheck={false}
+              // Combobox-over-listbox: ↑/↓ already moved a visual highlight
+              // that existed only as a background colour. `aria-activedescendant`
+              // is what turns that into something announceable, and keeps
+              // real focus in the input so typing never breaks.
+              aria-label="Search chats, spaces, snippets"
+              role="combobox"
+              aria-expanded={results.length > 0}
+              aria-controls="search-results"
+              aria-autocomplete="list"
+              aria-activedescendant={
+                results.length > 0 ? `search-option-${activeIndex}` : undefined
+              }
               className="min-w-0 flex-1 bg-transparent text-sm text-foreground placeholder:text-foreground/40 focus:outline-none"
             />
             <kbd className="hidden rounded border border-foreground/10 bg-foreground/[0.05] px-1.5 py-0.5 font-mono text-[10px] tracking-wider text-foreground/40 sm:inline">
@@ -330,38 +409,49 @@ export function SearchBar() {
                 : "Nothing yet — start a chat, create a space, or save a snippet."}
             </div>
           ) : (
-            <ul className="max-h-[60vh] overflow-y-auto py-1">
+            // Rows were <button>s, which put every result in the tab order:
+            // Tab moved focus off the input onto a result, and since Escape
+            // was bound to the input the palette then had no keyboard exit.
+            // As listbox options they're driven by `aria-activedescendant`
+            // instead — same click behaviour, no stolen tab stops.
+            <ul
+              id="search-results"
+              role="listbox"
+              aria-label="Search results"
+              className="max-h-[60vh] overflow-y-auto py-1"
+            >
               {results.map((r, i) => (
-                <li key={`${r.kind}-${r.id}`}>
-                  <button
-                    type="button"
-                    onMouseEnter={() => setActiveIndex(i)}
-                    // preventDefault on mousedown so the input doesn't blur
-                    // before our click handler runs.
-                    onMouseDown={(e) => e.preventDefault()}
-                    onClick={() => void commit(r)}
-                    className={cn(
-                      "flex w-full items-center gap-2.5 px-4 py-2 text-left text-sm transition-colors",
-                      i === activeIndex
-                        ? "bg-foreground/10"
-                        : "hover:bg-foreground/[0.06]",
-                    )}
-                  >
-                    <ResultIcon kind={r.kind} />
-                    <div className="min-w-0 flex-1">
-                      <div className="truncate text-foreground">
-                        {r.label || "Untitled"}
-                      </div>
-                      {r.sub && (
-                        <div className="truncate text-[12px] text-foreground/45">
-                          {r.sub}
-                        </div>
-                      )}
+                <li
+                  key={`${r.kind}-${r.id}`}
+                  id={`search-option-${i}`}
+                  role="option"
+                  aria-selected={i === activeIndex}
+                  onMouseEnter={() => setActiveIndex(i)}
+                  // preventDefault on mousedown so the input doesn't blur
+                  // before our click handler runs.
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => void commit(r)}
+                  className={cn(
+                    "flex w-full cursor-pointer items-center gap-2.5 px-4 py-2 text-left text-sm transition-colors",
+                    i === activeIndex
+                      ? "bg-foreground/10"
+                      : "hover:bg-foreground/[0.06]",
+                  )}
+                >
+                  <ResultIcon kind={r.kind} />
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-foreground">
+                      {r.label || "Untitled"}
                     </div>
-                    <span className="shrink-0 text-[10px] uppercase tracking-wider text-foreground/35">
-                      {r.kind}
-                    </span>
-                  </button>
+                    {r.sub && (
+                      <div className="truncate text-[12px] text-foreground/45">
+                        {r.sub}
+                      </div>
+                    )}
+                  </div>
+                  <span className="shrink-0 text-[10px] uppercase tracking-wider text-foreground/35">
+                    {r.kind}
+                  </span>
                 </li>
               ))}
             </ul>

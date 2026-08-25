@@ -27,8 +27,9 @@ export function GeneralTab({ open }: { open: boolean }) {
                 <SectionTitle>General</SectionTitle>
 
                 <div>
-                  <Label>Your name</Label>
+                  <Label htmlFor="settings-user-name">Your name</Label>
                   <Input
+                    id="settings-user-name"
                     className="mt-1.5"
                     value={userNameField.value}
                     onChange={(e) => userNameField.onChange(e.target.value)}
@@ -57,8 +58,11 @@ export function GeneralTab({ open }: { open: boolean }) {
                 <Separator />
 
                 <div>
-                  <Label>Custom instructions</Label>
+                  <Label htmlFor="settings-custom-instructions">
+                    Custom instructions
+                  </Label>
                   <Textarea
+                    id="settings-custom-instructions"
                     rows={10}
                     className="mt-1.5 resize-none"
                     value={systemPromptField.value}

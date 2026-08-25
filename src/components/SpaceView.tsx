@@ -208,7 +208,7 @@ export function SpaceView() {
       : "Default model";
 
   return (
-    <div className="flex min-w-0 flex-1 flex-col">
+    <main className="flex min-w-0 flex-1 flex-col">
       <ScrollArea className="flex-1">
         {/* Page wrapper carries no horizontal padding — children that need
             indentation handle their own. This way the title column and the
@@ -438,7 +438,7 @@ export function SpaceView() {
         initialDescription={space.description}
         onSave={handleSaveDetails}
       />
-    </div>
+    </main>
   );
 }
 
