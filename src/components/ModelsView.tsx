@@ -545,8 +545,10 @@ const NUMERIC_FIELDS: {
   { key: "tfs_z", label: "Tail-free (tfs_z)", step: 0.05 },
   { key: "typical_p", label: "Typical-P", step: 0.01 },
   { key: "mirostat", label: "Mirostat (0/1/2)", step: 1 },
-  { key: "mirostat_eta", label: "Mirostat η", step: 0.05 },
-  { key: "mirostat_tau", label: "Mirostat τ", step: 0.5 },
+  // "eta"/"tau" spelled out: the labels render uppercased, and capital η/τ
+  // (Η/Τ) are indistinguishable from Latin H/T.
+  { key: "mirostat_eta", label: "Mirostat eta", step: 0.05 },
+  { key: "mirostat_tau", label: "Mirostat tau", step: 0.5 },
   { key: "seed", label: "Seed (blank = random)", step: 1 },
 ];
 

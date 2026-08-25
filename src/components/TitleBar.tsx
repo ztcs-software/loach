@@ -6,6 +6,7 @@ import { useChatStore } from "@/stores/chatStore";
 import { usePrivateChatStore } from "@/stores/privateChatStore";
 import { useUIStore } from "@/stores/uiStore";
 import { useSettingsStore } from "@/stores/settingsStore";
+import { useSecurityStore } from "@/stores/securityStore";
 import topBarLogo from "@/assets/loach-icon.png";
 
 // Detect macOS so we can label the Ctrl/Cmd+K shortcut with the right
@@ -24,13 +25,20 @@ export function TitleBar() {
   const toggleSidebar = useUIStore((s) => s.toggleSidebar);
   // Mirror App.tsx's onboarding gate so the sidebar-toggle and search
   // pill are disabled while the wizard is on screen — the wizard owns
-  // the user's attention and lets them dismiss with X. We rely on
-  // settings being unhydrated during the lock-screen probe phase, so
-  // this also stays inactive (false) during lock without an extra
-  // condition.
+  // the user's attention and lets them dismiss with X.
   const settingsHydrated = useSettingsStore((s) => s.hydrated);
   const onboardingCompleted = useSettingsStore((s) => s.onboarding_completed);
   const onboardingActive = settingsHydrated && !onboardingCompleted;
+  // Mirror App.tsx's lock gate (`showLock`). While the lock screen owns
+  // the surface, the sidebar toggle / search pill / Private Chat button
+  // are HIDDEN rather than disabled: the surfaces they operate don't
+  // exist behind the lock, and a greyed-out "Search chats, spaces,
+  // snippets…" pill both looks broken and advertises what a locked app
+  // contains. Window controls stay, so min/max/close keep working.
+  const securityHydrated = useSecurityStore((s) => s.hydrated);
+  const securityConfigured = useSecurityStore((s) => s.status.configured);
+  const unlocked = useSecurityStore((s) => s.unlocked);
+  const appLocked = securityHydrated && securityConfigured && !unlocked;
   // Private Chat takes over the whole surface below the title bar. The
   // sidebar toggle and global search both interact with regular,
   // SQLite-backed chats — clicking them while in private mode would either
@@ -113,16 +121,18 @@ export function TitleBar() {
           the surrounding `data-tauri-drag-region` automatically (Tauri
           excludes interactive descendants), so click works without
           fighting the drag-and-double-click-to-maximize behaviour. */}
-      <button
-        type="button"
-        onClick={toggleSidebar}
-        disabled={topBarLocked}
-        aria-label={sidebarOpen ? "Hide sidebar" : "Show sidebar"}
-        title={sidebarOpen ? "Hide sidebar" : "Show sidebar"}
-        className="inline-flex h-7 w-7 items-center justify-center rounded-md text-foreground/55 transition-colors hover:bg-foreground/10 hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
-      >
-        <PanelLeft className="h-3.5 w-3.5" />
-      </button>
+      {!appLocked && (
+        <button
+          type="button"
+          onClick={toggleSidebar}
+          disabled={topBarLocked}
+          aria-label={sidebarOpen ? "Hide sidebar" : "Show sidebar"}
+          title={sidebarOpen ? "Hide sidebar" : "Show sidebar"}
+          className="inline-flex h-7 w-7 items-center justify-center rounded-md text-foreground/55 transition-colors hover:bg-foreground/10 hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
+        >
+          <PanelLeft className="h-3.5 w-3.5" />
+        </button>
+      )}
 
       {/* App identity — Loach mark + wordmark + version. The mark uses a
           dedicated top-bar asset (src/assets/loach-icon.png) imported
@@ -160,24 +170,26 @@ export function TitleBar() {
           pointer events. Click dispatches the same `loach:focus-search`
           event the Cmd/Ctrl+K shortcut uses, so the palette overlay
           (`SearchBar`) stays the single source of truth for search UI. */}
-      <div className="pointer-events-none absolute inset-y-0 left-1/2 flex -translate-x-1/2 items-center">
-        <button
-          type="button"
-          onClick={() => window.dispatchEvent(new CustomEvent("loach:focus-search"))}
-          disabled={topBarLocked}
-          aria-label="Search"
-          title="Search"
-          className="pointer-events-auto inline-flex h-7 w-72 items-center gap-2 rounded-md border border-foreground/[0.08] bg-foreground/[0.04] px-2.5 text-foreground/55 transition-colors hover:bg-foreground/[0.08] hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
-        >
-          <Search className="h-3.5 w-3.5 shrink-0" />
-          <span className="min-w-0 flex-1 truncate text-left text-xs">
-            Search chats, spaces, snippets…
-          </span>
-          <kbd className="rounded border border-foreground/10 bg-foreground/[0.05] px-1 py-px font-mono text-[10px] tracking-wider text-foreground/40">
-            {isMac ? "⌘K" : "Ctrl K"}
-          </kbd>
-        </button>
-      </div>
+      {!appLocked && (
+        <div className="pointer-events-none absolute inset-y-0 left-1/2 flex -translate-x-1/2 items-center">
+          <button
+            type="button"
+            onClick={() => window.dispatchEvent(new CustomEvent("loach:focus-search"))}
+            disabled={topBarLocked}
+            aria-label="Search"
+            title="Search"
+            className="pointer-events-auto inline-flex h-7 w-72 items-center gap-2 rounded-md border border-foreground/[0.08] bg-foreground/[0.04] px-2.5 text-foreground/55 transition-colors hover:bg-foreground/[0.08] hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
+          >
+            <Search className="h-3.5 w-3.5 shrink-0" />
+            <span className="min-w-0 flex-1 truncate text-left text-xs">
+              Search chats, spaces, snippets…
+            </span>
+            <kbd className="rounded border border-foreground/10 bg-foreground/[0.05] px-1 py-px font-mono text-[10px] tracking-wider text-foreground/40">
+              {isMac ? "⌘K" : "Ctrl K"}
+            </kbd>
+          </button>
+        </div>
+      )}
 
       <div className="min-w-0 flex-1" />
 
@@ -188,22 +200,24 @@ export function TitleBar() {
           chrome itself. Disabled during onboarding for the same reason
           the sidebar toggle and search pill are disabled — the wizard
           owns the user's attention. */}
-      <div className="flex shrink-0 items-center pr-2">
-        <button
-          type="button"
-          onClick={openPrivateChat}
-          disabled={topBarLocked}
-          aria-label="Open Private Chat"
-          title={
-            privateChatOpen
-              ? "Private Chat is already open"
-              : "Private Chat — temporary, nothing stored"
-          }
-          className="inline-flex h-7 w-7 items-center justify-center rounded-md text-foreground/55 transition-colors hover:bg-foreground/10 hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
-        >
-          <Ghost className="h-3.5 w-3.5" />
-        </button>
-      </div>
+      {!appLocked && (
+        <div className="flex shrink-0 items-center pr-2">
+          <button
+            type="button"
+            onClick={openPrivateChat}
+            disabled={topBarLocked}
+            aria-label="Open Private Chat"
+            title={
+              privateChatOpen
+                ? "Private Chat is already open"
+                : "Private Chat — temporary, nothing stored"
+            }
+            className="inline-flex h-7 w-7 items-center justify-center rounded-md text-foreground/55 transition-colors hover:bg-foreground/10 hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
+          >
+            <Ghost className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
       <div className="flex shrink-0 items-center">
         <TitleButton onClick={minimize} ariaLabel="Minimize">
           <Minus className="h-3.5 w-3.5" />

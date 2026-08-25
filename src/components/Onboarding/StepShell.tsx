@@ -39,6 +39,9 @@ export interface StepShellProps {
   primaryLabel?: string | null;
   primaryIcon?: "next" | "check";
   primaryDisabled?: boolean;
+  /** One-liner shown beside the primary button while it is disabled, so a
+   *  dead-looking Continue always says what would bring it to life. */
+  primaryHint?: string;
   onPrimary?: () => void;
   /** Show a Skip button to the left of Next. */
   skippable?: boolean;
@@ -59,6 +62,7 @@ export function StepShell({
   primaryLabel = "Continue",
   primaryIcon = "next",
   primaryDisabled,
+  primaryHint,
   onPrimary,
   skippable,
   onSkip,
@@ -133,6 +137,11 @@ export function StepShell({
             )}
           </div>
           <div className="flex items-center gap-2">
+            {primaryDisabled && primaryHint && (
+              <p className="text-right text-[11px] leading-snug text-foreground/45">
+                {primaryHint}
+              </p>
+            )}
             {skippable && (
               <Button
                 variant="ghost"

@@ -224,6 +224,22 @@ export function SearchBar() {
     if (target?.isConnected) window.setTimeout(() => target.focus(), 0);
   };
 
+  // The focus() guard above stops the palette OPENING under Private Chat;
+  // this covers the reverse order — palette already open when Private Chat
+  // takes the screen. Without it the palette lingers beneath the overlay
+  // (Esc routes to Private Chat) and greets the user when the overlay
+  // closes. Plain setters, not close(): restoring focus into the surface
+  // Private Chat just covered would fight its own focus handling.
+  const privateChatOpen = usePrivateChatStore((s) => s.open);
+  useEffect(() => {
+    if (privateChatOpen && open) {
+      setOpen(false);
+      setQuery("");
+      setActiveIndex(0);
+      restoreFocusTo.current = null;
+    }
+  }, [privateChatOpen, open]);
+
   /**
    * Keep Tab inside the palette while it's open.
    *

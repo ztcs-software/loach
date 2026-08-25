@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Brain, Clock, Globe, MemoryStick } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -22,11 +22,11 @@ import { StepShell } from "./StepShell";
  *     in-chat toggle is right there if a model OOMs.
  *
  * All four are committed to settings on Continue. Skip commits too —
- * establishing defaults is the wizard's job — but it commits what's on
- * screen, not RECOMMENDED. Since the draft starts at RECOMMENDED, an
- * untouched Skip behaves exactly as before; what it no longer does is
- * flip a toggle back ON after the user deliberately turned it off (Web
- * fetch being the one that matters — the app ships offline-first).
+ * establishing defaults is the wizard's job — with one carve-out: Web
+ * fetch. It is the sole network-touching default and the app ships it
+ * OFF, so a Skip only commits it when the user actually flipped the
+ * switch — pressing Skip without reading the screen is not consent to
+ * networking. Continue counts as consent to whatever is on screen.
  */
 
 interface DraftFeatures {
@@ -56,13 +56,20 @@ export function FeaturesStep({ onClose }: { onClose: () => void }) {
   const set = <K extends keyof DraftFeatures>(k: K, v: DraftFeatures[K]) =>
     setDraft((d) => ({ ...d, [k]: v }));
 
-  const commit = async (values: DraftFeatures) => {
-    await Promise.all([
+  // See the header comment: Skip only writes Web fetch if the user touched
+  // its switch, so an unread Skip can't silently opt into networking.
+  const webFetchTouched = useRef(false);
+
+  const commit = async (values: DraftFeatures, skipping = false) => {
+    const writes = [
       update("temporal_awareness", values.temporal_awareness),
       update("thinking_default", values.thinking_default),
-      update("web_fetch_enabled", values.web_fetch_enabled),
       update("low_vram_global", values.low_vram_global),
-    ]);
+    ];
+    if (!skipping || webFetchTouched.current) {
+      writes.push(update("web_fetch_enabled", values.web_fetch_enabled));
+    }
+    await Promise.all(writes);
     goNext();
   };
 
@@ -73,7 +80,7 @@ export function FeaturesStep({ onClose }: { onClose: () => void }) {
       subtitle="Tune later in Settings — these are just the defaults Loach starts with."
       onPrimary={() => void commit(draft)}
       skippable
-      onSkip={() => void commit(draft)}
+      onSkip={() => void commit(draft, true)}
       canGoBack
       onBack={goBack}
       onClose={onClose}
@@ -98,7 +105,10 @@ export function FeaturesStep({ onClose }: { onClose: () => void }) {
           title="Web fetch"
           description="When your prompt contains an http(s):// URL, Loach downloads the page and inlines the readable text. Up to 5 URLs per message, 5 MB each, private IPs blocked."
           checked={draft.web_fetch_enabled}
-          onChange={(v) => set("web_fetch_enabled", v)}
+          onChange={(v) => {
+            webFetchTouched.current = true;
+            set("web_fetch_enabled", v);
+          }}
         />
         <FeatureRow
           icon={<MemoryStick className="h-4 w-4" />}

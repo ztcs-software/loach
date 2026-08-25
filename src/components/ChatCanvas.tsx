@@ -747,15 +747,22 @@ export function ChatCanvas() {
 
 /**
  * Flatten a response into a single line of plain prose for the pinned-bar
- * chip. Deliberately shallow — it drops fence markers and the handful of
- * inline markdown characters that read as noise at chip size, then collapses
- * whitespace. It is not a renderer: a code-only response previews as its
- * first line of code, which is the honest thing to show.
+ * chip. Deliberately shallow — it drops fence markers, unwraps links to
+ * their text, removes table rules, and strips the handful of inline
+ * markdown characters (including table pipes) that read as noise at chip
+ * size, then collapses whitespace. It is not a renderer: a code-only
+ * response previews as its first line of code, which is the honest thing
+ * to show.
  */
 function pinPreview(content: string): string {
   return content
     .replace(/^```.*$/gm, "")
-    .replace(/[*_`#>]/g, "")
+    // [text](url) / ![alt](url) → text. Keeps the label, drops the URL.
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
+    // Table separator rows and thematic breaks — lines of only pipes,
+    // colons, dashes and spaces — carry no preview-worthy text.
+    .replace(/^[|\s:-]+$/gm, "")
+    .replace(/[*_`#>|]/g, "")
     .replace(/\s+/g, " ")
     .trim();
 }

@@ -1148,6 +1148,11 @@ function PrivateChatComposer() {
             className="min-h-[28px] max-h-[220px] flex-1 resize-none border-none bg-transparent backdrop-blur-none px-1 py-1.5 text-[15px] leading-relaxed text-zinc-100 placeholder:text-zinc-500 shadow-none outline-none focus-visible:ring-0 focus-visible:border-none focus-visible:bg-transparent focus-visible:outline-none"
             rows={1}
           />
+          {/* No voice-dictation button here, deliberately: the regular
+              composer's dictation rides the Web Speech API, which sends
+              audio to an online recognition service in Chromium/WebView2.
+              Private Chat promises nothing leaves the machine, so the mic
+              stays out — don't re-add it for parity with ChatInput. */}
           <button
             type="button"
             onClick={onPrimary}

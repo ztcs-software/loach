@@ -29,7 +29,7 @@ import {
   openaiListModels,
 } from "@/lib/tauri";
 import type { ProviderId } from "@/types";
-import { cn } from "@/lib/utils";
+import { cn, prefersReducedMotion } from "@/lib/utils";
 import { StepShell } from "./StepShell";
 
 /**
@@ -128,6 +128,17 @@ export function ProviderStep({
       subtitle="Loach can run local models through Ollama or talk to any OpenAI-compatible API."
       primaryLabel="Continue"
       primaryDisabled={!provisioned}
+      // Say why Continue is dead instead of leaving a greyed-out mystery.
+      // Phrased around the unlock condition (not a specific action) so it
+      // stays true whether Ollama is down or merely empty. The ✕ route
+      // through "Skip setup?" stays available on every branch.
+      primaryHint={
+        phase === "ollama"
+          ? "Continue unlocks once Ollama has a model — or close (✕) to finish setup later."
+          : phase === "openai"
+            ? "Continue unlocks once a key is verified — or close (✕) to finish setup later."
+            : "Pick a provider to continue — or close (✕) to finish setup later."
+      }
       onPrimary={goNext}
       canGoBack={phase === "choose"}
       onBack={goBack}
@@ -444,6 +455,17 @@ function ModelCatalog({ onPulled }: { onPulled: () => void }) {
 
   // Custom tag input
   const [customTag, setCustomTag] = useState("");
+  // The custom-tag card sits below the catalog and can end up under the
+  // fold on short windows; the header link scrolls it into view so users
+  // who arrived with a specific tag in mind can find it without hunting.
+  const customTagRef = useRef<HTMLInputElement>(null);
+  const jumpToCustomTag = () => {
+    customTagRef.current?.scrollIntoView({
+      behavior: prefersReducedMotion() ? "auto" : "smooth",
+      block: "center",
+    });
+    customTagRef.current?.focus({ preventScroll: true });
+  };
 
   // Track tags we've kicked off so we can show their progress chip even
   // after the run cleans up. Map: tag -> stream id.
@@ -494,7 +516,16 @@ function ModelCatalog({ onPulled }: { onPulled: () => void }) {
   return (
     <div className="space-y-3">
       <div>
-        <h3 className="text-[13px] font-medium">Recommended models</h3>
+        <div className="flex items-baseline justify-between gap-3">
+          <h3 className="text-[13px] font-medium">Recommended models</h3>
+          <button
+            type="button"
+            onClick={jumpToCustomTag}
+            className="shrink-0 text-[11.5px] text-foreground/55 underline-offset-2 hover:text-foreground hover:underline"
+          >
+            Have a specific tag in mind?
+          </button>
+        </div>
         <p className="mt-0.5 text-[11.5px] text-foreground/50">
           Sizes are approximate disk footprint after the pull finishes.
           MoE = mixture of experts (only a fraction of weights run per
@@ -593,6 +624,7 @@ function ModelCatalog({ onPulled }: { onPulled: () => void }) {
         <div className="mt-2 flex gap-2">
           <Input
             id="onboarding-custom-tag"
+            ref={customTagRef}
             value={customTag}
             onChange={(e) => setCustomTag(e.target.value)}
             placeholder="model:tag"

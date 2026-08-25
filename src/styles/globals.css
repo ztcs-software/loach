@@ -534,6 +534,23 @@ html.font-size-large   { --font-scale: 1.05; }
 .text-foreground\/95 { color: hsl(var(--foreground)); }
 
 /* =========================================================================
+   Contrast lift for destructive menu items in dark mode
+   -------------------------------------------------------------------------
+   Dropdown items styled `text-destructive` (Delete, Remove…) sit on the
+   dark popover surface, where the `--destructive` token (0 70% 55%) lands
+   at 4.44:1 — a hair under AA. The token itself can't move: it also fills
+   destructive buttons under white text, and no single lightness passes
+   both jobs on dark (the same two-sided bind the light theme resolves at
+   44%). So lift only the menu-item text role; same hue, higher lightness
+   (5.8:1 on the popover). Specificity (0,3,0) also outranks the
+   `focus:text-destructive` variants the items carry.
+   ========================================================================= */
+.dark [role="menuitem"].text-destructive,
+.dark [role="menuitemcheckbox"].text-destructive {
+  color: hsl(0 84% 66%);
+}
+
+/* =========================================================================
    Light-theme syntax highlighting (highlight.js)
    -------------------------------------------------------------------------
    `Markdown.tsx` imports `highlight.js/styles/github-dark.css` globally —

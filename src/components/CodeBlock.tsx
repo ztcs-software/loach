@@ -114,7 +114,7 @@ export function CodeBlock({ className, children, raw, language }: CodeBlockProps
           </ToolbarButton>
           <ToolbarButton
             onClick={onExport}
-            label={`Export to .${language ?? "txt"} file`}
+            label={`Export to ${defaultFilename(language)}`}
             icon={<Download className="h-3 w-3" />}
           >
             Export
