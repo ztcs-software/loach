@@ -465,6 +465,13 @@ export interface Settings {
    *  offline-first unless the user opts in. Ignored on installs where the
    *  updater isn't supported (dev builds, plain binaries). */
   auto_check_updates: boolean;
+  /** Slash commands the user ran most recently, newest first, as a JSON
+   *  string array (`["model","new"]`). Drives the "Recent" section at the
+   *  top of the composer's `/` palette. Never shown in the Settings dialog
+   *  — like `default_provider` / `default_model` it's last-used state that
+   *  happens to live in the same KV table. Encode/decode via
+   *  `src/lib/commands/recency.ts`; `""` means no history yet. */
+  recent_commands: string;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -500,6 +507,7 @@ export const DEFAULT_SETTINGS: Settings = {
   default_tone_id: "default",
   onboarding_completed: false,
   auto_check_updates: false,
+  recent_commands: "",
 };
 
 /** Shape returned by the Rust `fetch_url` command. Kept in sync with

@@ -67,6 +67,7 @@ export function SearchBar() {
   const newSession = useChatStore((s) => s.newSession);
   const setViewingSpace = useSpaceStore((s) => s.setViewingSpace);
   const setSidebarTab = useUIStore((s) => s.setSidebarTab);
+  const recentSessionIds = useUIStore((s) => s.recentSessionIds);
 
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
@@ -121,7 +122,20 @@ export function SearchBar() {
     // Empty query → "suggestions": a small mixed slice of recent items.
     if (!q) {
       const out: Result[] = [];
-      const liveChats = sessions.filter((s) => !s.archived_at).slice(0, 4);
+      // `sessions` arrives as `updated_at DESC` — recently *written to*.
+      // Chats the user has actually opened this session come first, since
+      // "the one I was just looking at" is the overwhelmingly likely
+      // target when the palette is opened with an empty box. Everything
+      // else keeps the updated_at order behind them.
+      const visitRank = new Map(recentSessionIds.map((id, i) => [id, i]));
+      const liveChats = sessions
+        .filter((s) => !s.archived_at)
+        .sort(
+          (a, b) =>
+            (visitRank.get(a.id) ?? Number.MAX_SAFE_INTEGER) -
+            (visitRank.get(b.id) ?? Number.MAX_SAFE_INTEGER),
+        )
+        .slice(0, 4);
       for (const s of liveChats) {
         out.push({
           kind: "chat",
@@ -195,7 +209,7 @@ export function SearchBar() {
     }
 
     return matches.slice(0, MAX_RESULTS);
-  }, [query, sessions, spaces, snippets]);
+  }, [query, sessions, spaces, snippets, recentSessionIds]);
 
   // Keep the active row valid whenever the result set changes.
   useEffect(() => {

@@ -13,6 +13,7 @@ import {
   clearOpenAIKey as clearOpenAIKeyCmd,
   setSetting,
 } from "@/lib/tauri";
+import { pushRecentCommand } from "@/lib/commands/recency";
 import { useToastStore } from "./toastStore";
 
 interface SettingsState extends Settings {
@@ -23,6 +24,9 @@ interface SettingsState extends Settings {
   setOpenAIKey: (key: string) => Promise<void>;
   clearOpenAIKey: () => Promise<void>;
   setProviderDefault: (provider: ProviderId, model: string) => Promise<void>;
+  /** Note that a slash command just ran, so the palette can float it to the
+   *  top next time. Fire-and-forget by design — see the implementation. */
+  recordCommandUse: (name: string) => void;
 }
 
 export const useSettingsStore = create<SettingsState>((set, get) => ({
@@ -137,6 +141,22 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       return;
     }
     set({ default_provider: provider, default_model: model });
+  },
+
+  recordCommandUse: (name) => {
+    const prev = get().recent_commands;
+    const next = pushRecentCommand(prev, name);
+    // Already the most-recent entry — nothing to write, and skipping the
+    // `set` avoids re-rendering the composer on every repeat of a command.
+    if (next === prev) return;
+    set({ recent_commands: next });
+    // Deliberately not routed through `update()`: that surfaces a toast on
+    // failure, and "couldn't save your command history" is noise on top of
+    // whatever the user was actually doing. The in-memory list above still
+    // works for this session; the next successful write repairs the row.
+    void setSetting("recent_commands", next).catch((e) => {
+      logger.warn("recent-command persist failed", e);
+    });
   },
 }));
 

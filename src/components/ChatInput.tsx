@@ -37,8 +37,10 @@ import { dispatch as dispatchCommand } from "@/lib/commands/dispatch";
 import {
   isCommandInput,
   matchCommands,
+  parseInput,
   type PaletteEntry,
 } from "@/lib/commands/parser";
+import { orderByRecency, parseRecentCommands } from "@/lib/commands/recency";
 import type { CommandResult } from "@/lib/commands/types";
 import type { Attachment } from "@/types";
 
@@ -74,6 +76,8 @@ export function ChatInput({ centered = false }: ChatInputProps) {
   const toneIdBySession = useUIStore((s) => s.toneIdBySession);
   const setSessionTone = useUIStore((s) => s.setSessionTone);
   const defaultToneId = useSettingsStore((s) => s.default_tone_id);
+  const recentCommands = useSettingsStore((s) => s.recent_commands);
+  const recordCommandUse = useSettingsStore((s) => s.recordCommandUse);
   // Imperative confirm for destructive slash commands (/clear, /delete). The
   // dispatcher isn't a component, so it can't call the hook itself — we inject
   // the resolver into dispatch().
@@ -123,9 +127,19 @@ export function ChatInput({ centered = false }: ChatInputProps) {
   const [paletteIndex, setPaletteIndex] = useState(0);
   const [paletteDismissed, setPaletteDismissed] = useState(false);
   const [commandResult, setCommandResult] = useState<CommandResult | null>(null);
+  // Recency is applied HERE rather than inside the palette: `paletteIndex`
+  // indexes into this array, and both the keyboard handler and the palette
+  // must agree on the order or Enter would accept a different row than the
+  // one highlighted.
   const paletteEntries: PaletteEntry[] = useMemo(
-    () => (isCommandInput(text) ? matchCommands(text.slice(1)) : []),
-    [text],
+    () =>
+      isCommandInput(text)
+        ? orderByRecency(
+            matchCommands(text.slice(1)),
+            parseRecentCommands(recentCommands),
+          )
+        : [],
+    [text, recentCommands],
   );
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -582,6 +596,12 @@ export function ChatInput({ centered = false }: ChatInputProps) {
     if (trimmed && isCommandInput(trimmed)) {
       const outcome = await dispatchCommand(trimmed, { confirm });
       if (outcome.kind === "handled") {
+        // "Handled" covers the failed-command case too, and that's the
+        // behaviour we want: reaching for a command is the signal recency
+        // tracks, and a command that just errored is one you're likely to
+        // retry. `passthrough` (unregistered text) is correctly excluded.
+        const name = parseInput(trimmed)?.name;
+        if (name) recordCommandUse(name);
         setText("");
         setComposerDraft("");
         setError(null);

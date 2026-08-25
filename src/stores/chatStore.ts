@@ -1555,6 +1555,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       return { activeSessionId: id, unread: next };
     });
     if (!id) return;
+    // Feeds the Ctrl/Cmd+K palette's "recently opened" suggestion order.
+    // After the early return, so clearing the selection (delete / archive)
+    // doesn't register as a visit.
+    useUIStore.getState().noteSessionVisit(id);
     if (!get().messages[id]) {
       // Every caller fires this without awaiting (`void select(id)`), so an
       // unguarded reject here surfaces only as an unhandled promise rejection

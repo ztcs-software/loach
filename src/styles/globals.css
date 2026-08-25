@@ -149,6 +149,22 @@
        only for the text role. */
     --primary-text: 210 100% 42%;
   }
+  /* Light Solid ground. `:root`'s `--background` is a WARM 30-hue off-white
+     chosen to sit under Aurora's peach mesh; Solid shows it bare next to an
+     azure accent, which reads as a beige page someone dropped a blue button
+     onto. Same saturation and lightness, re-hued to the 230 the rest of the
+     light neutrals (`--muted`, `--secondary`, `--accent`) already use — so
+     light Solid becomes one cool family around its cool accent, and every
+     measured contrast ratio holds (lightness is unchanged).
+
+     `:not(.dark)` rather than plain `.bg-solid`: `.bg-solid` and `.dark`
+     have equal specificity and `.bg-solid` is declared later, so an
+     unqualified rule here would win over `.dark`'s near-black background
+     and wash out the dark Solid theme. */
+  .bg-solid:not(.dark) {
+    --background: 230 25% 97%;
+  }
+
   .bg-solid.dark {
     /* Slightly brighter azure for dark Solid so the accent stays legible
        against the near-black background. */

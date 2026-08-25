@@ -40,7 +40,7 @@ export function CommandPalette({
   // the filter has narrowed to a single group (or to one command's
   // sub-entries) a lone header is pure noise, so headers only appear once
   // two or more groups are on screen.
-  const groupOf = (e: PaletteEntry) => e.cmd.group ?? "Other";
+  const groupOf = (e: PaletteEntry) => e.groupOverride ?? e.cmd.group ?? "Other";
   const showHeaders = new Set(entries.map(groupOf)).size > 1;
 
   return (

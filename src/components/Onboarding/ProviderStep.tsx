@@ -4,7 +4,6 @@ import {
   ArrowRight,
   Check,
   ChevronDown,
-  ChevronRight,
   CircleDot,
   Cloud,
   Download,
@@ -150,22 +149,22 @@ export function ProviderStep({
             setPhase(p === "ollama" ? "ollama" : "openai");
           }}
         />
-      ) : phase === "ollama" ? (
-        <OllamaPath
-          onBack={() => {
-            setProvisioned(false);
-            setPhase("choose");
-          }}
-          onProvisioned={() => setProvisioned(true)}
-        />
       ) : (
-        <OpenAIPath
-          onBack={() => {
-            setProvisioned(false);
-            setPhase("choose");
-          }}
-          onProvisioned={() => setProvisioned(true)}
-        />
+        <div className="space-y-4">
+          <ProviderSwitch
+            value={phase}
+            onChange={(p) => {
+              if (p === phase) return;
+              setProvisioned(false);
+              setPhase(p);
+            }}
+          />
+          {phase === "ollama" ? (
+            <OllamaPath onProvisioned={() => setProvisioned(true)} />
+          ) : (
+            <OpenAIPath onProvisioned={() => setProvisioned(true)} />
+          )}
+        </div>
       )}
     </StepShell>
   );
@@ -248,13 +247,7 @@ type OllamaProbe =
   | { kind: "down"; error: string }
   | { kind: "up"; modelCount: number };
 
-function OllamaPath({
-  onBack,
-  onProvisioned,
-}: {
-  onBack: () => void;
-  onProvisioned: () => void;
-}) {
+function OllamaPath({ onProvisioned }: { onProvisioned: () => void }) {
   const baseUrl = useSettingsStore((s) => s.ollama_base_url);
   const update = useSettingsStore((s) => s.update);
   const setProviderDefault = useSettingsStore((s) => s.setProviderDefault);
@@ -299,8 +292,6 @@ function OllamaPath({
 
   return (
     <div className="space-y-4">
-      <BackChip onBack={onBack} label="Pick a different provider" />
-
       {/* Status panel */}
       {probe.kind === "probing" ? (
         <StatusPanel tone="neutral" icon={<Loader2 className="h-4 w-4 animate-spin" />}>
@@ -426,16 +417,63 @@ function StatusPanel({
   );
 }
 
-function BackChip({ onBack, label }: { onBack: () => void; label: string }) {
+/**
+ * Provider selector shown once a path is open. Replaces the old
+ * "Pick a different provider" back-chip, which could say only that *a*
+ * choice had been made — never which one. The big choice cards unmount as
+ * soon as a provider is picked, so this row is the only place the current
+ * selection can be represented: it shows both options, marks the active
+ * one visually and via `aria-pressed`, and switches in one click instead
+ * of back-then-repick.
+ *
+ * Toggle buttons rather than `role="radio"` on purpose: a radiogroup owes
+ * the user arrow-key roving focus, and two plain `aria-pressed` buttons
+ * announce their state just as clearly without that keyboard debt.
+ */
+function ProviderSwitch({
+  value,
+  onChange,
+}: {
+  value: Exclude<Phase, "choose">;
+  onChange: (p: Exclude<Phase, "choose">) => void;
+}) {
+  const options = [
+    { id: "ollama" as const, label: "Ollama", icon: <HardDrive className="h-3.5 w-3.5" /> },
+    { id: "openai" as const, label: "OpenAI API", icon: <Cloud className="h-3.5 w-3.5" /> },
+  ];
   return (
-    <button
-      type="button"
-      onClick={onBack}
-      className="inline-flex items-center gap-1 text-[11.5px] text-foreground/55 hover:text-foreground transition-colors"
-    >
-      <ChevronRight className="h-3.5 w-3.5 rotate-180" />
-      {label}
-    </button>
+    <div className="flex items-center gap-2">
+      <span id="provider-switch-label" className="text-[11.5px] text-foreground/50">
+        Provider
+      </span>
+      <div
+        role="group"
+        aria-labelledby="provider-switch-label"
+        className="inline-flex gap-1 rounded-full border border-foreground/[0.08] bg-foreground/[0.03] p-0.5"
+      >
+        {options.map((o) => {
+          const active = o.id === value;
+          return (
+            <button
+              key={o.id}
+              type="button"
+              aria-pressed={active}
+              onClick={() => onChange(o.id)}
+              className={cn(
+                "inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11.5px] font-medium transition-colors",
+                "focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/40",
+                active
+                  ? "bg-foreground/[0.10] text-foreground"
+                  : "text-foreground/55 hover:bg-foreground/[0.06] hover:text-foreground/85",
+              )}
+            >
+              {o.icon}
+              {o.label}
+            </button>
+          );
+        })}
+      </div>
+    </div>
   );
 }
 
@@ -746,13 +784,7 @@ function fmtPct(run: AdminProgress) {
 
 /* ───────────────────────── OpenAI path ───────────────────────── */
 
-function OpenAIPath({
-  onBack,
-  onProvisioned,
-}: {
-  onBack: () => void;
-  onProvisioned: () => void;
-}) {
+function OpenAIPath({ onProvisioned }: { onProvisioned: () => void }) {
   const baseUrl = useSettingsStore((s) => s.openai_base_url);
   const keySet = useSettingsStore((s) => s.openai_key_set);
   const update = useSettingsStore((s) => s.update);
@@ -828,8 +860,6 @@ function OpenAIPath({
 
   return (
     <div className="space-y-4">
-      <BackChip onBack={onBack} label="Pick a different provider" />
-
       <div className="rounded-xl border border-foreground/[0.08] bg-foreground/[0.015] p-4 space-y-4">
         <div>
           <Label htmlFor="onboarding-openai-url" className="text-[12px]">Base URL</Label>
