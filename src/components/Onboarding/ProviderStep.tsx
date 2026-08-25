@@ -391,11 +391,15 @@ function StatusPanel({
   title?: string;
   children: React.ReactNode;
 }) {
+  // The tone colour is inherited by the leading icon (the body below sets
+  // its own `text-foreground/85`). Light/dark pair rather than the bare
+  // bright tone: on the light theme these washes are near-white, where
+  // emerald-300 / amber-300 land around 1.3:1.
   const palette =
     tone === "ok"
-      ? "border-emerald-500/25 bg-emerald-500/[0.06] text-emerald-300"
+      ? "border-emerald-500/25 bg-emerald-500/[0.06] text-emerald-800 dark:text-emerald-300"
       : tone === "warn"
-        ? "border-amber-500/30 bg-amber-500/[0.06] text-amber-300"
+        ? "border-amber-500/30 bg-amber-500/[0.06] text-amber-800 dark:text-amber-300"
         : "border-foreground/10 bg-foreground/[0.03] text-foreground/75";
   return (
     <div className={cn("rounded-xl border p-3.5 text-[12.5px] leading-relaxed", palette)}>
@@ -645,7 +649,7 @@ function VariantRow({
         )}
       </div>
       {done ? (
-        <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/15 px-2 py-0.5 text-[11px] text-emerald-300">
+        <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/15 px-2 py-0.5 text-[11px] text-emerald-800 dark:text-emerald-300">
           <Check className="h-3 w-3" />
           Ready
         </span>
@@ -871,7 +875,7 @@ function OpenAIPath({
         )}
 
         {verified && !error && (
-          <p className="flex items-center gap-1.5 rounded-lg border border-emerald-500/25 bg-emerald-500/[0.06] px-3 py-2 text-[12px] text-emerald-300">
+          <p className="flex items-center gap-1.5 rounded-lg border border-emerald-500/25 bg-emerald-500/[0.06] px-3 py-2 text-[12px] text-emerald-800 dark:text-emerald-300">
             <Check className="h-3.5 w-3.5" />
             Key verified — you're ready to chat.
           </p>

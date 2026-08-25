@@ -144,7 +144,11 @@ const config: Config = {
             "--tw-prose-body": "hsl(var(--foreground))",
             "--tw-prose-headings": "hsl(var(--foreground))",
             "--tw-prose-lead": "hsl(var(--foreground) / 0.95)",
-            "--tw-prose-links": "hsl(var(--primary))",
+            // `--primary-text`, not `--primary`: link copy is small text on
+            // the message background, where the full-strength accent is
+            // 2.4:1 in light mode. The token is the same hue at a lightness
+            // that clears AA, and is aliased back to `--primary` in dark.
+            "--tw-prose-links": "hsl(var(--primary-text))",
             "--tw-prose-bold": "hsl(var(--foreground))",
             "--tw-prose-counters": "hsl(var(--muted-foreground))",
             "--tw-prose-bullets": "hsl(var(--foreground) / 0.35)",
@@ -163,7 +167,7 @@ const config: Config = {
             "--tw-prose-invert-body": "hsl(var(--foreground))",
             "--tw-prose-invert-headings": "hsl(var(--foreground))",
             "--tw-prose-invert-lead": "hsl(var(--foreground) / 0.95)",
-            "--tw-prose-invert-links": "hsl(var(--primary))",
+            "--tw-prose-invert-links": "hsl(var(--primary-text))",
             "--tw-prose-invert-bold": "hsl(var(--foreground))",
             "--tw-prose-invert-counters": "hsl(var(--muted-foreground))",
             "--tw-prose-invert-bullets": "hsl(var(--foreground) / 0.35)",

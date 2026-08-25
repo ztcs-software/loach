@@ -30,12 +30,26 @@
     --muted-foreground: 230 14% 28%;
     --accent: 230 15% 92%;
     --accent-foreground: 230 30% 7%;
-    --destructive: 0 84% 50%;
+    /* 44% (not the shadcn default 50%) so the token clears WCAG AA on both
+       sides of its two jobs: `text-destructive` copy on the near-white
+       background (was 4.23:1) and `--destructive-foreground` white on a
+       `bg-destructive` button (was 4.33:1). Both now land above 5:1. */
+    --destructive: 0 84% 44%;
     --destructive-foreground: 0 0% 98%;
     --border: 230 25% 12% / 0.12;
     --input: 230 25% 12% / 0.10;
     --ring: 22 95% 60%;
     --radius: 1.25rem;
+
+    /* Accent for accent-COLOURED TEXT (prose links, and anywhere the accent
+       carries meaning as small copy rather than as a fill). `--primary` is a
+       60%-lightness saturated hue chosen to read as a button/glow surface;
+       as text on the near-white background it lands at 2.4:1. This is the
+       same hue and saturation dropped to a lightness that clears 4.5:1, so
+       links stay recognisably "the accent" without failing AA. Dark mode
+       re-points it at `--primary` (see `.dark`), where the bright accent
+       already has ~8:1 against the near-black backdrop. */
+    --primary-text: 22 95% 38%;
 
     /* Glass tokens flipped per theme */
     --glass-tint: 255 255 255;
@@ -78,6 +92,9 @@
     --primary: 22 95% 60%;
     --primary-foreground: 0 0% 100%;
     --primary-glow: 255 110 50;
+    /* No darkening needed here — the accent already clears 8:1 as text on
+       the near-black backdrop, so link copy keeps the full-strength hue. */
+    --primary-text: 22 95% 60%;
     --secondary: 230 20% 14%;
     --secondary-foreground: 0 0% 100%;
     --muted: 230 18% 14%;
@@ -122,6 +139,10 @@
     --primary-glow: 0 127 255;
     --ring: 210 100% 50%;
     --prompt-glow: 0 10px 40px -8px rgba(0, 127, 255, 0.20);
+    /* Azure at 50% is 3.8:1 as text on the light background — closer than
+       the orange but still short of AA. Same treatment: drop the lightness
+       only for the text role. */
+    --primary-text: 210 100% 42%;
   }
   .bg-solid.dark {
     /* Slightly brighter azure for dark Solid so the accent stays legible
@@ -130,6 +151,7 @@
     --primary-glow: 36 150 255;
     --ring: 210 100% 58%;
     --prompt-glow: 0 10px 40px -8px rgba(36, 150, 255, 0.30);
+    --primary-text: 210 100% 58%;
   }
 
   * {
@@ -287,6 +309,32 @@
     box-shadow:
       0 1px 0 0 rgb(255 255 255 / var(--glass-highlight)) inset,
       var(--glass-shadow);
+  }
+
+  /* Light-theme correction for the one glass surface that sits over a
+     SCRIM rather than over the page.
+     -------------------------------------------------------------------
+     `--glass-surface-a/b` (0.62 / 0.42 in light) are tuned for glass laid
+     directly on the light background — the sidebar and the prompt bar,
+     which both read correctly at that opacity. Dialogs are different:
+     `DialogContent` and the onboarding card pair `.glass-panel` with a
+     `bg-black/55` overlay, so at 0.70/0.48 the card composited to
+     #d4d4d4 → #b5b4b4 — a mid-grey slab. Body copy survived that, but
+     anything relying on colour to carry meaning did not (the onboarding
+     status text bottomed out at 2.4:1 even after being darkened to the
+     -700 tier).
+
+     Raising the fill for `.glass-panel` alone lands the card at
+     ~#f4f3f3 → #ebebeb and leaves `.glass-subtle` / `.glass-prompt`
+     untouched, so only the over-scrim surface changes. Dark mode is
+     unaffected: there the scrim and the panel pull the same direction,
+     and the existing tokens already give ~13:1 on body copy. */
+  html:not(.dark) .glass-panel {
+    background: linear-gradient(
+      180deg,
+      rgb(var(--glass-tint) / 0.92) 0%,
+      rgb(var(--glass-tint) / 0.86) 100%
+    );
   }
 
   /* Premium prompt-bar glass */
@@ -491,6 +539,14 @@ html.font-size-large   { --font-scale: 1.05; }
    contrast holds. Background declarations are intentionally omitted — the
    CodeBlock / CodeCanvas already manage their own surface, and adding a
    white slab here would conflict with their glass treatment.
+
+   Four tokens use github's *high-contrast* light values rather than its
+   default ones. github tunes its default light palette against pure white;
+   our code surface composites to ~#edebea, and at the 10px the block renders
+   that cost the red / orange / grey / green tokens their AA margin (they
+   measured 3.85 / 2.94 / 4.05 / 3.89 against the surface). The replacements
+   below are github's own darker variants for the same roles, so the palette
+   still reads as github-light — every token now clears 4.5:1.
    ========================================================================= */
 html:not(.dark) .hljs                            { color: #24292e; }
 html:not(.dark) .hljs-doctag,
@@ -499,7 +555,7 @@ html:not(.dark) .hljs-meta .hljs-keyword,
 html:not(.dark) .hljs-template-tag,
 html:not(.dark) .hljs-template-variable,
 html:not(.dark) .hljs-type,
-html:not(.dark) .hljs-variable.language_         { color: #d73a49; }
+html:not(.dark) .hljs-variable.language_         { color: #a0111f; }
 html:not(.dark) .hljs-title,
 html:not(.dark) .hljs-title.class_,
 html:not(.dark) .hljs-title.class_.inherited__,
@@ -518,20 +574,20 @@ html:not(.dark) .hljs-regexp,
 html:not(.dark) .hljs-string,
 html:not(.dark) .hljs-meta .hljs-string          { color: #032f62; }
 html:not(.dark) .hljs-built_in,
-html:not(.dark) .hljs-symbol                     { color: #e36209; }
+html:not(.dark) .hljs-symbol                     { color: #953800; }
 html:not(.dark) .hljs-comment,
 html:not(.dark) .hljs-code,
-html:not(.dark) .hljs-formula                    { color: #6a737d; }
+html:not(.dark) .hljs-formula                    { color: #57606a; }
 html:not(.dark) .hljs-name,
 html:not(.dark) .hljs-quote,
 html:not(.dark) .hljs-selector-tag,
-html:not(.dark) .hljs-selector-pseudo            { color: #22863a; }
+html:not(.dark) .hljs-selector-pseudo            { color: #116329; }
 html:not(.dark) .hljs-subst                      { color: #24292e; }
 html:not(.dark) .hljs-section                    { color: #005cc5; font-weight: bold; }
 html:not(.dark) .hljs-bullet                     { color: #735c0f; }
 html:not(.dark) .hljs-emphasis                   { color: #24292e; font-style: italic; }
 html:not(.dark) .hljs-strong                     { color: #24292e; font-weight: bold; }
-html:not(.dark) .hljs-addition                   { color: #22863a; background-color: #f0fff4; }
+html:not(.dark) .hljs-addition                   { color: #116329; background-color: #f0fff4; }
 html:not(.dark) .hljs-deletion                   { color: #b31d28; background-color: #ffeef0; }
 
 /* =========================================================================

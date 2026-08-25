@@ -34,16 +34,23 @@ function ToastItem({ toast, onDismiss }: { toast: Toast; onDismiss: () => void }
       className={cn(
         "pointer-events-auto flex max-w-sm items-start gap-2.5 rounded-2xl border px-3.5 py-2.5 text-sm shadow-lg backdrop-blur-md",
         "animate-in slide-in-from-bottom-2 fade-in duration-200",
+        // Both tinted variants pair a light-mode-readable tone with the
+        // original bright one under `dark:`. They previously carried only
+        // the bright tone, which is sized for the dark backdrop — over a
+        // 15% wash on the light theme the memory title measured 1.04:1 and
+        // the error title 1.31:1, i.e. invisible. `text-destructive-
+        // foreground` was the wrong token for the error case either way:
+        // it's the on-solid-destructive colour, not an on-tint one.
         isMemory &&
-          "border-indigo-400/30 bg-indigo-500/15 text-indigo-100",
+          "border-indigo-400/30 bg-indigo-500/15 text-indigo-700 dark:text-indigo-100",
         isError &&
-          "border-destructive/40 bg-destructive/15 text-destructive-foreground",
+          "border-destructive/40 bg-destructive/15 text-red-700 dark:text-red-200",
         !isMemory && !isError &&
           "border-foreground/15 bg-foreground/[0.06] text-foreground/90",
       )}
     >
       {isMemory && (
-        <Brain className="mt-0.5 h-4 w-4 shrink-0 text-indigo-200" />
+        <Brain className="mt-0.5 h-4 w-4 shrink-0 text-indigo-600 dark:text-indigo-200" />
       )}
       <div className="min-w-0 flex-1">
         <div className="font-medium">{toast.title}</div>
