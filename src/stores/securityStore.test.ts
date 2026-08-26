@@ -113,3 +113,25 @@ describe("securityStore hydration", () => {
     expect(s.unlocked).toBe(true);
   });
 });
+
+describe("securityStore.lock", () => {
+  it("re-engages the lock screen mid-session", () => {
+    useSecurityStore.setState({ status: PIN_LOCK, hydrated: true, unlocked: true });
+
+    useSecurityStore.getState().lock();
+
+    expect(useSecurityStore.getState().unlocked).toBe(false);
+  });
+
+  it("is a no-op when no lock is configured", () => {
+    // Same fail-open invariant the hydration tests pin: without a configured
+    // lock there is no credential to unlock with, so flipping the flag would
+    // strand the user behind a lock screen they can't clear. The auto-lock
+    // triggers gate on `configured` too, but this is the last line.
+    useSecurityStore.setState({ status: UNCONFIGURED, hydrated: true, unlocked: true });
+
+    useSecurityStore.getState().lock();
+
+    expect(useSecurityStore.getState().unlocked).toBe(true);
+  });
+});

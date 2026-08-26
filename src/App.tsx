@@ -77,6 +77,7 @@ import { useSnippetVarStore } from "@/stores/snippetVarStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useSecurityStore, lockUntilHydrated } from "@/stores/securityStore";
 import { useUIStore } from "@/stores/uiStore";
+import { useAutoLock } from "@/lib/autoLock";
 import { useCanvasStore } from "@/stores/canvasStore";
 import { cn } from "@/lib/utils";
 import { DEFAULT_PARAMS } from "@/types";
@@ -136,6 +137,11 @@ export default function App() {
     lockUntilHydrated();
     void hydrateSecurity();
   }, [hydrateSecurity]);
+
+  // Re-lock triggers (idle timeout / minimize). Self-gating: does nothing
+  // until a lock is configured AND the user has opted into a trigger, so
+  // it costs nothing for the installs that never set a lock up.
+  useAutoLock();
 
   // See `warmLazyChunks`. `requestIdleCallback` is missing on the oldest
   // webviews we support (Safari gained it in 17.4), hence the timeout path.

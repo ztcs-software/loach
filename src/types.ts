@@ -350,6 +350,14 @@ export type FontSize = "small" | "normal" | "large";
  *  before this setting existed. */
 export type OllamaKeepAlive = "5m" | "30m" | "1h" | "-1";
 
+/** Idle window after which a configured app lock re-engages. `"off"` (the
+ *  default) keeps the pre-1.4 behaviour where unlocking once lasts for the
+ *  whole process. Stored as a string rather than a number of minutes because
+ *  the settings KV table is string-keyed and `settingsStore.hydrate` only
+ *  coerces booleans back out of it — a numeric field would silently arrive
+ *  as a string. */
+export type LockIdleTimeout = "off" | "1m" | "5m" | "15m" | "30m";
+
 export interface Settings {
   theme: ThemeChoice;
   background_style: BackgroundStyle;
@@ -465,6 +473,16 @@ export interface Settings {
    *  offline-first unless the user opts in. Ignored on installs where the
    *  updater isn't supported (dev builds, plain binaries). */
   auto_check_updates: boolean;
+  /** How long the app may sit idle before a configured app lock re-engages.
+   *  Ignored when no lock is set up — there'd be nothing to unlock with.
+   *  Activity is any pointer / key / wheel / touch event on the window. */
+  lock_idle_timeout: LockIdleTimeout;
+  /** When true, a configured app lock re-engages as soon as the window is
+   *  minimized or otherwise hidden. Keyed on `document.visibilityState`
+   *  rather than window focus on purpose: a native save / open dialog steals
+   *  focus but leaves the document visible, so a focus-based trigger would
+   *  relock the app every time the user exported a chat or attached a file. */
+  lock_on_hide: boolean;
   /** Slash commands the user ran most recently, newest first, as a JSON
    *  string array (`["model","new"]`). Drives the "Recent" section at the
    *  top of the composer's `/` palette. Never shown in the Settings dialog
@@ -507,6 +525,8 @@ export const DEFAULT_SETTINGS: Settings = {
   default_tone_id: "default",
   onboarding_completed: false,
   auto_check_updates: false,
+  lock_idle_timeout: "off",
+  lock_on_hide: false,
   recent_commands: "",
 };
 

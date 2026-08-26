@@ -31,10 +31,16 @@ export type ShortcutAction =
   | "toggle-sidebar"
   | "toggle-params"
   | "delete-current-chat"
+  | "lock-now"
   | "show-shortcuts";
 
 /** Where a shortcut belongs in the help dialog. */
-export type ShortcutGroup = "Navigation" | "Chat" | "Layout" | "Help";
+export type ShortcutGroup =
+  | "Navigation"
+  | "Chat"
+  | "Layout"
+  | "Security"
+  | "Help";
 
 /** Canonical, platform-independent description of a shortcut. The `mod`
  *  flag stands for Ctrl-on-PC / Cmd-on-Mac (the conventional primary
@@ -110,6 +116,15 @@ export const SHORTCUTS: ShortcutSpec[] = [
     mod: true,
     shift: true,
     keys: ["p"],
+  },
+  // Security
+  {
+    action: "lock-now",
+    label: "Lock Loach now",
+    group: "Security",
+    mod: true,
+    shift: true,
+    keys: ["l"],
   },
   // Help
   {

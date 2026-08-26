@@ -23,6 +23,9 @@ import { matches, SHORTCUTS, type ShortcutAction } from "@/lib/shortcuts";
  *   - onboarding (not yet completed)
  *   - private chat (owns the whole UI below the title bar)
  *
+ * `lock-now` is the one exception: it runs through the last two, since the
+ * point of a panic key is that it works wherever you are.
+ *
  * The Cmd/Ctrl-K palette has its OWN listener inside `SearchBar` that
  * predates this component; we intentionally don't double-handle it here.
  * Same for `loach:open-chat-search` (the existing in-chat finder), which
@@ -35,6 +38,16 @@ export function KeyboardShortcuts() {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // Find the first spec that matches the event. `matches` is strict on
+      // Shift/Alt so Ctrl+S and Ctrl+Shift+S can't collide. Resolved BEFORE
+      // the gate below because `lock-now` is exempt from part of it.
+      const spec = SHORTCUTS.find((s) => matches(s, e));
+      if (!spec) return;
+
+      // `global-search` is already owned by SearchBar's own listener —
+      // skip it here so we don't fight that handler for `preventDefault`.
+      if (spec.action === "global-search") return;
+
       // Gate. Read store state directly inside the handler so we never get
       // stale snapshots and don't have to re-bind the listener on every
       // gate-state change.
@@ -44,16 +57,12 @@ export function KeyboardShortcuts() {
       const onboardingActive =
         settings.hydrated && !settings.onboarding_completed;
       const locked = sec.status.configured && !sec.unlocked;
-      if (locked || onboardingActive || priv.open) return;
-
-      // Find the first spec that matches the event. `matches` is strict on
-      // Shift/Alt so Ctrl+S and Ctrl+Shift+S can't collide.
-      const spec = SHORTCUTS.find((s) => matches(s, e));
-      if (!spec) return;
-
-      // `global-search` is already owned by SearchBar's own listener —
-      // skip it here so we don't fight that handler for `preventDefault`.
-      if (spec.action === "global-search") return;
+      // `lock-now` deliberately survives the onboarding / private-chat gates:
+      // a panic key that goes dead on the most sensitive surface in the app
+      // (an off-the-record chat) is worse than not shipping one. It stays
+      // gated on `locked` because re-locking a locked app does nothing.
+      const panic = spec.action === "lock-now";
+      if (locked || ((onboardingActive || priv.open) && !panic)) return;
 
       e.preventDefault();
       e.stopPropagation();
@@ -121,6 +130,12 @@ export function KeyboardShortcuts() {
             destructive: true,
           });
           if (ok) void chat.remove(id);
+          return;
+        }
+
+        case "lock-now": {
+          // No-op unless a lock is configured — see `securityStore.lock`.
+          useSecurityStore.getState().lock();
           return;
         }
 

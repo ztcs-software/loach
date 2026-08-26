@@ -543,6 +543,8 @@ const WRITABLE_SETTING_KEYS: &[&str] = &[
     "default_tone_id",
     "onboarding_completed",
     "auto_check_updates",
+    "lock_idle_timeout",
+    "lock_on_hide",
     "recent_commands",
 ];
 
