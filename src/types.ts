@@ -673,3 +673,29 @@ export interface ImportStats {
   mcp_servers: number;
   settings: number;
 }
+
+/** Storage usage for the Settings → Data tile, from `storage_stats`.
+ *
+ *  Two size notions, deliberately not mixed:
+ *
+ *  - `db_bytes` / `wal_bytes` are filesystem truth.
+ *  - The `*_bytes` buckets are logical text lengths per area. They're
+ *    comparable to each other but always total less than `db_bytes`, since
+ *    they exclude page overhead and indexes. */
+export interface StorageStats {
+  db_path: string;
+  db_bytes: number;
+  wal_bytes: number;
+
+  sessions: number;
+  messages: number;
+  spaces: number;
+  space_files: number;
+  snippets: number;
+  mcp_servers: number;
+
+  message_bytes: number;
+  attachment_bytes: number;
+  space_bytes: number;
+  other_bytes: number;
+}

@@ -21,6 +21,7 @@ import type {
   SpaceContext,
   SpaceFile,
   SpaceMemory,
+  StorageStats,
   StreamEvent,
 } from "@/types";
 
@@ -1016,6 +1017,14 @@ export function mcpTest(input: McpServerInput): Promise<McpTestResult> {
 export function exportDataJson(): Promise<string> {
   if (!isTauri) return Promise.reject(new Error("export requires the Tauri runtime"));
   return invoke<string>("export_data_json");
+}
+
+/** Row counts and byte totals for the storage tile. Resolves `null` outside
+ *  the Tauri shell, where there's no database to measure — the tile renders a
+ *  "desktop app only" line rather than a wall of zeros. */
+export function storageStats(): Promise<StorageStats | null> {
+  if (!isTauri) return notInTauri<StorageStats | null>(null);
+  return invoke<StorageStats>("storage_stats");
 }
 
 /** Native filter shape for {@link saveTextToFile}. */

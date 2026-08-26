@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 // `parking_lot::Mutex` instead of `std::sync::Mutex` for two reasons:
 //   1. No `PoisonError` to ignore on every lock — a panic inside one
@@ -283,6 +283,32 @@ pub struct Message {
     pub created_at: i64,
 }
 
+/// What Settings -> Data reports about on-disk usage. See
+/// `Database::storage_stats` for how the two size notions differ.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct StorageStats {
+    /// Absolute path to `loach.db`, shown so users can find the folder.
+    pub db_path: String,
+    /// Size of the database file itself.
+    pub db_bytes: u64,
+    /// The `-wal` + `-shm` sidecars WAL mode keeps beside it.
+    pub wal_bytes: u64,
+
+    pub sessions: i64,
+    pub messages: i64,
+    pub spaces: i64,
+    pub space_files: i64,
+    pub snippets: i64,
+    pub mcp_servers: i64,
+
+    /// Logical text bytes, by area. These ignore page overhead and indexes,
+    /// so they sum to less than `db_bytes`.
+    pub message_bytes: i64,
+    pub attachment_bytes: i64,
+    pub space_bytes: i64,
+    pub other_bytes: i64,
+}
+
 pub struct Database {
     conn: Mutex<Connection>,
     /// Read-only connection pool used by the hot SELECT paths. WAL mode
@@ -292,6 +318,10 @@ pub struct Database {
     /// plenty for a desktop app and keeps the file-descriptor / mmap
     /// footprint modest.
     read_pool: Pool<SqliteConnectionManager>,
+    /// The file we were opened from. Kept so `storage_stats` can size the
+    /// database (plus its -wal / -shm sidecars) without re-deriving the
+    /// path from the app data dir and drifting out of sync with `lib.rs`.
+    path: PathBuf,
 }
 
 impl Database {
@@ -358,7 +388,13 @@ impl Database {
         Ok(Self {
             conn: Mutex::new(conn),
             read_pool,
+            path: path.to_path_buf(),
         })
+    }
+
+    /// Path to the SQLite file backing this handle.
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
     /// Run a read-only closure against a pooled connection. Use this for
@@ -1157,6 +1193,99 @@ impl Database {
                 .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
                 .collect::<Result<std::collections::HashMap<String, i64>, _>>()?;
             Ok(map)
+        })
+    }
+
+    /// Byte + row totals for the Settings -> Data storage tile.
+    ///
+    /// Two different notions of "size" live here on purpose:
+    ///
+    ///   - `db_bytes` / `wal_bytes` are what the filesystem reports. This is
+    ///     what the user's disk actually gives up, and it never shrinks on
+    ///     delete — SQLite recycles freed pages instead of truncating.
+    ///   - The `*_bytes` buckets are *logical* sizes: the length of the text
+    ///     we store, ignoring page overhead, indexes, and slack. They're
+    ///     comparable to each other but always add up to less than the file.
+    ///
+    /// `LENGTH(CAST(x AS BLOB))` rather than plain `LENGTH(x)`: on a TEXT
+    /// value the latter counts characters, so any non-ASCII transcript would
+    /// under-report. The CAST forces the octet count.
+    pub fn storage_stats(&self) -> Result<StorageStats> {
+        let file_len = |p: std::path::PathBuf| -> u64 {
+            std::fs::metadata(p).map(|m| m.len()).unwrap_or(0)
+        };
+        let db_bytes = file_len(self.path.clone());
+        // WAL mode keeps two sidecars next to the database. The -wal in
+        // particular can hold tens of MB between checkpoints, so leaving it
+        // out would under-report what the folder costs.
+        let sidecar = |suffix: &str| {
+            let mut name = self.path.as_os_str().to_os_string();
+            name.push(suffix);
+            file_len(std::path::PathBuf::from(name))
+        };
+        let wal_bytes = sidecar("-wal") + sidecar("-shm");
+
+        self.with_read(|conn| {
+            let scalar = |sql: &str| -> Result<i64> {
+                Ok(conn.query_row(sql, [], |r| r.get::<_, i64>(0))?)
+            };
+            Ok(StorageStats {
+                db_path: self.path.display().to_string(),
+                db_bytes,
+                wal_bytes,
+
+                sessions: scalar("SELECT COUNT(*) FROM sessions")?,
+                messages: scalar("SELECT COUNT(*) FROM messages")?,
+                spaces: scalar("SELECT COUNT(*) FROM spaces")?,
+                space_files: scalar("SELECT COUNT(*) FROM space_files")?,
+                snippets: scalar("SELECT COUNT(*) FROM snippets")?,
+                mcp_servers: scalar("SELECT COUNT(*) FROM mcp_servers")?,
+
+                message_bytes: scalar(
+                    "SELECT COALESCE(SUM(LENGTH(CAST(content AS BLOB))), 0) FROM messages",
+                )?,
+                // Attachments are inlined as base64 into the owning row —
+                // there's no separate file store — so they're the bucket
+                // that actually grows the database.
+                attachment_bytes: scalar(
+                    "SELECT COALESCE(SUM(LENGTH(CAST(attachments_json AS BLOB))), 0) FROM messages",
+                )? + scalar(
+                    "SELECT COALESCE(SUM(LENGTH(CAST(attachments_json AS BLOB))), 0) FROM snippets",
+                )?,
+                space_bytes: scalar(
+                    "SELECT COALESCE(SUM(LENGTH(CAST(data AS BLOB))), 0) FROM space_files",
+                )? + scalar(
+                    "SELECT COALESCE(SUM(LENGTH(CAST(content AS BLOB))), 0) FROM space_memories",
+                )? + scalar(
+                    "SELECT COALESCE(SUM(LENGTH(CAST(description AS BLOB))
+                                       + LENGTH(CAST(instructions AS BLOB))), 0) FROM spaces",
+                )?,
+                // Everything else worth counting: prompt text, settings, and
+                // the per-chat metadata. Deliberately not exhaustive over
+                // every column — this is a rough "and the rest" figure, so a
+                // future column that goes unlisted only nudges it slightly.
+                other_bytes: scalar(
+                    "SELECT COALESCE(SUM(LENGTH(CAST(title AS BLOB))
+                                       + LENGTH(CAST(prompt AS BLOB))), 0) FROM snippets",
+                )? + scalar(
+                    "SELECT COALESCE(SUM(LENGTH(CAST(key AS BLOB))
+                                       + LENGTH(CAST(value AS BLOB))), 0) FROM settings",
+                )? + scalar(
+                    "SELECT COALESCE(SUM(LENGTH(CAST(value AS BLOB))), 0) FROM snippet_variables",
+                )? + scalar(
+                    "SELECT COALESCE(SUM(LENGTH(CAST(value AS BLOB))), 0) FROM snippet_fill_values",
+                )? + scalar(
+                    "SELECT COALESCE(SUM(LENGTH(CAST(name AS BLOB))
+                                       + LENGTH(CAST(COALESCE(url, '') AS BLOB))
+                                       + LENGTH(CAST(COALESCE(headers_json, '') AS BLOB))), 0)
+                     FROM mcp_servers",
+                )? + scalar(
+                    "SELECT COALESCE(SUM(LENGTH(CAST(title AS BLOB))
+                                       + LENGTH(CAST(COALESCE(system_prompt, '') AS BLOB))
+                                       + LENGTH(CAST(COALESCE(params_json, '') AS BLOB))), 0)
+                     FROM sessions",
+                )?,
+            })
         })
     }
 
@@ -2684,6 +2813,43 @@ mod tests {
         let db = Database::open(&path).expect("open");
         db.migrate().expect("migrate");
         (db, dir)
+    }
+
+    /// Guards the `storage_stats` SQL. Every bucket names tables and columns
+    /// as string literals, so a rename that `cargo check` waves through would
+    /// otherwise only surface as a runtime error in the Settings tile.
+    ///
+    /// Also pins the octet-vs-character distinction: the message content here
+    /// is deliberately non-ASCII, which a plain `LENGTH()` would under-count.
+    #[test]
+    fn storage_stats_counts_rows_and_octets() {
+        let (db, _dir) = fresh_db();
+
+        let empty = db.storage_stats().expect("stats on empty db");
+        assert_eq!(empty.messages, 0);
+        assert_eq!(empty.message_bytes, 0);
+        assert!(empty.db_bytes > 0, "an open database is never zero-length");
+
+        let s = db
+            .create_session("t", "ollama", "llama3", None, None)
+            .expect("session");
+        // 5 chars, 10 octets in UTF-8 — the gap a character count would miss.
+        db.append_message(&s.id, "user", "źdźbło", Some("[\"att\"]"))
+            .expect("message");
+        let sp = db.create_space("s", "", "").expect("space");
+        db.add_space_file(&sp.id, "f.txt", "text/plain", "text", "0123456789", 10, 0)
+            .expect("file");
+
+        let st = db.storage_stats().expect("stats");
+        assert_eq!(st.sessions, 1);
+        assert_eq!(st.messages, 1);
+        assert_eq!(st.spaces, 1);
+        assert_eq!(st.space_files, 1);
+        assert_eq!(st.message_bytes, "źdźbło".len() as i64);
+        assert_eq!(st.attachment_bytes, 7);
+        assert_eq!(st.space_bytes, 10);
+        // Session title + the two NULL-coalesced columns.
+        assert_eq!(st.other_bytes, 1);
     }
 
     #[test]

@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { StorageTile } from "@/components/settings/StorageTile";
 import { cn } from "@/lib/utils";
 import { type DestructiveAuth, type LockMethod, archiveAllSessions, exportDataJson, factoryReset, importDataWithDialog, isTauri, saveTextToFile, wipeUserData } from "@/lib/tauri";
 import { useChatStore } from "@/stores/chatStore";
@@ -174,7 +175,9 @@ export function DataPanel() {
 
   return (
     <>
-      <div className="divide-y divide-foreground/[0.06] rounded-2xl border border-foreground/10 bg-foreground/[0.02]">
+      <StorageTile />
+
+      <div className="mt-5 divide-y divide-foreground/[0.06] rounded-2xl border border-foreground/10 bg-foreground/[0.02]">
         <DataRow
           icon={<Download className="h-4 w-4" />}
           title="Export data"

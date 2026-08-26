@@ -338,6 +338,7 @@ pub fn run() {
             commands::mcp_save,
             commands::mcp_delete,
             commands::mcp_test,
+            commands::storage_stats,
             commands::export_data_json,
             commands::import_data_with_dialog,
             commands::save_text_to_file,

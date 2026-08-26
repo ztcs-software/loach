@@ -5,7 +5,7 @@ use tauri::{AppHandle, Emitter, State};
 
 use crate::db::{
     DatabaseSnapshot, Folder, ImportStats, McpServer, Message, Session, Snippet, SnippetFillValue,
-    SnippetVariable, Space, SpaceFile, SpaceMemory,
+    SnippetVariable, Space, SpaceFile, SpaceMemory, StorageStats,
 };
 use crate::mcp::{self, McpTestResult};
 use crate::providers::{self, ChatRequest, ModelInfo};
@@ -1922,6 +1922,20 @@ pub async fn save_binary_to_file(
         .map_err(|e| format!("invalid base64: {e}"))?;
 
     save_bytes_via_dialog(app, bytes, default_path, filters).await
+}
+
+/// Row counts and byte totals for the Settings -> Data storage tile.
+///
+/// On the blocking pool for the same reason as `export_data_json`: the
+/// `SUM(LENGTH(...))` scans walk every message and space file, including
+/// their inlined base64 bodies, so on an attachment-heavy database this is
+/// firmly CPU-bound and would otherwise stall a runtime worker.
+#[tauri::command]
+pub async fn storage_stats(state: State<'_, AppState>) -> Result<StorageStats, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || db.storage_stats().map_err(err))
+        .await
+        .map_err(|e| format!("storage stats task panicked: {e}"))?
 }
 
 /// Serialise every table to a JSON string. Pretty-printed so users can
