@@ -199,5 +199,3 @@ export const useUIStore = create<UIState>((set, get) => ({
     return id;
   },
 }));
-
-;(window as unknown as {__uiStore?: unknown}).__uiStore = useUIStore;

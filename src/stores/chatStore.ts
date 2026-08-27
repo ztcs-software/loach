@@ -2536,5 +2536,3 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (!held) promoteQueueHead(get, set);
   },
 }));
-
-;(window as unknown as {__chatStore?: unknown}).__chatStore = useChatStore;
