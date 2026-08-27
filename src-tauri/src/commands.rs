@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 
 use crate::db::{
-    DatabaseSnapshot, Folder, ImportStats, McpServer, Message, Session, Snippet, SnippetFillValue,
-    SnippetVariable, Space, SpaceFile, SpaceMemory, StorageStats,
+    DatabaseSnapshot, Folder, ImportStats, McpServer, Message, MessageHit, Session, Snippet,
+    SnippetFillValue, SnippetVariable, Space, SpaceFile, SpaceMemory, StorageStats,
 };
 use crate::mcp::{self, McpTestResult};
 use crate::providers::{self, ChatRequest, ModelInfo};
@@ -330,6 +330,23 @@ pub async fn session_message_counts(
     state: State<'_, AppState>,
 ) -> Result<std::collections::HashMap<String, i64>, String> {
     state.db.session_message_counts().map_err(err)
+}
+
+/// Hard ceiling on `search_messages` results, whatever the caller asks for.
+/// The palette shows a handful; this only stops a bug (or a future caller)
+/// from turning the search box into a whole-database export.
+const MAX_MESSAGE_HITS: usize = 50;
+
+/// Substring search across live chat transcripts, backing the Cmd-K palette's
+/// message results. See `Database::search_messages` for what's in scope.
+#[tauri::command]
+pub async fn search_messages(
+    state: State<'_, AppState>,
+    query: String,
+    limit: Option<usize>,
+) -> Result<Vec<MessageHit>, String> {
+    let limit = limit.unwrap_or(20).min(MAX_MESSAGE_HITS);
+    state.db.search_messages(&query, limit).map_err(err)
 }
 
 #[derive(Debug, Deserialize)]

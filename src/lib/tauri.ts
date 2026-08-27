@@ -11,6 +11,7 @@ import type {
   McpServerInput,
   McpTestResult,
   Message,
+  MessageHit,
   ModelInfo,
   OllamaShowResponse,
   Session,
@@ -259,6 +260,19 @@ export function listMessages(sessionId: string): Promise<Message[]> {
 export function sessionMessageCounts(): Promise<Record<string, number>> {
   if (!isTauri) return notInTauri<Record<string, number>>({});
   return invoke("session_message_counts", {});
+}
+
+/** Substring search across every live chat's transcript, newest hit first.
+ *  Backs the Cmd/Ctrl-K palette's message results — the frontend only holds
+ *  the *active* chat's messages, so this is the only way to search the rest.
+ *  Archived chats, `system` notices and hidden imported rows are out of
+ *  scope; see `Database::search_messages` for why. */
+export function searchMessages(
+  query: string,
+  limit?: number,
+): Promise<MessageHit[]> {
+  if (!isTauri) return notInTauri<MessageHit[]>([]);
+  return invoke("search_messages", { query, limit });
 }
 
 export function appendMessage(args: {

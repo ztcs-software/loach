@@ -283,6 +283,26 @@ pub struct Message {
     pub created_at: i64,
 }
 
+/// One hit from the Cmd-K palette's transcript search. A trimmed projection
+/// rather than a whole `Message`: the palette only renders a chat title, a
+/// one-line excerpt and a role tag, so shipping full rows (with their
+/// inlined attachment bodies) over IPC for every keystroke would be wasted
+/// bandwidth. `message_id` is enough for the jump-to-message handoff, which
+/// reads the real row out of the already-loaded transcript.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct MessageHit {
+    pub message_id: String,
+    pub session_id: String,
+    /// Title of the chat the message belongs to, so the palette can label the
+    /// row without a second lookup.
+    pub session_title: String,
+    pub role: String,
+    /// A short window of the message text centred on the match, whitespace
+    /// collapsed onto one line, with `…` marking where it was cut.
+    pub snippet: String,
+    pub created_at: i64,
+}
+
 /// What Settings -> Data reports about on-disk usage. See
 /// `Database::storage_stats` for how the two size notions differ.
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -1194,6 +1214,88 @@ impl Database {
                 .collect::<Result<std::collections::HashMap<String, i64>, _>>()?;
             Ok(map)
         })
+    }
+
+    /// Full-text-ish search across every live chat transcript, backing the
+    /// Cmd-K palette's message results. Substring match, newest first.
+    ///
+    /// Scoped deliberately:
+    ///   - archived chats are skipped, matching the palette's title search
+    ///   - `system` rows are skipped — they're UI notices, not conversation
+    ///   - hidden imported rows are skipped for the same reason the in-chat
+    ///     finder skips them: they live inside a collapsed card, so a hit
+    ///     there scrolls nowhere
+    ///
+    /// The `LIKE` is only a coarse pre-filter. It runs against the raw stored
+    /// `content`, which for user turns still carries the inlined attachment /
+    /// fetched-page bodies the bubble hides; `build_snippet` re-checks against
+    /// the *displayed* text and drops rows that only matched inside one, so a
+    /// result always highlights something once the user jumps to it.
+    ///
+    /// Case-insensitivity comes from SQLite's `LIKE`, which folds ASCII only.
+    /// A non-ASCII query matches at its own case but not across cases — an
+    /// accepted limitation, not worth an ICU build for a local search box.
+    pub fn search_messages(&self, query: &str, limit: usize) -> Result<Vec<MessageHit>> {
+        let needle = query.trim();
+        if needle.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let pattern = format!("%{}%", escape_like(needle));
+        // Over-fetch, because attachment-only matches get dropped below and we
+        // still want to fill the page when a query is common inside inlined
+        // documents.
+        let scan_limit = limit.saturating_mul(4) as i64;
+
+        let rows = self.with_read(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT m.id, m.session_id, m.role, m.content, m.created_at, s.title
+                 FROM messages m
+                 JOIN sessions s ON s.id = m.session_id
+                 WHERE s.archived_at IS NULL
+                   AND m.import_hidden = 0
+                   AND m.role IN ('user', 'assistant')
+                   AND m.content LIKE ?1 ESCAPE '\\'
+                 ORDER BY m.created_at DESC
+                 LIMIT ?2",
+            )?;
+            let rows = stmt
+                .query_map(params![pattern, scan_limit], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, i64>(4)?,
+                        r.get::<_, String>(5)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })?;
+
+        let mut out = Vec::with_capacity(limit);
+        for (message_id, session_id, role, content, created_at, session_title) in rows {
+            if out.len() >= limit {
+                break;
+            }
+            let displayed = if role == "user" {
+                strip_inlined_attachments(&content)
+            } else {
+                content.as_str()
+            };
+            let Some(snippet) = build_snippet(displayed, needle) else {
+                continue;
+            };
+            out.push(MessageHit {
+                message_id,
+                session_id,
+                session_title,
+                role,
+                snippet,
+                created_at,
+            });
+        }
+        Ok(out)
     }
 
     /// Byte + row totals for the Settings -> Data storage tile.
@@ -2757,6 +2859,87 @@ pub struct ImportStats {
     pub settings: usize,
 }
 
+/// How much text `search_messages` keeps around a hit, in characters: the
+/// lead is what sits *before* the match so the excerpt reads as a sentence
+/// rather than starting mid-word on the query itself.
+const SNIPPET_LEAD: usize = 40;
+const SNIPPET_LEN: usize = 180;
+
+/// Neutralise the `LIKE` wildcards in a user-typed query so searching for
+/// `100%` or `foo_bar` matches those literals instead of turning into a
+/// match-anything pattern. Pairs with `ESCAPE '\'` in the statement.
+fn escape_like(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 8);
+    for c in s.chars() {
+        if matches!(c, '\\' | '%' | '_') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Rust mirror of `stripInlinedAttachments` in `src/lib/files.ts`: cuts a user
+/// message at the first inlined attachment / fetched-page header, which is
+/// where the bubble stops rendering too. Kept in sync by hand — the two live
+/// on opposite sides of the IPC boundary, and the alternative (shipping whole
+/// transcripts to the frontend to strip them there) is what this search
+/// exists to avoid.
+fn strip_inlined_attachments(content: &str) -> &str {
+    const MARKER: &str = "\n\n---\n";
+    const HEADERS: [&str; 4] = [
+        "Attached ",
+        "The user also attached ",
+        "Fetched URL: ",
+        "Failed to fetch ",
+    ];
+    let mut from = 0;
+    while let Some(rel) = content[from..].find(MARKER) {
+        let at = from + rel;
+        let rest = &content[at + MARKER.len()..];
+        if HEADERS.iter().any(|h| rest.starts_with(h)) {
+            return content[..at].trim_end();
+        }
+        // The marker starts with a newline, so `at + 1` is always a char
+        // boundary — safe to resume the scan just past it.
+        from = at + 1;
+    }
+    content.trim_end()
+}
+
+/// A one-line excerpt of `text` centred on the first case-insensitive
+/// occurrence of `needle`, or `None` when the needle isn't there at all.
+///
+/// Comparison runs over `Vec<char>` with a one-char-per-char lowercase fold
+/// (rather than `str::to_lowercase`, whose output can be longer than its
+/// input) so match positions stay valid indices into the original text.
+fn build_snippet(text: &str, needle: &str) -> Option<String> {
+    let hay: Vec<char> = text.chars().collect();
+    let fold = |c: char| c.to_lowercase().next().unwrap_or(c);
+    let hay_lower: Vec<char> = hay.iter().copied().map(fold).collect();
+    let needle_lower: Vec<char> = needle.chars().map(fold).collect();
+    if needle_lower.is_empty() {
+        return None;
+    }
+    let at = hay_lower
+        .windows(needle_lower.len())
+        .position(|w| w == needle_lower.as_slice())?;
+
+    let start = at.saturating_sub(SNIPPET_LEAD);
+    let end = (start + SNIPPET_LEN).min(hay.len());
+    let mut out = String::new();
+    if start > 0 {
+        out.push('…');
+    }
+    out.extend(&hay[start..end]);
+    if end < hay.len() {
+        out.push('…');
+    }
+    // The palette renders the excerpt as a single truncated line, so fold the
+    // markdown's newlines and indentation into single spaces.
+    Some(out.split_whitespace().collect::<Vec<_>>().join(" "))
+}
+
 /// Authoritative "does this column exist?" check via `PRAGMA table_info`.
 /// Used by `migrate()` to decide whether to run an `ALTER TABLE ADD COLUMN`.
 /// Returns an `Err` only on genuine query failures (bad table name,
@@ -2850,6 +3033,106 @@ mod tests {
         assert_eq!(st.space_bytes, 10);
         // Session title + the two NULL-coalesced columns.
         assert_eq!(st.other_bytes, 1);
+    }
+
+    /// Pins what the Cmd-K palette's transcript search is allowed to surface:
+    /// user + assistant turns from live chats, newest first, and nothing from
+    /// an archived chat or a `system` notice row.
+    #[test]
+    fn search_messages_scopes_to_live_user_and_assistant_turns() {
+        let (db, _dir) = fresh_db();
+
+        let live = db
+            .create_session("Rust notes", "ollama", "llama3", None, None)
+            .expect("session");
+        db.append_message(&live.id, "user", "how do I pin a borrow?", None)
+            .expect("prompt");
+        db.append_message(&live.id, "assistant", "You BORROW it mutably.", None)
+            .expect("response");
+        db.append_message(&live.id, "system", "borrow notice", None)
+            .expect("system");
+
+        let archived = db
+            .create_session("Old", "ollama", "llama3", None, None)
+            .expect("session");
+        db.append_message(&archived.id, "user", "borrow checker again", None)
+            .expect("prompt");
+        db.archive_session(&archived.id, true).expect("archive");
+
+        let hits = db.search_messages("BoRrOw", 10).expect("search");
+        assert_eq!(hits.len(), 2, "user + assistant from the live chat only");
+        // `ORDER BY created_at DESC` — the response was appended last.
+        assert_eq!(hits[0].role, "assistant");
+        assert_eq!(hits[1].role, "user");
+        assert_eq!(hits[0].session_title, "Rust notes");
+        assert_eq!(hits[0].session_id, live.id);
+        assert_eq!(hits[0].snippet, "You BORROW it mutably.");
+
+        assert!(db.search_messages("", 10).expect("empty").is_empty());
+        assert!(db.search_messages("borrow", 0).expect("no room").is_empty());
+    }
+
+    /// A hit that only exists inside an inlined attachment body is dropped:
+    /// the bubble never renders that text, so jumping to it would land the
+    /// user on a message with nothing highlighted.
+    #[test]
+    fn search_messages_ignores_inlined_attachment_bodies() {
+        let (db, _dir) = fresh_db();
+        let s = db
+            .create_session("t", "ollama", "llama3", None, None)
+            .expect("session");
+        db.append_message(
+            &s.id,
+            "user",
+            "summarise this\n\n---\nAttached file `notes.txt`:\nkaleidoscope",
+            None,
+        )
+        .expect("message");
+
+        assert!(db.search_messages("kaleidoscope", 10).expect("search").is_empty());
+        let hits = db.search_messages("summarise", 10).expect("search");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].snippet, "summarise this");
+    }
+
+    /// `%` and `_` are ordinary characters in the search box, not wildcards.
+    #[test]
+    fn search_messages_escapes_like_wildcards() {
+        let (db, _dir) = fresh_db();
+        let s = db
+            .create_session("t", "ollama", "llama3", None, None)
+            .expect("session");
+        db.append_message(&s.id, "user", "battery at 100% now", None)
+            .expect("a");
+        db.append_message(&s.id, "user", "battery at 42 percent", None)
+            .expect("b");
+
+        let hits = db.search_messages("100%", 10).expect("search");
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].snippet.contains("100%"));
+        // Bare `%` would match every row if it reached SQLite unescaped.
+        assert_eq!(db.search_messages("at %", 10).expect("search").len(), 0);
+    }
+
+    /// Long messages come back as a window around the match, cut marks and
+    /// all, with the markdown's line breaks folded onto one line.
+    #[test]
+    fn search_messages_centres_the_snippet_on_the_match() {
+        let (db, _dir) = fresh_db();
+        let s = db
+            .create_session("t", "ollama", "llama3", None, None)
+            .expect("session");
+        let content = format!("{}\nNEEDLE\n{}", "a".repeat(200), "b".repeat(200));
+        db.append_message(&s.id, "assistant", &content, None)
+            .expect("message");
+
+        let hits = db.search_messages("needle", 10).expect("search");
+        assert_eq!(hits.len(), 1);
+        let snip = &hits[0].snippet;
+        assert!(snip.starts_with('…') && snip.ends_with('…'), "{snip}");
+        assert!(snip.contains("NEEDLE"), "{snip}");
+        assert!(!snip.contains('\n'), "newlines are folded away: {snip}");
+        assert!(snip.chars().count() <= SNIPPET_LEN + 2);
     }
 
     #[test]

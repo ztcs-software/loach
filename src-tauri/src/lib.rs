@@ -279,6 +279,7 @@ pub fn run() {
             commands::export_session,
             commands::list_messages,
             commands::session_message_counts,
+            commands::search_messages,
             commands::append_message,
             commands::import_messages,
             commands::delete_import_group,

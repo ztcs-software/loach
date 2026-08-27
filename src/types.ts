@@ -207,6 +207,24 @@ export interface Message {
   created_at: number;
 }
 
+/** One transcript hit from the Cmd/Ctrl-K palette's message search
+ *  (`search_messages`). A trimmed projection of a `Message` rather than the
+ *  row itself: the palette only needs a chat title, a one-line excerpt and a
+ *  role tag, and the jump handoff re-reads the real message from the
+ *  transcript once the chat is open. */
+export interface MessageHit {
+  message_id: string;
+  session_id: string;
+  /** Title of the chat the message lives in, resolved backend-side so the
+   *  palette doesn't have to look it up per row. */
+  session_title: string;
+  role: "user" | "assistant";
+  /** A window of the message text centred on the match, whitespace collapsed
+   *  onto one line, `…` marking where it was cut. */
+  snippet: string;
+  created_at: number;
+}
+
 /** One MCP tool invocation surfaced in the transcript. The renderer pairs
  *  call + result and shows a single collapsible block per id. While the
  *  tool is still running, `result` is null and the UI shows a spinner. */

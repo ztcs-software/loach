@@ -5,15 +5,24 @@ import {
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
-import { Search, MessageSquare, Layers, SquareTerminal, X } from "lucide-react";
+import {
+  Search,
+  MessageSquare,
+  Layers,
+  SquareTerminal,
+  Quote,
+  X,
+} from "lucide-react";
 import { cn } from "@/lib/utils";
+import { logger } from "@/lib/logger";
+import { searchMessages } from "@/lib/tauri";
 import { useChatStore } from "@/stores/chatStore";
 import { usePrivateChatStore } from "@/stores/privateChatStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useSnippetStore } from "@/stores/snippetStore";
 import { useUIStore } from "@/stores/uiStore";
 import { expandAndPrimeSnippet } from "@/lib/runSnippet";
-import type { Session, Snippet, Space } from "@/types";
+import type { MessageHit, Session, Snippet, Space } from "@/types";
 
 /**
  * Floating command-palette-style search.
@@ -31,7 +40,8 @@ import type { Session, Snippet, Space } from "@/types";
  * Behaviour while open:
  *   - Empty query → "suggestions" mix of recent chats / spaces / snippets
  *   - Typing filters across all three stores with case-insensitive substring
- *     match on the most-relevant fields
+ *     match on the most-relevant fields, and searches inside chat transcripts
+ *     (both prompts and responses) via the backend — see `messageHits`
  *   - ↑/↓ move the active row, Enter commits, Esc closes (clears query first
  *     if non-empty)
  *   - Click on the backdrop closes
@@ -42,9 +52,11 @@ import type { Session, Snippet, Space } from "@/types";
  *   space   → open SpaceView, flip sidebar to "spaces"
  *   snippet → open a fresh chat and prime the composer (mirrors
  *             SnippetsLibrary.runSnippet)
+ *   message → select the chat it lives in, then hand ChatCanvas the message
+ *             id so it scrolls there and flashes the row
  */
 
-type ResultKind = "chat" | "space" | "snippet";
+type ResultKind = "chat" | "space" | "snippet" | "message";
 
 type Result =
   | { kind: "chat"; id: string; label: string; sub?: string; session: Session }
@@ -55,9 +67,26 @@ type Result =
       label: string;
       sub?: string;
       snippet: Snippet;
-    };
+    }
+  | { kind: "message"; id: string; label: string; sub?: string; hit: MessageHit };
 
 const MAX_RESULTS = 20;
+
+/** How many transcript hits the backend is asked for, and how many slots the
+ *  combined list reserves for them. Without the reservation a query matching
+ *  many chat titles would push every message hit past `MAX_RESULTS` — which
+ *  is precisely the case where searching message text is most useful. */
+const MAX_MESSAGE_RESULTS = 8;
+
+/** Shortest query that goes to the backend. One character matches most of the
+ *  database and tells the user nothing; title/space/snippet filtering still
+ *  runs from the first keystroke because it's free and local. */
+const MIN_MESSAGE_QUERY = 2;
+
+/** Idle time before a keystroke turns into an IPC round trip. Long enough
+ *  that typing a word is one query rather than five, short enough to feel
+ *  like the local filtering happening beside it. */
+const MESSAGE_SEARCH_DEBOUNCE_MS = 160;
 
 export function SearchBar() {
   const sessions = useChatStore((s) => s.sessions);
@@ -68,10 +97,19 @@ export function SearchBar() {
   const setViewingSpace = useSpaceStore((s) => s.setViewingSpace);
   const setSidebarTab = useUIStore((s) => s.setSidebarTab);
   const recentSessionIds = useUIStore((s) => s.recentSessionIds);
+  const setPendingJumpMessage = useUIStore((s) => s.setPendingJumpMessage);
 
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
+  // Transcript hits for the current query. Unlike the other three sources
+  // this can't be derived: only the ACTIVE chat's messages are resident in
+  // the store, so matching the rest means asking SQLite.
+  const [messageHits, setMessageHits] = useState<MessageHit[]>([]);
+  // True from the keystroke until that query's transcript search settles.
+  // Only used to hold back the "no matches" line: asserting it while a
+  // message-only query is still in flight contradicts itself a moment later.
+  const [searching, setSearching] = useState(false);
 
   const inputRef = useRef<HTMLInputElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
@@ -115,6 +153,40 @@ export function SearchBar() {
       window.removeEventListener("loach:focus-search", focus);
     };
   }, []);
+
+  // Transcript search. Debounced so a typed word is one round trip, and
+  // sequence-guarded so a slow early query can't land on top of a later one
+  // and show results for a prefix the user has already typed past.
+  useEffect(() => {
+    const q = query.trim();
+    if (!open || q.length < MIN_MESSAGE_QUERY) {
+      setMessageHits([]);
+      setSearching(false);
+      return;
+    }
+    let live = true;
+    setSearching(true);
+    const timer = window.setTimeout(() => {
+      searchMessages(q, MAX_MESSAGE_RESULTS)
+        .then((hits) => {
+          if (live) setMessageHits(hits);
+        })
+        .catch((e) => {
+          // Non-fatal: the local title/space/snippet matches are still on
+          // screen, so a failed transcript search degrades to the old
+          // behaviour rather than emptying the palette.
+          logger.error("message search failed", e);
+          if (live) setMessageHits([]);
+        })
+        .finally(() => {
+          if (live) setSearching(false);
+        });
+    }, MESSAGE_SEARCH_DEBOUNCE_MS);
+    return () => {
+      live = false;
+      window.clearTimeout(timer);
+    };
+  }, [query, open]);
 
   const results = useMemo<Result[]>(() => {
     const q = query.trim().toLowerCase();
@@ -208,8 +280,23 @@ export function SearchBar() {
       }
     }
 
-    return matches.slice(0, MAX_RESULTS);
-  }, [query, sessions, spaces, snippets, recentSessionIds]);
+    // Transcript hits go last: a chat whose *title* matches is a stronger
+    // signal than a phrase buried in one of its turns. They still get a
+    // guaranteed block of slots at the bottom, so a query that also matches
+    // dozens of titles can't squeeze them out entirely.
+    const messages: Result[] = messageHits.map((hit) => ({
+      kind: "message",
+      id: hit.message_id,
+      label: hit.session_title || "New chat",
+      sub: hit.snippet,
+      hit,
+    }));
+
+    return [
+      ...matches.slice(0, MAX_RESULTS - Math.min(messages.length, MAX_MESSAGE_RESULTS)),
+      ...messages.slice(0, MAX_MESSAGE_RESULTS),
+    ];
+  }, [query, sessions, spaces, snippets, recentSessionIds, messageHits]);
 
   // Keep the active row valid whenever the result set changes.
   useEffect(() => {
@@ -304,6 +391,18 @@ export function SearchBar() {
       return;
     }
 
+    if (r.kind === "message") {
+      setViewingSpace(null);
+      setSidebarTab("chats");
+      // Park the target BEFORE selecting, so it's already waiting whichever
+      // way the race goes — ChatCanvas picks it up as soon as the row is in
+      // the transcript, which for a cold chat is only after `select` has
+      // loaded the messages.
+      setPendingJumpMessage(r.hit.message_id);
+      await select(r.hit.session_id);
+      return;
+    }
+
     // snippet — same handler as the sidebar's "Run" action.
     setViewingSpace(null);
     setSidebarTab("chats");
@@ -391,13 +490,13 @@ export function SearchBar() {
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               onKeyDown={onKeyDown}
-              placeholder="Search chats, spaces, snippets…"
+              placeholder="Search chats, messages, spaces, snippets…"
               spellCheck={false}
               // Combobox-over-listbox: ↑/↓ already moved a visual highlight
               // that existed only as a background colour. `aria-activedescendant`
               // is what turns that into something announceable, and keeps
               // real focus in the input so typing never breaks.
-              aria-label="Search chats, spaces, snippets"
+              aria-label="Search chats, messages, spaces, snippets"
               role="combobox"
               aria-expanded={results.length > 0}
               aria-controls="search-results"
@@ -434,9 +533,11 @@ export function SearchBar() {
 
           {results.length === 0 ? (
             <div className="px-4 py-6 text-center text-xs text-foreground/45">
-              {query.trim()
-                ? `No matches for "${query.trim()}"`
-                : "Nothing yet — start a chat, create a space, or save a snippet."}
+              {!query.trim()
+                ? "Nothing yet — start a chat, create a space, or save a snippet."
+                : searching
+                  ? "Searching…"
+                  : `No matches for "${query.trim()}"`}
             </div>
           ) : (
             // Rows were <button>s, which put every result in the tab order:
@@ -480,7 +581,7 @@ export function SearchBar() {
                     )}
                   </div>
                   <span className="shrink-0 text-[10px] uppercase tracking-wider text-foreground/35">
-                    {r.kind}
+                    {resultTag(r)}
                   </span>
                 </li>
               ))}
@@ -496,5 +597,14 @@ function ResultIcon({ kind }: { kind: ResultKind }) {
   const cls = "h-4 w-4 shrink-0 text-foreground/55";
   if (kind === "chat") return <MessageSquare className={cls} />;
   if (kind === "space") return <Layers className={cls} />;
+  if (kind === "message") return <Quote className={cls} />;
   return <SquareTerminal className={cls} />;
+}
+
+/** The kind badge on the right of a row. Transcript hits say who wrote the
+ *  matching turn instead of repeating "message" — the chat title is already
+ *  the row's headline, so the speaker is the part that isn't visible. */
+function resultTag(r: Result): string {
+  if (r.kind !== "message") return r.kind;
+  return r.hit.role === "user" ? "you" : "reply";
 }

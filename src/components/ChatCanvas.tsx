@@ -4,6 +4,7 @@ import { MessageItem } from "./Message";
 import { Button } from "@/components/ui/button";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { useChatStore } from "@/stores/chatStore";
+import { useUIStore } from "@/stores/uiStore";
 import { extractSummary } from "@/lib/contextUsage";
 import { cn, prefersReducedMotion } from "@/lib/utils";
 import { stripInlinedAttachments } from "@/lib/files";
@@ -517,6 +518,23 @@ export function ChatCanvas() {
       1000,
     );
   }, [jumpTarget]);
+
+  // Same landing, different door: the Cmd/Ctrl-K palette parks a message id on
+  // uiStore when the user picks a transcript hit, because at that moment the
+  // chat is only just being selected and its messages may not have loaded yet.
+  // Waiting for the row to appear in `messages` is what makes the handoff
+  // reliable — `jumpToMessage` then takes over exactly as the pinned bar does,
+  // including reaching past the mounted window for an old message.
+  const pendingJumpMessageId = useUIStore((s) => s.pendingJumpMessageId);
+  const consumePendingJumpMessage = useUIStore(
+    (s) => s.consumePendingJumpMessage,
+  );
+  useEffect(() => {
+    if (!pendingJumpMessageId) return;
+    if (!messages.some((m) => m.id === pendingJumpMessageId)) return;
+    consumePendingJumpMessage();
+    jumpToMessage(pendingJumpMessageId);
+  }, [pendingJumpMessageId, messages, consumePendingJumpMessage]);
 
   // Reveal the next batch of older rows. Snapshot the scroller geometry first
   // so the layout effect above can re-anchor once the prepended rows mount.

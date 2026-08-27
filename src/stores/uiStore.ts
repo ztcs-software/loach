@@ -78,6 +78,13 @@ interface UIState {
    *  Set by the `/export` slash command, which can't reach the dialog's
    *  local state directly. Mirrors `pendingOpenModelPicker`. */
   pendingOpenExport: boolean;
+  /** One-shot: a message the transcript should scroll to and flash as soon as
+   *  it's mounted. Set by the Cmd/Ctrl-K palette when the user picks a message
+   *  result, consumed by ChatCanvas. It can't be a plain call because the
+   *  chat is still being selected — its transcript may not even be loaded —
+   *  when the palette commits, so the target has to wait somewhere until the
+   *  row exists. */
+  pendingJumpMessageId: string | null;
   toggleSidebar: () => void;
   toggleParams: () => void;
   setSettingsOpen: (open: boolean) => void;
@@ -102,6 +109,8 @@ interface UIState {
   consumePendingOpenModelPicker: () => boolean;
   setPendingOpenExport: (v: boolean) => void;
   consumePendingOpenExport: () => boolean;
+  setPendingJumpMessage: (messageId: string | null) => void;
+  consumePendingJumpMessage: () => string | null;
 }
 
 export const useUIStore = create<UIState>((set, get) => ({
@@ -118,6 +127,7 @@ export const useUIStore = create<UIState>((set, get) => ({
   composerInsertSeq: 0,
   personaIdBySession: {},
   pendingPersonaId: null,
+  pendingJumpMessageId: null,
   toneIdBySession: {},
   pendingOpenModelPicker: false,
   pendingOpenExport: false,
@@ -181,5 +191,11 @@ export const useUIStore = create<UIState>((set, get) => ({
     const v = get().pendingOpenExport;
     if (v) set({ pendingOpenExport: false });
     return v;
+  },
+  setPendingJumpMessage: (pendingJumpMessageId) => set({ pendingJumpMessageId }),
+  consumePendingJumpMessage: (): string | null => {
+    const id = get().pendingJumpMessageId;
+    if (id) set({ pendingJumpMessageId: null });
+    return id;
   },
 }));

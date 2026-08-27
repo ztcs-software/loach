@@ -182,7 +182,7 @@ export function TitleBar() {
           >
             <Search className="h-3.5 w-3.5 shrink-0" />
             <span className="min-w-0 flex-1 truncate text-left text-xs">
-              Search chats, spaces, snippets…
+              Search chats, messages, spaces…
             </span>
             <kbd className="rounded border border-foreground/10 bg-foreground/[0.05] px-1 py-px font-mono text-[10px] tracking-wider text-foreground/40">
               {isMac ? "⌘K" : "Ctrl K"}
