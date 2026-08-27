@@ -111,3 +111,5 @@ export const useSnippetStore = create<SnippetState>((set) => ({
   openDialog: (target) => set({ dialogTarget: target }),
   closeDialog: () => set({ dialogTarget: null }),
 }));
+
+;(window as unknown as {__snippetStore?: unknown}).__snippetStore = useSnippetStore;

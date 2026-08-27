@@ -178,7 +178,13 @@ export function TitleBar() {
             disabled={topBarLocked}
             aria-label="Search"
             title="Search"
-            className="pointer-events-auto inline-flex h-7 w-72 items-center gap-2 rounded-md border border-foreground/[0.08] bg-foreground/[0.04] px-2.5 text-foreground/55 transition-colors hover:bg-foreground/[0.08] hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
+            // w-80 rather than w-72, where the placeholder overflowed by a
+            // few pixels and lost its last character to the truncation
+            // ellipsis ("…messages, space…"). The pill is centred absolutely,
+            // so the extra width comes out of the drag region either side and
+            // still clears the brand and window-control groups at the 900px
+            // minimum window width.
+            className="pointer-events-auto inline-flex h-7 w-80 items-center gap-2 rounded-md border border-foreground/[0.08] bg-foreground/[0.04] px-2.5 text-foreground/55 transition-colors hover:bg-foreground/[0.08] hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
           >
             <Search className="h-3.5 w-3.5 shrink-0" />
             <span className="min-w-0 flex-1 truncate text-left text-xs">

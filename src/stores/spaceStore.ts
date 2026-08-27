@@ -316,3 +316,5 @@ export const useSpaceStore = create<SpaceState>((set, get) => ({
     }));
   },
 }));
+
+;(window as unknown as {__spaceStore?: unknown}).__spaceStore = useSpaceStore;
