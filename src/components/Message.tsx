@@ -721,9 +721,9 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
                   done, fall back to the plain whole-message render so the
                   settled view (and its full highlighting) is unchanged. */}
               {isStreaming ? (
-                <StreamingMarkdown content={message.content} />
+                <StreamingMarkdown content={message.content} math />
               ) : (
-                <Markdown content={message.content} />
+                <Markdown content={message.content} math />
               )}
             </MarkdownSourceProvider>
           </div>

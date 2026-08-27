@@ -62,6 +62,7 @@ Behind a calm, beautifully crafted UI sits a rich feature set - ready when you n
 - **Personas and Tones** - pick a role (Code Reviewer, Translator, ELI5...) and delivery style (Formal, Casual, Direct, Detailed...).
 - **Context management** - a live bar under the composer shows how full the context window is, with one-click compaction that summarizes older turns to free space.
 - **Import / export context** - export chat context to JSON or Markdown, optionally summarized to compact it, and paste exported data - or any text - back to any chat's context.
+- **LaTeX math** - replies typeset with KaTeX: `$$…$$`, `$…$`, `\(…\)`, `\[…\]` and ` ```math ` fences render out of the box. `$` doubles as a currency sign, so `$…$` only typesets when the span actually reads as math - "it costs $5 and $10" stays prose. KaTeX ships inside the app (no network access) and is only read from disk the first time a reply contains math.
 
 #### Model tools & capabilities
 - **Tools** - let models call local tools including calculate, date/time, count, hash, UUID, base64, JSON, unit convert, text diff, sort, IP math and PDF generation. 
@@ -206,6 +207,7 @@ Only one OpenAI-compatible endpoint is active at a time — switch the base URL 
 | Argon2id | `argon2` + `rand_core` (for app-lock hashing) |
 | HTTP | `reqwest` with streaming + `rustls-tls` |
 | Markdown | `react-markdown` + `remark-gfm` + `rehype-highlight` (highlight.js) |
+| Math | `remark-math` + `rehype-katex` + KaTeX, lazy-loaded from the bundle on first use |
 | Document parsing | `pdfjs-dist` (PDF) + `mammoth` (DOCX) |
 | PDF generation | `printpdf` 0.12 with a bundled Liberation Sans subset (Unicode-capable output) |
 | System tray | Tauri 2 built-in (`tray-icon` feature) |

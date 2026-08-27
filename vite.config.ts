@@ -59,5 +59,12 @@ export default defineConfig(async () => ({
       process.env.TAURI_ENV_PLATFORM === "windows" ? "chrome105" : "safari13",
     minify: !process.env.TAURI_ENV_DEBUG,
     sourcemap: !!process.env.TAURI_ENV_DEBUG,
+    // KaTeX fonts must stay real files: anything Vite inlines as a `data:`
+    // URI is dead on arrival in the packaged app, whose CSP
+    // (`default-src 'self'` with no `font-src`) blocks data: fonts. Only
+    // KaTeX_Size3 currently sits under the 4 KB inline threshold, but pin
+    // the whole family so a KaTeX upgrade can't silently regress this.
+    assetsInlineLimit: (filePath) =>
+      filePath.includes("KaTeX_") ? false : undefined,
   },
 }));

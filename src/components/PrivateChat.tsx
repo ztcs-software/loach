@@ -471,11 +471,13 @@ function PrivateMessageBubble({
           // and leaves the tail unhighlighted until the block settles.
           <StreamingMarkdown
             content={message.content}
+            math
             className="prose prose-invert prose-sm max-w-none text-zinc-100"
           />
         ) : (
           <Markdown
             content={message.content}
+            math
             className="prose prose-invert prose-sm max-w-none text-zinc-100"
           />
         )}

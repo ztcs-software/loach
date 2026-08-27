@@ -90,8 +90,36 @@ transcript of messages.
 - **Metrics chip** — every assistant turn shows the prompt+completion token
   count, wall-clock time, and tokens/sec when the provider reports them.
 - **Markdown + code highlighting** — `react-markdown` + `rehype-highlight`
-  with GitHub-flavored markdown extensions. Tables, lists, footnotes, math,
-  and language-aware syntax highlighting work out of the box.
+  with GitHub-flavored markdown extensions. Tables, lists, footnotes, and
+  language-aware syntax highlighting work out of the box.
+- **LaTeX math** — formulas typeset with KaTeX, no opt-in required.
+  `$$…$$`, `$…$`, `\(…\)`, `\[…\]` and ``` ```math ``` fences all render,
+  and a `$$…$$` written on a single line is promoted to a centred display
+  block. TeX that doesn't parse degrades to showing its own source (parse
+  error on hover) rather than flashing an error, which keeps half-typed
+  formulas quiet mid-stream. Applies to assistant replies in the transcript
+  and Private Chat; app-authored markdown like release notes opts out
+  explicitly.
+- **Currency-safe `$…$`** — `$` doubles as a currency sign, so a
+  single-dollar span only typesets when it reads as math: the content must
+  hug both delimiters, stay on one line, not follow a word character, and
+  not be chased by a digit. "it costs $5 and $10", "between $5-$10" and
+  "US$5" all stay prose, while `$x^2$` — the delimiter most models actually
+  emit for inline math — renders with no settings hunt. `\$` always means a
+  literal dollar sign.
+- **Lazy engine** — KaTeX is a ~270 KB JS chunk plus a 29 KB stylesheet and
+  59 font files, all bundled into the installer like the rest of `dist/`.
+  **Nothing is fetched over the network** — the window CSP
+  (`default-src 'self'`) would block it if anything tried. What's deferred is
+  only *when it's read from disk and parsed*: a dynamic `import()` fires the
+  first time a message in that session actually looks like it contains math,
+  so a launch that never renders a formula never pays for one. It reloads on
+  the next launch — the deferral is per session, not a one-time install step.
+- **Unicode symbol fallback** — independent of the setting above and always
+  on: loose single-token TeX in prose (`\rightarrow`, `\alpha`, `\sum`) is
+  rewritten to the equivalent Unicode character. It runs over the parsed
+  tree, so code blocks, inline code, and anything inside math delimiters are
+  left byte-for-byte intact.
 - **Long-prompt clamp** — user bubbles that paste in dozens of lines clamp
   to ten lines with a **Show more** toggle so the answer stays visible.
 - **Right-click menu** — right-click any bubble for a contextual menu with

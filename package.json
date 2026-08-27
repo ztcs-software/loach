@@ -31,6 +31,7 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "highlight.js": "^11.12.0",
+    "katex": "^0.16.47",
     "lucide-react": "^1.33.0",
     "mammoth": "^1.12.1",
     "pdfjs-dist": "^6.2.108",
@@ -38,7 +39,9 @@
     "react-dom": "^19.2.8",
     "react-markdown": "^10.1.0",
     "rehype-highlight": "^7.0.2",
+    "rehype-katex": "^7.0.1",
     "remark-gfm": "^4.0.1",
+    "remark-math": "^6.0.0",
     "tailwind-merge": "^2.6.1",
     "tailwindcss-animate": "^1.0.7",
     "zustand": "^5.0.15"
