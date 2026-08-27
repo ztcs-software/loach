@@ -11,8 +11,16 @@ import {
   Layers,
   SquareTerminal,
   Quote,
+  Check,
+  ChevronDown,
   X,
 } from "lucide-react";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
 import { logger } from "@/lib/logger";
 import { searchMessages } from "@/lib/tauri";
@@ -42,6 +50,11 @@ import type { MessageHit, Session, Snippet, Space } from "@/types";
  *   - Typing filters across all three stores with case-insensitive substring
  *     match on the most-relevant fields, and searches inside chat transcripts
  *     (both prompts and responses) via the backend — see `messageHits`
+ *   - An `in:<scope>` token narrows the search to one kind. The token is the
+ *     ONLY scope state: the dropdown beside the input writes and removes it
+ *     rather than tracking a scope of its own, so the menu's label and the
+ *     text in the box can never disagree, and editing either is editing the
+ *     same thing. See `parseQuery`.
  *   - ↑/↓ move the active row, Enter commits, Esc closes (clears query first
  *     if non-empty)
  *   - Click on the backdrop closes
@@ -69,6 +82,55 @@ type Result =
       snippet: Snippet;
     }
   | { kind: "message"; id: string; label: string; sub?: string; hit: MessageHit };
+
+/** What the search is currently pointed at. "everywhere" is the default and
+ *  means "no filter"; every other value narrows the list to a single kind. */
+const SCOPES = ["everywhere", "chats", "messages", "spaces", "snippets"] as const;
+type Scope = (typeof SCOPES)[number];
+
+/** The one result kind each narrowing scope admits. "everywhere" is absent
+ *  because it admits all of them. */
+const SCOPE_KIND: Record<Exclude<Scope, "everywhere">, ResultKind> = {
+  chats: "chat",
+  messages: "message",
+  spaces: "space",
+  snippets: "snippet",
+};
+
+/** The `in:<scope>` filter, matched as a standalone word anywhere in the query
+ *  rather than only at the front — `notes in:messages` is as natural to type as
+ *  the other order. `in:everywhere` is deliberately not accepted: "everywhere"
+ *  is the *absence* of a filter, spelled by deleting the token. */
+const SCOPE_TOKEN = /(^|\s)(in:(?:chats|messages|spaces|snippets))(?=\s|$)/i;
+
+interface ParsedQuery {
+  scope: Scope;
+  /** The query with the filter token lifted out — what actually gets matched.
+   *  Everything downstream searches on this, never on the raw query. */
+  terms: string;
+  /** Where the token sits in the raw query, so the overlay can draw a box
+   *  around exactly those characters. Null when there's no token. */
+  token: { start: number; end: number } | null;
+}
+
+function parseQuery(raw: string): ParsedQuery {
+  const m = SCOPE_TOKEN.exec(raw);
+  if (!m) return { scope: "everywhere", terms: raw.trim(), token: null };
+  // m[1] is the leading boundary (start-of-string or a space) — the token
+  // itself is m[2], and only that should be boxed.
+  const start = m.index + m[1].length;
+  const end = start + m[2].length;
+  return {
+    scope: m[2].slice("in:".length).toLowerCase() as Scope,
+    // Trim each side before rejoining rather than collapsing whitespace
+    // globally: lifting a token out of the middle leaves a double space that
+    // a plain `.trim()` wouldn't touch.
+    terms: [raw.slice(0, start).trim(), raw.slice(end).trim()]
+      .filter(Boolean)
+      .join(" "),
+    token: { start, end },
+  };
+}
 
 const MAX_RESULTS = 20;
 
@@ -110,9 +172,16 @@ export function SearchBar() {
   // Only used to hold back the "no matches" line: asserting it while a
   // message-only query is still in flight contradicts itself a moment later.
   const [searching, setSearching] = useState(false);
+  const [scopeMenuOpen, setScopeMenuOpen] = useState(false);
+
+  const { scope, terms, token } = useMemo(() => parseQuery(query), [query]);
 
   const inputRef = useRef<HTMLInputElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
+  // Underlay that draws the box around the `in:` token. Kept in horizontal
+  // sync with the input so the box doesn't drift once the query is long
+  // enough for the input to scroll.
+  const mirrorRef = useRef<HTMLDivElement>(null);
   // Whatever had focus when the palette opened, so closing can hand it back
   // instead of dropping the user at the top of the document.
   const restoreFocusTo = useRef<HTMLElement | null>(null);
@@ -158,8 +227,8 @@ export function SearchBar() {
   // sequence-guarded so a slow early query can't land on top of a later one
   // and show results for a prefix the user has already typed past.
   useEffect(() => {
-    const q = query.trim();
-    if (!open || q.length < MIN_MESSAGE_QUERY) {
+    const wantsMessages = scope === "everywhere" || scope === "messages";
+    if (!open || !wantsMessages || terms.length < MIN_MESSAGE_QUERY) {
       setMessageHits([]);
       setSearching(false);
       return;
@@ -167,7 +236,9 @@ export function SearchBar() {
     let live = true;
     setSearching(true);
     const timer = window.setTimeout(() => {
-      searchMessages(q, MAX_MESSAGE_RESULTS)
+      // Scoped to messages there's nothing to share the list with, so ask for
+      // a full page instead of the slice reserved in the mixed view.
+      searchMessages(terms, scope === "messages" ? MAX_RESULTS : MAX_MESSAGE_RESULTS)
         .then((hits) => {
           if (live) setMessageHits(hits);
         })
@@ -186,117 +257,140 @@ export function SearchBar() {
       live = false;
       window.clearTimeout(timer);
     };
-  }, [query, open]);
+  }, [terms, scope, open]);
 
   const results = useMemo<Result[]>(() => {
-    const q = query.trim().toLowerCase();
+    const q = terms.toLowerCase();
+    // Ternary rather than `scope === "everywhere" || …` so TS narrows `scope`
+    // to the keys `SCOPE_KIND` actually has.
+    const allows = (kind: ResultKind) =>
+      scope === "everywhere" ? true : SCOPE_KIND[scope] === kind;
 
-    // Empty query → "suggestions": a small mixed slice of recent items.
+    // Empty query → "suggestions": a small mixed slice of recent items. Under
+    // a narrowed scope one kind has the list to itself, so it gets to show
+    // more than its share of the mixed default.
     if (!q) {
       const out: Result[] = [];
+      const room = scope === "everywhere" ? { chat: 4, other: 2 } : { chat: 8, other: 8 };
       // `sessions` arrives as `updated_at DESC` — recently *written to*.
       // Chats the user has actually opened this session come first, since
       // "the one I was just looking at" is the overwhelmingly likely
       // target when the palette is opened with an empty box. Everything
       // else keeps the updated_at order behind them.
       const visitRank = new Map(recentSessionIds.map((id, i) => [id, i]));
-      const liveChats = sessions
-        .filter((s) => !s.archived_at)
-        .sort(
-          (a, b) =>
-            (visitRank.get(a.id) ?? Number.MAX_SAFE_INTEGER) -
-            (visitRank.get(b.id) ?? Number.MAX_SAFE_INTEGER),
-        )
-        .slice(0, 4);
-      for (const s of liveChats) {
-        out.push({
-          kind: "chat",
-          id: s.id,
-          label: s.title || "New chat",
-          session: s,
-        });
+      if (allows("chat")) {
+        const liveChats = sessions
+          .filter((s) => !s.archived_at)
+          .sort(
+            (a, b) =>
+              (visitRank.get(a.id) ?? Number.MAX_SAFE_INTEGER) -
+              (visitRank.get(b.id) ?? Number.MAX_SAFE_INTEGER),
+          )
+          .slice(0, room.chat);
+        for (const s of liveChats) {
+          out.push({
+            kind: "chat",
+            id: s.id,
+            label: s.title || "New chat",
+            session: s,
+          });
+        }
       }
-      for (const sp of spaces.slice(0, 2)) {
-        out.push({
-          kind: "space",
-          id: sp.id,
-          label: sp.name,
-          sub: sp.description || undefined,
-          space: sp,
-        });
+      if (allows("space")) {
+        for (const sp of spaces.slice(0, room.other)) {
+          out.push({
+            kind: "space",
+            id: sp.id,
+            label: sp.name,
+            sub: sp.description || undefined,
+            space: sp,
+          });
+        }
       }
-      for (const sn of snippets.slice(0, 2)) {
-        out.push({
-          kind: "snippet",
-          id: sn.id,
-          label: sn.title,
-          sub: sn.prompt,
-          snippet: sn,
-        });
+      if (allows("snippet")) {
+        for (const sn of snippets.slice(0, room.other)) {
+          out.push({
+            kind: "snippet",
+            id: sn.id,
+            label: sn.title,
+            sub: sn.prompt,
+            snippet: sn,
+          });
+        }
       }
       return out;
     }
 
     const matches: Result[] = [];
 
-    for (const s of sessions) {
-      if (s.archived_at) continue;
-      const title = (s.title || "New chat").toLowerCase();
-      if (title.includes(q)) {
-        matches.push({
-          kind: "chat",
-          id: s.id,
-          label: s.title || "New chat",
-          session: s,
-        });
+    if (allows("chat")) {
+      for (const s of sessions) {
+        if (s.archived_at) continue;
+        const title = (s.title || "New chat").toLowerCase();
+        if (title.includes(q)) {
+          matches.push({
+            kind: "chat",
+            id: s.id,
+            label: s.title || "New chat",
+            session: s,
+          });
+        }
       }
     }
 
-    for (const sp of spaces) {
-      const name = sp.name.toLowerCase();
-      const desc = (sp.description || "").toLowerCase();
-      if (name.includes(q) || desc.includes(q)) {
-        matches.push({
-          kind: "space",
-          id: sp.id,
-          label: sp.name,
-          sub: sp.description || undefined,
-          space: sp,
-        });
+    if (allows("space")) {
+      for (const sp of spaces) {
+        const name = sp.name.toLowerCase();
+        const desc = (sp.description || "").toLowerCase();
+        if (name.includes(q) || desc.includes(q)) {
+          matches.push({
+            kind: "space",
+            id: sp.id,
+            label: sp.name,
+            sub: sp.description || undefined,
+            space: sp,
+          });
+        }
       }
     }
 
-    for (const sn of snippets) {
-      const title = sn.title.toLowerCase();
-      const prompt = sn.prompt.toLowerCase();
-      if (title.includes(q) || prompt.includes(q)) {
-        matches.push({
-          kind: "snippet",
-          id: sn.id,
-          label: sn.title,
-          sub: sn.prompt,
-          snippet: sn,
-        });
+    if (allows("snippet")) {
+      for (const sn of snippets) {
+        const title = sn.title.toLowerCase();
+        const prompt = sn.prompt.toLowerCase();
+        if (title.includes(q) || prompt.includes(q)) {
+          matches.push({
+            kind: "snippet",
+            id: sn.id,
+            label: sn.title,
+            sub: sn.prompt,
+            snippet: sn,
+          });
+        }
       }
     }
 
     // Transcript hits go last: a chat whose *title* matches is a stronger
     // signal than a phrase buried in one of its turns. They still get a
     // guaranteed block of slots at the bottom, so a query that also matches
-    // dozens of titles can't squeeze them out entirely.
-    const messages: Result[] = messageHits.map((hit) => ({
-      kind: "message",
-      id: hit.message_id,
-      label: hit.session_title || "New chat",
-      sub: hit.snippet,
-      hit,
-    }));
+    // dozens of titles can't squeeze them out entirely — and under
+    // `in:messages` that block is the whole list.
+    const messageRoom = scope === "messages" ? MAX_RESULTS : MAX_MESSAGE_RESULTS;
+    const messages: Result[] = allows("message")
+      ? messageHits.map((hit) => ({
+          kind: "message",
+          id: hit.message_id,
+          label: hit.session_title || "New chat",
+          sub: hit.snippet,
+          hit,
+        }))
+      : [];
 
     return [
-      ...matches.slice(0, MAX_RESULTS - Math.min(messages.length, MAX_MESSAGE_RESULTS)),
-      ...messages.slice(0, MAX_MESSAGE_RESULTS),
+      ...matches.slice(0, MAX_RESULTS - Math.min(messages.length, messageRoom)),
+      ...messages.slice(0, messageRoom),
     ];
-  }, [query, sessions, spaces, snippets, recentSessionIds, messageHits]);
+  }, [terms, scope, sessions, spaces, snippets, recentSessionIds, messageHits]);
 
   // Keep the active row valid whenever the result set changes.
   useEffect(() => {
@@ -352,6 +446,11 @@ export function SearchBar() {
    * handler only fires while the input holds focus.
    */
   const onPanelKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
+    // The scope menu portals out of the DOM but stays inside this panel's
+    // REACT tree, so its key events still bubble to this handler. While it's
+    // open Radix owns Escape and Tab — handling them again here would close
+    // the menu and wipe the query on a single keystroke.
+    if (scopeMenuOpen) return;
     if (e.key === "Escape") {
       e.preventDefault();
       if (query) setQuery("");
@@ -373,6 +472,20 @@ export function SearchBar() {
       e.preventDefault();
       first.focus();
     }
+  };
+
+  /**
+   * Point the search at `next` by rewriting the query's `in:` token — the
+   * token is the scope, so the dropdown edits the same text the user can.
+   * Picking "everywhere" deletes it.
+   *
+   * The trailing space on an otherwise-empty query means the token is already
+   * terminated, so whatever the user types next lands beside it rather than
+   * inside it.
+   */
+  const applyScope = (next: Scope) => {
+    if (next === "everywhere") setQuery(terms);
+    else setQuery(terms ? `in:${next} ${terms}` : `in:${next} `);
   };
 
   const commit = async (r: Result) => {
@@ -450,7 +563,9 @@ export function SearchBar() {
 
   if (!open) return null;
 
-  const headerLabel = query.trim() ? "Results" : "Suggestions";
+  // Driven by `terms`, not the raw query: "in:messages" on its own is a scope
+  // with nothing to match yet, so what's below it is still suggestions.
+  const headerLabel = terms ? "Results" : "Suggestions";
 
   return (
     <>
@@ -484,28 +599,107 @@ export function SearchBar() {
           {/* Input row */}
           <div className="flex items-center gap-3 border-b border-foreground/[0.06] px-4 py-3">
             <Search className="h-4 w-4 shrink-0 text-foreground/45" aria-hidden />
-            <input
-              ref={inputRef}
-              autoFocus
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              onKeyDown={onKeyDown}
-              placeholder="Search chats, messages, spaces, snippets…"
-              spellCheck={false}
-              // Combobox-over-listbox: ↑/↓ already moved a visual highlight
-              // that existed only as a background colour. `aria-activedescendant`
-              // is what turns that into something announceable, and keeps
-              // real focus in the input so typing never breaks.
-              aria-label="Search chats, messages, spaces, snippets"
-              role="combobox"
-              aria-expanded={results.length > 0}
-              aria-controls="search-results"
-              aria-autocomplete="list"
-              aria-activedescendant={
-                results.length > 0 ? `search-option-${activeIndex}` : undefined
-              }
-              className="min-w-0 flex-1 bg-transparent text-sm text-foreground placeholder:text-foreground/40 focus:outline-none"
-            />
+            {/* Input + the underlay that boxes its `in:` token.
+
+                A substring of an <input> can't be styled, so the underlay is
+                a character-for-character copy of the query rendered in
+                transparent text directly behind it: only the box around the
+                token is visible, and the input's own glyphs land on top of it.
+                Both are unpadded and share `text-sm`, so the copy lines up.
+
+                `outline` rather than `border` because outlines take no part in
+                layout — a border would push every character after the token
+                2px right in the copy but not in the input, and the box would
+                sit off the word it's meant to mark. */}
+            <div className="relative min-w-0 flex-1">
+              {token && (
+                <div
+                  ref={mirrorRef}
+                  aria-hidden
+                  className="pointer-events-none absolute inset-0 overflow-hidden whitespace-pre text-sm text-transparent"
+                >
+                  {query.slice(0, token.start)}
+                  <span className="rounded-[3px] bg-primary/15 outline outline-1 outline-offset-1 outline-primary/50">
+                    {query.slice(token.start, token.end)}
+                  </span>
+                  {query.slice(token.end)}
+                </div>
+              )}
+              <input
+                ref={inputRef}
+                autoFocus
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                onKeyDown={onKeyDown}
+                // Keep the underlay pinned to the input once the query is long
+                // enough to scroll, or the box drifts off its word.
+                onScroll={(e) => {
+                  if (mirrorRef.current)
+                    mirrorRef.current.scrollLeft = e.currentTarget.scrollLeft;
+                }}
+                placeholder="Search chats, messages, spaces, snippets…"
+                spellCheck={false}
+                // Combobox-over-listbox: ↑/↓ already moved a visual highlight
+                // that existed only as a background colour. `aria-activedescendant`
+                // is what turns that into something announceable, and keeps
+                // real focus in the input so typing never breaks.
+                aria-label="Search chats, messages, spaces, snippets"
+                role="combobox"
+                aria-expanded={results.length > 0}
+                aria-controls="search-results"
+                aria-autocomplete="list"
+                aria-activedescendant={
+                  results.length > 0 ? `search-option-${activeIndex}` : undefined
+                }
+                // `block` matters: an inline-block input leaves the wrapper a
+                // line box ~4px taller than the field, and the underlay —
+                // which is `inset-0` on that wrapper — would draw its box
+                // that much above the text it's marking.
+                className="relative block w-full bg-transparent text-sm text-foreground placeholder:text-foreground/40 focus:outline-none"
+              />
+            </div>
+
+            {/* Scope picker. Selecting a scope rewrites the query's `in:`
+                token, so this menu and the text box are two views of one
+                value — there's no second piece of state to drift. */}
+            <DropdownMenu open={scopeMenuOpen} onOpenChange={setScopeMenuOpen}>
+              <DropdownMenuTrigger asChild>
+                <button
+                  type="button"
+                  aria-label={`Search scope: ${scope}`}
+                  className="inline-flex h-6 shrink-0 items-center gap-1 rounded-md border border-foreground/10 bg-foreground/[0.05] pl-2 pr-1 text-[11px] capitalize text-foreground/60 transition-colors hover:bg-foreground/10 hover:text-foreground"
+                >
+                  {scope}
+                  <ChevronDown className="h-3 w-3 opacity-70" aria-hidden />
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent
+                align="end"
+                // Above the palette card (z-56), which the menu portals out of.
+                className="z-[60] min-w-[9rem]"
+                // Radix returns focus to the trigger on close; the palette is
+                // only usable with focus in the input, where every key it
+                // handles is bound.
+                onCloseAutoFocus={(e) => {
+                  e.preventDefault();
+                  inputRef.current?.focus();
+                }}
+              >
+                {SCOPES.map((s) => (
+                  <DropdownMenuItem
+                    key={s}
+                    onSelect={() => applyScope(s)}
+                    className="justify-between gap-4 capitalize"
+                  >
+                    {s}
+                    {s === scope && (
+                      <Check className="h-3.5 w-3.5 shrink-0" aria-hidden />
+                    )}
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
+
             <kbd className="hidden rounded border border-foreground/10 bg-foreground/[0.05] px-1.5 py-0.5 font-mono text-[10px] tracking-wider text-foreground/40 sm:inline">
               Esc
             </kbd>
@@ -537,7 +731,14 @@ export function SearchBar() {
                 ? "Nothing yet — start a chat, create a space, or save a snippet."
                 : searching
                   ? "Searching…"
-                  : `No matches for "${query.trim()}"`}
+                  : !terms
+                    ? // A bare `in:` token — a scope with nothing to look for
+                      // yet. Only reachable when scoped, since an unscoped
+                      // query with no terms is caught by the first branch.
+                      `Type to search ${scope}.`
+                    : scope === "everywhere"
+                      ? `No matches for "${terms}"`
+                      : `No ${scope} matching "${terms}"`}
             </div>
           ) : (
             // Rows were <button>s, which put every result in the tab order:
@@ -600,3 +801,5 @@ function ResultIcon({ kind }: { kind: ResultKind }) {
   if (kind === "message") return <Quote className={cls} />;
   return <SquareTerminal className={cls} />;
 }
+
+export const __testing = { parseQuery };
