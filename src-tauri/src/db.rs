@@ -296,7 +296,6 @@ pub struct MessageHit {
     /// Title of the chat the message belongs to, so the palette can label the
     /// row without a second lookup.
     pub session_title: String,
-    pub role: String,
     /// A short window of the message text centred on the match, whitespace
     /// collapsed onto one line, with `…` marking where it was cut.
     pub snippet: String,
@@ -1290,7 +1289,6 @@ impl Database {
                 message_id,
                 session_id,
                 session_title,
-                role,
                 snippet,
                 created_at,
             });
@@ -3062,11 +3060,10 @@ mod tests {
         let hits = db.search_messages("BoRrOw", 10).expect("search");
         assert_eq!(hits.len(), 2, "user + assistant from the live chat only");
         // `ORDER BY created_at DESC` — the response was appended last.
-        assert_eq!(hits[0].role, "assistant");
-        assert_eq!(hits[1].role, "user");
+        assert_eq!(hits[0].snippet, "You BORROW it mutably.");
+        assert_eq!(hits[1].snippet, "how do I pin a borrow?");
         assert_eq!(hits[0].session_title, "Rust notes");
         assert_eq!(hits[0].session_id, live.id);
-        assert_eq!(hits[0].snippet, "You BORROW it mutably.");
 
         assert!(db.search_messages("", 10).expect("empty").is_empty());
         assert!(db.search_messages("borrow", 0).expect("no room").is_empty());

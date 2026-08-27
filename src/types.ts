@@ -218,7 +218,6 @@ export interface MessageHit {
   /** Title of the chat the message lives in, resolved backend-side so the
    *  palette doesn't have to look it up per row. */
   session_title: string;
-  role: "user" | "assistant";
   /** A window of the message text centred on the match, whitespace collapsed
    *  onto one line, `…` marking where it was cut. */
   snippet: string;

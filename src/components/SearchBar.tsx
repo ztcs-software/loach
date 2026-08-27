@@ -581,7 +581,7 @@ export function SearchBar() {
                     )}
                   </div>
                   <span className="shrink-0 text-[10px] uppercase tracking-wider text-foreground/35">
-                    {resultTag(r)}
+                    {r.kind}
                   </span>
                 </li>
               ))}
@@ -599,12 +599,4 @@ function ResultIcon({ kind }: { kind: ResultKind }) {
   if (kind === "space") return <Layers className={cls} />;
   if (kind === "message") return <Quote className={cls} />;
   return <SquareTerminal className={cls} />;
-}
-
-/** The kind badge on the right of a row. Transcript hits say who wrote the
- *  matching turn instead of repeating "message" — the chat title is already
- *  the row's headline, so the speaker is the part that isn't visible. */
-function resultTag(r: Result): string {
-  if (r.kind !== "message") return r.kind;
-  return r.hit.role === "user" ? "you" : "reply";
 }
