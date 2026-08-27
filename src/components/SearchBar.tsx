@@ -616,10 +616,20 @@ export function SearchBar() {
                 <div
                   ref={mirrorRef}
                   aria-hidden
-                  className="pointer-events-none absolute inset-0 overflow-hidden whitespace-pre text-sm text-transparent"
+                  // `-m-2 p-2` grows the clipping box 8px on every side while
+                  // leaving the text exactly where the input puts it, so the
+                  // token's padding has somewhere to go: `overflow-hidden`
+                  // clips at the padding EDGE, and without the slack a token
+                  // at either end of the query lost the outer half of its box.
+                  className="pointer-events-none absolute inset-0 -m-2 overflow-hidden p-2 whitespace-pre text-sm text-transparent"
                 >
                   {query.slice(0, token.start)}
-                  <span className="rounded-[3px] bg-primary/15 outline outline-1 outline-offset-1 outline-primary/50">
+                  {/* `-mx` cancels `px` in the advance width: the box grows
+                      outwards into its neighbours' space, so the characters
+                      after the token stay put and the copy keeps lining up
+                      with the input. Vertical padding needs no such
+                      compensation — an inline box's is ink, not layout. */}
+                  <span className="-mx-1.5 rounded-md bg-primary/15 px-1.5 py-[3px] outline outline-1 outline-primary/50">
                     {query.slice(token.start, token.end)}
                   </span>
                   {query.slice(token.end)}
