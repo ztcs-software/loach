@@ -86,6 +86,13 @@ interface CatalogVariant {
 
 // Recommended Ollama catalog. Sizes are rough disk-footprint estimates so
 // users can budget; exact bytes come back during the pull stream.
+//
+// Parameter sizes only: a family's quantization and format tags (q4_K_M, q8_0,
+// bf16, mlx, mxfp8, nvfp4, …) are deliberately left out. Several families ship
+// a single parameter size and a dozen quant variants of it, and listing those
+// would rebuild exactly the wall of near-identical options this step exists to
+// spare a newcomer — a one-variant family here is complete, not truncated.
+// The custom-tag field below covers anyone who wants a specific quant.
 const OLLAMA_CATALOG: {
   family: string;
   url: string;
@@ -124,10 +131,6 @@ const OLLAMA_CATALOG: {
     ],
   },
   {
-    // Ships a single parameter size. The other eleven tags on the library
-    // page are quantization / format variants of this same 27B model
-    // (q4_K_M, q8_0, bf16, mlx, mxfp8, nvfp4) — the catalog lists parameter
-    // sizes only, and the custom-tag field below covers a specific quant.
     family: "Qwen 3.8",
     url: "https://ollama.com/library/qwen3.8",
     variants: [{ tag: "qwen3.8:27b", label: "27B", sizeGb: 18 }],
@@ -140,6 +143,21 @@ const OLLAMA_CATALOG: {
       { tag: "ministral-3:8b", label: "8B", sizeGb: 6 },
       { tag: "ministral-3:14b", label: "14B", sizeGb: 9.1 },
     ],
+  },
+  {
+    family: "Nemotron 3.5 Lightning",
+    url: "https://ollama.com/library/nemotron-3.5-lightning",
+    // NVIDIA's 30B MoE with 3B active per token — the `a3b` in its other tags.
+    // MoE cuts compute per token, not residency: all 30B of weights still have
+    // to be held, so it is sized against RAM like any other 25 GB download.
+    variants: [
+      { tag: "nemotron-3.5-lightning:30b", label: "30B (MoE)", sizeGb: 25 },
+    ],
+  },
+  {
+    family: "Muse Glimmer",
+    url: "https://ollama.com/library/muse-glimmer",
+    variants: [{ tag: "muse-glimmer:30b", label: "30B", sizeGb: 18 }],
   },
 ];
 
