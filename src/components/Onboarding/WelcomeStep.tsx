@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Loader2, Sparkles, Upload } from "lucide-react";
+import { ArrowRight, Loader2, Upload } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Logo } from "@/components/Logo";
 import { useToastStore } from "@/stores/toastStore";
@@ -72,9 +72,14 @@ export function WelcomeStep({ onClose }: { onClose: () => void }) {
         </p>
 
         <div className="mt-9 flex flex-col items-stretch gap-2.5">
+          {/* Arrow, not a sparkle: this button is the wizard's forward action,
+              and StepShell renders ArrowRight on every other Continue. Sparkles
+              carries a different meaning inside the wizard — "we suggest this"
+              (the best-fit badge, the recommended model, the example prompt) —
+              so spending it on plain navigation blunted both. */}
           <Button onClick={goNext} className="gap-2 px-6 py-5 text-[14px]">
-            <Sparkles className="h-4 w-4" />
             Get started
+            <ArrowRight className="h-4 w-4" />
           </Button>
           <button
             type="button"
