@@ -645,7 +645,16 @@ function DefaultModelPicker({
               <ChevronDown className="h-3.5 w-3.5 shrink-0 opacity-60" />
             </Button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="start" className="max-h-72 w-72 overflow-y-auto">
+          {/* z-60, not the primitive's default z-50: this menu portals to
+              document.body, where it lands in the same stacking context as the
+              onboarding overlay (z-55). At the default it opens *behind* the
+              backdrop and reads as a dead button. 60 clears the overlay while
+              staying under the TitleBar (z-70), so window controls keep
+              working — the same band LockScreen uses. */}
+          <DropdownMenuContent
+            align="start"
+            className="z-[60] max-h-72 w-72 overflow-y-auto"
+          >
             {models.map((m) => (
               <DropdownMenuItem
                 key={m.id}
@@ -1156,7 +1165,20 @@ function OpenAIPath({ onProvisioned }: { onProvisioned: () => void }) {
   // in flight, so a stored key here really is a verified one.
   const keySetAtMount = useRef(useSettingsStore.getState().openai_key_set);
   useEffect(() => {
-    if (keySetAtMount.current) onProvisioned();
+    if (!keySetAtMount.current) return;
+    onProvisioned();
+    // Also re-load the catalog. `catalog` is otherwise only filled by
+    // `handleSave`, so a user returning to this step with a key already
+    // verified got no default-model picker at all — nothing to change the
+    // pick with, and no indication of what the pick even was. Mount-only by
+    // construction (the ref is a mount snapshot), so reading `baseUrl` from
+    // the closure is deliberate rather than a stale dep.
+    void openaiListModels(baseUrl)
+      .then((list) => setCatalog(rankChatModels(list)))
+      .catch(() => {
+        /* Key may have been revoked since — the form below still works. */
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [onProvisioned]);
 
   const handleSave = async () => {
