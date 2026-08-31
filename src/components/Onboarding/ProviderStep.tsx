@@ -124,6 +124,15 @@ const OLLAMA_CATALOG: {
     ],
   },
   {
+    // Ships a single parameter size. The other eleven tags on the library
+    // page are quantization / format variants of this same 27B model
+    // (q4_K_M, q8_0, bf16, mlx, mxfp8, nvfp4) — the catalog lists parameter
+    // sizes only, and the custom-tag field below covers a specific quant.
+    family: "Qwen 3.8",
+    url: "https://ollama.com/library/qwen3.8",
+    variants: [{ tag: "qwen3.8:27b", label: "27B", sizeGb: 18 }],
+  },
+  {
     family: "Ministral 3",
     url: "https://ollama.com/library/ministral-3",
     variants: [
