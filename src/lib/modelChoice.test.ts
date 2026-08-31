@@ -6,6 +6,7 @@
 
 import { describe, it, expect } from "vitest";
 import {
+  capacityBasis,
   classifyFit,
   formatGb,
   rankChatModels,
@@ -16,9 +17,22 @@ import type { ModelInfo } from "@/types";
 
 const GB = 1024 ** 3;
 
+/** A machine with no discrete GPU — RAM is the binding constraint. */
 const host = (ramGb: number, diskGb: number | null = 500): HostCapacity => ({
   totalRamBytes: ramGb * GB,
   freeDiskBytes: diskGb === null ? null : diskGb * GB,
+  vramBytes: null,
+});
+
+/** A machine with a discrete GPU, where VRAM binds instead. */
+const gpuHost = (
+  ramGb: number,
+  vramGb: number,
+  diskGb: number | null = 500,
+): HostCapacity => ({
+  totalRamBytes: ramGb * GB,
+  freeDiskBytes: diskGb === null ? null : diskGb * GB,
+  vramBytes: vramGb * GB,
 });
 
 /**
@@ -142,6 +156,58 @@ describe("rankChatModels", () => {
   it("keeps a lone non-chat-looking model rather than emptying the list", () => {
     const ranked = rankChatModels([m("my-embedded-llm")]);
     expect(ranked).toHaveLength(1);
+  });
+});
+
+describe("classifyFit with a discrete GPU", () => {
+  // The bug this whole path exists for: 32 GB of RAM behind an 8 GB card. The
+  // RAM-only heuristic called an 18 GB model comfortable and recommended it,
+  // when in reality most of it would be running on the CPU.
+  it("sizes against VRAM, not RAM, when a GPU is present", () => {
+    expect(classifyFit(18, host(32)).tier).toBe("comfortable");
+    expect(classifyFit(18, gpuHost(32, 8)).tier).toBe("offload");
+  });
+
+  it("calls a model that overflows VRAM but fits RAM an offload, not heavy", () => {
+    // Runs — just with layers on the CPU — so it must not read as impossible.
+    expect(classifyFit(12, gpuHost(64, 8)).tier).toBe("offload");
+  });
+
+  it("still calls a model heavy when it exceeds RAM as well", () => {
+    expect(classifyFit(81, gpuHost(16, 8)).tier).toBe("heavy");
+  });
+
+  it("never reports offload without a GPU — there is nothing to spill from", () => {
+    const tiers = [1, 8, 18, 81].map((gb) => classifyFit(gb, host(16)).tier);
+    expect(tiers).not.toContain("offload");
+  });
+
+  it("lets a large GPU rate a model comfortable that RAM alone would reject", () => {
+    // 16 GB of system RAM can't hold a 12 GB model (needs ~14.4 GB), but a
+    // 24 GB card runs it entirely on the GPU — the under-recommendation case.
+    expect(classifyFit(12, host(16)).tier).toBe("heavy");
+    expect(classifyFit(12, gpuHost(16, 24)).tier).toBe("comfortable");
+  });
+});
+
+describe("recommendVariant with a discrete GPU", () => {
+  it("recommends what fits the card, not what fits system RAM", () => {
+    expect(recommendVariant(CATALOG, host(32))?.tag).toBe("gemma4:26b");
+    expect(recommendVariant(CATALOG, gpuHost(32, 8))?.tag).toBe("qwen3.5:4b");
+  });
+
+  it("scales its pick with VRAM at fixed RAM", () => {
+    const sizeFor = (vramGb: number) =>
+      recommendVariant(CATALOG, gpuHost(64, vramGb))!.sizeGb;
+    const sizes = [8, 12, 24, 48].map(sizeFor);
+    expect(sizes).toEqual([...sizes].sort((a, b) => a - b));
+  });
+});
+
+describe("capacityBasis", () => {
+  it("names VRAM when a GPU is present and RAM otherwise", () => {
+    expect(capacityBasis(gpuHost(32, 8))).toEqual({ kind: "vram", totalGb: 8 });
+    expect(capacityBasis(host(32))).toEqual({ kind: "ram", totalGb: 32 });
   });
 });
 

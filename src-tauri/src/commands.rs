@@ -730,11 +730,19 @@ pub struct SystemInfo {
     /// `null` when no mounted disk contains that path (network shares, some
     /// container mounts). Callers must treat null as "unknown", not "full".
     pub free_disk_bytes: Option<u64>,
+    /// Dedicated VRAM of the most capable discrete GPU, in bytes, or `null`
+    /// when there isn't one we can read. This is the figure that actually
+    /// decides whether a model runs fast: Ollama offloads whatever doesn't fit
+    /// to the CPU. Null on macOS by design — unified memory means
+    /// `total_ram_bytes` already describes the GPU's budget.
+    pub vram_bytes: Option<u64>,
+    /// Adapter name for display, e.g. "NVIDIA GeForce RTX 4060". Null
+    /// whenever `vram_bytes` is.
+    pub gpu_name: Option<String>,
 }
 
-/// Probe installed RAM and free disk. Cheap enough to call on demand
-/// (`refresh_memory` reads /proc or the Win32 API directly), but onboarding
-/// only asks once per mount.
+/// Probe installed RAM, free disk, and discrete-GPU VRAM. Cheap enough to call
+/// on demand, but onboarding only asks once per mount.
 #[tauri::command]
 pub async fn system_info(app: AppHandle) -> Result<SystemInfo, String> {
     use tauri::Manager;
@@ -755,10 +763,14 @@ pub async fn system_info(app: AppHandle) -> Result<SystemInfo, String> {
             .max_by_key(|d| d.mount_point().as_os_str().len())
             .map(|d| d.available_space());
 
+        let gpu = crate::gpu::detect();
+
         SystemInfo {
             total_ram_bytes: sys.total_memory(),
             available_ram_bytes: sys.available_memory(),
             free_disk_bytes,
+            vram_bytes: gpu.as_ref().map(|g| g.vram_bytes),
+            gpu_name: gpu.map(|g| g.name),
         }
     })
     .await

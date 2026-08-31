@@ -3,9 +3,9 @@
 // Two related jobs live here, both pure so they can be unit-tested without a
 // Tauri runtime:
 //
-//   1. Sizing a local Ollama catalog entry against the host's RAM, so the
-//      wizard can recommend one variant instead of listing seventeen and
-//      leaving a newcomer to guess which of them their laptop can run.
+//   1. Sizing a local Ollama catalog entry against the host, so the wizard can
+//      recommend one variant instead of listing seventeen and leaving a
+//      newcomer to guess which of them their laptop can run.
 //   2. Ranking a remote provider's model list, so the "default model" picker
 //      pre-selects something chat-shaped rather than whatever the endpoint
 //      happened to return first (`/v1/models` on api.openai.com is not sorted
@@ -26,6 +26,11 @@ const RUNTIME_OVERHEAD = 1.2;
  *  engine Loach itself runs on, and whatever else the user has open. */
 const OS_RESERVE_GB = 3;
 
+/** VRAM we refuse to count: the desktop compositor, the browser, and anything
+ *  else already drawing on the card. Much smaller than the RAM reserve because
+ *  a GPU isn't also running the OS. */
+const VRAM_RESERVE_GB = 1;
+
 /** Fraction of usable RAM a model may need and still be called comfortable.
  *  Above it (but under 100%) the model runs, just with everything else on the
  *  machine competing for what's left. */
@@ -36,18 +41,24 @@ const COMFORT_FRACTION = 0.8;
 const DISK_SLACK_GB = 2;
 
 /**
- * How well a model sits on this machine.
+ * How well a model sits on this machine, measured against whichever budget
+ * actually binds — VRAM when there's a discrete GPU, system RAM otherwise.
  *
  *   - `comfortable` — runs with room to spare.
- *   - `tight`       — fits, but leaves little headroom; expect swapping if
- *                     the user has much else open.
- *   - `heavy`       — needs more RAM than the machine has.
+ *   - `tight`       — fits, but leaves little headroom.
+ *   - `offload`     — bigger than VRAM yet within RAM. Ollama will still run
+ *                     it, putting the layers that don't fit on the CPU, so it
+ *                     works but generates far slower. Only reachable when a
+ *                     GPU was detected; without one there is nothing to spill
+ *                     out of.
+ *   - `heavy`       — needs more memory than the machine has at all.
  */
-export type FitTier = "comfortable" | "tight" | "heavy";
+export type FitTier = "comfortable" | "tight" | "offload" | "heavy";
 
 export interface FitVerdict {
   tier: FitTier;
-  /** Estimated peak RAM in GB. Shown in the "needs ~14 GB" badge. */
+  /** Estimated peak memory in GB, against whichever budget applies. Shown in
+   *  the "needs ~14 GB" badge. */
   requiredGb: number;
   /** True only when free disk is *known* and too small to hold the download.
    *  Unknown disk (null from the backend) is never reported as insufficient —
@@ -61,19 +72,55 @@ export interface FitVerdict {
 export interface HostCapacity {
   totalRamBytes: number;
   freeDiskBytes: number | null;
+  /** Dedicated VRAM of a discrete GPU, or null when there is none (CPU-only,
+   *  integrated graphics, or Apple's unified memory — in all three cases RAM
+   *  is already the right number). */
+  vramBytes: number | null;
 }
 
-/** Classify one catalog variant against the host. */
+/** Which capacity the recommendation was sized against, for display. A user
+ *  with a discrete GPU shown a RAM-derived figure is being told about the
+ *  wrong constraint, so the UI names the one actually used. */
+export interface CapacityBasis {
+  kind: "vram" | "ram";
+  /** The raw installed figure in GB — not minus the reserve, since this is
+   *  what the user recognises as "my machine has X". */
+  totalGb: number;
+}
+
+export function capacityBasis(host: HostCapacity): CapacityBasis {
+  return host.vramBytes !== null
+    ? { kind: "vram", totalGb: host.vramBytes / BYTES_PER_GB }
+    : { kind: "ram", totalGb: host.totalRamBytes / BYTES_PER_GB };
+}
+
+/**
+ * Classify one catalog variant against the host.
+ *
+ * The budget is VRAM whenever a discrete GPU was found, because that is what
+ * decides whether a model is pleasant to use: Ollama fits what it can into
+ * VRAM and runs the rest on the CPU, so a 18 GB model on an 8 GB card "fits in
+ * RAM" and still crawls. Sizing against RAM alone recommended exactly that.
+ */
 export function classifyFit(sizeGb: number, host: HostCapacity): FitVerdict {
   const requiredGb = sizeGb * RUNTIME_OVERHEAD;
-  const usableGb = Math.max(0, host.totalRamBytes / BYTES_PER_GB - OS_RESERVE_GB);
+  const ramGb = Math.max(0, host.totalRamBytes / BYTES_PER_GB - OS_RESERVE_GB);
+  const vramGb =
+    host.vramBytes === null
+      ? null
+      : Math.max(0, host.vramBytes / BYTES_PER_GB - VRAM_RESERVE_GB);
+  const budgetGb = vramGb ?? ramGb;
 
   const tier: FitTier =
-    requiredGb <= usableGb * COMFORT_FRACTION
+    requiredGb <= budgetGb * COMFORT_FRACTION
       ? "comfortable"
-      : requiredGb <= usableGb
+      : requiredGb <= budgetGb
         ? "tight"
-        : "heavy";
+        : // Overflowing VRAM is survivable — the excess runs on the CPU. With
+          // no GPU there is no such middle ground: past RAM it simply won't fit.
+          vramGb !== null && requiredGb <= ramGb
+          ? "offload"
+          : "heavy";
 
   const freeDiskGb =
     host.freeDiskBytes === null ? null : host.freeDiskBytes / BYTES_PER_GB;

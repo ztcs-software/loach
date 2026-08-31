@@ -39,6 +39,7 @@ import {
 } from "@/lib/tauri";
 import {
   bytesToGb,
+  capacityBasis,
   classifyFit,
   formatGb,
   rankChatModels,
@@ -56,8 +57,8 @@ import { StepShell } from "./StepShell";
  *
  *   - Ollama: probe `/api/tags`. If the daemon already lists models we show
  *     them in a default-model picker and unblock Continue. If it's running
- *     but empty we size the recommended catalog against the machine's RAM
- *     and lead with one suggestion. If it isn't answering at all we offer to
+ *     but empty we size the recommended catalog against the machine's GPU
+ *     (falling back to RAM when there isn't one) and lead with one suggestion. If it isn't answering at all we offer to
  *     start it, and keep re-probing in the background so a user who leaves to
  *     install Ollama comes back to a green panel instead of a stale warning.
  *     Pulls run inline and the user can keep onboarding while one finishes —
@@ -154,11 +155,14 @@ const OLLAMA_CATALOG: {
 
 const ALL_VARIANTS: CatalogVariant[] = OLLAMA_CATALOG.flatMap((f) => f.variants);
 
-/** Read the host's RAM / free disk once per mount. Null while in flight, and
- *  stays null outside the Tauri shell or if the probe fails — every consumer
- *  treats that as "no fit hints", never as "zero RAM". */
-function useHostCapacity(): HostCapacity | null {
+/** Read the host's RAM / VRAM / free disk once per mount. Null while in flight,
+ *  and stays null outside the Tauri shell or if the probe fails — every
+ *  consumer treats that as "no fit hints", never as "zero RAM". `gpuName` is
+ *  display-only, so it rides alongside rather than inside `HostCapacity`
+ *  (which the pure sizing helpers own). */
+function useHostCapacity(): { host: HostCapacity | null; gpuName: string | null } {
   const [host, setHost] = useState<HostCapacity | null>(null);
+  const [gpuName, setGpuName] = useState<string | null>(null);
   useEffect(() => {
     let cancelled = false;
     void systemInfo()
@@ -167,7 +171,9 @@ function useHostCapacity(): HostCapacity | null {
         setHost({
           totalRamBytes: info.total_ram_bytes,
           freeDiskBytes: info.free_disk_bytes,
+          vramBytes: info.vram_bytes,
         });
+        setGpuName(info.gpu_name);
       })
       .catch(() => {
         /* No hardware hints — the catalog still works unaided. */
@@ -176,7 +182,7 @@ function useHostCapacity(): HostCapacity | null {
       cancelled = true;
     };
   }, []);
-  return host;
+  return { host, gpuName };
 }
 
 export function ProviderStep({
@@ -332,7 +338,7 @@ function OllamaPath({ onProvisioned }: { onProvisioned: () => void }) {
   const setProviderDefault = useSettingsStore((s) => s.setProviderDefault);
   const pinnedModel = useSettingsStore((s) => s.default_model);
   const refreshModels = useModelsStore((s) => s.refresh);
-  const host = useHostCapacity();
+  const { host, gpuName } = useHostCapacity();
 
   const [probe, setProbe] = useState<OllamaProbe>({ kind: "probing" });
   const [editingUrl, setEditingUrl] = useState(false);
@@ -527,7 +533,7 @@ function OllamaPath({ onProvisioned }: { onProvisioned: () => void }) {
           exist we hide the catalog — the picker above is enough; if
           they want more they can pull from the Models page later. */}
       {probe.kind === "up" && probe.models.length === 0 && (
-        <ModelCatalog host={host} onPulled={onProvisioned} />
+        <ModelCatalog host={host} gpuName={gpuName} onPulled={onProvisioned} />
       )}
     </div>
   );
@@ -719,14 +725,27 @@ function FitBadge({ fit, recommended }: { fit: FitVerdict | null; recommended: b
   if (fit.tier === "heavy") {
     return (
       <span className="shrink-0 rounded-full bg-foreground/[0.07] px-2 py-0.5 text-[10px] font-medium text-foreground/50">
-        Needs ~{formatGb(fit.requiredGb)} RAM
+        Needs ~{formatGb(fit.requiredGb)}
+      </span>
+    );
+  }
+  if (fit.tier === "offload") {
+    // Distinct from "tight" on purpose: this one runs, it's just slow. Calling
+    // it heavy would read as "won't work" and calling it tight would hide that
+    // the user is about to lose most of their GPU acceleration.
+    return (
+      <span
+        title={`Needs ~${formatGb(fit.requiredGb)} — more than your GPU has, so Ollama will run the excess layers on the CPU. It works, just slower.`}
+        className="shrink-0 rounded-full bg-orange-500/15 px-2 py-0.5 text-[10px] font-medium text-orange-700 dark:text-orange-300"
+      >
+        Partly on CPU
       </span>
     );
   }
   if (fit.tier === "tight") {
     return (
       <span className="shrink-0 rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] font-medium text-amber-700 dark:text-amber-300">
-        Heavy
+        Tight
       </span>
     );
   }
@@ -735,9 +754,11 @@ function FitBadge({ fit, recommended }: { fit: FitVerdict | null; recommended: b
 
 function ModelCatalog({
   host,
+  gpuName,
   onPulled,
 }: {
   host: HostCapacity | null;
+  gpuName: string | null;
   onPulled: () => void;
 }) {
   const pullModel = useModelsStore((s) => s.pullModel);
@@ -822,6 +843,7 @@ function ModelCatalog({
         <RecommendationCard
           variant={recommended}
           host={host}
+          gpuName={gpuName}
           run={inFlight[recommended.tag]}
           onPull={() => void startPull(recommended.tag)}
         />
@@ -976,16 +998,18 @@ function ModelCatalog({
 function RecommendationCard({
   variant,
   host,
+  gpuName,
   run,
   onPull,
 }: {
   variant: CatalogVariant;
   host: HostCapacity;
+  gpuName: string | null;
   run: AdminProgress | undefined;
   onPull: () => void;
 }) {
   const fit = classifyFit(variant.sizeGb, host);
-  const ramGb = bytesToGb(host.totalRamBytes);
+  const basis = capacityBasis(host);
   const diskGb = host.freeDiskBytes === null ? null : bytesToGb(host.freeDiskBytes);
   const downloading = run && !run.finished;
   const done = run?.finished === "ok";
@@ -1002,10 +1026,14 @@ function RecommendationCard({
           <p className="mt-0.5 text-[11.5px] text-foreground/60">
             ~{formatGb(variant.sizeGb)} download ·{" "}
             {fit.tier === "comfortable"
-              ? "runs comfortably alongside your other apps"
+              ? basis.kind === "vram"
+                ? "fits entirely on your GPU"
+                : "runs comfortably alongside your other apps"
               : fit.tier === "tight"
                 ? "the smallest we list — expect it to be tight here"
-                : "larger than this machine's RAM, but the smallest we list"}
+                : fit.tier === "offload"
+                  ? "the smallest we list — part of it will still run on the CPU"
+                  : "larger than this machine can hold, but the smallest we list"}
           </p>
         </div>
         {done ? (
@@ -1035,8 +1063,12 @@ function RecommendationCard({
           <ProgressBar run={run} />
         </div>
       )}
+      {/* Name the constraint actually used. Showing a RAM figure to someone
+          with a discrete GPU describes the wrong bottleneck — VRAM is what
+          decides whether the model runs on the card or spills to the CPU. */}
       <p className="mt-2 text-[11px] text-foreground/45">
-        Based on {formatGb(ramGb)} RAM
+        Based on {formatGb(basis.totalGb)}{" "}
+        {basis.kind === "vram" ? `VRAM${gpuName ? ` · ${gpuName}` : ""}` : "RAM"}
         {diskGb !== null && ` · ${formatGb(diskGb)} free on disk`}
         {fit.insufficientDisk && " — not enough free space for this download"}
       </p>

@@ -556,6 +556,13 @@ export interface SystemInfo {
   /** Null when no mounted disk contains the app data dir — treat as
    *  "unknown", never as "no space". */
   free_disk_bytes: number | null;
+  /** Dedicated VRAM of the most capable discrete GPU, or null when there is
+   *  none we can read. Null on macOS by design: unified memory means
+   *  `total_ram_bytes` already describes the GPU's budget. */
+  vram_bytes: number | null;
+  /** Adapter name for display, e.g. "NVIDIA GeForce RTX 4060". Null whenever
+   *  `vram_bytes` is. */
+  gpu_name: string | null;
 }
 
 /** Shape returned by the Rust `fetch_url` command. Kept in sync with

@@ -1,5 +1,6 @@
 mod commands;
 mod db;
+mod gpu;
 mod mcp;
 mod ollama_launch;
 mod preload;

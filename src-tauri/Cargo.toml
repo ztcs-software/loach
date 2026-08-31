@@ -100,6 +100,14 @@ exmex = "0.21"
 # read. Held at 0.38: 0.39 raises its MSRV to 1.95, above our 1.88.
 sysinfo = { version = "0.38", default-features = false, features = ["system", "disk"] }
 
+# Windows VRAM + adapter name for the onboarding model recommendation, read via
+# DXGI so it works for NVIDIA / AMD / Intel alike without vendor tooling. The
+# crate is already in the tree (sysinfo pulls it in), so declaring it directly
+# costs a feature set, not a new download. Linux reads nvidia-smi / sysfs and
+# macOS needs nothing — see src/gpu.rs.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common"] }
+
 [dev-dependencies]
 # Only used by the db.rs test suite, which opens a fresh database in a
 # tempdir per test so we don't trample the user's real `loach.db` and so

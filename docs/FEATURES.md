@@ -805,14 +805,38 @@ only pays off for users who go on to write it into a custom instruction.
 
 ### 14.1 Choosing a model
 
-When Ollama is running but has no models, the step reads the host's RAM and
-free disk (`system_info`) and leads with a single recommendation — the
-largest catalog entry that still runs comfortably — instead of asking a
-newcomer to pick blind from seventeen tags. Every variant carries a fit badge
-derived from the same `src/lib/modelChoice.ts` helpers: **Best fit**,
-**Heavy** (runs, no headroom), **Needs ~N GB RAM**, or **Not enough disk**
-(which also disables its Pull button). Outside the Tauri shell `system_info`
-returns null and the catalog renders unadorned.
+When Ollama is running but has no models, the step reads the host's capacity
+(`system_info`) and leads with a single recommendation — the largest catalog
+entry that still runs comfortably — instead of asking a newcomer to pick blind
+from a dozen tags.
+
+**It sizes against VRAM, not RAM, whenever a discrete GPU is present.** That is
+the number which decides whether a model is usable: Ollama loads what fits into
+VRAM and runs the remaining layers on the CPU, so an 18 GB model behind an 8 GB
+card technically "fits in RAM" and still generates at a crawl. Sizing on RAM
+alone both over-recommended on big-RAM/small-GPU machines and under-recommended
+on small-RAM/big-GPU ones. Detection lives in `src-tauri/src/gpu.rs`:
+
+- **Windows** — DXGI `DedicatedVideoMemory`, vendor-neutral across NVIDIA / AMD
+  / Intel, no external tooling.
+- **Linux** — `nvidia-smi`, else the amdgpu sysfs node. Intel Arc is not
+  covered and falls back to RAM.
+- **macOS** — deliberately none. Apple Silicon is unified memory, so system RAM
+  already *is* the GPU budget and a separate figure would double-count it.
+
+Adapters under 1 GB of dedicated memory are ignored as integrated graphics,
+which carve out system RAM and are already covered by the RAM path. Every probe
+is best-effort: anything unreadable falls back to RAM, which stays correct for
+CPU-only and integrated setups.
+
+Each variant carries a fit badge from the pure helpers in
+`src/lib/modelChoice.ts`: **Best fit**, **Tight** (fits the budget, no
+headroom), **Partly on CPU** (exceeds VRAM but fits RAM — it runs, just slowly),
+**Needs ~N GB** (exceeds both), or **Not enough disk**, which also disables its
+Pull button. The card names the constraint it used — "Based on 8 GB VRAM ·
+NVIDIA GeForce RTX 4060" rather than a RAM figure — since telling a GPU owner
+about their RAM describes the wrong bottleneck. Outside the Tauri shell
+`system_info` returns null and the catalog renders unadorned.
 
 Neither provider path pins a default model silently any more. Ollama shows a
 picker of the models it found; the OpenAI path ranks the endpoint's catalog
