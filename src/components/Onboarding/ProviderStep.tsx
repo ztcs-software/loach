@@ -714,10 +714,15 @@ function DefaultModelPicker({
 
 /* ───────────────────────── Ollama catalog ───────────────────────── */
 
-/** Small coloured pill describing how a variant sits on this machine. Each
- *  badge states the *experience* verdict; the mechanism behind it lives in
- *  the tooltip. Comfortable rows carry no badge — inside a catalog that shows
- *  badges at all, absence reads as "no caveats". */
+/** Small coloured pill answering the only question a newcomer has per row:
+ *  will this run on my machine, and how well? Labels are plain verdicts that
+ *  need no tooltip to decode ("Runs well", "Runs slowly", "Too big for this
+ *  machine") — the tooltip carries the numbers and mechanics for anyone who
+ *  hovers. Every evaluated row gets a badge, so "good" is stated instead of
+ *  implied by absence. Solid standard fills — green (Runs well), amber
+ *  (Runs OK), yellow (Runs slowly), red (Too big / disk) — with one shared
+ *  dark text colour on every status pill; dark text is the only choice that
+ *  stays readable on yellow, and solid fills need no per-theme variants. */
 function FitBadge({ fit, recommended }: { fit: FitVerdict | null; recommended: boolean }) {
   if (recommended) {
     // "Recommended", not "Best fit": on the fallback path (nothing rates
@@ -725,69 +730,78 @@ function FitBadge({ fit, recommended }: { fit: FitVerdict | null; recommended: b
     // a best *fit* contradicted the card right above it. "Recommended" is
     // true on every path and echoes the card's own header.
     return (
-      <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-primary/15 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-primary">
+      <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-primary px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-primary-foreground">
         <Sparkles className="h-2.5 w-2.5" />
         Recommended
       </span>
     );
   }
   if (!fit) return null;
+
+  // One text colour for every status pill, carried by the shared base so a
+  // future badge can't drift. Solid fills read identically in both themes.
+  // A tick marks the good verdict; an exclamation marks everything below it.
+  const pill =
+    "inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium text-black/85";
+  const icon = "h-2.5 w-2.5 shrink-0";
+
   if (fit.insufficientDisk) {
     return (
-      <span className="shrink-0 rounded-full bg-destructive/15 px-2 py-0.5 text-[10px] font-medium text-destructive">
-        Not enough disk
+      <span className={cn(pill, "bg-red-500")}>
+        <AlertCircle className={icon} />
+        Not enough disk space
       </span>
     );
   }
   if (fit.tier === "heavy") {
     return (
-      <span className="shrink-0 rounded-full bg-foreground/[0.07] px-2 py-0.5 text-[10px] font-medium text-foreground/50">
-        Needs ~{formatGb(fit.requiredGb)}
+      <span
+        title={`Needs ~${formatGb(fit.requiredGb)} of memory — more than this machine has.`}
+        className={cn(pill, "bg-red-500")}
+      >
+        <AlertCircle className={icon} />
+        Too big for this machine
       </span>
     );
   }
-  if (fit.tier === "offload") {
-    if (fit.moeSplit) {
-      // Same mechanics as the orange badge below — weights overflow the GPU —
-      // but for a mixture-of-experts model the split is the mode it's built
-      // for, so warning about it would misdescribe a good option. "Still"
-      // concedes the overflow; the hedged phrasing (not "fast") keeps the
-      // pill from promising throughput we haven't measured. It also picks up
-      // the catalog subtitle, which ends "…these stay quick even when most
-      // of the model sits in system RAM".
-      return (
-        <span
-          title="Too big for your GPU alone, but as a mixture-of-experts model it activates only a few billion parameters per token — split across GPU and system RAM it stays quick."
-          className="shrink-0 rounded-full bg-sky-500/15 px-2 py-0.5 text-[10px] font-medium text-sky-700 dark:text-sky-300"
-        >
-          Still quick
-        </span>
-      );
-    }
-    // Distinct from "tight" on purpose: this one runs, it's just slow. Calling
-    // it heavy would read as "won't work" and calling it tight would hide that
-    // the user is about to lose most of their GPU acceleration. Consequence
-    // over mechanism ("Partly on CPU" said where, not what it costs — and was
-    // equally true of the MoE case above, making opposite verdicts read as
-    // synonyms); "here" grounds it to this machine, like the card's
-    // "Recommended for this machine".
+  if (fit.tier === "offload" && !fit.moeSplit) {
     return (
       <span
-        title={`Needs ~${formatGb(fit.requiredGb)} — more than your GPU has, so Ollama will run the excess layers on the CPU. It works, just slower.`}
-        className="shrink-0 rounded-full bg-orange-500/15 px-2 py-0.5 text-[10px] font-medium text-orange-700 dark:text-orange-300"
+        title={`Needs ~${formatGb(fit.requiredGb)} — more than your GPU has, so part of it will run on the CPU. It works, just noticeably slower.`}
+        className={cn(pill, "bg-yellow-400")}
       >
-        Slower here
+        <AlertCircle className={icon} />
+        Runs slowly
       </span>
     );
   }
   if (fit.tier === "tight") {
     return (
-      <span className="shrink-0 rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] font-medium text-amber-700 dark:text-amber-300">
-        Tight
+      <span
+        title="Fits, but with little memory to spare — close other heavy apps for best results."
+        className={cn(pill, "bg-amber-500")}
+      >
+        <AlertCircle className={icon} />
+        Runs OK
       </span>
     );
   }
-  return null;
+  // Comfortable — and MoE splits, which overflow the GPU but are built to:
+  // only a small share of the model works per token, so from the user's chair
+  // the verdict is the same "runs well". The tooltip is where the two differ.
+  return (
+    <span
+      title={
+        fit.moeSplit
+          ? "Doesn't fit on your GPU alone, but as a mixture-of-experts model only a small part runs per token — split across GPU and system RAM it stays fast."
+          : "Fits this machine's memory with room to spare."
+      }
+      className={cn(pill, "bg-green-500")}
+    >
+      <Check className={icon} />
+      Runs well
+    </span>
+  );
 }
 
 function ModelCatalog({

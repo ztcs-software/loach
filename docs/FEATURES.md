@@ -848,7 +848,7 @@ the memory that matters — in opposite directions:
   which changes what overflowing VRAM *means*: a dense 31B spilling to RAM
   crawls, while a 30B-A3B split across GPU and RAM is in the mode it was built
   for and stays quick. The classifier reports that as `moeSplit` and the badge
-  reads "Still quick" instead of warning.
+  reads "Runs well" instead of warning.
 
 Runtime overhead on top of the resident weights (KV cache, compute buffers) is
 a floor plus a small fraction, since it grows with layers and context rather
@@ -859,14 +859,18 @@ VRAM reserve any more: the runner already keeps ~1 GB free when fitting layers
 to the card, and reserving on top of that pushed every verdict a tier down.
 
 Each variant carries a fit badge from the pure helpers in
-`src/lib/modelChoice.ts`. Badges state the experience verdict and leave the
-mechanism to their tooltips: **Recommended** (true on every path, unlike the
-"Best fit" it replaced, which lied whenever the pick was merely the least-bad
-fallback), **Tight** (fits the budget, no headroom), **Still quick** (a MoE
-split across GPU and RAM — good news, not a warning), **Slower here** (a dense
-model exceeding VRAM but fitting RAM — it runs, just slowly), **Needs ~N GB**
-(exceeds both), or **Not enough disk**, which also disables its Pull button.
-Comfortable rows carry no badge — absence reads as "no caveats". Rows within a family are ordered by resident
+`src/lib/modelChoice.ts`. Labels are plain verdicts a first-time user can
+parse with no context — numbers and mechanics live in the tooltips:
+**Recommended** (true on every path, unlike the "Best fit" it replaced, which
+lied whenever the pick was merely the least-bad fallback), **Runs well**
+(comfortable — and MoE splits, whose tooltip explains why overflowing the GPU
+doesn't hurt them), **Runs OK** (fits with little headroom), **Runs slowly**
+(a dense model exceeding VRAM but fitting RAM), **Too big for this machine**
+(exceeds both; the ~N GB estimate moved to the tooltip), or **Not enough disk
+space**, which also disables its Pull button. Every evaluated row gets a badge
+— "good" is stated, not implied by absence — coloured green ("Runs well",
+with a tick) and amber / yellow / red ("Runs OK" / "Runs slowly" / "Too big",
+each with an exclamation mark). Rows within a family are ordered by resident
 footprint so the badge column reads monotonically. The card names the
 constraint it used — "Based on 8 GB VRAM · NVIDIA GeForce RTX 4060" rather
 than a RAM figure — since telling a GPU owner about their RAM describes the
