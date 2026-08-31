@@ -136,15 +136,6 @@ const OLLAMA_CATALOG: {
     variants: [{ tag: "qwen3.8:27b", label: "27B", sizeGb: 18 }],
   },
   {
-    family: "Ministral 3",
-    url: "https://ollama.com/library/ministral-3",
-    variants: [
-      { tag: "ministral-3:3b", label: "3B", sizeGb: 3 },
-      { tag: "ministral-3:8b", label: "8B", sizeGb: 6 },
-      { tag: "ministral-3:14b", label: "14B", sizeGb: 9.1 },
-    ],
-  },
-  {
     family: "Nemotron 3.5 Lightning",
     url: "https://ollama.com/library/nemotron-3.5-lightning",
     // NVIDIA's 30B MoE with 3B active per token — the `a3b` in its other tags.

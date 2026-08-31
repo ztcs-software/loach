@@ -21,17 +21,20 @@ const host = (ramGb: number, diskGb: number | null = 500): HostCapacity => ({
   freeDiskBytes: diskGb === null ? null : diskGb * GB,
 });
 
-/** A slice of the real OLLAMA_CATALOG variants, smallest to largest. */
+/**
+ * Representative variant sizes spanning the shipped catalog's range, smallest
+ * to largest. Deliberately a *sample* rather than a mirror of OLLAMA_CATALOG:
+ * these tests pin the sizing math, so binding them to the live catalog would
+ * break every expectation below each time a family is added or dropped. Tags
+ * are real ones so a failure names something recognisable.
+ */
 const CATALOG = [
   { tag: "qwen3.5:0.8b", sizeGb: 1 },
   { tag: "qwen3.5:2b", sizeGb: 2.7 },
-  { tag: "ministral-3:3b", sizeGb: 3 },
   { tag: "qwen3.5:4b", sizeGb: 3.4 },
-  { tag: "ministral-3:8b", sizeGb: 6 },
   { tag: "qwen3.5:9b", sizeGb: 6.6 },
   { tag: "gemma4:e2b", sizeGb: 7.2 },
   { tag: "gemma4:12b", sizeGb: 7.6 },
-  { tag: "ministral-3:14b", sizeGb: 9.1 },
   { tag: "gemma4:e4b", sizeGb: 9.6 },
   { tag: "qwen3.5:27b", sizeGb: 17 },
   { tag: "gemma4:26b", sizeGb: 18 },
@@ -83,7 +86,7 @@ describe("classifyFit", () => {
 
 describe("recommendVariant", () => {
   it("picks the largest comfortable variant for the machine", () => {
-    expect(recommendVariant(CATALOG, host(8))?.tag).toBe("ministral-3:3b");
+    expect(recommendVariant(CATALOG, host(8))?.tag).toBe("qwen3.5:2b");
     expect(recommendVariant(CATALOG, host(16))?.tag).toBe("gemma4:12b");
     expect(recommendVariant(CATALOG, host(32))?.tag).toBe("gemma4:26b");
   });
