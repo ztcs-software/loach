@@ -829,14 +829,46 @@ which carve out system RAM and are already covered by the RAM path. Every probe
 is best-effort: anything unreadable falls back to RAM, which stays correct for
 CPU-only and integrated setups.
 
+**A model's memory need is modeled, not equated with its download.** Each
+catalog variant is a `SizedVariant` (`src/lib/modelChoice.ts`) carrying up to
+three facts, because two architectures deliberately decouple the download from
+the memory that matters — in opposite directions:
+
+- `sizeGb`, the download. Billed to the disk check, and the bound for "runnable
+  at all": when a model overflows the GPU its weights are mmapped from system
+  RAM, so the download (not an inflated estimate) is what must fit there.
+- `residentGb`, set only where an architecture keeps part of itself off the
+  accelerator. Gemma's E-variants are the case: `gemma4:e2b` downloads 7.2 GB
+  but holds ~2.5 GB on the card (per-layer embeddings stay in system RAM), so
+  judging it by its download declared an edge-device model too big for the
+  8 GB cards it targets. The figures are estimates — Ollama publishes no
+  runtime memory numbers to validate them against.
+- `moe`, for mixture-of-experts models. Every expert must be held, so the
+  memory math is unchanged — but only a few billion parameters run per token,
+  which changes what overflowing VRAM *means*: a dense 31B spilling to RAM
+  crawls, while a 30B-A3B split across GPU and RAM is in the mode it was built
+  for and stays quick. The classifier reports that as `moeSplit` and the badge
+  reads "Fast on CPU + GPU" instead of warning.
+
+Runtime overhead on top of the resident weights (KV cache, compute buffers) is
+a floor plus a small fraction, since it grows with layers and context rather
+than weight bytes. The flat ×1.2 it replaces charged a 25 GB MoE model 5 GB of
+phantom overhead — filing models that run well on a 32 GB / 8 GB-card machine
+under "won't fit" — while barely taxing tiny ones. There is also no separate
+VRAM reserve any more: the runner already keeps ~1 GB free when fitting layers
+to the card, and reserving on top of that pushed every verdict a tier down.
+
 Each variant carries a fit badge from the pure helpers in
 `src/lib/modelChoice.ts`: **Best fit**, **Tight** (fits the budget, no
-headroom), **Partly on CPU** (exceeds VRAM but fits RAM — it runs, just slowly),
-**Needs ~N GB** (exceeds both), or **Not enough disk**, which also disables its
-Pull button. The card names the constraint it used — "Based on 8 GB VRAM ·
-NVIDIA GeForce RTX 4060" rather than a RAM figure — since telling a GPU owner
-about their RAM describes the wrong bottleneck. Outside the Tauri shell
-`system_info` returns null and the catalog renders unadorned.
+headroom), **Fast on CPU + GPU** (a MoE split — good news, not a warning),
+**Partly on CPU** (a dense model exceeding VRAM but fitting RAM — it runs,
+just slowly), **Needs ~N GB** (exceeds both), or **Not enough disk**, which
+also disables its Pull button. Rows within a family are ordered by resident
+footprint so the badge column reads monotonically. The card names the
+constraint it used — "Based on 8 GB VRAM · NVIDIA GeForce RTX 4060" rather
+than a RAM figure — since telling a GPU owner about their RAM describes the
+wrong bottleneck. Outside the Tauri shell `system_info` returns null and the
+catalog renders unadorned.
 
 Neither provider path pins a default model silently any more. Ollama shows a
 picker of the models it found; the OpenAI path ranks the endpoint's catalog

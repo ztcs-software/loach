@@ -46,6 +46,7 @@ import {
   recommendVariant,
   type FitVerdict,
   type HostCapacity,
+  type SizedVariant,
 } from "@/lib/modelChoice";
 import type { ModelInfo, ProviderId } from "@/types";
 import { cn, prefersReducedMotion } from "@/lib/utils";
@@ -77,12 +78,11 @@ import { StepShell } from "./StepShell";
 
 type Phase = "choose" | "ollama" | "openai";
 
-interface CatalogVariant {
+/** `SizedVariant` (download / resident / MoE semantics documented there)
+ *  plus what the rows need to render and pull. */
+interface CatalogVariant extends SizedVariant {
   tag: string;
   label: string;
-  /** On-disk footprint after the pull, in GB. Numeric (not a display string)
-   *  because `modelChoice` sizes it against the host's RAM. */
-  sizeGb: number;
 }
 
 // Recommended Ollama catalog. Sizes are rough disk-footprint estimates so
@@ -103,10 +103,18 @@ const OLLAMA_CATALOG: {
     family: "Gemma 4",
     url: "https://ollama.com/library/gemma4",
     variants: [
-      { tag: "gemma4:e2b", label: "E2B", sizeGb: 7.2 },
-      { tag: "gemma4:e4b", label: "E4B", sizeGb: 9.6 },
+      // The E-variants ("effective" parameters) are built for edge devices:
+      // their per-layer embeddings stay in system RAM, so the accelerator
+      // holds far less than the download suggests — E2B is 2.3B-effective
+      // out of 5.1B total, E4B 4.5B out of 8B. Judging them by download size
+      // declared a phone-class model too big for an 8 GB card. `residentGb`
+      // carries the commonly cited on-accelerator footprints (~2–3 GB and
+      // ~5 GB at this quantization); they're estimates — Ollama publishes no
+      // runtime memory numbers to pin them against.
+      { tag: "gemma4:e2b", label: "E2B", sizeGb: 7.2, residentGb: 2.5 },
+      { tag: "gemma4:e4b", label: "E4B", sizeGb: 7.6, residentGb: 5 },
       { tag: "gemma4:12b", label: "12B", sizeGb: 7.6 },
-      { tag: "gemma4:26b", label: "26B (MoE)", sizeGb: 18 },
+      { tag: "gemma4:26b", label: "26B (MoE)", sizeGb: 19, moe: true },
       { tag: "gemma4:31b", label: "31B", sizeGb: 20 },
     ],
   },
@@ -119,16 +127,16 @@ const OLLAMA_CATALOG: {
       { tag: "qwen3.5:4b", label: "4B", sizeGb: 3.4 },
       { tag: "qwen3.5:9b", label: "9B", sizeGb: 6.6 },
       { tag: "qwen3.5:27b", label: "27B", sizeGb: 17 },
-      { tag: "qwen3.5:35b", label: "35B (MoE)", sizeGb: 24 },
-      { tag: "qwen3.5:122b", label: "122B (MoE)", sizeGb: 81 },
+      { tag: "qwen3.5:35b", label: "35B (MoE)", sizeGb: 24, moe: true },
+      { tag: "qwen3.5:122b", label: "122B (MoE)", sizeGb: 81, moe: true },
     ],
   },
   {
     family: "Qwen 3.6",
     url: "https://ollama.com/library/qwen3.6",
     variants: [
-      { tag: "qwen3.6:27b", label: "27B", sizeGb: 17 },
-      { tag: "qwen3.6:35b", label: "35B (MoE)", sizeGb: 24 },
+      { tag: "qwen3.6:27b", label: "27B", sizeGb: 18 },
+      { tag: "qwen3.6:35b", label: "35B (MoE)", sizeGb: 23, moe: true },
     ],
   },
   {
@@ -139,11 +147,13 @@ const OLLAMA_CATALOG: {
   {
     family: "Nemotron 3.5 Lightning",
     url: "https://ollama.com/library/nemotron-3.5-lightning",
-    // NVIDIA's 30B MoE with 3B active per token — the `a3b` in its other tags.
-    // MoE cuts compute per token, not residency: all 30B of weights still have
-    // to be held, so it is sized against RAM like any other 25 GB download.
+    // NVIDIA's 30B MoE with 3B active per token, pitched at always-on agents
+    // on consumer hardware. All 30B of weights still have to be held (MoE
+    // cuts work per token, not residency), but with only 3B active the
+    // GPU/RAM split it lands in on most machines stays fast — which is
+    // exactly what the `moe` flag tells the classifier.
     variants: [
-      { tag: "nemotron-3.5-lightning:30b", label: "30B (MoE)", sizeGb: 25 },
+      { tag: "nemotron-3.5-lightning:30b", label: "30B (MoE)", sizeGb: 25, moe: true },
     ],
   },
   {
@@ -730,6 +740,19 @@ function FitBadge({ fit, recommended }: { fit: FitVerdict | null; recommended: b
     );
   }
   if (fit.tier === "offload") {
+    if (fit.moeSplit) {
+      // Same mechanics as the orange badge below — weights overflow the GPU —
+      // but for a mixture-of-experts model the split is the mode it's built
+      // for, so warning about it would misdescribe a good option.
+      return (
+        <span
+          title="Too big for your GPU alone, but as a mixture-of-experts model it activates only a few billion parameters per token — split across GPU and system RAM it stays quick."
+          className="shrink-0 rounded-full bg-sky-500/15 px-2 py-0.5 text-[10px] font-medium text-sky-700 dark:text-sky-300"
+        >
+          Fast on CPU + GPU
+        </span>
+      );
+    }
     // Distinct from "tight" on purpose: this one runs, it's just slow. Calling
     // it heavy would read as "won't work" and calling it tight would hide that
     // the user is about to lose most of their GPU acceleration.
@@ -863,9 +886,9 @@ function ModelCatalog({
           </button>
         </div>
         <p className="mt-0.5 text-[11.5px] text-foreground/50">
-          Sizes are approximate disk footprint after the pull finishes.
-          MoE = mixture of experts (only a fraction of weights run per
-          token, so they're faster than the headline parameter count).
+          Sizes are the approximate download. MoE = mixture of experts: only a
+          few billion parameters run per token, so these stay quick even when
+          most of the model sits in system RAM.
         </p>
       </div>
 
@@ -923,22 +946,32 @@ function ModelCatalog({
               </div>
               {open && (
                 <div className="border-t border-foreground/[0.05] bg-background/40">
-                  {fam.variants.map((v) => {
-                    const run = inFlight[v.tag];
-                    const fit = host ? classifyFit(v.sizeGb, host) : null;
-                    return (
-                      <VariantRow
-                        key={v.tag}
-                        label={v.label}
-                        sizeGb={v.sizeGb}
-                        tag={v.tag}
-                        run={run}
-                        fit={fit}
-                        recommended={recommended?.tag === v.tag}
-                        onPull={() => void startPull(v.tag)}
-                      />
-                    );
-                  })}
+                  {/* Ordered by what actually occupies the machine (resident
+                      footprint), matching the axis the fit badges judge on —
+                      in download or label order the badge column reads as
+                      arbitrary (an E-variant's fat download is a better fit
+                      than a slimmer dense model). */}
+                  {[...fam.variants]
+                    .sort(
+                      (a, b) =>
+                        (a.residentGb ?? a.sizeGb) - (b.residentGb ?? b.sizeGb),
+                    )
+                    .map((v) => {
+                      const run = inFlight[v.tag];
+                      const fit = host ? classifyFit(v, host) : null;
+                      return (
+                        <VariantRow
+                          key={v.tag}
+                          label={v.label}
+                          sizeGb={v.sizeGb}
+                          tag={v.tag}
+                          run={run}
+                          fit={fit}
+                          recommended={recommended?.tag === v.tag}
+                          onPull={() => void startPull(v.tag)}
+                        />
+                      );
+                    })}
                 </div>
               )}
             </li>
@@ -1008,7 +1041,7 @@ function RecommendationCard({
   run: AdminProgress | undefined;
   onPull: () => void;
 }) {
-  const fit = classifyFit(variant.sizeGb, host);
+  const fit = classifyFit(variant, host);
   const basis = capacityBasis(host);
   const diskGb = host.freeDiskBytes === null ? null : bytesToGb(host.freeDiskBytes);
   const downloading = run && !run.finished;
