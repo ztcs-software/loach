@@ -12,22 +12,41 @@ import {
   EyeOff,
   HardDrive,
   Loader2,
+  Play,
   RefreshCw,
   Server,
+  Sparkles,
   XCircle,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useModelsStore, type AdminProgress } from "@/stores/modelsStore";
 import { useOnboardingStore } from "@/stores/onboardingStore";
 import {
   openExternal,
   ollamaListModels,
+  ollamaStart,
   openaiListModels,
+  systemInfo,
 } from "@/lib/tauri";
-import type { ProviderId } from "@/types";
+import {
+  bytesToGb,
+  classifyFit,
+  formatGb,
+  rankChatModels,
+  recommendVariant,
+  type FitVerdict,
+  type HostCapacity,
+} from "@/lib/modelChoice";
+import type { ModelInfo, ProviderId } from "@/types";
 import { cn, prefersReducedMotion } from "@/lib/utils";
 import { StepShell } from "./StepShell";
 
@@ -35,19 +54,20 @@ import { StepShell } from "./StepShell";
  * Provider configuration — the only step the user can't skip past
  * without consequence. Two flows live here side by side:
  *
- *   - Ollama: probe `/api/tags`. If the daemon already lists at least
- *     one model, we silently auto-pick the first one and zoom past to
- *     the next step (after showing a quick "Found Ollama" confirmation
- *     the user can dismiss). If no models are present we show the
- *     recommended catalog plus a custom-tag input. Pulls run inline
- *     and the user can keep onboarding while a download finishes —
- *     the existing run-tracker chip in the sidebar takes over once
- *     they reach the chat.
+ *   - Ollama: probe `/api/tags`. If the daemon already lists models we show
+ *     them in a default-model picker and unblock Continue. If it's running
+ *     but empty we size the recommended catalog against the machine's RAM
+ *     and lead with one suggestion. If it isn't answering at all we offer to
+ *     start it, and keep re-probing in the background so a user who leaves to
+ *     install Ollama comes back to a green panel instead of a stale warning.
+ *     Pulls run inline and the user can keep onboarding while one finishes —
+ *     `PullStrip` (in StepShell) follows the download through the rest of the
+ *     wizard, and `ModelDownloadBanner` takes over in the chat.
  *
  *   - OpenAI API: base URL + key. Saving runs `openai_list_models` as
  *     a connectivity probe; a 401 / network error blocks Continue and
- *     surfaces inline. We don't try to guess a default model here —
- *     the chat empty-state's model picker handles that.
+ *     surfaces inline. The returned catalog feeds the same default-model
+ *     picker.
  *
  * The X behaviour (`onCloseRequest`) bubbles up to the controller so
  * it can show the "Skip setup?" confirmation; the local state stays
@@ -56,55 +76,90 @@ import { StepShell } from "./StepShell";
 
 type Phase = "choose" | "ollama" | "openai";
 
+interface CatalogVariant {
+  tag: string;
+  label: string;
+  /** On-disk footprint after the pull, in GB. Numeric (not a display string)
+   *  because `modelChoice` sizes it against the host's RAM. */
+  sizeGb: number;
+}
+
 // Recommended Ollama catalog. Sizes are rough disk-footprint estimates so
 // users can budget; exact bytes come back during the pull stream.
 const OLLAMA_CATALOG: {
   family: string;
   url: string;
-  variants: { tag: string; label: string; size: string }[];
+  variants: CatalogVariant[];
 }[] = [
   {
     family: "Gemma 4",
     url: "https://ollama.com/library/gemma4",
     variants: [
-      { tag: "gemma4:e2b", label: "E2B", size: "~7.2 GB" },
-      { tag: "gemma4:e4b", label: "E4B", size: "~9.6 GB" },
-      { tag: "gemma4:12b", label: "12B", size: "~7.6 GB" },
-      { tag: "gemma4:26b", label: "26B (MoE)", size: "~18 GB" },
-      { tag: "gemma4:31b", label: "31B", size: "~20 GB" },
+      { tag: "gemma4:e2b", label: "E2B", sizeGb: 7.2 },
+      { tag: "gemma4:e4b", label: "E4B", sizeGb: 9.6 },
+      { tag: "gemma4:12b", label: "12B", sizeGb: 7.6 },
+      { tag: "gemma4:26b", label: "26B (MoE)", sizeGb: 18 },
+      { tag: "gemma4:31b", label: "31B", sizeGb: 20 },
     ],
   },
   {
     family: "Qwen 3.5",
     url: "https://ollama.com/library/qwen3.5",
     variants: [
-      { tag: "qwen3.5:0.8b", label: "0.8B", size: "~1 GB" },
-      { tag: "qwen3.5:2b", label: "2B", size: "~2.7 GB" },
-      { tag: "qwen3.5:4b", label: "4B", size: "~3.4 GB" },
-      { tag: "qwen3.5:9b", label: "9B", size: "~6.6 GB" },
-      { tag: "qwen3.5:27b", label: "27B", size: "~17 GB" },
-      { tag: "qwen3.5:35b", label: "35B (MoE)", size: "~24 GB" },
-      { tag: "qwen3.5:122b", label: "122B (MoE)", size: "~81 GB" },
+      { tag: "qwen3.5:0.8b", label: "0.8B", sizeGb: 1 },
+      { tag: "qwen3.5:2b", label: "2B", sizeGb: 2.7 },
+      { tag: "qwen3.5:4b", label: "4B", sizeGb: 3.4 },
+      { tag: "qwen3.5:9b", label: "9B", sizeGb: 6.6 },
+      { tag: "qwen3.5:27b", label: "27B", sizeGb: 17 },
+      { tag: "qwen3.5:35b", label: "35B (MoE)", sizeGb: 24 },
+      { tag: "qwen3.5:122b", label: "122B (MoE)", sizeGb: 81 },
     ],
   },
   {
     family: "Qwen 3.6",
     url: "https://ollama.com/library/qwen3.6",
     variants: [
-      { tag: "qwen3.6:27b", label: "27B", size: "~17 GB" },
-      { tag: "qwen3.6:35b", label: "35B (MoE)", size: "~24 GB" },
+      { tag: "qwen3.6:27b", label: "27B", sizeGb: 17 },
+      { tag: "qwen3.6:35b", label: "35B (MoE)", sizeGb: 24 },
     ],
   },
   {
     family: "Ministral 3",
     url: "https://ollama.com/library/ministral-3",
     variants: [
-      { tag: "ministral-3:3b", label: "3B", size: "~3 GB" },
-      { tag: "ministral-3:8b", label: "8B", size: "~6 GB" },
-      { tag: "ministral-3:14b", label: "14B", size: "~9.1 GB" },
+      { tag: "ministral-3:3b", label: "3B", sizeGb: 3 },
+      { tag: "ministral-3:8b", label: "8B", sizeGb: 6 },
+      { tag: "ministral-3:14b", label: "14B", sizeGb: 9.1 },
     ],
   },
 ];
+
+const ALL_VARIANTS: CatalogVariant[] = OLLAMA_CATALOG.flatMap((f) => f.variants);
+
+/** Read the host's RAM / free disk once per mount. Null while in flight, and
+ *  stays null outside the Tauri shell or if the probe fails — every consumer
+ *  treats that as "no fit hints", never as "zero RAM". */
+function useHostCapacity(): HostCapacity | null {
+  const [host, setHost] = useState<HostCapacity | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    void systemInfo()
+      .then((info) => {
+        if (cancelled || !info) return;
+        setHost({
+          totalRamBytes: info.total_ram_bytes,
+          freeDiskBytes: info.free_disk_bytes,
+        });
+      })
+      .catch(() => {
+        /* No hardware hints — the catalog still works unaided. */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  return host;
+}
 
 export function ProviderStep({
   onClose,
@@ -245,26 +300,45 @@ function ProviderCard({
 type OllamaProbe =
   | { kind: "probing" }
   | { kind: "down"; error: string }
-  | { kind: "up"; modelCount: number };
+  | { kind: "up"; models: ModelInfo[] };
+
+/** How often to silently re-probe while Ollama is unreachable. The expected
+ *  journey out of that state is "leave, install Ollama, come back", so the
+ *  panel has to heal itself — a user who never finds the Recheck button would
+ *  otherwise sit in front of a warning that is no longer true. */
+const REPROBE_MS = 3000;
 
 function OllamaPath({ onProvisioned }: { onProvisioned: () => void }) {
   const baseUrl = useSettingsStore((s) => s.ollama_base_url);
   const update = useSettingsStore((s) => s.update);
   const setProviderDefault = useSettingsStore((s) => s.setProviderDefault);
+  const pinnedModel = useSettingsStore((s) => s.default_model);
   const refreshModels = useModelsStore((s) => s.refresh);
+  const host = useHostCapacity();
 
   const [probe, setProbe] = useState<OllamaProbe>({ kind: "probing" });
   const [editingUrl, setEditingUrl] = useState(false);
   const [urlDraft, setUrlDraft] = useState(baseUrl);
+  const [starting, setStarting] = useState(false);
+  const [startError, setStartError] = useState<string | null>(null);
 
-  const runProbe = async () => {
-    setProbe({ kind: "probing" });
+  // Guards the background poll against stacking probes when a connect attempt
+  // takes longer than the poll interval.
+  const probing = useRef(false);
+
+  const runProbe = async (opts?: { quiet?: boolean }) => {
+    if (probing.current) return;
+    probing.current = true;
+    // A background poll must not flip the panel back to "Looking for…" every
+    // few seconds — the user would watch it strobe between two states.
+    if (!opts?.quiet) setProbe({ kind: "probing" });
     try {
       const list = await ollamaListModels(baseUrl);
-      setProbe({ kind: "up", modelCount: list.length });
+      setProbe({ kind: "up", models: list });
       if (list.length > 0) {
-        // Pre-existing models — auto-pin the first one as the default
-        // and let the user advance immediately.
+        // Pre-existing models — pin the first as the default so Continue is
+        // live immediately. Unlike before, the pick is *shown* in a picker
+        // below, so it's a visible default rather than a silent one.
         await setProviderDefault("ollama", list[0].id);
         await refreshModels();
         onProvisioned();
@@ -274,6 +348,8 @@ function OllamaPath({ onProvisioned }: { onProvisioned: () => void }) {
         kind: "down",
         error: e instanceof Error ? e.message : String(e),
       });
+    } finally {
+      probing.current = false;
     }
   };
 
@@ -282,12 +358,37 @@ function OllamaPath({ onProvisioned }: { onProvisioned: () => void }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [baseUrl]);
 
+  // Self-healing poll while unreachable. Torn down as soon as the probe
+  // succeeds (or the user edits the URL, which re-runs the effect above).
+  useEffect(() => {
+    if (probe.kind !== "down") return;
+    const id = window.setInterval(() => void runProbe({ quiet: true }), REPROBE_MS);
+    return () => window.clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [probe.kind, baseUrl]);
+
   const handleUrlSave = async () => {
     const next = urlDraft.trim();
     if (!next) return;
     await update("ollama_base_url", next);
     setEditingUrl(false);
     // Probe will re-fire via the baseUrl effect.
+  };
+
+  const handleStartOllama = async () => {
+    setStarting(true);
+    setStartError(null);
+    try {
+      await ollamaStart(baseUrl);
+      await runProbe();
+    } catch (e) {
+      // Typically "couldn't find the ollama binary" — which is exactly the
+      // signal that distinguishes "installed but not running" from "not
+      // installed", so it's worth showing verbatim.
+      setStartError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setStarting(false);
+    }
   };
 
   return (
@@ -305,14 +406,24 @@ function OllamaPath({ onProvisioned }: { onProvisioned: () => void }) {
           title="Ollama isn't reachable"
         >
           <p>
-            Couldn't connect to <span className="font-mono">{baseUrl}</span>.
-            Install Ollama and run <span className="font-mono">ollama serve</span>,
-            then retry.
+            Nothing is answering at <span className="font-mono">{baseUrl}</span>.
+            If Ollama is already installed, Loach can start it for you.
+            Otherwise install it first — it starts on its own once installed.
           </p>
           <div className="mt-2.5 flex flex-wrap gap-2">
-            <Button size="sm" variant="outline" onClick={() => void runProbe()} className="gap-1.5">
-              <RefreshCw className="h-3.5 w-3.5" />
-              Recheck
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={starting}
+              onClick={() => void handleStartOllama()}
+              className="gap-1.5"
+            >
+              {starting ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Play className="h-3.5 w-3.5" />
+              )}
+              {starting ? "Starting…" : "Start Ollama"}
             </Button>
             <Button
               size="sm"
@@ -331,17 +442,27 @@ function OllamaPath({ onProvisioned }: { onProvisioned: () => void }) {
               Change URL
             </Button>
           </div>
+          {startError && (
+            <p className="mt-2 flex items-start gap-1.5 text-[11.5px] text-destructive">
+              <XCircle className="mt-0.5 h-3 w-3 shrink-0" />
+              {startError}
+            </p>
+          )}
+          <p className="mt-2 flex items-center gap-1.5 text-[11px] text-foreground/45">
+            <RefreshCw className="h-3 w-3 animate-spin [animation-duration:3s]" />
+            Rechecking automatically — this panel updates itself when Ollama
+            comes up.
+          </p>
         </StatusPanel>
-      ) : probe.modelCount > 0 ? (
+      ) : probe.models.length > 0 ? (
         <StatusPanel
           tone="ok"
           icon={<Check className="h-4 w-4" />}
           title="Found a running Ollama instance"
         >
-          {probe.modelCount === 1
+          {probe.models.length === 1
             ? "1 model installed and ready to use."
-            : `${probe.modelCount} models installed and ready to use.`}{" "}
-          You're set — hit Continue.
+            : `${probe.models.length} models installed and ready to use.`}
         </StatusPanel>
       ) : (
         <StatusPanel
@@ -349,8 +470,8 @@ function OllamaPath({ onProvisioned }: { onProvisioned: () => void }) {
           icon={<Server className="h-4 w-4" />}
           title="Ollama is running, no models yet"
         >
-          Pick one from the list below — Loach will pull it for you. You can
-          continue while the download runs.
+          Pick one below — Loach will pull it for you. You can continue setup
+          while the download runs.
         </StatusPanel>
       )}
 
@@ -372,12 +493,23 @@ function OllamaPath({ onProvisioned }: { onProvisioned: () => void }) {
         </div>
       )}
 
+      {/* Models already installed — let the user choose which one this
+          install defaults to instead of silently taking the first. */}
+      {probe.kind === "up" && probe.models.length > 0 && (
+        <DefaultModelPicker
+          models={probe.models}
+          value={pinnedModel}
+          onSelect={(id) => void setProviderDefault("ollama", id)}
+          hint="Used for new chats. Change it any time from the model dropdown."
+        />
+      )}
+
       {/* Catalog only when we know Ollama is up but empty (or after the
           user has clicked Recheck successfully). When models already
-          exist we hide the catalog — the auto-advance is enough; if
+          exist we hide the catalog — the picker above is enough; if
           they want more they can pull from the Models page later. */}
-      {probe.kind === "up" && probe.modelCount === 0 && (
-        <ModelCatalog onPulled={onProvisioned} />
+      {probe.kind === "up" && probe.models.length === 0 && (
+        <ModelCatalog host={host} onPulled={onProvisioned} />
       )}
     </div>
   );
@@ -477,9 +609,110 @@ function ProviderSwitch({
   );
 }
 
+/* ───────────────────────── default model picker ───────────────────────── */
+
+/**
+ * Shows — and lets the user change — which model this install will start new
+ * chats with. Both provider paths used to pin `list[0]` and say nothing,
+ * which on api.openai.com means the first reply can come from whatever
+ * `/v1/models` happened to return first. The pick is now visible even when
+ * the user accepts it unchanged.
+ */
+function DefaultModelPicker({
+  models,
+  value,
+  onSelect,
+  hint,
+}: {
+  models: ModelInfo[];
+  value: string;
+  onSelect: (id: string) => void;
+  hint: string;
+}) {
+  const current = models.find((m) => m.id === value) ?? models[0];
+  return (
+    <div className="rounded-xl border border-foreground/[0.08] bg-foreground/[0.015] p-3">
+      <Label className="text-[12px]">Default model</Label>
+      <div className="mt-1.5">
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              variant="outline"
+              size="sm"
+              className="w-full justify-between gap-2 font-mono text-[12.5px]"
+            >
+              <span className="truncate">{current?.label ?? current?.id ?? "Select a model"}</span>
+              <ChevronDown className="h-3.5 w-3.5 shrink-0 opacity-60" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start" className="max-h-72 w-72 overflow-y-auto">
+            {models.map((m) => (
+              <DropdownMenuItem
+                key={m.id}
+                onSelect={() => onSelect(m.id)}
+                className="gap-2 font-mono text-[12.5px]"
+              >
+                <Check
+                  className={cn(
+                    "h-3.5 w-3.5 shrink-0",
+                    m.id === current?.id ? "opacity-100" : "opacity-0",
+                  )}
+                />
+                <span className="truncate">{m.label}</span>
+              </DropdownMenuItem>
+            ))}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
+      <p className="mt-1.5 text-[11px] text-foreground/50">{hint}</p>
+    </div>
+  );
+}
+
 /* ───────────────────────── Ollama catalog ───────────────────────── */
 
-function ModelCatalog({ onPulled }: { onPulled: () => void }) {
+/** Small coloured pill describing how a variant sits on this machine. */
+function FitBadge({ fit, recommended }: { fit: FitVerdict | null; recommended: boolean }) {
+  if (recommended) {
+    return (
+      <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-primary/15 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-primary">
+        <Sparkles className="h-2.5 w-2.5" />
+        Best fit
+      </span>
+    );
+  }
+  if (!fit) return null;
+  if (fit.insufficientDisk) {
+    return (
+      <span className="shrink-0 rounded-full bg-destructive/15 px-2 py-0.5 text-[10px] font-medium text-destructive">
+        Not enough disk
+      </span>
+    );
+  }
+  if (fit.tier === "heavy") {
+    return (
+      <span className="shrink-0 rounded-full bg-foreground/[0.07] px-2 py-0.5 text-[10px] font-medium text-foreground/50">
+        Needs ~{formatGb(fit.requiredGb)} RAM
+      </span>
+    );
+  }
+  if (fit.tier === "tight") {
+    return (
+      <span className="shrink-0 rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] font-medium text-amber-700 dark:text-amber-300">
+        Heavy
+      </span>
+    );
+  }
+  return null;
+}
+
+function ModelCatalog({
+  host,
+  onPulled,
+}: {
+  host: HostCapacity | null;
+  onPulled: () => void;
+}) {
   const pullModel = useModelsStore((s) => s.pullModel);
   const setProviderDefault = useSettingsStore((s) => s.setProviderDefault);
   const runs = useModelsStore((s) => s.runs);
@@ -508,6 +741,11 @@ function ModelCatalog({ onPulled }: { onPulled: () => void }) {
   // Track tags we've kicked off so we can show their progress chip even
   // after the run cleans up. Map: tag -> stream id.
   const [pulledTags, setPulledTags] = useState<Record<string, string>>({});
+
+  const recommended = useMemo(
+    () => (host ? recommendVariant(ALL_VARIANTS, host) : null),
+    [host],
+  );
 
   const startPull = async (tag: string) => {
     if (!tag.trim()) return;
@@ -553,9 +791,20 @@ function ModelCatalog({ onPulled }: { onPulled: () => void }) {
 
   return (
     <div className="space-y-3">
+      {recommended && host && (
+        <RecommendationCard
+          variant={recommended}
+          host={host}
+          run={inFlight[recommended.tag]}
+          onPull={() => void startPull(recommended.tag)}
+        />
+      )}
+
       <div>
         <div className="flex items-baseline justify-between gap-3">
-          <h3 className="text-[13px] font-medium">Recommended models</h3>
+          <h3 className="text-[13px] font-medium">
+            {recommended ? "All models" : "Recommended models"}
+          </h3>
           <button
             type="button"
             onClick={jumpToCustomTag}
@@ -627,13 +876,16 @@ function ModelCatalog({ onPulled }: { onPulled: () => void }) {
                 <div className="border-t border-foreground/[0.05] bg-background/40">
                   {fam.variants.map((v) => {
                     const run = inFlight[v.tag];
+                    const fit = host ? classifyFit(v.sizeGb, host) : null;
                     return (
                       <VariantRow
                         key={v.tag}
                         label={v.label}
-                        size={v.size}
+                        sizeGb={v.sizeGb}
                         tag={v.tag}
                         run={run}
+                        fit={fit}
+                        recommended={recommended?.tag === v.tag}
                         onPull={() => void startPull(v.tag)}
                       />
                     );
@@ -688,17 +940,98 @@ function ModelCatalog({ onPulled }: { onPulled: () => void }) {
   );
 }
 
-function VariantRow({
-  label,
-  size,
-  tag,
+/**
+ * The one suggestion the step leads with. A newcomer's real question is "what
+ * should I pick for this machine?", which a list of seventeen tags and their
+ * disk sizes doesn't answer — so we answer it directly and keep the full
+ * catalog underneath as the escape hatch.
+ */
+function RecommendationCard({
+  variant,
+  host,
   run,
   onPull,
 }: {
+  variant: CatalogVariant;
+  host: HostCapacity;
+  run: AdminProgress | undefined;
+  onPull: () => void;
+}) {
+  const fit = classifyFit(variant.sizeGb, host);
+  const ramGb = bytesToGb(host.totalRamBytes);
+  const diskGb = host.freeDiskBytes === null ? null : bytesToGb(host.freeDiskBytes);
+  const downloading = run && !run.finished;
+  const done = run?.finished === "ok";
+
+  return (
+    <div className="rounded-xl border border-primary/25 bg-primary/[0.05] p-3.5">
+      <div className="flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wider text-primary">
+        <Sparkles className="h-3 w-3" />
+        Recommended for this machine
+      </div>
+      <div className="mt-2 flex items-start justify-between gap-3">
+        <div className="min-w-0 flex-1">
+          <p className="font-mono text-[13.5px] font-medium">{variant.tag}</p>
+          <p className="mt-0.5 text-[11.5px] text-foreground/60">
+            ~{formatGb(variant.sizeGb)} download ·{" "}
+            {fit.tier === "comfortable"
+              ? "runs comfortably alongside your other apps"
+              : fit.tier === "tight"
+                ? "the smallest we list — expect it to be tight here"
+                : "larger than this machine's RAM, but the smallest we list"}
+          </p>
+        </div>
+        {done ? (
+          <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-emerald-500/15 px-2 py-1 text-[11px] text-emerald-800 dark:text-emerald-300">
+            <Check className="h-3 w-3" />
+            Ready
+          </span>
+        ) : downloading ? (
+          <span className="inline-flex shrink-0 items-center gap-1 text-[11px] text-foreground/55">
+            <Loader2 className="h-3 w-3 animate-spin" />
+            {fmtPct(run!)}
+          </span>
+        ) : (
+          <Button
+            size="sm"
+            disabled={fit.insufficientDisk}
+            onClick={onPull}
+            className="shrink-0 gap-1.5"
+          >
+            <Download className="h-3.5 w-3.5" />
+            Pull this one
+          </Button>
+        )}
+      </div>
+      {run && (
+        <div className="mt-2">
+          <ProgressBar run={run} />
+        </div>
+      )}
+      <p className="mt-2 text-[11px] text-foreground/45">
+        Based on {formatGb(ramGb)} RAM
+        {diskGb !== null && ` · ${formatGb(diskGb)} free on disk`}
+        {fit.insufficientDisk && " — not enough free space for this download"}
+      </p>
+    </div>
+  );
+}
+
+function VariantRow({
+  label,
+  sizeGb,
+  tag,
+  run,
+  fit,
+  recommended,
+  onPull,
+}: {
   label: string;
-  size: string;
+  sizeGb: number;
   tag: string;
   run: AdminProgress | undefined;
+  fit: FitVerdict | null;
+  recommended: boolean;
   onPull: () => void;
 }) {
   const downloading = run && !run.finished;
@@ -709,9 +1042,10 @@ function VariantRow({
     <div className="flex items-center gap-3 px-3.5 py-2 text-[12.5px]">
       <CircleDot className="h-3 w-3 text-foreground/30" />
       <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <span className="font-medium">{label}</span>
-          <span className="text-[11px] text-foreground/45">{size}</span>
+          <span className="text-[11px] text-foreground/45">~{formatGb(sizeGb)}</span>
+          <FitBadge fit={fit} recommended={recommended} />
         </div>
         <p className="font-mono text-[11px] text-foreground/40">{tag}</p>
         {run && (
@@ -736,7 +1070,14 @@ function VariantRow({
           {fmtPct(run!)}
         </span>
       ) : (
-        <Button size="sm" variant="outline" onClick={onPull} className="gap-1.5">
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={fit?.insufficientDisk}
+          title={fit?.insufficientDisk ? "Not enough free disk space for this download" : undefined}
+          onClick={onPull}
+          className="gap-1.5"
+        >
           <Download className="h-3.5 w-3.5" />
           Pull
         </Button>
@@ -787,6 +1128,7 @@ function fmtPct(run: AdminProgress) {
 function OpenAIPath({ onProvisioned }: { onProvisioned: () => void }) {
   const baseUrl = useSettingsStore((s) => s.openai_base_url);
   const keySet = useSettingsStore((s) => s.openai_key_set);
+  const pinnedModel = useSettingsStore((s) => s.default_model);
   const update = useSettingsStore((s) => s.update);
   const setOpenAIKey = useSettingsStore((s) => s.setOpenAIKey);
   const clearOpenAIKey = useSettingsStore((s) => s.clearOpenAIKey);
@@ -799,6 +1141,9 @@ function OpenAIPath({ onProvisioned }: { onProvisioned: () => void }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [verified, setVerified] = useState(keySet);
+  /** Models the verified endpoint returned, ranked so a chat model leads.
+   *  Feeds the default-model picker below. */
+  const [catalog, setCatalog] = useState<ModelInfo[]>([]);
 
   // If a verified key is already stored (the user set it, advanced, then
   // navigated back), the parent's `provisioned` flag has reset but there's
@@ -833,10 +1178,13 @@ function OpenAIPath({ onProvisioned }: { onProvisioned: () => void }) {
       try {
         // Probe — a key that isn't valid will surface here as a 401.
         const list = await openaiListModels(urlDraft.trim() || baseUrl);
-        if (list.length > 0) {
-          // Pin a sensible default (first model returned). The user can
-          // change later from Settings.
-          await setProviderDefault("openai", list[0].id);
+        const ranked = rankChatModels(list);
+        setCatalog(ranked);
+        if (ranked.length > 0) {
+          // Pin the best chat candidate rather than whatever `/v1/models`
+          // listed first — on api.openai.com that's frequently an embedding
+          // or audio model. The picker below shows the result either way.
+          await setProviderDefault("openai", ranked[0].id);
         }
         await refreshModels();
       } catch (probeErr) {
@@ -947,6 +1295,15 @@ function OpenAIPath({ onProvisioned }: { onProvisioned: () => void }) {
           </p>
         )}
       </div>
+
+      {catalog.length > 0 && (
+        <DefaultModelPicker
+          models={catalog}
+          value={pinnedModel}
+          onSelect={(id) => void setProviderDefault("openai", id)}
+          hint={`${catalog.length} models available. Used for new chats — change it any time from the model dropdown.`}
+        />
+      )}
     </div>
   );
 }

@@ -77,6 +77,7 @@ import { useSettingsStore } from "./settingsStore";
 import { useSpaceStore } from "./spaceStore";
 import { useUIStore } from "./uiStore";
 import { useModelsStore } from "./modelsStore";
+import { getLivePullFor, pullPercent } from "@/lib/usePullRuns";
 
 interface ActiveStream {
   stop: () => Promise<void>;
@@ -2025,6 +2026,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const session = get().sessions.find((s) => s.id === sessionId)!;
     if (!session.model) {
       throw new Error("No model selected. Pick one from the model dropdown.");
+    }
+    // A model chosen during onboarding is routinely still downloading when the
+    // user sends their first message — the wizard pins it and lets them carry
+    // on. Ollama answers 404 for a tag it doesn't have yet, which
+    // `formatProviderError` renders as "endpoint or model not found. Check the
+    // model name and URL": wrong, unactionable, and the first thing the app
+    // would ever say to a new user. Only Ollama pulls create runs, so matching
+    // on the tag can't misfire for a cloud model.
+    const pull = getLivePullFor(session.model);
+    if (pull) {
+      const pct = pullPercent(pull);
+      throw new Error(
+        `${session.model} is still downloading${pct === null ? "" : ` (${pct}%)`}. It'll be ready shortly.`,
+      );
     }
 
     // Lazy hydration: a session other than the one loaded at startup only

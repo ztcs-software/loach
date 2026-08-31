@@ -6,17 +6,21 @@ import { useOnboardingStore } from "@/stores/onboardingStore";
 import { cn } from "@/lib/utils";
 import { StepShell } from "./StepShell";
 
-const EXAMPLE_PROMPT = `You are a concise, technically rigorous assistant. The user's name is {{USER_NAME}}. When unsure, say so rather than guessing. Default to short answers; expand only when asked.`;
+const EXAMPLE_PROMPT = `You are a concise, technically rigorous assistant. When unsure, say so rather than guessing. Default to short answers; expand only when asked.`;
 
 /**
  * Custom instructions step. Skippable. Saves to `global_system_prompt` —
  * the same field surfaced as "Custom instructions" in Settings.
  *
- * The expandable example exists for two reasons: (a) it shows the
- * `{{USER_NAME}}` template variable in context, which is otherwise
- * invisible to a new user, and (b) "Use example" gives a one-click
- * starting point so the user can iterate from a working baseline
- * instead of staring at an empty box.
+ * The expandable example exists for two reasons: (a) it gives a one-click
+ * starting point so the user can iterate from a working baseline instead of
+ * staring at an empty box, and (b) the note beneath it is where template
+ * variables are introduced — they're otherwise invisible to a new user.
+ *
+ * The example deliberately doesn't use `{{USER_NAME}}`: the wizard no longer
+ * asks for a name, so it would expand to "The user's name is ." in every
+ * chat of anyone who clicked "Use this example". The variable is still
+ * listed below as one they *can* use once they set a name in Settings.
  */
 
 export function PromptStep({ onClose }: { onClose: () => void }) {
@@ -92,9 +96,10 @@ export function PromptStep({ onClose }: { onClose: () => void }) {
               </button>
               <p className="mt-2 text-[11px] text-foreground/50">
                 You can use template variables like{" "}
-                <span className="font-mono">{"{{USER_NAME}}"}</span>,{" "}
-                <span className="font-mono">{"{{CURRENT_DATE}}"}</span>, or{" "}
-                <span className="font-mono">{"{{CURRENT_TIME}}"}</span>.
+                <span className="font-mono">{"{{CURRENT_DATE}}"}</span>,{" "}
+                <span className="font-mono">{"{{CURRENT_TIME}}"}</span>, or{" "}
+                <span className="font-mono">{"{{USER_NAME}}"}</span> (set your
+                name in Settings → General).
               </p>
             </div>
           )}

@@ -298,6 +298,7 @@ pub fn run() {
             commands::security_unlock,
             commands::security_get_hint,
             commands::security_clear,
+            commands::system_info,
             commands::ollama_list_models,
             commands::ollama_probe,
             commands::ollama_start,

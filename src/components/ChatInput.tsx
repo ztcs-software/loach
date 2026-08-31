@@ -17,6 +17,7 @@ import { useConfirm } from "./ConfirmDialog";
 import { CommandPalette } from "./CommandPalette";
 import { CommandResultPanel } from "./CommandResultPanel";
 import { ContextUsageBar } from "./ContextUsageBar";
+import { ModelDownloadBanner } from "./ModelDownloadBanner";
 import {
   fileToAttachment,
   FileTooLargeError,
@@ -728,6 +729,7 @@ export function ChatInput({ centered = false }: ChatInputProps) {
       )}
     >
       <div className="relative mx-auto w-full max-w-3xl">
+        <ModelDownloadBanner />
         {commandResult && commandResult.kind === "list" && (
           <CommandResultPanel
             result={commandResult}

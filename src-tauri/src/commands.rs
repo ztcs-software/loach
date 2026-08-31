@@ -715,6 +715,56 @@ pub async fn security_clear(args: Option<SecurityClearArgs>) -> Result<(), Strin
     .map_err(err)
 }
 
+// ---------- host hardware ----------
+
+/// Coarse machine capacity, read once by onboarding so the Ollama catalog can
+/// size its recommendation against the host instead of quoting raw gigabytes.
+#[derive(Debug, Serialize)]
+pub struct SystemInfo {
+    /// Physical RAM installed, in bytes.
+    pub total_ram_bytes: u64,
+    /// RAM not currently in use, in bytes. Advisory only — the OS will evict
+    /// cache under pressure, so a model larger than this may still run.
+    pub available_ram_bytes: u64,
+    /// Free space on the volume holding the app data directory, in bytes, or
+    /// `null` when no mounted disk contains that path (network shares, some
+    /// container mounts). Callers must treat null as "unknown", not "full".
+    pub free_disk_bytes: Option<u64>,
+}
+
+/// Probe installed RAM and free disk. Cheap enough to call on demand
+/// (`refresh_memory` reads /proc or the Win32 API directly), but onboarding
+/// only asks once per mount.
+#[tauri::command]
+pub async fn system_info(app: AppHandle) -> Result<SystemInfo, String> {
+    use tauri::Manager;
+
+    let data_dir = app.path().app_data_dir().map_err(err)?;
+
+    tokio::task::spawn_blocking(move || {
+        let mut sys = sysinfo::System::new();
+        sys.refresh_memory();
+
+        // Pick the mounted disk whose mount point is the longest prefix of the
+        // app data dir — on Unix every path is under `/`, so the deepest match
+        // is the volume actually holding it rather than the root filesystem.
+        let disks = sysinfo::Disks::new_with_refreshed_list();
+        let free_disk_bytes = disks
+            .iter()
+            .filter(|d| data_dir.starts_with(d.mount_point()))
+            .max_by_key(|d| d.mount_point().as_os_str().len())
+            .map(|d| d.available_space());
+
+        SystemInfo {
+            total_ram_bytes: sys.total_memory(),
+            available_ram_bytes: sys.available_memory(),
+            free_disk_bytes,
+        }
+    })
+    .await
+    .map_err(|e| format!("system_info task panicked: {e}"))
+}
+
 // ---------- providers ----------
 
 #[tauri::command]

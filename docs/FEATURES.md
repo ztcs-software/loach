@@ -783,18 +783,65 @@ A six-step wizard runs on first launch (and after a factory reset). Each
 step writes its choice straight into settings, so dismissing partway through
 still leaves the app in a consistent state.
 
-1. **Welcome** — intro card.
-2. **Name** — optional display name; available as `{{USER_NAME}}` in any
-   system prompt thereafter.
-3. **Provider** — pick Ollama (and suggest a starter model to pull) or
-   add an OpenAI key. This is the only required step; the X / Esc on
-   this step routes through a confirm dialog.
-4. **Prompt** — the global *Custom instructions* textarea.
-5. **Features** — toggle defaults for Temporal awareness, Thinking, Web
-   fetch, and Low VRAM (the screen recommends Temporal awareness ON,
-   Thinking ON, Web fetch ON, Low VRAM OFF).
+1. **Welcome** — intro card, plus *Restore from backup* for users arriving
+   from another install.
+2. **Provider** — pick Ollama or add an OpenAI key. This is the only
+   required step; the X / Esc on it routes through a confirm dialog. It sits
+   second so a model download has the rest of the wizard to make progress.
+3. **Features** — defaults for Temporal awareness, Thinking, and Low VRAM
+   (recommends ON / ON / OFF). Committed on Skip as well as Continue.
+4. **Tools** — Web fetch and the twelve in-process utility tools, all off to
+   start. Unlike Features, this screen writes **only** what the user
+   actually toggles, so skipping past can't opt them into networking or
+   inflate the tool catalogue sent to the model. MCP is described here but
+   configured in Settings.
+5. **Prompt** — the global *Custom instructions* textarea.
 6. **Final** — closes the wizard, lands the user in a fresh chat with the
    model dropdown auto-opened so they can pick a model immediately.
+
+The wizard does not ask for a display name. `{{USER_NAME}}` still resolves
+from Settings → General; it just isn't collected up front, because the value
+only pays off for users who go on to write it into a custom instruction.
+
+### 14.1 Choosing a model
+
+When Ollama is running but has no models, the step reads the host's RAM and
+free disk (`system_info`) and leads with a single recommendation — the
+largest catalog entry that still runs comfortably — instead of asking a
+newcomer to pick blind from seventeen tags. Every variant carries a fit badge
+derived from the same `src/lib/modelChoice.ts` helpers: **Best fit**,
+**Heavy** (runs, no headroom), **Needs ~N GB RAM**, or **Not enough disk**
+(which also disables its Pull button). Outside the Tauri shell `system_info`
+returns null and the catalog renders unadorned.
+
+Neither provider path pins a default model silently any more. Ollama shows a
+picker of the models it found; the OpenAI path ranks the endpoint's catalog
+so a chat model leads (`/v1/models` order routinely puts an embedding or
+audio model first) and shows the pick in the same picker.
+
+### 14.2 Downloads that outlive the wizard
+
+Pulls started here keep running while the user finishes setup, so the
+download is surfaced the whole way:
+
+- A progress strip pinned to the bottom of every remaining wizard step.
+- The final screen swaps "You're all set" for "Setup complete / still
+  downloading" rather than claiming readiness it doesn't have.
+- `ModelDownloadBanner` above the composer in the chat itself.
+- `sendUserMessage` refuses a send against a still-downloading model with
+  "<tag> is still downloading (43%)". Without it Ollama returns 404 for the
+  missing tag, which `providerErrors` renders as "endpoint or model not
+  found. Check the model name and URL" — a wrong and unactionable first
+  impression.
+
+### 14.3 When Ollama isn't reachable
+
+The step offers **Start Ollama** (the same `ollama_start` command the chat
+header uses) before suggesting a download, since "installed but not running"
+and "not installed" look identical from a failed probe — the error from a
+failed start is what tells them apart. It also re-probes every 3 s in the
+background, so a user who leaves to install Ollama returns to a green panel
+instead of a stale warning they have to know to dismiss.
 
 ---
 

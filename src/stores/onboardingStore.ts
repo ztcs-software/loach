@@ -14,20 +14,27 @@ import { useChatStore } from "./chatStore";
  * — it just owns the wizard's transient state.
  */
 
+/**
+ * Step order. Provider sits second on purpose: it's the only step that can
+ * kick off a multi-gigabyte download, and everything after it is cheap
+ * configuration, so putting it early gives the pull the rest of the wizard to
+ * make progress instead of stranding the user at "You're all set" next to an
+ * unusable model.
+ */
 export type OnboardingStep =
   | "welcome"
-  | "name"
   | "provider"
-  | "prompt"
   | "features"
+  | "tools"
+  | "prompt"
   | "final";
 
 export const ONBOARDING_STEPS: OnboardingStep[] = [
   "welcome",
-  "name",
   "provider",
-  "prompt",
   "features",
+  "tools",
+  "prompt",
   "final",
 ];
 

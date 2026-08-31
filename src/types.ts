@@ -547,6 +547,17 @@ export const DEFAULT_SETTINGS: Settings = {
   recent_commands: "",
 };
 
+/** Coarse host capacity from the Rust `system_info` command. Read by
+ *  onboarding so the Ollama catalog can size its recommendation against the
+ *  machine. Kept in sync with `src-tauri/src/commands.rs::SystemInfo`. */
+export interface SystemInfo {
+  total_ram_bytes: number;
+  available_ram_bytes: number;
+  /** Null when no mounted disk contains the app data dir — treat as
+   *  "unknown", never as "no space". */
+  free_disk_bytes: number | null;
+}
+
 /** Shape returned by the Rust `fetch_url` command. Kept in sync with
  *  `src-tauri/src/tools/fetch_url.rs::FetchedPage`. */
 export interface FetchedPage {

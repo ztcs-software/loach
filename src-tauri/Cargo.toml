@@ -93,6 +93,13 @@ printpdf = { version = "0.12", default-features = false }
 # `tools/calculate.rs` for the two operators we add on top of its defaults.
 exmex = "0.21"
 
+# Total RAM + free disk for the onboarding model recommendation, which sizes
+# the Ollama catalog against the machine instead of quoting raw GB. Only the
+# `system` and `disk` collectors are compiled in — the default feature set also
+# pulls process enumeration, networks, components and users, none of which we
+# read. Held at 0.38: 0.39 raises its MSRV to 1.95, above our 1.88.
+sysinfo = { version = "0.38", default-features = false, features = ["system", "disk"] }
+
 [dev-dependencies]
 # Only used by the db.rs test suite, which opens a fresh database in a
 # tempdir per test so we don't trample the user's real `loach.db` and so

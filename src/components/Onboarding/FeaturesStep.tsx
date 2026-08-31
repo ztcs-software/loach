@@ -1,45 +1,37 @@
-import { useRef, useState } from "react";
-import { Brain, Clock, Globe, MemoryStick } from "lucide-react";
+import { useState } from "react";
+import { Brain, Clock, MemoryStick } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useOnboardingStore } from "@/stores/onboardingStore";
 import { StepShell } from "./StepShell";
 
 /**
- * Feature toggles. Loach exposes four privacy- or perf-relevant
- * defaults that are easier to set once at onboarding than to discover
- * later in Settings:
+ * Feature toggles. Three defaults that are easier to set once at onboarding
+ * than to discover later in Settings:
  *
  *   - Temporal awareness (date/time injection): ON by default. Cheap
  *     and fixes the "what's today's date?" surprise.
  *   - Thinking: ON by default. Reasoning models default to thinking
  *     unless the model author says otherwise.
- *   - Web fetch: ON in onboarding (privacy-conscious users will turn
- *     it off in Settings; the default Loach app keeps it OFF, but
- *     onboarding asks the user to opt in explicitly so the toggle is
- *     visible and consented to).
  *   - Low VRAM: OFF by default. Hurts speed if you don't need it; the
  *     in-chat toggle is right there if a model OOMs.
  *
- * All four are committed to settings on Continue. Skip commits too —
- * establishing defaults is the wizard's job — with one carve-out: Web
- * fetch. It is the sole network-touching default and the app ships it
- * OFF, so a Skip only commits it when the user actually flipped the
- * switch — pressing Skip without reading the screen is not consent to
- * networking. Continue counts as consent to whatever is on screen.
+ * All three are committed to settings on Continue *and* on Skip —
+ * establishing defaults is the wizard's job, and none of these three reaches
+ * the network or changes what the model is allowed to do. Web fetch used to
+ * live here and needed a carve-out for exactly that reason; it now sits on
+ * the Tools step, which writes nothing the user didn't touch.
  */
 
 interface DraftFeatures {
   temporal_awareness: boolean;
   thinking_default: boolean;
-  web_fetch_enabled: boolean;
   low_vram_global: boolean;
 }
 
 const RECOMMENDED: DraftFeatures = {
   temporal_awareness: true,
   thinking_default: true,
-  web_fetch_enabled: true,
   low_vram_global: false,
 };
 
@@ -56,20 +48,12 @@ export function FeaturesStep({ onClose }: { onClose: () => void }) {
   const set = <K extends keyof DraftFeatures>(k: K, v: DraftFeatures[K]) =>
     setDraft((d) => ({ ...d, [k]: v }));
 
-  // See the header comment: Skip only writes Web fetch if the user touched
-  // its switch, so an unread Skip can't silently opt into networking.
-  const webFetchTouched = useRef(false);
-
-  const commit = async (values: DraftFeatures, skipping = false) => {
-    const writes = [
-      update("temporal_awareness", values.temporal_awareness),
-      update("thinking_default", values.thinking_default),
-      update("low_vram_global", values.low_vram_global),
-    ];
-    if (!skipping || webFetchTouched.current) {
-      writes.push(update("web_fetch_enabled", values.web_fetch_enabled));
-    }
-    await Promise.all(writes);
+  const commit = async () => {
+    await Promise.all([
+      update("temporal_awareness", draft.temporal_awareness),
+      update("thinking_default", draft.thinking_default),
+      update("low_vram_global", draft.low_vram_global),
+    ]);
     goNext();
   };
 
@@ -78,9 +62,9 @@ export function FeaturesStep({ onClose }: { onClose: () => void }) {
       step="features"
       title="Pick your defaults"
       subtitle="Tune later in Settings — these are just the defaults Loach starts with."
-      onPrimary={() => void commit(draft)}
+      onPrimary={() => void commit()}
       skippable
-      onSkip={() => void commit(draft, true)}
+      onSkip={() => void commit()}
       canGoBack
       onBack={goBack}
       onClose={onClose}
@@ -99,16 +83,6 @@ export function FeaturesStep({ onClose }: { onClose: () => void }) {
           description="Default for the per-chat Thinking toggle. Only takes effect on thinking-capable Ollama models. Different providers ignore it."
           checked={draft.thinking_default}
           onChange={(v) => set("thinking_default", v)}
-        />
-        <FeatureRow
-          icon={<Globe className="h-4 w-4" />}
-          title="Web fetch"
-          description="When your prompt contains an http(s):// URL, Loach downloads the page and inlines the readable text. Up to 5 URLs per message, 5 MB each, private IPs blocked."
-          checked={draft.web_fetch_enabled}
-          onChange={(v) => {
-            webFetchTouched.current = true;
-            set("web_fetch_enabled", v);
-          }}
         />
         <FeatureRow
           icon={<MemoryStick className="h-4 w-4" />}
@@ -147,8 +121,8 @@ function FeatureRow({
         </p>
       </div>
       {/* Named after the row's own title. Settings → Features labels the
-          same four toggles; these were the only unnamed ones, so a screen
-          reader heard four consecutive "switch, on" with nothing to tell
+          same toggles; these were the only unnamed ones, so a screen
+          reader heard three consecutive "switch, on" with nothing to tell
           them apart. */}
       <Switch
         checked={checked}

@@ -6,6 +6,7 @@ import {
   ONBOARDING_STEPS,
   type OnboardingStep,
 } from "@/stores/onboardingStore";
+import { PullStrip } from "./PullStrip";
 
 /**
  * Common chrome for every onboarding step. Holds the close X (top-right),
@@ -174,6 +175,10 @@ export function StepShell({
           </div>
         </div>
       )}
+
+      {/* Live model download, if any. Sits below the action bar so it reads
+          as ambient status rather than something blocking the step. */}
+      <PullStrip />
 
       {/* Progress dots, fixed at the very bottom. Lives outside the
           action bar so welcome/final still get a progress hint. */}

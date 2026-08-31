@@ -3,12 +3,18 @@ import { Button } from "@/components/ui/button";
 import { Logo } from "@/components/Logo";
 import { useOnboardingStore } from "@/stores/onboardingStore";
 import { useUIStore } from "@/stores/uiStore";
+import { useLivePulls } from "@/lib/usePullRuns";
 import { StepShell } from "./StepShell";
 
 /**
  * Closer screen. Marks `onboarding_completed` true, kicks off a fresh
  * chat session, and arms the ChatHeader to auto-open its model picker
  * so the user's first action lands on the model selection dropdown.
+ *
+ * The copy adapts to a download still running. "Loach is ready to chat" is a
+ * lie at 40% of an 18 GB pull, and it's the last thing the wizard says before
+ * handing over — so when a pull is live we say so instead, and the
+ * `PullStrip` below (from StepShell) carries the actual progress.
  */
 
 export function FinalStep({ onClose }: { onClose: () => void }) {
@@ -17,6 +23,7 @@ export function FinalStep({ onClose }: { onClose: () => void }) {
   const setPendingOpenModelPicker = useUIStore(
     (s) => s.setPendingOpenModelPicker,
   );
+  const downloading = useLivePulls().length > 0;
 
   const handleStart = async () => {
     // Arm the picker before complete() runs — complete() creates the
@@ -48,18 +55,27 @@ export function FinalStep({ onClose }: { onClose: () => void }) {
           </span>
         </div>
         <h1 className="text-2xl font-semibold tracking-tight">
-          You're all set
+          {downloading ? "Setup complete" : "You're all set"}
         </h1>
         <p className="mt-2.5 max-w-sm text-[13.5px] leading-relaxed text-foreground/60">
-          Loach is ready to chat. Anything set up here can be changed
-          later in Settings.
+          {downloading ? (
+            <>
+              Your model is still downloading — you can look around while it
+              finishes, and Loach will tell you when it's ready to chat.
+            </>
+          ) : (
+            <>
+              Loach is ready to chat. Anything set up here can be changed later
+              in Settings.
+            </>
+          )}
         </p>
 
         <Button
           onClick={() => void handleStart()}
           className="mt-8 gap-2 px-6 py-5 text-[14px]"
         >
-          Start chatting
+          {downloading ? "Explore Loach" : "Start chatting"}
         </Button>
       </div>
     </StepShell>

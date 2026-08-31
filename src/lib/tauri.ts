@@ -24,6 +24,7 @@ import type {
   SpaceMemory,
   StorageStats,
   StreamEvent,
+  SystemInfo,
 } from "@/types";
 
 /**
@@ -508,6 +509,16 @@ export function securityClear(args?: {
 }): Promise<void> {
   if (!isTauri) return notInTauri(undefined);
   return invoke("security_clear", { args: args ?? {} });
+}
+
+// ------------ host hardware ------------
+
+/** Installed RAM + free disk, used by onboarding to size its model
+ *  recommendation. Resolves `null` outside the Tauri shell (browser preview),
+ *  where callers fall back to showing the catalog without fit hints. */
+export function systemInfo(): Promise<SystemInfo | null> {
+  if (!isTauri) return notInTauri(null);
+  return invoke("system_info");
 }
 
 // ------------ providers ------------
