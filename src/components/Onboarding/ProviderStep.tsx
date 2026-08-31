@@ -714,13 +714,20 @@ function DefaultModelPicker({
 
 /* ───────────────────────── Ollama catalog ───────────────────────── */
 
-/** Small coloured pill describing how a variant sits on this machine. */
+/** Small coloured pill describing how a variant sits on this machine. Each
+ *  badge states the *experience* verdict; the mechanism behind it lives in
+ *  the tooltip. Comfortable rows carry no badge — inside a catalog that shows
+ *  badges at all, absence reads as "no caveats". */
 function FitBadge({ fit, recommended }: { fit: FitVerdict | null; recommended: boolean }) {
   if (recommended) {
+    // "Recommended", not "Best fit": on the fallback path (nothing rates
+    // comfortable) the pick is merely the least-bad variant, and calling that
+    // a best *fit* contradicted the card right above it. "Recommended" is
+    // true on every path and echoes the card's own header.
     return (
       <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-primary/15 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-primary">
         <Sparkles className="h-2.5 w-2.5" />
-        Best fit
+        Recommended
       </span>
     );
   }
@@ -743,25 +750,33 @@ function FitBadge({ fit, recommended }: { fit: FitVerdict | null; recommended: b
     if (fit.moeSplit) {
       // Same mechanics as the orange badge below — weights overflow the GPU —
       // but for a mixture-of-experts model the split is the mode it's built
-      // for, so warning about it would misdescribe a good option.
+      // for, so warning about it would misdescribe a good option. "Still"
+      // concedes the overflow; the hedged phrasing (not "fast") keeps the
+      // pill from promising throughput we haven't measured. It also picks up
+      // the catalog subtitle, which ends "…these stay quick even when most
+      // of the model sits in system RAM".
       return (
         <span
           title="Too big for your GPU alone, but as a mixture-of-experts model it activates only a few billion parameters per token — split across GPU and system RAM it stays quick."
           className="shrink-0 rounded-full bg-sky-500/15 px-2 py-0.5 text-[10px] font-medium text-sky-700 dark:text-sky-300"
         >
-          Fast on CPU + GPU
+          Still quick
         </span>
       );
     }
     // Distinct from "tight" on purpose: this one runs, it's just slow. Calling
     // it heavy would read as "won't work" and calling it tight would hide that
-    // the user is about to lose most of their GPU acceleration.
+    // the user is about to lose most of their GPU acceleration. Consequence
+    // over mechanism ("Partly on CPU" said where, not what it costs — and was
+    // equally true of the MoE case above, making opposite verdicts read as
+    // synonyms); "here" grounds it to this machine, like the card's
+    // "Recommended for this machine".
     return (
       <span
         title={`Needs ~${formatGb(fit.requiredGb)} — more than your GPU has, so Ollama will run the excess layers on the CPU. It works, just slower.`}
         className="shrink-0 rounded-full bg-orange-500/15 px-2 py-0.5 text-[10px] font-medium text-orange-700 dark:text-orange-300"
       >
-        Partly on CPU
+        Slower here
       </span>
     );
   }
