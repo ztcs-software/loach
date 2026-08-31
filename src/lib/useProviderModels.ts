@@ -8,8 +8,9 @@ import type { ModelInfo } from "@/types";
  *
  * Probes Ollama first (so a dead server shows as down rather than as an empty
  * list) and only asks the OpenAI-compatible endpoint when a key is set.
- * Refreshes itself once the settings store hydrates, and re-runs whenever a
- * base URL or the key-set flag changes.
+ * Refreshes itself once the settings store hydrates, re-runs whenever a base
+ * URL or the key-set flag changes, and re-runs once more when onboarding
+ * finishes.
  *
  * Concurrent refreshes are resolved by a monotonic request id: a run that has
  * been superseded drops its results on the floor instead of racing a newer one
@@ -26,6 +27,7 @@ export function useProviderModels() {
   const openaiBaseUrl = useSettingsStore((s) => s.openai_base_url);
   const openaiKeySet = useSettingsStore((s) => s.openai_key_set);
   const settingsHydrated = useSettingsStore((s) => s.hydrated);
+  const onboardingCompleted = useSettingsStore((s) => s.onboarding_completed);
 
   const [ollamaModels, setOllamaModels] = useState<ModelInfo[]>([]);
   const [openaiModels, setOpenaiModels] = useState<ModelInfo[]>([]);
@@ -61,10 +63,17 @@ export function useProviderModels() {
     [ollamaBaseUrl, openaiBaseUrl, openaiKeySet],
   );
 
+  // `onboardingCompleted` is a dependency even though it's not an input to the
+  // probe: it's the signal that the world may have changed underneath us.
+  // Every picker mounts behind the onboarding overlay at boot, so it captures
+  // its probe BEFORE the wizard runs — and the wizard is where the user
+  // installs Ollama, or has Loach start it for them. Without this the chat
+  // header kept offering "Start Ollama" for a daemon onboarding had just
+  // started, with no base-URL or key change to invalidate the stale `false`.
   useEffect(() => {
     if (!settingsHydrated) return;
     void refresh();
-  }, [settingsHydrated, refresh]);
+  }, [settingsHydrated, refresh, onboardingCompleted]);
 
   return { ollamaModels, openaiModels, ollamaUp, loading, refresh };
 }
