@@ -66,7 +66,8 @@ import { StepShell } from "./StepShell";
  *     `PullStrip` (in StepShell) follows the download through the rest of the
  *     wizard, and `ModelDownloadBanner` takes over in the chat.
  *
- *   - OpenAI API: base URL + key. Saving runs `openai_list_models` as
+ *   - OpenAI API: base URL + optional key (local servers like LM Studio
+ *     accept keyless requests). Saving runs `openai_list_models` as
  *     a connectivity probe; a 401 / network error blocks Continue and
  *     surfaces inline. The returned catalog feeds the same default-model
  *     picker.
@@ -224,7 +225,7 @@ export function ProviderStep({
         phase === "ollama"
           ? "Continue unlocks once Ollama has a model — or close (✕) to finish setup later."
           : phase === "openai"
-            ? "Continue unlocks once a key is verified — or close (✕) to finish setup later."
+            ? "Continue unlocks once the connection is verified — or close (✕) to finish setup later."
             : "Pick a provider to continue — or close (✕) to finish setup later."
       }
       onPrimary={goNext}
@@ -504,8 +505,8 @@ function OllamaPath({ onProvisioned }: { onProvisioned: () => void }) {
           icon={<Server className="h-4 w-4" />}
           title="Ollama is running, no models yet"
         >
-          Pick one below — Loach will pull it for you. You can continue setup
-          while the download runs.
+          Pick one from the list below or pull a custom tag from Ollama
+          library.
         </StatusPanel>
       )}
 
@@ -718,24 +719,14 @@ function DefaultModelPicker({
  *  will this run on my machine, and how well? Labels are plain verdicts that
  *  need no tooltip to decode ("Runs well", "Runs slowly", "Too big for this
  *  machine") — the tooltip carries the numbers and mechanics for anyone who
- *  hovers. Every evaluated row gets a badge, so "good" is stated instead of
+ *  hovers. Every evaluated row gets one, the recommended row included — the
+ *  pick is already singled out by the card above the list, and a special
+ *  badge there hid the row's actual verdict. "Good" is stated instead of
  *  implied by absence. Solid standard fills — green (Runs well), amber
  *  (Runs OK), yellow (Runs slowly), red (Too big / disk) — with one shared
  *  dark text colour on every status pill; dark text is the only choice that
  *  stays readable on yellow, and solid fills need no per-theme variants. */
-function FitBadge({ fit, recommended }: { fit: FitVerdict | null; recommended: boolean }) {
-  if (recommended) {
-    // "Recommended", not "Best fit": on the fallback path (nothing rates
-    // comfortable) the pick is merely the least-bad variant, and calling that
-    // a best *fit* contradicted the card right above it. "Recommended" is
-    // true on every path and echoes the card's own header.
-    return (
-      <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-primary px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-primary-foreground">
-        <Sparkles className="h-2.5 w-2.5" />
-        Recommended
-      </span>
-    );
-  }
+function FitBadge({ fit }: { fit: FitVerdict | null }) {
   if (!fit) return null;
 
   // One text colour for every status pill, carried by the shared base so a
@@ -817,10 +808,10 @@ function ModelCatalog({
   const setProviderDefault = useSettingsStore((s) => s.setProviderDefault);
   const runs = useModelsStore((s) => s.runs);
 
-  // Track which family rows are expanded. Default: first family open.
-  const [expanded, setExpanded] = useState<Record<string, boolean>>({
-    [OLLAMA_CATALOG[0]?.family ?? ""]: true,
-  });
+  // Track which family rows are expanded. All start collapsed — the
+  // recommendation card leads the step, and an auto-opened first family
+  // just pushed everything else below the fold.
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const toggle = (k: string) =>
     setExpanded((e) => ({ ...e, [k]: !e[k] }));
 
@@ -902,23 +893,20 @@ function ModelCatalog({
       )}
 
       <div>
-        <div className="flex items-baseline justify-between gap-3">
-          <h3 className="text-[13px] font-medium">
-            {recommended ? "All models" : "Recommended models"}
-          </h3>
-          <button
-            type="button"
-            onClick={jumpToCustomTag}
-            className="shrink-0 text-[11.5px] text-foreground/55 underline-offset-2 hover:text-foreground hover:underline"
-          >
-            Have a specific tag in mind?
-          </button>
-        </div>
+        <h3 className="text-[13px] font-medium">
+          {recommended ? "Download models" : "Recommended models"}
+        </h3>
         <p className="mt-0.5 text-[11.5px] text-foreground/50">
-          Sizes are the approximate download. MoE = mixture of experts: only a
-          few billion parameters run per token, so these stay quick even when
-          most of the model sits in system RAM.
+          Sizes are approximate download. Badges are based on this machine's
+          GPU memory, RAM, and free disk space.
         </p>
+        <button
+          type="button"
+          onClick={jumpToCustomTag}
+          className="mt-1 text-[11.5px] text-primary underline underline-offset-2 hover:text-primary/80"
+        >
+          Have a specific tag in mind?
+        </button>
       </div>
 
       <ul className="overflow-hidden rounded-xl border border-foreground/[0.08] bg-foreground/[0.015]">
@@ -996,7 +984,6 @@ function ModelCatalog({
                           tag={v.tag}
                           run={run}
                           fit={fit}
-                          recommended={recommended?.tag === v.tag}
                           onPull={() => void startPull(v.tag)}
                         />
                       );
@@ -1019,8 +1006,7 @@ function ModelCatalog({
           >
             ollama.com/library
           </button>
-          . Examples: <span className="font-mono">llama3.1:8b</span>,{" "}
-          <span className="font-mono">deepseek-r1:14b</span>.
+          . Example: <span className="font-mono">granite4.2:8b</span>.
         </p>
         <div className="mt-2 flex gap-2">
           <Input
@@ -1144,7 +1130,6 @@ function VariantRow({
   tag,
   run,
   fit,
-  recommended,
   onPull,
 }: {
   label: string;
@@ -1152,7 +1137,6 @@ function VariantRow({
   tag: string;
   run: AdminProgress | undefined;
   fit: FitVerdict | null;
-  recommended: boolean;
   onPull: () => void;
 }) {
   const downloading = run && !run.finished;
@@ -1166,7 +1150,7 @@ function VariantRow({
         <div className="flex flex-wrap items-center gap-2">
           <span className="font-medium">{label}</span>
           <span className="text-[11px] text-foreground/45">~{formatGb(sizeGb)}</span>
-          <FitBadge fit={fit} recommended={recommended} />
+          <FitBadge fit={fit} />
         </div>
         <p className="font-mono text-[11px] text-foreground/40">{tag}</p>
         {run && (
@@ -1295,22 +1279,19 @@ function OpenAIPath({ onProvisioned }: { onProvisioned: () => void }) {
 
   const handleSave = async () => {
     setError(null);
-    if (!key.trim()) {
-      setError("Enter an API key.");
-      return;
-    }
     setBusy(true);
+    // A blank key is a supported path, not a validation error: local
+    // OpenAI-compatible servers (LM Studio, vLLM, llama.cpp) accept keyless
+    // requests, and the Rust side already omits the Authorization header
+    // when no key is stored.
+    const newKey = key.trim();
     try {
       // Persist URL changes first so the model-list call uses the right base.
       if (urlDraft.trim() && urlDraft.trim() !== baseUrl) {
         await update("openai_base_url", urlDraft.trim());
       }
-      // The probe reads the key from the keyring, so it must be stored first.
-      // If the probe then fails, roll the key back below — leaving a known-bad
-      // key stored would flip `keySet` true and auto-provision it on re-entry.
-      await setOpenAIKey(key.trim());
-      try {
-        // Probe — a key that isn't valid will surface here as a 401.
+      // Probe — a key that isn't valid will surface here as a 401.
+      const probe = async () => {
         const list = await openaiListModels(urlDraft.trim() || baseUrl);
         const ranked = rankChatModels(list);
         setCatalog(ranked);
@@ -1321,18 +1302,38 @@ function OpenAIPath({ onProvisioned }: { onProvisioned: () => void }) {
           await setProviderDefault("openai", ranked[0].id);
         }
         await refreshModels();
-      } catch (probeErr) {
-        await clearOpenAIKey().catch(() => {});
-        throw probeErr;
+      };
+      if (newKey) {
+        // The probe reads the key from the keyring, so it must be stored
+        // first. If the probe then fails, roll the key back — leaving a
+        // known-bad key stored would flip `keySet` true and auto-provision
+        // it on re-entry.
+        await setOpenAIKey(newKey);
+        try {
+          await probe();
+        } catch (probeErr) {
+          await clearOpenAIKey().catch(() => {});
+          throw probeErr;
+        }
+      } else {
+        // Nothing typed: probe with whatever is stored — usually nothing,
+        // the keyless local-server case. A stored key stays untouched, so
+        // this also re-verifies without forcing a re-type.
+        await probe();
       }
       setVerified(true);
       setKey("");
       onProvisioned();
     } catch (e) {
+      // Only tell the user to check a key that exists to be checked.
+      const hint =
+        newKey || keySet
+          ? "Double-check the key and base URL."
+          : "Double-check the base URL.";
       setError(
         e instanceof Error
-          ? `${e.message}. Double-check the key and base URL.`
-          : "Couldn't verify the API key.",
+          ? `${e.message}. ${hint}`
+          : "Couldn't reach the endpoint.",
       );
       setVerified(false);
     } finally {
@@ -1385,7 +1386,7 @@ function OpenAIPath({ onProvisioned }: { onProvisioned: () => void }) {
             </div>
             <Button
               size="sm"
-              disabled={busy || !key.trim()}
+              disabled={busy}
               onClick={() => void handleSave()}
               className="gap-1.5"
             >
@@ -1401,8 +1402,9 @@ function OpenAIPath({ onProvisioned }: { onProvisioned: () => void }) {
             </Button>
           </div>
           <p className="mt-1.5 text-[11px] text-foreground/50">
-            Stored in your OS credential manager. Never written to disk in
-            plain text.{" "}
+            Local servers like LM Studio usually need no key — leave it blank.
+            Keys are stored in your OS credential manager, never written to
+            disk in plain text.{" "}
             <button
               type="button"
               onClick={() =>
@@ -1425,7 +1427,7 @@ function OpenAIPath({ onProvisioned }: { onProvisioned: () => void }) {
         {verified && !error && (
           <p className="flex items-center gap-1.5 rounded-lg border border-emerald-500/25 bg-emerald-500/[0.06] px-3 py-2 text-[12px] text-emerald-800 dark:text-emerald-300">
             <Check className="h-3.5 w-3.5" />
-            Key verified — you're ready to chat.
+            Connection verified — you're ready to chat.
           </p>
         )}
       </div>
