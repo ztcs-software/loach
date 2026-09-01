@@ -887,7 +887,9 @@ audio model first) and shows the pick in the same picker.
 Pulls started here keep running while the user finishes setup, so the
 download is surfaced the whole way:
 
-- A progress strip pinned to the bottom of every remaining wizard step.
+- A progress strip pinned to the bottom of every remaining wizard step, with
+  a stop button per download (`admin_cancel` under the hood; Ollama keeps the
+  layers it already fetched, so a re-pull resumes from them).
 - The final screen swaps "You're all set" for "Setup complete / still
   downloading" rather than claiming readiness it doesn't have.
 - `ModelDownloadBanner` above the composer in the chat itself.

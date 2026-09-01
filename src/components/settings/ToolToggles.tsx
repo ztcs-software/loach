@@ -24,6 +24,9 @@ export const TOOL_TOGGLES: {
   key: BooleanSettingKey;
   icon: LucideIcon;
   title: string;
+  /** One-line summary for compact surfaces (the onboarding tools step).
+   *  `description` below stays the full Settings copy. */
+  blurb: string;
   /** Verb phrase for the switch's accessible name in each direction. */
   ariaOn: string;
   ariaOff: string;
@@ -33,6 +36,7 @@ export const TOOL_TOGGLES: {
     key: "web_fetch_enabled",
     icon: Globe,
     title: "Web fetch",
+    blurb: "Read pages from URLs in your message",
     ariaOn: "Enable web fetch",
     ariaOff: "Disable web fetch",
     description: (
@@ -50,6 +54,7 @@ export const TOOL_TOGGLES: {
     key: "calculate_tool_enabled",
     icon: Calculator,
     title: "Calculator",
+    blurb: "Exact math instead of guessed arithmetic",
     ariaOn: "Enable calculator tool",
     ariaOff: "Disable calculator tool",
     description: (
@@ -68,6 +73,7 @@ export const TOOL_TOGGLES: {
     key: "datetime_tool_enabled",
     icon: CalendarClock,
     title: "Date & time",
+    blurb: "Date maths, timezones, business days",
     ariaOn: "Enable datetime tool",
     ariaOff: "Disable datetime tool",
     description: (
@@ -85,6 +91,7 @@ export const TOOL_TOGGLES: {
     key: "count_tool_enabled",
     icon: Hash,
     title: "Count",
+    blurb: "Exact character, word, and line counts",
     ariaOn: "Enable count tool",
     ariaOff: "Disable count tool",
     description: (
@@ -101,6 +108,7 @@ export const TOOL_TOGGLES: {
     key: "hash_tool_enabled",
     icon: Fingerprint,
     title: "Hash",
+    blurb: "Real SHA-2 digests, never fabricated",
     ariaOn: "Enable hash tool",
     ariaOff: "Disable hash tool",
     description: (
@@ -117,6 +125,7 @@ export const TOOL_TOGGLES: {
     key: "uuid_tool_enabled",
     icon: KeyRound,
     title: "UUID",
+    blurb: "Generate real v4 / v7 UUIDs",
     ariaOn: "Enable uuid tool",
     ariaOff: "Disable uuid tool",
     description: (
@@ -134,6 +143,7 @@ export const TOOL_TOGGLES: {
     key: "base64_tool_enabled",
     icon: Binary,
     title: "Base64",
+    blurb: "Encode and decode without garbling",
     ariaOn: "Enable base64 tool",
     ariaOff: "Disable base64 tool",
     description: (
@@ -149,6 +159,7 @@ export const TOOL_TOGGLES: {
     key: "json_tool_enabled",
     icon: Braces,
     title: "JSON",
+    blurb: "Validate, pretty-print, extract values",
     ariaOn: "Enable json tool",
     ariaOff: "Disable json tool",
     description: (
@@ -165,6 +176,7 @@ export const TOOL_TOGGLES: {
     key: "unit_convert_tool_enabled",
     icon: Ruler,
     title: "Unit conversion",
+    blurb: "Exact factors, from km↔mi to parsecs",
     ariaOn: "Enable unit conversion tool",
     ariaOff: "Disable unit conversion tool",
     description: (
@@ -183,6 +195,7 @@ export const TOOL_TOGGLES: {
     key: "diff_text_tool_enabled",
     icon: Diff,
     title: "Text diff",
+    blurb: "Unified diffs by line, word, or character",
     ariaOn: "Enable text diff tool",
     ariaOff: "Disable text diff tool",
     description: (
@@ -199,6 +212,7 @@ export const TOOL_TOGGLES: {
     key: "sort_tool_enabled",
     icon: ArrowDownAZ,
     title: "Sort",
+    blurb: "Lexical, natural, and numeric sorting",
     ariaOn: "Enable sort tool",
     ariaOff: "Disable sort tool",
     description: (
@@ -216,6 +230,7 @@ export const TOOL_TOGGLES: {
     key: "ip_tool_enabled",
     icon: Network,
     title: "IP / CIDR",
+    blurb: "CIDR containment and subnet info",
     ariaOn: "Enable IP / CIDR tool",
     ariaOff: "Disable IP / CIDR tool",
     description: (
@@ -233,6 +248,7 @@ export const TOOL_TOGGLES: {
     key: "pdf_tool_enabled",
     icon: FileText,
     title: "PDF",
+    blurb: "Generate downloadable PDF documents",
     ariaOn: "Enable PDF tool",
     ariaOff: "Disable PDF tool",
     description: (

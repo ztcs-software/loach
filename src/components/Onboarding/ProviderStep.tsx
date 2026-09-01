@@ -5,7 +5,6 @@ import {
   Check,
   ChevronDown,
   CircleDot,
-  Cloud,
   Download,
   ExternalLink,
   Eye,
@@ -13,6 +12,7 @@ import {
   HardDrive,
   Loader2,
   Play,
+  Plug2,
   RefreshCw,
   Server,
   Sparkles,
@@ -268,16 +268,16 @@ function ProviderChoice({ onPick }: { onPick: (p: ProviderId) => void }) {
       <ProviderCard
         title="Ollama"
         tagline="Local · private · free"
-        description="Run models on this machine."
+        description="Run models on this machine. Requires the free Ollama app — the next step helps you set it up."
         icon={<HardDrive className="h-5 w-5" />}
         recommended
         onClick={() => onPick("ollama")}
       />
       <ProviderCard
         title="OpenAI API"
-        tagline="Cloud · pay-as-you-go"
-        description="Use GPT, LM Studio, or any other OpenAI-compatible endpoint with your API key."
-        icon={<Cloud className="h-5 w-5" />}
+        tagline="Cloud or local server"
+        description="Use a cloud API or local server — anything OpenAI-compatible works."
+        icon={<Plug2 className="h-5 w-5" />}
         onClick={() => onPick("openai")}
       />
     </div>
@@ -606,7 +606,7 @@ function ProviderSwitch({
 }) {
   const options = [
     { id: "ollama" as const, label: "Ollama", icon: <HardDrive className="h-3.5 w-3.5" /> },
-    { id: "openai" as const, label: "OpenAI API", icon: <Cloud className="h-3.5 w-3.5" /> },
+    { id: "openai" as const, label: "OpenAI API", icon: <Plug2 className="h-3.5 w-3.5" /> },
   ];
   return (
     <div className="flex items-center gap-2">
