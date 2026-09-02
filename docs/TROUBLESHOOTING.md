@@ -111,6 +111,25 @@ above the answer.
 3. Thinking is **Ollama-only**. OpenAI providers ignore the toggle even
    when it's on.
 
+### A formula shows as raw TeX instead of rendering
+
+**Problem.** The reply contains `\frac{a}{b}` or similar and you see the
+source, not typeset math.
+
+**Solution.** Which case it is:
+
+- **Broken TeX renders as its own source** on purpose, with the parse
+  error on hover — that keeps a half-typed formula quiet while it streams
+  rather than flashing an error. Hover it to see what KaTeX objected to.
+- **`$…$` didn't typeset.** Single dollars are treated as currency unless
+  the span reads as math: it has to hug both delimiters, stay on one line,
+  not follow a word character, and not be chased by a digit. "$5 and $10"
+  and "US$5" stay prose by design. Ask the model for `$$…$$`, `\(…\)` or
+  a ```` ```math ```` fence if you need the ambiguous case.
+- **Nothing renders at all.** Math is on with no setting to find, so this
+  is more likely a delimiter the model didn't emit — check the raw text
+  via **Copy message**.
+
 ### Tokens-per-second or token count chip is missing
 
 **Problem.** Some replies show a metrics chip; others don't.
@@ -153,6 +172,34 @@ error.
    at the cost of speed.
 4. Pick a smaller quantization (for example `q4_K_M` instead of `q8_0`)
    or a smaller parameter size.
+
+### Onboarding sized my machine wrong
+
+**Problem.** The model recommendation calls a model too big (or too small)
+for what your hardware actually manages, or names a constraint you don't
+recognise.
+
+**Solution.** The card names the number it used — "Based on 8 GB VRAM ·
+NVIDIA GeForce RTX 4060", or a RAM figure when there's no usable GPU
+reading. Which one you get:
+
+- **Windows** reads dedicated video memory directly, for any vendor.
+- **Linux** reads `nvidia-smi`, then the amdgpu sysfs node. **Intel Arc
+  isn't covered** and falls back to system RAM, which under-reports what
+  the card can do — pick a larger variant by hand if you have one.
+- **macOS** deliberately uses system RAM: Apple Silicon shares it with the
+  GPU, so a separate figure would double-count.
+- Adapters under 1 GB are treated as integrated graphics and ignored,
+  since they carve out system RAM the RAM path already counts.
+
+Any probe that fails falls back to RAM. Nothing here restricts you — every
+catalog entry stays pullable, and the custom-tag field takes any tag at
+all. The badges are advice, except **Not enough disk space**, which does
+disable that row's Pull button.
+
+If a model marked **Runs slowly** feels fine in practice, that's the
+expected direction of error for a rough estimate — Ollama publishes no
+runtime memory figures to size against.
 
 ### The UI feels sluggish
 
@@ -394,6 +441,38 @@ changing or removing the lock, importing data, wiping user data, and
 factory resetting, so that a compromised UI process can't quietly disable
 the gate.
 
+### Loach keeps locking itself
+
+**Problem.** The lock screen appears mid-session, not just at launch.
+
+**Solution.** One of the two auto-lock triggers is on. Both live in the
+**Auto-lock** card in **Settings → Security**, which only appears once a
+lock is configured:
+
+- **Lock after inactivity** — set it to **Off**, or to a longer interval,
+  if a 1- or 5-minute timeout is catching you while you read a long reply.
+  Only typing, clicking, scrolling and touch count as activity; watching a
+  reply stream does not.
+- **Lock when minimized** — turn it off if you routinely minimize Loach
+  while it works. Note that native save / open dialogs don't trigger it,
+  so exporting or attaching a file is safe either way.
+
+If neither is on, check you aren't hitting `Cmd/Ctrl + Shift + L`, which
+locks immediately.
+
+A reply already streaming keeps running behind the lock screen — unlocking
+returns you to it with the tokens that arrived meanwhile.
+
+### The lock fired later than the timeout I set
+
+**Problem.** You picked 1 minute but it took closer to 75 seconds.
+
+**Solution.** Expected. The idle deadline is re-checked periodically rather
+than driven by one long timer, so the lock lands up to 15 seconds after
+the interval. Erring late is deliberate: a timer that fires early on a
+throttled or suspended window is the worse failure. A machine that sleeps
+past the interval locks the moment it wakes.
+
 ---
 
 ## 8. Models editor
@@ -440,10 +519,31 @@ delete a model that's currently loaded.
 **Problem.** You're on Linux and the Updates panel only shows a link to
 GitHub releases.
 
-**Solution.** This is expected for **`.deb`** and **`.rpm`** installs —
-the Tauri updater can only patch AppImage installs on Linux. Your
-package manager owns updates instead. To get in-app updates, install the
-AppImage build from the releases page.
+**Solution.** All three Linux formats — AppImage, `.deb` and `.rpm` —
+support in-app updates, so the panel should offer one. Two things hide it:
+
+1. **You installed v1.2.3 or earlier from a `.deb` or `.rpm`.** That
+   build's check looked for an AppImage-only environment variable, so it
+   reported "unsupported" on packages. Download a newer `.deb` / `.rpm`
+   once from the releases page; in-app updates work from then on.
+2. **You're running a development build** (`npm run tauri dev` or
+   `cargo run`). Format detection reads a marker the bundler writes at
+   build time, which dev builds don't have. Install a packaged build.
+
+Note that updates are in-app only — there's no apt or yum repository, so
+`apt upgrade` won't pick up new versions either way.
+
+### The update asks for my password on Linux
+
+**Problem.** Installing an update on a `.deb` / `.rpm` install pops a
+system authentication prompt.
+
+**Solution.** Expected. Replacing a package-managed install means running
+`dpkg -i` / `rpm -U` as root, which Loach requests through `pkexec`
+(falling back to zenity or kdialog plus `sudo`). Going around the package
+manager instead would leave its database describing a version that's no
+longer on disk. AppImage installs replace themselves in place and never
+prompt.
 
 ### "Up to date" but I see a newer version on GitHub
 
@@ -519,6 +619,36 @@ the in-app setting if you need everything uniform.
 **Solution.** The palette is suppressed while the **onboarding wizard**
 or the **lock screen** owns the window. Finish onboarding or unlock the
 app first.
+
+### Search doesn't find a phrase I know I wrote
+
+**Problem.** You remember the wording, but the palette returns nothing —
+or only chat titles.
+
+**Solution.** Message search covers live transcripts, and deliberately
+skips several things:
+
+- **Archived chats.** The archive has no search of its own — unarchive
+  the chat from **Settings → Archive** to bring it back into scope.
+- **Private Chat.** It never writes to the database, so nothing from it
+  is searchable by design.
+- **Text inside an attachment or a fetched page.** Those bodies are
+  inlined into the message but not displayed in the bubble, so a hit there
+  would jump nowhere. Open the attachment instead.
+- **Imported turns you hid from the transcript.** Expanding the collapsed
+  card shows them, but there's no un-hide — they stay out of both this
+  search and the in-chat finder. Re-import without **Hide from
+  transcript** if you need them findable.
+- **System notices**, which aren't conversation.
+
+Two more things to check: the query needs at least **two characters**, and
+case-insensitivity is ASCII-only — a query with accented or non-Latin
+characters matches at its own case but not across cases. Try the exact
+casing you used.
+
+If titles crowd out what you want, narrow with the scope dropdown or type
+`in:messages` in the query — scoped to messages, transcript hits get the
+whole list instead of a reserved block at the bottom.
 
 ---
 

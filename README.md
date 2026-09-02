@@ -54,8 +54,8 @@ Behind a calm, beautifully crafted UI sits a rich feature set - ready when you n
 - **Fork chats** - branch any conversation into a new copy that links back to its source.
 - **Pinned responses** - pin any reply and jump straight back to it from a bar under the chat header.
 - **Private chats** - an ephemeral chat that writes nothing to disk and wipes its transcript the moment you close it; open it from the ghost icon in the title bar.
-- **Chat archive** - move chats out of the sidebar without deleting them; restore or delete them from dedicated archive view.
-- **Search** - search across chats, spaces and snippets, plus a browser-style in-chat finder with phrase highlighting.
+- **Chat archive** - move chats out of the sidebar without deleting them, with an inline Undo if you mis-clicked; restore or delete them from dedicated archive view.
+- **Search** - search across chats, message content, spaces and snippets, narrowed with a scope picker or an `in:` filter, plus a browser-style in-chat finder with phrase highlighting.
 
 #### Composing & steering a chat
 - **Slash commands** - type `/` in the composer for a command palette: `/fork`, `/regenerate`, `/compact`, `/private`, `/model`, `/persona`, `/snippet`, `/remember` and more.
@@ -77,8 +77,8 @@ Behind a calm, beautifully crafted UI sits a rich feature set - ready when you n
 - **Share a message** - copy any message as text or as a rendered chat-bubble image, save the image as a PNG, or open a pre-filled post on Facebook, X, Reddit or LinkedIn.
 
 #### App, data & updates 
-- **Data management** - make backups of your content to JSON file, restore data or permanently delete it with a few clicks. 
-- **App lock** - optional PIN, password or PIN + password gate at launch; credentials are hashed and stored in OS credential manager.
+- **Data management** - make backups of your content to JSON file, restore data or permanently delete it with a few clicks, with a storage breakdown showing what your chats, attachments and Spaces actually weigh on disk. 
+- **App lock** - optional PIN, password or PIN + password gate at launch, with opt-in auto-lock after inactivity or on minimize and a lock-now shortcut; credentials are hashed and stored in OS credential manager.
 - **Themes** - glassy, gradient Aurora or flat Solid, both available in Dark and Light variants.
 - **OTA updates** - get new features, bug fixes, performance improvements and security patches directly from the app, with an opt-in check at launch that tells you when a new version is out.
 
@@ -105,7 +105,16 @@ With each stable release we publish pre-built `.exe`, `.deb`, `.rpm`, `.AppImage
 **👉 Download a pre-built package from the [latest stable release](https://github.com/ztcs-software/loach/releases/latest)**
 
 > [!NOTE]
->For local models make sure [Ollama](https://ollama.com) is up and running (`ollama serve`). If you don't have any models pulled yet, Loach will offer to install one during onboarding. 
+>For local models make sure [Ollama](https://ollama.com) is up and running (`ollama serve`). If you don't have any models pulled yet, Loach will offer to install one during onboarding, sized against your GPU's VRAM (or system RAM when there's no discrete GPU) so the suggestion actually runs well on your machine. 
+
+### Install on Linux
+
+All three Linux packages — `.AppImage`, `.deb` and `.rpm` — support in-app updates. Deb and rpm installs download the signed package and elevate through `pkexec` so the package database stays consistent; there's no apt/yum repository, so `apt upgrade` won't see new versions.
+
+Builds target **glibc 2.35**, which makes **Ubuntu 22.04** and **Debian 12** the oldest supported distributions.
+
+> [!NOTE]
+>If you installed **v1.2.3 or earlier** from a `.deb` or `.rpm`, that build hides the Updates panel. Download a newer package once from the releases page and in-app updates take over from there.
 
 ### Install on macOS
 
