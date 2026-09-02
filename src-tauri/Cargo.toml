@@ -1,6 +1,6 @@
 [package]
 name = "loach"
-version = "1.3.0"
+version = "1.4.0"
 description = "Native local LLM chat client (Ollama + OpenAI-compatible)."
 authors = ["Loach"]
 license = "MIT"
