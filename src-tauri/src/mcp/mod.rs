@@ -332,6 +332,13 @@ pub async fn dispatch_tool_call(
                 // re-running a `send_message` or `create_issue` is worse than
                 // reporting the error.
                 if !client::is_pre_execution(&e) {
+                    // Report this call's failure without replaying it — but
+                    // still drop the session. A server that has forgotten us
+                    // may say so with any status it likes (the spec's 404 is
+                    // only a SHOULD; SDKs answer 400 for "not initialized"),
+                    // and keeping a session it rejects makes every later call
+                    // fail identically until the TTL ages it out.
+                    *pooled = None;
                     return Err(e);
                 }
                 tracing::debug!(

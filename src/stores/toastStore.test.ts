@@ -56,12 +56,12 @@ describe("toast auto-dismiss", () => {
 
   it("pause holds past the TTL and resume re-arms a full window", () => {
     const id = useToastStore.getState().push({ kind: "info", title: "Copied" });
-    useToastStore.getState().pause(id);
+    useToastStore.getState().pause(id, "pointer");
 
     vi.advanceTimersByTime(60_000);
     expect(useToastStore.getState().toasts).toHaveLength(1);
 
-    useToastStore.getState().resume(id);
+    useToastStore.getState().resume(id, "pointer");
     vi.advanceTimersByTime(3999);
     expect(useToastStore.getState().toasts).toHaveLength(1);
     vi.advanceTimersByTime(1);
@@ -70,15 +70,64 @@ describe("toast auto-dismiss", () => {
 
   it("a duplicate push while held does not re-arm the sweep", () => {
     const id = useToastStore.getState().push({ kind: "error", title: "boom" });
-    useToastStore.getState().pause(id);
+    useToastStore.getState().pause(id, "pointer");
 
     // Coalesces onto the held toast; must not start a fresh timer.
     useToastStore.getState().push({ kind: "error", title: "boom" });
     vi.advanceTimersByTime(60_000);
     expect(useToastStore.getState().toasts).toHaveLength(1);
 
-    useToastStore.getState().resume(id);
+    useToastStore.getState().resume(id, "pointer");
     vi.advanceTimersByTime(10_000);
     expect(useToastStore.getState().toasts).toHaveLength(0);
+  });
+
+  it("keeps holding while focus is inside after the pointer leaves", () => {
+    // Tab to the chip's Undo button, then move the mouse off it. The pointer
+    // hold is released but the focus hold isn't, so the chip must stay.
+    const id = useToastStore.getState().push({ kind: "info", title: "Copied" });
+    useToastStore.getState().pause(id, "pointer");
+    useToastStore.getState().pause(id, "focus");
+
+    useToastStore.getState().resume(id, "pointer");
+    vi.advanceTimersByTime(60_000);
+    expect(useToastStore.getState().toasts).toHaveLength(1);
+
+    useToastStore.getState().resume(id, "focus");
+    vi.advanceTimersByTime(4000);
+    expect(useToastStore.getState().toasts).toHaveLength(0);
+  });
+
+  it("repeated focus pauses release on one blur", () => {
+    // Focus moving between the chip's own buttons fires focus capture again
+    // with no intervening blur-out; the hold must not become unreleasable.
+    const id = useToastStore.getState().push({ kind: "info", title: "Copied" });
+    useToastStore.getState().pause(id, "focus");
+    useToastStore.getState().pause(id, "focus");
+
+    useToastStore.getState().resume(id, "focus");
+    vi.advanceTimersByTime(4000);
+    expect(useToastStore.getState().toasts).toHaveLength(0);
+  });
+
+  it("never coalesces toasts that carry an action", () => {
+    // Two chats archived back to back, both still titled "New chat": each
+    // needs its own chip so its own Undo survives.
+    const undoA = vi.fn();
+    const undoB = vi.fn();
+    const base = { kind: "info" as const, title: "Moved to archive", body: "New chat" };
+    const idA = useToastStore
+      .getState()
+      .push({ ...base, action: { label: "Undo", onClick: undoA } });
+    const idB = useToastStore
+      .getState()
+      .push({ ...base, action: { label: "Undo", onClick: undoB } });
+
+    expect(idA).not.toBe(idB);
+    const toasts = useToastStore.getState().toasts;
+    expect(toasts).toHaveLength(2);
+    toasts[1].action?.onClick();
+    expect(undoB).toHaveBeenCalledOnce();
+    expect(undoA).not.toHaveBeenCalled();
   });
 });

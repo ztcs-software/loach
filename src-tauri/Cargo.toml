@@ -106,7 +106,7 @@ sysinfo = { version = "0.38", default-features = false, features = ["system", "d
 # costs a feature set, not a new download. Linux reads nvidia-smi / sysfs and
 # macOS needs nothing — see src/gpu.rs.
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common"] }
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D12"] }
 
 [dev-dependencies]
 # Only used by the db.rs test suite, which opens a fresh database in a

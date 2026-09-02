@@ -159,6 +159,27 @@ describe("stableSplit (streaming prefix/tail boundary)", () => {
     expect(stable).toBe("a\n\nb\n\n");
     expect(tail).toBe("");
   });
+
+  it("never splits inside an open $$ display-math block", () => {
+    // Cutting at the blank line between stacked equations would leave the
+    // prefix holding an unclosed `$$` and let the tail's closer open a block
+    // that typesets the prose after it.
+    const [stable, tail] = split("intro\n\n$$\na = b\n\nc = d");
+    expect(stable).toBe("intro\n\n");
+    expect(tail).toBe("$$\na = b\n\nc = d");
+  });
+
+  it("treats a blank line after a CLOSED math block as a boundary", () => {
+    const [stable, tail] = split("$$\na = b\n$$\n\nnext para");
+    expect(stable).toBe("$$\na = b\n$$\n\n");
+    expect(tail).toBe("next para");
+  });
+
+  it("ignores $$ inside a code fence", () => {
+    const [stable, tail] = split("```sh\necho $$\n```\n\nnext para");
+    expect(stable).toBe("```sh\necho $$\n```\n\n");
+    expect(tail).toBe("next para");
+  });
 });
 
 describe("shouldOpenExternally (link scheme allow-list)", () => {

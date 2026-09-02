@@ -21,18 +21,25 @@ export interface Toast {
   durationMs?: number;
 }
 
+/** Why a toast is being held open. Tracked separately because the two
+ *  holders are independent: the pointer can leave a chip whose Undo button
+ *  still has keyboard focus, and that must not re-arm the timer. */
+export type HoldReason = "pointer" | "focus";
+
 interface ToastState {
   toasts: Toast[];
   push: (toast: Omit<Toast, "id">) => string;
   dismiss: (id: string) => void;
-  /** Suspend a toast's auto-dismiss (pointer hover / keyboard focus).
-   *  Pairs with `resume`; while held, duplicate pushes also won't re-arm
-   *  the timer out from under the reader. */
-  pause: (id: string) => void;
-  /** Re-arm the auto-dismiss after `pause`. Restarts the full window
-   *  rather than tracking remaining time — the user was reading, so a
-   *  fresh read window is the friendlier behaviour and far less code. */
-  resume: (id: string) => void;
+  /** Suspend a toast's auto-dismiss for one reason (pointer hover / keyboard
+   *  focus). Pairs with `resume`; while held, duplicate pushes also won't
+   *  re-arm the timer out from under the reader. Adding the same reason twice
+   *  is a no-op, so an unbalanced pause can't strand a chip on screen. */
+  pause: (id: string, reason: HoldReason) => void;
+  /** Release one hold. The timer re-arms only once no reason remains.
+   *  Restarts the full window rather than tracking remaining time — the user
+   *  was reading, so a fresh read window is the friendlier behaviour and far
+   *  less code. */
+  resume: (id: string, reason: HoldReason) => void;
   clear: () => void;
 }
 
@@ -41,10 +48,10 @@ interface ToastState {
 // against a now-empty toast list, leaking a closure per dismissed toast.
 const dismissTimers = new Map<string, number>();
 
-// Toasts currently held open by hover/focus. `startDismissTimer` refuses to
-// arm while held, so a duplicate `push` mid-hover can't sweep the chip away
-// under the cursor.
-const heldToasts = new Set<string>();
+// Toasts currently held open, and by which holders. `startDismissTimer`
+// refuses to arm while a toast has any hold, so a duplicate `push` mid-hover
+// can't sweep the chip away under the cursor.
+const heldToasts = new Map<string, Set<HoldReason>>();
 
 /** Most toasts visible at once. A burst of failures (e.g. the global
  *  rejection net catching a sweep of rejected mutations) evicts oldest-first
@@ -84,12 +91,21 @@ export const useToastStore = create<ToastState>((set, get) => ({
     // Coalesce exact duplicates: re-pushing an identical toast restarts its
     // timer instead of stacking a copy, so a source failing repeatedly (a
     // retry loop, N identical rejections in one burst) shows one chip.
-    const dup = get().toasts.find(
-      (t) =>
-        t.kind === toast.kind &&
-        t.title === toast.title &&
-        t.body === toast.body,
-    );
+    //
+    // Toasts carrying an action are exempt. The identity keys say nothing
+    // about what the action closes over — archive two chats before either is
+    // auto-titled and both chips read "Moved to archive / New chat" — so
+    // folding them would leave the surviving Undo wired to the first chat and
+    // silently drop the second chat's undo affordance.
+    const dup = toast.action
+      ? undefined
+      : get().toasts.find(
+          (t) =>
+            !t.action &&
+            t.kind === toast.kind &&
+            t.title === toast.title &&
+            t.body === toast.body,
+        );
     if (dup) {
       const timer = dismissTimers.get(dup.id);
       if (timer !== undefined) window.clearTimeout(timer);
@@ -125,16 +141,25 @@ export const useToastStore = create<ToastState>((set, get) => ({
     heldToasts.delete(id);
     set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) }));
   },
-  pause: (id) => {
-    heldToasts.add(id);
+  pause: (id, reason) => {
+    const held = heldToasts.get(id) ?? new Set<HoldReason>();
+    held.add(reason);
+    heldToasts.set(id, held);
     const timer = dismissTimers.get(id);
     if (timer !== undefined) {
       window.clearTimeout(timer);
       dismissTimers.delete(id);
     }
   },
-  resume: (id) => {
-    heldToasts.delete(id);
+  resume: (id, reason) => {
+    const held = heldToasts.get(id);
+    if (held) {
+      held.delete(reason);
+      // Someone else is still holding it — most often the pointer leaving a
+      // chip whose Undo button has keyboard focus.
+      if (held.size > 0) return;
+      heldToasts.delete(id);
+    }
     const toast = get().toasts.find((t) => t.id === id);
     if (toast) startDismissTimer(id, ttlFor(toast), set);
   },

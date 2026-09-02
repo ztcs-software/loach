@@ -153,7 +153,9 @@ jobs:
 
       # Runs as root inside the container, so no sudo. build-essential,
       # pkg-config and libssl-dev come preinstalled on the runner image but
-      # are absent from the bare base image.
+      # are absent from the bare base image — as are `file` and `wget`, which
+      # the AppImage bundler shells out to (see the Dockerfile, which keeps the
+      # same list for local builds).
       - name: Install Linux build deps
         if: matrix.platform == 'ubuntu-24.04'
         run: |
@@ -168,6 +170,7 @@ jobs:
             patchelf \
             rpm \
             file \
+            wget \
             desktop-file-utils
 
       - uses: actions/setup-node@v7

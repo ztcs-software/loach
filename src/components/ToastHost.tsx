@@ -38,11 +38,12 @@ function ToastItem({ toast, onDismiss }: { toast: Toast; onDismiss: () => void }
       // is inside it (keyboard users tabbing to Undo / ×) — a toast should
       // never vanish out from under someone who is engaging with it. The
       // capture-phase focus pair fires for any focusable descendant.
-      onMouseEnter={() => pause(toast.id)}
-      onMouseLeave={() => resume(toast.id)}
-      onFocusCapture={() => pause(toast.id)}
+      onMouseEnter={() => pause(toast.id, "pointer")}
+      onMouseLeave={() => resume(toast.id, "pointer")}
+      onFocusCapture={() => pause(toast.id, "focus")}
       onBlurCapture={(e) => {
-        if (!e.currentTarget.contains(e.relatedTarget)) resume(toast.id);
+        if (!e.currentTarget.contains(e.relatedTarget))
+          resume(toast.id, "focus");
       }}
       className={cn(
         "pointer-events-auto flex max-w-sm items-start gap-2.5 rounded-2xl border px-3.5 py-2.5 text-sm shadow-lg backdrop-blur-md",

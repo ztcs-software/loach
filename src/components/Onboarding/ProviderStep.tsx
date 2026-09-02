@@ -48,6 +48,7 @@ import {
   type HostCapacity,
   type SizedVariant,
 } from "@/lib/modelChoice";
+import { useLivePulls } from "@/lib/usePullRuns";
 import type { ModelInfo, ProviderId } from "@/types";
 import { cn, prefersReducedMotion } from "@/lib/utils";
 import { StepShell } from "./StepShell";
@@ -374,7 +375,17 @@ function OllamaPath({ onProvisioned }: { onProvisioned: () => void }) {
         // Pre-existing models — pin the first as the default so Continue is
         // live immediately. Unlike before, the pick is *shown* in a picker
         // below, so it's a visible default rather than a silent one.
-        await setProviderDefault("ollama", list[0].id);
+        //
+        // Only when nothing usable is pinned yet, though: that picker writes
+        // this same setting, and the probe re-runs on every remount of this
+        // path (toggling the provider switch away and back, saving a base URL,
+        // leaving and re-entering the step). Pinning unconditionally stamped
+        // the user's explicit choice back to `list[0]` each time.
+        const settings = useSettingsStore.getState();
+        const alreadyPinned =
+          settings.default_provider === "ollama" &&
+          list.some((m) => m.id === settings.default_model);
+        if (!alreadyPinned) await setProviderDefault("ollama", list[0].id);
         await refreshModels();
         onProvisioned();
       }
@@ -401,6 +412,23 @@ function OllamaPath({ onProvisioned }: { onProvisioned: () => void }) {
     return () => window.clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [probe.kind, baseUrl]);
+
+  // A download already running is reason enough to continue — that's the whole
+  // point of letting the wizard proceed while it finishes. This step remounts
+  // unprovisioned whenever the user comes back to it, and mid-pull the probe
+  // sees an empty model list, so without this Continue stayed dead for the rest
+  // of the download and clicking Pull again just hit `startPull`'s dedup guard.
+  // When the last pull ends, re-probe so the model list and the picker catch up
+  // in place.
+  const livePullCount = useLivePulls().length;
+  const hadLivePull = useRef(livePullCount > 0);
+  useEffect(() => {
+    const justFinished = hadLivePull.current && livePullCount === 0;
+    hadLivePull.current = livePullCount > 0;
+    if (livePullCount > 0) onProvisioned();
+    else if (justFinished) void runProbe({ quiet: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [livePullCount]);
 
   const handleUrlSave = async () => {
     const next = urlDraft.trim();

@@ -20,7 +20,10 @@ export function ModelDownloadBanner() {
   const model = useChatStore(
     (s) => s.sessions.find((x) => x.id === s.activeSessionId)?.model ?? null,
   );
-  const pull = useLivePullFor(model);
+  const provider = useChatStore(
+    (s) => s.sessions.find((x) => x.id === s.activeSessionId)?.provider ?? null,
+  );
+  const pull = useLivePullFor(provider, model);
   if (!pull) return null;
 
   const pct = pullPercent(pull);

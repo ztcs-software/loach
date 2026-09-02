@@ -11,6 +11,7 @@
 
 import { useMemo } from "react";
 import { useModelsStore, type AdminProgress } from "@/stores/modelsStore";
+import type { ModelInfo } from "@/types";
 
 export interface LivePull {
   streamId: string;
@@ -30,27 +31,53 @@ export function useLivePulls(): LivePull[] {
   );
 }
 
-/** The in-flight pull for one model tag, or null. Used to answer "can this
- *  session send yet?" for the session's pinned model. */
-export function useLivePullFor(model: string | null | undefined): AdminProgress | null {
-  const runs = useModelsStore((s) => s.runs);
-  return useMemo(() => {
-    if (!model) return null;
-    const hit = Object.values(runs).find(
+/** The in-flight pull that makes a session's pinned model unusable, or null.
+ *
+ *  Two qualifiers, because a run's `target` is only a string and "a pull is
+ *  running for this name" isn't the same as "this model can't answer yet":
+ *
+ *    * the session has to be on Ollama — nothing else creates pull runs, and an
+ *      OpenAI-compatible endpoint can serve a model id spelled like a tag;
+ *    * the tag must not already be installed — re-pulling a resident tag is how
+ *      Ollama updates it, and it keeps serving the existing copy until the new
+ *      manifest lands, so there is nothing to wait for.
+ */
+function findBlockingPull(
+  runs: Record<string, AdminProgress>,
+  installed: ModelInfo[],
+  provider: string | null | undefined,
+  model: string | null | undefined,
+): AdminProgress | null {
+  if (!model || provider !== "ollama") return null;
+  if (installed.some((m) => m.id === model)) return null;
+  return (
+    Object.values(runs).find(
       (r) => r.kind === "pull" && r.target === model && r.finished === null,
-    );
-    return hit ?? null;
-  }, [runs, model]);
+    ) ?? null
+  );
+}
+
+/** Reactive {@link findBlockingPull} for components. */
+export function useLivePullFor(
+  provider: string | null | undefined,
+  model: string | null | undefined,
+): AdminProgress | null {
+  const runs = useModelsStore((s) => s.runs);
+  const installed = useModelsStore((s) => s.models);
+  return useMemo(
+    () => findBlockingPull(runs, installed, provider, model),
+    [runs, installed, provider, model],
+  );
 }
 
 /** Non-reactive twin of {@link useLivePullFor} for store code, which can't
- *  call hooks. Reads the same `runs` map straight off the store. */
-export function getLivePullFor(model: string): AdminProgress | null {
-  const runs = useModelsStore.getState().runs;
-  const hit = Object.values(runs).find(
-    (r) => r.kind === "pull" && r.target === model && r.finished === null,
-  );
-  return hit ?? null;
+ *  call hooks. Reads the same state straight off the store. */
+export function getLivePullFor(
+  provider: string | null | undefined,
+  model: string | null | undefined,
+): AdminProgress | null {
+  const { runs, models } = useModelsStore.getState();
+  return findBlockingPull(runs, models, provider, model);
 }
 
 /** Completion percentage, or null while the daemon is still working out how

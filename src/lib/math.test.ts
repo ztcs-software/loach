@@ -8,6 +8,7 @@
 // currency heuristics as the other load-bearing half: they are the reason the
 // renderer can typeset `$x^2$` by default without typesetting price lists.
 
+import { readFileSync } from "node:fs";
 import { describe, it, expect } from "vitest";
 import { fromMarkdown } from "mdast-util-from-markdown";
 import { math } from "micromark-extension-math";
@@ -141,6 +142,29 @@ describe("normalizeMath — $…$ currency heuristics", () => {
     const fence = "$$a + b$$ tail"; // promotion doesn't apply (trailing text)
     expect(normalizeMath(fence)).toBe(fence);
   });
+
+  it("converts several spans on one line", () => {
+    // The opener's guard consumes the character before the `$` rather than
+    // looking behind it (Safari < 16.4 has no lookbehind, and this module is
+    // in the entry chunk). That character must be replayed, and it must not
+    // starve the next span of its own guard.
+    expect(normalizeMath("both $x$ and $y$ render")).toBe(
+      "both $$x$$ and $$y$$ render",
+    );
+    expect(normalizeMath("($a$)($b$)")).toBe("($$a$$)($$b$$)");
+    expect(normalizeMath("$x$ leads")).toBe("$$x$$ leads");
+  });
+
+  it("has no lookbehind in its patterns", () => {
+    // Guards the boot path, not the behaviour: a `new RegExp` JavaScriptCore
+    // can't compile throws while the entry chunk is evaluating, before React
+    // mounts or any error boundary exists — a blank window on macOS 11/12.
+    const source = readFileSync(
+      new URL("./math.ts", import.meta.url),
+      "utf8",
+    );
+    expect(source).not.toMatch(/\(\?<[=!]/);
+  });
 });
 
 describe("normalizeMath — code is never touched", () => {
@@ -183,6 +207,63 @@ describe("normalizeMath — code is never touched", () => {
   it("does not promote a $$ … $$ line that is inline code", () => {
     const src = "`$$x$$`";
     expect(normalizeMath(src)).toBe(src);
+  });
+
+  it("leaves an indented code block intact", () => {
+    // Four-space blocks are code too, and shell written that way is full of
+    // both BRE grouping and `$VAR$VAR` pairs the currency heuristic accepts.
+    const src = [
+      "Run this:",
+      "",
+      "    sed 's/\\(a\\)/\\1/' file",
+      "    echo $HOME/$USER",
+      "",
+      "Then \\( y \\).",
+    ].join("\n");
+    const out = normalizeMath(src);
+    expect(out).toContain("    sed 's/\\(a\\)/\\1/' file");
+    expect(out).toContain("    echo $HOME/$USER");
+    expect(out).toContain("Then $$ y $$.");
+  });
+
+  it("keeps an indented block together across a blank line", () => {
+    const src = ["x:", "", "    \\(a\\)", "", "    \\(b\\)"].join("\n");
+    const out = normalizeMath(src);
+    expect(out).toContain("    \\(a\\)");
+    expect(out).toContain("    \\(b\\)");
+  });
+
+  it("leaves a fence nested in a list item intact", () => {
+    // The fence sits four columns in, past the three CommonMark allows
+    // *relative to the document* but legal relative to the list item.
+    const src = [
+      "- outer",
+      "  - inner:",
+      "",
+      "    ```bash",
+      "    sed 's/\\(a\\)/\\1/' f",
+      "    ```",
+    ].join("\n");
+    expect(normalizeMath(src)).toContain("sed 's/\\(a\\)/\\1/' f");
+  });
+
+  it("does not let a short inner fence close a longer outer one", () => {
+    // A ```` block whose body shows ``` fenced markdown: the inner run is
+    // content, so the `$$…$$` in the example must survive as written.
+    const src = [
+      "````markdown",
+      "```",
+      "inner \\(code\\) and $x$ here",
+      "```",
+      "````",
+    ].join("\n");
+    expect(normalizeMath(src)).toBe(src);
+  });
+
+  it("still rewrites math indented inside a list item", () => {
+    // Two columns in is list content, not code — the formula must render.
+    const src = ["- item", "", "  \\( x \\)"].join("\n");
+    expect(normalizeMath(src)).toContain("  $$ x $$");
   });
 });
 

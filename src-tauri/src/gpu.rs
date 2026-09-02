@@ -22,9 +22,10 @@
 
 /// A discrete GPU worth sizing against.
 pub struct GpuInfo {
-    /// Dedicated video memory in bytes. Never zero — a zero-VRAM adapter is
-    /// integrated graphics carving out system RAM, which is already covered by
-    /// the RAM path, so it is reported as absent rather than as a 0 GB GPU.
+    /// Dedicated video memory in bytes. Integrated adapters never reach this
+    /// struct — whether they report zero or a multi-gigabyte UMA carve-out,
+    /// that memory is system RAM, which the RAM path already covers, so they
+    /// are reported as absent rather than as a small GPU.
     pub vram_bytes: u64,
     /// Adapter name for display, e.g. "NVIDIA GeForce RTX 4060".
     pub name: String,
@@ -44,6 +45,40 @@ pub fn detect() -> Option<GpuInfo> {
         return None;
     }
     Some(found)
+}
+
+/// Whether an adapter shares memory with the CPU (an APU or integrated GPU).
+///
+/// `DedicatedVideoMemory` alone can't answer this: an AMD APU reports its BIOS
+/// UMA frame-buffer carve-out there, commonly 2–4 GB, which sails past the
+/// discrete threshold and made a 32 GB laptop look like a 4 GB graphics card.
+/// D3D12's architecture feature is the signal that actually distinguishes them.
+/// Unreadable (pre-D3D12 hardware, a driver that won't create a device) counts
+/// as discrete, which is the behaviour that shipped before.
+#[cfg(windows)]
+unsafe fn is_unified_memory(adapter: &windows::Win32::Graphics::Dxgi::IDXGIAdapter1) -> bool {
+    use windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_11_0;
+    use windows::Win32::Graphics::Direct3D12::{
+        D3D12CreateDevice, ID3D12Device, D3D12_FEATURE_ARCHITECTURE,
+        D3D12_FEATURE_DATA_ARCHITECTURE,
+    };
+
+    let mut device: Option<ID3D12Device> = None;
+    if unsafe { D3D12CreateDevice(adapter, D3D_FEATURE_LEVEL_11_0, &mut device) }.is_err() {
+        return false;
+    }
+    let Some(device) = device else {
+        return false;
+    };
+    let mut arch = D3D12_FEATURE_DATA_ARCHITECTURE::default();
+    let ok = unsafe {
+        device.CheckFeatureSupport(
+            D3D12_FEATURE_ARCHITECTURE,
+            std::ptr::from_mut(&mut arch).cast(),
+            std::mem::size_of::<D3D12_FEATURE_DATA_ARCHITECTURE>() as u32,
+        )
+    };
+    ok.is_ok() && arch.UMA.as_bool()
 }
 
 #[cfg(windows)]
@@ -74,6 +109,11 @@ fn detect_impl() -> Option<GpuInfo> {
             if DXGI_ADAPTER_FLAG(desc.Flags as i32) == DXGI_ADAPTER_FLAG_SOFTWARE {
                 continue;
             }
+            // Integrated graphics carve their "VRAM" out of system RAM, which
+            // the caller already sizes against.
+            if is_unified_memory(&adapter) {
+                continue;
+            }
 
             let vram_bytes = desc.DedicatedVideoMemory as u64;
             let name = String::from_utf16_lossy(&desc.Description)
@@ -96,17 +136,49 @@ fn detect_impl() -> Option<GpuInfo> {
     nvidia_smi().or_else(amdgpu_sysfs)
 }
 
+/// How long to wait for `nvidia-smi`. A wedged NVIDIA driver (a GPU that fell
+/// off the bus, a broken WSL passthrough) leaves the tool hung indefinitely,
+/// and `Command::output()` would wait with it — taking the whole `system_info`
+/// call, and with it onboarding's model recommendation, down with it.
+#[cfg(target_os = "linux")]
+const NVIDIA_SMI_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// `nvidia-smi --query-gpu=memory.total,name` → "8192, NVIDIA GeForce RTX 4060".
 /// Memory is reported in MiB.
 #[cfg(target_os = "linux")]
 fn nvidia_smi() -> Option<GpuInfo> {
-    let out = std::process::Command::new("nvidia-smi")
+    use std::process::Stdio;
+
+    let mut child = std::process::Command::new("nvidia-smi")
         .args([
             "--query-gpu=memory.total,name",
             "--format=csv,noheader,nounits",
         ])
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
         .ok()?;
+
+    // Poll rather than block: the output is two short lines, so it can't fill
+    // the pipe buffer and stall a process that is otherwise healthy.
+    let deadline = std::time::Instant::now() + NVIDIA_SMI_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            Ok(None) => {
+                tracing::warn!("nvidia-smi did not exit within {NVIDIA_SMI_TIMEOUT:?} — giving up");
+                let _ = child.kill();
+                let _ = child.wait(); // reap, so we don't leave a zombie
+                return None;
+            }
+            Err(_) => return None,
+        }
+    }
+
+    let out = child.wait_with_output().ok()?;
     if !out.status.success() {
         return None;
     }

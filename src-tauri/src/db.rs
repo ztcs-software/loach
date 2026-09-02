@@ -2908,29 +2908,37 @@ fn strip_inlined_attachments(content: &str) -> &str {
 /// A one-line excerpt of `text` centred on the first case-insensitive
 /// occurrence of `needle`, or `None` when the needle isn't there at all.
 ///
-/// Comparison runs over `Vec<char>` with a one-char-per-char lowercase fold
-/// (rather than `str::to_lowercase`, whose output can be longer than its
-/// input) so match positions stay valid indices into the original text.
+/// Folds ASCII case only, which is exactly what the `LIKE` prefilter that
+/// selected this row does. That also keeps the fold byte-for-byte the same
+/// length as its input — unlike `str::to_lowercase`, where 'ß' becomes "ss" —
+/// so a match offset in the folded copy is a valid offset into `text`.
 fn build_snippet(text: &str, needle: &str) -> Option<String> {
-    let hay: Vec<char> = text.chars().collect();
-    let fold = |c: char| c.to_lowercase().next().unwrap_or(c);
-    let hay_lower: Vec<char> = hay.iter().copied().map(fold).collect();
-    let needle_lower: Vec<char> = needle.chars().map(fold).collect();
-    if needle_lower.is_empty() {
+    if needle.is_empty() {
         return None;
     }
-    let at = hay_lower
-        .windows(needle_lower.len())
-        .position(|w| w == needle_lower.as_slice())?;
+    // One folded copy and a substring search, rather than two `Vec<char>`
+    // materialisations (four bytes per character, twice over) and a naive
+    // sliding-window compare: this runs on every candidate row of every
+    // keystroke's scan, and assistant turns run to tens of kilobytes.
+    let at = text
+        .to_ascii_lowercase()
+        .find(&needle.to_ascii_lowercase())?;
 
-    let start = at.saturating_sub(SNIPPET_LEAD);
-    let end = (start + SNIPPET_LEN).min(hay.len());
+    // Widen to a character window around the hit. `at` is a char boundary
+    // because ASCII folding never touches a multi-byte sequence.
+    let start = text[..at].chars().count().saturating_sub(SNIPPET_LEAD);
     let mut out = String::new();
     if start > 0 {
         out.push('…');
     }
-    out.extend(&hay[start..end]);
-    if end < hay.len() {
+    let mut chars = text.chars().skip(start);
+    for _ in 0..SNIPPET_LEN {
+        match chars.next() {
+            Some(c) => out.push(c),
+            None => break,
+        }
+    }
+    if chars.next().is_some() {
         out.push('…');
     }
     // The palette renders the excerpt as a single truncated line, so fold the
@@ -3129,6 +3137,27 @@ mod tests {
         assert!(snip.starts_with('…') && snip.ends_with('…'), "{snip}");
         assert!(snip.contains("NEEDLE"), "{snip}");
         assert!(!snip.contains('\n'), "newlines are folded away: {snip}");
+        assert!(snip.chars().count() <= SNIPPET_LEN + 2);
+    }
+
+    /// The snippet window is measured in characters but located by byte
+    /// offset, so multi-byte text on both sides of the hit is the case that
+    /// would panic on a bad slice.
+    #[test]
+    fn search_messages_snippet_handles_multibyte_text() {
+        let (db, _dir) = fresh_db();
+        let s = db
+            .create_session("t", "ollama", "llama3", None, None)
+            .expect("session");
+        let content = format!("{}NEEDLE{}", "é🌍".repeat(120), "ß—".repeat(120));
+        db.append_message(&s.id, "assistant", &content, None)
+            .expect("message");
+
+        let hits = db.search_messages("needle", 10).expect("search");
+        assert_eq!(hits.len(), 1);
+        let snip = &hits[0].snippet;
+        assert!(snip.contains("NEEDLE"), "{snip}");
+        assert!(snip.starts_with('…') && snip.ends_with('…'), "{snip}");
         assert!(snip.chars().count() <= SNIPPET_LEN + 2);
     }
 

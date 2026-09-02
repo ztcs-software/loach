@@ -2032,9 +2032,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // on. Ollama answers 404 for a tag it doesn't have yet, which
     // `formatProviderError` renders as "endpoint or model not found. Check the
     // model name and URL": wrong, unactionable, and the first thing the app
-    // would ever say to a new user. Only Ollama pulls create runs, so matching
-    // on the tag can't misfire for a cloud model.
-    const pull = getLivePullFor(session.model);
+    // would ever say to a new user. `getLivePullFor` decides when a pull
+    // genuinely makes the model unusable — see it for why the provider and the
+    // installed set both matter.
+    const pull = getLivePullFor(session.provider, session.model);
     if (pull) {
       const pct = pullPercent(pull);
       throw new Error(

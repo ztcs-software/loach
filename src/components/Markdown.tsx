@@ -262,8 +262,12 @@ function useMathPipeline(
   }, [shouldLoad]);
 
   const math = allowed ? loaded : null;
+  // Re-check `hasMath` here rather than rewriting unconditionally: once the
+  // engine is loaded this memo re-runs on every streaming flush, over the whole
+  // accumulated reply, and `normalizeMath`'s own `includes("$")` short-circuit
+  // doesn't fire for a reply that merely mentions `$HOME`.
   const source = useMemo(
-    () => (math ? normalizeMath(content) : content),
+    () => (math && hasMath(content) ? normalizeMath(content) : content),
     [math, content],
   );
   return { math, source };
@@ -408,10 +412,16 @@ export const Markdown = memo(function Markdown({
 // boundary, and a long code block streams as one growing tail — which the
 // no-highlight tail renderer keeps cheap until its closing fence lands and it
 // folds into the highlighted, memoised prefix.
+//
+// A `$$` display-math block is a fence in the same sense. Models do put a blank
+// line between stacked equations, and cutting there leaves the prefix holding
+// an unclosed `$$` (KaTeX renders the error) while the tail's closing `$$`
+// opens a block of its own that typesets the prose after it.
 export function stableSplit(content: string): number {
   const lines = content.split("\n");
   let inFence = false;
   let fenceChar = "";
+  let inMath = false;
   let offset = 0;
   let boundary = 0;
   for (let i = 0; i < lines.length; i++) {
@@ -425,12 +435,14 @@ export function stableSplit(content: string): number {
       } else if (ch === fenceChar) {
         inFence = false;
       }
+    } else if (!inFence && /^[ \t]*\$\$[ \t]*$/.test(line)) {
+      inMath = !inMath;
     }
     offset += line.length + 1; // +1 for the "\n" that split() consumed
     // A top-level blank line closes the preceding block. Never treat the very
     // last line as a boundary — the tail must keep the trailing block so a
     // message ending in "\n\n" doesn't render an empty tail.
-    if (!inFence && line.trim() === "" && i < lines.length - 1) {
+    if (!inFence && !inMath && line.trim() === "" && i < lines.length - 1) {
       boundary = offset;
     }
   }

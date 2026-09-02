@@ -339,6 +339,15 @@ const MAX_MESSAGE_HITS: usize = 50;
 
 /// Substring search across live chat transcripts, backing the Cmd-K palette's
 /// message results. See `Database::search_messages` for what's in scope.
+///
+/// On the blocking pool for the same reason as `storage_stats`: the `LIKE`
+/// scan has no index to lean on and walks every message body, inlined
+/// attachments and all, then builds an excerpt per candidate. That is CPU-bound
+/// work fired once per keystroke, and the palette can't cancel a scan already
+/// in flight — left on a runtime worker, a few overlapping scans on a large
+/// database exhaust the read pool and the next `with_read` parks a worker for
+/// r2d2's 30-second timeout, stalling unrelated commands including the start of
+/// a chat stream.
 #[tauri::command]
 pub async fn search_messages(
     state: State<'_, AppState>,
@@ -346,7 +355,10 @@ pub async fn search_messages(
     limit: Option<usize>,
 ) -> Result<Vec<MessageHit>, String> {
     let limit = limit.unwrap_or(20).min(MAX_MESSAGE_HITS);
-    state.db.search_messages(&query, limit).map_err(err)
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || db.search_messages(&query, limit).map_err(err))
+        .await
+        .map_err(|e| format!("message search task panicked: {e}"))?
 }
 
 #[derive(Debug, Deserialize)]

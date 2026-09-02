@@ -43,21 +43,29 @@ export interface MathPlugins {
 const UNAMBIGUOUS_RE = /\$\$|\\\[|\\\(|```[ \t]*math\b/;
 
 // A `$…$` span that is *math*, not money. Every part earns its keep:
-//   `(?<![\w$\\])` — the opener can't follow a word character ("US$5", "50$"),
+//   `(^|[^\w$\\])` — the opener can't follow a word character ("US$5", "50$"),
 //       another `$` (that's a `$$` fence), or a backslash (`\$` is an escaped
-//       dollar sign).
-//   `(?=\S)` / `(?<![\s\\])` — the content hugs both delimiters. "it costs
+//       dollar sign). Written as a captured leading character rather than a
+//       lookbehind: JavaScriptCore only gained lookbehind in Safari 16.4, and
+//       this module is in the entry chunk, so a `new RegExp` the engine can't
+//       compile takes the whole app down with a blank window on the older
+//       WebKit builds we still support (macOS 11/12, webkit2gtk < 2.40).
+//       Consuming the character is equivalent here — the only matches it could
+//       swallow are back-to-back spans (`$a$$b$`), which the `(?![\d$])` tail
+//       rejects anyway — but it does mean callers must replay group 1.
+//   first/last body character — the content hugs both delimiters. "it costs
 //       $5 and $10" dies here: the only closing candidate has a space before
-//       it. The trailing `\` exclusion keeps `$…\$` (escaped dollar) inert.
-//   `[^$\n]{1,200}?` — spans never cross a line break or contain a `$`, and
-//       the bound keeps the scan linear on a long reply with a stray `$`.
+//       it. Excluding a trailing `\` keeps `$…\$` (escaped dollar) inert.
+//   `[^$\n]` throughout — spans never cross a line break or contain a `$`, and
+//       the 200-character bound keeps the scan linear on a long reply with a
+//       stray `$`.
 //   `(?![\d$])` — a digit after the closer means it opened a second price
 //       ("between $5-$10", "paid $25 ($5 each)"); `$` means we clipped a
 //       `$$` fence.
 // Residual risk is a glued non-currency pair like `$FOO=$BAR` in unquoted
 // prose — rare, and the failure (typeset as italic text) is milder than the
 // inverse failure of never rendering `$x^2$` at all.
-const SINGLE_DOLLAR_SRC = String.raw`(?<![\w$\\])\$(?=\S)([^$\n]{1,200}?)(?<![\s\\])\$(?![\d$])`;
+const SINGLE_DOLLAR_SRC = String.raw`(^|[^\w$\\])\$([^$\n\s\\]|[^$\n\s][^$\n]{0,198}?[^$\n\s\\])\$(?![\d$])`;
 const SINGLE_DOLLAR_TEST = new RegExp(SINGLE_DOLLAR_SRC);
 const SINGLE_DOLLAR_RE = new RegExp(SINGLE_DOLLAR_SRC, "g");
 
@@ -120,8 +128,26 @@ const INLINE_CODE_RE = new RegExp(
   String.raw`(\x60+)${NO_BLANK}*?\1(?!\x60)`,
   "g",
 );
-/** An opening or closing fence at the start of a line. */
-const FENCE_RE = /^\s{0,3}(`{3,}|~{3,})/;
+/** An opening or closing fence, with its indent and backtick/tilde run.
+ *  Any indent is allowed: a fence nested in a list item sits well past the
+ *  three columns CommonMark allows *relative to its container*, and matching
+ *  only 0–3 left those blocks exposed to the rewrite. */
+const FENCE_RE = /^([ \t]*)(`{3,}|~{3,})/;
+/** A list-item marker. Its content column is where an indented code block
+ *  inside the item starts counting from. */
+const LIST_ITEM_RE = /^[ \t]*(?:[-*+]|\d{1,9}[.)])[ \t]+/;
+
+/** Width of `text` in columns, with tabs advancing to 4-column stops. */
+function columnWidth(text: string): number {
+  let n = 0;
+  for (const c of text) n += c === "\t" ? 4 - (n % 4) : 1;
+  return n;
+}
+
+/** Width of a line's leading whitespace in columns. */
+function indentWidth(line: string): number {
+  return columnWidth(line.slice(0, line.length - line.trimStart().length));
+}
 
 // Order matters. `\[…\]` becomes `$$…$$` first so a bracket block alone on its
 // line gets promoted to display by the second pass. The two *inline* rewrites
@@ -138,7 +164,10 @@ function rewriteProse(text: string): string {
         `${indent}$$\n${indent}${body}\n${indent}$$`,
     )
     .replace(PAREN_RE, (_, body: string) => `$$${body}$$`)
-    .replace(SINGLE_DOLLAR_RE, (_, body: string) => `$$${body}$$`);
+    .replace(
+      SINGLE_DOLLAR_RE,
+      (_, before: string, body: string) => `${before}$$${body}$$`,
+    );
 }
 
 /** Apply `rewriteProse` to everything outside inline-code spans. */
@@ -169,6 +198,13 @@ export function normalizeMath(src: string): string {
   let prose: string[] = [];
   let inFence = false;
   let fenceChar = "";
+  let fenceLen = 0;
+  let fenceIndent = 0;
+  // Column at which an indented code block starts. 4 at the top level, and 4
+  // past the content column of the innermost list item we're inside.
+  let codeIndent = 4;
+  let inIndentedCode = false;
+  let prevBlank = true; // start of the string counts as a blank line
 
   const flush = () => {
     if (prose.length) {
@@ -179,23 +215,58 @@ export function normalizeMath(src: string): string {
 
   for (const line of src.split("\n")) {
     const fence = FENCE_RE.exec(line);
-    if (fence) {
-      const ch = fence[1][0];
-      if (!inFence) {
-        flush();
-        inFence = true;
-        fenceChar = ch;
-        out.push(line);
-        continue;
-      }
-      if (ch === fenceChar) {
+
+    if (inFence) {
+      out.push(line);
+      // CommonMark closes a fence only on the same character, a run at least
+      // as long as the opener, and no more than three columns further in —
+      // so a shorter ``` inside a ```` block stays content.
+      if (
+        fence &&
+        fence[2][0] === fenceChar &&
+        fence[2].length >= fenceLen &&
+        indentWidth(fence[1]) <= fenceIndent + 3
+      ) {
         inFence = false;
-        out.push(line);
-        continue;
       }
+      continue;
     }
-    if (inFence) out.push(line);
-    else prose.push(line);
+
+    const blank = !line.trim();
+    const width = indentWidth(line);
+
+    // Indented code block. Not a full CommonMark block scan, but it keeps the
+    // rewrite off the shell and TeX-lookalike snippets models write indented
+    // rather than fenced. A paragraph continuing a list item can look the same,
+    // and there the cost is only that math in it renders as text.
+    if (!blank && width >= codeIndent && (prevBlank || inIndentedCode)) {
+      flush();
+      out.push(line);
+      inIndentedCode = true;
+      prevBlank = false;
+      continue;
+    }
+
+    if (fence) {
+      flush();
+      inFence = true;
+      fenceChar = fence[2][0];
+      fenceLen = fence[2].length;
+      fenceIndent = indentWidth(fence[1]);
+      out.push(line);
+      inIndentedCode = false;
+      prevBlank = false;
+      continue;
+    }
+
+    if (!blank) {
+      inIndentedCode = false;
+      const item = LIST_ITEM_RE.exec(line);
+      if (item) codeIndent = columnWidth(item[0]) + 4;
+      else if (width < codeIndent - 4) codeIndent = 4;
+    }
+    prose.push(line);
+    prevBlank = blank;
   }
   flush();
   return out.join("\n");
