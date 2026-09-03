@@ -74,7 +74,8 @@ pub async fn start(http: &Client, base_url: &str) -> Result<(), String> {
             Ok(Some(status)) => {
                 return Err(match status.code() {
                     Some(code) => format!(
-                        "Ollama exited immediately (code {code}). Something else may already be                          listening on that port — try `ollama serve` in a terminal to see why."
+                        "Ollama exited immediately (code {code}). Something else may already be \
+                         listening on that port — try `ollama serve` in a terminal to see why."
                     ),
                     None => "Ollama was terminated immediately after starting.".to_string(),
                 });

@@ -89,7 +89,7 @@ const BARE_FILENAMES: Record<string, string> = {
   makefile: "Makefile",
 };
 
-export function extensionForLanguage(lang: string | undefined | null): string {
+function extensionForLanguage(lang: string | undefined | null): string {
   if (!lang) return "txt";
   return EXT_MAP[lang.toLowerCase()] ?? "txt";
 }

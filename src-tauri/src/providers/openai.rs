@@ -9,10 +9,11 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
 use tokio::select;
 
-use super::{ChatRequest, ModelInfo};
+use super::{resolve_qualified, ChatRequest, ModelInfo};
 use crate::db::Database;
 use crate::mcp::McpToolDef;
 use crate::secrets;
+use crate::sse::find_frame_end;
 use crate::stream::{event_channel, StreamEvent, StreamRegistry};
 
 /// Per-frame ceiling on the SSE buffer between blank-line delimiters. Mirrors
@@ -668,7 +669,7 @@ async fn run_one_turn(
                         let mut pending_think = String::new();
                         let mut finished = false;
                         while let Some((rel_pos, sep_len)) =
-                            find_frame_end_with_len(&buf[scan_offset..])
+                            find_frame_end(&buf[scan_offset..])
                         {
                             let pos = scan_offset + rel_pos;
                             let frame: Vec<u8> = buf.drain(..pos + sep_len).collect();
@@ -685,7 +686,19 @@ async fn run_one_turn(
                                     finished = true;
                                     break;
                                 }
-                                if let Ok(parsed) = serde_json::from_str::<SseChunk>(data) {
+                                let parsed = serde_json::from_str::<SseChunk>(data);
+                                if let Err(e) = &parsed {
+                                    // Don't drop malformed frames silently.
+                                    // The Ollama pump logs its parse errors;
+                                    // without the same here, a compat server
+                                    // emitting a bad chunk was indistinguishable
+                                    // from a model that just stopped talking.
+                                    tracing::warn!(
+                                        "OpenAI SSE: skipping unparseable frame ({e}): {}",
+                                        data.chars().take(200).collect::<String>()
+                                    );
+                                }
+                                if let Ok(parsed) = parsed {
                                     // OpenAI (and most compat servers)
                                     // emit a final choices-empty frame
                                     // carrying `usage`. When we see it,
@@ -939,14 +952,6 @@ fn parse_args(s: &str) -> Value {
     }
 }
 
-fn resolve_qualified<'a>(
-    tools: &'a [McpToolDef],
-    qualified: &str,
-) -> Option<(&'a McpToolDef, String)> {
-    let def = tools.iter().find(|t| t.qualified_name == qualified)?;
-    Some((def, def.name.clone()))
-}
-
 /// Decide whether it's safe to attach a bearer token to a request going
 /// to `base_url`. Safe iff:
 ///   - the URL is https://, OR
@@ -1022,27 +1027,6 @@ fn sniff_image_mime(b64: &str) -> &'static str {
     } else {
         "image/png"
     }
-}
-
-fn find_frame_end_with_len(buf: &[u8]) -> Option<(usize, usize)> {
-    let lf = buf.windows(2).position(|w| w == b"\n\n");
-    let crlf = buf.windows(4).position(|w| w == b"\r\n\r\n");
-    match (lf, crlf) {
-        (Some(a), Some(b)) => {
-            if a <= b {
-                Some((a, 2))
-            } else {
-                Some((b, 4))
-            }
-        }
-        (Some(a), None) => Some((a, 2)),
-        (None, Some(b)) => Some((b, 4)),
-        (None, None) => None,
-    }
-}
-
-fn find_frame_end(buf: &[u8]) -> Option<usize> {
-    find_frame_end_with_len(buf).map(|(pos, _)| pos)
 }
 
 #[cfg(test)]
@@ -1152,37 +1136,6 @@ mod tests {
         // mid-char.
         let evil = format!("UklGR{}", "é".repeat(12));
         assert_eq!(sniff_image_mime(&evil), "image/png");
-    }
-
-    // --- find_frame_end_with_len --------------------------------------------
-
-    #[test]
-    fn frame_end_handles_lf_frames() {
-        assert_eq!(find_frame_end_with_len(b"data: x\n\nrest"), Some((7, 2)));
-    }
-
-    #[test]
-    fn frame_end_reports_4_byte_length_for_crlf_frames() {
-        // \r\n\r\n contains no adjacent \n\n pair, so only the CRLF detector
-        // fires — and the caller must learn the 4-byte terminator length or
-        // it would leave \r\n debris at the head of the next frame.
-        assert_eq!(find_frame_end_with_len(b"data: x\r\n\r\nrest"), Some((7, 4)));
-    }
-
-    #[test]
-    fn frame_end_picks_earliest_terminator_when_both_present() {
-        // LF frame first, CRLF junk later: the LF frame wins.
-        assert_eq!(find_frame_end_with_len(b"a\n\nb\r\n\r\n"), Some((1, 2)));
-        // CRLF frame first, LF frame later: the CRLF frame wins.
-        assert_eq!(find_frame_end_with_len(b"a\r\n\r\nb\n\n"), Some((1, 4)));
-    }
-
-    #[test]
-    fn frame_end_none_when_no_terminator_yet() {
-        assert_eq!(find_frame_end_with_len(b"data: partial"), None);
-        assert_eq!(find_frame_end_with_len(b""), None);
-        // A lone \r\n (mid-frame line break) is not a frame end.
-        assert_eq!(find_frame_end_with_len(b"data: x\r\ny"), None);
     }
 
     // --- parse_args -----------------------------------------------------------

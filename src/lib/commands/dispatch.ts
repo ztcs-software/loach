@@ -239,7 +239,10 @@ async function runPin(): Promise<CommandResult> {
 async function runArchive(): Promise<CommandResult> {
   const session = requireSession();
   await useChatStore.getState().archive(session.id, true);
-  return ok("Archived chat", session.title);
+  // No toast of our own: `chatStore.archive` now pushes the richer
+  // "Moved to archive — Undo" chip for every archive path, and a second
+  // confirmation here would stack a duplicate.
+  return { kind: "noop" };
 }
 
 async function runDelete(deps: CommandDeps): Promise<CommandResult> {

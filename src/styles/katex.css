@@ -1,0 +1,39 @@
+/* =========================================================================
+   KaTeX — Loach overrides
+   -------------------------------------------------------------------------
+   Loaded from `src/lib/mathChunk.ts` immediately after `katex.min.css` so
+   these rules win the cascade on equal specificity. Both files ship inside
+   the lazy math chunk, not the baseline stylesheet.
+   ========================================================================= */
+
+/* A display equation is often wider than a chat bubble — `\begin{bmatrix}`
+   with four columns already is. KaTeX sets `white-space: nowrap` on the inner
+   `.katex` and no overflow on the wrapper, so without this a wide formula
+   pushes the whole transcript sideways. Scroll it inside its own block
+   instead. The padding keeps descenders off the scrollbar. */
+.katex-display {
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0.25rem 0;
+}
+
+/* KaTeX emits every formula twice: a visually-hidden MathML tree for screen
+   readers and the `.katex-html` layer that's actually drawn. Both are real
+   text, so dragging a selection across a reply and hitting Ctrl+C pastes each
+   formula twice over. Drop the MathML layer from selection — it stays in the
+   accessibility tree, which `user-select` doesn't touch. (The kebab's "Copy
+   message" and right-click Copy are unaffected either way; they write
+   `message.content`, the raw markdown.) */
+.katex-mathml {
+  user-select: none;
+}
+
+/* KaTeX renders unparseable input as its own source text. `errorColor:
+   currentColor` (see `KATEX_OPTIONS`) already keeps that from flashing red on
+   every half-typed formula mid-stream; this just stops the browser inheriting
+   any surrounding emphasis so it reads as the plain source it is. The parse
+   error stays available on hover via the element's `title`. */
+.katex-error {
+  font-style: normal;
+  cursor: help;
+}

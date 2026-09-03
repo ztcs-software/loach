@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { TitleBar } from "@/components/TitleBar";
 import { Sidebar } from "@/components/Sidebar";
 import { ChatHeader } from "@/components/ChatHeader";
@@ -7,7 +7,6 @@ import { ChatInput } from "@/components/ChatInput";
 import { ParameterPanel } from "@/components/ParameterPanel";
 import { SettingsDialog } from "@/components/SettingsDialog";
 import { HelpDialog } from "@/components/HelpDialog";
-import { TooltipProvider } from "@/components/ui/tooltip";
 import { SwitchVariantProvider } from "@/components/ui/switch";
 import { SpaceForm } from "@/components/SpaceForm";
 // Lazily loaded surfaces — each renders only when the user navigates to it
@@ -41,6 +40,24 @@ const Onboarding = lazy(() =>
 const CodeCanvas = lazy(() =>
   import("@/components/CodeCanvas").then((m) => ({ default: m.CodeCanvas })),
 );
+
+// Pre-resolve those chunks once the app is idle. React 19 commits a Suspense
+// fallback more eagerly than 18 did and then throttles the retry commit by
+// ~300 ms, so a chunk that resolves from local disk in single-digit ms can
+// still leave the panel blank for a third of a second on first navigation —
+// and every boundary below uses `fallback={null}`, making that blank total.
+// Resolving ahead of time means `lazy` is already settled when the user
+// navigates, so no boundary suspends at all. Deliberately after first paint,
+// so the cold-start win these were split out for is untouched.
+function warmLazyChunks() {
+  void import("@/components/SpaceView");
+  void import("@/components/SpacesLibrary");
+  void import("@/components/SnippetsLibrary");
+  void import("@/components/ModelsView");
+  void import("@/components/ModelsLibrary");
+  void import("@/components/Onboarding");
+  void import("@/components/CodeCanvas");
+}
 import { SearchBar } from "@/components/SearchBar";
 import { UpdateAvailableDialog } from "@/components/UpdateAvailableDialog";
 import { PrivateChat } from "@/components/PrivateChat";
@@ -60,6 +77,7 @@ import { useSnippetVarStore } from "@/stores/snippetVarStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useSecurityStore, lockUntilHydrated } from "@/stores/securityStore";
 import { useUIStore } from "@/stores/uiStore";
+import { useAutoLock } from "@/lib/autoLock";
 import { useCanvasStore } from "@/stores/canvasStore";
 import { cn } from "@/lib/utils";
 import { DEFAULT_PARAMS } from "@/types";
@@ -84,6 +102,7 @@ export default function App() {
   const viewingModel = useModelsStore((s) => s.viewingModel);
   const sidebarTab = useUIStore((s) => s.sidebarTab);
   const canvasOpen = useCanvasStore((s) => s.isOpen);
+  const paramsOpen = useUIStore((s) => s.paramsOpen);
   const session = useChatStore((s) =>
     s.activeSessionId ? s.sessions.find((x) => x.id === s.activeSessionId) : undefined,
   );
@@ -118,6 +137,22 @@ export default function App() {
     lockUntilHydrated();
     void hydrateSecurity();
   }, [hydrateSecurity]);
+
+  // Re-lock triggers (idle timeout / minimize). Self-gating: does nothing
+  // until a lock is configured AND the user has opted into a trigger, so
+  // it costs nothing for the installs that never set a lock up.
+  useAutoLock();
+
+  // See `warmLazyChunks`. `requestIdleCallback` is missing on the oldest
+  // webviews we support (Safari gained it in 17.4), hence the timeout path.
+  useEffect(() => {
+    if (typeof window.requestIdleCallback === "function") {
+      const id = window.requestIdleCallback(warmLazyChunks, { timeout: 3000 });
+      return () => window.cancelIdleCallback(id);
+    }
+    const t = window.setTimeout(warmLazyChunks, 1500);
+    return () => window.clearTimeout(t);
+  }, []);
 
   // Phase 2 — once we're past the lock screen, hydrate the rest of the app.
   // Doing this after unlock keeps the lock surface snappy and avoids
@@ -227,6 +262,28 @@ export default function App() {
     hydrateModels,
   ]);
 
+  // Narrow-window squeeze relief. At the 900 px minimum, the expanded
+  // sidebar (256 px) plus a right panel (~260 px) leave the transcript a
+  // ~310 px ribbon — so when a right panel OPENS below the breakpoint,
+  // borrow the sidebar's width by collapsing it to the icon rail, and give
+  // it back when the right slot empties again. One-shot on the open/close
+  // transition (not a continuous override) so the title-bar toggle always
+  // wins: a manual toggle clears `sidebarAutoCollapsed`, which also cancels
+  // the pending restore.
+  const rightPanelOpen = canvasOpen || paramsOpen;
+  const prevRightPanelOpen = useRef(rightPanelOpen);
+  useEffect(() => {
+    const was = prevRightPanelOpen.current;
+    prevRightPanelOpen.current = rightPanelOpen;
+    if (rightPanelOpen === was) return;
+    const ui = useUIStore.getState();
+    if (rightPanelOpen && window.innerWidth < 1080 && ui.sidebarOpen) {
+      useUIStore.setState({ sidebarOpen: false, sidebarAutoCollapsed: true });
+    } else if (!rightPanelOpen && ui.sidebarAutoCollapsed) {
+      useUIStore.setState({ sidebarOpen: true, sidebarAutoCollapsed: false });
+    }
+  }, [rightPanelOpen]);
+
   // While waiting for the security probe to land, render only the
   // background — no titlebar, no sidebar, no chat. Otherwise users would
   // see a brief flash of the unlocked UI before the lock screen mounts.
@@ -241,7 +298,7 @@ export default function App() {
     !showLock && !probing && settingsHydrated && !onboardingCompleted;
 
   return (
-    <TooltipProvider delayDuration={250}>
+    <>
       {/* SwitchVariantProvider tells the Switch primitive which visual
           style to use by default ("glassy" on the Aurora gradient,
           "flat" on the Solid background). Keeps the primitive
@@ -398,7 +455,7 @@ export default function App() {
           above every surface (chat / library / lock screen-adjacent) and
           isn't tied to whichever main view is currently rendered. The
           component renders nothing until the user opens it via Ctrl/Cmd+K
-          or the `loach:focus-search` event the sidebar fires. */}
+          or the `loach:focus-search` event the title bar fires. */}
       {/* Suppress the search palette while onboarding owns the screen — the
           wizard is modal and Cmd+K should stay inert until the user finishes
           or dismisses. */}
@@ -431,7 +488,7 @@ export default function App() {
       <ToastHost />
       </ConfirmDialogHost>
       </SwitchVariantProvider>
-    </TooltipProvider>
+    </>
   );
 }
 

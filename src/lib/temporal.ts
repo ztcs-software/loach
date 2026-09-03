@@ -14,7 +14,7 @@
  * model sees the same wall time the user does.
  */
 
-export interface TemporalVars {
+interface TemporalVars {
   CURRENT_DATE: string; // YYYY-MM-DD
   CURRENT_TIME: string; // HH:MM (24h)
   CURRENT_WEEKDAY: string; // Monday, Tuesday, ...
@@ -78,7 +78,7 @@ export function temporalVars(now: Date = new Date()): TemporalVars {
  * concrete values. Whitespace inside the braces is tolerated so copy-pastes
  * from other tools don't break silently.
  */
-export function substituteTemporalVars(prompt: string, vars: TemporalVars): string {
+function substituteTemporalVars(prompt: string, vars: TemporalVars): string {
   return prompt.replace(
     /\{\{\s*(CURRENT_DATE|CURRENT_TIME|CURRENT_WEEKDAY|CURRENT_DATETIME|CURRENT_TIMEZONE)\s*\}\}/g,
     (_match, key: keyof TemporalVars) => vars[key],
@@ -88,7 +88,7 @@ export function substituteTemporalVars(prompt: string, vars: TemporalVars): stri
 /** Does the prompt already reference any temporal template variable? If so,
  *  the user has taken manual control and we skip the auto preamble so we
  *  don't stomp on their phrasing. */
-export function promptUsesTemporalVars(prompt: string): boolean {
+function promptUsesTemporalVars(prompt: string): boolean {
   return /\{\{\s*(CURRENT_DATE|CURRENT_TIME|CURRENT_WEEKDAY|CURRENT_DATETIME|CURRENT_TIMEZONE)\s*\}\}/.test(
     prompt,
   );
@@ -107,7 +107,7 @@ export function promptUsesTemporalVars(prompt: string): boolean {
  * time can place `{{CURRENT_TIME}}` explicitly (accepting that trade-off) or
  * enable the datetime built-in tool, which the model can call on demand.
  */
-export function temporalPreamble(vars: TemporalVars): string {
+function temporalPreamble(vars: TemporalVars): string {
   return `Current date: ${vars.CURRENT_DATE} (${vars.CURRENT_WEEKDAY}, ${vars.CURRENT_TIMEZONE}).`;
 }
 

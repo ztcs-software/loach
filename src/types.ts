@@ -207,6 +207,23 @@ export interface Message {
   created_at: number;
 }
 
+/** One transcript hit from the Cmd/Ctrl-K palette's message search
+ *  (`search_messages`). A trimmed projection of a `Message` rather than the
+ *  row itself: the palette only needs a chat title, a one-line excerpt and a
+ *  role tag, and the jump handoff re-reads the real message from the
+ *  transcript once the chat is open. */
+export interface MessageHit {
+  message_id: string;
+  session_id: string;
+  /** Title of the chat the message lives in, resolved backend-side so the
+   *  palette doesn't have to look it up per row. */
+  session_title: string;
+  /** A window of the message text centred on the match, whitespace collapsed
+   *  onto one line, `…` marking where it was cut. */
+  snippet: string;
+  created_at: number;
+}
+
 /** One MCP tool invocation surfaced in the transcript. The renderer pairs
  *  call + result and shows a single collapsible block per id. While the
  *  tool is still running, `result` is null and the UI shows a spinner. */
@@ -350,6 +367,14 @@ export type FontSize = "small" | "normal" | "large";
  *  before this setting existed. */
 export type OllamaKeepAlive = "5m" | "30m" | "1h" | "-1";
 
+/** Idle window after which a configured app lock re-engages. `"off"` (the
+ *  default) keeps the pre-1.4 behaviour where unlocking once lasts for the
+ *  whole process. Stored as a string rather than a number of minutes because
+ *  the settings KV table is string-keyed and `settingsStore.hydrate` only
+ *  coerces booleans back out of it — a numeric field would silently arrive
+ *  as a string. */
+export type LockIdleTimeout = "off" | "1m" | "5m" | "15m" | "30m";
+
 export interface Settings {
   theme: ThemeChoice;
   background_style: BackgroundStyle;
@@ -465,6 +490,23 @@ export interface Settings {
    *  offline-first unless the user opts in. Ignored on installs where the
    *  updater isn't supported (dev builds, plain binaries). */
   auto_check_updates: boolean;
+  /** How long the app may sit idle before a configured app lock re-engages.
+   *  Ignored when no lock is set up — there'd be nothing to unlock with.
+   *  Activity is any pointer / key / wheel / touch event on the window. */
+  lock_idle_timeout: LockIdleTimeout;
+  /** When true, a configured app lock re-engages as soon as the window is
+   *  minimized or otherwise hidden. Keyed on `document.visibilityState`
+   *  rather than window focus on purpose: a native save / open dialog steals
+   *  focus but leaves the document visible, so a focus-based trigger would
+   *  relock the app every time the user exported a chat or attached a file. */
+  lock_on_hide: boolean;
+  /** Slash commands the user ran most recently, newest first, as a JSON
+   *  string array (`["model","new"]`). Drives the "Recent" section at the
+   *  top of the composer's `/` palette. Never shown in the Settings dialog
+   *  — like `default_provider` / `default_model` it's last-used state that
+   *  happens to live in the same KV table. Encode/decode via
+   *  `src/lib/commands/recency.ts`; `""` means no history yet. */
+  recent_commands: string;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -500,7 +542,28 @@ export const DEFAULT_SETTINGS: Settings = {
   default_tone_id: "default",
   onboarding_completed: false,
   auto_check_updates: false,
+  lock_idle_timeout: "off",
+  lock_on_hide: false,
+  recent_commands: "",
 };
+
+/** Coarse host capacity from the Rust `system_info` command. Read by
+ *  onboarding so the Ollama catalog can size its recommendation against the
+ *  machine. Kept in sync with `src-tauri/src/commands.rs::SystemInfo`. */
+export interface SystemInfo {
+  total_ram_bytes: number;
+  available_ram_bytes: number;
+  /** Null when no mounted disk contains the app data dir — treat as
+   *  "unknown", never as "no space". */
+  free_disk_bytes: number | null;
+  /** Dedicated VRAM of the most capable discrete GPU, or null when there is
+   *  none we can read. Null on macOS by design: unified memory means
+   *  `total_ram_bytes` already describes the GPU's budget. */
+  vram_bytes: number | null;
+  /** Adapter name for display, e.g. "NVIDIA GeForce RTX 4060". Null whenever
+   *  `vram_bytes` is. */
+  gpu_name: string | null;
+}
 
 /** Shape returned by the Rust `fetch_url` command. Kept in sync with
  *  `src-tauri/src/tools/fetch_url.rs::FetchedPage`. */
@@ -664,4 +727,30 @@ export interface ImportStats {
   snippet_fill_values: number;
   mcp_servers: number;
   settings: number;
+}
+
+/** Storage usage for the Settings → Data tile, from `storage_stats`.
+ *
+ *  Two size notions, deliberately not mixed:
+ *
+ *  - `db_bytes` / `wal_bytes` are filesystem truth.
+ *  - The `*_bytes` buckets are logical text lengths per area. They're
+ *    comparable to each other but always total less than `db_bytes`, since
+ *    they exclude page overhead and indexes. */
+export interface StorageStats {
+  db_path: string;
+  db_bytes: number;
+  wal_bytes: number;
+
+  sessions: number;
+  messages: number;
+  spaces: number;
+  space_files: number;
+  snippets: number;
+  mcp_servers: number;
+
+  message_bytes: number;
+  attachment_bytes: number;
+  space_bytes: number;
+  other_bytes: number;
 }

@@ -253,6 +253,16 @@ pub(crate) async fn resolve_safe_addrs(url: &Url) -> Result<Vec<SocketAddr>, Str
         .ok_or_else(|| "URL has no host".to_string())?;
     let port = url.port_or_known_default().unwrap_or(80);
 
+    // `host_str` keeps the brackets on an IPv6 literal — strip them before
+    // parsing, exactly as `resolve_lan_addrs` and `refuse_link_local_host` do.
+    // Without this every public IPv6-literal URL fell through to `lookup_host`,
+    // which can't resolve a bracketed literal either, and died with a
+    // misleading "DNS lookup failed".
+    let host = host
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(host);
+
     // Literal IP: skip DNS, just validate the address.
     if let Ok(ip) = host.parse::<IpAddr>() {
         if !is_public_ip(&ip) {
@@ -606,14 +616,6 @@ fn looks_like_html(body: &str) -> bool {
 /// Good enough for extracting prose. For JS-heavy SPAs the result will be
 /// near-empty; that's expected and correct for a zero-dep fetcher.
 fn html_to_text(html: &str) -> (Option<String>, String) {
-    let title = extract_between_ci(html, "<title", "</title>")
-        .map(|raw| {
-            // Skip past the opening tag's `>`
-            let start = raw.find('>').map(|i| i + 1).unwrap_or(0);
-            decode_entities(&raw[start..]).trim().to_string()
-        })
-        .filter(|s| !s.is_empty());
-
     // Compute the ASCII-lowercased view of the body exactly ONCE and pass
     // it through the rest of the pipeline. The previous version called
     // `strip_block_ci` + `replace_ci` 18 times in sequence, each of
@@ -621,8 +623,20 @@ fn html_to_text(html: &str) -> (Option<String>, String) {
     // body that's ~90 MB of throwaway allocation per fetch. `to_ascii_-
     // lowercase` preserves byte length so we can safely index into either
     // view interchangeably.
+    //
+    // Hoisted above the title extraction so that shares it too: the title
+    // scan used to build a second full-body copy of its own, right under a
+    // comment promising the lowercasing happened once.
     let lower = html.to_ascii_lowercase();
     debug_assert_eq!(lower.len(), html.len());
+
+    let title = extract_between_ci(html, &lower, "<title", "</title>")
+        .map(|raw| {
+            // Skip past the opening tag's `>`
+            let start = raw.find('>').map(|i| i + 1).unwrap_or(0);
+            decode_entities(&raw[start..]).trim().to_string()
+        })
+        .filter(|s| !s.is_empty());
 
     let stripped = strip_blocks_with_lower(
         html,
@@ -784,8 +798,11 @@ fn replace_many_ci(hay: &str, needles: &[&str], repl: &str) -> String {
     out
 }
 
-fn extract_between_ci(hay: &str, open: &str, close: &str) -> Option<String> {
-    let lower = hay.to_ascii_lowercase();
+/// `lower` must be `hay.to_ascii_lowercase()` — passed in rather than built
+/// here so the caller's single copy is reused. ASCII-lowercasing preserves
+/// byte length, so offsets found in `lower` index `hay` directly.
+fn extract_between_ci(hay: &str, lower: &str, open: &str, close: &str) -> Option<String> {
+    debug_assert_eq!(lower.len(), hay.len());
     let open_l = open.to_ascii_lowercase();
     let close_l = close.to_ascii_lowercase();
     let a = lower.find(&open_l)?;
@@ -1124,6 +1141,25 @@ mod tests {
             matches!(err, HostScreenError::Blocked(_)),
             "link-local must classify as Blocked, got {err:?}"
         );
+    }
+
+    /// `host_str()` keeps the brackets on an IPv6 literal, so without a strip
+    /// every public IPv6 URL fell through to DNS — which can't resolve
+    /// `[2606:…]` either — and failed with a misleading "DNS lookup failed".
+    #[tokio::test]
+    async fn resolve_safe_addrs_handles_ipv6_literals() {
+        let url = Url::parse("http://[2606:4700:4700::1111]:80/").unwrap();
+        let addrs = resolve_safe_addrs(&url)
+            .await
+            .expect("a public IPv6 literal must be fetchable");
+        assert_eq!(addrs, vec!["[2606:4700:4700::1111]:80".parse().unwrap()]);
+
+        // The screen still applies to IPv6 — loopback is refused, and the
+        // bracket strip must not turn that into a DNS error.
+        let err = resolve_safe_addrs(&Url::parse("http://[::1]/").unwrap())
+            .await
+            .expect_err("IPv6 loopback must be refused");
+        assert!(err.contains("private/loopback"), "{err}");
     }
 
     /// A host DNS can't answer for is `Unresolvable`, NOT `Blocked`: nothing

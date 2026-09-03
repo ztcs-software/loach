@@ -6,6 +6,7 @@ import {
   ONBOARDING_STEPS,
   type OnboardingStep,
 } from "@/stores/onboardingStore";
+import { PullStrip } from "./PullStrip";
 
 /**
  * Common chrome for every onboarding step. Holds the close X (top-right),
@@ -39,6 +40,9 @@ export interface StepShellProps {
   primaryLabel?: string | null;
   primaryIcon?: "next" | "check";
   primaryDisabled?: boolean;
+  /** One-liner shown beside the primary button while it is disabled, so a
+   *  dead-looking Continue always says what would bring it to life. */
+  primaryHint?: string;
   onPrimary?: () => void;
   /** Show a Skip button to the left of Next. */
   skippable?: boolean;
@@ -59,6 +63,7 @@ export function StepShell({
   primaryLabel = "Continue",
   primaryIcon = "next",
   primaryDisabled,
+  primaryHint,
   onPrimary,
   skippable,
   onSkip,
@@ -133,6 +138,11 @@ export function StepShell({
             )}
           </div>
           <div className="flex items-center gap-2">
+            {primaryDisabled && primaryHint && (
+              <p className="text-right text-[11px] leading-snug text-foreground/45">
+                {primaryHint}
+              </p>
+            )}
             {skippable && (
               <Button
                 variant="ghost"
@@ -143,21 +153,32 @@ export function StepShell({
                 Skip
               </Button>
             )}
-            <Button
-              onClick={onPrimary}
-              disabled={primaryDisabled}
-              className="gap-1.5 px-5"
-            >
-              {primaryLabel}
-              {primaryIcon === "check" ? (
-                <Check className="h-4 w-4" />
-              ) : (
-                <ArrowRight className="h-4 w-4" />
-              )}
-            </Button>
+            {/* Guarded on the label too, not just the bar. The final step
+                asks for the bar (`canGoBack`) while passing
+                `primaryLabel={null}`, which rendered an enabled button with
+                no text, no accessible name, and `onClick` undefined — a
+                live-looking arrow that did nothing. */}
+            {primaryLabel !== null && (
+              <Button
+                onClick={onPrimary}
+                disabled={primaryDisabled}
+                className="gap-1.5 px-5"
+              >
+                {primaryLabel}
+                {primaryIcon === "check" ? (
+                  <Check className="h-4 w-4" />
+                ) : (
+                  <ArrowRight className="h-4 w-4" />
+                )}
+              </Button>
+            )}
           </div>
         </div>
       )}
+
+      {/* Live model download, if any. Sits below the action bar so it reads
+          as ambient status rather than something blocking the step. */}
+      <PullStrip />
 
       {/* Progress dots, fixed at the very bottom. Lives outside the
           action bar so welcome/final still get a progress hint. */}
@@ -169,7 +190,15 @@ export function StepShell({
 function ProgressDots({ active }: { active: OnboardingStep }) {
   const activeIdx = ONBOARDING_STEPS.indexOf(active);
   return (
-    <div className="flex items-center justify-center gap-1.5 pb-4 pt-1">
+    // The dots themselves stay `aria-hidden` — they're a decorative
+    // rendering of the position. The position itself is not decorative,
+    // so the row carries it as text instead; without this the wizard gave
+    // assistive tech no way to tell how far along it was.
+    <div
+      className="flex items-center justify-center gap-1.5 pb-4 pt-1"
+      role="group"
+      aria-label={`Step ${activeIdx + 1} of ${ONBOARDING_STEPS.length}`}
+    >
       {ONBOARDING_STEPS.map((step, i) => {
         const done = i < activeIdx;
         const current = i === activeIdx;

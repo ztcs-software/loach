@@ -49,11 +49,11 @@ pub fn input_schema() -> Value {
 
 pub fn dispatch(args: &Value) -> McpCallResult {
     let version = args.get("version").and_then(|v| v.as_str()).unwrap_or("v4");
-    let count = args.get("count").and_then(|v| v.as_u64()).unwrap_or(1);
-    if count == 0 {
+    let count = crate::tools::lenient_i64(args, "count").unwrap_or(1);
+    if count < 1 {
         return err("`count` must be at least 1");
     }
-    if count > MAX_COUNT as u64 {
+    if count > MAX_COUNT as i64 {
         return err(format!("`count` is {count}; max is {MAX_COUNT}"));
     }
     let gen_one: fn() -> Uuid = match version {
@@ -81,6 +81,15 @@ fn err(msg: impl Into<String>) -> McpCallResult {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn count_accepts_float_shaped_integers() {
+        // `count: 5.0` used to fail `as_u64`, fall back to the default, and
+        // silently emit a single UUID.
+        let r = dispatch(&json!({"count": 5.0}));
+        assert!(!r.is_error, "{}", r.content_text);
+        assert_eq!(r.content_text.lines().count(), 5);
+    }
 
     #[test]
     fn default_generates_one_v4() {

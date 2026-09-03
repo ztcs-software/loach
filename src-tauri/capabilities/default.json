@@ -3,20 +3,27 @@
   "identifier": "default",
   "description": "Default capabilities for the Loach main window",
   "windows": ["main"],
+  "comment": [
+    "Only the window methods the renderer actually calls are granted.",
+    "TitleBar's control union is minimize | toggleMaximize | close, plus",
+    "isMaximized() and the data-tauri-drag-region hit area.",
+    "",
+    "Deliberately NOT granted: maximize / unmaximize (we only ever toggle),",
+    "and hide / show (the tray drives those from Rust, which the ACL doesn't",
+    "gate). Granting them handed a compromised renderer window control it has",
+    "no legitimate use for.",
+    "",
+    "Not listed because core:default already covers them: is-maximized and",
+    "internal-toggle-maximize (core:window:default), app version",
+    "(core:app:default), and the event + path sets. process:default is",
+    "exit + restart."
+  ],
   "permissions": [
     "core:default",
     "core:window:allow-minimize",
-    "core:window:allow-maximize",
-    "core:window:allow-unmaximize",
     "core:window:allow-toggle-maximize",
     "core:window:allow-close",
-    "core:window:allow-hide",
-    "core:window:allow-show",
     "core:window:allow-start-dragging",
-    "core:window:allow-is-maximized",
-    "core:app:allow-version",
-    "core:event:default",
-    "core:path:default",
     {
       "identifier": "shell:allow-open",
       "allow": [
@@ -26,7 +33,6 @@
       ]
     },
     "updater:default",
-    "process:default",
-    "process:allow-restart"
+    "process:default"
   ]
 }

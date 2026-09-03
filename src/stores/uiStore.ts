@@ -22,6 +22,11 @@ export type SettingsTab =
 
 interface UIState {
   sidebarOpen: boolean;
+  /** True while the sidebar is collapsed because a right panel opened on a
+   *  narrow window (see App.tsx's squeeze effect), not because the user
+   *  asked. Lets the panel-close path give the sidebar back, while a manual
+   *  toggle takes ownership and cancels the pending restore. */
+  sidebarAutoCollapsed: boolean;
   paramsOpen: boolean;
   settingsOpen: boolean;
   /** Visibility of the slash-command help dialog. Toggled by `/help` and
@@ -33,6 +38,13 @@ interface UIState {
   settingsTab: SettingsTab;
   /** Which icon-rail tab is active on the sidebar. */
   sidebarTab: SidebarTab;
+  /** Session ids in most-recently-opened order, newest first. Feeds the
+   *  Ctrl/Cmd+K palette's zero-query suggestions, which otherwise fall back
+   *  to `updated_at DESC` — that surfaces recently *written to*, not
+   *  recently *read*, so a chat you keep opening to re-read never rises.
+   *  In-memory on purpose: on a cold start the `updated_at` fallback is
+   *  already the right answer, so there's nothing worth persisting. */
+  recentSessionIds: string[];
   composerDraft: string;
   /** Files that should land in the composer when it next mounts / the primer
    *  seq bumps. Kept separate from `composerDraft` so suggestion chips (which
@@ -66,6 +78,13 @@ interface UIState {
    *  Set by the `/export` slash command, which can't reach the dialog's
    *  local state directly. Mirrors `pendingOpenModelPicker`. */
   pendingOpenExport: boolean;
+  /** One-shot: a message the transcript should scroll to and flash as soon as
+   *  it's mounted. Set by the Cmd/Ctrl-K palette when the user picks a message
+   *  result, consumed by ChatCanvas. It can't be a plain call because the
+   *  chat is still being selected — its transcript may not even be loaded —
+   *  when the palette commits, so the target has to wait somewhere until the
+   *  row exists. */
+  pendingJumpMessageId: string | null;
   toggleSidebar: () => void;
   toggleParams: () => void;
   setSettingsOpen: (open: boolean) => void;
@@ -75,6 +94,8 @@ interface UIState {
    *  "Archive" in the sidebar rail. */
   openSettingsTab: (tab: SettingsTab) => void;
   setSidebarTab: (tab: SidebarTab) => void;
+  /** Record that a chat was opened. Called by `chatStore.selectSession`. */
+  noteSessionVisit: (sessionId: string) => void;
   setComposerDraft: (text: string) => void;
   insertComposerDraft: (text: string) => void;
   /** One-shot: seed both text and attachments into the composer. Used by
@@ -88,30 +109,50 @@ interface UIState {
   consumePendingOpenModelPicker: () => boolean;
   setPendingOpenExport: (v: boolean) => void;
   consumePendingOpenExport: () => boolean;
+  setPendingJumpMessage: (messageId: string | null) => void;
+  consumePendingJumpMessage: () => string | null;
 }
 
 export const useUIStore = create<UIState>((set, get) => ({
   sidebarOpen: true,
+  sidebarAutoCollapsed: false,
   paramsOpen: false,
   settingsOpen: false,
   helpOpen: false,
   settingsTab: "general",
   sidebarTab: "chats",
+  recentSessionIds: [],
   composerDraft: "",
   composerAttachments: [],
   composerInsertSeq: 0,
   personaIdBySession: {},
   pendingPersonaId: null,
+  pendingJumpMessageId: null,
   toneIdBySession: {},
   pendingOpenModelPicker: false,
   pendingOpenExport: false,
-  toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
+  toggleSidebar: () =>
+    set((s) => ({ sidebarOpen: !s.sidebarOpen, sidebarAutoCollapsed: false })),
   toggleParams: () => set((s) => ({ paramsOpen: !s.paramsOpen })),
   setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
   setHelpOpen: (helpOpen) => set({ helpOpen }),
   setSettingsTab: (settingsTab) => set({ settingsTab }),
   openSettingsTab: (settingsTab) => set({ settingsTab, settingsOpen: true }),
   setSidebarTab: (sidebarTab) => set({ sidebarTab }),
+  noteSessionVisit: (sessionId) =>
+    set((s) => {
+      // Re-opening the chat that's already at the head is the common case
+      // (selectSession fires on every open); bail without a new array so
+      // subscribers don't re-render for a no-op. Capped — this is a
+      // suggestion hint, not a history.
+      if (s.recentSessionIds[0] === sessionId) return s;
+      return {
+        recentSessionIds: [
+          sessionId,
+          ...s.recentSessionIds.filter((id) => id !== sessionId),
+        ].slice(0, 10),
+      };
+    }),
   setComposerDraft: (composerDraft) => set({ composerDraft }),
   insertComposerDraft: (text) =>
     set((s) => ({
@@ -150,5 +191,11 @@ export const useUIStore = create<UIState>((set, get) => ({
     const v = get().pendingOpenExport;
     if (v) set({ pendingOpenExport: false });
     return v;
+  },
+  setPendingJumpMessage: (pendingJumpMessageId) => set({ pendingJumpMessageId }),
+  consumePendingJumpMessage: (): string | null => {
+    const id = get().pendingJumpMessageId;
+    if (id) set({ pendingJumpMessageId: null });
+    return id;
   },
 }));

@@ -1,11 +1,13 @@
 mod commands;
 mod db;
+mod gpu;
 mod mcp;
 mod ollama_launch;
 mod preload;
 mod providers;
 mod secrets;
 mod security;
+mod sse;
 mod stream;
 mod tools;
 
@@ -278,6 +280,7 @@ pub fn run() {
             commands::export_session,
             commands::list_messages,
             commands::session_message_counts,
+            commands::search_messages,
             commands::append_message,
             commands::import_messages,
             commands::delete_import_group,
@@ -296,6 +299,7 @@ pub fn run() {
             commands::security_unlock,
             commands::security_get_hint,
             commands::security_clear,
+            commands::system_info,
             commands::ollama_list_models,
             commands::ollama_probe,
             commands::ollama_start,
@@ -311,7 +315,6 @@ pub fn run() {
             commands::ollama_create_model,
             commands::admin_cancel,
             commands::list_spaces,
-            commands::get_space,
             commands::create_space,
             commands::update_space,
             commands::delete_space,
@@ -338,6 +341,7 @@ pub fn run() {
             commands::mcp_save,
             commands::mcp_delete,
             commands::mcp_test,
+            commands::storage_stats,
             commands::export_data_json,
             commands::import_data_with_dialog,
             commands::save_text_to_file,

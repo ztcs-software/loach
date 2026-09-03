@@ -2,11 +2,10 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
-use uuid::Uuid;
 
 use crate::db::{
-    DatabaseSnapshot, Folder, ImportStats, McpServer, Message, Session, Snippet, SnippetFillValue,
-    SnippetVariable, Space, SpaceFile, SpaceMemory,
+    DatabaseSnapshot, Folder, ImportStats, McpServer, Message, MessageHit, Session, Snippet,
+    SnippetFillValue, SnippetVariable, Space, SpaceFile, SpaceMemory, StorageStats,
 };
 use crate::mcp::{self, McpTestResult};
 use crate::providers::{self, ChatRequest, ModelInfo};
@@ -333,6 +332,35 @@ pub async fn session_message_counts(
     state.db.session_message_counts().map_err(err)
 }
 
+/// Hard ceiling on `search_messages` results, whatever the caller asks for.
+/// The palette shows a handful; this only stops a bug (or a future caller)
+/// from turning the search box into a whole-database export.
+const MAX_MESSAGE_HITS: usize = 50;
+
+/// Substring search across live chat transcripts, backing the Cmd-K palette's
+/// message results. See `Database::search_messages` for what's in scope.
+///
+/// On the blocking pool for the same reason as `storage_stats`: the `LIKE`
+/// scan has no index to lean on and walks every message body, inlined
+/// attachments and all, then builds an excerpt per candidate. That is CPU-bound
+/// work fired once per keystroke, and the palette can't cancel a scan already
+/// in flight — left on a runtime worker, a few overlapping scans on a large
+/// database exhaust the read pool and the next `with_read` parks a worker for
+/// r2d2's 30-second timeout, stalling unrelated commands including the start of
+/// a chat stream.
+#[tauri::command]
+pub async fn search_messages(
+    state: State<'_, AppState>,
+    query: String,
+    limit: Option<usize>,
+) -> Result<Vec<MessageHit>, String> {
+    let limit = limit.unwrap_or(20).min(MAX_MESSAGE_HITS);
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || db.search_messages(&query, limit).map_err(err))
+        .await
+        .map_err(|e| format!("message search task panicked: {e}"))?
+}
+
 #[derive(Debug, Deserialize)]
 pub struct AppendMessageArgs {
     pub session_id: String,
@@ -544,6 +572,9 @@ const WRITABLE_SETTING_KEYS: &[&str] = &[
     "default_tone_id",
     "onboarding_completed",
     "auto_check_updates",
+    "lock_idle_timeout",
+    "lock_on_hide",
+    "recent_commands",
 ];
 
 /// Whether `key` is a setting the app is allowed to write. Built-in tool
@@ -696,6 +727,68 @@ pub async fn security_clear(args: Option<SecurityClearArgs>) -> Result<(), Strin
     .map_err(err)
 }
 
+// ---------- host hardware ----------
+
+/// Coarse machine capacity, read once by onboarding so the Ollama catalog can
+/// size its recommendation against the host instead of quoting raw gigabytes.
+#[derive(Debug, Serialize)]
+pub struct SystemInfo {
+    /// Physical RAM installed, in bytes.
+    pub total_ram_bytes: u64,
+    /// RAM not currently in use, in bytes. Advisory only — the OS will evict
+    /// cache under pressure, so a model larger than this may still run.
+    pub available_ram_bytes: u64,
+    /// Free space on the volume holding the app data directory, in bytes, or
+    /// `null` when no mounted disk contains that path (network shares, some
+    /// container mounts). Callers must treat null as "unknown", not "full".
+    pub free_disk_bytes: Option<u64>,
+    /// Dedicated VRAM of the most capable discrete GPU, in bytes, or `null`
+    /// when there isn't one we can read. This is the figure that actually
+    /// decides whether a model runs fast: Ollama offloads whatever doesn't fit
+    /// to the CPU. Null on macOS by design — unified memory means
+    /// `total_ram_bytes` already describes the GPU's budget.
+    pub vram_bytes: Option<u64>,
+    /// Adapter name for display, e.g. "NVIDIA GeForce RTX 4060". Null
+    /// whenever `vram_bytes` is.
+    pub gpu_name: Option<String>,
+}
+
+/// Probe installed RAM, free disk, and discrete-GPU VRAM. Cheap enough to call
+/// on demand, but onboarding only asks once per mount.
+#[tauri::command]
+pub async fn system_info(app: AppHandle) -> Result<SystemInfo, String> {
+    use tauri::Manager;
+
+    let data_dir = app.path().app_data_dir().map_err(err)?;
+
+    tokio::task::spawn_blocking(move || {
+        let mut sys = sysinfo::System::new();
+        sys.refresh_memory();
+
+        // Pick the mounted disk whose mount point is the longest prefix of the
+        // app data dir — on Unix every path is under `/`, so the deepest match
+        // is the volume actually holding it rather than the root filesystem.
+        let disks = sysinfo::Disks::new_with_refreshed_list();
+        let free_disk_bytes = disks
+            .iter()
+            .filter(|d| data_dir.starts_with(d.mount_point()))
+            .max_by_key(|d| d.mount_point().as_os_str().len())
+            .map(|d| d.available_space());
+
+        let gpu = crate::gpu::detect();
+
+        SystemInfo {
+            total_ram_bytes: sys.total_memory(),
+            available_ram_bytes: sys.available_memory(),
+            free_disk_bytes,
+            vram_bytes: gpu.as_ref().map(|g| g.vram_bytes),
+            gpu_name: gpu.map(|g| g.name),
+        }
+    })
+    .await
+    .map_err(|e| format!("system_info task panicked: {e}"))
+}
+
 // ---------- providers ----------
 
 #[tauri::command]
@@ -802,6 +895,20 @@ pub async fn ollama_copy_model(
         .map_err(err)
 }
 
+/// Require the caller to have named the event channel, rather than minting an
+/// id when they didn't.
+///
+/// Frames start emitting before the invoke returns, so an id invented here
+/// would be announced too late for the caller to `listen()` on — they'd
+/// silently lose the head of the stream. Every caller supplies one; this turns
+/// the never-hit fallback into a loud error instead of a partial stream.
+fn require_stream_id(id: String) -> Result<String, String> {
+    if id.trim().is_empty() {
+        return Err("stream_id is required — the caller must name the event channel".to_string());
+    }
+    Ok(id)
+}
+
 #[derive(Debug, Deserialize)]
 pub struct OllamaPullArgs {
     pub base_url: String,
@@ -817,11 +924,7 @@ pub async fn ollama_pull_model(
     state: State<'_, AppState>,
     args: OllamaPullArgs,
 ) -> Result<StreamHandle, String> {
-    let stream_id = if args.stream_id.is_empty() {
-        Uuid::new_v4().to_string()
-    } else {
-        args.stream_id
-    };
+    let stream_id = require_stream_id(args.stream_id)?;
     let http = state.http.clone();
     let registry = state.streams.clone();
     let sid = stream_id.clone();
@@ -863,11 +966,7 @@ pub async fn ollama_create_model(
     state: State<'_, AppState>,
     args: OllamaCreateArgs,
 ) -> Result<StreamHandle, String> {
-    let stream_id = if args.stream_id.is_empty() {
-        Uuid::new_v4().to_string()
-    } else {
-        args.stream_id
-    };
+    let stream_id = require_stream_id(args.stream_id)?;
     let http = state.http.clone();
     let registry = state.streams.clone();
     let sid = stream_id.clone();
@@ -915,11 +1014,6 @@ pub async fn openai_list_models(
 #[tauri::command]
 pub async fn list_spaces(state: State<'_, AppState>) -> Result<Vec<Space>, String> {
     state.db.list_spaces().map_err(err)
-}
-
-#[tauri::command]
-pub async fn get_space(state: State<'_, AppState>, id: String) -> Result<Option<Space>, String> {
-    state.db.get_space(&id).map_err(err)
 }
 
 #[derive(Debug, Deserialize)]
@@ -1603,10 +1697,7 @@ pub async fn mcp_delete(state: State<'_, AppState>, id: String) -> Result<(), St
 /// Probe the given MCP server config (handshake + list tools). Accepts the
 /// *input* rather than an id so the user can try a config before saving it.
 #[tauri::command]
-pub async fn mcp_test(
-    _state: State<'_, AppState>,
-    input: McpServerInput,
-) -> Result<McpTestResult, String> {
+pub async fn mcp_test(input: McpServerInput) -> Result<McpTestResult, String> {
     let addrs = validate_mcp_input(&input).await?;
     let draft = input.to_draft();
     // Build a one-shot DNS-pinned client for the test. Using the shared
@@ -1633,10 +1724,8 @@ pub async fn chat_stream(
     state: State<'_, AppState>,
     mut request: ChatRequest,
 ) -> Result<StreamHandle, String> {
-    if request.stream_id.is_empty() {
-        request.stream_id = Uuid::new_v4().to_string();
-    }
-    let stream_id = request.stream_id.clone();
+    let stream_id = require_stream_id(std::mem::take(&mut request.stream_id))?;
+    request.stream_id = stream_id.clone();
     let http = state.http.clone();
     let registry = state.streams.clone();
     let provider = request.provider.clone();
@@ -1817,85 +1906,38 @@ pub struct DialogFilter {
 /// fill the user's disk.
 const MAX_SAVE_BYTES: usize = 256 * 1024 * 1024; // 256 MB
 
-#[tauri::command]
-pub async fn save_text_to_file(
-    app: AppHandle,
-    content: String,
-    default_path: Option<String>,
-    filters: Option<Vec<DialogFilter>>,
-) -> Result<Option<String>, String> {
-    use tauri_plugin_dialog::DialogExt;
-
-    if content.len() > MAX_SAVE_BYTES {
-        return Err(format!(
-            "save_text_to_file refused: content is {} bytes (cap {} bytes)",
-            content.len(),
-            MAX_SAVE_BYTES
-        ));
-    }
-
-    let path_opt = tauri::async_runtime::spawn_blocking(move || {
-        let mut builder = app.dialog().file();
-        if let Some(name) = default_path.as_deref() {
-            builder = builder.set_file_name(name);
-        }
-        if let Some(filters) = filters.as_ref() {
-            for f in filters {
-                let exts: Vec<&str> = f.extensions.iter().map(|s| s.as_str()).collect();
-                builder = builder.add_filter(&f.name, &exts);
-            }
-        }
-        builder.blocking_save_file()
+/// Gate a destructive command on the app-lock credentials.
+///
+/// Runs on the blocking pool: argon2id at m=64 MiB / t=3 plus a keyring read
+/// is 100-250 ms of pinned CPU and a possible DBus round-trip. The `security_*`
+/// commands offload this for the stated reason that "a slow unlock attempt can
+/// stall every other in-flight command"; the destructive paths were the
+/// exception until this was hoisted out of all three of them.
+async fn check_destructive_auth(auth: Option<DestructiveAuthArgs>) -> Result<(), String> {
+    let auth = auth.unwrap_or_default();
+    tokio::task::spawn_blocking(move || {
+        security::require_unlocked(auth.pin.as_deref(), auth.password.as_deref())
     })
     .await
-    .map_err(|e| format!("save dialog task failed: {e}"))?;
-
-    let chosen = match path_opt {
-        Some(fp) => fp,
-        None => return Ok(None),
-    };
-    let path = chosen
-        .into_path()
-        .map_err(|e| format!("invalid path returned from dialog: {e}"))?;
-
-    // The actual write needs to be on the blocking pool too. The previous
-    // version only put the dialog in `spawn_blocking`, then called
-    // `std::fs::write` back on the async runtime — a multi-MB export
-    // would park the runtime worker on synchronous I/O.
-    let returned_path = path.clone();
-    tokio::task::spawn_blocking(move || std::fs::write(&path, content))
-        .await
-        .map_err(|e| format!("save task panicked: {e}"))?
-        .map_err(|e| format!("couldn't write {}: {e}", returned_path.display()))?;
-
-    Ok(Some(returned_path.to_string_lossy().to_string()))
+    .map_err(|e| format!("unlock check panicked: {e}"))?
+    .map_err(err)
 }
 
-/// Binary sibling of `save_text_to_file` — accepts base64-encoded bytes,
-/// decodes them in Rust, and writes the raw bytes to a user-chosen path.
-/// Powers "Save image" from the in-chat preview, where the image is already
-/// held in memory as base64 on an `Attachment`.
-#[tauri::command]
-pub async fn save_binary_to_file(
+/// Shared body of `save_text_to_file` / `save_binary_to_file`: put up the
+/// save dialog, then write `bytes` to whatever the user picked. Returns
+/// `Ok(None)` when they cancel.
+///
+/// Both the dialog and the write go on the blocking pool. An earlier version
+/// offloaded only the dialog and then called `std::fs::write` back on the
+/// async runtime, which parked a runtime worker on synchronous I/O for the
+/// length of a multi-MB export.
+async fn save_bytes_via_dialog(
     app: AppHandle,
-    base64_data: String,
+    bytes: Vec<u8>,
     default_path: Option<String>,
     filters: Option<Vec<DialogFilter>>,
 ) -> Result<Option<String>, String> {
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
     use tauri_plugin_dialog::DialogExt;
-
-    if base64_data.len() > MAX_SAVE_BYTES {
-        return Err(format!(
-            "save_binary_to_file refused: payload is {} bytes (cap {} bytes)",
-            base64_data.len(),
-            MAX_SAVE_BYTES
-        ));
-    }
-
-    let bytes = STANDARD
-        .decode(base64_data.as_bytes())
-        .map_err(|e| format!("invalid base64: {e}"))?;
 
     let path_opt = tauri::async_runtime::spawn_blocking(move || {
         let mut builder = app.dialog().file();
@@ -1928,6 +1970,65 @@ pub async fn save_binary_to_file(
         .map_err(|e| format!("couldn't write {}: {e}", returned_path.display()))?;
 
     Ok(Some(returned_path.to_string_lossy().to_string()))
+}
+
+#[tauri::command]
+pub async fn save_text_to_file(
+    app: AppHandle,
+    content: String,
+    default_path: Option<String>,
+    filters: Option<Vec<DialogFilter>>,
+) -> Result<Option<String>, String> {
+    if content.len() > MAX_SAVE_BYTES {
+        return Err(format!(
+            "save_text_to_file refused: content is {} bytes (cap {} bytes)",
+            content.len(),
+            MAX_SAVE_BYTES
+        ));
+    }
+    save_bytes_via_dialog(app, content.into_bytes(), default_path, filters).await
+}
+
+/// Binary sibling of `save_text_to_file` — accepts base64-encoded bytes,
+/// decodes them in Rust, and writes the raw bytes to a user-chosen path.
+/// Powers "Save image" from the in-chat preview, where the image is already
+/// held in memory as base64 on an `Attachment`.
+#[tauri::command]
+pub async fn save_binary_to_file(
+    app: AppHandle,
+    base64_data: String,
+    default_path: Option<String>,
+    filters: Option<Vec<DialogFilter>>,
+) -> Result<Option<String>, String> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+
+    if base64_data.len() > MAX_SAVE_BYTES {
+        return Err(format!(
+            "save_binary_to_file refused: payload is {} bytes (cap {} bytes)",
+            base64_data.len(),
+            MAX_SAVE_BYTES
+        ));
+    }
+
+    let bytes = STANDARD
+        .decode(base64_data.as_bytes())
+        .map_err(|e| format!("invalid base64: {e}"))?;
+
+    save_bytes_via_dialog(app, bytes, default_path, filters).await
+}
+
+/// Row counts and byte totals for the Settings -> Data storage tile.
+///
+/// On the blocking pool for the same reason as `export_data_json`: the
+/// `SUM(LENGTH(...))` scans walk every message and space file, including
+/// their inlined base64 bodies, so on an attachment-heavy database this is
+/// firmly CPU-bound and would otherwise stall a runtime worker.
+#[tauri::command]
+pub async fn storage_stats(state: State<'_, AppState>) -> Result<StorageStats, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || db.storage_stats().map_err(err))
+        .await
+        .map_err(|e| format!("storage stats task panicked: {e}"))?
 }
 
 /// Serialise every table to a JSON string. Pretty-printed so users can
@@ -1973,21 +2074,7 @@ pub async fn import_data_with_dialog(
 ) -> Result<Option<ImportStats>, String> {
     use tauri_plugin_dialog::DialogExt;
 
-    let auth = auth.unwrap_or_default();
-    // argon2id at m=64 MiB / t=3 plus a keyring read — 100-250 ms of pinned
-    // CPU and a possible DBus round-trip. The `security_*` commands offload
-    // this for the stated reason that "a slow unlock attempt can stall every
-    // other in-flight command"; the destructive paths were the exception.
-    {
-        let pin = auth.pin.clone();
-        let password = auth.password.clone();
-        tokio::task::spawn_blocking(move || {
-            security::require_unlocked(pin.as_deref(), password.as_deref())
-        })
-        .await
-        .map_err(|e| format!("unlock check panicked: {e}"))?
-        .map_err(err)?;
-    }
+    check_destructive_auth(auth).await?;
 
     let path_opt = tauri::async_runtime::spawn_blocking(move || {
         app.dialog()
@@ -2180,22 +2267,14 @@ pub async fn wipe_user_data(
     state: State<'_, AppState>,
     auth: Option<DestructiveAuthArgs>,
 ) -> Result<(), String> {
-    let auth = auth.unwrap_or_default();
-    // argon2id at m=64 MiB / t=3 plus a keyring read — 100-250 ms of pinned
-    // CPU and a possible DBus round-trip. The `security_*` commands offload
-    // this for the stated reason that "a slow unlock attempt can stall every
-    // other in-flight command"; the destructive paths were the exception.
-    {
-        let pin = auth.pin.clone();
-        let password = auth.password.clone();
-        tokio::task::spawn_blocking(move || {
-            security::require_unlocked(pin.as_deref(), password.as_deref())
-        })
-        .await
-        .map_err(|e| format!("unlock check panicked: {e}"))?
-        .map_err(err)?;
-    }
-    state.db.wipe_user_data().map_err(err)
+    check_destructive_auth(auth).await?;
+    state.db.wipe_user_data().map_err(err)?;
+    // The wipe deletes every `mcp_servers` row, so the cached tool catalogue
+    // is now stale. The webview reloads afterwards but `AppState` doesn't, so
+    // without this the next chat send would still advertise the just-erased
+    // servers' tools to the model for up to the cache TTL.
+    crate::mcp::invalidate_tools_cache(&state.mcp_tools_cache).await;
+    Ok(())
 }
 
 /// Factory reset: wipe_user_data + drop all settings + clear the stored
@@ -2212,22 +2291,11 @@ pub async fn factory_reset(
     state: State<'_, AppState>,
     auth: Option<DestructiveAuthArgs>,
 ) -> Result<(), String> {
-    let auth = auth.unwrap_or_default();
-    // argon2id at m=64 MiB / t=3 plus a keyring read — 100-250 ms of pinned
-    // CPU and a possible DBus round-trip. The `security_*` commands offload
-    // this for the stated reason that "a slow unlock attempt can stall every
-    // other in-flight command"; the destructive paths were the exception.
-    {
-        let pin = auth.pin.clone();
-        let password = auth.password.clone();
-        tokio::task::spawn_blocking(move || {
-            security::require_unlocked(pin.as_deref(), password.as_deref())
-        })
-        .await
-        .map_err(|e| format!("unlock check panicked: {e}"))?
-        .map_err(err)?;
-    }
+    check_destructive_auth(auth).await?;
     state.db.wipe_all().map_err(err)?;
+    // Same reason as in `wipe_user_data`: the MCP rows are gone, so the
+    // in-process tool catalogue has to go with them.
+    crate::mcp::invalidate_tools_cache(&state.mcp_tools_cache).await;
     // Best-effort: if the user never had a key we silently ignore the
     // NoEntry branch inside `clear_openai_key`. A hard failure here
     // (keyring daemon dead, etc.) shouldn't undo the DB wipe. Both are
@@ -2247,24 +2315,42 @@ pub async fn factory_reset(
 // ---------- open in external editor ----------
 //
 // The code canvas holds a snippet, not a file. "Open in VS Code" writes the
-// current snapshot to a temp file (the renderer supplies the language-derived
+// current snapshot to a scratch file (the renderer supplies the language-derived
 // filename; we own the directory and reduce the name to a bare basename so a
-// compromised renderer can't write outside the temp dir) and launches VS
-// Code's `code` CLI on it. Snapshot only — it does not stream as the block
-// keeps generating.
+// compromised renderer can't write outside it) and launches VS Code's `code`
+// CLI on it. Snapshot only — it does not stream as the block keeps generating.
 
 #[tauri::command]
-pub async fn open_in_vscode(code: String, filename: String) -> Result<(), String> {
+pub async fn open_in_vscode(
+    app: AppHandle,
+    code: String,
+    filename: String,
+) -> Result<(), String> {
+    use tauri::Manager;
+    // Deliberately the app's own cache dir rather than the shared temp root.
+    // `std::env::temp_dir()` is /tmp on Linux — world-writable, so another
+    // local user could pre-create `loach-canvas` and plant symlinks that
+    // redirect our write to a path of their choosing, with this user's
+    // privileges (CWE-379). The per-user cache dir has no such window.
+    let dir = app
+        .path()
+        .app_cache_dir()
+        .map_err(|e| format!("Couldn't resolve the app cache directory: {e}"))?
+        .join("canvas");
     // Everything below is blocking — `create_dir_all`, a file write, and on
     // Windows a spawn-and-wait `where code` PATH scan. Running it inline on
     // the main thread visibly hitched the UI for as long as a cold PATH scan
     // took.
-    tokio::task::spawn_blocking(move || open_in_vscode_blocking(code, filename))
+    tokio::task::spawn_blocking(move || open_in_vscode_blocking(dir, code, filename))
         .await
         .map_err(|e| format!("editor task panicked: {e}"))?
 }
 
-fn open_in_vscode_blocking(code: String, filename: String) -> Result<(), String> {
+fn open_in_vscode_blocking(
+    dir: std::path::PathBuf,
+    code: String,
+    filename: String,
+) -> Result<(), String> {
     use std::io::Write;
     use std::process::Command;
 
@@ -2301,8 +2387,8 @@ fn open_in_vscode_blocking(code: String, filename: String) -> Result<(), String>
         safe_name = "snippet.txt".to_string();
     }
 
-    let dir = std::env::temp_dir().join("loach-canvas");
-    std::fs::create_dir_all(&dir).map_err(|e| format!("Couldn't create the temp folder: {e}"))?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("Couldn't create the scratch folder: {e}"))?;
     let path = dir.join(&safe_name);
     std::fs::File::create(&path)
         .and_then(|mut f| f.write_all(code.as_bytes()))

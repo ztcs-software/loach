@@ -114,7 +114,7 @@ export function CodeBlock({ className, children, raw, language }: CodeBlockProps
           </ToolbarButton>
           <ToolbarButton
             onClick={onExport}
-            label={`Export to .${language ?? "txt"} file`}
+            label={`Export to ${defaultFilename(language)}`}
             icon={<Download className="h-3 w-3" />}
           >
             Export
@@ -138,7 +138,10 @@ export function CodeBlock({ className, children, raw, language }: CodeBlockProps
       <div className="flex font-mono text-[12.5px] leading-relaxed">
         <pre
           aria-hidden
-          className="select-none px-3 py-3 text-right tabular-nums text-foreground/30"
+          // /40 (not /30): the gutter still reads as secondary next to the
+          // code's /95, but /30 remaps to 0.48 alpha in globals.css, which
+          // is 3.3:1 on the light code surface.
+          className="select-none px-3 py-3 text-right tabular-nums text-foreground/40"
         >
           {Array.from({ length: lineCount }, (_, i) => i + 1).join("\n")}
         </pre>

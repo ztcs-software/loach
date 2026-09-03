@@ -14,7 +14,7 @@
 /** True when running on macOS — detected from `navigator.userAgentData`
  *  (Chromium) or the legacy `navigator.platform`. Pure cosmetic + key-label
  *  use; the shortcut matcher itself is platform-agnostic (Ctrl ≡ Cmd). */
-export const IS_MAC =
+const IS_MAC =
   typeof navigator !== "undefined" &&
   /mac/i.test(
     (navigator as Navigator & { userAgentData?: { platform?: string } })
@@ -31,10 +31,16 @@ export type ShortcutAction =
   | "toggle-sidebar"
   | "toggle-params"
   | "delete-current-chat"
+  | "lock-now"
   | "show-shortcuts";
 
 /** Where a shortcut belongs in the help dialog. */
-export type ShortcutGroup = "Navigation" | "Chat" | "Layout" | "Help";
+export type ShortcutGroup =
+  | "Navigation"
+  | "Chat"
+  | "Layout"
+  | "Security"
+  | "Help";
 
 /** Canonical, platform-independent description of a shortcut. The `mod`
  *  flag stands for Ctrl-on-PC / Cmd-on-Mac (the conventional primary
@@ -111,6 +117,15 @@ export const SHORTCUTS: ShortcutSpec[] = [
     shift: true,
     keys: ["p"],
   },
+  // Security
+  {
+    action: "lock-now",
+    label: "Lock Loach now",
+    group: "Security",
+    mod: true,
+    shift: true,
+    keys: ["l"],
+  },
   // Help
   {
     action: "show-shortcuts",
@@ -162,13 +177,4 @@ function prettyKey(key: string): string {
     default:
       return key.length === 1 ? key.toUpperCase() : key;
   }
-}
-
-/** Look up a single spec by action — convenience for the title bar pill
- *  (which displays the Cmd-K hint) and anywhere else that wants to render
- *  a specific shortcut without iterating the whole table. */
-export function getShortcut(action: ShortcutAction): ShortcutSpec {
-  const found = SHORTCUTS.find((s) => s.action === action);
-  if (!found) throw new Error(`Unknown shortcut action: ${action}`);
-  return found;
 }

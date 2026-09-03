@@ -80,6 +80,42 @@ describe("rehypeTexFallback", () => {
     expect(p2.children[1].children[0].value).toBe("\\beta");
     expect(p2.children[2].value).toBe(" after β");
   });
+
+  it("leaves remark-math nodes alone so KaTeX gets intact TeX", () => {
+    // `remark-math` emits inline math as `<code class="math-inline">` and
+    // display math as `<pre><code class="math-display">`, so the code/pre skip
+    // above is what keeps this pass off real math. Without it `\sqrt{c}`
+    // would reach KaTeX as `√{c}` and fail to parse.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const tree: any = {
+      type: "root",
+      children: [
+        {
+          type: "element",
+          tagName: "code",
+          properties: { className: ["language-math", "math-inline"] },
+          children: [{ type: "text", value: "\\sqrt{c} + \\alpha" }],
+        },
+        {
+          type: "element",
+          tagName: "pre",
+          children: [
+            {
+              type: "element",
+              tagName: "code",
+              properties: { className: ["language-math", "math-display"] },
+              children: [{ type: "text", value: "\\sum_{i=1}^{n} \\theta_i" }],
+            },
+          ],
+        },
+      ],
+    };
+    rehypeTexFallback()(tree);
+    expect(tree.children[0].children[0].value).toBe("\\sqrt{c} + \\alpha");
+    expect(tree.children[1].children[0].children[0].value).toBe(
+      "\\sum_{i=1}^{n} \\theta_i",
+    );
+  });
 });
 
 describe("stableSplit (streaming prefix/tail boundary)", () => {
@@ -122,6 +158,27 @@ describe("stableSplit (streaming prefix/tail boundary)", () => {
     const [stable, tail] = split("a\n\nb\n\n");
     expect(stable).toBe("a\n\nb\n\n");
     expect(tail).toBe("");
+  });
+
+  it("never splits inside an open $$ display-math block", () => {
+    // Cutting at the blank line between stacked equations would leave the
+    // prefix holding an unclosed `$$` and let the tail's closer open a block
+    // that typesets the prose after it.
+    const [stable, tail] = split("intro\n\n$$\na = b\n\nc = d");
+    expect(stable).toBe("intro\n\n");
+    expect(tail).toBe("$$\na = b\n\nc = d");
+  });
+
+  it("treats a blank line after a CLOSED math block as a boundary", () => {
+    const [stable, tail] = split("$$\na = b\n$$\n\nnext para");
+    expect(stable).toBe("$$\na = b\n$$\n\n");
+    expect(tail).toBe("next para");
+  });
+
+  it("ignores $$ inside a code fence", () => {
+    const [stable, tail] = split("```sh\necho $$\n```\n\nnext para");
+    expect(stable).toBe("```sh\necho $$\n```\n\n");
+    expect(tail).toBe("next para");
   });
 });
 

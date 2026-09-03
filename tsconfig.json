@@ -27,7 +27,12 @@
     "allowSyntheticDefaultImports": true,
     "esModuleInterop": true,
 
-    "baseUrl": ".",
+    // TypeScript 7 no longer auto-discovers `@types/*` from node_modules, so
+    // the `node:` imports in `tests/` need `node` named explicitly. Tests pull
+    // `describe`/`it`/`expect` from "vitest" directly rather than relying on
+    // globals, so narrowing the list to `node` costs nothing.
+    "types": ["node"],
+
     "paths": {
       "@/*": ["./src/*"]
     }

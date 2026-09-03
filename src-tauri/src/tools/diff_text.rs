@@ -83,11 +83,9 @@ pub fn dispatch(args: &Value) -> McpCallResult {
         ));
     }
     let mode = args.get("mode").and_then(|v| v.as_str()).unwrap_or("line");
-    let context = args
-        .get("context")
-        .and_then(|v| v.as_u64())
+    let context = crate::tools::lenient_i64(args, "context")
         .unwrap_or(3)
-        .min(1000) as usize;
+        .clamp(0, 1000) as usize;
     let out = match mode {
         "line" => unified_lines(a, b, context),
         "word" => inline_diff(TextDiff::configure().timeout(DIFF_TIMEOUT).diff_words(a, b)),
@@ -122,7 +120,7 @@ fn unified_lines(a: &str, b: &str, context: usize) -> String {
 /// concept of "lines" doesn't translate cleanly. Render an inline,
 /// `[+added+][-removed-]` style that's still copy-pasteable. (The
 /// brackets prevent ambiguity when the change itself contains spaces.)
-fn inline_diff<'a>(diff: TextDiff<'a, 'a, 'a, str>) -> String {
+fn inline_diff<'a>(diff: TextDiff<'a, 'a, str>) -> String {
     let mut out = String::new();
     for change in diff.iter_all_changes() {
         let s = change.value();

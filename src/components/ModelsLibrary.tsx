@@ -35,8 +35,7 @@ import type { ModelInfo, ProviderId } from "@/types";
 /**
  * Full-canvas browse-and-act surface for installed models. Mirrors
  * SpacesLibrary / SnippetsLibrary in shape so all three "library" tabs feel
- * like the same place in different outfits — same header, same search bar,
- * same tile grid. Replaces the dense in-sidebar ModelsPanel.
+ * like the same place in different outfits — same header, same tile grid. Replaces the dense in-sidebar ModelsPanel.
  *
  * Reached via the "Models" quick action in the sidebar — App.tsx routes to
  * this component when `sidebarTab === "models"` and no specific model is
@@ -102,7 +101,7 @@ export function ModelsLibrary() {
   };
 
   return (
-    <div className="flex min-w-0 flex-1 flex-col">
+    <main className="flex min-w-0 flex-1 flex-col">
       <ScrollArea className="flex-1">
         <div className="mx-auto w-full max-w-6xl px-8 py-8">
           <header className="mb-6 flex flex-wrap items-end justify-between gap-4">
@@ -282,7 +281,7 @@ export function ModelsLibrary() {
           )}
         </div>
       </ScrollArea>
-    </div>
+    </main>
   );
 }
 

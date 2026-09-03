@@ -95,10 +95,7 @@ export function SnippetVariablesPanel() {
         </button>
         <button
           type="button"
-          onClick={(e) => {
-            e.stopPropagation();
-            openDialog("new");
-          }}
+          onClick={() => openDialog("new")}
           aria-label="New variable"
           className={cn(
             "absolute right-3 top-1/2 -translate-y-1/2",

@@ -10,7 +10,7 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { buildShareUrl, type ShareNetwork } from "@/lib/share";
 import { renderShareImage, type ShareImage } from "@/lib/shareImage";
-import { isTauri, saveBinaryToFile } from "@/lib/tauri";
+import { openExternal, saveBinaryToFile } from "@/lib/tauri";
 import { logger } from "@/lib/logger";
 import { cn } from "@/lib/utils";
 import { useShareStore } from "@/stores/shareStore";
@@ -34,15 +34,6 @@ const NETWORKS: { id: ShareNetwork; label: string; hover: string }[] = [
   { id: "reddit", label: "Reddit", hover: "hover:bg-[#FF4500]" },
   { id: "linkedin", label: "LinkedIn", hover: "hover:bg-[#0A66C2]" },
 ];
-
-async function openExternal(url: string) {
-  if (isTauri) {
-    const { open } = await import("@tauri-apps/plugin-shell");
-    await open(url);
-  } else {
-    window.open(url, "_blank", "noopener,noreferrer");
-  }
-}
 
 /**
  * "Share" popup for a single message, opened from either kebab menu.

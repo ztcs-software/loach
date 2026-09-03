@@ -90,8 +90,36 @@ transcript of messages.
 - **Metrics chip** — every assistant turn shows the prompt+completion token
   count, wall-clock time, and tokens/sec when the provider reports them.
 - **Markdown + code highlighting** — `react-markdown` + `rehype-highlight`
-  with GitHub-flavored markdown extensions. Tables, lists, footnotes, math,
-  and language-aware syntax highlighting work out of the box.
+  with GitHub-flavored markdown extensions. Tables, lists, footnotes, and
+  language-aware syntax highlighting work out of the box.
+- **LaTeX math** — formulas typeset with KaTeX, no opt-in required.
+  `$$…$$`, `$…$`, `\(…\)`, `\[…\]` and ``` ```math ``` fences all render,
+  and a `$$…$$` written on a single line is promoted to a centred display
+  block. TeX that doesn't parse degrades to showing its own source (parse
+  error on hover) rather than flashing an error, which keeps half-typed
+  formulas quiet mid-stream. Applies to assistant replies in the transcript
+  and Private Chat; app-authored markdown like release notes opts out
+  explicitly.
+- **Currency-safe `$…$`** — `$` doubles as a currency sign, so a
+  single-dollar span only typesets when it reads as math: the content must
+  hug both delimiters, stay on one line, not follow a word character, and
+  not be chased by a digit. "it costs $5 and $10", "between $5-$10" and
+  "US$5" all stay prose, while `$x^2$` — the delimiter most models actually
+  emit for inline math — renders with no settings hunt. `\$` always means a
+  literal dollar sign.
+- **Lazy engine** — KaTeX is a ~270 KB JS chunk plus a 29 KB stylesheet and
+  59 font files, all bundled into the installer like the rest of `dist/`.
+  **Nothing is fetched over the network** — the window CSP
+  (`default-src 'self'`) would block it if anything tried. What's deferred is
+  only *when it's read from disk and parsed*: a dynamic `import()` fires the
+  first time a message in that session actually looks like it contains math,
+  so a launch that never renders a formula never pays for one. It reloads on
+  the next launch — the deferral is per session, not a one-time install step.
+- **Unicode symbol fallback** — independent of the setting above and always
+  on: loose single-token TeX in prose (`\rightarrow`, `\alpha`, `\sum`) is
+  rewritten to the equivalent Unicode character. It runs over the parsed
+  tree, so code blocks, inline code, and anything inside math delimiters are
+  left byte-for-byte intact.
 - **Long-prompt clamp** — user bubbles that paste in dozens of lines clamp
   to ten lines with a **Show more** toggle so the answer stays visible.
 - **Right-click menu** — right-click any bubble for a contextual menu with
@@ -118,8 +146,14 @@ The input box at the bottom of every chat.
 - **Suggestion chips** — on the welcome hero screen of an empty chat,
   shortcuts seed the composer with starter prompts ("Explain a concept",
   "Write code", "Summarize a file", "Brainstorm").
-- **Persona pill** — when a persona is active the composer shows a chip
-  with the persona name above it. Click to swap.
+- **Chip row** — the active persona and tone each show as a chip above the
+  input, sharing the row with the attachment chips. Persona and tone are
+  accent-tinted and stick across sends; file chips are neutral and leave on
+  send, with a divider between the two groups. Click a chip to swap it or
+  its ✕ to clear it. Clearing a tone clears it for *this* chat only — it's
+  written as a per-chat override rather than an unset, which would fall
+  straight back through to the **Settings → General** default and put the
+  chip right back.
 - **Send / Stop morph** — while a reply is streaming for the active chat,
   the send button becomes a stop button. Cancelling persists whatever has
   been streamed so far.
@@ -196,6 +230,12 @@ FIFO queue:
   - The folder's own menu offers **Rename** and **Delete folder**.
     Deleting never deletes chats — they move back to the main list.
 
+Below 1080 px the sidebar gets out of the way on its own: opening a right
+panel (code canvas or parameters) folds it to its icon rail so the
+transcript keeps a usable width, and restores it when the right slot empties
+again. A manual toggle always wins — flipping the sidebar yourself cancels the
+pending restore.
+
 ### 2.6 Header actions (per chat)
 
 - **Rename**, **Pin/Unpin**, **Label**, **Move to Archive**, **Delete**.
@@ -228,6 +268,11 @@ lives in **Settings → Archive** and lets you:
 - "Archive all" to mass-park your current chats before starting fresh.
 - "Remove all" to permanently delete every archived chat in one step
   (guarded by a typed-confirm dialog because it's irreversible).
+
+Archiving a chat raises a toast naming it with an inline **Undo**, held for
+7 seconds (and longer while hovered) — the chat vanishes from the sidebar
+with its only way back buried in Settings, so a mis-click otherwise reads as
+a delete. Unarchiving gets no toast: its result is visible in the list.
 
 ### 2.8 Private Chat
 
@@ -288,6 +333,11 @@ Commands are grouped the way `/help` lists them:
 - **Tools & web** — `/tools` (list tools from enabled MCP servers),
   `/web-fetch on|off`, `/fetch <url>`, `/thinking on|off`.
 - **App** — `/settings [tab]`, `/help`.
+
+Above those sits a **Recent** group: the four commands you last ran, hoisted
+out of their normal groups. The list is persisted (six names, in the settings
+table) rather than session-scoped, so it's useful on the first `/` after a
+restart instead of only once you've already run the command that launch.
 
 `/clear` and `/delete` are destructive and route through a confirmation
 dialog before they run.
@@ -642,12 +692,35 @@ Calls render in the collapsible tool-call block described in §2.1.
 Press **Cmd/Ctrl+K** (or click the title-bar search pill) to open a global
 command palette:
 
-- Cross-searches **chats**, **spaces**, and **snippets**.
-- Empty query shows recent suggestions across all three.
+- Cross-searches **chats**, **messages**, **spaces**, and **snippets**.
+- Empty query shows recent chats, spaces and snippets as suggestions.
 - Arrow keys to move, Enter to commit, Esc to dismiss (or to clear a
   non-empty query first).
 - Picking a chat opens it. Picking a Space opens its detail view. Picking
-  a Snippet starts a fresh chat with the snippet's prompt primed.
+  a Snippet starts a fresh chat with the snippet's prompt primed. Picking
+  a message opens its chat and jumps to that turn.
+
+**Message search** looks inside transcripts, not just titles. Hits carry a
+`MESSAGE` badge and a snippet centred on the match, and sort below title
+matches — a chat whose *title* matches is the stronger signal, but transcript
+hits keep a reserved block at the bottom so a common word can't squeeze them
+out. It starts at two characters, is debounced, and returns up to 8 hits
+(20 when the search is scoped to messages).
+
+What it deliberately doesn't reach: archived chats (matching the title
+search), system notices, imported turns hidden inside a collapsed card, and
+matches that only occur inside an attachment or fetched-page body the bubble
+doesn't display — jumping to any of those would scroll nowhere or highlight
+nothing. Private Chat never touches the database, so it can't appear here.
+Case-insensitivity is ASCII-only, so a non-ASCII query matches at its own
+case but not across cases.
+
+**Scoping.** A dropdown beside the input narrows to one kind: *everywhere*
+(the default), *chats*, *messages*, *spaces* or *snippets*. It works by
+writing an `in:<scope>` token into the query itself — the token *is* the
+scope, so you can type `in:messages borrow` by hand, or `notes in:spaces`
+with the token last, and the dropdown label follows either way. Clearing the
+token from the text returns to *everywhere*.
 
 The palette is suppressed while onboarding or the lock screen owns the
 window.
@@ -692,14 +765,15 @@ In **Settings → Appearance**:
 
 Background style and color mode update instantly. The title bar shows the
 window controls (minimise / maximise / close) inline since the window is
-borderless on both platforms.
+borderless on all three platforms.
 
 ---
 
 ## 12. App lock (Security)
 
-Optional credential gate that runs before any chat data hydrates. Configure
-in **Settings → Security**.
+Optional credential gate that runs before any chat data hydrates, with
+opt-in triggers (§12.4) that re-engage it mid-session. Configure in
+**Settings → Security**.
 
 - **PIN** (4, 6, or 8 digits), **Password**, or **both**.
 - **Optional hint** stored alongside (plaintext — the user has to be able
@@ -727,11 +801,47 @@ wipe, factory reset) require the user's *current* credentials even though
 the app is unlocked, so a compromised renderer cannot silently disable the
 gate or trigger a wipe.
 
+### 12.4 Auto-lock
+
+On its own the lock only gates *launch*: clear the lock screen once and you
+stay unlocked until you quit. That covers a stolen laptop but not the threat
+people actually have — walking away from an unlocked machine. Two opt-in
+triggers close it, both in the **Auto-lock** card that appears in
+**Settings → Security** once a lock is configured:
+
+- **Lock after inactivity** — off, 1, 5, 15 or 30 minutes with no typing,
+  clicking, scrolling or touch. A reply already streaming keeps running
+  behind the lock screen. The countdown is a deadline checked periodically
+  rather than one long timer, so a machine that sleeps through the interval
+  is over the threshold the moment it wakes; the trade is that the lock can
+  land up to 15 seconds late.
+- **Lock when minimized** — locks as soon as the window is minimized or
+  otherwise hidden. Keyed on visibility, not focus, so a native save / open
+  dialog (export, import, attaching a file) doesn't lock you out mid-task.
+
+**`Cmd/Ctrl + Shift + L`** locks immediately from anywhere in the app,
+whether or not either trigger is on. Re-locking never touches the backend —
+it flips the render gate, and the credentials were never in the renderer to
+begin with.
+
 ---
 
 ## 13. Data management
 
 **Settings → Data** is where backups, restores, and cleanups live.
+
+A read-only **storage breakdown** sits above the controls, so "how big is
+this?" is answered before you reach for a destructive one:
+
+- **Database** — total bytes on disk (the SQLite file plus its write-ahead
+  log) and the path, itemised into chats (with message and chat counts),
+  attachments inlined into messages and snippets, Spaces (with file counts),
+  and everything else (snippets, MCP servers, settings).
+- **Local models** — how many Ollama models are installed and what they
+  weigh, as reported by Ollama. Listed for context, not as something Loach
+  can reclaim: they're stored by Ollama, outside the app-data folder above.
+
+Below it sit the actions:
 
 - **Export everything** — produces a single JSON blob with every chat,
   message, folder, Space, file, memory, snippet, MCP server, and setting.
@@ -755,18 +865,137 @@ A six-step wizard runs on first launch (and after a factory reset). Each
 step writes its choice straight into settings, so dismissing partway through
 still leaves the app in a consistent state.
 
-1. **Welcome** — intro card.
-2. **Name** — optional display name; available as `{{USER_NAME}}` in any
-   system prompt thereafter.
-3. **Provider** — pick Ollama (and suggest a starter model to pull) or
-   add an OpenAI key. This is the only required step; the X / Esc on
-   this step routes through a confirm dialog.
-4. **Prompt** — the global *Custom instructions* textarea.
-5. **Features** — toggle defaults for Temporal awareness, Thinking, Web
-   fetch, and Low VRAM (the screen recommends Temporal awareness ON,
-   Thinking ON, Web fetch ON, Low VRAM OFF).
+1. **Welcome** — intro card, plus *Restore from backup* for users arriving
+   from another install.
+2. **Provider** — pick Ollama or add an OpenAI key. This is the only
+   required step; the X / Esc on it routes through a confirm dialog. It sits
+   second so a model download has the rest of the wizard to make progress.
+3. **Features** — defaults for Temporal awareness, Thinking, and Low VRAM
+   (recommends ON / ON / OFF). Committed on Skip as well as Continue.
+4. **Tools** — Web fetch and the twelve in-process utility tools, which
+   before this screen existed were discover-by-accident in Settings. The
+   utilities open on a **Recommended** preset — everything on except the
+   four only a developer asks for (hash, UUID, base64, IP/CIDR) — and
+   **All OFF / Recommended / All ON** buttons flip the set at once.
+   Because the screen *shows* a selection, the write rules differ from
+   Features: **Continue** commits the utilities exactly as displayed, while
+   **Skip** writes only what was explicitly flipped, since skipping past is
+   not consent to the recommended set. **Web fetch** is exempt from both
+   the preset and the default — it starts off and is only ever written when
+   touched, being the one switch in the app that opens a socket. MCP gets a
+   row with no switch: it's described here but configured in Settings.
+5. **Prompt** — the global *Custom instructions* textarea.
 6. **Final** — closes the wizard, lands the user in a fresh chat with the
    model dropdown auto-opened so they can pick a model immediately.
+
+The wizard does not ask for a display name. `{{USER_NAME}}` still resolves
+from Settings → General; it just isn't collected up front, because the value
+only pays off for users who go on to write it into a custom instruction.
+
+### 14.1 Choosing a model
+
+When Ollama is running but has no models, the step reads the host's capacity
+(`system_info`) and leads with a single recommendation — the largest catalog
+entry that still runs comfortably — instead of asking a newcomer to pick blind
+from a dozen tags.
+
+**It sizes against VRAM, not RAM, whenever a discrete GPU is present.** That is
+the number which decides whether a model is usable: Ollama loads what fits into
+VRAM and runs the remaining layers on the CPU, so an 18 GB model behind an 8 GB
+card technically "fits in RAM" and still generates at a crawl. Sizing on RAM
+alone both over-recommended on big-RAM/small-GPU machines and under-recommended
+on small-RAM/big-GPU ones. Detection lives in `src-tauri/src/gpu.rs`:
+
+- **Windows** — DXGI `DedicatedVideoMemory`, vendor-neutral across NVIDIA / AMD
+  / Intel, no external tooling.
+- **Linux** — `nvidia-smi`, else the amdgpu sysfs node. Intel Arc is not
+  covered and falls back to RAM.
+- **macOS** — deliberately none. Apple Silicon is unified memory, so system RAM
+  already *is* the GPU budget and a separate figure would double-count it.
+
+Adapters under 1 GB of dedicated memory are ignored as integrated graphics,
+which carve out system RAM and are already covered by the RAM path. Every probe
+is best-effort: anything unreadable falls back to RAM, which stays correct for
+CPU-only and integrated setups.
+
+**A model's memory need is modeled, not equated with its download.** Each
+catalog variant is a `SizedVariant` (`src/lib/modelChoice.ts`) carrying up to
+three facts, because two architectures deliberately decouple the download from
+the memory that matters — in opposite directions:
+
+- `sizeGb`, the download. Billed to the disk check, and the bound for "runnable
+  at all": when a model overflows the GPU its weights are mmapped from system
+  RAM, so the download (not an inflated estimate) is what must fit there.
+- `residentGb`, set only where an architecture keeps part of itself off the
+  accelerator. Gemma's E-variants are the case: `gemma4:e2b` downloads 7.2 GB
+  but holds ~2.5 GB on the card (per-layer embeddings stay in system RAM), so
+  judging it by its download declared an edge-device model too big for the
+  8 GB cards it targets. The figures are estimates — Ollama publishes no
+  runtime memory numbers to validate them against.
+- `moe`, for mixture-of-experts models. Every expert must be held, so the
+  memory math is unchanged — but only a few billion parameters run per token,
+  which changes what overflowing VRAM *means*: a dense 31B spilling to RAM
+  crawls, while a 30B-A3B split across GPU and RAM is in the mode it was built
+  for and stays quick. The classifier reports that as `moeSplit` and the badge
+  reads "Runs well" instead of warning.
+
+Runtime overhead on top of the resident weights (KV cache, compute buffers) is
+a floor plus a small fraction, since it grows with layers and context rather
+than weight bytes. The flat ×1.2 it replaces charged a 25 GB MoE model 5 GB of
+phantom overhead — filing models that run well on a 32 GB / 8 GB-card machine
+under "won't fit" — while barely taxing tiny ones. There is also no separate
+VRAM reserve any more: the runner already keeps ~1 GB free when fitting layers
+to the card, and reserving on top of that pushed every verdict a tier down.
+
+Each variant carries a fit badge from the pure helpers in
+`src/lib/modelChoice.ts`. Labels are plain verdicts a first-time user can
+parse with no context — numbers and mechanics live in the tooltips:
+**Runs well** (comfortable — and MoE splits, whose tooltip explains why
+overflowing the GPU doesn't hurt them), **Runs OK** (fits with little
+headroom), **Runs slowly** (a dense model exceeding VRAM but fitting RAM),
+**Too big for this machine** (exceeds both; the ~N GB estimate lives in the
+tooltip), or **Not enough disk space**, which also disables its Pull button.
+Every evaluated row gets a badge — "good" is stated, not implied by absence —
+coloured green ("Runs well", with a tick) and amber / yellow / red ("Runs OK"
+/ "Runs slowly" / "Too big", each with an exclamation mark). The recommended
+pick carries no special row badge: the recommendation card above the list is
+its highlight, and the row shows the same honest verdict as any other. Rows within a family are ordered by resident
+footprint so the badge column reads monotonically. The card names the
+constraint it used — "Based on 8 GB VRAM · NVIDIA GeForce RTX 4060" rather
+than a RAM figure — since telling a GPU owner about their RAM describes the
+wrong bottleneck. Outside the Tauri shell `system_info` returns null and the
+catalog renders unadorned.
+
+Neither provider path pins a default model silently any more. Ollama shows a
+picker of the models it found; the OpenAI path ranks the endpoint's catalog
+so a chat model leads (`/v1/models` order routinely puts an embedding or
+audio model first) and shows the pick in the same picker.
+
+### 14.2 Downloads that outlive the wizard
+
+Pulls started here keep running while the user finishes setup, so the
+download is surfaced the whole way:
+
+- A progress strip pinned to the bottom of every remaining wizard step, with
+  a stop button per download (`admin_cancel` under the hood; Ollama keeps the
+  layers it already fetched, so a re-pull resumes from them).
+- The final screen swaps "You're all set" for "Setup complete / still
+  downloading" rather than claiming readiness it doesn't have.
+- `ModelDownloadBanner` above the composer in the chat itself.
+- `sendUserMessage` refuses a send against a still-downloading model with
+  "<tag> is still downloading (43%)". Without it Ollama returns 404 for the
+  missing tag, which `providerErrors` renders as "endpoint or model not
+  found. Check the model name and URL" — a wrong and unactionable first
+  impression.
+
+### 14.3 When Ollama isn't reachable
+
+The step offers **Start Ollama** (the same `ollama_start` command the chat
+header uses) before suggesting a download, since "installed but not running"
+and "not installed" look identical from a failed probe — the error from a
+failed start is what tells them apart. It also re-probes every 3 s in the
+background, so a user who leaves to install Ollama returns to a green panel
+instead of a stale warning they have to know to dismiss.
 
 ---
 
@@ -821,9 +1050,14 @@ In-app updater for the Tauri-supported install formats:
 - **Windows NSIS** — passive install of the downloaded `.nsis.zip` after
   a click on **Install update**.
 - **Linux AppImage** — same path; in-place replacement.
-- **Linux `.deb` / `.rpm`** — managed by the system package manager.
-  The Updates panel detects this and points to the GitHub releases page
-  instead of pretending in-app updates work.
+- **Linux `.deb` / `.rpm`** — the signed package is downloaded and handed
+  to `dpkg -i` / `rpm -U` through a `pkexec` prompt (falling back to
+  zenity / kdialog + `sudo`), so the package database stays consistent
+  instead of a package install being silently overwritten. Format
+  detection reads a marker the bundler patches into the binary at build
+  time, which is also what gates the panel — dev builds and `cargo run`
+  report unsupported. There's no apt/yum repository, so `apt upgrade`
+  still won't see new versions; updates are in-app only.
 - **macOS `.app`** — in-place replacement of the application bundle from
   the downloaded `.app.tar.gz`. Works even though the build isn't
   Apple-notarized: the updater's integrity check uses our own Ed25519
@@ -838,6 +1072,11 @@ The manual **Check for updates** button in the same panel works whether or
 not the auto-check is on. On an install the updater can't patch, the panel
 shows neither control — just a note to download the release manually and an
 **Open releases** button.
+
+One historical gap: installs from **v1.2.3 or earlier** on `.deb` / `.rpm`
+hide the Updates panel entirely, because that build's gate looked for an
+AppImage environment variable. Those users need one manual download of a
+newer build before in-app updates reach them.
 
 **What's new** — every release includes a markdown notes file that
 populates both the GitHub release body and the in-app **Updates** panel
@@ -872,7 +1111,9 @@ verification happens before the binary is replaced.
 ## 19. Keyboard reference
 
 Press `Cmd/Ctrl + /` at any time to see these shortcuts as an in-app cheat
-sheet.
+sheet, grouped into Navigation, Chat, Layout, Security and Help. The dialog
+and the handler read the same table, so the keys listed there are the keys
+the app actually listens for.
 
 - `Cmd/Ctrl + K` — global search palette.
 - `Cmd/Ctrl + N` — start a new chat.
@@ -882,6 +1123,8 @@ sheet.
   after a confirmation.
 - `Cmd/Ctrl + Shift + S` — show / hide the left sidebar.
 - `Cmd/Ctrl + Shift + P` — show / hide the parameters panel.
+- `Cmd/Ctrl + Shift + L` — lock Loach now (when an app lock is configured;
+  see §12.4).
 - `Cmd/Ctrl + /` — open the keyboard-shortcuts cheat sheet.
 - `/` (start of the composer) — open the slash-command palette.
 - `Enter` — send the composer, or run the typed slash command.
@@ -896,8 +1139,9 @@ sheet.
 ## 20. Platform support
 
 - **Windows 10/11 x86_64** — NSIS installer, in-app updater.
-- **Linux x86_64** — AppImage (with in-app updater), `.deb`, and `.rpm`
-  (managed by the package manager).
+- **Linux x86_64** — AppImage, `.deb`, and `.rpm`, all three with the
+  in-app updater (§17). Built against **glibc 2.35**, so Ubuntu 22.04 and
+  Debian 12 are the oldest supported distributions.
 - **macOS 11+ Apple Silicon** — `.dmg` install plus a `.app` bundle, with
   in-app updater. The build is **not Apple-notarized** (we don't subscribe
   to the Apple Developer Program), so first launch requires a one-time

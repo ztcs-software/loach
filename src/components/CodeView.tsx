@@ -64,7 +64,9 @@ export function CodeView({
       <div className="flex w-max min-w-full font-mono text-[12.5px] leading-[1.65]">
         <pre
           aria-hidden
-          className="sticky left-0 z-10 select-none bg-background px-3 py-3 text-right tabular-nums text-foreground/30"
+          // /40 for the same reason as CodeBlock's gutter — /30 remaps to
+          // 0.48 alpha, which fails AA against the light code surface.
+          className="sticky left-0 z-10 select-none bg-background px-3 py-3 text-right tabular-nums text-foreground/40"
         >
           {Array.from({ length: lineCount }, (_, i) => i + 1).join("\n")}
         </pre>

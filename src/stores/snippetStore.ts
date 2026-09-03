@@ -7,7 +7,7 @@ import {
   updateSnippet,
 } from "@/lib/tauri";
 import { useToastStore } from "./toastStore";
-import type { Attachment, ProviderId, Snippet } from "@/types";
+import type { ProviderId, Snippet } from "@/types";
 
 /** Open a fresh snippet dialog with the prompt textarea pre-filled. */
 export interface NewSnippetSeed {
@@ -111,18 +111,3 @@ export const useSnippetStore = create<SnippetState>((set) => ({
   openDialog: (target) => set({ dialogTarget: target }),
   closeDialog: () => set({ dialogTarget: null }),
 }));
-
-/** Safe Attachment[] parser for the JSON we stored. Falls back to `[]`.
- *  Retained for forward-compat — the attachments UI is temporarily removed
- *  from snippets but the column and parser stay so existing rows aren't
- *  dropped on load. */
-export function parseSnippetAttachments(json: string | null): Attachment[] {
-  if (!json) return [];
-  try {
-    const parsed = JSON.parse(json);
-    if (!Array.isArray(parsed)) return [];
-    return parsed as Attachment[];
-  } catch {
-    return [];
-  }
-}

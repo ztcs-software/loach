@@ -77,6 +77,7 @@ import { useSettingsStore } from "./settingsStore";
 import { useSpaceStore } from "./spaceStore";
 import { useUIStore } from "./uiStore";
 import { useModelsStore } from "./modelsStore";
+import { getLivePullFor, pullPercent } from "@/lib/usePullRuns";
 
 interface ActiveStream {
   stop: () => Promise<void>;
@@ -266,6 +267,13 @@ interface ChatState {
    *  Read-only — nothing is persisted. Throws with a user-facing message when
    *  there's no model or fewer than COMPACT_MIN_TOTAL messages to compact. */
   exportCompactedContext: (sessionId: string) => Promise<string>;
+  /** Pause or resume queue promotion. Private Chat holds the queue while its
+   *  overlay is open: the entry points already cancel whichever regular chat
+   *  is *streaming*, but without this the next queued task from another chat
+   *  was promoted straight into the gap and streamed into SQLite behind the
+   *  overlay, competing for the same model slot — the exact thing that cancel
+   *  exists to prevent. Releasing re-nudges the queue so parked work resumes. */
+  setQueueHeld: (held: boolean) => void;
 }
 
 /** Module-level re-entry guard for the auto-dispatcher. Set synchronously
@@ -273,6 +281,11 @@ interface ChatState {
  *  start attempt resolves. Prevents two `done`/cancel events in the same
  *  tick from both trying to promote the same head. */
 let dispatching = false;
+
+/** While true, `promoteQueueHead` refuses to start the next waiter. Module
+ *  scope for the same reason as `dispatching` — it's dispatch bookkeeping, not
+ *  something the UI renders. Set via `setQueueHeld`. */
+let queueHeld = false;
 
 /** Buffers for the task currently being streamed. Held at module scope so
  *  `cancelForSession` (triggered by a button click, outside the stream
@@ -496,13 +509,13 @@ function readSessionParams(session: Session | undefined): GenerationParams {
     const space = useSpaceStore
       .getState()
       .spaces.find((s) => s.id === session.space_id);
-    if (space?.default_params_json) {
-      try {
-        spaceLayer = JSON.parse(space.default_params_json) as Partial<GenerationParams>;
-      } catch {
-        /* malformed JSON — ignore the layer */
-      }
-    }
+    // Through the same guard as the per-session layer, not a raw
+    // `JSON.parse`: a wrong-typed value here (a hand-edited or imported
+    // snapshot writing `temperature: "high"`) otherwise sailed through to
+    // the `chat_stream` invoke and failed serde deserialization on the Rust
+    // side, so every send in the space died with an opaque invoke error
+    // instead of the guard quietly dropping the bad key.
+    spaceLayer = parseOverrides(space?.default_params_json ?? null);
   }
   const merged: GenerationParams = {
     ...DEFAULT_PARAMS,
@@ -818,7 +831,7 @@ async function maybeAutoTitle(
   if (!session) return;
   if (session.title && session.title !== "New chat") return;
   const raw = firstUserContent.trim();
-  const draft = raw.length > 28 ? raw.slice(0, 28).trimEnd() + "..." : raw;
+  const draft = raw.length > 28 ? raw.slice(0, 28).trimEnd() + "…" : raw;
   if (!draft) return;
   await renameSession(sessionId, draft);
   setStore({
@@ -1038,6 +1051,7 @@ function finishRunning(
  *  Releasing the lock first and then re-promoting closes that window. */
 function promoteQueueHead(get: Getter, set: Setter) {
   queueMicrotask(() => {
+    if (queueHeld) return;
     if (dispatching) return;
     const q = get().queue;
     if (q.length === 0) return;
@@ -1378,6 +1392,7 @@ async function startTask(task: QueueTask, get: Getter, set: Setter) {
  */
 function resetForTests() {
   dispatching = false;
+  queueHeld = false;
   sendingSessions.clear();
   runningBuffers = null;
   if (pendingFrame !== null) {
@@ -1541,6 +1556,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       return { activeSessionId: id, unread: next };
     });
     if (!id) return;
+    // Feeds the Ctrl/Cmd+K palette's "recently opened" suggestion order.
+    // After the early return, so clearing the selection (delete / archive)
+    // doesn't register as a visit.
+    useUIStore.getState().noteSessionVisit(id);
     if (!get().messages[id]) {
       // Every caller fires this without awaiting (`void select(id)`), so an
       // unguarded reject here surfaces only as an unhandled promise rejection
@@ -1548,7 +1567,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // actions: log + toast so a failed read is visible and retryable.
       try {
         const msgs = await listMessages(id);
-        set((s) => ({ messages: { ...s.messages, [id]: msgs } }));
+        // Re-check inside the update: a send that started while this read was
+        // in flight may have already installed the transcript and appended the
+        // user's message. Committing unconditionally would overwrite it with
+        // the pre-send list and the bubble would vanish until reload.
+        set((s) => (s.messages[id] ? s : { messages: { ...s.messages, [id]: msgs } }));
       } catch (e) {
         logger.error("failed to load messages for session", e);
         useToastStore.getState().push({
@@ -1755,6 +1778,22 @@ export const useChatStore = create<ChatState>((set, get) => ({
         archived && s.activeSessionId === id ? null : s.activeSessionId;
       return { sessions, activeSessionId: active };
     });
+    // Archiving makes the chat vanish from the sidebar with its only way
+    // back buried in Settings → Archive — without feedback it reads as a
+    // delete to anyone who mis-clicked. Name the chat and offer an inline
+    // Undo; the window is longer than an info chip since it carries a
+    // decision, and hovering holds it open. Deliberately not mirrored on
+    // unarchive: that action's result is visible right there in the list.
+    if (archived) {
+      const title = get().sessions.find((x) => x.id === id)?.title;
+      useToastStore.getState().push({
+        kind: "info",
+        title: "Moved to archive",
+        body: title,
+        durationMs: 7000,
+        action: { label: "Undo", onClick: () => void get().archive(id, false) },
+      });
+    }
   },
 
   remove: async (id) => {
@@ -1988,6 +2027,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (!session.model) {
       throw new Error("No model selected. Pick one from the model dropdown.");
     }
+    // A model chosen during onboarding is routinely still downloading when the
+    // user sends their first message — the wizard pins it and lets them carry
+    // on. Ollama answers 404 for a tag it doesn't have yet, which
+    // `formatProviderError` renders as "endpoint or model not found. Check the
+    // model name and URL": wrong, unactionable, and the first thing the app
+    // would ever say to a new user. `getLivePullFor` decides when a pull
+    // genuinely makes the model unusable — see it for why the provider and the
+    // installed set both matter.
+    const pull = getLivePullFor(session.provider, session.model);
+    if (pull) {
+      const pct = pullPercent(pull);
+      throw new Error(
+        `${session.model} is still downloading${pct === null ? "" : ` (${pct}%)`}. It'll be ready shortly.`,
+      );
+    }
 
     // Lazy hydration: a session other than the one loaded at startup only
     // fetches its transcript when opened. A send can race that load (the user
@@ -2000,7 +2054,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (!get().messages[sessionId!]) {
       try {
         const msgs = await listMessages(sessionId!);
-        set((s) => ({ messages: { ...s.messages, [sessionId!]: msgs } }));
+        // Same guard as `select`: if the select-triggered load resolved first,
+        // keep what it installed rather than racing it back to a stale list.
+        set((s) =>
+          s.messages[sessionId!]
+            ? s
+            : { messages: { ...s.messages, [sessionId!]: msgs } },
+        );
       } catch (e) {
         logger.error("failed to load chat history before send", e);
         useToastStore.getState().push({
@@ -2371,7 +2431,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // edit the block in the Parameters panel's "Custom instructions"
     // textarea, which is intentional — compaction shouldn't be a black
     // box.
-    const existing = session.system_prompt ?? "";
+    //
+    // Read the prompt back off the store rather than reusing the snapshot
+    // taken before `generateSummary`: that call has a three-minute ceiling,
+    // and anything the user typed into Custom instructions while it ran would
+    // otherwise be overwritten by the stale copy. (If the chat was deleted
+    // meanwhile there's nothing left to write to.)
+    const fresh = get().sessions.find((s) => s.id === sessionId);
+    if (!fresh) {
+      set({ compactingSessionId: null });
+      return;
+    }
+    const existing = fresh.system_prompt ?? "";
     const stripped = stripSummaryBlock(existing);
     const block = `${SUMMARY_START_TAG}\n${cleanSummary}\n${SUMMARY_END_TAG}\n\n`;
     const newPrompt = block + stripped;
@@ -2472,5 +2543,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
     );
 
     return buildCompactedMarkdown(session, summary, []);
+  },
+
+  setQueueHeld: (held) => {
+    queueHeld = held;
+    // Releasing has to nudge the dispatcher: anything queued while the hold
+    // was in place is sitting there with nothing scheduled to pick it up.
+    if (!held) promoteQueueHead(get, set);
   },
 }));

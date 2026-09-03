@@ -11,6 +11,7 @@ import type {
   McpServerInput,
   McpTestResult,
   Message,
+  MessageHit,
   ModelInfo,
   OllamaShowResponse,
   Session,
@@ -21,7 +22,9 @@ import type {
   SpaceContext,
   SpaceFile,
   SpaceMemory,
+  StorageStats,
   StreamEvent,
+  SystemInfo,
 } from "@/types";
 
 /**
@@ -35,6 +38,34 @@ export const isTauri =
 
 function notInTauri<T>(fallback: T): Promise<T> {
   return Promise.resolve(fallback);
+}
+
+/**
+ * Hand a URL to the OS browser, or to a new tab when running outside the
+ * Tauri shell.
+ *
+ * The five surfaces that link out (markdown links, Settings, Onboarding,
+ * Share, Updates) each grew their own copy of this, and they had drifted:
+ * only one guarded against an empty href, and only one fell back to
+ * `window.open` when the shell plugin threw. This is the union of the two —
+ * the safest behaviour of the set.
+ *
+ * Callers are responsible for deciding whether a URL is *allowed* to be
+ * opened; `Markdown.shouldOpenExternally` screens untrusted model output
+ * against a scheme allow-list before calling here.
+ */
+export async function openExternal(url: string): Promise<void> {
+  if (!url || url === "#") return;
+  if (isTauri) {
+    try {
+      const { open } = await import("@tauri-apps/plugin-shell");
+      await open(url);
+      return;
+    } catch {
+      /* shell plugin unavailable — fall through to the browser path */
+    }
+  }
+  window.open(url, "_blank", "noopener,noreferrer");
 }
 
 /** Mint a unique-ish id for the no-backend fallback path. `Date.now()` alone
@@ -230,6 +261,19 @@ export function listMessages(sessionId: string): Promise<Message[]> {
 export function sessionMessageCounts(): Promise<Record<string, number>> {
   if (!isTauri) return notInTauri<Record<string, number>>({});
   return invoke("session_message_counts", {});
+}
+
+/** Substring search across every live chat's transcript, newest hit first.
+ *  Backs the Cmd/Ctrl-K palette's message results — the frontend only holds
+ *  the *active* chat's messages, so this is the only way to search the rest.
+ *  Archived chats, `system` notices and hidden imported rows are out of
+ *  scope; see `Database::search_messages` for why. */
+export function searchMessages(
+  query: string,
+  limit?: number,
+): Promise<MessageHit[]> {
+  if (!isTauri) return notInTauri<MessageHit[]>([]);
+  return invoke("search_messages", { query, limit });
 }
 
 export function appendMessage(args: {
@@ -467,6 +511,16 @@ export function securityClear(args?: {
   return invoke("security_clear", { args: args ?? {} });
 }
 
+// ------------ host hardware ------------
+
+/** Installed RAM + free disk, used by onboarding to size its model
+ *  recommendation. Resolves `null` outside the Tauri shell (browser preview),
+ *  where callers fall back to showing the catalog without fit hints. */
+export function systemInfo(): Promise<SystemInfo | null> {
+  if (!isTauri) return notInTauri(null);
+  return invoke("system_info");
+}
+
 // ------------ providers ------------
 
 export function ollamaProbe(baseUrl: string): Promise<boolean> {
@@ -618,11 +672,6 @@ export async function ollamaCreateModel(
 export function listSpaces(): Promise<Space[]> {
   if (!isTauri) return notInTauri([]);
   return invoke("list_spaces");
-}
-
-export function getSpace(id: string): Promise<Space | null> {
-  if (!isTauri) return notInTauri(null);
-  return invoke("get_space", { id });
 }
 
 export function createSpace(args: {
@@ -993,6 +1042,14 @@ export function mcpTest(input: McpServerInput): Promise<McpTestResult> {
 export function exportDataJson(): Promise<string> {
   if (!isTauri) return Promise.reject(new Error("export requires the Tauri runtime"));
   return invoke<string>("export_data_json");
+}
+
+/** Row counts and byte totals for the storage tile. Resolves `null` outside
+ *  the Tauri shell, where there's no database to measure — the tile renders a
+ *  "desktop app only" line rather than a wall of zeros. */
+export function storageStats(): Promise<StorageStats | null> {
+  if (!isTauri) return notInTauri<StorageStats | null>(null);
+  return invoke<StorageStats>("storage_stats");
 }
 
 /** Native filter shape for {@link saveTextToFile}. */

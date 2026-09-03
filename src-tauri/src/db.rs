@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 // `parking_lot::Mutex` instead of `std::sync::Mutex` for two reasons:
 //   1. No `PoisonError` to ignore on every lock — a panic inside one
@@ -283,6 +283,51 @@ pub struct Message {
     pub created_at: i64,
 }
 
+/// One hit from the Cmd-K palette's transcript search. A trimmed projection
+/// rather than a whole `Message`: the palette only renders a chat title, a
+/// one-line excerpt and a role tag, so shipping full rows (with their
+/// inlined attachment bodies) over IPC for every keystroke would be wasted
+/// bandwidth. `message_id` is enough for the jump-to-message handoff, which
+/// reads the real row out of the already-loaded transcript.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct MessageHit {
+    pub message_id: String,
+    pub session_id: String,
+    /// Title of the chat the message belongs to, so the palette can label the
+    /// row without a second lookup.
+    pub session_title: String,
+    /// A short window of the message text centred on the match, whitespace
+    /// collapsed onto one line, with `…` marking where it was cut.
+    pub snippet: String,
+    pub created_at: i64,
+}
+
+/// What Settings -> Data reports about on-disk usage. See
+/// `Database::storage_stats` for how the two size notions differ.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct StorageStats {
+    /// Absolute path to `loach.db`, shown so users can find the folder.
+    pub db_path: String,
+    /// Size of the database file itself.
+    pub db_bytes: u64,
+    /// The `-wal` + `-shm` sidecars WAL mode keeps beside it.
+    pub wal_bytes: u64,
+
+    pub sessions: i64,
+    pub messages: i64,
+    pub spaces: i64,
+    pub space_files: i64,
+    pub snippets: i64,
+    pub mcp_servers: i64,
+
+    /// Logical text bytes, by area. These ignore page overhead and indexes,
+    /// so they sum to less than `db_bytes`.
+    pub message_bytes: i64,
+    pub attachment_bytes: i64,
+    pub space_bytes: i64,
+    pub other_bytes: i64,
+}
+
 pub struct Database {
     conn: Mutex<Connection>,
     /// Read-only connection pool used by the hot SELECT paths. WAL mode
@@ -292,6 +337,10 @@ pub struct Database {
     /// plenty for a desktop app and keeps the file-descriptor / mmap
     /// footprint modest.
     read_pool: Pool<SqliteConnectionManager>,
+    /// The file we were opened from. Kept so `storage_stats` can size the
+    /// database (plus its -wal / -shm sidecars) without re-deriving the
+    /// path from the app data dir and drifting out of sync with `lib.rs`.
+    path: PathBuf,
 }
 
 impl Database {
@@ -358,7 +407,13 @@ impl Database {
         Ok(Self {
             conn: Mutex::new(conn),
             read_pool,
+            path: path.to_path_buf(),
         })
+    }
+
+    /// Path to the SQLite file backing this handle.
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
     /// Run a read-only closure against a pooled connection. Use this for
@@ -470,8 +525,13 @@ impl Database {
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL
             );
-            CREATE INDEX IF NOT EXISTS idx_mcp_servers_updated
-                ON mcp_servers(updated_at DESC);
+            -- Retired: nothing ever ordered or filtered `mcp_servers` by
+            -- `updated_at` (the one SELECT sorts by `name`, everything else
+            -- goes by primary key), so this only cost write amplification.
+            -- Dropped rather than merely un-created so databases that already
+            -- have it get cleaned up too; `IF EXISTS` keeps it idempotent,
+            -- same as every other statement in this batch.
+            DROP INDEX IF EXISTS idx_mcp_servers_updated;
             "#,
         )?;
 
@@ -835,13 +895,17 @@ impl Database {
             ],
         )?;
 
-        for m in to_copy {
-            let msg_id = Uuid::new_v4().to_string();
-            tx.execute(
+        // One prepare for the whole copy — forking a long chat replays every
+        // message, and `tx.execute` would re-parse the INSERT each time.
+        {
+            let mut stmt = tx.prepare(
                 "INSERT INTO messages (id, session_id, role, content, thinking,
                                        attachments_json, metrics_json, tool_calls_json, compacted_at, created_at, import_group, import_hidden, pinned_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-                params![
+            )?;
+            for m in to_copy {
+                let msg_id = Uuid::new_v4().to_string();
+                stmt.execute(params![
                     msg_id,
                     new_id,
                     m.role,
@@ -855,8 +919,8 @@ impl Database {
                     m.import_group,
                     m.import_hidden,
                     m.pinned_at,
-                ],
-            )?;
+                ])?;
+            }
         }
         tx.commit()?;
         drop(conn);
@@ -1148,6 +1212,180 @@ impl Database {
                 .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
                 .collect::<Result<std::collections::HashMap<String, i64>, _>>()?;
             Ok(map)
+        })
+    }
+
+    /// Full-text-ish search across every live chat transcript, backing the
+    /// Cmd-K palette's message results. Substring match, newest first.
+    ///
+    /// Scoped deliberately:
+    ///   - archived chats are skipped, matching the palette's title search
+    ///   - `system` rows are skipped — they're UI notices, not conversation
+    ///   - hidden imported rows are skipped for the same reason the in-chat
+    ///     finder skips them: they live inside a collapsed card, so a hit
+    ///     there scrolls nowhere
+    ///
+    /// The `LIKE` is only a coarse pre-filter. It runs against the raw stored
+    /// `content`, which for user turns still carries the inlined attachment /
+    /// fetched-page bodies the bubble hides; `build_snippet` re-checks against
+    /// the *displayed* text and drops rows that only matched inside one, so a
+    /// result always highlights something once the user jumps to it.
+    ///
+    /// Case-insensitivity comes from SQLite's `LIKE`, which folds ASCII only.
+    /// A non-ASCII query matches at its own case but not across cases — an
+    /// accepted limitation, not worth an ICU build for a local search box.
+    pub fn search_messages(&self, query: &str, limit: usize) -> Result<Vec<MessageHit>> {
+        let needle = query.trim();
+        if needle.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let pattern = format!("%{}%", escape_like(needle));
+        // Over-fetch, because attachment-only matches get dropped below and we
+        // still want to fill the page when a query is common inside inlined
+        // documents.
+        let scan_limit = limit.saturating_mul(4) as i64;
+
+        let rows = self.with_read(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT m.id, m.session_id, m.role, m.content, m.created_at, s.title
+                 FROM messages m
+                 JOIN sessions s ON s.id = m.session_id
+                 WHERE s.archived_at IS NULL
+                   AND m.import_hidden = 0
+                   AND m.role IN ('user', 'assistant')
+                   AND m.content LIKE ?1 ESCAPE '\\'
+                 ORDER BY m.created_at DESC
+                 LIMIT ?2",
+            )?;
+            let rows = stmt
+                .query_map(params![pattern, scan_limit], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, i64>(4)?,
+                        r.get::<_, String>(5)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })?;
+
+        let mut out = Vec::with_capacity(limit);
+        for (message_id, session_id, role, content, created_at, session_title) in rows {
+            if out.len() >= limit {
+                break;
+            }
+            let displayed = if role == "user" {
+                strip_inlined_attachments(&content)
+            } else {
+                content.as_str()
+            };
+            let Some(snippet) = build_snippet(displayed, needle) else {
+                continue;
+            };
+            out.push(MessageHit {
+                message_id,
+                session_id,
+                session_title,
+                snippet,
+                created_at,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Byte + row totals for the Settings -> Data storage tile.
+    ///
+    /// Two different notions of "size" live here on purpose:
+    ///
+    ///   - `db_bytes` / `wal_bytes` are what the filesystem reports. This is
+    ///     what the user's disk actually gives up, and it never shrinks on
+    ///     delete — SQLite recycles freed pages instead of truncating.
+    ///   - The `*_bytes` buckets are *logical* sizes: the length of the text
+    ///     we store, ignoring page overhead, indexes, and slack. They're
+    ///     comparable to each other but always add up to less than the file.
+    ///
+    /// `LENGTH(CAST(x AS BLOB))` rather than plain `LENGTH(x)`: on a TEXT
+    /// value the latter counts characters, so any non-ASCII transcript would
+    /// under-report. The CAST forces the octet count.
+    pub fn storage_stats(&self) -> Result<StorageStats> {
+        let file_len = |p: std::path::PathBuf| -> u64 {
+            std::fs::metadata(p).map(|m| m.len()).unwrap_or(0)
+        };
+        let db_bytes = file_len(self.path.clone());
+        // WAL mode keeps two sidecars next to the database. The -wal in
+        // particular can hold tens of MB between checkpoints, so leaving it
+        // out would under-report what the folder costs.
+        let sidecar = |suffix: &str| {
+            let mut name = self.path.as_os_str().to_os_string();
+            name.push(suffix);
+            file_len(std::path::PathBuf::from(name))
+        };
+        let wal_bytes = sidecar("-wal") + sidecar("-shm");
+
+        self.with_read(|conn| {
+            let scalar = |sql: &str| -> Result<i64> {
+                Ok(conn.query_row(sql, [], |r| r.get::<_, i64>(0))?)
+            };
+            Ok(StorageStats {
+                db_path: self.path.display().to_string(),
+                db_bytes,
+                wal_bytes,
+
+                sessions: scalar("SELECT COUNT(*) FROM sessions")?,
+                messages: scalar("SELECT COUNT(*) FROM messages")?,
+                spaces: scalar("SELECT COUNT(*) FROM spaces")?,
+                space_files: scalar("SELECT COUNT(*) FROM space_files")?,
+                snippets: scalar("SELECT COUNT(*) FROM snippets")?,
+                mcp_servers: scalar("SELECT COUNT(*) FROM mcp_servers")?,
+
+                message_bytes: scalar(
+                    "SELECT COALESCE(SUM(LENGTH(CAST(content AS BLOB))), 0) FROM messages",
+                )?,
+                // Attachments are inlined as base64 into the owning row —
+                // there's no separate file store — so they're the bucket
+                // that actually grows the database.
+                attachment_bytes: scalar(
+                    "SELECT COALESCE(SUM(LENGTH(CAST(attachments_json AS BLOB))), 0) FROM messages",
+                )? + scalar(
+                    "SELECT COALESCE(SUM(LENGTH(CAST(attachments_json AS BLOB))), 0) FROM snippets",
+                )?,
+                space_bytes: scalar(
+                    "SELECT COALESCE(SUM(LENGTH(CAST(data AS BLOB))), 0) FROM space_files",
+                )? + scalar(
+                    "SELECT COALESCE(SUM(LENGTH(CAST(content AS BLOB))), 0) FROM space_memories",
+                )? + scalar(
+                    "SELECT COALESCE(SUM(LENGTH(CAST(description AS BLOB))
+                                       + LENGTH(CAST(instructions AS BLOB))), 0) FROM spaces",
+                )?,
+                // Everything else worth counting: prompt text, settings, and
+                // the per-chat metadata. Deliberately not exhaustive over
+                // every column — this is a rough "and the rest" figure, so a
+                // future column that goes unlisted only nudges it slightly.
+                other_bytes: scalar(
+                    "SELECT COALESCE(SUM(LENGTH(CAST(title AS BLOB))
+                                       + LENGTH(CAST(prompt AS BLOB))), 0) FROM snippets",
+                )? + scalar(
+                    "SELECT COALESCE(SUM(LENGTH(CAST(key AS BLOB))
+                                       + LENGTH(CAST(value AS BLOB))), 0) FROM settings",
+                )? + scalar(
+                    "SELECT COALESCE(SUM(LENGTH(CAST(value AS BLOB))), 0) FROM snippet_variables",
+                )? + scalar(
+                    "SELECT COALESCE(SUM(LENGTH(CAST(value AS BLOB))), 0) FROM snippet_fill_values",
+                )? + scalar(
+                    "SELECT COALESCE(SUM(LENGTH(CAST(name AS BLOB))
+                                       + LENGTH(CAST(COALESCE(url, '') AS BLOB))
+                                       + LENGTH(CAST(COALESCE(headers_json, '') AS BLOB))), 0)
+                     FROM mcp_servers",
+                )? + scalar(
+                    "SELECT COALESCE(SUM(LENGTH(CAST(title AS BLOB))
+                                       + LENGTH(CAST(COALESCE(system_prompt, '') AS BLOB))
+                                       + LENGTH(CAST(COALESCE(params_json, '') AS BLOB))), 0)
+                     FROM sessions",
+                )?,
+            })
         })
     }
 
@@ -2285,12 +2523,18 @@ impl Database {
             )?;
         }
 
-        for m in &d.messages {
-            tx.execute(
+        // Prepared once for the whole batch, like `import_messages` and
+        // `mark_messages_compacted` do. `tx.execute` re-parses the statement on
+        // every call, which is the dominant cost when a restore replays tens of
+        // thousands of rows.
+        {
+            let mut stmt = tx.prepare(
                 "INSERT INTO messages (id, session_id, role, content, thinking,
                                        attachments_json, metrics_json, tool_calls_json, compacted_at, created_at, import_group, import_hidden, pinned_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-                params![
+            )?;
+            for m in &d.messages {
+                stmt.execute(params![
                     m.id,
                     m.session_id,
                     m.role,
@@ -2304,8 +2548,8 @@ impl Database {
                     m.import_group,
                     m.import_hidden,
                     m.pinned_at,
-                ],
-            )?;
+                ])?;
+            }
         }
 
         for sp in &d.spaces {
@@ -2613,6 +2857,95 @@ pub struct ImportStats {
     pub settings: usize,
 }
 
+/// How much text `search_messages` keeps around a hit, in characters: the
+/// lead is what sits *before* the match so the excerpt reads as a sentence
+/// rather than starting mid-word on the query itself.
+const SNIPPET_LEAD: usize = 40;
+const SNIPPET_LEN: usize = 180;
+
+/// Neutralise the `LIKE` wildcards in a user-typed query so searching for
+/// `100%` or `foo_bar` matches those literals instead of turning into a
+/// match-anything pattern. Pairs with `ESCAPE '\'` in the statement.
+fn escape_like(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 8);
+    for c in s.chars() {
+        if matches!(c, '\\' | '%' | '_') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Rust mirror of `stripInlinedAttachments` in `src/lib/files.ts`: cuts a user
+/// message at the first inlined attachment / fetched-page header, which is
+/// where the bubble stops rendering too. Kept in sync by hand — the two live
+/// on opposite sides of the IPC boundary, and the alternative (shipping whole
+/// transcripts to the frontend to strip them there) is what this search
+/// exists to avoid.
+fn strip_inlined_attachments(content: &str) -> &str {
+    const MARKER: &str = "\n\n---\n";
+    const HEADERS: [&str; 4] = [
+        "Attached ",
+        "The user also attached ",
+        "Fetched URL: ",
+        "Failed to fetch ",
+    ];
+    let mut from = 0;
+    while let Some(rel) = content[from..].find(MARKER) {
+        let at = from + rel;
+        let rest = &content[at + MARKER.len()..];
+        if HEADERS.iter().any(|h| rest.starts_with(h)) {
+            return content[..at].trim_end();
+        }
+        // The marker starts with a newline, so `at + 1` is always a char
+        // boundary — safe to resume the scan just past it.
+        from = at + 1;
+    }
+    content.trim_end()
+}
+
+/// A one-line excerpt of `text` centred on the first case-insensitive
+/// occurrence of `needle`, or `None` when the needle isn't there at all.
+///
+/// Folds ASCII case only, which is exactly what the `LIKE` prefilter that
+/// selected this row does. That also keeps the fold byte-for-byte the same
+/// length as its input — unlike `str::to_lowercase`, where 'ß' becomes "ss" —
+/// so a match offset in the folded copy is a valid offset into `text`.
+fn build_snippet(text: &str, needle: &str) -> Option<String> {
+    if needle.is_empty() {
+        return None;
+    }
+    // One folded copy and a substring search, rather than two `Vec<char>`
+    // materialisations (four bytes per character, twice over) and a naive
+    // sliding-window compare: this runs on every candidate row of every
+    // keystroke's scan, and assistant turns run to tens of kilobytes.
+    let at = text
+        .to_ascii_lowercase()
+        .find(&needle.to_ascii_lowercase())?;
+
+    // Widen to a character window around the hit. `at` is a char boundary
+    // because ASCII folding never touches a multi-byte sequence.
+    let start = text[..at].chars().count().saturating_sub(SNIPPET_LEAD);
+    let mut out = String::new();
+    if start > 0 {
+        out.push('…');
+    }
+    let mut chars = text.chars().skip(start);
+    for _ in 0..SNIPPET_LEN {
+        match chars.next() {
+            Some(c) => out.push(c),
+            None => break,
+        }
+    }
+    if chars.next().is_some() {
+        out.push('…');
+    }
+    // The palette renders the excerpt as a single truncated line, so fold the
+    // markdown's newlines and indentation into single spaces.
+    Some(out.split_whitespace().collect::<Vec<_>>().join(" "))
+}
+
 /// Authoritative "does this column exist?" check via `PRAGMA table_info`.
 /// Used by `migrate()` to decide whether to run an `ALTER TABLE ADD COLUMN`.
 /// Returns an `Err` only on genuine query failures (bad table name,
@@ -2669,6 +3002,163 @@ mod tests {
         let db = Database::open(&path).expect("open");
         db.migrate().expect("migrate");
         (db, dir)
+    }
+
+    /// Guards the `storage_stats` SQL. Every bucket names tables and columns
+    /// as string literals, so a rename that `cargo check` waves through would
+    /// otherwise only surface as a runtime error in the Settings tile.
+    ///
+    /// Also pins the octet-vs-character distinction: the message content here
+    /// is deliberately non-ASCII, which a plain `LENGTH()` would under-count.
+    #[test]
+    fn storage_stats_counts_rows_and_octets() {
+        let (db, _dir) = fresh_db();
+
+        let empty = db.storage_stats().expect("stats on empty db");
+        assert_eq!(empty.messages, 0);
+        assert_eq!(empty.message_bytes, 0);
+        assert!(empty.db_bytes > 0, "an open database is never zero-length");
+
+        let s = db
+            .create_session("t", "ollama", "llama3", None, None)
+            .expect("session");
+        // 5 chars, 10 octets in UTF-8 — the gap a character count would miss.
+        db.append_message(&s.id, "user", "źdźbło", Some("[\"att\"]"))
+            .expect("message");
+        let sp = db.create_space("s", "", "").expect("space");
+        db.add_space_file(&sp.id, "f.txt", "text/plain", "text", "0123456789", 10, 0)
+            .expect("file");
+
+        let st = db.storage_stats().expect("stats");
+        assert_eq!(st.sessions, 1);
+        assert_eq!(st.messages, 1);
+        assert_eq!(st.spaces, 1);
+        assert_eq!(st.space_files, 1);
+        assert_eq!(st.message_bytes, "źdźbło".len() as i64);
+        assert_eq!(st.attachment_bytes, 7);
+        assert_eq!(st.space_bytes, 10);
+        // Session title + the two NULL-coalesced columns.
+        assert_eq!(st.other_bytes, 1);
+    }
+
+    /// Pins what the Cmd-K palette's transcript search is allowed to surface:
+    /// user + assistant turns from live chats, newest first, and nothing from
+    /// an archived chat or a `system` notice row.
+    #[test]
+    fn search_messages_scopes_to_live_user_and_assistant_turns() {
+        let (db, _dir) = fresh_db();
+
+        let live = db
+            .create_session("Rust notes", "ollama", "llama3", None, None)
+            .expect("session");
+        db.append_message(&live.id, "user", "how do I pin a borrow?", None)
+            .expect("prompt");
+        db.append_message(&live.id, "assistant", "You BORROW it mutably.", None)
+            .expect("response");
+        db.append_message(&live.id, "system", "borrow notice", None)
+            .expect("system");
+
+        let archived = db
+            .create_session("Old", "ollama", "llama3", None, None)
+            .expect("session");
+        db.append_message(&archived.id, "user", "borrow checker again", None)
+            .expect("prompt");
+        db.archive_session(&archived.id, true).expect("archive");
+
+        let hits = db.search_messages("BoRrOw", 10).expect("search");
+        assert_eq!(hits.len(), 2, "user + assistant from the live chat only");
+        // `ORDER BY created_at DESC` — the response was appended last.
+        assert_eq!(hits[0].snippet, "You BORROW it mutably.");
+        assert_eq!(hits[1].snippet, "how do I pin a borrow?");
+        assert_eq!(hits[0].session_title, "Rust notes");
+        assert_eq!(hits[0].session_id, live.id);
+
+        assert!(db.search_messages("", 10).expect("empty").is_empty());
+        assert!(db.search_messages("borrow", 0).expect("no room").is_empty());
+    }
+
+    /// A hit that only exists inside an inlined attachment body is dropped:
+    /// the bubble never renders that text, so jumping to it would land the
+    /// user on a message with nothing highlighted.
+    #[test]
+    fn search_messages_ignores_inlined_attachment_bodies() {
+        let (db, _dir) = fresh_db();
+        let s = db
+            .create_session("t", "ollama", "llama3", None, None)
+            .expect("session");
+        db.append_message(
+            &s.id,
+            "user",
+            "summarise this\n\n---\nAttached file `notes.txt`:\nkaleidoscope",
+            None,
+        )
+        .expect("message");
+
+        assert!(db.search_messages("kaleidoscope", 10).expect("search").is_empty());
+        let hits = db.search_messages("summarise", 10).expect("search");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].snippet, "summarise this");
+    }
+
+    /// `%` and `_` are ordinary characters in the search box, not wildcards.
+    #[test]
+    fn search_messages_escapes_like_wildcards() {
+        let (db, _dir) = fresh_db();
+        let s = db
+            .create_session("t", "ollama", "llama3", None, None)
+            .expect("session");
+        db.append_message(&s.id, "user", "battery at 100% now", None)
+            .expect("a");
+        db.append_message(&s.id, "user", "battery at 42 percent", None)
+            .expect("b");
+
+        let hits = db.search_messages("100%", 10).expect("search");
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].snippet.contains("100%"));
+        // Bare `%` would match every row if it reached SQLite unescaped.
+        assert_eq!(db.search_messages("at %", 10).expect("search").len(), 0);
+    }
+
+    /// Long messages come back as a window around the match, cut marks and
+    /// all, with the markdown's line breaks folded onto one line.
+    #[test]
+    fn search_messages_centres_the_snippet_on_the_match() {
+        let (db, _dir) = fresh_db();
+        let s = db
+            .create_session("t", "ollama", "llama3", None, None)
+            .expect("session");
+        let content = format!("{}\nNEEDLE\n{}", "a".repeat(200), "b".repeat(200));
+        db.append_message(&s.id, "assistant", &content, None)
+            .expect("message");
+
+        let hits = db.search_messages("needle", 10).expect("search");
+        assert_eq!(hits.len(), 1);
+        let snip = &hits[0].snippet;
+        assert!(snip.starts_with('…') && snip.ends_with('…'), "{snip}");
+        assert!(snip.contains("NEEDLE"), "{snip}");
+        assert!(!snip.contains('\n'), "newlines are folded away: {snip}");
+        assert!(snip.chars().count() <= SNIPPET_LEN + 2);
+    }
+
+    /// The snippet window is measured in characters but located by byte
+    /// offset, so multi-byte text on both sides of the hit is the case that
+    /// would panic on a bad slice.
+    #[test]
+    fn search_messages_snippet_handles_multibyte_text() {
+        let (db, _dir) = fresh_db();
+        let s = db
+            .create_session("t", "ollama", "llama3", None, None)
+            .expect("session");
+        let content = format!("{}NEEDLE{}", "é🌍".repeat(120), "ß—".repeat(120));
+        db.append_message(&s.id, "assistant", &content, None)
+            .expect("message");
+
+        let hits = db.search_messages("needle", 10).expect("search");
+        assert_eq!(hits.len(), 1);
+        let snip = &hits[0].snippet;
+        assert!(snip.contains("NEEDLE"), "{snip}");
+        assert!(snip.starts_with('…') && snip.ends_with('…'), "{snip}");
+        assert!(snip.chars().count() <= SNIPPET_LEN + 2);
     }
 
     #[test]

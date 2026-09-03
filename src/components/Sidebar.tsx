@@ -1108,15 +1108,35 @@ const SessionRow = memo(function SessionRowImpl({
 });
 
 // ---------------------------------------------------------------------------
-// Footer — Settings only. Profile/account isn't a concept in Loach (it's a
-// local-first app), so we just pin the gear here where ChatGPT puts the
-// user avatar.
+// Footer — Settings, plus a quiet "Archived" row whenever archived chats
+// exist. Archived chats live in Settings → Archive, which nothing else
+// signposts — without this row an archived chat looks gone for good.
+// Profile/account isn't a concept in Loach (it's a local-first app), so we
+// just pin the gear here where ChatGPT puts the user avatar.
 // ---------------------------------------------------------------------------
 
 function SidebarFooter() {
   const openSettingsTab = useUIStore((s) => s.openSettingsTab);
+  // Primitive selector so the row only re-renders when the count changes,
+  // not on every sessions-array identity change mid-stream.
+  const archivedCount = useChatStore((s) =>
+    s.sessions.reduce((n, x) => n + (x.archived_at ? 1 : 0), 0),
+  );
   return (
     <div className="border-t border-foreground/[0.06] p-2">
+      {archivedCount > 0 && (
+        <button
+          type="button"
+          onClick={() => openSettingsTab("archive")}
+          className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-[13px] font-medium text-foreground/75 transition-colors hover:bg-foreground/[0.07] hover:text-foreground"
+        >
+          <Archive className="h-4 w-4 text-foreground/55" />
+          <span>Archived</span>
+          <span className="ml-auto text-[11px] text-foreground/45">
+            {archivedCount}
+          </span>
+        </button>
+      )}
       <button
         type="button"
         onClick={() => openSettingsTab("general")}

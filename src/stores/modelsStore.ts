@@ -538,4 +538,40 @@ async function runAdminStream(
   } catch (e) {
     logger.warn("admin onFinish hook failed", e);
   }
+  await unpinAbandonedPull(streamId);
+}
+
+/** Undo an optimistic default-model pin when the pull that justified it never
+ *  produced a model.
+ *
+ *  Onboarding pins the tag at pull *start* — that's what lets the user leave
+ *  the wizard while a multi-gigabyte download runs. Cancel or fail that
+ *  download and the pin was left aimed at a tag Ollama doesn't have, so the
+ *  first message came back as a bare 404 rendered "endpoint or model not found.
+ *  Check the model name and URL" — precisely the first-run dead end the pin
+ *  exists to avoid.
+ *
+ *  Runs after `onFinish` has refreshed the model list, so "did it land?" is
+ *  answered against fresh state: cancelling a re-pull of a model that was
+ *  already installed correctly keeps its pin. */
+async function unpinAbandonedPull(streamId: string) {
+  const models = useModelsStore.getState();
+  const run = models.runs[streamId];
+  if (!run || run.kind !== "pull" || run.finished === "ok") return;
+  if (models.models.some((m) => m.id === run.target)) return;
+
+  const settings = useSettingsStore.getState();
+  if (
+    settings.default_provider !== "ollama" ||
+    settings.default_model !== run.target
+  ) {
+    return;
+  }
+  // "" is the no-pin state a fresh install starts from — new chats fall back
+  // to the most recently used model instead of a tag that doesn't exist.
+  try {
+    await settings.update("default_model", "");
+  } catch (e) {
+    logger.warn("could not clear the default model after an abandoned pull", e);
+  }
 }

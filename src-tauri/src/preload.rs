@@ -47,24 +47,6 @@ pub fn try_warm_default_model(db: Arc<Database>, http: reqwest::Client) {
     // already has a tokio runtime in scope. Tauri sets one up before
     // `setup()` runs, so this is safe from inside the builder closure.
     tauri::async_runtime::spawn(async move {
-        // If the user has an app-lock configured, don't warm anything
-        // before they prove they're allowed to be here. The lock-screen
-        // UI then drives the post-unlock JS preload. (The model itself
-        // isn't user data, but spinning up VRAM before authentication
-        // crosses a sensible boundary — and saves nothing for someone
-        // who closes the lock screen without unlocking.)
-        match crate::security::status() {
-            Ok(s) if s.configured => {
-                tracing::debug!("preload: skipped, app-lock configured");
-                return;
-            }
-            Err(e) => {
-                tracing::debug!("preload: security status read failed: {e}");
-                return;
-            }
-            _ => {}
-        }
-
         let settings: HashMap<String, String> = match db.all_settings() {
             Ok(rows) => rows.into_iter().collect(),
             Err(e) => {
@@ -80,6 +62,34 @@ pub fn try_warm_default_model(db: Arc<Database>, http: reqwest::Client) {
         // including the missing-row case on a fresh install.
         if settings.get("default_model_preload").map(String::as_str) != Some("true") {
             return;
+        }
+
+        // If the user has an app-lock configured, don't warm anything
+        // before they prove they're allowed to be here. The lock-screen
+        // UI then drives the post-unlock JS preload. (The model itself
+        // isn't user data, but spinning up VRAM before authentication
+        // crosses a sensible boundary — and saves nothing for someone
+        // who closes the lock screen without unlocking.)
+        //
+        // Checked *after* the opt-in gate and off the async runtime: it's a
+        // keyring read — a DBus round-trip on Linux — so every other keyring
+        // call goes through `spawn_blocking`, and running it ahead of the
+        // gate made every launch pay for it even with preload off, which is
+        // the default.
+        match tokio::task::spawn_blocking(crate::security::status).await {
+            Ok(Ok(s)) if s.configured => {
+                tracing::debug!("preload: skipped, app-lock configured");
+                return;
+            }
+            Ok(Err(e)) => {
+                tracing::debug!("preload: security status read failed: {e}");
+                return;
+            }
+            Err(e) => {
+                tracing::debug!("preload: security status task failed: {e}");
+                return;
+            }
+            _ => {}
         }
 
         let choice = settings
@@ -288,11 +298,9 @@ fn resolve_default_model_choice(
     if let Some(p) = choice.strip_prefix("provider:") {
         if p == "ollama" || p == "openai" {
             // sessions arrive in `updated_at DESC` order from
-            // `Database::list_sessions`, so the first match is already
-            // the most recent — no extra sort needed (the TS version
-            // re-sorts defensively because the in-memory list can drift
-            // after a model swap; the Rust preload reads straight from
-            // disk so we don't have that concern).
+            // `Database::list_sessions`, so the first match here is already
+            // the most recent. The caller re-sorts anyway rather than rely on
+            // that ordering holding across both implementations.
             if let Some(s) = sessions
                 .iter()
                 .find(|s| s.provider == p && !s.model.is_empty())

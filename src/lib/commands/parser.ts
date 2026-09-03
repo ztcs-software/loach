@@ -93,4 +93,8 @@ export interface PaletteEntry {
   /** Text inserted into the textarea when the entry is accepted. */
   insertText: string;
   description: string;
+  /** Set when something re-sectioned this row away from its registry group
+   *  — today only `orderByRecency`, which hoists recent commands under a
+   *  "Recent" header. The palette prefers this over `cmd.group`. */
+  groupOverride?: string;
 }

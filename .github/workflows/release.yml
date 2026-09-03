@@ -41,13 +41,13 @@ jobs:
     # this guard a stray manual run on that branch would tag and draft-release
     # unmerged code.
     if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.gate.outputs.version }}
       should_release: ${{ steps.gate.outputs.should_release }}
       release_body: ${{ steps.notes.outputs.body }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0  # need full history to inspect existing tags
 
@@ -109,7 +109,15 @@ jobs:
         include:
           - platform: windows-latest
             args: '--bundles nsis'
-          - platform: ubuntu-22.04
+          # Built inside an Ubuntu 22.04 container on the 24.04 runner. The
+          # 22.04 *runner image* is being retired (deprecation began
+          # 2026-09-17), but bundling against 24.04's glibc 2.39 would lock out
+          # every user still on Ubuntu 22.04 or Debian 12 — and the updater
+          # can't detect that, so they'd just get a binary that won't start.
+          # The container keeps the artifacts on glibc 2.35 while the job
+          # itself runs on a supported runner image.
+          - platform: ubuntu-24.04
+            container: ubuntu:22.04
             args: '--bundles deb,appimage,rpm'
           # Apple Silicon only — macos-14 is an M1 runner, so the target
           # matches the host arch and no extra `rustup target add` is needed.
@@ -122,27 +130,52 @@ jobs:
             args: '--target aarch64-apple-darwin --bundles app,dmg'
 
     runs-on: ${{ matrix.platform }}
+    container: ${{ matrix.container }}
     steps:
-      - uses: actions/checkout@v4
+      # The bare ubuntu:22.04 image ships neither git nor curl, and this must
+      # run *before* checkout: with no git present, actions/checkout quietly
+      # falls back to a tarball download and leaves no .git behind, which
+      # breaks tauri-action's tag creation. `safe.directory` because the
+      # container runs as root against a workspace owned by the runner user.
+      - name: Bootstrap container
+        if: matrix.container != ''
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            git curl ca-certificates xz-utils sudo
+          git config --global --add safe.directory '*'
+
+      - uses: actions/checkout@v7
         with:
           # Tauri-action needs full history to compute the right tag base
           # for the auto-created tag. Matches `prepare`'s checkout.
           fetch-depth: 0
 
+      # Runs as root inside the container, so no sudo. build-essential,
+      # pkg-config and libssl-dev come preinstalled on the runner image but
+      # are absent from the bare base image — as are `file` and `wget`, which
+      # the AppImage bundler shells out to (see the Dockerfile, which keeps the
+      # same list for local builds).
       - name: Install Linux build deps
-        if: matrix.platform == 'ubuntu-22.04'
+        if: matrix.platform == 'ubuntu-24.04'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential \
+            pkg-config \
+            libssl-dev \
             libwebkit2gtk-4.1-dev \
             libappindicator3-dev \
             librsvg2-dev \
             patchelf \
-            rpm
+            rpm \
+            file \
+            wget \
+            desktop-file-utils
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       # Pin to a specific stable release rather than tracking `@stable`. A
@@ -168,6 +201,9 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # appimagetool mounts itself through FUSE, which a container does not
+          # provide; this makes it self-extract instead. Harmless elsewhere.
+          APPIMAGE_EXTRACT_AND_RUN: 1
         with:
           # tauri-action will create + push this tag at the commit being built
           # if it doesn't already exist. First matrix job to finish creates

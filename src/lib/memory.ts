@@ -182,6 +182,9 @@ async function runOneShotStream(args: {
   return new Promise<string>((resolve, reject) => {
     let buffer = "";
     let unlistenFn: (() => void) | null = null;
+    // This run's own stop handle. Kept separately from the module-global
+    // `memoryStopFn` so cleanup can tell "my handle" from "a newer run's".
+    let stopFn: (() => Promise<unknown>) | null = null;
     // `timedOut` covers the race where `startChatStream`'s setup takes
     // longer than the wall-clock budget: the timer fires first, but
     // `unlistenFn` is still null because the `.then` hasn't run. Without
@@ -197,14 +200,26 @@ async function runOneShotStream(args: {
         /* already unlistened — harmless */
       }
       unlistenFn = null;
-      memoryStopFn = null;
+      // Only clear the module-global when it still points at THIS run. A
+      // superseded run's late `cancelled` event would otherwise wipe the
+      // handle a newer extraction had just installed, leaving that one with
+      // no working `cancelMemoryExtraction`.
+      if (memoryStopFn === stopFn) memoryStopFn = null;
+      stopFn = null;
     };
 
     // Hard ceiling on extractor wall-clock. If a model goes off the rails
     // and never emits `done`, we'd otherwise leak a listener.
     const timeoutId = window.setTimeout(() => {
       timedOut = true;
+      // Stop the backend generation, don't just drop the listener: the model
+      // would otherwise keep burning a generation slot with nobody reading
+      // it, competing with the user's next visible turn — and since cleanup
+      // clears the stop handle, no later `cancelMemoryExtraction()` could
+      // reach it either. Same reasoning as `generateSummary`'s `finally`.
+      const stop = stopFn;
       cleanup();
+      if (stop) void stop().catch(() => {});
       reject(new Error("memory extraction timed out"));
     }, 60_000);
 
@@ -262,9 +277,14 @@ async function runOneShotStream(args: {
           } catch {
             /* ignore */
           }
+          // Stop the generation too — the timer already gave up on reading
+          // it, so leaving it running would strand the model exactly as the
+          // timeout path above describes.
+          void handle.stop().catch(() => {});
           return;
         }
         unlistenFn = handle.unlisten;
+        stopFn = handle.stop;
         memoryStopFn = handle.stop;
       })
       .catch((e) => {

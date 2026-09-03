@@ -49,15 +49,10 @@ import { useSpaceStore } from "@/stores/spaceStore";
 import { useToastStore } from "@/stores/toastStore";
 import { useUIStore } from "@/stores/uiStore";
 import { fileToAttachment, SPACE_BYTES_CAP } from "@/lib/files";
-import {
-  ollamaListModels,
-  ollamaProbe,
-  openaiListModels,
-} from "@/lib/tauri";
+import { useProviderModels } from "@/lib/useProviderModels";
 import { cn, relativeDay } from "@/lib/utils";
 import {
   type ChatLabel,
-  type ModelInfo,
   type ProviderId,
   type Session,
   type SpaceFile,
@@ -213,7 +208,7 @@ export function SpaceView() {
       : "Default model";
 
   return (
-    <div className="flex min-w-0 flex-1 flex-col">
+    <main className="flex min-w-0 flex-1 flex-col">
       <ScrollArea className="flex-1">
         {/* Page wrapper carries no horizontal padding — children that need
             indentation handle their own. This way the title column and the
@@ -443,7 +438,7 @@ export function SpaceView() {
         initialDescription={space.description}
         onSave={handleSaveDetails}
       />
-    </div>
+    </main>
   );
 }
 
@@ -994,48 +989,9 @@ function ModelsTab({
   // Slice the store: only the four fields that drive the model probe.
   // A full `useSettingsStore()` subscription would re-render this picker
   // on every keystroke in the global SettingsDialog textareas.
-  const ollamaBaseUrl = useSettingsStore((s) => s.ollama_base_url);
-  const openaiBaseUrl = useSettingsStore((s) => s.openai_base_url);
   const openaiKeySet = useSettingsStore((s) => s.openai_key_set);
-  const settingsHydrated = useSettingsStore((s) => s.hydrated);
-  const [ollamaModels, setOllamaModels] = useState<ModelInfo[]>([]);
-  const [openaiModels, setOpenaiModels] = useState<ModelInfo[]>([]);
-  const [ollamaUp, setOllamaUp] = useState<boolean | null>(null);
-  const [loading, setLoading] = useState(false);
-
-  const reqId = useRef(0);
-  const refresh = useMemo(
-    () => async () => {
-      const id = ++reqId.current;
-      setLoading(true);
-      try {
-        const probe = await ollamaProbe(ollamaBaseUrl).catch(() => false);
-        if (id !== reqId.current) return;
-        setOllamaUp(probe);
-        if (probe) {
-          const m = await ollamaListModels(ollamaBaseUrl).catch(() => []);
-          if (id !== reqId.current) return;
-          setOllamaModels(m);
-        } else {
-          setOllamaModels([]);
-        }
-        if (openaiKeySet) {
-          const m = await openaiListModels(openaiBaseUrl).catch(() => []);
-          if (id !== reqId.current) return;
-          setOpenaiModels(m);
-        }
-      } finally {
-        // Only the latest-initiated run owns the loading flag.
-        if (id === reqId.current) setLoading(false);
-      }
-    },
-    [ollamaBaseUrl, openaiBaseUrl, openaiKeySet],
-  );
-
-  useEffect(() => {
-    if (!settingsHydrated) return;
-    refresh();
-  }, [settingsHydrated, refresh]);
+  const { ollamaModels, openaiModels, ollamaUp, loading, refresh } =
+    useProviderModels();
 
   const hasPick = !!(space.default_model && space.default_provider);
 

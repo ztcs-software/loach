@@ -192,7 +192,7 @@ fn op_add(args: &Value) -> McpCallResult {
         Some(s) => s,
         None => return err("missing required `unit` argument"),
     };
-    let amount = match args.get("amount").and_then(|v| v.as_i64()) {
+    let amount = match crate::tools::lenient_i64(args, "amount") {
         Some(n) => n,
         None => return err("missing required `amount` argument (integer)"),
     };
@@ -245,7 +245,7 @@ fn op_diff(args: &Value) -> McpCallResult {
         Ok(dt) => dt,
         Err(e) => return err(format!("could not parse `to`: {e}")),
     };
-    match diff_unit(from_dt, to_dt, unit) {
+    match diff_unit(from_dt, to_dt, &tz, unit) {
         Ok(n) => ok(n.to_string()),
         Err(e) => err(e),
     }
@@ -295,7 +295,7 @@ fn op_business_days_from(args: &Value) -> McpCallResult {
         Ok(s) => s,
         Err(e) => return err(e),
     };
-    let amount = match args.get("amount").and_then(|v| v.as_i64()) {
+    let amount = match crate::tools::lenient_i64(args, "amount") {
         Some(n) => n,
         None => return err("missing required `amount` argument (integer, negative goes backward)"),
     };
@@ -455,14 +455,22 @@ fn apply_seconds(start: DateTime<Utc>, secs: i64, neg: bool) -> Result<DateTime<
         .ok_or_else(|| "result is outside chrono's supported range".to_string())
 }
 
-fn diff_unit(from: DateTime<Utc>, to: DateTime<Utc>, unit: &str) -> Result<i64, String> {
+fn diff_unit(from: DateTime<Utc>, to: DateTime<Utc>, tz: &Tz, unit: &str) -> Result<i64, String> {
+    // Calendar units have to be read in the caller's timezone: "how many
+    // months apart" depends on which *local* date each instant lands on, and
+    // the UTC date can sit a day either side of it. Reading the UTC fields
+    // instead made e.g. a Fri→Mon `business_days` diff in America/New_York
+    // answer 2 (UTC sees Sat→Tue) where the local answer is 1. Duration units
+    // are frame-independent, so those keep using the UTC instants directly.
+    let from_local = from.with_timezone(tz);
+    let to_local = to.with_timezone(tz);
     match unit {
         // Calendar-based: subtract fields, not durations, so "Jan 31 → Feb 1"
         // is 1 month rather than ~0.97 of a month.
-        "years" => Ok(to.year() as i64 - from.year() as i64),
+        "years" => Ok(to_local.year() as i64 - from_local.year() as i64),
         "months" => {
-            let y = to.year() as i64 - from.year() as i64;
-            let m = to.month() as i64 - from.month() as i64;
+            let y = to_local.year() as i64 - from_local.year() as i64;
+            let m = to_local.month() as i64 - from_local.month() as i64;
             Ok(y * 12 + m)
         }
         "weeks" => Ok(to.signed_duration_since(from).num_weeks()),
@@ -471,8 +479,8 @@ fn diff_unit(from: DateTime<Utc>, to: DateTime<Utc>, unit: &str) -> Result<i64, 
         "minutes" => Ok(to.signed_duration_since(from).num_minutes()),
         "seconds" => Ok(to.signed_duration_since(from).num_seconds()),
         "business_days" => {
-            let from_date = from.date_naive();
-            let to_date = to.date_naive();
+            let from_date = from_local.date_naive();
+            let to_date = to_local.date_naive();
             // Mirror the magnitude cap `op_add` / `op_business_days_from`
             // enforce: `business_days_between` walks the span one day at a
             // time, so an uncapped diff between two far-apart (but individually
@@ -670,6 +678,51 @@ mod tests {
         }));
         assert!(!r.is_error);
         assert_eq!(r.content_text, "1");
+    }
+
+    #[test]
+    fn diff_business_days_uses_the_requested_timezone() {
+        // Fri 21:00 EDT → Mon 21:00 EDT is one business day apart. Both
+        // instants land on the *next* UTC day (EDT is UTC-4), so reading the
+        // UTC calendar instead saw Sat → Tue and answered 2.
+        let r = dispatch(&json!({
+            "op": "diff",
+            "from": "2026-05-29T21:00:00",
+            "to": "2026-06-01T21:00:00",
+            "timezone": "America/New_York",
+            "unit": "business_days",
+        }));
+        assert!(!r.is_error, "{}", r.content_text);
+        assert_eq!(r.content_text, "1");
+    }
+
+    #[test]
+    fn diff_months_uses_the_requested_timezone() {
+        // 20:00 on Jan 31 in New York is already Feb 1 in UTC, so the UTC
+        // reading collapsed a month boundary the caller straddles.
+        let r = dispatch(&json!({
+            "op": "diff",
+            "from": "2026-01-31T20:00:00-05:00",
+            "to": "2026-02-01T10:00:00-05:00",
+            "timezone": "America/New_York",
+            "unit": "months",
+        }));
+        assert!(!r.is_error, "{}", r.content_text);
+        assert_eq!(r.content_text, "1");
+    }
+
+    #[test]
+    fn add_accepts_float_shaped_integers() {
+        // Models routinely emit `5.0` where the schema says integer; that
+        // used to be reported as a missing argument.
+        let r = dispatch(&json!({
+            "op": "add",
+            "input": "2026-05-25T00:00:00Z",
+            "unit": "days",
+            "amount": 5.0,
+        }));
+        assert!(!r.is_error, "{}", r.content_text);
+        assert!(r.content_text.starts_with("2026-05-30"), "got: {}", r.content_text);
     }
 
     #[test]

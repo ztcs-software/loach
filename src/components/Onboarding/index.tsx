@@ -4,10 +4,10 @@ import { Button } from "@/components/ui/button";
 import { useOnboardingStore } from "@/stores/onboardingStore";
 import { cn } from "@/lib/utils";
 import { WelcomeStep } from "./WelcomeStep";
-import { NameStep } from "./NameStep";
 import { ProviderStep } from "./ProviderStep";
 import { PromptStep } from "./PromptStep";
 import { FeaturesStep } from "./FeaturesStep";
+import { ToolsStep } from "./ToolsStep";
 import { FinalStep } from "./FinalStep";
 
 /**
@@ -93,10 +93,10 @@ export function Onboarding() {
         />
         <div className="relative z-10 flex flex-1 min-h-0 flex-col">
           {step === "welcome" && <WelcomeStep onClose={handleClose} />}
-          {step === "name" && <NameStep onClose={handleClose} />}
           {step === "provider" && <ProviderStep onClose={handleClose} />}
-          {step === "prompt" && <PromptStep onClose={handleClose} />}
           {step === "features" && <FeaturesStep onClose={handleClose} />}
+          {step === "tools" && <ToolsStep onClose={handleClose} />}
+          {step === "prompt" && <PromptStep onClose={handleClose} />}
           {step === "final" && <FinalStep onClose={handleClose} />}
         </div>
 

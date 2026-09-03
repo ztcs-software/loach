@@ -1,7 +1,7 @@
 import type { Attachment } from "@/types";
 import { saveBinaryToFile, saveTextToFile } from "@/lib/tauri";
 
-export const MAX_FILE_BYTES = 20 * 1024 * 1024; // 20 MB
+const MAX_FILE_BYTES = 20 * 1024 * 1024; // 20 MB
 export const SPACE_BYTES_CAP = 200 * 1024 * 1024; // 200 MB total per space
 
 /**
@@ -15,7 +15,7 @@ export const SPACE_BYTES_CAP = 200 * 1024 * 1024; // 200 MB total per space
  * {@link Attachment.truncated} so the UI can flag it and inline a marker
  * so the model knows the slice is partial.
  */
-export const MAX_EXTRACTED_CHARS = 200_000;
+const MAX_EXTRACTED_CHARS = 200_000;
 
 /**
  * Combined inline-content ceiling for a single outgoing user message.
@@ -110,15 +110,30 @@ function blobToBase64(blob: Blob): Promise<string> {
   });
 }
 
-/** Lazy-loaded to keep the initial bundle small. */
-let pdfjsPromise: Promise<typeof import("pdfjs-dist")> | null = null;
+/** Lazy-loaded to keep the initial bundle small.
+ *
+ * The `legacy/` build rather than the default one. pdfjs calls
+ * `Promise.withResolvers` (Safari 17.4+) from `PDFDocumentLoadingTask`'s own
+ * class fields and `Map.prototype.getOrInsertComputed` (Chrome 145 / Safari
+ * 26.2+) on the render path, both unguarded. Our `minimumSystemVersion` of
+ * 11.0 tops out at Safari 16.6, where the default build throws a bare
+ * TypeError before reading a single byte. `legacy/` ships the core-js
+ * polyfills for both — including inside the worker, which a main-thread
+ * polyfill cannot reach, since it is a separate JS realm. Costs ~105 KB
+ * across the two files, on a path that only loads once a PDF is opened.
+ */
+let pdfjsPromise: Promise<
+  typeof import("pdfjs-dist/legacy/build/pdf.mjs")
+> | null = null;
 export async function getPdfjs() {
   if (!pdfjsPromise) {
     pdfjsPromise = (async () => {
-      const pdfjs = await import("pdfjs-dist");
-      // Vite picks this up via ?url and emits a static asset.
+      const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+      // Vite picks this up via ?url and emits a static asset. The `.min`
+      // build, because `?url` assets bypass the bundler's own minify step —
+      // the unminified worker shipped as ~2.2 MB against 1.2 MB for this one.
       const workerUrl = (
-        await import("pdfjs-dist/build/pdf.worker.mjs?url")
+        await import("pdfjs-dist/legacy/build/pdf.worker.min.mjs?url")
       ).default;
       pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
       return pdfjs;
@@ -172,7 +187,7 @@ async function extractPdfText(buf: ArrayBuffer): Promise<ExtractionResult> {
     }
   }
   await doc.cleanup();
-  await doc.destroy();
+  await doc.loadingTask.destroy();
 
   let text = pages.join("\n\n");
   let truncated = pagesExtracted < totalPages;
@@ -305,15 +320,10 @@ export async function fileToAttachment(file: File): Promise<Attachment> {
  * (or skipped if it can't even fit its frame), and any remaining
  * attachments are listed by name in a single trailing footer so the model
  * still knows they exist.
- *
- * @param maxTotalChars Optional override of the per-message ceiling, useful
- *   if a caller wants to reserve budget for a later append (e.g. fetched
- *   web pages — see {@link inlineFetchedPages}).
  */
 export function inlineTextAttachments(
   content: string,
   attachments: Attachment[],
-  maxTotalChars: number = MAX_INLINED_CHARS_PER_MESSAGE,
 ): string {
   const texts = attachments.filter((a) => a.kind === "text");
   const binary = attachments.filter((a) => a.kind === "file");
@@ -331,7 +341,7 @@ export function inlineTextAttachments(
     const header = `\n\n---\n${label}\n\`\`\`\n`;
     const footer = "\n```";
     const wrapCost = header.length + footer.length;
-    const remaining = maxTotalChars - out.length - wrapCost;
+    const remaining = MAX_INLINED_CHARS_PER_MESSAGE - out.length - wrapCost;
 
     if (remaining <= 200) {
       // Not enough room for even a tiny preview — defer this and any

@@ -26,10 +26,11 @@ pub const TOOL_NAME: &str = "pdf";
 
 /// Bundled text fonts: Liberation Sans (SIL OFL — see
 /// `assets/fonts/LICENSE-Liberation.txt`), metric-compatible with
-/// Helvetica/Arial so the fixed width estimate holds. printpdf 0.9 embeds
-/// each registered font *whole* (its runtime subsetting is disabled), so
-/// the vendored files are themselves pre-subset (via fonttools) to Latin +
-/// European + common punctuation/currency — ≈80 KB each instead of ≈410 KB.
+/// Helvetica/Arial so the fixed width estimate holds. The vendored files
+/// are pre-subset (via fonttools) to Latin + European + common
+/// punctuation/currency — ≈80 KB each instead of ≈410 KB — which keeps the
+/// `include_bytes!` blobs small in the binary itself. printpdf subsets
+/// again at save time; the two are independent and compose.
 /// Characters outside that coverage become `?` in [`sanitise`].
 const FONT_REGULAR: &[u8] = include_bytes!("../../assets/fonts/LiberationSans-Regular.ttf");
 const FONT_BOLD: &[u8] = include_bytes!("../../assets/fonts/LiberationSans-Bold.ttf");
@@ -435,9 +436,8 @@ fn render_document(title: &str, pages: &[PageSpec]) -> Result<Vec<u8>, String> {
     }
 
     let rendered_pages = state.into_pages();
-    // printpdf 0.9 embeds whole fonts (its runtime subsetting is disabled),
-    // so we keep PDFs small by pre-subsetting the bundled fonts instead —
-    // `PdfSaveOptions::subset_fonts` would be a no-op here.
+    // `PdfSaveOptions::default()` sets `subset_fonts: true`, so printpdf
+    // trims each embedded font down to the glyphs actually used.
     let opts = PdfSaveOptions::default();
     Ok(doc.with_pages(rendered_pages).save(&opts, &mut Vec::new()))
 }

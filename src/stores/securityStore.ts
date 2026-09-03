@@ -15,9 +15,9 @@ interface SecurityState {
   status: LockStatus;
   /** Hydration ran and we know whether the app is configured for a lock. */
   hydrated: boolean;
-  /** True once the user has cleared the lock screen. Stays true for the
-   *  rest of the session. There's no auto-relock-on-idle yet — when we add
-   *  one, this becomes a timer-driven boolean. */
+  /** True once the user has cleared the lock screen. Flipped back to false
+   *  by `lock()` — on the auto-lock triggers in `src/lib/autoLock.ts` or the
+   *  Lock-now shortcut — so a session can re-lock without a restart. */
   unlocked: boolean;
 
   hydrate: () => Promise<void>;
@@ -27,6 +27,11 @@ interface SecurityState {
   /** Try the supplied credentials. Returns true on success and flips
    *  `unlocked` so the gate in App.tsx falls open. */
   unlock: (args: { pin?: string; password?: string }) => Promise<boolean>;
+  /** Re-engage the lock screen. No-op when no lock is configured — there'd
+   *  be no credential to unlock with, so flipping the flag would strand the
+   *  user behind a dead lock screen (the same failure `hydrate` fails open
+   *  to avoid). Purely local state; the backend has nothing to forget. */
+  lock: () => void;
   /** Tear down the lock. Used by "Remove app lock" in Settings. Requires
    *  the user's CURRENT credentials so a compromised renderer can't disable
    *  the lock without authenticating first. */
@@ -113,6 +118,12 @@ export const useSecurityStore = create<SecurityState>((set, get) => ({
     const ok = await backendUnlock({ pin, password });
     if (ok) set({ unlocked: true });
     return ok;
+  },
+
+  lock: () => {
+    const { status, unlocked } = get();
+    if (!status.configured || !unlocked) return;
+    set({ unlocked: false });
   },
 
   clear: async (args) => {

@@ -21,12 +21,18 @@ import {
  * theme + background style the user has set — no extra theming work
  * needed for dark/light or solid/aurora.
  *
- * Rows are grouped (Navigation / Chat / Layout / Help) so the user can
+ * Rows are grouped (Navigation / Chat / Layout / Security / Help) so the user can
  * scan by category instead of memorising the full list. Each row is
  * label + kbd chips; chips are stacked when a binding has multiple
  * accepted keys (e.g. Cmd+Shift+⌫ / Cmd+Shift+⌦ on macOS).
  */
-const GROUP_ORDER: ShortcutGroup[] = ["Navigation", "Chat", "Layout", "Help"];
+const GROUP_ORDER: ShortcutGroup[] = [
+  "Navigation",
+  "Chat",
+  "Layout",
+  "Security",
+  "Help",
+];
 
 export function ShortcutListDialog({
   open,

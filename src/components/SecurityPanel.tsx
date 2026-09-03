@@ -4,16 +4,22 @@ import {
   CircleAlert,
   KeyRound,
   Lock,
+  MonitorOff,
   ShieldCheck,
+  Timer,
   Trash2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
+import { Switch } from "@/components/ui/switch";
 import { useSecurityStore } from "@/stores/securityStore";
+import { useSettingsStore } from "@/stores/settingsStore";
+import { SHORTCUTS, formatShortcut } from "@/lib/shortcuts";
 import { cn } from "@/lib/utils";
 import type { LockMethod } from "@/lib/tauri";
+import type { LockIdleTimeout } from "@/types";
 
 type PinLength = 4 | 6 | 8;
 type Mode = "idle" | "setup" | "remove";
@@ -80,17 +86,20 @@ export function SecurityPanel() {
     <div className="space-y-5">
       <p className="text-[13px] text-foreground/55">
         Lock the access to Loach with a PIN, a password, or both. Credentials
-        are securely stored in your operating system's credentials manager.
+        are securely stored in your OS credential manager.
       </p>
 
       {status.configured ? (
-        <ConfiguredCard
-          method={status.method!}
-          pinLength={status.pin_length}
-          hasHint={status.has_hint}
-          onChange={() => setMode("setup")}
-          onRemove={() => setMode("remove")}
-        />
+        <>
+          <ConfiguredCard
+            method={status.method!}
+            pinLength={status.pin_length}
+            hasHint={status.has_hint}
+            onChange={() => setMode("setup")}
+            onRemove={() => setMode("remove")}
+          />
+          <AutoLockCard />
+        </>
       ) : (
         <UnconfiguredCard onSetup={() => setMode("setup")} />
       )}
@@ -159,8 +168,9 @@ function RemoveConfirm({
 
         {usesPin && (
           <div>
-            <Label>Current PIN</Label>
+            <Label htmlFor="remove-current-pin">Current PIN</Label>
             <Input
+              id="remove-current-pin"
               className="mt-1.5"
               type="password"
               inputMode="numeric"
@@ -176,8 +186,9 @@ function RemoveConfirm({
         )}
         {usesPassword && (
           <div>
-            <Label>Current password</Label>
+            <Label htmlFor="remove-current-password">Current password</Label>
             <Input
+              id="remove-current-password"
               className="mt-1.5"
               type="password"
               autoComplete="current-password"
@@ -209,6 +220,119 @@ function RemoveConfirm({
           {busy ? "Removing…" : "Remove app lock"}
         </Button>
       </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Auto-lock — only rendered alongside a CONFIGURED lock. Without credentials
+// on file there is nothing to re-lock to, and `securityStore.lock()` no-ops,
+// so offering the controls would be offering dead switches.
+// ---------------------------------------------------------------------------
+
+const IDLE_OPTIONS: { value: LockIdleTimeout; label: string }[] = [
+  { value: "off", label: "Off" },
+  { value: "1m", label: "1 min" },
+  { value: "5m", label: "5 min" },
+  { value: "15m", label: "15 min" },
+  { value: "30m", label: "30 min" },
+];
+
+function AutoLockCard() {
+  const idleTimeout = useSettingsStore((s) => s.lock_idle_timeout);
+  const lockOnHide = useSettingsStore((s) => s.lock_on_hide);
+  const update = useSettingsStore((s) => s.update);
+
+  // Read the binding off the shortcut table rather than hard-coding "Ctrl
+  // Shift L" — the table is the single source of truth and already handles
+  // the ⌘ / Ctrl split.
+  const lockShortcut = useMemo(() => {
+    const spec = SHORTCUTS.find((x) => x.action === "lock-now");
+    return spec ? formatShortcut(spec) : null;
+  }, []);
+
+  return (
+    <div className="rounded-2xl border border-foreground/10 bg-foreground/[0.025] p-5 space-y-4">
+      <div>
+        <h3 className="text-sm font-semibold text-foreground/90">Auto-lock</h3>
+        <p className="mt-1 text-[12.5px] leading-relaxed text-foreground/60">
+          Without a trigger below, unlocking once lasts until you quit Loach.
+        </p>
+      </div>
+
+      <div>
+        <Label className="flex items-center gap-1.5">
+          <Timer className="h-3.5 w-3.5 text-foreground/60" />
+          Lock after inactivity
+        </Label>
+        <p className="mt-1 text-[11px] text-foreground/50">
+          Locks when there has been no typing, clicking or scrolling for this
+          long. Anything already streaming keeps running behind the lock
+          screen.
+        </p>
+        <div
+          role="radiogroup"
+          aria-label="Lock after inactivity"
+          className="mt-3 grid grid-cols-5 gap-2 rounded-2xl border border-foreground/10 bg-foreground/[0.03] p-1"
+        >
+          {IDLE_OPTIONS.map((opt) => {
+            const selected = idleTimeout === opt.value;
+            return (
+              <button
+                key={opt.value}
+                type="button"
+                role="radio"
+                aria-checked={selected}
+                onClick={() => void update("lock_idle_timeout", opt.value)}
+                className={cn(
+                  "flex items-center justify-center rounded-xl px-2 py-2 text-[12px] font-medium transition-colors",
+                  selected
+                    ? "bg-primary/10 text-foreground shadow-[0_1px_0_0_rgba(255,255,255,0.06)_inset]"
+                    : "text-foreground/70 hover:bg-foreground/[0.05] hover:text-foreground",
+                )}
+              >
+                {opt.label}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      <Separator />
+
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0">
+          <Label className="flex items-center gap-1.5">
+            <MonitorOff className="h-3.5 w-3.5 text-foreground/60" />
+            Lock when minimized
+          </Label>
+          <p className="mt-1 text-[11px] text-foreground/50">
+            Locks as soon as the window is minimized or hidden. Save and file
+            dialogs don't count, so exporting or attaching a file won't lock
+            you out mid-task.
+          </p>
+        </div>
+        <Switch
+          checked={lockOnHide}
+          onCheckedChange={(next) => void update("lock_on_hide", next)}
+          className="shrink-0"
+          aria-label={
+            lockOnHide
+              ? "Don't lock when the window is minimized"
+              : "Lock when the window is minimized"
+          }
+        />
+      </div>
+
+      {lockShortcut && (
+        <p className="text-[11px] text-foreground/45">
+          Press{" "}
+          <kbd className="inline-flex h-5 items-center rounded-md border border-foreground/15 bg-foreground/[0.06] px-1.5 font-mono text-[10.5px] font-medium tracking-wide text-foreground/70">
+            {lockShortcut}
+          </kbd>{" "}
+          to lock right now.
+        </p>
+      )}
     </div>
   );
 }
@@ -438,8 +562,9 @@ function SetupWizard({
           </div>
           {currentUsesPin && (
             <div>
-              <Label>Current PIN</Label>
+              <Label htmlFor="setup-current-pin">Current PIN</Label>
               <Input
+                id="setup-current-pin"
                 className="mt-1.5"
                 type="password"
                 inputMode="numeric"
@@ -457,8 +582,9 @@ function SetupWizard({
           )}
           {currentUsesPassword && (
             <div>
-              <Label>Current password</Label>
+              <Label htmlFor="setup-current-password">Current password</Label>
               <Input
+                id="setup-current-password"
                 className="mt-1.5"
                 type="password"
                 autoComplete="current-password"
@@ -522,8 +648,9 @@ function SetupWizard({
 
             <div className="grid gap-3 sm:grid-cols-2">
               <div>
-                <Label>New PIN</Label>
+                <Label htmlFor="setup-new-pin">New PIN</Label>
                 <Input
+                  id="setup-new-pin"
                   className="mt-1.5"
                   type="password"
                   inputMode="numeric"
@@ -537,8 +664,9 @@ function SetupWizard({
                 />
               </div>
               <div>
-                <Label>Confirm PIN</Label>
+                <Label htmlFor="setup-confirm-pin">Confirm PIN</Label>
                 <Input
+                  id="setup-confirm-pin"
                   className="mt-1.5"
                   type="password"
                   inputMode="numeric"
@@ -562,8 +690,9 @@ function SetupWizard({
             <Separator />
             <div className="grid gap-3 sm:grid-cols-2">
               <div>
-                <Label>New password</Label>
+                <Label htmlFor="setup-new-password">New password</Label>
                 <Input
+                  id="setup-new-password"
                   className="mt-1.5"
                   type="password"
                   autoComplete="new-password"
@@ -573,8 +702,9 @@ function SetupWizard({
                 />
               </div>
               <div>
-                <Label>Confirm password</Label>
+                <Label htmlFor="setup-confirm-password">Confirm password</Label>
                 <Input
+                  id="setup-confirm-password"
                   className="mt-1.5"
                   type="password"
                   autoComplete="new-password"
@@ -590,10 +720,11 @@ function SetupWizard({
         <Separator />
 
         <div>
-          <Label>
+          <Label htmlFor="setup-hint">
             Hint <span className="text-foreground/40">(optional)</span>
           </Label>
           <Input
+            id="setup-hint"
             className="mt-1.5"
             value={hint}
             onChange={(e) => setHint(e.target.value)}

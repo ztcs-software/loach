@@ -31,15 +31,17 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Slider } from "@/components/ui/slider";
 import { FileChip } from "./FileChip";
-import { Markdown } from "./Markdown";
+import { ChipDivider, PersonaChip, ToneChip } from "./ComposerChip";
+import { Markdown, StreamingMarkdown } from "./Markdown";
 import { fileToAttachment, FileTooLargeError } from "@/lib/files";
 import { ollamaListModels, ollamaProbe } from "@/lib/tauri";
 import {
   DEFAULT_PERSONA_ID,
+  getPersona,
   PERSONAS,
   type Persona,
 } from "@/lib/personas";
-import { DEFAULT_TONE_ID, TONES, type Tone } from "@/lib/tones";
+import { DEFAULT_TONE_ID, getTone, TONES, type Tone } from "@/lib/tones";
 import { useChatStore } from "@/stores/chatStore";
 import { useModelsStore } from "@/stores/modelsStore";
 import {
@@ -76,6 +78,20 @@ import { cn } from "@/lib/utils";
 export function PrivateChat() {
   const open = usePrivateChatStore((s) => s.open);
   const paramsOpen = usePrivateChatStore((s) => s.paramsOpen);
+
+  // Hold the regular chat queue for as long as the overlay is up. The entry
+  // points (TitleBar, the `/private` command) already cancel whichever chat is
+  // *streaming*, but the queue would then promote the next waiter straight
+  // into the gap and stream it into SQLite behind the overlay, competing for
+  // the same model slot. Tied to the overlay's lifetime rather than to the
+  // entry points so that every exit — the X button, an unmount into the lock
+  // screen — releases the hold.
+  useEffect(() => {
+    if (!open) return;
+    const { setQueueHeld } = useChatStore.getState();
+    setQueueHeld(true);
+    return () => setQueueHeld(false);
+  }, [open]);
 
   if (!open) return null;
 
@@ -447,9 +463,21 @@ function PrivateMessageBubble({
             <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-zinc-400 [animation-delay:160ms]" />
             <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-zinc-400 [animation-delay:320ms]" />
           </div>
+        ) : isStreaming ? (
+          // Same treatment the regular transcript gets: the store hands us a
+          // new message object every animation frame, so rendering the full
+          // `Markdown` here re-ran remark and re-highlighted the whole growing
+          // reply on each flush. `StreamingMarkdown` memoizes the stable prefix
+          // and leaves the tail unhighlighted until the block settles.
+          <StreamingMarkdown
+            content={message.content}
+            math
+            className="prose prose-invert prose-sm max-w-none text-zinc-100"
+          />
         ) : (
           <Markdown
             content={message.content}
+            math
             className="prose prose-invert prose-sm max-w-none text-zinc-100"
           />
         )}
@@ -559,7 +587,9 @@ function PrivateParamsPanel() {
       ? `Using ${model}'s Modelfile defaults.`
       : modelDefaults === undefined && model
         ? "Loading model defaults…"
-        : "Using app defaults — this model lists no overrides.";
+        : !model
+          ? "Using app defaults — no model selected yet."
+          : "Using app defaults — this model lists no overrides.";
 
   // Effective values shown on each row mirror chatStore.readSessionParams'
   // merge order: DEFAULT_PARAMS < thinking-default < modelDefaults <
@@ -609,7 +639,9 @@ function PrivateParamsPanel() {
               disabledHint={
                 modelCapabilities === undefined && model
                   ? "Loading model capabilities…"
-                  : "This model doesn't support a thinking step."
+                  : !model
+                    ? "Pick a model to see whether it supports a thinking step."
+                    : "This model doesn't support a thinking step."
               }
               onChange={(next) => update({ think: next })}
             />
@@ -691,9 +723,11 @@ function PrivateParamsPanel() {
                   key={t.id}
                   tone={t}
                   active={effectiveToneId === t.id}
-                  onClick={() =>
-                    setTone(t.id === DEFAULT_TONE_ID ? null : t.id)
-                  }
+                  // Write the literal id, "default" included. Mapping it back
+                  // to `null` would fall through to the global default again,
+                  // so picking Default (or clearing the composer's tone chip)
+                  // could never turn off an inherited tone.
+                  onClick={() => setTone(t.id)}
                 />
               ))}
             </div>
@@ -713,7 +747,7 @@ function PrivateParamsPanel() {
               id="private-system-prompt"
               rows={5}
               placeholder="Extra instructions for this chat — sit between the persona and the tone…"
-              className="mt-2 resize-none border-white/10 bg-white/[0.04] text-sm focus-visible:border-white/25 focus-visible:ring-0"
+              className="mt-2 resize-none border-white/10 bg-white/[0.04] text-sm focus-visible:border-white/25"
               value={additional}
               onChange={(e) => setAdditional(e.target.value)}
             />
@@ -815,13 +849,12 @@ function LowVramRow({
   );
 }
 
+/** Stops-only slider. The private params panel has exactly one slider
+ *  (Context Length) and it snaps to `CTX_STOPS`, so the continuous
+ *  min/max/step variant this started life with was never reachable here. */
 function SliderRow({
   label,
   value,
-  min = 0,
-  max = 0,
-  step = 1,
-  precision = 2,
   onChange,
   hint,
   stops,
@@ -829,34 +862,22 @@ function SliderRow({
 }: {
   label: string;
   value: number;
-  min?: number;
-  max?: number;
-  step?: number;
-  precision?: number;
   onChange: (v: number) => void;
   hint?: string;
-  stops?: number[];
+  stops: number[];
   format?: (v: number) => string;
 }) {
-  const usingStops = stops && stops.length > 0;
-  const stopIdx = usingStops
-    ? (() => {
-        let best = 0;
-        let bestDiff = Infinity;
-        for (let i = 0; i < stops!.length; i++) {
-          const d = Math.abs(stops![i] - value);
-          if (d < bestDiff) {
-            bestDiff = d;
-            best = i;
-          }
-        }
-        return best;
-      })()
-    : 0;
-  const displayValue = usingStops ? stops![stopIdx] : value;
-  const displayText = format
-    ? format(displayValue)
-    : displayValue.toFixed(precision);
+  let stopIdx = 0;
+  let bestDiff = Infinity;
+  for (let i = 0; i < stops.length; i++) {
+    const d = Math.abs(stops[i] - value);
+    if (d < bestDiff) {
+      bestDiff = d;
+      stopIdx = i;
+    }
+  }
+  const displayValue = stops[stopIdx];
+  const displayText = format ? format(displayValue) : String(displayValue);
 
   return (
     <div>
@@ -868,23 +889,15 @@ function SliderRow({
           {displayText}
         </span>
       </div>
-      {usingStops ? (
-        <Slider
-          value={[stopIdx]}
-          min={0}
-          max={stops!.length - 1}
-          step={1}
-          onValueChange={(v) => onChange(stops![v[0]])}
-        />
-      ) : (
-        <Slider
-          value={[value]}
-          min={min}
-          max={max}
-          step={step}
-          onValueChange={(v) => onChange(v[0])}
-        />
-      )}
+      <Slider
+        thumbLabel={label}
+        thumbValueText={displayText}
+        value={[stopIdx]}
+        min={0}
+        max={stops.length - 1}
+        step={1}
+        onValueChange={(v) => onChange(stops[v[0]])}
+      />
       {hint && (
         <p className="mt-1.5 text-[10.5px] leading-snug text-zinc-500">
           {hint}
@@ -912,7 +925,7 @@ function PersonaPill({
       className={cn(
         "inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[11px] transition-colors",
         active
-          ? "border-zinc-300 bg-transparent font-bold text-zinc-50"
+          ? "border-primary/50 bg-primary/10 font-semibold text-zinc-50"
           : "border-white/10 bg-white/[0.04] font-medium text-zinc-300 hover:border-white/25 hover:bg-white/10 hover:text-zinc-50",
       )}
     >
@@ -940,7 +953,7 @@ function TonePill({
       className={cn(
         "inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[11px] transition-colors",
         active
-          ? "border-zinc-300 bg-transparent font-bold text-zinc-50"
+          ? "border-primary/50 bg-primary/10 font-semibold text-zinc-50"
           : "border-white/10 bg-white/[0.04] font-medium text-zinc-300 hover:border-white/25 hover:bg-white/10 hover:text-zinc-50",
       )}
     >
@@ -959,6 +972,19 @@ function PrivateChatComposer() {
   const cancel = usePrivateChatStore((s) => s.cancel);
   const isStreaming = usePrivateChatStore((s) => s.isStreaming);
   const model = usePrivateChatStore((s) => s.model);
+  // Same config chips as the main composer. Private Chat's persona / tone
+  // live on its own store (both nullable, both wiped on close) rather than
+  // keyed by session id, but the chip row reads identically.
+  const personaId = usePrivateChatStore((s) => s.personaId);
+  const setPersona = usePrivateChatStore((s) => s.setPersona);
+  const toneId = usePrivateChatStore((s) => s.toneId);
+  const setTone = usePrivateChatStore((s) => s.setTone);
+  const defaultToneId = useSettingsStore((s) => s.default_tone_id);
+  const activePersona =
+    personaId && personaId !== DEFAULT_PERSONA_ID ? getPersona(personaId) : null;
+  const effectiveToneId = toneId ?? defaultToneId ?? DEFAULT_TONE_ID;
+  const activeTone =
+    effectiveToneId !== DEFAULT_TONE_ID ? getTone(effectiveToneId) : null;
   const [text, setText] = useState("");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -1046,8 +1072,21 @@ function PrivateChatComposer() {
     // panel edge as it does in a normal chat.
     <div className="relative px-4 pb-5 pt-3">
       <div className="mx-auto w-full max-w-3xl">
-        {attachments.length > 0 && (
+        {(attachments.length > 0 || activePersona || activeTone) && (
           <div className="mb-3 flex flex-wrap items-center gap-2">
+            {activePersona && (
+              <PersonaChip persona={activePersona} onRemove={() => setPersona(null)} />
+            )}
+            {activeTone && (
+              <ToneChip
+                tone={activeTone}
+                fromGlobal={!toneId}
+                onRemove={() => setTone(DEFAULT_TONE_ID)}
+              />
+            )}
+            {(activePersona || activeTone) && attachments.length > 0 && (
+              <ChipDivider />
+            )}
             {attachments.map((a, i) => (
               <FileChip
                 key={`${a.name}-${i}`}
@@ -1111,6 +1150,11 @@ function PrivateChatComposer() {
             className="min-h-[28px] max-h-[220px] flex-1 resize-none border-none bg-transparent backdrop-blur-none px-1 py-1.5 text-[15px] leading-relaxed text-zinc-100 placeholder:text-zinc-500 shadow-none outline-none focus-visible:ring-0 focus-visible:border-none focus-visible:bg-transparent focus-visible:outline-none"
             rows={1}
           />
+          {/* No voice-dictation button here, deliberately: the regular
+              composer's dictation rides the Web Speech API, which sends
+              audio to an online recognition service in Chromium/WebView2.
+              Private Chat promises nothing leaves the machine, so the mic
+              stays out — don't re-add it for parity with ChatInput. */}
           <button
             type="button"
             onClick={onPrimary}

@@ -12,9 +12,9 @@ Run local LLMs with [Ollama](https://ollama.com) or connect any OpenAI-compatibl
 [![Release build](https://github.com/ztcs-software/loach/actions/workflows/release.yml/badge.svg)](https://github.com/ztcs-software/loach/actions/workflows/release.yml)
 
 ![Tauri 2](https://img.shields.io/badge/Tauri-2-FFC131?logo=tauri&logoColor=white)
-![React 18](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=white)
-![Rust](https://img.shields.io/badge/Rust-stable-000000?logo=rust&logoColor=white)
-![Vite](https://img.shields.io/badge/Vite-7-646CFF?logo=vite&logoColor=white)
+![React 19](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=white)
+![Rust 1.88+](https://img.shields.io/badge/Rust-1.88+-000000?logo=rust&logoColor=white)
+![Vite](https://img.shields.io/badge/Vite-8-646CFF?logo=vite&logoColor=white)
 ![Tailwind CSS](https://img.shields.io/badge/Tailwind-3-38BDF8?logo=tailwindcss&logoColor=white)
 ![Ollama](https://img.shields.io/badge/Ollama-compatible-000000?logo=ollama&logoColor=white)
 
@@ -54,14 +54,15 @@ Behind a calm, beautifully crafted UI sits a rich feature set - ready when you n
 - **Fork chats** - branch any conversation into a new copy that links back to its source.
 - **Pinned responses** - pin any reply and jump straight back to it from a bar under the chat header.
 - **Private chats** - an ephemeral chat that writes nothing to disk and wipes its transcript the moment you close it; open it from the ghost icon in the title bar.
-- **Chat archive** - move chats out of the sidebar without deleting them; restore or delete them from dedicated archive view.
-- **Search** - search across chats, spaces and snippets, plus a browser-style in-chat finder with phrase highlighting.
+- **Chat archive** - move chats out of the sidebar without deleting them, with an inline Undo if you mis-clicked; restore or delete them from dedicated archive view.
+- **Search** - search across chats, message content, spaces and snippets, narrowed with a scope picker or an `in:` filter, plus a browser-style in-chat finder with phrase highlighting.
 
 #### Composing & steering a chat
 - **Slash commands** - type `/` in the composer for a command palette: `/fork`, `/regenerate`, `/compact`, `/private`, `/model`, `/persona`, `/snippet`, `/remember` and more.
 - **Personas and Tones** - pick a role (Code Reviewer, Translator, ELI5...) and delivery style (Formal, Casual, Direct, Detailed...).
 - **Context management** - a live bar under the composer shows how full the context window is, with one-click compaction that summarizes older turns to free space.
 - **Import / export context** - export chat context to JSON or Markdown, optionally summarized to compact it, and paste exported data - or any text - back to any chat's context.
+- **LaTeX math** - replies typeset with KaTeX: `$$…$$`, `$…$`, `\(…\)`, `\[…\]` and ` ```math ` fences render out of the box. `$` doubles as a currency sign, so `$…$` only typesets when the span actually reads as math - "it costs $5 and $10" stays prose. KaTeX ships inside the app (no network access) and is only read from disk the first time a reply contains math.
 
 #### Model tools & capabilities
 - **Tools** - let models call local tools including calculate, date/time, count, hash, UUID, base64, JSON, unit convert, text diff, sort, IP math and PDF generation. 
@@ -76,8 +77,8 @@ Behind a calm, beautifully crafted UI sits a rich feature set - ready when you n
 - **Share a message** - copy any message as text or as a rendered chat-bubble image, save the image as a PNG, or open a pre-filled post on Facebook, X, Reddit or LinkedIn.
 
 #### App, data & updates 
-- **Data management** - make backups of your content to JSON file, restore data or permanently delete it with a few clicks. 
-- **App lock** - optional PIN, password or PIN + password gate at launch; credentials are hashed and stored in OS credential manager.
+- **Data management** - make backups of your content to JSON file, restore data or permanently delete it with a few clicks, with a storage breakdown showing what your chats, attachments and Spaces actually weigh on disk. 
+- **App lock** - optional PIN, password or PIN + password gate at launch, with opt-in auto-lock after inactivity or on minimize and a lock-now shortcut; credentials are hashed and stored in OS credential manager.
 - **Themes** - glassy, gradient Aurora or flat Solid, both available in Dark and Light variants.
 - **OTA updates** - get new features, bug fixes, performance improvements and security patches directly from the app, with an opt-in check at launch that tells you when a new version is out.
 
@@ -104,7 +105,16 @@ With each stable release we publish pre-built `.exe`, `.deb`, `.rpm`, `.AppImage
 **👉 Download a pre-built package from the [latest stable release](https://github.com/ztcs-software/loach/releases/latest)**
 
 > [!NOTE]
->For local models make sure [Ollama](https://ollama.com) is up and running (`ollama serve`). If you don't have any models pulled yet, Loach will offer to install one during onboarding. 
+>For local models make sure [Ollama](https://ollama.com) is up and running (`ollama serve`). If you don't have any models pulled yet, Loach will offer to install one during onboarding, sized against your GPU's VRAM (or system RAM when there's no discrete GPU) so the suggestion actually runs well on your machine. 
+
+### Install on Linux
+
+All three Linux packages — `.AppImage`, `.deb` and `.rpm` — support in-app updates. Deb and rpm installs download the signed package and elevate through `pkexec` so the package database stays consistent; there's no apt/yum repository, so `apt upgrade` won't see new versions.
+
+Builds target **glibc 2.35**, which makes **Ubuntu 22.04** and **Debian 12** the oldest supported distributions.
+
+> [!NOTE]
+>If you installed **v1.2.3 or earlier** from a `.deb` or `.rpm`, that build hides the Updates panel. Download a newer package once from the releases page and in-app updates take over from there.
 
 ### Install on macOS
 
@@ -123,8 +133,8 @@ Auto-updates are delivered through Loach's own signed updater (independent of Ap
 
 #### Prerequisites
 
-- **Node.js 20.19+** (or 22.12+) and **npm** — Vite 7 won't run on older 20.x point releases.
-- **Rust** stable toolchain via [`rustup`](https://rustup.rs)
+- **Node.js 20.19+** (or 22.12+) and **npm** — Vite 8 won't run on older 20.x point releases.
+- **Rust 1.88+** via [`rustup`](https://rustup.rs) — the dependency tree's minimum; CI builds on 1.88.0
 - Platform build tooling — install once via the official Tauri prerequisites guide: <https://tauri.app/start/prerequisites/>
   - **Windows**: Microsoft Visual Studio Build Tools, WebView2 runtime (preinstalled on Windows 11)
   - **Linux**: `webkit2gtk-4.1`, `libayatana-appindicator3-dev`, `librsvg2-dev`, `build-essential`, `libssl-dev`, `pkg-config`, `libsecret-1-dev`
@@ -197,7 +207,7 @@ Only one OpenAI-compatible endpoint is active at a time — switch the base URL 
 | Layer | Choice |
 |---|---|
 | Desktop shell | Tauri 2.x (Rust) |
-| Frontend | React 18 + Vite 7 + TypeScript |
+| Frontend | React 19 + Vite 8 + TypeScript |
 | Styling | Tailwind CSS + shadcn/ui (Radix primitives) + `tailwindcss-animate` + `@tailwindcss/typography` |
 | Icons | `lucide-react` |
 | State | Zustand (in-memory; backed by SQLite for persistence where appropriate) |
@@ -206,8 +216,9 @@ Only one OpenAI-compatible endpoint is active at a time — switch the base URL 
 | Argon2id | `argon2` + `rand_core` (for app-lock hashing) |
 | HTTP | `reqwest` with streaming + `rustls-tls` |
 | Markdown | `react-markdown` + `remark-gfm` + `rehype-highlight` (highlight.js) |
+| Math | `remark-math` + `rehype-katex` + KaTeX, lazy-loaded from the bundle on first use |
 | Document parsing | `pdfjs-dist` (PDF) + `mammoth` (DOCX) |
-| PDF generation | `printpdf` 0.9 with a bundled Liberation Sans subset (Unicode-capable output) |
+| PDF generation | `printpdf` 0.12 with a bundled Liberation Sans subset (Unicode-capable output) |
 | System tray | Tauri 2 built-in (`tray-icon` feature) |
 | Bundle targets | `.exe` (NSIS) on Windows; `.deb` / `.rpm` / `.AppImage` on Linux; `.dmg` on macOS (Apple Silicon) |
 

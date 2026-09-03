@@ -88,13 +88,22 @@ pub fn dispatch(args: &Value) -> McpCallResult {
             // Pair each line with its parsed value (if any) and sort. Lines
             // that don't parse are pushed to the back in their original
             // order so the model still gets every line back.
+            //
+            // NaN is treated as unparseable even though `parse` accepts it:
+            // it compares unequal to everything, so admitting it makes the
+            // comparator non-transitive — which left the whole list unsorted
+            // (and could trip the standard sort's order-violation panic).
+            // "NaN" shows up in real data columns, so this is reachable.
             let mut decorated: Vec<(usize, Option<f64>, String)> = lines
                 .iter()
                 .enumerate()
-                .map(|(i, l)| (i, l.trim().parse::<f64>().ok(), l.clone()))
+                .map(|(i, l)| {
+                    let n = l.trim().parse::<f64>().ok().filter(|v| !v.is_nan());
+                    (i, n, l.clone())
+                })
                 .collect();
             decorated.sort_by(|a, b| match (a.1, b.1) {
-                (Some(x), Some(y)) => x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal),
+                (Some(x), Some(y)) => x.total_cmp(&y),
                 (Some(_), None) => std::cmp::Ordering::Less,
                 (None, Some(_)) => std::cmp::Ordering::Greater,
                 (None, None) => a.0.cmp(&b.0),
@@ -152,6 +161,16 @@ mod tests {
         let r = dispatch(&json!({"input": "10\n2\n1.5", "mode": "numeric"}));
         assert!(!r.is_error);
         assert_eq!(r.content_text, "1.5\n2\n10");
+    }
+
+    #[test]
+    fn numeric_sort_treats_nan_as_unparseable() {
+        // `"nan".parse::<f64>()` succeeds, and NaN compares unequal to
+        // everything — admitting it made the comparator non-transitive and
+        // left the whole list in input order.
+        let r = dispatch(&json!({"input": "200\nnan\n199\nnan\n198", "mode": "numeric"}));
+        assert!(!r.is_error);
+        assert_eq!(r.content_text, "198\n199\n200\nnan\nnan");
     }
 
     #[test]

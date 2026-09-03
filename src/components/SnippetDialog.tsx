@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   ChevronDown,
   CircleAlert,
@@ -25,12 +25,8 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { useSnippetStore } from "@/stores/snippetStore";
 import { useSettingsStore } from "@/stores/settingsStore";
-import {
-  ollamaListModels,
-  ollamaProbe,
-  openaiListModels,
-} from "@/lib/tauri";
-import type { ModelInfo, ProviderId } from "@/types";
+import { useProviderModels } from "@/lib/useProviderModels";
+import type { ProviderId } from "@/types";
 
 /**
  * Create / edit modal for a Snippet. Uses the same compact `Dialog` shell as
@@ -197,42 +193,9 @@ function ModelPicker({
   // model loading. Subscribing to the whole settings object would
   // re-render the dialog on every keystroke in the global SettingsDialog
   // textareas.
-  const ollamaBaseUrl = useSettingsStore((s) => s.ollama_base_url);
-  const openaiBaseUrl = useSettingsStore((s) => s.openai_base_url);
   const openaiKeySet = useSettingsStore((s) => s.openai_key_set);
-  const settingsHydrated = useSettingsStore((s) => s.hydrated);
-  const [ollamaModels, setOllamaModels] = useState<ModelInfo[]>([]);
-  const [openaiModels, setOpenaiModels] = useState<ModelInfo[]>([]);
-  const [ollamaUp, setOllamaUp] = useState<boolean | null>(null);
-  const [loading, setLoading] = useState(false);
-
-  const refresh = useMemo(
-    () => async () => {
-      setLoading(true);
-      try {
-        const probe = await ollamaProbe(ollamaBaseUrl).catch(() => false);
-        setOllamaUp(probe);
-        if (probe) {
-          const m = await ollamaListModels(ollamaBaseUrl).catch(() => []);
-          setOllamaModels(m);
-        } else {
-          setOllamaModels([]);
-        }
-        if (openaiKeySet) {
-          const m = await openaiListModels(openaiBaseUrl).catch(() => []);
-          setOpenaiModels(m);
-        }
-      } finally {
-        setLoading(false);
-      }
-    },
-    [ollamaBaseUrl, openaiBaseUrl, openaiKeySet],
-  );
-
-  useEffect(() => {
-    if (!settingsHydrated) return;
-    refresh();
-  }, [settingsHydrated, refresh]);
+  const { ollamaModels, openaiModels, ollamaUp, loading, refresh } =
+    useProviderModels();
 
   const label =
     provider && model ? `${model} · ${provider}` : "No default model";

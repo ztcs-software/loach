@@ -6,6 +6,7 @@ use futures_util::StreamExt;
 use serde_json::{json, Value};
 
 use crate::db::McpServer;
+use crate::sse::find_frame_end;
 
 use super::types::{
     Attachment, CallToolContent, CallToolResult, InitializeResult, JsonRpcError, JsonRpcResponse,
@@ -16,6 +17,32 @@ use super::types::{
 /// start (especially gateway-backed ones), so we give each JSON-RPC call
 /// 30 s before giving up.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Marker attached to failures that provably happened *before* the server
+/// could dispatch the tool — the TCP connection never came up, or the server
+/// rejected our session outright with 404.
+///
+/// `dispatch_tool_call` retries a failed pooled session once, and needs to
+/// know which failures are safe to replay. A transport error raised *after*
+/// the request was delivered (a timeout, a connection reset while reading the
+/// response) may well have executed the tool already, and re-running one with
+/// side effects — `send_message`, `create_issue` — is worse than surfacing
+/// the error. Only failures carrying this marker are retried.
+#[derive(Debug)]
+pub struct PreExecutionFailure;
+
+impl std::fmt::Display for PreExecutionFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("request failed before the server could run the tool")
+    }
+}
+
+impl std::error::Error for PreExecutionFailure {}
+
+/// True when `err` was tagged [`PreExecutionFailure`] anywhere in its chain.
+pub fn is_pre_execution(err: &anyhow::Error) -> bool {
+    err.chain().any(|c| c.is::<PreExecutionFailure>())
+}
 
 /// Cap on the response body we'll buffer per JSON-RPC call. MCP responses
 /// in practice are kilobytes (an initialize handshake or a tools/list of
@@ -448,7 +475,21 @@ async fn post_rpc_raw(
         req = req.header("Mcp-Session-Id", s);
     }
 
-    let resp = req.send().await.context("POST to MCP server failed")?;
+    let resp = match req.send().await {
+        Ok(r) => r,
+        Err(e) => {
+            // A connect-phase failure means the request never reached the
+            // server, so replaying it can't double-run anything. Anything
+            // else (notably a timeout) may have been delivered and executed.
+            let tag_safe = e.is_connect();
+            let err = anyhow::Error::new(e).context("POST to MCP server failed");
+            return Err(if tag_safe {
+                err.context(PreExecutionFailure)
+            } else {
+                err
+            });
+        }
+    };
     let status = resp.status();
     let sid = resp
         .headers()
@@ -465,7 +506,16 @@ async fn post_rpc_raw(
         let text = read_capped_text(resp)
             .await
             .context("read MCP server response")?;
-        bail!("server responded with HTTP {}: {}", status, truncate(&text));
+        let err = anyhow!("server responded with HTTP {}: {}", status, truncate(&text));
+        // 404 against a session-carrying request is the spec's "unknown or
+        // expired session" signal: the server refused the envelope, so it
+        // never got as far as running the tool. That's the case the pooled
+        // retry exists for.
+        return Err(if status == reqwest::StatusCode::NOT_FOUND && session.is_some() {
+            err.context(PreExecutionFailure)
+        } else {
+            err
+        });
     }
 
     // Streamable HTTP may push its JSON inside a `data:` frame of an SSE
@@ -547,29 +597,6 @@ async fn read_sse_rpc_response(resp: reqwest::Response) -> Result<String> {
                     .ok_or_else(|| anyhow!("event-stream response contained no data frame"));
             }
         }
-    }
-}
-
-/// Position and length of the blank line ending the first frame in `buf`.
-/// Returns the delimiter length too so the caller consumes all of it —
-/// dropping only 2 bytes of a `\r\n\r\n` would leave a stray `\r\n` glued to
-/// the front of the next frame. When both forms match at overlapping
-/// offsets the earlier one wins, and a CRLF pair is reported at its `\r` so
-/// the frame text excludes it.
-fn find_frame_end(buf: &[u8]) -> Option<(usize, usize)> {
-    let lf = buf.windows(2).position(|w| w == b"\n\n");
-    let crlf = buf.windows(4).position(|w| w == b"\r\n\r\n");
-    match (lf, crlf) {
-        (Some(a), Some(b)) => {
-            if a <= b {
-                Some((a, 2))
-            } else {
-                Some((b, 4))
-            }
-        }
-        (Some(a), None) => Some((a, 2)),
-        (None, Some(b)) => Some((b, 4)),
-        (None, None) => None,
     }
 }
 

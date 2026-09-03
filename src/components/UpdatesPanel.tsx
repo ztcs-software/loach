@@ -13,9 +13,8 @@ import {
   type DownloadProgress,
   type UpdateInfo,
 } from "@/lib/updater";
-import { isTauri } from "@/lib/tauri";
+import { openExternal } from "@/lib/tauri";
 import { useSettingsStore } from "@/stores/settingsStore";
-import pkg from "../../package.json";
 
 const GITHUB_RELEASES_URL = "https://github.com/ztcs-software/loach/releases/latest";
 
@@ -26,15 +25,6 @@ type State =
   | { kind: "available"; info: UpdateInfo }
   | { kind: "installing"; info: UpdateInfo; progress: DownloadProgress }
   | { kind: "error"; message: string };
-
-async function openExternal(url: string) {
-  if (isTauri) {
-    const { open } = await import("@tauri-apps/plugin-shell");
-    await open(url);
-  } else {
-    window.open(url, "_blank", "noopener,noreferrer");
-  }
-}
 
 export function UpdatesPanel() {
   const [supported, setSupported] = useState<boolean | null>(null);
@@ -54,7 +44,7 @@ export function UpdatesPanel() {
       <div className="space-y-4">
         <div className="flex items-baseline gap-3">
           <span className="text-sm text-foreground/70">Current version</span>
-          <span className="font-mono text-sm">v{pkg.version}</span>
+          <span className="font-mono text-sm">v{__APP_VERSION__}</span>
         </div>
         <Separator />
         <div className="rounded-xl border border-foreground/10 bg-foreground/[0.03] p-4 text-sm leading-relaxed text-foreground/75">
@@ -98,7 +88,7 @@ export function UpdatesPanel() {
     <div className="space-y-5">
       <div className="flex items-baseline gap-3">
         <span className="text-sm text-foreground/70">Current version</span>
-        <span className="font-mono text-sm">v{pkg.version}</span>
+        <span className="font-mono text-sm">v{__APP_VERSION__}</span>
       </div>
 
       <Separator />

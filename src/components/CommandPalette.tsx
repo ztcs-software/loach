@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { Fragment, useEffect, useRef } from "react";
 import { cn } from "@/lib/utils";
 import type { PaletteEntry } from "@/lib/commands/parser";
 
@@ -34,6 +34,15 @@ export function CommandPalette({
 
   if (entries.length === 0) return null;
 
+  // Group headers, reusing the registry's `group` labels (the same ones the
+  // /help dialog sections on). Entries arrive in registry order, so groups
+  // are contiguous and a header renders wherever the group changes. When
+  // the filter has narrowed to a single group (or to one command's
+  // sub-entries) a lone header is pure noise, so headers only appear once
+  // two or more groups are on screen.
+  const groupOf = (e: PaletteEntry) => e.groupOverride ?? e.cmd.group ?? "Other";
+  const showHeaders = new Set(entries.map(groupOf)).size > 1;
+
   return (
     <div
       // Anchored to the composer's outer wrapper. Positioned just above the
@@ -53,28 +62,40 @@ export function CommandPalette({
         )}
       >
         {entries.map((entry, i) => (
-          <button
-            key={entry.display + ":" + i}
-            type="button"
-            role="option"
-            aria-selected={i === highlightIndex}
-            data-palette-index={i}
-            onMouseEnter={() => onHighlightChange(i)}
-            onClick={() => onSelect(entry)}
-            className={cn(
-              "flex w-full items-center gap-3 rounded-xl px-3 py-2 text-left text-sm transition-colors",
-              i === highlightIndex
-                ? "bg-foreground/10 text-foreground"
-                : "text-foreground/85 hover:bg-foreground/[0.06]",
+          <Fragment key={entry.display + ":" + i}>
+            {showHeaders && (i === 0 || groupOf(entries[i - 1]) !== groupOf(entry)) && (
+              <div
+                role="presentation"
+                className={cn(
+                  "px-3 pb-1 text-[10px] font-semibold uppercase tracking-wider text-foreground/40",
+                  i === 0 ? "pt-1.5" : "pt-2.5",
+                )}
+              >
+                {groupOf(entry)}
+              </div>
             )}
-          >
-            <span className="font-mono text-[13px] text-foreground">
-              {entry.display}
-            </span>
-            <span className="ml-auto truncate text-xs text-foreground/55">
-              {entry.description}
-            </span>
-          </button>
+            <button
+              type="button"
+              role="option"
+              aria-selected={i === highlightIndex}
+              data-palette-index={i}
+              onMouseEnter={() => onHighlightChange(i)}
+              onClick={() => onSelect(entry)}
+              className={cn(
+                "flex w-full items-center gap-3 rounded-xl px-3 py-2 text-left text-sm transition-colors",
+                i === highlightIndex
+                  ? "bg-foreground/10 text-foreground"
+                  : "text-foreground/85 hover:bg-foreground/[0.06]",
+              )}
+            >
+              <span className="font-mono text-[13px] text-foreground">
+                {entry.display}
+              </span>
+              <span className="ml-auto truncate text-xs text-foreground/55">
+                {entry.description}
+              </span>
+            </button>
+          </Fragment>
         ))}
         <div className="mt-1 border-t border-foreground/10 px-3 py-1.5 text-[11px] text-foreground/40">
           <kbd className="font-mono">↑↓</kbd> navigate ·{" "}

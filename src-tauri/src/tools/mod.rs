@@ -27,3 +27,25 @@ pub mod pdf;
 pub mod sort_tool;
 pub mod unit_convert;
 pub mod uuid_gen;
+
+/// Read an integer argument a model may have written in float shape.
+///
+/// Local models routinely emit `5.0` where the schema says `integer`, and
+/// `as_i64`/`as_u64` reject that outright — which in the callers that fall
+/// back to a default meant the argument was silently ignored (`count: 5.0`
+/// generating one UUID) or reported missing when it was plainly there.
+/// A float is accepted only when it is exactly integral.
+pub fn lenient_i64(args: &serde_json::Value, key: &str) -> Option<i64> {
+    let v = args.get(key)?;
+    if let Some(n) = v.as_i64() {
+        return Some(n);
+    }
+    let f = v.as_f64()?;
+    if f.fract() != 0.0 {
+        return None;
+    }
+    // Float→int casts saturate rather than wrap, so round-trip to reject
+    // magnitudes i64 can't actually hold.
+    let n = f as i64;
+    (n as f64 == f).then_some(n)
+}

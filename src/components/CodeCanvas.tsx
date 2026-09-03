@@ -231,7 +231,7 @@ export function CodeCanvas() {
             size="sm"
             onClick={onExport}
             className="h-7 gap-1 rounded-md px-2 text-[11px] text-foreground/65 hover:bg-foreground/10 hover:text-foreground"
-            title={`Export to .${displayLanguage ?? "txt"} file`}
+            title={`Export to ${defaultFilename(displayLanguage)}`}
           >
             <Download className="h-3.5 w-3.5" /> Export
           </Button>

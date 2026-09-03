@@ -9,7 +9,6 @@ import {
   Scissors,
   Square,
   TextCursorInput,
-  X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -18,24 +17,31 @@ import { useConfirm } from "./ConfirmDialog";
 import { CommandPalette } from "./CommandPalette";
 import { CommandResultPanel } from "./CommandResultPanel";
 import { ContextUsageBar } from "./ContextUsageBar";
+import { ModelDownloadBanner } from "./ModelDownloadBanner";
 import {
   fileToAttachment,
   FileTooLargeError,
 } from "@/lib/files";
 import { useChatStore } from "@/stores/chatStore";
 import { useUIStore } from "@/stores/uiStore";
+import { useSettingsStore } from "@/stores/settingsStore";
 import { useToastStore } from "@/stores/toastStore";
 import { cn } from "@/lib/utils";
+import { logger } from "@/lib/logger";
+import { ChipDivider, PersonaChip, ToneChip } from "./ComposerChip";
 import {
   DEFAULT_PERSONA_ID,
   getPersona,
 } from "@/lib/personas";
+import { DEFAULT_TONE_ID, getTone } from "@/lib/tones";
 import { dispatch as dispatchCommand } from "@/lib/commands/dispatch";
 import {
   isCommandInput,
   matchCommands,
+  parseInput,
   type PaletteEntry,
 } from "@/lib/commands/parser";
+import { orderByRecency, parseRecentCommands } from "@/lib/commands/recency";
 import type { CommandResult } from "@/lib/commands/types";
 import type { Attachment } from "@/types";
 
@@ -68,6 +74,11 @@ export function ChatInput({ centered = false }: ChatInputProps) {
   const pendingPersonaId = useUIStore((s) => s.pendingPersonaId);
   const setSessionPersona = useUIStore((s) => s.setSessionPersona);
   const setPendingPersona = useUIStore((s) => s.setPendingPersona);
+  const toneIdBySession = useUIStore((s) => s.toneIdBySession);
+  const setSessionTone = useUIStore((s) => s.setSessionTone);
+  const defaultToneId = useSettingsStore((s) => s.default_tone_id);
+  const recentCommands = useSettingsStore((s) => s.recent_commands);
+  const recordCommandUse = useSettingsStore((s) => s.recordCommandUse);
   // Imperative confirm for destructive slash commands (/clear, /delete). The
   // dispatcher isn't a component, so it can't call the hook itself — we inject
   // the resolver into dispatch().
@@ -87,6 +98,22 @@ export function ChatInput({ centered = false }: ChatInputProps) {
       ? getPersona(activePersonaId)
       : null;
 
+  // Tone chip. Unlike persona, a tone can arrive from two places — a per-chat
+  // override or the global `default_tone_id` — and the global case is the one
+  // that used to run invisibly, so the chip keys off the *effective* tone and
+  // says which scope it came from. Scoped to a real session: the welcome
+  // composer has no chat to override yet (persona parks in `pendingPersonaId`;
+  // tone has no such slot), so the chip appears from the first send onward.
+  const sessionToneId = activeSessionId
+    ? toneIdBySession[activeSessionId]
+    : undefined;
+  const effectiveToneId = sessionToneId ?? defaultToneId ?? DEFAULT_TONE_ID;
+  const activeTone =
+    activeSessionId && effectiveToneId !== DEFAULT_TONE_ID
+      ? getTone(effectiveToneId)
+      : null;
+  const toneFromGlobal = !sessionToneId;
+
   const [text, setText] = useState(composerDraft);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -101,9 +128,19 @@ export function ChatInput({ centered = false }: ChatInputProps) {
   const [paletteIndex, setPaletteIndex] = useState(0);
   const [paletteDismissed, setPaletteDismissed] = useState(false);
   const [commandResult, setCommandResult] = useState<CommandResult | null>(null);
+  // Recency is applied HERE rather than inside the palette: `paletteIndex`
+  // indexes into this array, and both the keyboard handler and the palette
+  // must agree on the order or Enter would accept a different row than the
+  // one highlighted.
   const paletteEntries: PaletteEntry[] = useMemo(
-    () => (isCommandInput(text) ? matchCommands(text.slice(1)) : []),
-    [text],
+    () =>
+      isCommandInput(text)
+        ? orderByRecency(
+            matchCommands(text.slice(1)),
+            parseRecentCommands(recentCommands),
+          )
+        : [],
+    [text, recentCommands],
   );
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -267,7 +304,13 @@ export function ChatInput({ centered = false }: ChatInputProps) {
         if (e instanceof FileTooLargeError) {
           setError(`${e.name} is larger than 20 MB.`);
         } else {
-          setError("Failed to read file");
+          // Name the file and surface the underlying reason. A bare "Failed
+          // to read file" hid genuine faults — most importantly a TypeError
+          // from pdfjs touching an API the webview lacks, which reads
+          // identically to a corrupt upload but needs a different fix.
+          logger.error("attachment read failed", f.name, e);
+          const reason = e instanceof Error ? e.message : String(e);
+          setError(`Couldn't read ${f.name}: ${reason}`);
         }
       }
     }
@@ -290,6 +333,14 @@ export function ChatInput({ centered = false }: ChatInputProps) {
   };
 
   const clearPersona = () => applyPersona(DEFAULT_PERSONA_ID);
+
+  // Clearing writes "default" as a per-chat override rather than unsetting
+  // the session entry — unsetting would fall straight back through to the
+  // global `default_tone_id` and the chip would reappear. The user's global
+  // setting is never touched from here.
+  const clearTone = () => {
+    if (activeSessionId) setSessionTone(activeSessionId, DEFAULT_TONE_ID);
+  };
 
   const onPick = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!e.target.files) return;
@@ -546,6 +597,12 @@ export function ChatInput({ centered = false }: ChatInputProps) {
     if (trimmed && isCommandInput(trimmed)) {
       const outcome = await dispatchCommand(trimmed, { confirm });
       if (outcome.kind === "handled") {
+        // "Handled" covers the failed-command case too, and that's the
+        // behaviour we want: reaching for a command is the signal recency
+        // tracks, and a command that just errored is one you're likely to
+        // retry. `passthrough` (unregistered text) is correctly excluded.
+        const name = parseInput(trimmed)?.name;
+        if (name) recordCommandUse(name);
         setText("");
         setComposerDraft("");
         setError(null);
@@ -672,16 +729,30 @@ export function ChatInput({ centered = false }: ChatInputProps) {
       )}
     >
       <div className="relative mx-auto w-full max-w-3xl">
+        <ModelDownloadBanner />
         {commandResult && commandResult.kind === "list" && (
           <CommandResultPanel
             result={commandResult}
             onDismiss={() => setCommandResult(null)}
           />
         )}
-        {(attachments.length > 0 || activePersona) && (
+        {(attachments.length > 0 || activePersona || activeTone) && (
+          // Config chips first, then payload. The divider marks the lifetime
+          // boundary — everything left of it survives the send, everything
+          // right of it goes with the message.
           <div className="mb-3 flex flex-wrap items-center gap-2">
             {activePersona && (
               <PersonaChip persona={activePersona} onRemove={clearPersona} />
+            )}
+            {activeTone && (
+              <ToneChip
+                tone={activeTone}
+                fromGlobal={toneFromGlobal}
+                onRemove={clearTone}
+              />
+            )}
+            {(activePersona || activeTone) && attachments.length > 0 && (
+              <ChipDivider />
             )}
             {attachments.map((a, i) => (
               <FileChip
@@ -741,6 +812,12 @@ export function ChatInput({ centered = false }: ChatInputProps) {
 
           <Textarea
             ref={textareaRef}
+            // Not left to the placeholder: it is the only thing naming this
+            // control, and it swaps to "Replying — press the Stop button…"
+            // mid-stream, so the composer's accessible name would change
+            // under the user. A fixed label keeps it stable; the placeholder
+            // stays as the visible status hint.
+            aria-label="Message"
             value={text}
             onChange={(e) => {
               // Mirror every keystroke into the persisted draft. ChatInput is
@@ -990,39 +1067,6 @@ function PrimaryButton({
         />
       )}
     </button>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// PersonaChip — pill above the textarea showing the active persona, with an
-// `×` to clear. Visually distinct from FileChip (warm orange tint vs. neutral
-// glass) so the two stack types are unambiguous when both render at once.
-// ---------------------------------------------------------------------------
-
-function PersonaChip({
-  persona,
-  onRemove,
-}: {
-  persona: import("@/lib/personas").Persona;
-  onRemove: () => void;
-}) {
-  const Icon = persona.icon;
-  return (
-    <div
-      className="inline-flex items-center gap-1.5 rounded-full border border-orange-400/30 bg-orange-500/10 px-2.5 py-1 text-xs text-orange-700 dark:text-orange-200"
-      title={persona.description}
-    >
-      <Icon className="h-3.5 w-3.5" />
-      <span className="font-medium">{persona.label}</span>
-      <button
-        type="button"
-        onClick={onRemove}
-        aria-label={`Remove ${persona.label} persona`}
-        className="ml-0.5 -my-1 -mr-1 grid h-6 w-6 place-items-center rounded-full text-orange-700/80 hover:bg-orange-500/20 hover:text-orange-900 dark:text-orange-200/70 dark:hover:text-orange-100"
-      >
-        <X className="h-3.5 w-3.5" />
-      </button>
-    </div>
   );
 }
 

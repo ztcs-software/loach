@@ -1,29 +1,43 @@
-import { memo, useMemo, type ReactNode } from "react";
+import { memo, useEffect, useMemo, useSyncExternalStore, type ReactNode } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import "highlight.js/styles/github-dark.css";
 import { CodeBlock } from "./CodeBlock";
 import { cn } from "@/lib/utils";
-import { isTauri } from "@/lib/tauri";
+import { openExternal } from "@/lib/tauri";
+import {
+  getMathPlugins,
+  hasMath,
+  loadMath,
+  normalizeMath,
+  subscribeMath,
+  type MathPlugins,
+} from "@/lib/math";
 
 interface MarkdownProps {
   content: string;
   className?: string;
+  /** Opt this render site into KaTeX. Defaults to OFF so app-authored markdown
+   *  — release notes in the Updates panel — can't drag in the engine to render
+   *  a changelog. The two chat transcripts pass it. */
+  math?: boolean;
 }
 
 // ---------------------------------------------------------------------------
 // LaTeX-style symbol fallback
 //
 // Models routinely emit small bits of TeX like `$\rightarrow$` or `$\to$` even
-// when the user hasn't asked for math. Pulling in a full math stack
-// (`remark-math` + `rehype-katex` + the KaTeX CSS) is ~500 KB of JS for what
-// is, in practice, a handful of arrow / set / Greek symbols. So instead we
-// run a cheap textual rewrite *before* react-markdown sees the string and
-// convert the most common single-token TeX commands into their Unicode
-// equivalents. Anything we don't recognise is left untouched, so genuine
-// inline math (e.g. `$x^2 + y^2$`) still renders verbatim — which at least
-// reads better than `\rightarrow` slipping through as literal text.
+// when the user hasn't asked for math. Loading KaTeX for that would be ~300 KB
+// of JS plus a stylesheet and 20-odd web fonts, so this cheap rewrite is the
+// always-on baseline: the most common single-token TeX commands become their
+// Unicode equivalents, and anything unrecognised is left alone.
+//
+// Real math — fractions, integrals, matrices, anything with structure — needs
+// a real engine, which is what the `math_rendering` setting turns on (see
+// `@/lib/math`). The two coexist: KaTeX handles whatever sits inside math
+// delimiters, and this fallback keeps tidying up the loose `\to` in prose that
+// never gets wrapped in `$…$` at all.
 // ---------------------------------------------------------------------------
 
 const TEX_SYMBOLS: Record<string, string> = {
@@ -162,6 +176,11 @@ function texReplace(input: string): string {
 // too — and because `CodeBlock`'s `raw` is read back out of the parsed tree,
 // the corruption leaked into Copy / Export / the canvas, not just the on-screen
 // render. Operating on the hast tree leaves every code node's text intact.
+//
+// The same skip is what keeps this pass off real math when KaTeX is enabled:
+// `remark-math` lands inline math in `<code class="math-inline">` and display
+// math in `<pre><code class="math-display">`, so `\sqrt{c}` reaches KaTeX
+// intact instead of arriving as a bare `√{c}`.
 function rehypeTexFallback() {
   return (tree: unknown) => {
     const visit = (node: unknown, inCode: boolean): void => {
@@ -221,18 +240,42 @@ const MARKDOWN_PLUGINS_REHYPE = [rehypeTexFallback, rehypeHighlight];
 // fallback stays (cheap, and keeps inline symbols consistent across the split).
 const MARKDOWN_PLUGINS_REHYPE_NOHL = [rehypeTexFallback];
 
+// Pick the pipeline for this message and pull in the chunk if it's needed.
+// `hasMath` gates only the lazy *load*, not correctness — once the engine is
+// here every message goes through it, so the scan short-circuits away as soon
+// as the session's first formula lands.
+function useMathPipeline(
+  content: string,
+  allowed: boolean,
+): {
+  math: MathPlugins | null;
+  source: string;
+} {
+  const loaded = useSyncExternalStore(
+    subscribeMath,
+    getMathPlugins,
+    getMathPlugins,
+  );
+  const shouldLoad = allowed && loaded === null && hasMath(content);
+  useEffect(() => {
+    if (shouldLoad) loadMath();
+  }, [shouldLoad]);
+
+  const math = allowed ? loaded : null;
+  // Re-check `hasMath` here rather than rewriting unconditionally: once the
+  // engine is loaded this memo re-runs on every streaming flush, over the whole
+  // accumulated reply, and `normalizeMath`'s own `includes("$")` short-circuit
+  // doesn't fire for a reply that merely mentions `$HOME`.
+  const source = useMemo(
+    () => (math && hasMath(content) ? normalizeMath(content) : content),
+    [math, content],
+  );
+  return { math, source };
+}
+
 // Open a link from rendered (untrusted) markdown through the OS browser / mail
 // client. Mirrors the helper used by Settings / Onboarding / Updates; the
 // scheme allow-listing happens at the call site in the `a` component below.
-async function openExternal(url: string): Promise<void> {
-  if (isTauri) {
-    const { open } = await import("@tauri-apps/plugin-shell");
-    await open(url);
-  } else {
-    window.open(url, "_blank", "noopener,noreferrer");
-  }
-}
-
 // Decide whether a markdown link href is safe to hand to the OS handler. Model
 // output is untrusted: allow only absolute http / https / mailto URLs — the
 // schemes `shell:allow-open` grants — and reject javascript:, file:, data:,
@@ -304,14 +347,38 @@ const PROSE_CLASS = cn(
 const MarkdownBody = memo(function MarkdownBody({
   content,
   highlight,
+  math,
 }: {
   content: string;
   highlight: boolean;
+  math: MathPlugins | null;
 }) {
+  // `math` is a stable reference (null, then the one loaded plugin pair), so
+  // these memos settle immediately and react-markdown keeps seeing the same
+  // arrays it did before math existed.
+  const remarkPlugins = useMemo(
+    () =>
+      math ? [...MARKDOWN_PLUGINS_REMARK, ...math.remark] : MARKDOWN_PLUGINS_REMARK,
+    [math],
+  );
+  const rehypePlugins = useMemo(() => {
+    if (!math) {
+      return highlight ? MARKDOWN_PLUGINS_REHYPE : MARKDOWN_PLUGINS_REHYPE_NOHL;
+    }
+    // KaTeX has to run before `rehypeHighlight` *and* before the `pre` →
+    // CodeBlock mapping: `remark-math` hands display math over as
+    // `<pre><code class="language-math math-display">`, which both would
+    // otherwise treat as a fenced code block, Copy button and all.
+    // `rehype-katex` swaps the whole `<pre>` out before either gets a look.
+    return highlight
+      ? [rehypeTexFallback, ...math.rehype, rehypeHighlight]
+      : [rehypeTexFallback, ...math.rehype];
+  }, [math, highlight]);
+
   return (
     <ReactMarkdown
-      remarkPlugins={MARKDOWN_PLUGINS_REMARK}
-      rehypePlugins={highlight ? MARKDOWN_PLUGINS_REHYPE : MARKDOWN_PLUGINS_REHYPE_NOHL}
+      remarkPlugins={remarkPlugins}
+      rehypePlugins={rehypePlugins}
       components={MARKDOWN_COMPONENTS}
     >
       {content}
@@ -324,10 +391,12 @@ const MarkdownBody = memo(function MarkdownBody({
 export const Markdown = memo(function Markdown({
   content,
   className,
+  math: allowMath = false,
 }: MarkdownProps) {
+  const { math, source } = useMathPipeline(content, allowMath);
   return (
     <div className={cn(PROSE_CLASS, className)}>
-      <MarkdownBody content={content} highlight />
+      <MarkdownBody content={source} highlight math={math} />
     </div>
   );
 });
@@ -343,10 +412,16 @@ export const Markdown = memo(function Markdown({
 // boundary, and a long code block streams as one growing tail — which the
 // no-highlight tail renderer keeps cheap until its closing fence lands and it
 // folds into the highlighted, memoised prefix.
+//
+// A `$$` display-math block is a fence in the same sense. Models do put a blank
+// line between stacked equations, and cutting there leaves the prefix holding
+// an unclosed `$$` (KaTeX renders the error) while the tail's closing `$$`
+// opens a block of its own that typesets the prose after it.
 export function stableSplit(content: string): number {
   const lines = content.split("\n");
   let inFence = false;
   let fenceChar = "";
+  let inMath = false;
   let offset = 0;
   let boundary = 0;
   for (let i = 0; i < lines.length; i++) {
@@ -360,12 +435,14 @@ export function stableSplit(content: string): number {
       } else if (ch === fenceChar) {
         inFence = false;
       }
+    } else if (!inFence && /^[ \t]*\$\$[ \t]*$/.test(line)) {
+      inMath = !inMath;
     }
     offset += line.length + 1; // +1 for the "\n" that split() consumed
     // A top-level blank line closes the preceding block. Never treat the very
     // last line as a boundary — the tail must keep the trailing block so a
     // message ending in "\n\n" doesn't render an empty tail.
-    if (!inFence && line.trim() === "" && i < lines.length - 1) {
+    if (!inFence && !inMath && line.trim() === "" && i < lines.length - 1) {
       boundary = offset;
     }
   }
@@ -382,14 +459,21 @@ export function stableSplit(content: string): number {
 export const StreamingMarkdown = memo(function StreamingMarkdown({
   content,
   className,
+  math: allowMath = false,
 }: MarkdownProps) {
-  const splitAt = useMemo(() => stableSplit(content), [content]);
-  const stable = content.slice(0, splitAt);
-  const tail = content.slice(splitAt);
+  // Normalise before splitting, not per-half: `normalizeMath` promotes a
+  // single-line `$$…$$` into a three-line block, which moves where the safe
+  // split boundaries are.
+  const { math, source } = useMathPipeline(content, allowMath);
+  const splitAt = useMemo(() => stableSplit(source), [source]);
+  const stable = source.slice(0, splitAt);
+  const tail = source.slice(splitAt);
   return (
     <div className={cn(PROSE_CLASS, className)}>
-      {stable.length > 0 && <MarkdownBody content={stable} highlight />}
-      <MarkdownBody content={tail} highlight={false} />
+      {stable.length > 0 && (
+        <MarkdownBody content={stable} highlight math={math} />
+      )}
+      <MarkdownBody content={tail} highlight={false} math={math} />
     </div>
   );
 });

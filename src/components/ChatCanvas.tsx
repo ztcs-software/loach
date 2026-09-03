@@ -4,6 +4,7 @@ import { MessageItem } from "./Message";
 import { Button } from "@/components/ui/button";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { useChatStore } from "@/stores/chatStore";
+import { useUIStore } from "@/stores/uiStore";
 import { extractSummary } from "@/lib/contextUsage";
 import { cn, prefersReducedMotion } from "@/lib/utils";
 import { stripInlinedAttachments } from "@/lib/files";
@@ -217,7 +218,14 @@ export function ChatCanvas() {
     const q = searchQuery.trim().toLowerCase();
     if (!q) return [] as string[];
     return messages
-      .filter((m) => displayedText(m).toLowerCase().includes(q))
+      .filter(
+        (m) =>
+          // Same exclusion the pinned bar makes: a hidden imported row only
+          // registers a DOM ref while its collapsed card is open, so counting
+          // it gave the user a match they could step onto but never see —
+          // the counter advanced with no scroll and no highlight.
+          !m.import_hidden && displayedText(m).toLowerCase().includes(q),
+      )
       .map((m) => m.id);
   }, [messages, searchQuery]);
 
@@ -511,6 +519,23 @@ export function ChatCanvas() {
     );
   }, [jumpTarget]);
 
+  // Same landing, different door: the Cmd/Ctrl-K palette parks a message id on
+  // uiStore when the user picks a transcript hit, because at that moment the
+  // chat is only just being selected and its messages may not have loaded yet.
+  // Waiting for the row to appear in `messages` is what makes the handoff
+  // reliable — `jumpToMessage` then takes over exactly as the pinned bar does,
+  // including reaching past the mounted window for an old message.
+  const pendingJumpMessageId = useUIStore((s) => s.pendingJumpMessageId);
+  const consumePendingJumpMessage = useUIStore(
+    (s) => s.consumePendingJumpMessage,
+  );
+  useEffect(() => {
+    if (!pendingJumpMessageId) return;
+    if (!messages.some((m) => m.id === pendingJumpMessageId)) return;
+    consumePendingJumpMessage();
+    jumpToMessage(pendingJumpMessageId);
+  }, [pendingJumpMessageId, messages, consumePendingJumpMessage]);
+
   // Reveal the next batch of older rows. Snapshot the scroller geometry first
   // so the layout effect above can re-anchor once the prepended rows mount.
   const showEarlierMessages = () => {
@@ -740,15 +765,22 @@ export function ChatCanvas() {
 
 /**
  * Flatten a response into a single line of plain prose for the pinned-bar
- * chip. Deliberately shallow — it drops fence markers and the handful of
- * inline markdown characters that read as noise at chip size, then collapses
- * whitespace. It is not a renderer: a code-only response previews as its
- * first line of code, which is the honest thing to show.
+ * chip. Deliberately shallow — it drops fence markers, unwraps links to
+ * their text, removes table rules, and strips the handful of inline
+ * markdown characters (including table pipes) that read as noise at chip
+ * size, then collapses whitespace. It is not a renderer: a code-only
+ * response previews as its first line of code, which is the honest thing
+ * to show.
  */
 function pinPreview(content: string): string {
   return content
     .replace(/^```.*$/gm, "")
-    .replace(/[*_`#>]/g, "")
+    // [text](url) / ![alt](url) → text. Keeps the label, drops the URL.
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
+    // Table separator rows and thematic breaks — lines of only pipes,
+    // colons, dashes and spaces — carry no preview-worthy text.
+    .replace(/^[|\s:-]+$/gm, "")
+    .replace(/[*_`#>|]/g, "")
     .replace(/\s+/g, " ")
     .trim();
 }
