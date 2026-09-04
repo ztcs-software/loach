@@ -133,6 +133,17 @@ describe("recommendVariant", () => {
     expect(recommendVariant(CATALOG, host(64, 12))?.tag).toBe("gemma4:12b");
   });
 
+  it("recommends the smallest variant when nothing fits on disk", () => {
+    // Ample RAM, almost no disk — every variant fails the disk check. The
+    // largest-comfortable rule must not apply to a pool the user can't
+    // download from: it used to fall back to the whole catalog and still take
+    // the biggest comfortable entry, headlining a 24 GB model with its own
+    // Pull button disabled by the disk badge.
+    const picked = recommendVariant(CATALOG, host(64, 2))!;
+    const smallest = [...CATALOG].sort((a, b) => a.sizeGb - b.sizeGb)[0];
+    expect(picked.tag).toBe(smallest.tag);
+  });
+
   it("returns null for an empty catalog", () => {
     expect(recommendVariant([], host(16))).toBeNull();
   });

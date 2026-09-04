@@ -54,6 +54,13 @@ export function useProviderModels() {
           const m = await openaiListModels(openaiBaseUrl).catch(() => []);
           if (id !== reqId.current) return;
           setOpenaiModels(m);
+        } else {
+          // Clear, don't just skip. Removing the key flips `openai_key_set`,
+          // which re-runs this — but without an else the last list survived for
+          // the component's lifetime, and the pickers render it whether or not
+          // a key is set. Picking one of those pinned the session to a provider
+          // that can only fail at send time with an auth error.
+          setOpenaiModels([]);
         }
       } finally {
         // Only the latest-initiated run owns the loading flag.

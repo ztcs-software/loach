@@ -1294,16 +1294,21 @@ function OpenAIPath({ onProvisioned }: { onProvisioned: () => void }) {
     // Also re-load the catalog. `catalog` is otherwise only filled by
     // `handleSave`, so a user returning to this step with a key already
     // verified got no default-model picker at all — nothing to change the
-    // pick with, and no indication of what the pick even was. Mount-only by
-    // construction (the ref is a mount snapshot), so reading `baseUrl` from
-    // the closure is deliberate rather than a stale dep.
+    // pick with, and no indication of what the pick even was.
+    //
+    // Genuinely mount-only: `onProvisioned` used to be the dependency, but the
+    // parent passes it as an inline arrow, so this effect's own
+    // `onProvisioned()` call flipped parent state, re-rendered it, produced a
+    // fresh arrow and re-ran the effect — a second, redundant `/v1/models`
+    // request on every entry to this path. Reading `baseUrl` from the mount
+    // closure is deliberate for the same reason the key snapshot above is.
     void openaiListModels(baseUrl)
       .then((list) => setCatalog(rankChatModels(list)))
       .catch(() => {
         /* Key may have been revoked since — the form below still works. */
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [onProvisioned]);
+  }, []);
 
   const handleSave = async () => {
     setError(null);
