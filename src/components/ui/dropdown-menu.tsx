@@ -17,12 +17,9 @@ const DropdownMenuContent = React.forwardRef<
       ref={ref}
       sideOffset={sideOffset}
       className={cn(
-        // The surface the message-action menus have always used: no glass
-        // gradient, a flat `foreground/8` fill, a hairline border and a
-        // 24px blur. It lives here rather than on each call site so every
-        // menu in the app — sidebar right-click, model picker, message
-        // kebabs — is the same surface.
-        "glass-panel !bg-none !bg-foreground/[0.08] border border-foreground/10 backdrop-blur-xl z-50 min-w-[10rem] max-h-[60vh] overflow-y-auto rounded-2xl p-1.5 text-foreground/90 data-[state=open]:animate-in data-[state=closed]:animate-out",
+        // `.glass-menu` (globals.css) is the one surface every menu in the
+        // app shares — sidebar right-click, model pickers, message kebabs.
+        "glass-menu z-50 min-w-[10rem] max-h-[60vh] overflow-y-auto rounded-2xl p-1.5 text-foreground/90 data-[state=open]:animate-in data-[state=closed]:animate-out",
         className,
       )}
       {...props}
@@ -59,8 +56,7 @@ const DropdownMenuSubContent = React.forwardRef<
     <DropdownMenuPrimitive.SubContent
       ref={ref}
       className={cn(
-        // Same surface as DropdownMenuContent.
-        "glass-panel !bg-none !bg-foreground/[0.08] border border-foreground/10 backdrop-blur-xl z-50 min-w-[9rem] max-h-[60vh] overflow-y-auto rounded-2xl p-1.5 text-foreground/90 data-[state=open]:animate-in data-[state=closed]:animate-out",
+        "glass-menu z-50 min-w-[9rem] max-h-[60vh] overflow-y-auto rounded-2xl p-1.5 text-foreground/90 data-[state=open]:animate-in data-[state=closed]:animate-out",
         className,
       )}
       {...props}

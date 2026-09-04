@@ -358,6 +358,30 @@
     );
   }
 
+  /* Menus — every DropdownMenuContent / SubContent. The flat, transparent
+     `foreground/8` wash the message-action menus always had — in dark mode
+     this stays glassy on purpose, with no opaque ground behind it.
+     Deliberately no !important: Private Chat's inline flat surface must
+     still win over this. */
+  .glass-menu {
+    background: hsl(var(--foreground) / 0.08);
+    backdrop-filter: blur(24px);
+    -webkit-backdrop-filter: blur(24px);
+    border: 1px solid hsl(var(--foreground) / 0.1);
+    box-shadow:
+      0 1px 0 0 rgb(255 255 255 / var(--glass-highlight)) inset,
+      var(--glass-shadow);
+  }
+
+  /* Light theme: the same wash over the `popover/95` ground the command
+     palette uses. An 8% dark tint on its own is unreadable over a light
+     page where backdrop-filter is a no-op (software-composited WebView2). */
+  html:not(.dark) .glass-menu {
+    background:
+      linear-gradient(hsl(var(--foreground) / 0.08), hsl(var(--foreground) / 0.08)),
+      hsl(var(--popover) / 0.95);
+  }
+
   /* Premium prompt-bar glass */
   .glass-prompt {
     background: linear-gradient(
