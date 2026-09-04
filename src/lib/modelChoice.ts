@@ -198,17 +198,22 @@ export function recommendVariant<T extends SizedVariant & { tag: string }>(
 
   const affordable = variants.filter((v) => !fit(v).insufficientDisk);
   // Every variant is too big for the disk — recommending one the user can't
-  // download helps nobody, so fall through to the smallest and let the disk
-  // badge explain itself.
-  const pool = affordable.length > 0 ? affordable : variants;
+  // download helps nobody, so skip the largest-comfortable rule entirely and
+  // name the smallest, letting the disk badge explain itself. Falling back to
+  // the full list *and* then taking the largest comfortable one (which is what
+  // this used to do) headlined the biggest model in the catalog on the machine
+  // least able to fetch it, with its own Pull button disabled.
+  if (affordable.length === 0) {
+    return variants.reduce((best, v) => (v.sizeGb < best.sizeGb ? v : best));
+  }
 
-  const comfortable = pool.filter((v) => fit(v).tier === "comfortable");
+  const comfortable = affordable.filter((v) => fit(v).tier === "comfortable");
   if (comfortable.length > 0) {
     return comfortable.reduce((best, v) =>
       resident(v) > resident(best) ? v : best,
     );
   }
-  return pool.reduce((best, v) => (v.sizeGb < best.sizeGb ? v : best));
+  return affordable.reduce((best, v) => (v.sizeGb < best.sizeGb ? v : best));
 }
 
 /** Model ids that are served by an OpenAI-compatible `/v1/models` listing but

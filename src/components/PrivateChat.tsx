@@ -257,11 +257,11 @@ function ModelPicker() {
           <ChevronDown className="h-4 w-4 opacity-60" />
         </Button>
       </DropdownMenuTrigger>
-      {/* Two overrides to the shared `glass-panel`-based DropdownMenuContent:
+      {/* Two overrides to the shared `glass-menu`-based DropdownMenuContent:
           1. `z-[90]` lifts us above the overlay's `z-[80]` so the menu
              doesn't render behind the backdrop.
-          2. The inline `style` kills the gradient + backdrop blur from
-             `glass-panel` so the menu is a flat dark surface regardless of
+          2. The inline `style` kills the wash + backdrop blur from
+             `glass-menu` so the menu is a flat dark surface regardless of
              theme (Aurora vs Solid). Private Chat is always dark — and the
              user explicitly asked for no glass effect here.
 
@@ -280,8 +280,8 @@ function ModelPicker() {
         // Scoping `dark` here re-points those vars to the dark-theme
         // values (light text) regardless of the app's active theme.
         className="dark z-[90] min-w-[260px]"
-        // The shared DropdownMenuContent carries a `glass-panel` class that
-        // sets FOUR properties: background (gradient), backdrop-filter,
+        // The shared DropdownMenuContent carries a `glass-menu` class that
+        // sets FOUR properties: background (wash), backdrop-filter,
         // border, AND box-shadow (an inset top highlight + theme-aware
         // outer shadow). All four must be neutralised here or the residual
         // properties keep the "glass" feel — most visibly the 1 px white

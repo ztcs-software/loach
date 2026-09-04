@@ -14,7 +14,8 @@
 #
 # The container's CMD copies the bundle tree to /out at the end of the build
 # so the host volume receives only the finished artifacts, not the full
-# target/ directory.
+# target/ directory. The artifacts are unsigned (no updater .sig files) —
+# see the CMD comment for how to sign a local build.
 
 FROM ubuntu:22.04
 
@@ -23,13 +24,16 @@ ENV DEBIAN_FRONTEND=noninteractive \
     RUSTUP_HOME=/usr/local/rustup \
     PATH=/usr/local/cargo/bin:$PATH
 
-# Tauri's Linux system deps — the same set release.yml installs — plus the
-# build toolchain and the few utilities the AppImage bundler shells out to
-# (file, wget, xz).
+# Tauri's Linux system deps — the same link-time set release.yml installs —
+# plus the build toolchain and the few utilities the AppImage bundler shells
+# out to (file, wget, xz). release.yml additionally installs `rpm` (no rpm
+# bundle here) and `desktop-file-utils` (appimagetool ships its own static
+# desktop-file-validate, so it is belt-and-braces there).
 #
-# The base image stays on 22.04 while CI runs 24.04 ON PURPOSE: an AppImage
-# is only portable down to the glibc it was linked against, so building on
-# the older base widens the range of distros the local artifact runs on.
+# 22.04 ON PURPOSE, and it is what release.yml builds in too (an
+# `ubuntu:22.04` container on the 24.04 runner): an AppImage is only
+# portable down to the glibc it was linked against, so building on the
+# older base keeps the artifact running on Ubuntu 22.04 / Debian 12.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential curl ca-certificates git pkg-config \
       libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev \
@@ -58,14 +62,13 @@ WORKDIR /src
 COPY package.json package-lock.json ./
 RUN npm ci
 
-# Same trick for cargo: copy just the manifests + capabilities + build.rs
-# and stub out both `lib.rs` and `main.rs` so `cargo fetch` can resolve
-# the dependency graph into a cacheable layer. The Cargo.toml declares
-# both a `[lib]` target (`loach_lib`) and an auto-detected binary
-# (`src/main.rs` calls into it), so we need stubs for both — otherwise
-# `cargo fetch` errors with "can't find `loach_lib`" or "no targets
-# specified". `tauri-build` runs as a build script and needs the
-# capability JSON files present too, even at fetch time.
+# Same trick for cargo: copy the manifests (plus build.rs and the
+# capabilities, which `COPY . .` brings in anyway) and stub out `lib.rs`
+# and `main.rs` so `cargo fetch` can resolve the dependency graph into a
+# cacheable layer. Cargo refuses to parse a manifest whose declared `[lib]`
+# target (`loach_lib`) has no source file, so the lib stub is required.
+# Nothing compiles at fetch time — build scripts included — so the stubs'
+# contents don't matter.
 COPY src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/build.rs ./src-tauri/
 COPY src-tauri/capabilities ./src-tauri/capabilities
 RUN mkdir -p src-tauri/src \
@@ -79,6 +82,13 @@ COPY . .
 
 # Build both bundles, then stage the output tree under /out so the host
 # volume mount picks up only the finished installers. Using `sh -c` so the
-# `--bundles` flag is passed through `npm run tauri -- build` cleanly and
-# the post-build copy runs in the same layer.
-CMD ["sh", "-c", "npm run tauri -- build --bundles deb,appimage && mkdir -p /out && cp -r src-tauri/target/release/bundle/. /out/"]
+# flags are passed through `npm run tauri -- build` cleanly and the
+# post-build copy runs in the same layer.
+#
+# `--no-sign`: tauri.conf.json enables updater artifacts, so without it the
+# CLI demands TAURI_SIGNING_PRIVATE_KEY *after* bundling and the whole
+# build is lost with nothing copied to /out. Signed artifacts are
+# release.yml's job. To sign a local build anyway, drop the flag and pass
+# both TAURI_SIGNING_PRIVATE_KEY and TAURI_SIGNING_PRIVATE_KEY_PASSWORD via
+# `docker run -e` (without the password the CLI prompts interactively).
+CMD ["sh", "-c", "npm run tauri -- build --no-sign --bundles deb,appimage && mkdir -p /out && cp -r src-tauri/target/release/bundle/. /out/"]

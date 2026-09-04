@@ -460,12 +460,16 @@ export default function App() {
           wizard is modal and Cmd+K should stay inert until the user finishes
           or dismisses. */}
       {!showLock && !showOnboarding && <SearchBar />}
-      {/* Global keyboard shortcuts. Mounts below the same lock/onboarding
-          gates as SearchBar — the handler itself ALSO checks those gates
-          plus private chat at the moment of keypress, so re-mounting on
-          gate transitions doesn't matter; this conditional just keeps the
-          ShortcutListDialog out of the tree while the gates are active. */}
-      {!showLock && !showOnboarding && <KeyboardShortcuts />}
+      {/* Global keyboard shortcuts. Deliberately NOT gated on onboarding:
+          the handler re-checks every gate at the moment of keypress and
+          exempts `lock-now` from the onboarding and private-chat ones, so
+          gating the mount too made that panic key dead on the very surface
+          it was written for. Nothing else leaks — every other action returns
+          at the handler's onboarding check, and the ShortcutListDialog it
+          renders stays closed because the shortcut that opens it is gated.
+          Still behind `showLock`, where the handler refuses everything
+          anyway (re-locking a locked app does nothing). */}
+      {!showLock && <KeyboardShortcuts />}
       {/* Private Chat overlay. Suppressed during lock/onboarding for the
           same reason as the search palette — those gates own the screen.
           The component renders nothing until the user opens it from the

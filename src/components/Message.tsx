@@ -581,7 +581,7 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
               // near the viewport edge can land the menu right against
               // the window chrome and clip the action icons.
               collisionPadding={8}
-              className="!bg-none !bg-foreground/[0.08] border border-foreground/10 backdrop-blur-xl min-w-[160px]"
+              className="min-w-[160px]"
             >
               <DropdownMenuItem
                 onSelect={() => void copyFromContextMenu()}
@@ -623,7 +623,7 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
             <DropdownMenuContent
               align="start"
               collisionPadding={8}
-              className="!bg-none !bg-foreground/[0.08] border border-foreground/10 backdrop-blur-xl min-w-[160px]"
+              className="min-w-[160px]"
             >
               <DropdownMenuItem
                 onSelect={() => void copyFromContextMenu()}
@@ -797,7 +797,7 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
               </DropdownMenuTrigger>
               <DropdownMenuContent
                 align="end"
-                className="!bg-none !bg-foreground/[0.08] border border-foreground/10 backdrop-blur-xl min-w-[180px]"
+                className="min-w-[180px]"
               >
                 <DropdownMenuItem
                   onSelect={() => void copyUserContent(displayContent)}
@@ -869,7 +869,7 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
               </DropdownMenuTrigger>
               <DropdownMenuContent
                 align="start"
-                className="!bg-none !bg-foreground/[0.08] border border-foreground/10 backdrop-blur-xl min-w-[140px]"
+                className="min-w-[140px]"
               >
                 <DropdownMenuItem
                   onSelect={() => void copyContent()}

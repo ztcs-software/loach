@@ -339,21 +339,23 @@ export function ChatCanvas() {
     if (!searchOpen) return;
     const q = searchQuery.trim();
     if (!q) return;
-    const lowerQ = q.toLowerCase();
     const currentId = matchIds[matchCursor];
-    for (const m of messages) {
-      if (m.id === streamingMsgId) continue;
-      // Match the DISPLAYED text. User bubbles render
-      // `stripInlinedAttachments(content)`, so matching raw content counted
-      // hits inside an inlined attachment body — the finder then scrolled to
-      // a bubble and highlighted nothing, because the DOM walker can't find
-      // text that was never rendered.
-      if (!displayedText(m).toLowerCase().includes(lowerQ)) continue;
-      const el = messageRefs.current.get(m.id);
+    // Drive the highlighting from `matchIds` rather than re-deriving it from
+    // `messages`: the two filters have to agree, and they didn't. This loop
+    // marked any message with a DOM ref whose displayed text matched, while
+    // `matchIds` also excludes hidden imported rows — so expanding an import
+    // card produced highlights the counter didn't count and prev/next could
+    // never reach. Reusing the memoised list also drops a second full scan of
+    // every message body per keystroke.
+    for (const id of matchIds) {
+      if (id === streamingMsgId) continue;
+      const el = messageRefs.current.get(id);
       if (!el) continue;
-      highlightTextNodes(el, q, m.id === currentId);
+      highlightTextNodes(el, q, id === currentId);
       hasMarksRef.current = true;
     }
+    // `messages` stays a dependency for the `streamingMsgId` read above. It
+    // adds no runs — `matchIds` is re-derived from it on every change.
   }, [searchOpen, searchQuery, matchIds, matchCursor, messages, streamingHere]);
 
   const closeSearch = () => {
