@@ -197,18 +197,20 @@ export function SearchBar() {
       // regular app behind it — including surfacing persisted chat titles,
       // which is exactly what the TitleBar's disabled search pill prevents.
       if (usePrivateChatStore.getState().open) return;
-      // Only capture a restore target when the focus is coming from outside
-      // the palette. Pressing Ctrl+K again with the palette already open used
-      // to overwrite it with the palette's own input — which passes `close()`'s
-      // `isConnected` check while it's still mounted, then unmounts before the
-      // deferred `focus()` runs, dropping focus to <body> instead of returning
-      // it to the composer.
-      const active = document.activeElement;
-      const insidePalette =
-        active instanceof HTMLElement &&
-        (active === inputRef.current || !!panelRef.current?.contains(active));
-      if (!insidePalette) {
-        restoreFocusTo.current = active instanceof HTMLElement ? active : null;
+      // Only capture a restore target while the palette is closed. Pressing
+      // Ctrl+K again with it already open used to overwrite the target with
+      // whatever had focus inside the palette — the input, or an item of the
+      // scope menu — which passes `close()`'s `isConnected` check while it's
+      // still mounted, then unmounts before the deferred `focus()` runs,
+      // dropping focus to <body> instead of returning it to the composer.
+      // The panel only mounts while open, so its ref doubles as the open
+      // flag; a DOM-containment check missed the scope menu, which portals
+      // out of the panel.
+      if (!panelRef.current) {
+        restoreFocusTo.current =
+          document.activeElement instanceof HTMLElement
+            ? document.activeElement
+            : null;
       }
       setOpen(true);
       // Defer the focus call so the input has been mounted by the time we

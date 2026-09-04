@@ -59,8 +59,10 @@ export function useProviderModels() {
           // which re-runs this — but without an else the last list survived for
           // the component's lifetime, and the pickers render it whether or not
           // a key is set. Picking one of those pinned the session to a provider
-          // that can only fail at send time with an auth error.
-          setOpenaiModels([]);
+          // that can only fail at send time with an auth error. Functional so
+          // an already-empty list keeps its identity: this branch runs on every
+          // keyless refresh, and a fresh `[]` re-rendered each picker for nothing.
+          setOpenaiModels((prev) => (prev.length === 0 ? prev : []));
         }
       } finally {
         // Only the latest-initiated run owns the loading flag.

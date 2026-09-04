@@ -354,7 +354,9 @@ export function ChatCanvas() {
       highlightTextNodes(el, q, id === currentId);
       hasMarksRef.current = true;
     }
-  }, [searchOpen, searchQuery, matchIds, matchCursor, streamingHere]);
+    // `messages` stays a dependency for the `streamingMsgId` read above. It
+    // adds no runs — `matchIds` is re-derived from it on every change.
+  }, [searchOpen, searchQuery, matchIds, matchCursor, messages, streamingHere]);
 
   const closeSearch = () => {
     setSearchOpen(false);
