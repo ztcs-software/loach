@@ -952,8 +952,12 @@ function finishRunning(
   // The streaming metrics entry has served its purpose — the final numbers
   // are persisted in the message's `metrics_json` from here on. Left in
   // place it accumulated one entry per reply for the process's lifetime, and
-  // the whole record is cloned on every metrics flush.
+  // the whole record is cloned on every metrics flush. The in-memory message
+  // must pick up the same JSON in the same `set()` below: the `updateMessage`
+  // above only reaches SQLite, and a cached transcript is never re-read until
+  // restart, so without this the footer vanishes the moment the reply ends.
   const finishedMsgId = buf?.assistantMsgId;
+  const finishedMetricsJson = buf?.metrics ? JSON.stringify(buf.metrics) : null;
 
   // Snapshot the buffer + task before we null out `runningBuffers` so the
   // memory extractor (kicked off below) can read the assistant text. The
@@ -1006,12 +1010,22 @@ function finishRunning(
       streamingByMessage = { ...streamingByMessage };
       delete streamingByMessage[finishedMsgId];
     }
+    let messages = s.messages;
+    if (finishedId && finishedMsgId && finishedMetricsJson) {
+      messages = {
+        ...messages,
+        [finishedId]: (messages[finishedId] ?? []).map((m) =>
+          m.id === finishedMsgId ? { ...m, metrics_json: finishedMetricsJson } : m,
+        ),
+      };
+    }
     return {
       activeStream: null,
       isStreaming: false,
       streamingSessionId: null,
       runningTask: null,
       streamingByMessage,
+      messages,
       ...(unreadPatch ? { unread: unreadPatch } : {}),
     };
   });
