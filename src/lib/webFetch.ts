@@ -163,7 +163,7 @@ export function inlineFetchedPages(
 /**
  * Turn fetch outcomes into the same `ToolCallRecord` shape MCP and
  * the built-in `calculate` tool use, so the renderer can show a chip
- * per URL on the user's message bubble.
+ * per URL on the assistant's reply.
  *
  * Web fetch isn't *technically* a model-initiated tool call (the
  * frontend fires it before the chat request is built), but the chip

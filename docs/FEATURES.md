@@ -23,12 +23,14 @@ The default backend. Loach talks to a local `ollama serve` process over HTTP.
 
 - **Base URL** — defaults to `http://localhost:11434`. Override in
   **Settings → Providers** if you run Ollama on another machine or port.
-- **Auto-detected on launch** — the model list refreshes as soon as the app
-  reaches the providers panel; if Ollama isn't running, the panel surfaces a
-  soft "start ollama serve" hint instead of erroring.
+- **Auto-detected on launch** — Loach probes the base URL as soon as it
+  starts, so pulled models appear in the model picker without a refresh. If
+  Ollama isn't running, the picker says so and offers **Start Ollama**
+  (below); the Models tab shows the connection error.
 - **Test connection** — the Providers panel exposes a one-click probe that
-  pings `/api/tags` and reports the daemon version and visible model count,
-  so the user can confirm a custom base URL works without leaving Settings.
+  pings `/api/tags` and reports whether the daemon answered and how many
+  models it lists, so the user can confirm a custom base URL works without
+  leaving Settings.
 - **Start Ollama** — when the daemon isn't answering, the model picker
   shows a **Start Ollama** button that launches it on demand and swaps in
   the model list once it responds. Errors surface in the menu itself.
@@ -52,8 +54,11 @@ plus vLLM, LM Studio, LiteLLM, OpenRouter, Groq, and other proxies.
 - **API key** — saved into the OS credential manager (Windows Credential
   Manager, Linux Secret Service, macOS Keychain). Never written to disk in
   plain text, never shipped to the renderer.
-- **Catalog listing** — fetched on demand; the panel hides itself if no key
-  is configured rather than spamming 401s.
+- **Catalog listing** — fetched with the saved key, or without one when the
+  base URL points somewhere other than the OpenAI default (local servers
+  such as LM Studio and `llama-server` accept keyless requests). The Models
+  tab shows the section only when the listing returned something, rather
+  than spamming 401s.
 - **Test connection** — calls the endpoint's `/models` listing with the
   stored key and reports the model count (or a readable error) so the user
   can verify a base URL + key pair before opening a chat. Disabled while
@@ -62,7 +67,8 @@ plus vLLM, LM Studio, LiteLLM, OpenRouter, Groq, and other proxies.
 ### 1.3 Model picker
 
 Every chat shows a model dropdown in its header that lists both providers'
-catalogs grouped by name. Switching a chat's model:
+catalogs grouped by provider (**Ollama** and **API**; the API group shows up
+to 30 models). Switching a chat's model:
 
 - Persists onto the session row so reloads remember it.
 - Updates the global "most recent (provider, model)" pair used by **Default
@@ -84,14 +90,18 @@ transcript of messages.
 - **Thinking traces** — for reasoning-capable models the chain-of-thought
   stream is rendered into a separate collapsible block above the answer.
 - **Tool-call blocks** — when the model calls a tool (a built-in utility
-  or an MCP tool), the calls collapse into a single **"Called N tools"**
-  header above the answer, styled like the Thinking block. Expand it to
+  or an MCP tool), the calls collapse into a single header above the
+  answer — **Called <tool> tool** for one call, **Called N tools** for
+  more — styled like the Thinking block. Expand it to
   see each call's name, arguments, and result (or error, or *Denied*).
   An MCP call that needs your approval shows an **approval card** above
   the block — server, tool, arguments, and **Allow once / Always allow /
   Deny** — and the reply waits until you answer (§8.2).
-- **Metrics chip** — every assistant turn shows the prompt+completion token
-  count, wall-clock time, and tokens/sec when the provider reports them.
+- **Metrics chip** — every finished assistant turn shows the completion
+  token count, wall-clock time, and tokens/sec. Ollama reports the count
+  itself; OpenAI-compatible endpoints do so only when they send a `usage`
+  block, otherwise Loach counts streamed chunks. The rate falls back to
+  wall-clock timing when the backend reports none.
 - **Markdown + code highlighting** — `react-markdown` + `rehype-highlight`
   with GitHub-flavored markdown extensions. Tables, lists, footnotes, and
   language-aware syntax highlighting work out of the box.
@@ -144,16 +154,17 @@ The input box at the bottom of every chat.
 - **Slash commands** — type `/` at the start of the composer to open the
   command palette and run chat actions, switch model, fetch a URL, and
   more without leaving the keyboard (see §2.9).
-- **File picker** (`+` icon) — opens the native file dialog directly. Drag
-  and drop also works onto the composer or anywhere over the chat area.
+- **File picker** (`+` icon) — opens the file dialog directly. Drag and
+  drop also works anywhere in the window.
 - **Suggestion chips** — on the welcome hero screen of an empty chat,
   shortcuts seed the composer with starter prompts ("Explain a concept",
   "Write code", "Summarize a file", "Brainstorm").
 - **Chip row** — the active persona and tone each show as a chip above the
   input, sharing the row with the attachment chips. Persona and tone are
   accent-tinted and stick across sends; file chips are neutral and leave on
-  send, with a divider between the two groups. Click a chip to swap it or
-  its ✕ to clear it. Clearing a tone clears it for *this* chat only — it's
+  send, with a divider between the two groups. Click a chip's ✕ to clear it
+  (swap persona or tone from the parameters panel). Clearing a tone clears
+  it for *this* chat only — it's
   written as a per-chat override rather than an unset, which would fall
   straight back through to the **Settings → General** default and put the
   chip right back.
@@ -167,7 +178,7 @@ Drop any file up to **20 MB** into the composer. Loach handles three flavours:
 
 - **Images** (PNG, JPEG, WEBP, GIF) — sent as base64 to vision-capable
   models alongside the text turn.
-- **Text and code** (one of ~50 recognised extensions, plus anything with a
+- **Text and code** (one of ~70 recognised extensions, plus anything with a
   `text/*` MIME) — read verbatim and inlined into the prompt as a fenced
   code block.
 - **Documents** — **PDF** (text-extracted via `pdfjs-dist`) and **DOCX**
@@ -203,8 +214,9 @@ FIFO queue:
 - Sending in a busy chat refuses the second submit (one in-flight per chat).
 - Sending in another chat while one is running parks the request; the
   sidebar row shows a spinner while it waits.
-- The chat header offers **"Respond now"** for any waiting chat to jump
-  the queue and cancel the current runner.
+- A waiting chat shows a **Waiting for other chats to finish…** banner in
+  its transcript with **Respond now** to jump the queue and cancel the
+  current runner (and **Cancel** to withdraw the request).
 - A cancelled or errored stream persists the partial output and a visible
   error tail so the bubble is never silently empty.
 
@@ -213,7 +225,8 @@ FIFO queue:
 - **Grouped by recency** — Pinned, Today, Yesterday, This week, Older.
 - **Per-row indicator** — spinner while generating, accent dot for unread
   replies that finished while you were in another chat.
-- **Per-row menu** — Pin / Unpin, Label, Rename, Move to Archive, Delete.
+- **Per-row menu** — **Pin this chat** / **Unpin**, **Label**, **Rename**,
+  **Remove from folder** (when filed), **Move to archive**, **Delete**.
 - **Right-click** anywhere on the row opens the same menu.
 - **Spaces icon** marks chats that belong to a Space.
 - **Colour labels** — tag a chat Red, Amber, Green, Blue, Purple or Pink
@@ -222,7 +235,8 @@ FIFO queue:
   follows the chat everywhere it's listed. **No label** clears it.
 - **Folders** — drag one chat row onto another to group them. Loach asks
   for a folder name and files both chats into a **Folders** section that
-  sits between Pinned and the date groups. Folders are flat — they never
+  sits between Pinned and the date groups (if the target already sits in a
+  folder, the dragged chat joins that folder). Folders are flat — they never
   nest — start collapsed, and remember which ones you left open between
   launches.
   - Drop a chat on a folder to file it; drop it on a date caption (Today,
@@ -232,6 +246,8 @@ FIFO queue:
     under Pinned as well.
   - The folder's own menu offers **Rename** and **Delete folder**.
     Deleting never deletes chats — they move back to the main list.
+- **Archived** — a quiet footer row with a count appears whenever archived
+  chats exist and opens **Settings → Archive** (§2.7).
 
 Below 1080 px the sidebar gets out of the way on its own: opening a right
 panel (code canvas or parameters) folds it to its icon rail so the
@@ -241,41 +257,47 @@ pending restore.
 
 ### 2.6 Header actions (per chat)
 
-- **Rename**, **Pin/Unpin**, **Label**, **Move to Archive**, **Delete**.
+- **Search in chat**, **Pin this chat** / **Unpin**, **Label**, **Rename**,
+  **Move to archive** / **Restore from archive**, **Delete**.
 - **Fork this chat** — clone the conversation into a new chat (same model
   and Space) so you can branch a tangent without disturbing the original.
   The fork carries a **"Forked from …"** badge in its header that jumps
   back to the source; the badge disappears if the source is deleted. Also
   available from a message's `…` menu (forks up to that point) and via the
   `/fork` command.
-- **Copy as Markdown** — copies the full transcript to the clipboard.
-- **Export** to JSON or Markdown via the native save dialog. A **Compact
-  context** toggle in the dialog exports a summarised version instead of
-  the verbatim transcript (your chat isn't changed). The dialog and file
-  write both happen in Rust; the renderer never sees the path.
+- **Export context** — opens a dialog with the transcript rendered as
+  Markdown and a **Copy** button. A **Compact context** toggle in the
+  dialog shows a summarised version instead of the verbatim transcript
+  (your chat isn't changed). The Markdown is assembled in Rust; nothing is
+  written to disk — paste it wherever you need it. Also reachable as
+  `/export`.
 - **Import context** — paste exported JSON/Markdown or any plain text;
   it's parsed into messages and appended to the current chat. A **Hide
   from transcript** toggle folds the imported messages into a single
   collapsed card instead of showing them inline — either way they're
   still sent to the model.
-- **Search transcript** — Cmd/Ctrl+F-style find within the chat.
+- **Search in chat** — Cmd/Ctrl+F-style find within the chat.
 
 ### 2.7 Archive
 
 Chats can be archived (kept around but out of the main list). The Archive
 lives in **Settings → Archive** and lets you:
 
-- Open an archived chat read-only.
-- Unarchive to bring it back into the main list.
-- Permanently delete from the archive.
-- "Archive all" to mass-park your current chats before starting fresh.
-- "Remove all" to permanently delete every archived chat in one step
-  (guarded by a typed-confirm dialog because it's irreversible).
+- Open an archived chat. It stays interactive; the header shows an
+  **Archived** pill so you know where you are.
+- **Unarchive** to bring it back into the main list.
+- **Delete permanently** from the archive.
+- **Remove all** to permanently delete every archived chat in one step,
+  behind a confirmation because it's irreversible.
+
+Mass-archiving lives next door: **Archive all** on **Settings → Data** parks
+every live chat before starting fresh.
 
 Archiving a chat raises a toast naming it with an inline **Undo**, held for
-7 seconds (and longer while hovered) — the chat vanishes from the sidebar
-with its only way back buried in Settings, so a mis-click otherwise reads as
-a delete. Unarchiving gets no toast: its result is visible in the list.
+7 seconds (and longer while hovered), and the sidebar keeps a quiet
+**Archived** row with a count whenever archived chats exist — so a mis-click
+never reads as a delete. Unarchiving gets no toast: its result is visible in
+the list.
 
 ### 2.8 Private Chat
 
@@ -305,9 +327,9 @@ no trace. Open it from the ghost icon in the title bar.
   free-form per-chat instructions textarea, layered persona → instructions
   → tone. No Space context, no `{{USER_NAME}}` substitution, no temporal
   preamble — those layers belong to persistent chats.
-- **Same parameters panel** — Simple / Advanced toggle, model defaults,
-  Thinking and Low VRAM toggles. Closes and wipes along with the rest of
-  the overlay.
+- **Parameters panel** — the Simple view of the regular panel (context
+  length, model defaults, Thinking and Low VRAM toggles); there is no
+  Advanced view here. Closes and wipes along with the rest of the overlay.
 
 ### 2.9 Slash commands
 
@@ -335,7 +357,8 @@ Commands are grouped the way `/help` lists them:
   `/space <name>`.
 - **Tools & web** — `/tools` (list tools from enabled MCP servers),
   `/web-fetch on|off`, `/fetch <url>`, `/thinking on|off`.
-- **App** — `/settings [tab]`, `/help`.
+- **App** — `/settings [tab]` (general, providers, features, tools,
+  appearance, mcp, archive, data, security, updates, about), `/help`.
 
 Above those sits a **Recent** group: the four commands you last ran, hoisted
 out of their normal groups. The list is persisted (six names, in the settings
@@ -352,14 +375,14 @@ much of the model's context window the chat is using — `used / total`
 tokens and a percentage — with a popover that breaks the estimate down
 into the system prompt, message history, and attachments.
 
-When a chat grows long, **Compact context** (the button on the bar, or
-the `/compact` command) summarises the older turns with the chat's own
+When a chat grows long, **Compact context** (the button in the bar's
+popover, or the `/compact` command) summarises the older turns with the chat's own
 model and tucks the summary into the system prompt. The original messages
 aren't deleted — they stay in the transcript for scrollback, marked with a
 compaction divider, but are dropped from what the model sees on the next
 turn so the freed context goes to new conversation. Compaction is only
-offered once a chat is large enough to benefit (a handful of messages and
-at least a quarter of the window in use).
+offered once a chat is large enough to benefit (at least six messages and
+a quarter of the window in use).
 
 ### 2.11 Pinned responses
 
@@ -377,7 +400,7 @@ exactly like every other turn.
 - **Unpin this response** lives in the same `…` menu; the bar disappears
   with the last pin.
 - Pins are stored with the chat, so they survive restarts and travel in
-  exports.
+  Data backups (§13).
 
 ### 2.12 Sharing a message
 
@@ -411,23 +434,22 @@ context.
 - **Instructions** — a system prompt that *overrides* any global or per-chat
   prompt when set (the Space is the user explicitly opting into space-level
   guidance).
-- **Reference files** — text files and PDFs are inlined into the system
-  prompt of every chat in this Space; images ride along with the user
-  turn. Total per-Space cap: **200 MB**.
+- **Reference files** — text files, PDFs and DOCX documents are inlined
+  into the system prompt of every chat in this Space; images ride along
+  with the user turn. **20 MB** per file, **200 MB** total per Space.
 - **Memory** — auto-extracted one-line facts about the user (see §3.3).
 - **Default provider and model** — pinned per-Space so a "code review"
   Space can always start in a different model than a "writing" Space.
-- **Default generation parameters** — temperature/top-p/etc., layered
-  between model defaults and per-chat overrides.
 
 ### 3.2 Lifecycle
 
-- Create from the **Spaces** sidebar tab or the in-app library tile.
-- Edit name, description, instructions, default model, and defaults.
-- Open a Space to see its detail view — chats inside it, instructions,
-  files, memory, and model defaults — each on its own tab. Each chat row
+- Create from the **Spaces** library (**New space**).
+- Edit name and description from **Edit Space details**; instructions and
+  the default model live on their own tabs.
+- Open a Space to see its detail view — **Chats**, **Instructions**,
+  **Files**, **Memory** and **Models**, each on its own tab. Each chat row
   in the Chats tab exposes the same `…` action menu as the main sidebar
-  (Pin / Unpin, Rename, Move to archive, Delete).
+  (Pin this chat / Unpin, Label, Rename, Move to archive, Delete).
 - Delete a Space and all its associated files / memories cascade out of
   the DB.
 
@@ -464,11 +486,12 @@ in the **Snippets** sidebar tab.
   and model so "Run" always starts a chat there.
 - **Run** — opens a fresh chat (with the pinned model if set) and primes the
   composer with the snippet's prompt. The user can edit before sending.
-- **Bookmark from an assistant reply** — the right-click menu on any
-  assistant message offers "Save as snippet", which prefills the editor with
-  that text.
-- **Library view** — tile grid sorted by recency, search field at the top.
-- **Edit / Delete** behind a per-tile `⋯` menu.
+- **Save a prompt you already sent** — the `…` menu on any of your own
+  messages offers **Save as Snippet**, which prefills the editor with that
+  text.
+- **Library view** — tile grid sorted by recency, with the static-variables
+  panel (§4.1) above it.
+- **Run / Edit / Delete** behind a per-tile `⋯` menu.
 
 ### 4.1 Snippet variables
 
@@ -493,33 +516,34 @@ catalog plus a read-only listing of the OpenAI catalog.
 
 ### 5.1 List view
 
-- Tiles for every installed model: family, parameter size, on-disk size,
-  quantization, capabilities (thinking / tools / vision).
-- **Pull a model** (`Pull` button) — opens an inline progress chip with
-  the percentage and current digest. Can be cancelled.
+- Tiles for every installed model: family and on-disk size. Parameter
+  size, quantization and format show in the editor header.
+- **Pull model** — type a tag and press **Pull**; an inline chip shows the
+  current status line and a progress bar, and can be stopped.
 - **Refresh** — re-queries `/api/tags` and the OpenAI listing.
-- **Search** — substring match across model names.
-- **Open** any Ollama model to edit it in the **Models editor**.
+- **Open** any Ollama model to edit it in the **Models editor** — click
+  the tile, or **Customize** in its `⋯` menu.
 
 ### 5.2 Models editor
 
 For a single Ollama model, the editor lets you:
 
-- **Inspect** the Modelfile, the system prompt, the chat template, parsed
-  PARAMETER block, and the capabilities tags.
+- **Inspect** the system prompt, the prompt template and the parsed
+  PARAMETER block, plus the live Modelfile behind **Show live Modelfile**.
 - **Edit** any of those fields in the form.
-- **Save as…** writes a *new* derived model via `POST /api/create` —
-  Loach never overwrites the base, so the FROM line always points at
-  something you can revert to.
-- **Copy model** — duplicate under a new tag without changes.
-- **Delete model** — irreversible removal of the local copy.
-- **Thinking preference** — per-model override for the Thinking toggle.
+- **Save as new model** writes a *new* derived model via `POST /api/create`
+  (with a **Preview Modelfile** toggle) — Loach never overwrites the base,
+  so the FROM line always points at something you can revert to.
+- **Duplicate…** (in the tile's `⋯` menu on the list view) — copy under a
+  new tag without changes.
+- **Delete** — irreversible removal of the local copy.
+- **Allow thinking step** — per-model override for the Thinking toggle.
   Sits between the Modelfile default and per-chat overrides.
-- **Open a fresh chat** pre-selected to this model.
+- **New chat** pre-selected to this model.
 
 ### 5.3 Modelfile guardrails
 
-The "Save as…" form refuses to compile a Modelfile that would inject
+The **Save as new model** form refuses to compile a Modelfile that would inject
 additional directives via a malicious base tag, system block, or template
 block. The base tag is matched against a conservative `[A-Za-z0-9._/-]`
 allowlist; SYSTEM and TEMPLATE bodies are rejected if they contain `"""`
@@ -542,9 +566,10 @@ Pick from a curated list of preset roles that pre-pend a system prompt:
 - **Explain Like I'm 5** — plain language and concrete analogies.
 - **Translator** — accurate translation that preserves tone and idiom.
 
-Picked from the composer's `+` menu or the parameters sidebar. Per-chat.
-Not persisted across launches by design; the seed prompt itself lives on
-the session and survives a reload.
+Picked from the parameters sidebar or with `/persona`. Per-chat, and not
+persisted across launches by design: the persona text is layered into the
+system prompt at send time and never written to the chat, so after a
+restart you pick it again.
 
 ### 6.2 Tones (style)
 
@@ -574,31 +599,32 @@ every tone, so the default-tone picker doubles as a reference.
 
 Every chat has a slide-out **parameters panel** on the right. Two modes:
 
-- **Simple** — max tokens, num_ctx, seed, Thinking toggle, Low VRAM
-  toggle, per-chat system prompt textarea. The view stays terse on
-  purpose so the common knobs are reachable without scrolling.
-- **Advanced** — adds **temperature**, top_p, top_k, min_p,
-  repeat_penalty, frequency and presence penalties, GPU layer count,
-  and everything else the providers expose.
+- **Simple** — context length, Thinking toggle, Low VRAM toggle, persona,
+  tone, and the per-chat **Additional instructions** textarea. The view
+  stays terse on purpose so the common knobs are reachable without
+  scrolling.
+- **Advanced** — adds **temperature**, top_p, top_k, min_p, max tokens,
+  repeat_penalty, frequency and presence penalties, GPU layer count, and
+  seed.
 
-The same panel is reused by **Private Chat** (§2.8) with the same
-Simple / Advanced split.
+**Private Chat** (§2.8) reuses the Simple view.
 
 The parameter merge order, top to bottom (later layers win):
 
 1. **App defaults** — universal fallback (temp 0.7, top_p 0.95, etc.).
-2. **Model defaults** — parsed from the Ollama Modelfile's PARAMETER
+2. **Global Thinking default** — the **Settings → Features → Thinking**
+   switch (Ollama only).
+3. **Model defaults** — parsed from the Ollama Modelfile's PARAMETER
    block; cached after the first chat with that model.
-3. **Per-model preferences** — currently the Models-editor Thinking
+4. **Per-model preferences** — currently the Models-editor Thinking
    toggle.
-4. **Space defaults** — when the chat belongs to a Space with its own
-   pinned parameters.
 5. **Per-session overrides** — what the sliders in this panel save.
-6. **Global app overrides** — Settings → General Low-VRAM pin, which
-   forces `low_vram: true` on every Ollama request.
+6. **Global app overrides** — the **Settings → Features → Low VRAM mode**
+   pin, which forces `low_vram: true` on every Ollama request.
 
-A **Reset to defaults** button in the panel header clears the per-session
-overrides and falls back to the merged defaults.
+A **Reset to defaults** button at the bottom of the panel (labelled
+**Reset to model defaults** when the model ships Modelfile defaults) clears
+the per-session overrides and falls back to the merged defaults.
 
 ### 7.1 Thinking toggle
 
@@ -634,7 +660,8 @@ strips HTML to readable text, and appends it as a fenced block.
   special-use range. A hostname that DNS-resolves to a private address is
   rejected. Redirects are walked manually and re-screened per hop.
 - **Failures are silent per-URL** — a dead link does not block the send;
-  the failure is rendered as a short stub so the model knows we tried.
+  the failure is rendered as a short `Failed to fetch <url>: …` stub so the
+  model knows we tried.
 - **Shown on the reply** — the URLs Loach fetched for a turn appear as
   small chips on the assistant message.
 
@@ -662,7 +689,7 @@ Loach speaks two MCP transports. Configure servers in **Settings → MCP**.
 
 For each server:
 
-- **Name** — display label.
+- **Display name** — the label shown in menus.
 - **Enabled toggle** — disable without deleting.
 - **Test connection** — runs `initialize` + `tools/list` without
   persisting and reports the server name, protocol version, and tool
@@ -759,8 +786,9 @@ search), system notices, imported turns hidden inside a collapsed card, and
 matches that only occur inside an attachment or fetched-page body the bubble
 doesn't display — jumping to any of those would scroll nowhere or highlight
 nothing. Private Chat never touches the database, so it can't appear here.
-Case-insensitivity is ASCII-only, so a non-ASCII query matches at its own
-case but not across cases.
+Message-search case-insensitivity is ASCII-only, so a non-ASCII query
+matches transcript text at its own case but not across cases (title
+matching is fully case-folded).
 
 **Scoping.** A dropdown beside the input narrows to one kind: *everywhere*
 (the default), *chats*, *messages*, *spaces* or *snippets*. It works by
@@ -776,8 +804,8 @@ window.
 
 ## 10. Code canvas
 
-Inline code blocks in assistant messages get an **"Open in canvas"** button.
-Clicking opens a right-side panel:
+Inline code blocks in assistant messages get an **Open** button (tooltip
+"Open in canvas"). Clicking opens a right-side panel:
 
 - Title bar with the inferred language and the snippet title.
 - **Copy** to clipboard.
@@ -883,26 +911,29 @@ this?" is answered before you reach for a destructive one:
 - **Database** — total bytes on disk (the SQLite file plus its write-ahead
   log) and the path, itemised into chats (with message and chat counts),
   attachments inlined into messages and snippets, Spaces (with file counts),
-  and everything else (snippets, MCP servers, settings).
+  and **Other** (snippets, MCP servers, settings).
 - **Local models** — how many Ollama models are installed and what they
   weigh, as reported by Ollama. Listed for context, not as something Loach
   can reclaim: they're stored by Ollama, outside the app-data folder above.
 
 Below it sit the actions:
 
-- **Export everything** — produces a single JSON blob with every chat,
-  message, folder, Space, file, memory, snippet, MCP server, and setting.
-  Native save dialog through a Rust-owned write so the renderer never
-  sees the chosen path.
-- **Import** — open a previously exported JSON. Reports per-table row
-  counts in a toast on success. Requires current app-lock credentials
+- **Export data** — produces a single JSON blob with every chat, message,
+  folder, Space, file, memory, snippet, snippet variable, MCP server, and
+  setting (MCP headers and environment variables are scrubbed). The save
+  dialog and the file write happen in Rust; the panel confirms the path
+  it saved to.
+- **Import data** — open a previously exported JSON. Reports per-table row
+  counts in the panel on success. Requires current app-lock credentials
   when a lock is configured.
-- **Wipe user data** — drops chats, Spaces, snippets, MCP servers, and
-  memories, but keeps app settings and the stored OpenAI key. Gated on
-  the app-lock credentials.
-- **Factory reset** — wipe user data + clear all settings + remove the
-  OpenAI key from the credential store. Re-fires onboarding on next
-  launch. Irreversible.
+- **Archive all chats** — parks every live chat in the archive (§2.7).
+- **Erase & Reset → Remove my data** — drops chats, folders, Spaces (with
+  their files and memories), snippets, snippet variables and saved
+  fill-ins, and MCP servers, but keeps app settings and the stored OpenAI
+  key. Gated on the app-lock credentials.
+- **Erase & Reset → Factory reset** — the same wipe + clear all settings +
+  remove the OpenAI key and the app lock from the credential store.
+  Re-fires onboarding on next launch. Irreversible.
 
 ---
 
@@ -943,8 +974,9 @@ only pays off for users who go on to write it into a custom instruction.
 
 When Ollama is running but has no models, the step reads the host's capacity
 (`system_info`) and leads with a single recommendation — the largest catalog
-entry that still runs comfortably — instead of asking a newcomer to pick blind
-from a dozen tags.
+entry that still runs comfortably, or the smallest download when nothing fits
+the free disk space — instead of asking a newcomer to pick blind from a dozen
+tags.
 
 **It sizes against VRAM, not RAM, whenever a discrete GPU is present.** That is
 the number which decides whether a model is usable: Ollama loads what fits into
@@ -960,8 +992,9 @@ on small-RAM/big-GPU ones. Detection lives in `src-tauri/src/gpu.rs`:
 - **macOS** — deliberately none. Apple Silicon is unified memory, so system RAM
   already *is* the GPU budget and a separate figure would double-count it.
 
-Adapters under 1 GB of dedicated memory are ignored as integrated graphics,
-which carve out system RAM and are already covered by the RAM path. Every probe
+Adapters under 1 GB of dedicated memory — and, on Windows, any adapter that
+reports unified memory — are ignored as integrated graphics, which carve out
+system RAM and are already covered by the RAM path. Every probe
 is best-effort: anything unreadable falls back to RAM, which stays correct for
 CPU-only and integrated setups.
 
@@ -1008,8 +1041,9 @@ coloured green ("Runs well", with a tick) and amber / yellow / red ("Runs OK"
 pick carries no special row badge: the recommendation card above the list is
 its highlight, and the row shows the same honest verdict as any other. Rows within a family are ordered by resident
 footprint so the badge column reads monotonically. The card names the
-constraint it used — "Based on 8 GB VRAM · NVIDIA GeForce RTX 4060" rather
-than a RAM figure — since telling a GPU owner about their RAM describes the
+constraint it used — "Based on 8.0 GB VRAM · NVIDIA GeForce RTX 4060 · 412 GB
+free on disk" rather than a RAM figure — since telling a GPU owner about their
+RAM describes the
 wrong bottleneck. Outside the Tauri shell `system_info` returns null and the
 catalog renders unadorned.
 
@@ -1079,14 +1113,20 @@ example value.
 in. Three modes:
 
 - **Use most recent** (default) — pick up wherever you left off.
-- **Pin to provider** — most-recent model for Ollama or OpenAI
-  specifically.
-- **Pin to a specific model** — always start in this exact model.
+- **Pin to provider** — **Use last Ollama model** or **Use last OpenAI
+  model**.
+- **A specific model** — pick one from the **Ollama models** / **OpenAI
+  models** lists in the same menu to always start there.
 
-**Default model preload** (off by default, Ollama-only): on app launch
-Loach sends an empty chat to the resolved default model so it loads into
-VRAM ahead of your first real prompt. Pins VRAM even if you open Loach
-just to read old chats, so the toggle is opt-in.
+**Preload on startup** (off by default, Ollama-only; under the Default model
+picker): on app launch Loach sends an empty chat to the resolved default
+model so it loads into VRAM ahead of your first real prompt. Pins VRAM even
+if you open Loach just to read old chats, so the toggle is opt-in.
+
+**Keep model loaded** (**Settings → Features**) — how long Ollama keeps a
+model resident after a reply: **5 min** (default), **30 min**, **1 hour**
+or **Always**. Sent as `keep_alive` with every request, so it overrides the
+daemon's own `OLLAMA_KEEP_ALIVE`.
 
 ---
 
@@ -1094,16 +1134,17 @@ just to read old chats, so the toggle is opt-in.
 
 In-app updater for the Tauri-supported install formats:
 
-- **Windows NSIS** — passive install of the downloaded `.nsis.zip` after
-  a click on **Install update**.
+- **Windows NSIS** — passive install of the downloaded signed
+  `-setup.exe` after a click on **Install update**.
 - **Linux AppImage** — same path; in-place replacement.
 - **Linux `.deb` / `.rpm`** — the signed package is downloaded and handed
   to `dpkg -i` / `rpm -U` through a `pkexec` prompt (falling back to
   zenity / kdialog + `sudo`), so the package database stays consistent
-  instead of a package install being silently overwritten. Format
-  detection reads a marker the bundler patches into the binary at build
-  time, which is also what gates the panel — dev builds and `cargo run`
-  report unsupported. There's no apt/yum repository, so `apt upgrade`
+  instead of a package install being silently overwritten. Package
+  installs are recognised by a marker the bundler patches into the binary
+  at build time (an AppImage by the variable its runtime sets), and the
+  same check gates the panel — dev builds and `cargo run` report
+  unsupported. There's no apt/yum repository, so `apt upgrade`
   still won't see new versions; updates are in-app only.
 - **macOS `.app`** — in-place replacement of the application bundle from
   the downloaded `.app.tar.gz`. Works even though the build isn't
@@ -1149,9 +1190,10 @@ verification happens before the binary is replaced.
 - **CSP is locked down** — no remote scripts, no inline scripts, no eval.
   The Tauri global is disabled; the renderer talks to the backend only
   through registered commands.
-- **File I/O is backend-owned** — every save / open dialog and the actual
-  read / write happens in Rust. The renderer never knows the chosen
-  path, so a compromised UI cannot read or overwrite arbitrary files.
+- **File I/O is backend-owned** — every save dialog, the Data import
+  dialog, and the actual read / write happen in Rust. The renderer can't
+  pick a path itself (it only learns where a backup landed after the
+  write), so a compromised UI cannot read or overwrite arbitrary files.
 - **Running a program is backend-gated** — a stdio MCP server's command
   line is confirmed in a native OS dialog before it is saved or started
   (§8.2), and every MCP tool call asks in the chat before it runs unless

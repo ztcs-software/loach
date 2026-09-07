@@ -120,7 +120,7 @@ tempfile = "3"
 custom-protocol = ["tauri/custom-protocol"]
 
 [profile.release]
-# Smaller binary → smaller NSIS installer + updater `.nsis.zip` download for
+# Smaller binary → smaller NSIS installer + updater `-setup.exe` download for
 # every user on every release, and a faster cold start (Windows cold-start cost
 # is roughly proportional to bytes read + Defender-scanned). `lto = "thin"`
 # captures most of full LTO's size win for a fraction of the link time;

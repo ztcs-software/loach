@@ -51,11 +51,11 @@ interface UIState {
    *  only need text) don't have to touch attachments. */
   composerAttachments: Attachment[];
   composerInsertSeq: number;
-  /** Persona ID applied to a given chat session. Selected from the composer's
-   *  plus-menu; mirrors the session's `system_prompt` but is tracked separately
-   *  so the UI can show the persona name even after a reload. Not persisted
-   *  across launches by design — the seed prompt lives on the session itself,
-   *  and forgetting which preset produced it is an acceptable cost for v1. */
+  /** Persona ID applied to a given chat session. Selected from the parameters
+   *  panel or `/persona`; the persona text is layered into the system prompt
+   *  at send time (see chatStore) and never written to the session. Not
+   *  persisted across launches by design — a reload drops the persona and the
+   *  user picks it again from the panel. */
   personaIdBySession: Record<string, string>;
   /** Persona to apply to the next session created (welcome-screen flow, where
    *  no session exists yet when the user opens the menu). Consumed by

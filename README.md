@@ -61,7 +61,7 @@ Behind a calm, beautifully crafted UI sits a rich feature set - ready when you n
 - **Slash commands** - type `/` in the composer for a command palette: `/fork`, `/regenerate`, `/compact`, `/private`, `/model`, `/persona`, `/snippet`, `/remember` and more.
 - **Personas and Tones** - pick a role (Code Reviewer, Translator, ELI5...) and delivery style (Formal, Casual, Direct, Detailed...).
 - **Context management** - a live bar under the composer shows how full the context window is, with one-click compaction that summarizes older turns to free space.
-- **Import / export context** - export chat context to JSON or Markdown, optionally summarized to compact it, and paste exported data - or any text - back to any chat's context.
+- **Import / export context** - copy a chat's context as Markdown, optionally summarized to compact it, and paste it - or any text - back into any chat's context.
 - **LaTeX math** - replies typeset with KaTeX: `$$…$$`, `$…$`, `\(…\)`, `\[…\]` and ` ```math ` fences render out of the box. `$` doubles as a currency sign, so `$…$` only typesets when the span actually reads as math - "it costs $5 and $10" stays prose. KaTeX ships inside the app (no network access) and is only read from disk the first time a reply contains math.
 
 #### Model tools & capabilities
@@ -137,7 +137,7 @@ Auto-updates are delivered through Loach's own signed updater (independent of Ap
 - **Rust 1.88+** via [`rustup`](https://rustup.rs) — the dependency tree's minimum; CI builds on 1.88.0
 - Platform build tooling — install once via the official Tauri prerequisites guide: <https://tauri.app/start/prerequisites/>
   - **Windows**: Microsoft Visual Studio Build Tools, WebView2 runtime (preinstalled on Windows 11)
-  - **Linux**: `webkit2gtk-4.1`, `libayatana-appindicator3-dev`, `librsvg2-dev`, `build-essential`, `libssl-dev`, `pkg-config`, `libsecret-1-dev`
+  - **Linux**: `libwebkit2gtk-4.1-dev`, `libappindicator3-dev` (or `libayatana-appindicator3-dev`), `librsvg2-dev`, `build-essential`, `libssl-dev`, `pkg-config`; bundling `.AppImage` / `.rpm` installers also needs `patchelf`, `rpm`, `file`, `wget` and `desktop-file-utils`. No Secret Service headers are needed — the keyring backend is pure Rust.
   - **macOS**: Xcode Command Line Tools (`xcode-select --install`)
 
 #### Clone and install
@@ -218,9 +218,9 @@ Only one OpenAI-compatible endpoint is active at a time — switch the base URL 
 | Markdown | `react-markdown` + `remark-gfm` + `rehype-highlight` (highlight.js) |
 | Math | `remark-math` + `rehype-katex` + KaTeX, lazy-loaded from the bundle on first use |
 | Document parsing | `pdfjs-dist` (PDF) + `mammoth` (DOCX) |
-| PDF generation | `printpdf` 0.12 with a bundled Liberation Sans subset (Unicode-capable output) |
+| PDF generation | `printpdf` 0.12 with bundled Liberation Sans fonts, subset at render time (Unicode-capable output) |
 | System tray | Tauri 2 built-in (`tray-icon` feature) |
-| Bundle targets | `.exe` (NSIS) on Windows; `.deb` / `.rpm` / `.AppImage` on Linux; `.dmg` on macOS (Apple Silicon) |
+| Bundle targets | `.exe` (NSIS) on Windows; `.deb` / `.rpm` / `.AppImage` on Linux; `.dmg` + `.app` on macOS (Apple Silicon) |
 
 ---
 
@@ -228,7 +228,7 @@ Only one OpenAI-compatible endpoint is active at a time — switch the base URL 
 
 | What | Where |
 |---|---|
-| Chats, messages, folders, spaces, snippets, snippet variables, MCP servers, app settings | SQLite at `<app-data-dir>/loach.db` |
+| Chats, messages, folders, spaces (instructions, reference files, memories), snippets, snippet variables and saved fill-ins, MCP servers, app settings | SQLite at `<app-data-dir>/loach.db` |
 | OpenAI API key | OS credential manager (Windows Credential Manager / Linux Secret Service / macOS Keychain) |
 | App-lock hash + hint | OS credential manager — same store, separate entry |
 | Attached files (images, text) | Inlined into the message at send time; no separate file store |

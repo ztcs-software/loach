@@ -78,12 +78,12 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
   );
   const supportsThinking =
     session?.provider === "ollama" && (modelCapabilities?.includes("thinking") ?? false);
-  // Global Low-VRAM pin (Settings → General). When on, every Ollama request
+  // Global Low-VRAM pin (Settings → Features). When on, every Ollama request
   // is sent with `low_vram: true` regardless of what's in this panel — so
   // we visually pin the per-chat toggle on and disable it, with a hint
   // pointing the user back to the global setting.
   const lowVramGlobal = useSettingsStore((s) => s.low_vram_global);
-  // Global Thinking default (Settings → General). Mirrors the chatStore
+  // Global Thinking default (Settings → Features). Mirrors the chatStore
   // merge order so the panel shows the same value the request will send.
   const thinkingDefault = useSettingsStore((s) => s.thinking_default);
 
@@ -950,7 +950,7 @@ function GpuLayersRow({
  * isn't enough. We persist `undefined` instead of `false` so a session
  * that hasn't touched the toggle reads as "no override".
  *
- * `pinnedByGlobal` reflects the Settings → General master switch. When
+ * `pinnedByGlobal` reflects the Settings → Features master switch. When
  * true, the per-chat toggle is forced on and disabled — flipping it
  * would be a no-op, so we make that obvious instead of silently ignoring
  * the click.
@@ -985,7 +985,7 @@ function LowVramRow({
         {isOpenAI
           ? "Ignored by OpenAI providers."
           : pinnedByGlobal
-            ? "Pinned on by the global Low VRAM setting (Settings → General). Turn that off to control it per chat."
+            ? "Pinned on by the global Low VRAM setting (Settings → Features). Turn that off to control it per chat."
             : "Trade speed for memory: smaller batches and KV cache. Helpful when you're up against VRAM limits."}
       </p>
     </div>

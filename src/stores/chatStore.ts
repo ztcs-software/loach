@@ -264,8 +264,9 @@ interface ChatState {
   compactingSessionId: string | null;
   /** Summarize the older messages in a session via the same model and
    *  store the summary in `session.system_prompt` with a unique marker
-   *  block, then delete the summarized messages so they no longer
-   *  consume context. Earlier auto-summary blocks in `system_prompt`
+   *  block, then mark the summarized messages `compacted_at` so they stay
+   *  in the transcript but no longer reach the model. Earlier auto-summary
+   *  blocks in `system_prompt`
    *  are replaced, not stacked. */
   compactContext: (sessionId: string) => Promise<void>;
   /** Build a compacted Markdown export without touching the session.
@@ -484,7 +485,7 @@ function parseOverrides(json: string | null): Partial<GenerationParams> {
  *      (`params_json`). When `params_json` is `null` the session inherits
  *      from layers 1 – 3 only.
  *   5. Global app overrides — settings that win above every other layer,
- *      currently just the global Low-VRAM toggle from Settings → General.
+ *      currently just the global Low-VRAM toggle from Settings → Features.
  *      When the user pins it on we want it to apply to every chat with
  *      every model, even ones whose Modelfile sets `low_vram` differently.
  *
@@ -500,7 +501,7 @@ function readSessionParams(session: Session | undefined): GenerationParams {
   const modelsState = isOllama ? useModelsStore.getState() : null;
   const modelDefaults = modelsState?.modelDefaults[session.model] ?? {};
   const settingsState = useSettingsStore.getState();
-  // Global Thinking default (Settings → General). Sits below model + per-model
+  // Global Thinking default (Settings → Features). Sits below model + per-model
   // prefs and the per-chat override so an explicit per-model or per-chat
   // setting still wins.
   const globalThinkLayer: Partial<GenerationParams> = isOllama
@@ -534,7 +535,7 @@ function readSessionParams(session: Session | undefined): GenerationParams {
     ...spaceLayer,
     ...overrides,
   };
-  // Global Low-VRAM pin (Settings → General). Ollama-only — OpenAI ignores
+  // Global Low-VRAM pin (Settings → Features). Ollama-only — OpenAI ignores
   // the field, so we don't bother stamping it on those requests. Stays out
   // of `params_json` deliberately: a per-chat record of "user picked this"
   // shouldn't include settings the user never touched in the panel.

@@ -266,7 +266,7 @@ async function runFork(): Promise<CommandResult> {
 
 async function runExport(): Promise<CommandResult> {
   // Reuses the ChatHeader's "Export context" dialog (full / compacted views,
-  // copy, save-to-file) rather than duplicating that surface here. The header
+  // copy to clipboard) rather than duplicating that surface here. The header
   // owns the dialog's data-loading, so we flip a one-shot flag it consumes —
   // same pattern as the onboarding model-picker auto-open.
   requireSession();
