@@ -67,7 +67,7 @@ Behind a calm, beautifully crafted UI sits a rich feature set - ready when you n
 #### Model tools & capabilities
 - **Tools** - let models call local tools including calculate, date/time, count, hash, UUID, base64, JSON, unit convert, text diff, sort, IP math and PDF generation. 
 - **PDF generation** - the built-in pdf tool turns a model's structured spec (headings, lists, tables, page breaks) into a real PDF attached to the reply.
-- **MCP support** - register Model Context Protocol servers (Streamable HTTP), test the handshake and inspect the tools they provide. 
+- **MCP support** - register Model Context Protocol servers over Streamable HTTP or as local stdio processes (`npx`, `uvx`, …), test the handshake, inspect the tools they provide, and approve each tool call in the chat before it runs. 
 - **Web fetch** - add URLs to messages and they will be fetched, sanitized and inlined to context. 
 - **Temporal awareness** - inject current date, time, weekday and timezone into the system prompt so models can answer to "what day is it today?".
 

@@ -1,10 +1,17 @@
 pub mod ollama;
 pub mod openai;
 
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use tauri::{AppHandle, Emitter};
+use tokio::select;
+use tokio::sync::Notify;
 
+use crate::db::Database;
 use crate::mcp::McpToolDef;
+use crate::stream::{ApprovalDecision, ApprovalRegistry, StreamEvent};
 
 /// Map a model-supplied qualified tool name (`slug__tool`) back to its
 /// definition and the bare name the server expects.
@@ -17,6 +24,155 @@ pub(super) fn resolve_qualified<'a>(
 ) -> Option<(&'a McpToolDef, String)> {
     let def = tools.iter().find(|t| t.qualified_name == qualified)?;
     Some((def, def.name.clone()))
+}
+
+/// Per-tool-result ceiling fed back into the next chat turn. MCP responses
+/// can legitimately be tens of kilobytes (a `list_issues` page, a file
+/// read, …) but the client-side cap on the raw HTTP body is 4 MiB. Push
+/// a 4 MiB blob into `messages` and the next round-trip blows the model's
+/// context window — across 10 turns the conversation could carry 40 MiB
+/// of in-flight strings before anyone sees the bill. Truncate per call,
+/// tell the model it was truncated so it can decide whether to ask for
+/// a different slice. The UI still receives the full text.
+pub(super) const MAX_TOOL_RESULT_BYTES: usize = 32 * 1024;
+
+/// How long a per-call approval prompt stays open before it counts as a
+/// refusal. The stream is parked between provider turns while it waits, so
+/// nothing upstream times out — this only stops a walked-away-from prompt
+/// from pinning the chat (and the queue behind it) forever.
+const APPROVAL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
+/// What the model is told when the user refuses a call. Phrased as an
+/// instruction so it doesn't immediately retry the same tool.
+const DENIED_NOTE: &str =
+    "The user declined to run this tool. Do not call it again; continue without \
+     its result, or ask the user how they would like to proceed.";
+
+/// Everything the per-call helper needs from the provider loop, bundled so
+/// both providers pass one struct instead of six references.
+pub(super) struct ToolCallCtx<'a> {
+    pub app: &'a AppHandle,
+    pub channel: &'a str,
+    pub db: &'a Database,
+    pub cancel: &'a Notify,
+    pub approvals: &'a ApprovalRegistry,
+    pub stream_id: &'a str,
+}
+
+/// Result of one tool call, ready to append as the `tool` turn.
+pub(super) struct ToolOutcome {
+    /// The (possibly capped) text the model gets back.
+    pub for_model: String,
+}
+
+/// Run one model-requested tool call end to end: emit `ToolCall`, ask the
+/// user first when the server requires it, dispatch, emit `ToolResult`.
+/// Shared by both providers so the consent gate, the Stop handling and
+/// the result capping can't drift apart between them.
+///
+/// Returns `None` when the stream was cancelled while waiting — for an
+/// answer or for the tool — in which case nothing has been emitted for
+/// this call beyond `ToolCall`, and the caller emits `Cancelled` and
+/// returns exactly as it did before.
+pub(super) async fn execute_tool_call(
+    ctx: &ToolCallCtx<'_>,
+    call_id: &str,
+    tool_def: &McpToolDef,
+    tool_name: &str,
+    args: &Value,
+) -> Option<ToolOutcome> {
+    let approval_required = crate::mcp::needs_approval(ctx.db, &tool_def.server_id, tool_name);
+    let _ = ctx.app.emit(
+        ctx.channel,
+        StreamEvent::ToolCall {
+            id: call_id.to_string(),
+            server_id: tool_def.server_id.clone(),
+            server_name: tool_def.server_name.clone(),
+            tool: tool_def.qualified_name.clone(),
+            arguments: args.clone(),
+            approval_required,
+        },
+    );
+
+    if approval_required {
+        let rx = ctx.approvals.register(ctx.stream_id, call_id);
+        let decision = select! {
+            biased;
+            _ = ctx.cancel.notified() => {
+                ctx.approvals.forget(ctx.stream_id, call_id);
+                return None;
+            }
+            // A dropped sender can only mean the registry was cleared out
+            // from under us — treat it as a refusal.
+            d = rx => d.unwrap_or(ApprovalDecision::Deny),
+            _ = tokio::time::sleep(APPROVAL_TIMEOUT) => {
+                ctx.approvals.forget(ctx.stream_id, call_id);
+                ApprovalDecision::Deny
+            }
+        };
+        match decision {
+            ApprovalDecision::Deny => {
+                let _ = ctx.app.emit(
+                    ctx.channel,
+                    StreamEvent::ToolResult {
+                        id: call_id.to_string(),
+                        content: DENIED_NOTE.to_string(),
+                        is_error: true,
+                        attachments: Vec::new(),
+                        denied: true,
+                    },
+                );
+                return Some(ToolOutcome {
+                    for_model: DENIED_NOTE.to_string(),
+                });
+            }
+            ApprovalDecision::AllowAlways => {
+                // Best effort: a failed write just means the prompt comes
+                // back next time, which is the safe direction.
+                match ctx.db.add_mcp_allowed_tool(&tool_def.server_id, tool_name) {
+                    Ok(true) => {}
+                    Ok(false) => tracing::debug!(
+                        "MCP: `{}` vanished before its allow-list could record `{tool_name}`",
+                        tool_def.server_name
+                    ),
+                    Err(e) => tracing::warn!(
+                        "MCP: couldn't remember allow-always for `{tool_name}` on `{}`: {e:#}",
+                        tool_def.server_name
+                    ),
+                }
+            }
+            ApprovalDecision::AllowOnce => {}
+        }
+    }
+
+    // Honour cancellation while the tool runs — a slow MCP server (GitHub
+    // at peak hours, a tool that does its own long fetch) shouldn't lock
+    // the user into waiting once they hit Stop.
+    let dispatch = crate::mcp::dispatch_tool_call(ctx.db, &tool_def.server_id, tool_name, args);
+    let (content, is_error, attachments) = select! {
+        biased;
+        _ = ctx.cancel.notified() => return None,
+        r = dispatch => match r {
+            Ok(r) => (r.content_text, r.is_error, r.attachments),
+            Err(e) => (format!("tool call failed: {e:#}"), true, Vec::new()),
+        },
+    };
+
+    // Cap what we feed back to the model. The UI gets the original
+    // (cap-free) string so users can still inspect the full result; only
+    // the message turn that re-enters the model is truncated.
+    let for_model = cap_tool_text(&content, MAX_TOOL_RESULT_BYTES);
+    let _ = ctx.app.emit(
+        ctx.channel,
+        StreamEvent::ToolResult {
+            id: call_id.to_string(),
+            content,
+            is_error,
+            attachments,
+            denied: false,
+        },
+    );
+    Some(ToolOutcome { for_model })
 }
 
 /// Truncate a tool result to `max_bytes` on a UTF-8 boundary and append a

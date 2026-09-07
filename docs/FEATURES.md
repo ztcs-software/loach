@@ -86,7 +86,10 @@ transcript of messages.
 - **Tool-call blocks** — when the model calls a tool (a built-in utility
   or an MCP tool), the calls collapse into a single **"Called N tools"**
   header above the answer, styled like the Thinking block. Expand it to
-  see each call's name, arguments, and result (or error).
+  see each call's name, arguments, and result (or error, or *Denied*).
+  An MCP call that needs your approval shows an **approval card** above
+  the block — server, tool, arguments, and **Allow once / Always allow /
+  Deny** — and the reply waits until you answer (§8.2).
 - **Metrics chip** — every assistant turn shows the prompt+completion token
   count, wall-clock time, and tokens/sec when the provider reports them.
 - **Markdown + code highlighting** — `react-markdown` + `rehype-highlight`
@@ -637,24 +640,68 @@ strips HTML to readable text, and appends it as a fenced block.
 
 ### 8.2 MCP (Model Context Protocol)
 
-Loach speaks the **Streamable-HTTP** MCP transport. Configure servers in
-**Settings → MCP**.
+Loach speaks two MCP transports. Configure servers in **Settings → MCP**.
+
+- **Streamable HTTP** — a `https://…` endpoint plus optional headers
+  (typically `Authorization`). URLs are validated (the scheme must be
+  `http`/`https`, and link-local cloud-metadata addresses are refused;
+  `localhost` and private LAN addresses are allowed, since self-hosted
+  servers commonly live there). Headers go through size and character
+  checks, per-request bodies are capped at 4 MiB, and the per-request
+  timeout is 30 s.
+- **Local process (stdio)** — a command (`npx`, `uvx`, `node`, or a full
+  path), one argument per line, and optional `NAME=value` environment
+  variables layered over Loach's own. Loach starts the program and
+  speaks newline-delimited JSON-RPC over its pipes — the way most
+  published servers ship. The process stays running between turns and is
+  stopped when the server is disabled, edited, or deleted, and when Loach
+  exits. Startup is allowed 60 s (first-run package downloads), each
+  request 30 s, and the last lines of the server's stderr are quoted in
+  errors so a failed launch says why. On Windows a bare `npx` resolves to
+  `npx.cmd` through `PATH`/`PATHEXT`, so commands work as typed.
 
 For each server:
 
 - **Name** — display label.
-- **URL** — `https://…` endpoint.
-- **Headers** — optional key/value map (typically `Authorization`).
 - **Enabled toggle** — disable without deleting.
-- **Test connection** — runs `initialize` + `tools/list` against the
-  endpoint without persisting and reports the server name, protocol
-  version, and tool list.
+- **Test connection** — runs `initialize` + `tools/list` without
+  persisting and reports the server name, protocol version, and tool
+  list.
+- **Ask before each tool call** — the per-call approval switch, on by
+  default (see below).
 
-URLs are validated (the scheme must be `http`/`https`, and link-local
-cloud-metadata addresses are refused; `localhost` and private LAN addresses
-are allowed, since self-hosted MCP servers commonly live there). Headers go
-through size and character checks, and per-request bodies are capped at 4 MiB
-so a misconfigured endpoint can't OOM the app. Per-request timeout is 30 s.
+**Running a local program needs consent.** When a stdio configuration is
+saved or tested for the first time — and again whenever its command,
+arguments, or environment change, or a disabled server is turned on — a
+native OS dialog quotes the exact command line (and the *names* of any
+environment variables, never their values) and asks whether to start it.
+The dialog is raised by the Rust side, not by the web view, so a
+compromised renderer can't get a program run without a person clicking
+through it. Approved command lines are remembered for the rest of the
+session, so a test followed by a save asks once. Snapshot imports store
+stdio servers **disabled** for the same reason; enabling one in Settings
+raises the dialog.
+
+Environment variables are treated like headers: they hold API keys, so
+they are scrubbed from exports, exactly like HTTP headers.
+
+#### Per-call approvals
+
+By default every MCP tool call pauses the reply and shows what the model
+wants to run — server, tool, and the arguments — with three answers:
+
+- **Allow once** — run it this time.
+- **Always allow `<tool>`** — run it, and stop asking for this tool on
+  this server. The choice is stored on the server row and listed in its
+  editor under *Always allowed*, where **Ask again for all** clears it.
+- **Deny** — the tool does not run. The model is told the user declined
+  and continues without the result.
+
+A prompt left unanswered for 10 minutes counts as a denial, and **Stop**
+cancels the reply as usual. Turning **Ask before each tool call** off on
+a server skips the prompt for all of its tools; the server row shows an
+*Auto-approve* badge so the exception stays visible. Built-in tools
+(§8.3) never ask — they run in-process with no network or disk access.
 
 ### 8.3 Built-in tools
 
@@ -1105,6 +1152,10 @@ verification happens before the binary is replaced.
 - **File I/O is backend-owned** — every save / open dialog and the actual
   read / write happens in Rust. The renderer never knows the chosen
   path, so a compromised UI cannot read or overwrite arbitrary files.
+- **Running a program is backend-gated** — a stdio MCP server's command
+  line is confirmed in a native OS dialog before it is saved or started
+  (§8.2), and every MCP tool call asks in the chat before it runs unless
+  you opted a server out.
 
 ---
 

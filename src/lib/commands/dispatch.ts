@@ -1,5 +1,5 @@
 import { useChatStore } from "@/stores/chatStore";
-import { useMcpStore } from "@/stores/mcpStore";
+import { connectionLabel, inputFromView, useMcpStore } from "@/stores/mcpStore";
 import { useModelsStore } from "@/stores/modelsStore";
 import { usePrivateChatStore } from "@/stores/privateChatStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -392,7 +392,7 @@ async function runList(rest: string): Promise<CommandResult> {
         servers.map((s) => ({
           label: s.name,
           detail: s.enabled ? "enabled" : "disabled",
-          hint: s.url,
+          hint: connectionLabel(s),
         })),
       );
     }
@@ -561,7 +561,7 @@ async function runTools(): Promise<CommandResult> {
   const probes = await Promise.all(
     servers.map(async (s) => ({
       server: s,
-      result: await mcpTest({ id: s.id, name: s.name, url: s.url, headers: s.headers, enabled: true }),
+      result: await mcpTest(inputFromView(s, { enabled: true })),
     })),
   );
   const items: CommandResultItem[] = [];

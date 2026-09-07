@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use serde::Serialize;
-use tokio::sync::Notify;
+use serde::{Deserialize, Serialize};
+use tokio::sync::{oneshot, Notify};
 
 /// Tracks in-flight streaming generations so we can cancel them from the frontend.
 #[derive(Clone)]
@@ -81,12 +81,17 @@ pub enum StreamEvent {
     /// provider's call id (OpenAI provides one; for Ollama we synthesise
     /// `call_<turn>_<index>`), used by the frontend to pair the call with
     /// its matching `ToolResult`.
+    ///
+    /// `approval_required` tells the UI to render the consent prompt: the
+    /// backend is parked waiting for `tool_approval_respond` (or a Stop, or
+    /// the approval timeout) before it will dispatch this call.
     ToolCall {
         id: String,
         server_id: String,
         server_name: String,
         tool: String,
         arguments: serde_json::Value,
+        approval_required: bool,
     },
     /// Outcome of a `ToolCall`. `is_error` mirrors the MCP `isError` flag;
     /// `content` is the concatenated text content (or a stringified
@@ -99,13 +104,72 @@ pub enum StreamEvent {
     /// frontend appends them to the running assistant message so they
     /// render as file cards in the chat; they're **not** fed back to the
     /// model as part of the next turn's context.
+    ///
+    /// `denied` marks a call the user refused at the consent prompt (or
+    /// that timed out waiting for one). It never ran; `content` carries the
+    /// note the model was given so it can continue without the result.
     ToolResult {
         id: String,
         content: String,
         is_error: bool,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         attachments: Vec<crate::mcp::Attachment>,
+        denied: bool,
     },
+}
+
+/// The user's answer to a per-call tool approval prompt. Wire form is the
+/// snake_case string the frontend sends (`allow_once` / `allow_always` /
+/// `deny`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalDecision {
+    AllowOnce,
+    /// Run it now and remember the tool on the server's allow-list so it
+    /// never asks again.
+    AllowAlways,
+    Deny,
+}
+
+/// Pending per-call approvals, keyed by `(stream_id, call_id)`. The provider
+/// loop parks a `oneshot` here before it emits `ToolCall { approval_required:
+/// true }`; the `tool_approval_respond` command delivers the user's answer.
+/// Entries are removed on delivery and must be [`forget`](Self::forget)ed on
+/// every other exit path (cancel, timeout) so a stale sender can't linger.
+#[derive(Clone, Default)]
+pub struct ApprovalRegistry {
+    inner: Arc<DashMap<String, oneshot::Sender<ApprovalDecision>>>,
+}
+
+impl ApprovalRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn key(stream_id: &str, call_id: &str) -> String {
+        // Unit separator — never appears in a UUID or a provider call id.
+        format!("{stream_id}\u{1f}{call_id}")
+    }
+
+    /// Park a pending approval and hand back the receiving end.
+    pub fn register(&self, stream_id: &str, call_id: &str) -> oneshot::Receiver<ApprovalDecision> {
+        let (tx, rx) = oneshot::channel();
+        self.inner.insert(Self::key(stream_id, call_id), tx);
+        rx
+    }
+
+    /// Deliver an answer. `false` when nothing was waiting — the call was
+    /// already cancelled, timed out, or answered.
+    pub fn resolve(&self, stream_id: &str, call_id: &str, decision: ApprovalDecision) -> bool {
+        match self.inner.remove(&Self::key(stream_id, call_id)) {
+            Some((_, tx)) => tx.send(decision).is_ok(),
+            None => false,
+        }
+    }
+
+    pub fn forget(&self, stream_id: &str, call_id: &str) {
+        self.inner.remove(&Self::key(stream_id, call_id));
+    }
 }
 
 pub fn event_channel(stream_id: &str) -> String {
@@ -213,5 +277,36 @@ mod tests {
         reg.cancel("s2");
         let woke = timeout(Duration::from_millis(50), n.notified()).await;
         assert!(woke.is_err(), "no permit should exist after finish()");
+    }
+
+    /// A registered approval receives exactly the decision delivered to
+    /// its (stream, call) pair, and a second delivery finds nothing.
+    #[tokio::test]
+    async fn approval_resolves_once_by_stream_and_call() {
+        let reg = ApprovalRegistry::new();
+        let rx = reg.register("s1", "call_0");
+        assert!(!reg.resolve("s1", "call_9", ApprovalDecision::Deny), "wrong call id");
+        assert!(!reg.resolve("s2", "call_0", ApprovalDecision::Deny), "wrong stream id");
+        assert!(reg.resolve("s1", "call_0", ApprovalDecision::AllowAlways));
+        assert_eq!(rx.await.unwrap(), ApprovalDecision::AllowAlways);
+        assert!(!reg.resolve("s1", "call_0", ApprovalDecision::AllowOnce), "already delivered");
+    }
+
+    /// `forget` (the cancel / timeout path) drops the sender so a late
+    /// answer from the UI is a no-op rather than a leak.
+    #[tokio::test]
+    async fn forgotten_approval_rejects_late_answers() {
+        let reg = ApprovalRegistry::new();
+        let rx = reg.register("s1", "c");
+        reg.forget("s1", "c");
+        assert!(!reg.resolve("s1", "c", ApprovalDecision::AllowOnce));
+        assert!(rx.await.is_err(), "receiver sees the sender gone");
+    }
+
+    #[test]
+    fn approval_decision_wire_form_is_snake_case() {
+        let d: ApprovalDecision = serde_json::from_str("\"allow_always\"").unwrap();
+        assert_eq!(d, ApprovalDecision::AllowAlways);
+        assert!(serde_json::from_str::<ApprovalDecision>("\"maybe\"").is_err());
     }
 }

@@ -242,7 +242,20 @@ export interface ToolCallRecord {
   /** Mirrors MCP's `isError`. True for either a tool-reported failure
    *  (the tool ran but said "no") or a transport/dispatch error. */
   is_error: boolean;
+  /** True while the backend is parked on the per-call consent prompt for
+   *  this call. Cleared when the user answers (locally, the moment they
+   *  click) or when the `tool_result` lands. Only meaningful on the
+   *  currently-streaming message — `finishRunning` clears it before the
+   *  record is persisted. */
+  awaiting_approval?: boolean;
+  /** True when the user refused the call (or the prompt timed out). The
+   *  tool never ran; `result` holds the note the model was given. */
+  denied?: boolean;
 }
+
+/** Answer to a per-call tool approval prompt. `allow_always` also records
+ *  the tool on the server's allow-list so it never asks again. */
+export type ToolApprovalDecision = "allow_once" | "allow_always" | "deny";
 
 export interface ModelInfo {
   id: string;
@@ -333,7 +346,9 @@ export type StreamEvent =
       tokens_per_second: number;
     }
   /** Model asked to invoke an MCP tool. Emitted BEFORE the dispatcher
-   *  runs the tool — the UI uses this to render a "calling X…" block. */
+   *  runs the tool — the UI uses this to render a "calling X…" block.
+   *  `approval_required` means the backend is waiting on
+   *  `tool_approval_respond` before it will run the call. */
   | {
       kind: "tool_call";
       id: string;
@@ -341,6 +356,7 @@ export type StreamEvent =
       server_name: string;
       tool: string;
       arguments: unknown;
+      approval_required?: boolean;
     }
   /** Outcome of a tool call. `id` pairs with the matching `tool_call`. */
   | {
@@ -354,6 +370,9 @@ export type StreamEvent =
        *  file-card renderers handle display. Optional with default `[]`
        *  so prior tool_result events deserialise unchanged. */
       attachments?: Attachment[];
+      /** The user refused the call at the consent prompt (or it timed
+       *  out). The tool never ran. */
+      denied?: boolean;
     };
 
 export type ThemeChoice = "light" | "dark" | "system";
@@ -666,16 +685,31 @@ export type AdminEvent =
 // MCP (Model Context Protocol)
 // ---------------------------------------------------------------------------
 
-/** An MCP server row as persisted in SQLite. Loach only speaks the
- *  Streamable-HTTP transport — one endpoint URL plus an optional map of
- *  request headers (typically auth). The `headers_json` blob arrives as a
- *  JSON string and is parsed lazily in `mcpStore`. */
+/** How Loach reaches an MCP server: POST JSON-RPC to a URL (Streamable
+ *  HTTP), or spawn a local process and talk over its pipes (stdio). */
+export type McpTransport = "http" | "stdio";
+
+/** An MCP server row as persisted in SQLite. Which connection fields are
+ *  meaningful depends on `transport`: `url` + `headers_json` for HTTP,
+ *  `command` + `args_json` + `env_json` for stdio. The JSON blobs arrive as
+ *  strings and are parsed lazily in `mcpStore`. */
 export interface McpServer {
   id: string;
   name: string;
+  transport: McpTransport;
   url: string;
   /** JSON-encoded `Record<string, string>`. */
   headers_json: string | null;
+  command: string | null;
+  /** JSON-encoded `string[]`. */
+  args_json: string | null;
+  /** JSON-encoded `Record<string, string>`. */
+  env_json: string | null;
+  /** When true, tool calls from this server skip the per-call prompt. */
+  auto_approve: boolean;
+  /** JSON-encoded `string[]` of raw tool names the user answered "Always
+   *  allow" for from the in-chat prompt. */
+  allowed_tools_json: string | null;
   enabled: boolean;
   created_at: number;
   updated_at: number;
@@ -683,12 +717,18 @@ export interface McpServer {
 
 /** Shape the Settings editor hands to `mcp_save` / `mcp_test`. Strings are
  *  trimmed and validated on the Rust side; `id` being undefined means
- *  "create new". */
+ *  "create new". `transport` defaults to `"http"` when omitted. */
 export interface McpServerInput {
   id?: string;
   name: string;
-  url: string;
+  transport?: McpTransport;
+  url?: string;
   headers?: Record<string, string>;
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  auto_approve?: boolean;
+  allowed_tools?: string[];
   enabled?: boolean;
 }
 

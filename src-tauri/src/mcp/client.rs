@@ -254,7 +254,7 @@ impl McpSession {
 /// than dropping them to a placeholder), and resources stringified with a
 /// per-item cap. Pure and allocation-bounded so it's unit-testable without
 /// a live server.
-fn assemble_call_result(content: Vec<CallToolContent>, is_error: bool) -> McpCallResult {
+pub(super) fn assemble_call_result(content: Vec<CallToolContent>, is_error: bool) -> McpCallResult {
     let mut text = String::new();
     let mut attachments: Vec<Attachment> = Vec::new();
     let mut truncated = false;
@@ -420,7 +420,7 @@ async fn test_http(server: &McpServer, http: &reqwest::Client) -> Result<McpTest
     })
 }
 
-fn unwrap_response<T: serde::de::DeserializeOwned>(resp: JsonRpcResponse) -> Result<T> {
+pub(super) fn unwrap_response<T: serde::de::DeserializeOwned>(resp: JsonRpcResponse) -> Result<T> {
     if let Some(err) = resp.error {
         bail!(format_rpc_error(&err));
     }

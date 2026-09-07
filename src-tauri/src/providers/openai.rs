@@ -32,10 +32,6 @@ const ADMIN_TIMEOUT: Duration = Duration::from_secs(30);
 /// tool use so a confused model can't pin the chat in an infinite loop.
 const MAX_TOOL_TURNS: u32 = 10;
 
-/// Per-tool-result ceiling fed back into the model. See the matching
-/// constant in `providers::ollama` for the full rationale.
-const MAX_TOOL_RESULT_BYTES: usize = 32 * 1024;
-
 /// Ceiling on the number of parallel tool-call slots a single streamed turn
 /// may allocate. The OpenAI wire protocol indexes parallel calls from 0; a
 /// real turn issues a handful. The `index` is taken verbatim from the
@@ -221,11 +217,20 @@ pub async fn chat_stream(
     registry: StreamRegistry,
     db: Arc<Database>,
     cancel: Arc<tokio::sync::Notify>,
+    approvals: crate::stream::ApprovalRegistry,
     req: ChatRequest,
 ) -> Result<()> {
     // Cancel Notify is registered upstream in `commands::chat_stream`.
     // See the matching note in providers/ollama.rs::chat_stream.
     let channel = event_channel(&req.stream_id);
+    let tool_ctx = super::ToolCallCtx {
+        app: &app,
+        channel: &channel,
+        db: db.as_ref(),
+        cancel: cancel.as_ref(),
+        approvals: &approvals,
+        stream_id: &req.stream_id,
+    };
 
     // Defense-in-depth SSRF guard. The shared HTTP client is intentionally
     // *not* DNS-pinned the way MCP's per-server clients are — hosted
@@ -391,6 +396,7 @@ pub async fn chat_stream(
                                     content: msg.clone(),
                                     is_error: true,
                                     attachments: Vec::new(),
+                                    denied: false,
                                 },
                             );
                             messages.push(json!({
@@ -404,54 +410,27 @@ pub async fn chat_stream(
 
                     let args = parse_args(&call.arguments);
 
-                    let _ = app.emit(
-                        &channel,
-                        StreamEvent::ToolCall {
-                            id: call_id.clone(),
-                            server_id: tool_def.server_id.clone(),
-                            server_name: tool_def.server_name.clone(),
-                            tool: tool_def.qualified_name.clone(),
-                            arguments: args.clone(),
-                        },
-                    );
-
-                    let dispatch = crate::mcp::dispatch_tool_call(
-                        &db,
-                        &tool_def.server_id,
+                    // Emits ToolCall, asks the user first when the server
+                    // requires it, dispatches (honouring Stop throughout),
+                    // emits ToolResult. `None` = cancelled mid-way.
+                    let Some(outcome) = super::execute_tool_call(
+                        &tool_ctx,
+                        &call_id,
+                        tool_def,
                         &tool_name,
                         &args,
-                    );
-                    let (content, is_error, attachments) = select! {
-                        biased;
-                        _ = cancel.notified() => {
-                            let _ = app.emit(&channel, StreamEvent::Cancelled);
-                            registry.finish(&req.stream_id);
-                            return Ok(());
-                        }
-                        r = dispatch => match r {
-                            Ok(r) => (r.content_text, r.is_error, r.attachments),
-                            Err(e) => (format!("tool call failed: {e:#}"), true, Vec::new()),
-                        },
+                    )
+                    .await
+                    else {
+                        let _ = app.emit(&channel, StreamEvent::Cancelled);
+                        registry.finish(&req.stream_id);
+                        return Ok(());
                     };
-
-                    // UI sees the full result; model only sees the cap.
-                    let for_ui = content.clone();
-                    let for_model = super::cap_tool_text(&content, MAX_TOOL_RESULT_BYTES);
-
-                    let _ = app.emit(
-                        &channel,
-                        StreamEvent::ToolResult {
-                            id: call_id.clone(),
-                            content: for_ui,
-                            is_error,
-                            attachments,
-                        },
-                    );
 
                     messages.push(json!({
                         "role": "tool",
                         "tool_call_id": call_id,
-                        "content": for_model,
+                        "content": outcome.for_model,
                     }));
                 }
                 // Loop — give the model the tool results and let it

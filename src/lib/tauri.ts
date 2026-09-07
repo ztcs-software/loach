@@ -10,6 +10,7 @@ import type {
   McpServer,
   McpServerInput,
   McpTestResult,
+  ToolApprovalDecision,
   Message,
   MessageHit,
   ModelInfo,
@@ -1016,6 +1017,19 @@ export function mcpSave(input: McpServerInput): Promise<McpServer> {
 export function mcpDelete(id: string): Promise<void> {
   if (!isTauri) return notInTauri(undefined);
   return invoke("mcp_delete", { id });
+}
+
+/** Answer an in-chat tool approval prompt. Resolves `true` when the
+ *  backend was actually waiting on this call; `false` means it had already
+ *  been cancelled, timed out, or answered — the stream's `tool_result`
+ *  event says which. */
+export function toolApprovalRespond(
+  streamId: string,
+  callId: string,
+  decision: ToolApprovalDecision,
+): Promise<boolean> {
+  if (!isTauri) return Promise.resolve(false);
+  return invoke<boolean>("tool_approval_respond", { streamId, callId, decision });
 }
 
 /** Probe the given config (handshake + tools/list) without persisting it.

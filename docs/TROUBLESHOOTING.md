@@ -343,20 +343,69 @@ back.
 Try the URL in a browser. If it works there but not in Loach, the page is
 likely slow, large, or blocks non-browser user agents.
 
-### MCP "Test connection" fails
+### MCP "Test connection" fails (HTTP)
 
-**Problem.** An MCP server is configured but the test button reports an
-error.
+**Problem.** An HTTP MCP server is configured but the test button reports
+an error.
 
 **Solution.**
 
 1. Confirm the URL is the **Streamable-HTTP** endpoint. Loach does not
-   support stdio or SSE MCP transports.
+   support the legacy two-endpoint SSE transport. If the server is
+   distributed as a command to run (`npx …`, `uvx …`), add it as a
+   **Local process (stdio)** server instead.
 2. If the server requires auth, add an `Authorization` header in the
    server's row.
 3. Check that the response body fits under **4 MiB** — misconfigured
    servers that dump full schemas can exceed this.
 4. Per-request timeout is **30 s**.
+
+### A local (stdio) MCP server won't start
+
+**Problem.** Saving or testing a stdio server fails with "couldn't
+start", "exited before replying", or a timeout.
+
+**Solution.**
+
+1. Read the end of the error — Loach quotes the last lines the server
+   wrote to stderr (`npm ERR! 404`, a Python traceback, "command not
+   found"). That is usually the whole answer.
+2. Make sure the runtime the command needs is installed and on `PATH`
+   for your user: Node.js for `npx`, `uv` for `uvx`. Loach launches the
+   program with your normal environment; if it works in a fresh terminal
+   it should work here.
+3. On Windows, `npx` / `uvx` are `.cmd` shims. Loach resolves them for
+   you, but a full path to the `.cmd` file also works.
+4. First runs of `npx -y …` download the package. Startup is allowed
+   **60 s**; a slow network can exceed that — run the command once in a
+   terminal to warm the cache, then test again.
+5. Put one argument per line. Don't quote arguments the way you would in
+   a shell — Loach passes each line verbatim.
+6. If you clicked **Cancel** on the "Run MCP server …?" system dialog,
+   nothing was saved or started. Save again and choose **Start server**.
+
+### A server imported from a backup is disabled and won't turn on
+
+**Problem.** After **Settings → Data → Import**, a stdio MCP server shows
+up switched off, and flipping the toggle opens a system dialog.
+
+**Solution.** That is deliberate: a backup can't prove *you* configured
+that command on this machine, so imported stdio servers arrive disabled
+and the first enable asks you to confirm the command line. Review it and
+choose **Start server** to enable the row. HTTP servers import enabled.
+
+### The reply is stuck on "Waiting for your approval…"
+
+**Problem.** The assistant bubble shows an approval card and nothing else
+happens.
+
+**Solution.** The model asked to run an MCP tool and Loach is waiting for
+you — answer **Allow once**, **Always allow**, or **Deny** on the card. A
+prompt left unanswered for 10 minutes is treated as a denial, and the
+Stop button cancels the reply. To stop being asked for a server you
+trust, open it in **Settings → MCP** and turn off **Ask before each tool
+call**; to re-enable prompts for tools you answered "Always allow" for,
+use **Ask again for all** in the same editor.
 
 ---
 

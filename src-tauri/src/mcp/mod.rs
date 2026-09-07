@@ -1,19 +1,21 @@
 //! Minimal Model Context Protocol (MCP) client.
 //!
-//! Loach only speaks the **Streamable-HTTP** transport:
-//!   - Client POSTs JSON-RPC bodies to a single URL.
-//!   - Server may reply with either `application/json` or a
-//!     `text/event-stream` whose first `data:` frame carries the JSON-RPC
-//!     response — we handle both.
-//!   - Session continuity is via the `Mcp-Session-Id` response header, which
-//!     we echo back on subsequent requests.
+//! Two transports:
 //!
-//! Stdio and the legacy two-endpoint SSE transport are intentionally *not*
-//! supported; those roles are better served by dedicated gateways and keep
-//! the UI/config surface small.
+//!   - **Streamable HTTP** (`client.rs`) — the client POSTs JSON-RPC bodies
+//!     to a single URL; the server may reply with `application/json` or a
+//!     `text/event-stream` whose first `data:` frame carries the response.
+//!     Session continuity is via the `Mcp-Session-Id` response header.
+//!   - **stdio** (`stdio.rs`) — Loach spawns the server as a child process
+//!     and exchanges newline-delimited JSON-RPC over its pipes. This is how
+//!     most published servers ship (`npx -y @modelcontextprotocol/…`,
+//!     `uvx …`).
+//!
+//! The legacy two-endpoint SSE transport is intentionally *not* supported.
 //!
 //! Two layers are exposed:
-//!   - [`test_server`] — handshake + tools/list, used by the Settings UI.
+//!   - `test_server` (per transport) — handshake + tools/list, used by the
+//!     Settings UI.
 //!   - [`aggregate_tools`] + [`dispatch_tool_call`] — used by the chat
 //!     pipeline to expose tools to the model and dispatch the model's
 //!     tool calls back to the right server.
@@ -24,12 +26,17 @@
 //! misconfigured MCP server URL can't be aimed at the cloud-metadata
 //! service. Self-hosted servers on loopback or the local network are
 //! allowed — that's the common MCP deployment — only link-local
-//! (cloud-metadata) addresses are refused.
+//! (cloud-metadata) addresses are refused. stdio servers are gated
+//! differently: the exact command line has to be confirmed in a native
+//! dialog before it is ever saved or started (see
+//! `commands::confirm_stdio_spawn`).
 
 pub mod client;
+pub mod stdio;
 pub mod types;
 
 pub use client::{test_server, McpSession};
+pub use stdio::StdioSession;
 pub use types::{Attachment, McpCallResult, McpTestResult, McpToolDef};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -198,10 +205,27 @@ pub async fn invalidate_tools_cache(cache: &ToolsCache) {
 }
 
 async fn collect_one(server: &McpServer, slug: &str) -> Result<Vec<McpToolDef>> {
-    let (http, _) = pin_client_for(server).await?;
-    let mut session = McpSession::new(http, server)?;
-    session.initialize().await?;
-    let raws = session.list_tools_raw().await?;
+    let raws = if server.is_stdio() {
+        // Reuse the pooled process. Spawning one just to list tools and
+        // another for the first call would pay the cold start twice — an
+        // `npx`-backed server takes seconds each time — and the pool is
+        // what keeps the process alive between turns anyway.
+        let slot = session_slot(&server.id);
+        let mut pooled = slot.lock().await;
+        let session = ensure_pooled(&mut pooled, server).await?;
+        match session.list_tools_raw().await {
+            Ok(r) => r,
+            Err(e) => {
+                *pooled = None;
+                return Err(e);
+            }
+        }
+    } else {
+        let (http, _) = pin_client_for(server).await?;
+        let mut session = McpSession::new(http, server)?;
+        session.initialize().await?;
+        session.list_tools_raw().await?
+    };
     // Hoist the per-server clones out of the loop. The strings end up
     // copied into every `McpToolDef` anyway, but doing it once and reusing
     // the owned values per iteration costs nothing for servers that
@@ -301,15 +325,17 @@ pub async fn dispatch_tool_call(
     // resolve, a new TLS handshake, and the two-POST `initialize` dance
     // before doing any work — up to ten turns' worth in a single tool-heavy
     // reply — and threw away the `Mcp-Session-Id` each time, so servers that
-    // allocate per-session state accumulated orphans.
+    // allocate per-session state accumulated orphans. For stdio the pooled
+    // entry *is* the running process.
     let slot = session_slot(&server.id);
     let mut pooled = slot.lock().await;
     let fingerprint = session_fingerprint(&server);
 
-    // A config edit (URL, headers) or an aged-out entry must not be reused.
-    let reusable = pooled.as_ref().is_some_and(|p| {
-        p.fingerprint == fingerprint && p.created_at.elapsed() < SESSION_TTL
-    });
+    // A config edit (URL, headers, command line) or an aged-out / dead
+    // entry must not be reused.
+    let reusable = pooled
+        .as_ref()
+        .is_some_and(|p| p.fingerprint == fingerprint && p.is_fresh());
     if !reusable {
         *pooled = None;
     }
@@ -350,9 +376,7 @@ pub async fn dispatch_tool_call(
         }
     }
 
-    let (http, _) = pin_client_for(&server).await?;
-    let mut session = McpSession::new(http, &server)?;
-    session.initialize().await?;
+    let mut session = open_session(&server).await?;
     let out = session.call_tool(name, arguments).await;
     // Only pool a session that actually worked; a freshly built one that
     // fails is a genuine failure and is never retried.
@@ -366,6 +390,120 @@ pub async fn dispatch_tool_call(
     out
 }
 
+/// Whether a call to `tool_name` on `server_id` must be confirmed by the
+/// user before it runs. Built-ins never ask (pure local functions); an MCP
+/// server asks unless the user set it to auto-approve or already answered
+/// "Always allow" for this specific tool. A server that has vanished from
+/// the DB doesn't ask either — the dispatch that follows fails on its own,
+/// and a prompt for a call that can't run is noise.
+pub fn needs_approval(db: &Database, server_id: &str, tool_name: &str) -> bool {
+    if server_id == crate::tools::builtin::BUILTIN_SERVER_ID {
+        return false;
+    }
+    let Some(server) = db
+        .list_mcp_servers()
+        .ok()
+        .and_then(|rows| rows.into_iter().find(|s| s.id == server_id))
+    else {
+        return false;
+    };
+    !(server.auto_approve || server.allowed_tools().iter().any(|t| t == tool_name))
+}
+
+/// One live connection to a server, whichever way it is wired. The three
+/// operations the chat pipeline needs are the whole surface.
+pub enum Session {
+    Http(McpSession),
+    Stdio(StdioSession),
+}
+
+impl Session {
+    async fn list_tools_raw(&mut self) -> Result<Vec<types::McpToolRaw>> {
+        match self {
+            Session::Http(s) => s.list_tools_raw().await,
+            Session::Stdio(s) => s.list_tools_raw().await,
+        }
+    }
+
+    async fn call_tool(&mut self, name: &str, arguments: &Value) -> Result<McpCallResult> {
+        match self {
+            Session::Http(s) => s.call_tool(name, arguments).await,
+            Session::Stdio(s) => s.call_tool(name, arguments).await,
+        }
+    }
+}
+
+/// Open and handshake a fresh session for `server`.
+async fn open_session(server: &McpServer) -> Result<Session> {
+    if server.is_stdio() {
+        let mut session = StdioSession::spawn(server).await?;
+        session.initialize().await?;
+        Ok(Session::Stdio(session))
+    } else {
+        let (http, _) = pin_client_for(server).await?;
+        let mut session = McpSession::new(http, server)?;
+        session.initialize().await?;
+        Ok(Session::Http(session))
+    }
+}
+
+/// Hand back the pooled session for `server`, opening one when the slot is
+/// empty, stale, or was opened against a different config.
+async fn ensure_pooled<'a>(
+    pooled: &'a mut Option<PooledSession>,
+    server: &McpServer,
+) -> Result<&'a mut Session> {
+    let fingerprint = session_fingerprint(server);
+    let reusable = pooled
+        .as_ref()
+        .is_some_and(|p| p.fingerprint == fingerprint && p.is_fresh());
+    if !reusable {
+        *pooled = None;
+    }
+    if pooled.is_none() {
+        let session = open_session(server).await?;
+        *pooled = Some(PooledSession {
+            fingerprint,
+            created_at: Instant::now(),
+            session,
+        });
+    }
+    Ok(&mut pooled.as_mut().expect("just filled").session)
+}
+
+/// Forget (and for stdio: kill) the pooled session for one server. Called
+/// after every config save or delete so a disabled or reconfigured server's
+/// process doesn't linger. Never blocks the caller: if a tool call on that
+/// server is mid-flight the slot is cleared once it finishes.
+pub fn drop_session(server_id: &str) {
+    let slot = session_slot(server_id);
+    clear_slot(slot);
+}
+
+/// [`drop_session`] for every server — snapshot restore, data wipe, and
+/// app exit, when the whole table changes under us.
+pub fn drop_all_sessions() {
+    let slots: Vec<SessionSlot> = {
+        let pool = SESSION_POOL.get_or_init(Default::default);
+        let map = pool.lock().expect("MCP session pool mutex poisoned");
+        map.values().cloned().collect()
+    };
+    for slot in slots {
+        clear_slot(slot);
+    }
+}
+
+fn clear_slot(slot: SessionSlot) {
+    if let Ok(mut guard) = slot.try_lock() {
+        *guard = None;
+        return;
+    }
+    // A call on this server is mid-flight; clear once it's done.
+    tauri::async_runtime::spawn(async move {
+        *slot.lock().await = None;
+    });
+}
+
 /// How long a pooled session may be reused before we re-handshake. Servers
 /// commonly expire idle sessions on their own schedule; a ceiling well under
 /// the usual timeouts keeps the failure-and-retry path rare rather than
@@ -374,12 +512,23 @@ const SESSION_TTL: Duration = Duration::from_secs(120);
 
 struct PooledSession {
     /// Config the session was opened against. Any change to the server's URL
-    /// or headers makes the pooled entry unusable, which also means a
-    /// `mcp_save` needs no explicit invalidation hook — the next call reads
-    /// the fresh row and sees a different fingerprint.
+    /// / headers / command line makes the pooled entry unusable, so a config
+    /// edit that slips past `drop_session` is still caught on the next call.
     fingerprint: String,
     created_at: Instant,
-    session: McpSession,
+    session: Session,
+}
+
+impl PooledSession {
+    /// HTTP sessions age out after [`SESSION_TTL`] (servers expire idle
+    /// sessions on their own schedule). A stdio process is the session —
+    /// it stays good for as long as it is running.
+    fn is_fresh(&self) -> bool {
+        match &self.session {
+            Session::Http(_) => self.created_at.elapsed() < SESSION_TTL,
+            Session::Stdio(s) => s.is_alive(),
+        }
+    }
 }
 
 /// Per-server slot. The map lock is held only long enough to clone the
@@ -399,9 +548,11 @@ fn session_slot(server_id: &str) -> SessionSlot {
 
 fn session_fingerprint(server: &crate::db::McpServer) -> String {
     format!(
-        "{}\u{1f}{}",
+        "{}\u{1f}{}\u{1f}{}\u{1f}{}",
+        server.transport,
         server.url.trim(),
-        server.headers_json.as_deref().unwrap_or("")
+        server.headers_json.as_deref().unwrap_or(""),
+        server.stdio_fingerprint()
     )
 }
 
@@ -526,4 +677,79 @@ fn stable_id_suffix(id: &str) -> String {
         h /= 36;
     }
     buf
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fresh_db() -> (Database, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let db = Database::open(&dir.path().join("loach.db")).expect("open");
+        db.migrate().expect("migrate");
+        (db, dir)
+    }
+
+    fn http_row(name: &str) -> McpServer {
+        McpServer {
+            id: String::new(),
+            name: name.to_string(),
+            transport: "http".into(),
+            url: "http://localhost:3000/mcp".into(),
+            headers_json: None,
+            command: None,
+            args_json: None,
+            env_json: None,
+            auto_approve: false,
+            allowed_tools_json: None,
+            enabled: true,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    /// The consent gate: prompt by default, skip for an always-allowed tool
+    /// or an auto-approve server, never for built-ins or a vanished server.
+    #[test]
+    fn needs_approval_follows_the_server_policy() {
+        let (db, _dir) = fresh_db();
+        let saved = db.upsert_mcp_server(&http_row("gh")).expect("insert");
+        assert!(needs_approval(&db, &saved.id, "search"));
+
+        db.add_mcp_allowed_tool(&saved.id, "search").expect("allow");
+        assert!(!needs_approval(&db, &saved.id, "search"));
+        assert!(needs_approval(&db, &saved.id, "delete_repo"), "allow-list is per tool");
+
+        db.upsert_mcp_server(&McpServer {
+            auto_approve: true,
+            ..saved.clone()
+        })
+        .expect("update");
+        assert!(!needs_approval(&db, &saved.id, "delete_repo"));
+
+        assert!(!needs_approval(&db, crate::tools::builtin::BUILTIN_SERVER_ID, "calculate"));
+        assert!(!needs_approval(&db, "no-such-server", "anything"));
+    }
+
+    /// A pooled session is keyed on the whole connection config, so an
+    /// edit to the command line (or transport) can't reuse a process that
+    /// was started with the old one.
+    #[test]
+    fn session_fingerprint_covers_both_transports() {
+        let http = http_row("x");
+        let mut stdio = http_row("x");
+        stdio.transport = "stdio".into();
+        stdio.url = String::new();
+        stdio.command = Some("npx".into());
+        stdio.args_json = Some(r#"["-y","server-a"]"#.into());
+        assert_ne!(session_fingerprint(&http), session_fingerprint(&stdio));
+
+        let mut edited = stdio.clone();
+        edited.args_json = Some(r#"["-y","server-b"]"#.into());
+        assert_ne!(session_fingerprint(&stdio), session_fingerprint(&edited));
+
+        let mut renamed = stdio.clone();
+        renamed.name = "y".into();
+        assert_eq!(session_fingerprint(&stdio), session_fingerprint(&renamed));
+    }
 }

@@ -1441,34 +1441,82 @@ pub async fn upsert_snippet_fill_values(
 
 // ---------- mcp servers ----------
 
-/// Input for `mcp_save`. Matches the frontend `McpServerInput` shape: `id`
-/// is optional (undefined → insert, set → update). Loach only speaks the
-/// Streamable-HTTP transport, so the only connection fields are `url` and
-/// the optional `headers` k/v map (stored JSON-encoded to dodge a child
-/// table).
+/// Input for `mcp_save` / `mcp_test`. Matches the frontend `McpServerInput`
+/// shape: `id` is optional (undefined → insert, set → update). `transport`
+/// picks which connection fields matter — `url` + `headers` for Streamable
+/// HTTP, `command` + `args` + `env` for stdio — and the approval fields
+/// (`auto_approve`, `allowed_tools`) apply to both. Maps and lists are
+/// stored JSON-encoded to dodge child tables.
 #[derive(Debug, Deserialize)]
 pub struct McpServerInput {
     pub id: Option<String>,
     pub name: String,
+    /// `"http"` (default when absent) or `"stdio"`.
+    #[serde(default)]
+    pub transport: Option<String>,
+    #[serde(default)]
     pub url: String,
     #[serde(default)]
     pub headers: Option<HashMap<String, String>>,
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub args: Option<Vec<String>>,
+    #[serde(default)]
+    pub env: Option<HashMap<String, String>>,
+    #[serde(default)]
+    pub auto_approve: Option<bool>,
+    #[serde(default)]
+    pub allowed_tools: Option<Vec<String>>,
     #[serde(default)]
     pub enabled: Option<bool>,
 }
 
 impl McpServerInput {
-    /// Build an ephemeral `McpServer` (no DB id / timestamps) for use with
-    /// the test command when we want to dry-run a config before saving.
+    fn is_stdio(&self) -> bool {
+        self.transport.as_deref() == Some("stdio")
+    }
+
+    /// Build an ephemeral `McpServer` (no DB id / timestamps) — the shape
+    /// both `upsert_mcp_server` and the test paths consume. Fields that
+    /// don't belong to the chosen transport are dropped so a row can't
+    /// carry a stale URL *and* a command.
     fn to_draft(&self) -> McpServer {
+        fn json_of<T: serde::Serialize>(v: Option<&T>) -> Option<String> {
+            v.map(|v| serde_json::to_string(v).unwrap_or_default())
+        }
+        let stdio = self.is_stdio();
         McpServer {
             id: self.id.clone().unwrap_or_default(),
-            name: self.name.clone(),
-            url: self.url.clone(),
-            headers_json: self
-                .headers
-                .as_ref()
-                .map(|m| serde_json::to_string(m).unwrap_or_default()),
+            name: self.name.trim().to_string(),
+            transport: if stdio { "stdio" } else { "http" }.to_string(),
+            url: if stdio { String::new() } else { self.url.trim().to_string() },
+            headers_json: if stdio {
+                None
+            } else {
+                json_of(self.headers.as_ref().filter(|m| !m.is_empty()))
+            },
+            command: if stdio {
+                self.command
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|c| !c.is_empty())
+                    .map(String::from)
+            } else {
+                None
+            },
+            args_json: if stdio {
+                json_of(self.args.as_ref().filter(|a| !a.is_empty()))
+            } else {
+                None
+            },
+            env_json: if stdio {
+                json_of(self.env.as_ref().filter(|m| !m.is_empty()))
+            } else {
+                None
+            },
+            auto_approve: self.auto_approve.unwrap_or(false),
+            allowed_tools_json: json_of(self.allowed_tools.as_ref().filter(|a| !a.is_empty())),
             enabled: self.enabled.unwrap_or(true),
             created_at: 0,
             updated_at: 0,
@@ -1582,6 +1630,19 @@ async fn validate_mcp_input(
     if input.name.trim().is_empty() {
         return Err(Rejected("server name is required".into()));
     }
+    validate_allowed_tools(input)?;
+    match input.transport.as_deref().unwrap_or("http") {
+        "http" => {}
+        "stdio" => {
+            validate_stdio_fields(input)?;
+            return Ok(Vec::new());
+        }
+        other => {
+            return Err(Rejected(format!(
+                "unknown MCP transport `{other}` (expected `http` or `stdio`)"
+            )))
+        }
+    }
     let raw_url = input.url.trim();
     if raw_url.is_empty() {
         return Err(Rejected("server URL is required".into()));
@@ -1650,6 +1711,197 @@ async fn validate_mcp_input(
     Ok(resolved)
 }
 
+/// Structural checks for a stdio row. There is no host to screen here;
+/// what we can refuse is the shape — a command or argument carrying a NUL
+/// (the OS truncates at it, so what runs would differ from what the user
+/// reviewed), control characters in environment names, and sizes no real
+/// server needs. Consent to run the command *at all* is the native
+/// dialog's job — see `confirm_stdio_spawn`.
+fn validate_stdio_fields(input: &McpServerInput) -> Result<(), McpImportRejection> {
+    use McpImportRejection::Rejected;
+    const MAX_COMMAND_BYTES: usize = 1024;
+    const MAX_ARGS: usize = 64;
+    const MAX_ENV: usize = 64;
+    const MAX_STR_BYTES: usize = 4096;
+
+    let command = input.command.as_deref().map(str::trim).unwrap_or("");
+    if command.is_empty() {
+        return Err(Rejected("command is required for a stdio server".into()));
+    }
+    if command.len() > MAX_COMMAND_BYTES || command.chars().any(char::is_control) {
+        return Err(Rejected(format!(
+            "command must be a single line under {MAX_COMMAND_BYTES} bytes"
+        )));
+    }
+    if let Some(args) = input.args.as_ref() {
+        if args.len() > MAX_ARGS {
+            return Err(Rejected(format!(
+                "Too many arguments ({}); max {MAX_ARGS}.",
+                args.len()
+            )));
+        }
+        if args.iter().any(|a| a.len() > MAX_STR_BYTES || a.contains('\0')) {
+            return Err(Rejected(format!(
+                "Each argument must be under {MAX_STR_BYTES} bytes and contain no NUL."
+            )));
+        }
+    }
+    if let Some(env) = input.env.as_ref() {
+        if env.len() > MAX_ENV {
+            return Err(Rejected(format!(
+                "Too many environment variables ({}); max {MAX_ENV}.",
+                env.len()
+            )));
+        }
+        for (k, v) in env {
+            if k.is_empty()
+                || k.contains('=')
+                || k.chars().any(|c| c.is_control() || c.is_whitespace())
+            {
+                return Err(Rejected(format!(
+                    "Invalid environment variable name `{k}`."
+                )));
+            }
+            if v.len() > MAX_STR_BYTES || v.contains('\0') {
+                return Err(Rejected(format!(
+                    "Value for `{k}` must be under {MAX_STR_BYTES} bytes and contain no NUL."
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The allow-list is written by the in-chat prompt (raw tool names) and
+/// only ever *cleared* from Settings, but a hand-edited import can carry
+/// anything — bound it.
+fn validate_allowed_tools(input: &McpServerInput) -> Result<(), McpImportRejection> {
+    use McpImportRejection::Rejected;
+    const MAX_TOOLS: usize = 256;
+    const MAX_NAME_BYTES: usize = 256;
+    if let Some(tools) = input.allowed_tools.as_ref() {
+        if tools.len() > MAX_TOOLS {
+            return Err(Rejected(format!(
+                "Too many always-allowed tools ({}); max {MAX_TOOLS}.",
+                tools.len()
+            )));
+        }
+        if tools
+            .iter()
+            .any(|t| t.is_empty() || t.len() > MAX_NAME_BYTES || t.chars().any(char::is_control))
+        {
+            return Err(Rejected("Invalid tool name in the always-allowed list.".into()));
+        }
+    }
+    Ok(())
+}
+
+/// Longest command line the consent dialog will quote before eliding.
+const CONSENT_LINE_MAX_CHARS: usize = 1500;
+
+/// Native consent dialog for running a stdio server. Owned by the backend
+/// for the same reason the file dialogs are: a compromised renderer can
+/// call `mcp_save` / `mcp_test` with any command line it likes, and the one
+/// click it cannot fake is a click on an OS dialog. The dialog shows the
+/// exact program, arguments and environment variable *names* (never values
+/// — those are the API keys) so the user reviews what will run.
+async fn confirm_stdio_spawn(app: &AppHandle, draft: &McpServer) -> Result<(), String> {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+
+    let mut line = draft.command.clone().unwrap_or_default();
+    for a in draft.args() {
+        line.push(' ');
+        line.push_str(&a);
+    }
+    if line.chars().count() > CONSENT_LINE_MAX_CHARS {
+        line = line.chars().take(CONSENT_LINE_MAX_CHARS).collect::<String>() + "…";
+    }
+    let env = draft.env();
+    let env_note = if env.is_empty() {
+        String::new()
+    } else {
+        let names: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
+        format!("\n\nEnvironment variables set: {}", names.join(", "))
+    };
+    let body = format!(
+        "Loach will start this program on your computer, with your user account's \
+         permissions:\n\n{line}{env_note}\n\n\
+         It can do anything you can — read and change files, reach the network, run \
+         other programs. Only continue if you trust where this server configuration \
+         came from."
+    );
+    let title = format!("Run MCP server \"{}\"?", draft.name);
+
+    // Blocking native call — off the async runtime, like the file dialogs.
+    let app = app.clone();
+    let ok = tauri::async_runtime::spawn_blocking(move || {
+        app.dialog()
+            .message(body)
+            .title(title)
+            .kind(MessageDialogKind::Warning)
+            .buttons(MessageDialogButtons::OkCancelCustom(
+                "Start server".into(),
+                "Cancel".into(),
+            ))
+            .blocking_show()
+    })
+    .await
+    .map_err(|e| format!("consent dialog task failed: {e}"))?;
+    if ok {
+        Ok(())
+    } else {
+        Err("Cancelled — the server was not started.".into())
+    }
+}
+
+/// Show the consent dialog for `draft` unless this exact command line was
+/// already approved during this app session (a test-then-save asks once).
+/// `required = false` skips it outright — see `save_changes_what_runs`.
+async fn require_stdio_consent(
+    app: &AppHandle,
+    state: &AppState,
+    draft: &McpServer,
+    required: bool,
+) -> Result<(), String> {
+    if !required {
+        return Ok(());
+    }
+    let fingerprint = draft.stdio_fingerprint();
+    if state.stdio_approved.lock().contains(&fingerprint) {
+        return Ok(());
+    }
+    confirm_stdio_spawn(app, draft).await?;
+    state.stdio_approved.lock().insert(fingerprint);
+    Ok(())
+}
+
+/// Whether saving `draft` over the stored row (if any) changes what would
+/// execute: an enabled new row, a different command line / environment on
+/// an enabled row, or turning on a row that was off. Renames, approval
+/// edits, and disabling never need re-consent — the program either already
+/// ran with the user's blessing or won't run at all. Enabling a disabled
+/// row *does*: that is how a stdio server arrives from a snapshot import,
+/// which stores it disabled precisely so the first enable goes through the
+/// dialog on this machine.
+fn save_changes_what_runs(db: &crate::db::Database, draft: &McpServer) -> bool {
+    if !draft.enabled {
+        return false;
+    }
+    if draft.id.is_empty() {
+        return true;
+    }
+    let Some(existing) = db
+        .list_mcp_servers()
+        .ok()
+        .and_then(|rows| rows.into_iter().find(|s| s.id == draft.id))
+    else {
+        return true;
+    };
+    !existing.is_stdio()
+        || !existing.enabled
+        || existing.stdio_fingerprint() != draft.stdio_fingerprint()
+}
+
 #[tauri::command]
 pub async fn mcp_list(state: State<'_, AppState>) -> Result<Vec<McpServer>, String> {
     state.db.list_mcp_servers().map_err(err)
@@ -1657,6 +1909,7 @@ pub async fn mcp_list(state: State<'_, AppState>) -> Result<Vec<McpServer>, Stri
 
 #[tauri::command]
 pub async fn mcp_save(
+    app: AppHandle,
     state: State<'_, AppState>,
     input: McpServerInput,
 ) -> Result<McpServer, String> {
@@ -1664,26 +1917,19 @@ pub async fn mcp_save(
     // and screen so a save can't smuggle a private-IP-backed hostname into
     // the DB for a later, weaker code path to pick up.
     validate_mcp_input(&input).await?;
+    let draft = input.to_draft();
+    if draft.is_stdio() {
+        let required = save_changes_what_runs(&state.db, &draft);
+        require_stdio_consent(&app, &state, &draft, required).await?;
+    }
 
-    let headers_json = input
-        .headers
-        .as_ref()
-        .map(|m| serde_json::to_string(m).map_err(err))
-        .transpose()?;
-
-    let saved = state
-        .db
-        .upsert_mcp_server(
-            input.id.as_deref(),
-            input.name.trim(),
-            input.url.trim(),
-            headers_json.as_deref(),
-            input.enabled.unwrap_or(true),
-        )
-        .map_err(err)?;
+    let saved = state.db.upsert_mcp_server(&draft).map_err(err)?;
     // The cached tool catalogue (and the slugs derived from server names) is
     // now stale — drop it so the next send re-aggregates with this change.
     crate::mcp::invalidate_tools_cache(&state.mcp_tools_cache).await;
+    // Any pooled session was opened against the old config — or the server
+    // is now disabled and its process should not linger.
+    crate::mcp::drop_session(&saved.id);
     Ok(saved)
 }
 
@@ -1691,15 +1937,40 @@ pub async fn mcp_save(
 pub async fn mcp_delete(state: State<'_, AppState>, id: String) -> Result<(), String> {
     state.db.delete_mcp_server(&id).map_err(err)?;
     crate::mcp::invalidate_tools_cache(&state.mcp_tools_cache).await;
+    crate::mcp::drop_session(&id);
     Ok(())
+}
+
+/// Deliver the user's answer to an in-chat tool approval prompt. Returns
+/// `true` when a call was actually waiting; `false` means it had already
+/// been cancelled, timed out, or answered — the `ToolResult` event on the
+/// stream tells the UI which.
+#[tauri::command]
+pub async fn tool_approval_respond(
+    state: State<'_, AppState>,
+    stream_id: String,
+    call_id: String,
+    decision: crate::stream::ApprovalDecision,
+) -> Result<bool, String> {
+    Ok(state.approvals.resolve(&stream_id, &call_id, decision))
 }
 
 /// Probe the given MCP server config (handshake + list tools). Accepts the
 /// *input* rather than an id so the user can try a config before saving it.
+/// A stdio config runs through the consent dialog first — a test *starts
+/// the program*.
 #[tauri::command]
-pub async fn mcp_test(input: McpServerInput) -> Result<McpTestResult, String> {
+pub async fn mcp_test(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    input: McpServerInput,
+) -> Result<McpTestResult, String> {
     let addrs = validate_mcp_input(&input).await?;
     let draft = input.to_draft();
+    if draft.is_stdio() {
+        require_stdio_consent(&app, &state, &draft, true).await?;
+        return Ok(crate::mcp::stdio::test_server(&draft).await);
+    }
     // Build a one-shot DNS-pinned client for the test. Using the shared
     // `state.http` would let the connect-time system resolver answer
     // independently of our pre-flight screen — a window a DNS-rebinding
@@ -1731,6 +2002,7 @@ pub async fn chat_stream(
     let provider = request.provider.clone();
     let db = state.db.clone();
     let mcp_cache = state.mcp_tools_cache.clone();
+    let approvals = state.approvals.clone();
 
     // Register the cancel Notify SYNCHRONOUSLY here — before we spawn the
     // worker — so a `chat_cancel(stream_id)` arriving while we're still
@@ -1817,10 +2089,12 @@ pub async fn chat_stream(
 
         let res = match provider.as_str() {
             "ollama" => {
-                providers::ollama::chat_stream(app, http, registry, db, cancel, request).await
+                providers::ollama::chat_stream(app, http, registry, db, cancel, approvals, request)
+                    .await
             }
             "openai" => {
-                providers::openai::chat_stream(app, http, registry, db, cancel, request).await
+                providers::openai::chat_stream(app, http, registry, db, cancel, approvals, request)
+                    .await
             }
             other => {
                 tracing::warn!("unknown provider {other}");
@@ -2122,27 +2396,45 @@ pub async fn import_data_with_dialog(
     // structural check) so the user can't shoot themselves in the foot by
     // importing a tampered file.
     let mut quarantined: Vec<String> = Vec::new();
+    let mut stdio_parked: Vec<String> = Vec::new();
     for (idx, row) in snap.data.mcp_servers.iter_mut().enumerate() {
         let parsed_headers: Option<std::collections::HashMap<String, String>> =
-            match row.headers_json.as_deref() {
-                Some(s) if !s.trim().is_empty() => serde_json::from_str(s).map_err(|e| {
-                    format!(
-                        "import rejected: MCP server #{} ({}) has malformed headers_json: {e}",
-                        idx + 1,
-                        row.name
-                    )
-                })?,
-                _ => None,
-            };
+            parse_import_json(idx, &row.name, "headers_json", row.headers_json.as_deref())?;
+        let parsed_env: Option<std::collections::HashMap<String, String>> =
+            parse_import_json(idx, &row.name, "env_json", row.env_json.as_deref())?;
+        let parsed_args: Option<Vec<String>> =
+            parse_import_json(idx, &row.name, "args_json", row.args_json.as_deref())?;
+        let parsed_allowed: Option<Vec<String>> = parse_import_json(
+            idx,
+            &row.name,
+            "allowed_tools_json",
+            row.allowed_tools_json.as_deref(),
+        )?;
         let synthetic = McpServerInput {
             id: Some(row.id.clone()),
             name: row.name.clone(),
+            transport: Some(row.transport.clone()),
             url: row.url.clone(),
             headers: parsed_headers,
+            command: row.command.clone(),
+            args: parsed_args,
+            env: parsed_env,
+            auto_approve: Some(row.auto_approve),
+            allowed_tools: parsed_allowed,
             enabled: Some(row.enabled),
         };
         match validate_mcp_input(&synthetic).await {
-            Ok(_) => {}
+            Ok(_) => {
+                // A stdio row is a command line nobody has confirmed on
+                // *this* machine, in *this* session — and a snapshot is the
+                // one way such a row reaches the DB without the consent
+                // dialog. Park it disabled: the first enable in Settings
+                // goes through `mcp_save`, which asks.
+                if row.is_stdio() && row.enabled {
+                    row.enabled = false;
+                    stdio_parked.push(row.name.clone());
+                }
+            }
             // The host couldn't be screened because DNS didn't answer — the
             // machine is offline, off the VPN, or the box has since been
             // decommissioned. That says nothing about whether the row is
@@ -2195,6 +2487,13 @@ pub async fn import_data_with_dialog(
             quarantined.join(", ")
         );
     }
+    if !stdio_parked.is_empty() {
+        tracing::info!(
+            "import: {} stdio MCP server(s) imported disabled pending consent: {}",
+            stdio_parked.len(),
+            stdio_parked.join(", ")
+        );
+    }
 
     // Stage 2.5 — filter imported settings through the SAME allowlist
     // `set_setting` enforces. `restore_snapshot` writes settings rows
@@ -2225,9 +2524,30 @@ pub async fn import_data_with_dialog(
     .await
     .map_err(|e| format!("import restore task panicked: {e}"))??;
 
-    // The restore rewrote the mcp_servers table — drop any cached catalogue.
+    // The restore rewrote the mcp_servers table — drop any cached catalogue
+    // and retire every pooled session (stdio processes included).
     crate::mcp::invalidate_tools_cache(&state.mcp_tools_cache).await;
+    crate::mcp::drop_all_sessions();
     Ok(Some(stats))
+}
+
+/// Decode one JSON column of an imported MCP row, naming the row and the
+/// column in the rejection so a hand-edited export fails legibly.
+fn parse_import_json<T: serde::de::DeserializeOwned>(
+    idx: usize,
+    name: &str,
+    field: &str,
+    raw: Option<&str>,
+) -> Result<Option<T>, String> {
+    match raw {
+        Some(s) if !s.trim().is_empty() => serde_json::from_str(s).map(Some).map_err(|e| {
+            format!(
+                "import rejected: MCP server #{} ({name}) has malformed {field}: {e}",
+                idx + 1
+            )
+        }),
+        _ => Ok(None),
+    }
 }
 
 /// Archive every non-archived session in one go. The Rust side returns
@@ -2274,6 +2594,7 @@ pub async fn wipe_user_data(
     // without this the next chat send would still advertise the just-erased
     // servers' tools to the model for up to the cache TTL.
     crate::mcp::invalidate_tools_cache(&state.mcp_tools_cache).await;
+    crate::mcp::drop_all_sessions();
     Ok(())
 }
 
@@ -2296,6 +2617,7 @@ pub async fn factory_reset(
     // Same reason as in `wipe_user_data`: the MCP rows are gone, so the
     // in-process tool catalogue has to go with them.
     crate::mcp::invalidate_tools_cache(&state.mcp_tools_cache).await;
+    crate::mcp::drop_all_sessions();
     // Best-effort: if the user never had a key we silently ignore the
     // NoEntry branch inside `clear_openai_key`. A hard failure here
     // (keyring daemon dead, etc.) shouldn't undo the DB wipe. Both are

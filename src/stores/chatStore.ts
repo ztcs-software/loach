@@ -26,6 +26,7 @@ import {
   pinSession,
   renameSession,
   startChatStream,
+  toolApprovalRespond,
   updateMessage,
   updateSessionLabel,
   updateSessionModel as persistSessionModel,
@@ -71,6 +72,7 @@ import {
   type MessageMetrics,
   type ProviderId,
   type Session,
+  type ToolApprovalDecision,
   type ToolCallRecord,
 } from "@/types";
 import { useSettingsStore } from "./settingsStore";
@@ -80,6 +82,8 @@ import { useModelsStore } from "./modelsStore";
 import { getLivePullFor, pullPercent } from "@/lib/usePullRuns";
 
 interface ActiveStream {
+  /** Backend stream id — the key `tool_approval_respond` needs. */
+  streamId: string;
   stop: () => Promise<void>;
   unlisten: () => void;
 }
@@ -136,6 +140,11 @@ interface ChatState {
   messages: Record<string, Message[]>;
   streamingByMessage: Record<string, MessageMetrics | null>;
   activeStream: ActiveStream | null;
+  /** Answer the consent prompt for a tool call on the running stream.
+   *  Optimistically clears the prompt in the bubble, then delivers the
+   *  decision to the backend; the eventual `tool_result` settles the
+   *  record either way. No-op when nothing is streaming. */
+  respondToolApproval: (callId: string, decision: ToolApprovalDecision) => Promise<void>;
   isStreaming: boolean;
   /** Which session the active stream belongs to (mirrors `runningTask`).
    *  Used by the composer to scope the "Stop generating" button to the chat
@@ -894,6 +903,10 @@ function finishRunning(
   const running = get().runningTask;
   const buf = runningBuffers;
   if (running && buf) {
+    // A stream that ends (Stop, error) while a consent prompt is open
+    // leaves that call unanswered forever — never persist it as still
+    // waiting, or the transcript would show a dead prompt after reload.
+    for (const c of buf.toolCalls) delete c.awaiting_approval;
     // Persist the partial assistant reply. If the DB write fails (disk
     // full, lock contention, file permissions, …) the bubble we just
     // streamed exists in memory but won't survive a reload — so surface
@@ -1257,6 +1270,7 @@ async function startTask(task: QueueTask, get: Getter, set: Setter) {
             arguments: ev.arguments,
             result: null,
             is_error: false,
+            ...(ev.approval_required ? { awaiting_approval: true } : {}),
           });
           pendingDirty.toolCalls = true;
           scheduleFlush(get, set);
@@ -1265,6 +1279,9 @@ async function startTask(task: QueueTask, get: Getter, set: Setter) {
           if (existing) {
             existing.result = ev.content;
             existing.is_error = ev.is_error;
+            // A result — including a denial — ends the wait either way.
+            delete existing.awaiting_approval;
+            if (ev.denied) existing.denied = true;
           } else {
             // Defensive: a tool_result without a matching tool_call should
             // never happen (Rust emits the pair), but if it does, surface
@@ -1316,7 +1333,13 @@ async function startTask(task: QueueTask, get: Getter, set: Setter) {
       },
     );
     if (get().runningTask?.id === task.id) {
-      set({ activeStream: { stop: handle.stop, unlisten: handle.unlisten } });
+      set({
+        activeStream: {
+          streamId: handle.streamId,
+          stop: handle.stop,
+          unlisten: handle.unlisten,
+        },
+      });
     } else {
       // Cancelled or superseded during the connect window: the backend stream
       // is live but orphaned. Tear it down rather than installing a handle
@@ -1483,6 +1506,27 @@ export const useChatStore = create<ChatState>((set, get) => ({
   messages: {},
   streamingByMessage: {},
   activeStream: null,
+  respondToolApproval: async (callId, decision) => {
+    const stream = get().activeStream;
+    const buf = runningBuffers;
+    if (!stream || !buf) return;
+    const record = buf.toolCalls.find((c) => c.id === callId);
+    if (!record?.awaiting_approval) return;
+    delete record.awaiting_approval;
+    pendingDirty.toolCalls = true;
+    scheduleFlush(get, set);
+    try {
+      await toolApprovalRespond(stream.streamId, callId, decision);
+    } catch (e) {
+      // The backend will time the prompt out as a denial; tell the user
+      // why their click didn't take.
+      useToastStore.getState().push({
+        kind: "error",
+        title: "Couldn't send your answer",
+        body: e instanceof Error ? e.message : String(e),
+      });
+    }
+  },
   isStreaming: false,
   streamingSessionId: null,
   runningTask: null,

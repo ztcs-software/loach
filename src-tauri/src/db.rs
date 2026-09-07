@@ -206,28 +206,112 @@ pub struct SnippetFillValue {
     pub updated_at: i64,
 }
 
-/// A user-configured MCP (Model Context Protocol) server. Loach only
-/// speaks the Streamable-HTTP transport — one URL, POST JSON-RPC bodies,
-/// optional auth headers. The underlying SQLite table still carries the
-/// (now-unused) `transport` / `command` / `args_json` / `env_json` columns
-/// from an earlier revision so migrations stay a no-op; new writes leave
-/// them NULL.
+/// A user-configured MCP (Model Context Protocol) server. Two transports:
+///
+///   - **Streamable HTTP** — one URL, POST JSON-RPC bodies, optional auth
+///     headers. `command` / `args_json` / `env_json` stay NULL.
+///   - **stdio** — Loach spawns `command args…` as a child process and
+///     speaks newline-delimited JSON-RPC over its pipes. `url` /
+///     `headers_json` stay empty.
+///
+/// The per-call approval state lives on the row too: `auto_approve` skips
+/// the consent prompt for every tool on the server, and `allowed_tools_json`
+/// remembers the individual tools the user chose "Always allow" for.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct McpServer {
     pub id: String,
     pub name: String,
-    /// The endpoint URL (Streamable HTTP).
+    /// `"http"` or `"stdio"`. Defaults to `"http"` on deserialise so a
+    /// snapshot exported by a build that predates stdio support imports
+    /// unchanged.
+    #[serde(default = "default_transport")]
+    pub transport: String,
+    /// The endpoint URL (Streamable HTTP). Empty for stdio rows.
     pub url: String,
     /// JSON-encoded `{k: v}` map of request headers (typically
     /// `Authorization`, `X-API-Key`, etc.). Null means no headers.
     #[serde(default)]
     pub headers_json: Option<String>,
+    /// stdio: the executable to run — a bare name looked up on `PATH`
+    /// (`npx`, `uvx`, `node`) or a full path.
+    #[serde(default)]
+    pub command: Option<String>,
+    /// stdio: JSON-encoded `string[]` of arguments.
+    #[serde(default)]
+    pub args_json: Option<String>,
+    /// stdio: JSON-encoded `{k: v}` map of environment variables layered
+    /// over Loach's own environment. This is where stdio servers take
+    /// their API keys, so it is scrubbed from exports like `headers_json`.
+    #[serde(default)]
+    pub env_json: Option<String>,
+    /// When `true`, tool calls from this server run without asking the
+    /// user first. Off by default — every call prompts unless the user
+    /// has chosen "Always allow" for that specific tool.
+    #[serde(default)]
+    pub auto_approve: bool,
+    /// JSON-encoded `string[]` of raw tool names the user has approved
+    /// permanently from the in-chat prompt. Null / empty = none.
+    #[serde(default)]
+    pub allowed_tools_json: Option<String>,
     /// When `false` the server is kept in the config but not surfaced to the
     /// model — lets users disable a flaky integration without losing its
     /// config.
     pub enabled: bool,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+fn default_transport() -> String {
+    "http".to_string()
+}
+
+/// Decode a JSON `string[]` blob, tolerating null / blank / malformed
+/// input as "no entries" so a hand-edited row can't crash a chat send.
+pub fn json_string_list(json: Option<&str>) -> Vec<String> {
+    match json {
+        Some(s) if !s.trim().is_empty() => serde_json::from_str(s).unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+impl McpServer {
+    pub fn is_stdio(&self) -> bool {
+        self.transport == "stdio"
+    }
+
+    /// stdio argument vector (empty for HTTP rows).
+    pub fn args(&self) -> Vec<String> {
+        json_string_list(self.args_json.as_deref())
+    }
+
+    /// stdio environment overrides, sorted by name so two rows with the
+    /// same variables in a different order fingerprint identically.
+    pub fn env(&self) -> Vec<(String, String)> {
+        let map: std::collections::BTreeMap<String, String> = match self.env_json.as_deref() {
+            Some(s) if !s.trim().is_empty() => serde_json::from_str(s).unwrap_or_default(),
+            _ => Default::default(),
+        };
+        map.into_iter().collect()
+    }
+
+    /// Tools the user has permanently approved from the in-chat prompt.
+    pub fn allowed_tools(&self) -> Vec<String> {
+        json_string_list(self.allowed_tools_json.as_deref())
+    }
+
+    /// Canonical identity of *what would be executed* for a stdio row:
+    /// command + args + env, order-independent for env. The spawn-consent
+    /// dialog is keyed on this, so a rename or an enable/disable toggle
+    /// doesn't count as a new program while any change to the command
+    /// line or environment does.
+    pub fn stdio_fingerprint(&self) -> String {
+        serde_json::to_string(&(
+            self.command.as_deref().unwrap_or("").trim(),
+            self.args(),
+            self.env(),
+        ))
+        .unwrap_or_default()
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -508,10 +592,10 @@ impl Database {
             -- (global to this install); we don't track per-project scope
             -- because Loach is a chat app, not a per-repo CLI.
             --
-            -- `transport`, `command`, `args_json`, `env_json` are holdovers
-            -- from when we also spoke stdio + SSE. Kept here so existing
-            -- databases migrate cleanly; new rows leave them unset and the
-            -- Rust struct no longer reads them.
+            -- `transport` is 'http' or 'stdio'. HTTP rows fill `url` +
+            -- `headers_json`; stdio rows fill `command` + `args_json` +
+            -- `env_json`. `auto_approve` / `allowed_tools_json` (added by
+            -- migration below) hold the per-call approval state.
             CREATE TABLE IF NOT EXISTS mcp_servers (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
@@ -587,6 +671,22 @@ impl Database {
         if !has_column(&conn, "messages", "tool_calls_json")? {
             conn.execute_batch(
                 "ALTER TABLE messages ADD COLUMN tool_calls_json TEXT;",
+            )?;
+        }
+
+        // Per-call tool approvals (v1.5). `auto_approve` lets a server skip
+        // the in-chat consent prompt entirely; `allowed_tools_json` holds
+        // the tools the user answered "Always allow" for. Both default to
+        // the strict setting on existing rows, so upgrading turns the
+        // prompt ON for every already-configured server.
+        if !has_column(&conn, "mcp_servers", "auto_approve")? {
+            conn.execute_batch(
+                "ALTER TABLE mcp_servers ADD COLUMN auto_approve INTEGER NOT NULL DEFAULT 0;",
+            )?;
+        }
+        if !has_column(&conn, "mcp_servers", "allowed_tools_json")? {
+            conn.execute_batch(
+                "ALTER TABLE mcp_servers ADD COLUMN allowed_tools_json TEXT;",
             )?;
         }
 
@@ -2198,14 +2298,12 @@ impl Database {
     }
 
     // ------------ mcp servers ------------
-    //
-    // Only the HTTP transport is supported, so every row has a URL and the
-    // legacy stdio-flavoured columns stay NULL.
 
     pub fn list_mcp_servers(&self) -> Result<Vec<McpServer>> {
         self.with_read(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, name, url, headers_json, enabled, created_at, updated_at
+                "SELECT id, name, transport, url, headers_json, command, args_json, env_json,
+                        auto_approve, allowed_tools_json, enabled, created_at, updated_at
                  FROM mcp_servers ORDER BY name ASC",
             )?;
             let rows = stmt
@@ -2213,11 +2311,19 @@ impl Database {
                     Ok(McpServer {
                         id: r.get(0)?,
                         name: r.get(1)?,
-                        url: r.get::<_, Option<String>>(2)?.unwrap_or_default(),
-                        headers_json: r.get(3)?,
-                        enabled: r.get::<_, i64>(4)? != 0,
-                        created_at: r.get(5)?,
-                        updated_at: r.get(6)?,
+                        transport: r
+                            .get::<_, Option<String>>(2)?
+                            .unwrap_or_else(default_transport),
+                        url: r.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                        headers_json: r.get(4)?,
+                        command: r.get(5)?,
+                        args_json: r.get(6)?,
+                        env_json: r.get(7)?,
+                        auto_approve: r.get::<_, i64>(8)? != 0,
+                        allowed_tools_json: r.get(9)?,
+                        enabled: r.get::<_, i64>(10)? != 0,
+                        created_at: r.get(11)?,
+                        updated_at: r.get(12)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -2225,86 +2331,116 @@ impl Database {
         })
     }
 
-    /// Upsert: create a new row if `id` is empty, otherwise update the
-    /// existing one. Returns the row as it now stands in the DB.
-    pub fn upsert_mcp_server(
-        &self,
-        id: Option<&str>,
-        name: &str,
-        url: &str,
-        headers_json: Option<&str>,
-        enabled: bool,
-    ) -> Result<McpServer> {
+    /// Upsert: create a new row when `row.id` is empty, otherwise update
+    /// the existing one. The timestamps on `row` are ignored — the DB owns
+    /// them. Returns the row as it now stands.
+    pub fn upsert_mcp_server(&self, row: &McpServer) -> Result<McpServer> {
         let now = Utc::now().timestamp_millis();
         let conn = self.conn.lock();
+        let enabled = if row.enabled { 1_i64 } else { 0_i64 };
+        let auto_approve = if row.auto_approve { 1_i64 } else { 0_i64 };
 
-        match id {
-            Some(id) if !id.is_empty() => {
-                let affected = conn.execute(
-                    "UPDATE mcp_servers SET name = ?1, url = ?2, headers_json = ?3,
-                                             enabled = ?4, updated_at = ?5
-                     WHERE id = ?6",
-                    params![
-                        name,
-                        url,
-                        headers_json,
-                        if enabled { 1_i64 } else { 0_i64 },
-                        now,
-                        id,
-                    ],
-                )?;
-                if affected == 0 {
-                    // The row is gone — deleted in another window, or the id
-                    // came from a hand-edited import. Without this check the
-                    // UPDATE quietly changed nothing and the SELECT below
-                    // failed with rusqlite's bare "Query returned no rows",
-                    // which is what the user saw as their save error.
-                    return Err(anyhow::anyhow!(
-                        "MCP server `{name}` no longer exists — it may have been deleted in another window. Add it again."
-                    ));
-                }
-                let mut stmt =
-                    conn.prepare("SELECT created_at FROM mcp_servers WHERE id = ?1")?;
-                let created_at: i64 = stmt.query_row(params![id], |r| r.get(0))?;
-                Ok(McpServer {
-                    id: id.to_string(),
-                    name: name.to_string(),
-                    url: url.to_string(),
-                    headers_json: headers_json.map(|s| s.to_string()),
+        if !row.id.is_empty() {
+            let affected = conn.execute(
+                "UPDATE mcp_servers SET name = ?1, transport = ?2, url = ?3, headers_json = ?4,
+                                         command = ?5, args_json = ?6, env_json = ?7,
+                                         auto_approve = ?8, allowed_tools_json = ?9,
+                                         enabled = ?10, updated_at = ?11
+                 WHERE id = ?12",
+                params![
+                    row.name,
+                    row.transport,
+                    row.url,
+                    row.headers_json,
+                    row.command,
+                    row.args_json,
+                    row.env_json,
+                    auto_approve,
+                    row.allowed_tools_json,
                     enabled,
-                    created_at,
-                    updated_at: now,
-                })
+                    now,
+                    row.id,
+                ],
+            )?;
+            if affected == 0 {
+                // The row is gone — deleted in another window, or the id
+                // came from a hand-edited import. Without this check the
+                // UPDATE quietly changed nothing and the SELECT below
+                // failed with rusqlite's bare "Query returned no rows",
+                // which is what the user saw as their save error.
+                return Err(anyhow::anyhow!(
+                    "MCP server `{}` no longer exists — it may have been deleted in another window. Add it again.",
+                    row.name
+                ));
             }
-            _ => {
-                let new_id = Uuid::new_v4().to_string();
-                // The legacy `transport` column is NOT NULL; hard-code it to
-                // 'http' so inserts succeed on databases that were created
-                // before the stdio/sse removal.
-                conn.execute(
-                    "INSERT INTO mcp_servers (id, name, transport, url, headers_json,
-                                               enabled, created_at, updated_at)
-                     VALUES (?1, ?2, 'http', ?3, ?4, ?5, ?6, ?6)",
-                    params![
-                        new_id,
-                        name,
-                        url,
-                        headers_json,
-                        if enabled { 1_i64 } else { 0_i64 },
-                        now,
-                    ],
-                )?;
-                Ok(McpServer {
-                    id: new_id,
-                    name: name.to_string(),
-                    url: url.to_string(),
-                    headers_json: headers_json.map(|s| s.to_string()),
-                    enabled,
-                    created_at: now,
-                    updated_at: now,
-                })
-            }
+            let mut stmt = conn.prepare("SELECT created_at FROM mcp_servers WHERE id = ?1")?;
+            let created_at: i64 = stmt.query_row(params![row.id], |r| r.get(0))?;
+            return Ok(McpServer {
+                created_at,
+                updated_at: now,
+                ..row.clone()
+            });
         }
+
+        let new_id = Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO mcp_servers (id, name, transport, url, headers_json, command, args_json,
+                                      env_json, auto_approve, allowed_tools_json, enabled,
+                                      created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12)",
+            params![
+                new_id,
+                row.name,
+                row.transport,
+                row.url,
+                row.headers_json,
+                row.command,
+                row.args_json,
+                row.env_json,
+                auto_approve,
+                row.allowed_tools_json,
+                enabled,
+                now,
+            ],
+        )?;
+        Ok(McpServer {
+            id: new_id,
+            created_at: now,
+            updated_at: now,
+            ..row.clone()
+        })
+    }
+
+    /// Remember an "Always allow" answer from the in-chat approval prompt:
+    /// append `tool` to the server's allowed list. Idempotent. Returns
+    /// `false` when the server no longer exists (deleted mid-turn), which
+    /// the caller treats as "nothing to remember" rather than an error.
+    pub fn add_mcp_allowed_tool(&self, server_id: &str, tool: &str) -> Result<bool> {
+        let conn = self.conn.lock();
+        let current: Option<Option<String>> = conn
+            .query_row(
+                "SELECT allowed_tools_json FROM mcp_servers WHERE id = ?1",
+                params![server_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(current) = current else {
+            return Ok(false);
+        };
+        let mut list = json_string_list(current.as_deref());
+        if list.iter().any(|t| t == tool) {
+            return Ok(true);
+        }
+        list.push(tool.to_string());
+        conn.execute(
+            "UPDATE mcp_servers SET allowed_tools_json = ?1, updated_at = ?2 WHERE id = ?3",
+            params![
+                serde_json::to_string(&list)?,
+                Utc::now().timestamp_millis(),
+                server_id
+            ],
+        )?;
+        Ok(true)
     }
 
     pub fn delete_mcp_server(&self, id: &str) -> Result<()> {
@@ -2388,8 +2524,8 @@ impl Database {
     /// a schema bump.
     ///
     /// **MCP credentials are scrubbed.** Each `mcp_servers` row's
-    /// `headers_json` carries the user's bearer tokens / API keys for
-    /// that integration. A snapshot is meant to be portable (backup,
+    /// `headers_json` (HTTP) or `env_json` (stdio) carries the user's
+    /// bearer tokens / API keys for that integration. A snapshot is meant to be portable (backup,
     /// support handoff, hand-edited gist) so shipping credentials in
     /// plaintext would silently leak them whenever the user shared a
     /// dump. We blank the field at export time; the user must
@@ -2415,6 +2551,9 @@ impl Database {
             .into_iter()
             .map(|mut s| {
                 s.headers_json = None;
+                // stdio servers take their API keys through the environment
+                // map, so it is credentials in the same sense.
+                s.env_json = None;
                 s
             })
             .collect();
@@ -2628,17 +2767,22 @@ impl Database {
         }
 
         for mcp in &d.mcp_servers {
-            // Legacy `transport` column is NOT NULL — hard-code 'http' so
-            // inserts succeed on databases that still carry the older schema.
             tx.execute(
-                "INSERT INTO mcp_servers (id, name, transport, url, headers_json,
+                "INSERT INTO mcp_servers (id, name, transport, url, headers_json, command,
+                                           args_json, env_json, auto_approve, allowed_tools_json,
                                            enabled, created_at, updated_at)
-                 VALUES (?1, ?2, 'http', ?3, ?4, ?5, ?6, ?7)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                 params![
                     mcp.id,
                     mcp.name,
+                    mcp.transport,
                     mcp.url,
                     mcp.headers_json,
+                    mcp.command,
+                    mcp.args_json,
+                    mcp.env_json,
+                    if mcp.auto_approve { 1_i64 } else { 0_i64 },
+                    mcp.allowed_tools_json,
                     if mcp.enabled { 1_i64 } else { 0_i64 },
                     mcp.created_at,
                     mcp.updated_at,
@@ -3002,6 +3146,136 @@ mod tests {
         let db = Database::open(&path).expect("open");
         db.migrate().expect("migrate");
         (db, dir)
+    }
+
+    /// An unsaved MCP row of either transport, minimal but valid.
+    fn mcp_draft(name: &str, transport: &str) -> McpServer {
+        let stdio = transport == "stdio";
+        McpServer {
+            id: String::new(),
+            name: name.to_string(),
+            transport: transport.to_string(),
+            url: if stdio { String::new() } else { "http://localhost:3000/mcp".into() },
+            headers_json: if stdio { None } else { Some(r#"{"Authorization":"Bearer x"}"#.into()) },
+            command: if stdio { Some("npx".into()) } else { None },
+            args_json: if stdio {
+                Some(r#"["-y","@modelcontextprotocol/server-filesystem"]"#.into())
+            } else {
+                None
+            },
+            env_json: if stdio { Some(r#"{"B":"2","A":"1"}"#.into()) } else { None },
+            auto_approve: false,
+            allowed_tools_json: None,
+            enabled: true,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    /// stdio fields and the per-call approval state survive the insert →
+    /// list → update round-trip; the decoded accessors give the editor and
+    /// the spawner what they need without touching JSON.
+    #[test]
+    fn mcp_server_round_trips_stdio_fields_and_approval_state() {
+        let (db, _dir) = fresh_db();
+        let saved = db.upsert_mcp_server(&mcp_draft("fs", "stdio")).expect("insert");
+        assert!(!saved.id.is_empty());
+
+        let rows = db.list_mcp_servers().expect("list");
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert!(row.is_stdio());
+        assert_eq!(row.command.as_deref(), Some("npx"));
+        assert_eq!(row.args(), vec!["-y", "@modelcontextprotocol/server-filesystem"]);
+        // Sorted by name so the fingerprint is order-independent.
+        assert_eq!(
+            row.env(),
+            vec![("A".to_string(), "1".to_string()), ("B".to_string(), "2".to_string())]
+        );
+        assert!(!row.auto_approve, "prompting is the default");
+        assert!(row.allowed_tools().is_empty());
+
+        let updated = db
+            .upsert_mcp_server(&McpServer {
+                auto_approve: true,
+                ..row.clone()
+            })
+            .expect("update");
+        assert_eq!(updated.id, row.id, "update keeps the id");
+        assert!(db.list_mcp_servers().unwrap()[0].auto_approve);
+
+        // HTTP rows decode to empty stdio accessors rather than failing.
+        let http = db.upsert_mcp_server(&mcp_draft("gh", "http")).expect("insert http");
+        assert!(!http.is_stdio());
+        assert!(http.args().is_empty());
+        assert!(http.env().is_empty());
+    }
+
+    /// The consent dialog is keyed on what would *run*: a rename, an
+    /// enable flip, or the same env in a different order is the same
+    /// program; a changed argument is not.
+    #[test]
+    fn stdio_fingerprint_tracks_the_command_line_only() {
+        let a = mcp_draft("fs", "stdio");
+        let mut b = a.clone();
+        b.name = "renamed".into();
+        b.enabled = false;
+        b.env_json = Some(r#"{"A":"1","B":"2"}"#.into());
+        assert_eq!(a.stdio_fingerprint(), b.stdio_fingerprint());
+
+        b.args_json = Some(r#"["-y","@modelcontextprotocol/server-everything"]"#.into());
+        assert_ne!(a.stdio_fingerprint(), b.stdio_fingerprint());
+
+        let mut c = a.clone();
+        c.env_json = Some(r#"{"A":"1","B":"2","NODE_OPTIONS":"--require x"}"#.into());
+        assert_ne!(a.stdio_fingerprint(), c.stdio_fingerprint(), "env changes what runs");
+    }
+
+    /// "Always allow" appends once, ignores repeats, and reports a vanished
+    /// server as `false` rather than an error.
+    #[test]
+    fn add_mcp_allowed_tool_is_idempotent_and_tolerates_missing_rows() {
+        let (db, _dir) = fresh_db();
+        let saved = db.upsert_mcp_server(&mcp_draft("gh", "http")).expect("insert");
+        assert!(db.add_mcp_allowed_tool(&saved.id, "search").unwrap());
+        assert!(db.add_mcp_allowed_tool(&saved.id, "search").unwrap());
+        assert!(db.add_mcp_allowed_tool(&saved.id, "list_issues").unwrap());
+        assert_eq!(
+            db.list_mcp_servers().unwrap()[0].allowed_tools(),
+            vec!["search", "list_issues"]
+        );
+        assert!(!db.add_mcp_allowed_tool("no-such-server", "search").unwrap());
+    }
+
+    /// stdio servers take their API keys through `env_json`; an export
+    /// must scrub it exactly as it scrubs HTTP headers.
+    #[test]
+    fn snapshot_scrubs_stdio_env_like_http_headers() {
+        let (db, _dir) = fresh_db();
+        db.upsert_mcp_server(&mcp_draft("fs", "stdio")).expect("insert stdio");
+        db.upsert_mcp_server(&mcp_draft("gh", "http")).expect("insert http");
+        let snap = db.snapshot().expect("snapshot");
+        assert_eq!(snap.data.mcp_servers.len(), 2);
+        for row in &snap.data.mcp_servers {
+            assert!(row.headers_json.is_none(), "{}: headers leaked", row.name);
+            assert!(row.env_json.is_none(), "{}: env leaked", row.name);
+        }
+        // The non-secret command line still round-trips.
+        let fs = snap.data.mcp_servers.iter().find(|r| r.name == "fs").unwrap();
+        assert_eq!(fs.command.as_deref(), Some("npx"));
+        assert!(fs.args_json.is_some());
+    }
+
+    /// A pre-1.5 export has no transport / approval fields at all; it must
+    /// still deserialise (as an HTTP row that prompts) and restore.
+    #[test]
+    fn legacy_mcp_snapshot_rows_default_to_http_and_prompting() {
+        let raw = r#"{"id":"m1","name":"old","url":"http://localhost:1/mcp",
+                      "headers_json":null,"enabled":true,"created_at":1,"updated_at":1}"#;
+        let row: McpServer = serde_json::from_str(raw).expect("legacy row parses");
+        assert_eq!(row.transport, "http");
+        assert!(!row.auto_approve);
+        assert!(row.command.is_none());
     }
 
     /// Guards the `storage_stats` SQL. Every bucket names tables and columns

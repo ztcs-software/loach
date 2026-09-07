@@ -54,6 +54,14 @@ pub struct AppState {
     /// Cached MCP tool catalogue so each chat send doesn't re-handshake
     /// every enabled server. Invalidated on MCP config changes and restores.
     pub mcp_tools_cache: crate::mcp::ToolsCache,
+    /// Per-call tool approvals parked by the provider loop and answered by
+    /// `tool_approval_respond`.
+    pub approvals: crate::stream::ApprovalRegistry,
+    /// stdio MCP command lines the user confirmed in the native consent
+    /// dialog this session (keyed by `McpServer::stdio_fingerprint`), so a
+    /// test-then-save asks once. Deliberately not persisted: a fresh
+    /// process re-asks before anything runs.
+    pub stdio_approved: parking_lot::Mutex<std::collections::HashSet<String>>,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -181,6 +189,8 @@ pub fn run() {
                 http,
                 streams: StreamRegistry::new(),
                 mcp_tools_cache: crate::mcp::new_tools_cache(),
+                approvals: crate::stream::ApprovalRegistry::new(),
+                stdio_approved: Default::default(),
             };
             app.manage(state);
 
@@ -341,6 +351,7 @@ pub fn run() {
             commands::mcp_save,
             commands::mcp_delete,
             commands::mcp_test,
+            commands::tool_approval_respond,
             commands::storage_stats,
             commands::export_data_json,
             commands::import_data_with_dialog,
@@ -353,6 +364,14 @@ pub fn run() {
             commands::updater_supported,
             commands::open_in_vscode,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Loach");
+        .build(tauri::generate_context!())
+        .expect("error while building Loach")
+        .run(|_app, event| {
+            if let tauri::RunEvent::Exit = event {
+                // Pooled stdio MCP servers are our child processes. Kill
+                // them now rather than rely on each one noticing its stdin
+                // closing once we're gone.
+                crate::mcp::drop_all_sessions();
+            }
+        });
 }
