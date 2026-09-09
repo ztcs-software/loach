@@ -6,6 +6,7 @@ import type {
   ChatRequest,
   FetchedPage,
   Folder,
+  GlobalMemory,
   ImportStats,
   McpServer,
   McpServerInput,
@@ -819,6 +820,45 @@ export function removeSpaceMemory(args: {
 }): Promise<void> {
   if (!isTauri) return notInTauri(undefined);
   return invoke("remove_space_memory", { args });
+}
+
+// ------------ global memories ------------
+
+export function listGlobalMemories(): Promise<GlobalMemory[]> {
+  if (!isTauri) return notInTauri([]);
+  return invoke("list_global_memories");
+}
+
+export function addGlobalMemory(args: {
+  content: string;
+  source_session_id?: string | null;
+  source_message_id?: string | null;
+}): Promise<GlobalMemory> {
+  if (!isTauri) {
+    const now = Date.now();
+    return notInTauri<GlobalMemory>({
+      id: mockId("mock-gmem"),
+      content: args.content,
+      source_session_id: args.source_session_id ?? null,
+      source_message_id: args.source_message_id ?? null,
+      created_at: now,
+      updated_at: now,
+    });
+  }
+  return invoke("add_global_memory", { args });
+}
+
+export function updateGlobalMemory(args: {
+  id: string;
+  content: string;
+}): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("update_global_memory", { args });
+}
+
+export function removeGlobalMemory(args: { id: string }): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("remove_global_memory", { args });
 }
 
 // ------------ snippets ------------

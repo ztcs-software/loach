@@ -1,17 +1,35 @@
 //! Settings -> Features: the opt-in behaviours (memory, temporal awareness, snippet template vars).
 
-import { Brain, ChevronDown, ChevronRight, Clock, MemoryStick } from "lucide-react";
+import {
+  BookMarked,
+  Brain,
+  ChevronDown,
+  ChevronRight,
+  Clock,
+  MemoryStick,
+} from "lucide-react";
 import { KeepAliveSwitch } from "./switches";
+import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { SectionTitle } from "./shared";
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
+import { GlobalMemoriesDialog } from "@/components/GlobalMemoriesDialog";
+import { useGlobalMemoryStore } from "@/stores/globalMemoryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 export function FeaturesTab() {
   const settings = useSettingsStore();
   const [templateVarsOpen, setTemplateVarsOpen] = useState(false);
+  const [globalMemoriesOpen, setGlobalMemoriesOpen] = useState(false);
+  const globalMemories = useGlobalMemoryStore((s) => s.memories);
+  const ensureGlobalLoaded = useGlobalMemoryStore((s) => s.ensureLoaded);
+  // Warm the count on the button; a failed read just leaves it off.
+  useEffect(() => {
+    void ensureGlobalLoaded().catch(() => {});
+  }, [ensureGlobalLoaded]);
+  const globalCount = globalMemories?.length ?? 0;
   return (
     <>
                 <SectionTitle>Features</SectionTitle>
@@ -103,6 +121,53 @@ export function FeaturesTab() {
                       </div>
                     )}
                   </div>
+                </div>
+
+                <Separator />
+
+                <div>
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="min-w-0">
+                      <Label className="flex items-center gap-1.5">
+                        <BookMarked className="h-3.5 w-3.5 text-foreground/60" />
+                        Global memories
+                      </Label>
+                      <p className="mt-1 text-[11px] text-foreground/50">
+                        Remember durable facts about you across every chat,
+                        not just chats inside a Space. Chats outside a Space
+                        save here; Space chats keep their own memory but see
+                        these too. Off by default — when on, every reply
+                        triggers a second, hidden model call to extract facts.
+                        Never used in Private Chat.
+                      </p>
+                    </div>
+                    <Switch
+                      checked={settings.global_memory_enabled}
+                      onCheckedChange={(next) =>
+                        settings.update("global_memory_enabled", next)
+                      }
+                      className="shrink-0"
+                      aria-label={
+                        settings.global_memory_enabled
+                          ? "Disable global memories"
+                          : "Enable global memories"
+                      }
+                    />
+                  </div>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => setGlobalMemoriesOpen(true)}
+                    className="mt-3 rounded-xl"
+                  >
+                    <BookMarked className="h-3.5 w-3.5" />
+                    Manage global memories
+                    {globalCount > 0 ? ` (${globalCount})` : ""}
+                  </Button>
+                  <GlobalMemoriesDialog
+                    open={globalMemoriesOpen}
+                    onOpenChange={setGlobalMemoriesOpen}
+                  />
                 </div>
 
                 <Separator />

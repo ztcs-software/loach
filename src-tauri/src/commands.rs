@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 
 use crate::db::{
-    DatabaseSnapshot, Folder, ImportStats, McpServer, Message, MessageHit, Session, Snippet,
-    SnippetFillValue, SnippetVariable, Space, SpaceFile, SpaceMemory, StorageStats,
+    DatabaseSnapshot, Folder, GlobalMemory, ImportStats, McpServer, Message, MessageHit, Session,
+    Snippet, SnippetFillValue, SnippetVariable, Space, SpaceFile, SpaceMemory, StorageStats,
 };
 use crate::mcp::{self, McpTestResult};
 use crate::providers::{self, ChatRequest, ModelInfo};
@@ -565,6 +565,7 @@ const WRITABLE_SETTING_KEYS: &[&str] = &[
     "default_model_preload",
     "user_name",
     "temporal_awareness",
+    "global_memory_enabled",
     "web_fetch_enabled",
     "low_vram_global",
     "ollama_keep_alive",
@@ -1237,6 +1238,74 @@ pub async fn remove_space_memory(
         .db
         .remove_space_memory(&args.id, &args.space_id)
         .map_err(err)
+}
+
+// ---------- global memories ----------
+
+#[tauri::command]
+pub async fn list_global_memories(
+    state: State<'_, AppState>,
+) -> Result<Vec<GlobalMemory>, String> {
+    state.db.list_global_memories().map_err(err)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AddGlobalMemoryArgs {
+    pub content: String,
+    #[serde(default)]
+    pub source_session_id: Option<String>,
+    #[serde(default)]
+    pub source_message_id: Option<String>,
+}
+
+#[tauri::command]
+pub async fn add_global_memory(
+    state: State<'_, AppState>,
+    args: AddGlobalMemoryArgs,
+) -> Result<GlobalMemory, String> {
+    let trimmed = args.content.trim();
+    if trimmed.is_empty() {
+        return Err("memory content is required".into());
+    }
+    state
+        .db
+        .add_global_memory(
+            trimmed,
+            args.source_session_id.as_deref(),
+            args.source_message_id.as_deref(),
+        )
+        .map_err(err)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateGlobalMemoryArgs {
+    pub id: String,
+    pub content: String,
+}
+
+#[tauri::command]
+pub async fn update_global_memory(
+    state: State<'_, AppState>,
+    args: UpdateGlobalMemoryArgs,
+) -> Result<(), String> {
+    let trimmed = args.content.trim();
+    if trimmed.is_empty() {
+        return Err("memory content is required".into());
+    }
+    state.db.update_global_memory(&args.id, trimmed).map_err(err)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RemoveGlobalMemoryArgs {
+    pub id: String,
+}
+
+#[tauri::command]
+pub async fn remove_global_memory(
+    state: State<'_, AppState>,
+    args: RemoveGlobalMemoryArgs,
+) -> Result<(), String> {
+    state.db.remove_global_memory(&args.id).map_err(err)
 }
 
 // ---------- snippets ----------

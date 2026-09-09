@@ -123,7 +123,7 @@ export const COMMANDS: readonly CommandSpec[] = [
   // ----- memory & spaces -----
   {
     name: "remember",
-    description: "Save a fact to the active space's memory",
+    description: "Save a fact to the active space's memory, or to global memory outside a space",
     usage: "<fact>",
     group: "Memory & spaces",
   },

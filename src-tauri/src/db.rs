@@ -146,6 +146,20 @@ pub struct SpaceMemory {
     pub updated_at: i64,
 }
 
+/// One free-text fact that rides along in every non-private chat rather
+/// than one Space. Same shape as `SpaceMemory` minus the scope column.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct GlobalMemory {
+    pub id: String,
+    pub content: String,
+    #[serde(default)]
+    pub source_session_id: Option<String>,
+    #[serde(default)]
+    pub source_message_id: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SpaceFile {
     pub id: String,
@@ -825,6 +839,23 @@ impl Database {
             "#,
         )?;
 
+        // Global (Space-independent) memory rows. A separate table rather
+        // than a nullable `space_id` on `space_memories`, so the per-space
+        // scoping on update / delete stays a plain equality check and no
+        // table rebuild is needed to relax the NOT NULL.
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS global_memories (
+                id TEXT PRIMARY KEY,
+                content TEXT NOT NULL,
+                source_session_id TEXT,
+                source_message_id TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            "#,
+        )?;
+
         // Custom snippet variables.
         //   `snippet_variables` — user-defined KEY=VALUE pairs substituted into
         //   snippet bodies at expansion time. UNIQUE on `key` so the same name
@@ -1475,6 +1506,8 @@ impl Database {
                 )? + scalar(
                     "SELECT COALESCE(SUM(LENGTH(CAST(value AS BLOB))), 0) FROM snippet_fill_values",
                 )? + scalar(
+                    "SELECT COALESCE(SUM(LENGTH(CAST(content AS BLOB))), 0) FROM global_memories",
+                )? + scalar(
                     "SELECT COALESCE(SUM(LENGTH(CAST(name AS BLOB))
                                        + LENGTH(CAST(COALESCE(url, '') AS BLOB))
                                        + LENGTH(CAST(COALESCE(headers_json, '') AS BLOB))), 0)
@@ -2068,6 +2101,72 @@ impl Database {
         Ok(rows)
     }
 
+    // ------------ global memories ------------
+
+    pub fn list_global_memories(&self) -> Result<Vec<GlobalMemory>> {
+        self.with_read(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, content, source_session_id, source_message_id,
+                        created_at, updated_at
+                 FROM global_memories ORDER BY created_at ASC",
+            )?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok(GlobalMemory {
+                        id: r.get(0)?,
+                        content: r.get(1)?,
+                        source_session_id: r.get(2)?,
+                        source_message_id: r.get(3)?,
+                        created_at: r.get(4)?,
+                        updated_at: r.get(5)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+    }
+
+    pub fn add_global_memory(
+        &self,
+        content: &str,
+        source_session_id: Option<&str>,
+        source_message_id: Option<&str>,
+    ) -> Result<GlobalMemory> {
+        let id = Uuid::new_v4().to_string();
+        let now = Utc::now().timestamp_millis();
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO global_memories (id, content, source_session_id,
+                                          source_message_id, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+            params![id, content, source_session_id, source_message_id, now],
+        )?;
+        Ok(GlobalMemory {
+            id,
+            content: content.to_string(),
+            source_session_id: source_session_id.map(|s| s.to_string()),
+            source_message_id: source_message_id.map(|s| s.to_string()),
+            created_at: now,
+            updated_at: now,
+        })
+    }
+
+    pub fn update_global_memory(&self, id: &str, content: &str) -> Result<()> {
+        let now = Utc::now().timestamp_millis();
+        let conn = self.conn.lock();
+        conn.execute(
+            "UPDATE global_memories SET content = ?1, updated_at = ?2 WHERE id = ?3",
+            params![content, now, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn remove_global_memory(&self, id: &str) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute("DELETE FROM global_memories WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
     // ------------ snippets ------------
 
     pub fn list_snippets(&self) -> Result<Vec<Snippet>> {
@@ -2568,6 +2667,7 @@ impl Database {
                 spaces: self.list_spaces()?,
                 space_files: self.all_space_files()?,
                 space_memories: self.all_space_memories()?,
+                global_memories: self.list_global_memories()?,
                 snippets: self.list_snippets()?,
                 snippet_variables: self.list_snippet_variables()?,
                 snippet_fill_values: self.all_snippet_fill_values()?,
@@ -2612,6 +2712,7 @@ impl Database {
             DELETE FROM messages;
             DELETE FROM space_files;
             DELETE FROM space_memories;
+            DELETE FROM global_memories;
             DELETE FROM sessions;
             DELETE FROM folders;
             DELETE FROM spaces;
@@ -2730,6 +2831,22 @@ impl Database {
             )?;
         }
 
+        for mem in &d.global_memories {
+            tx.execute(
+                "INSERT INTO global_memories (id, content, source_session_id,
+                                              source_message_id, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    mem.id,
+                    mem.content,
+                    mem.source_session_id,
+                    mem.source_message_id,
+                    mem.created_at,
+                    mem.updated_at,
+                ],
+            )?;
+        }
+
         for f in &d.space_files {
             tx.execute(
                 "INSERT INTO space_files (id, space_id, name, mime, kind, data, size, position, created_at)
@@ -2826,6 +2943,7 @@ impl Database {
             spaces: d.spaces.len(),
             space_files: d.space_files.len(),
             space_memories: d.space_memories.len(),
+            global_memories: d.global_memories.len(),
             snippets: d.snippets.len(),
             snippet_variables: d.snippet_variables.len(),
             snippet_fill_values: d.snippet_fill_values.len(),
@@ -2892,6 +3010,7 @@ impl Database {
             DELETE FROM messages;
             DELETE FROM space_files;
             DELETE FROM space_memories;
+            DELETE FROM global_memories;
             DELETE FROM sessions;
             DELETE FROM folders;
             DELETE FROM spaces;
@@ -2932,6 +3051,7 @@ impl Database {
             DELETE FROM messages;
             DELETE FROM space_files;
             DELETE FROM space_memories;
+            DELETE FROM global_memories;
             DELETE FROM sessions;
             DELETE FROM folders;
             DELETE FROM spaces;
@@ -2971,6 +3091,9 @@ pub struct SnapshotData {
     /// that predate the memory feature so loading them stays a no-op.
     #[serde(default)]
     pub space_memories: Vec<SpaceMemory>,
+    /// Global memory rows. Empty on exports that predate the feature.
+    #[serde(default)]
+    pub global_memories: Vec<GlobalMemory>,
     pub snippets: Vec<Snippet>,
     /// User-defined `{{KEY}}` global variables. Defaults to empty on older
     /// exports that predate the feature so loading them stays a no-op.
@@ -2994,6 +3117,7 @@ pub struct ImportStats {
     pub spaces: usize,
     pub space_files: usize,
     pub space_memories: usize,
+    pub global_memories: usize,
     pub snippets: usize,
     pub snippet_variables: usize,
     pub snippet_fill_values: usize,
@@ -3684,5 +3808,41 @@ mod tests {
         assert_eq!(all[0].id, sn.id);
         assert_eq!(all[0].title, "Greet");
         assert_eq!(all[0].provider.as_deref(), Some("ollama"));
+    }
+
+    #[test]
+    fn global_memory_crud_roundtrip() {
+        let (db, _dir) = fresh_db();
+        assert!(db.list_global_memories().unwrap().is_empty());
+
+        let a = db
+            .add_global_memory("Prefers TypeScript.", Some("sess-1"), Some("msg-1"))
+            .unwrap();
+        let b = db.add_global_memory("Lives in Warsaw.", None, None).unwrap();
+
+        let listed = db.list_global_memories().unwrap();
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].id, a.id);
+        assert_eq!(listed[0].source_session_id.as_deref(), Some("sess-1"));
+        assert_eq!(listed[1].source_session_id, None);
+
+        db.update_global_memory(&b.id, "Lives in Berlin.").unwrap();
+        let listed = db.list_global_memories().unwrap();
+        assert_eq!(listed[1].content, "Lives in Berlin.");
+        assert!(listed[1].updated_at >= listed[1].created_at);
+
+        db.remove_global_memory(&a.id).unwrap();
+        let listed = db.list_global_memories().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, b.id);
+
+        // Global rows ride the export/import path alongside space memories.
+        let snapshot = db.snapshot().unwrap();
+        assert_eq!(snapshot.data.global_memories.len(), 1);
+        db.wipe_all().unwrap();
+        assert!(db.list_global_memories().unwrap().is_empty());
+        let stats = db.restore_snapshot(&snapshot).unwrap();
+        assert_eq!(stats.global_memories, 1);
+        assert_eq!(db.list_global_memories().unwrap()[0].content, "Lives in Berlin.");
     }
 }

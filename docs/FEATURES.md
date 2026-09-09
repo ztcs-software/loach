@@ -354,7 +354,8 @@ Commands are grouped the way `/help` lists them:
   system prompt), `/snippet <name>` (expand a saved snippet into the
   composer).
 - **Memory & spaces** — `/remember <fact>`, `/forget <id|query>`,
-  `/space <name>`.
+  `/space <name>`. Inside a Space the memory commands act on that Space's
+  memory; outside one they act on global memory (when it's enabled).
 - **Tools & web** — `/tools` (list tools from enabled MCP servers),
   `/web-fetch on|off`, `/fetch <url>`, `/thinking on|off`.
 - **App** — `/settings [tab]` (general, providers, features, tools,
@@ -458,22 +459,42 @@ context.
 Optional per-Space auto-memory. After every assistant reply in a Space, Loach
 fires a one-shot LLM call (against the same provider/model the user is
 chatting with) and asks it to extract durable, single-sentence facts about
-the user. Survivors are deduped (model dedupe + local Jaccard string
-similarity) and persisted.
+the user. The existing memories are shown to the extractor numbered, so it
+can also **update** one that changed (a reversed preference, a move) or
+**remove** one that no longer holds, instead of piling up contradictions.
+New facts are deduped locally too (token overlap that also checks word
+order, so "prefers A over B" is not mistaken for "prefers B over A").
 
-- **Toast for every save** — "Saved to memory" pill with the new fact,
-  so the user can see what landed in long-term context.
-- **Memory tab** — review, edit, or delete any auto-saved row, and add
-  facts manually.
+- **Toast for every change** — "Saved to memory" / "Updated memory" /
+  "Removed memory" pills with the fact and an **Undo** button.
+- **Memory tab** — review, edit, or delete any row, add facts manually,
+  search, see when each was saved and jump to the chat it came from, or
+  clear the whole list.
 - **Per-Space toggle** — turn extraction off without wiping existing rows.
   Existing memories continue to ride along in every chat; only new writes
   stop.
-- **Caps** — at most 60 memories sent into the extractor prompt to keep
-  context small. Each fact is rejected if longer than 280 chars.
+- **Coverage** — a reply that finishes while more messages are queued, or
+  an extraction aborted by the next send, is parked and folded into the
+  next extraction in that chat (up to three turns per run).
+- **Caps** — the newest 60 memories go into both the chat prompt and the
+  extractor prompt, so every fact the model sees is one the extractor can
+  still correct. Each fact is rejected if longer than 280 chars.
 
 Memories are silently injected into the system prompt of every chat inside
 the Space as a `--- Space memory ---` bulleted list. Cancel / error turns
 never trigger extraction, since the assistant text is incomplete.
+
+### 3.4 Global Memory
+
+Settings → Features → **Global memories** (off by default) extends the
+same mechanism to chats outside any Space: after each reply the extractor
+runs against the global list, and a `--- Global memory ---` block is
+injected into every chat, inside or outside a Space (Space facts win on
+conflict). Space chats keep writing to their own Space memory; the global
+facts are shown to their extractor as read-only context so they aren't
+duplicated. **Manage global memories** opens the same editor as a Space's
+Memory tab. Turning the setting off stops both extraction and injection.
+Private Chat never reads or writes memory of either kind.
 
 ---
 

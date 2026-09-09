@@ -1,4 +1,5 @@
 import { useChatStore } from "@/stores/chatStore";
+import { useGlobalMemoryStore } from "@/stores/globalMemoryStore";
 import { connectionLabel, inputFromView, useMcpStore } from "@/stores/mcpStore";
 import { useModelsStore } from "@/stores/modelsStore";
 import { usePrivateChatStore } from "@/stores/privateChatStore";
@@ -9,12 +10,19 @@ import { useUIStore, type SettingsTab } from "@/stores/uiStore";
 import { DEFAULT_PERSONA_ID, PERSONAS } from "@/lib/personas";
 import { expandAndPrimeSnippet } from "@/lib/runSnippet";
 import { stripSummaryBlock } from "@/lib/contextUsage";
+import type { MemoryScope } from "@/lib/memory";
 import {
   clearSessionMessages,
   fetchUrl,
   mcpTest,
 } from "@/lib/tauri";
-import type { GenerationParams, Message, MessageMetrics, Session } from "@/types";
+import type {
+  GenerationParams,
+  MemoryRow,
+  Message,
+  MessageMetrics,
+  Session,
+} from "@/types";
 import { findCommand, parseInput } from "./parser";
 import type { CommandResult, CommandResultItem } from "./types";
 
@@ -78,16 +86,34 @@ function requireSession(): Session {
   return session;
 }
 
-function activeSpaceId(): string {
+/** Where `/remember`, `/forget` and `/list memories` operate: the active
+ *  chat's Space (or the Space being viewed) when there is one, otherwise the
+ *  global list. */
+function memoryScope(): MemoryScope {
   const session = useChatStore.getState().sessions.find(
     (s) => s.id === useChatStore.getState().activeSessionId,
   );
-  if (session?.space_id) return session.space_id;
+  if (session?.space_id) return { kind: "space", spaceId: session.space_id };
   const sid = useSpaceStore.getState().activeSpaceId;
-  if (sid) return sid;
-  throw new Error(
-    "No active space. Open a chat that belongs to a space, or run /space <name>.",
+  if (sid) return { kind: "space", spaceId: sid };
+  return { kind: "global" };
+}
+
+async function scopedMemories(scope: MemoryScope): Promise<MemoryRow[]> {
+  if (scope.kind === "global") {
+    return useGlobalMemoryStore.getState().ensureLoaded();
+  }
+  return (
+    useSpaceStore.getState().spaceMemories[scope.spaceId] ??
+    (await useSpaceStore.getState().loadSpaceMemories(scope.spaceId))
   );
+}
+
+function removeScopedMemory(scope: MemoryScope, id: string): Promise<void> {
+  if (scope.kind === "global") {
+    return useGlobalMemoryStore.getState().removeMemory(id);
+  }
+  return useSpaceStore.getState().removeMemory(id, scope.spaceId);
 }
 
 function readCurrentParams(session: Session): Partial<GenerationParams> {
@@ -408,13 +434,13 @@ async function runList(rest: string): Promise<CommandResult> {
       ]);
     }
     case "memories": {
-      const spaceId = activeSpaceId();
-      const memories =
-        useSpaceStore.getState().spaceMemories[spaceId] ??
-        (await useSpaceStore.getState().loadSpaceMemories(spaceId));
-      if (memories.length === 0) return ok("No memories in this space");
+      const scope = memoryScope();
+      const memories = await scopedMemories(scope);
+      if (memories.length === 0) {
+        return ok(scope.kind === "global" ? "No global memories" : "No memories in this space");
+      }
       return listItems(
-        "Memories",
+        scope.kind === "global" ? "Global memories" : "Memories",
         memories.map((m) => ({
           label: m.content,
           detail: m.id.slice(0, 8),
@@ -480,25 +506,36 @@ async function runSnippet(rest: string): Promise<CommandResult> {
 async function runRemember(rest: string): Promise<CommandResult> {
   const fact = rest.trim();
   if (!fact) throw new Error("Usage: /remember <fact>");
-  const spaceId = activeSpaceId();
+  const scope = memoryScope();
   const session = useChatStore.getState().sessions.find(
     (s) => s.id === useChatStore.getState().activeSessionId,
   );
+  const preview = fact.length > 80 ? fact.slice(0, 80) + "…" : fact;
+  if (scope.kind === "global") {
+    if (!useSettingsStore.getState().global_memory_enabled) {
+      throw new Error(
+        "Global memory is off. Turn it on in Settings → Features, or open a chat in a space.",
+      );
+    }
+    await useGlobalMemoryStore.getState().addMemory({
+      content: fact,
+      source_session_id: session?.id ?? null,
+    });
+    return ok("Saved to global memory", preview);
+  }
   await useSpaceStore.getState().addMemory({
-    space_id: spaceId,
+    space_id: scope.spaceId,
     content: fact,
     source_session_id: session?.id ?? null,
   });
-  return ok("Saved to memory", fact.length > 80 ? fact.slice(0, 80) + "…" : fact);
+  return ok("Saved to memory", preview);
 }
 
 async function runForget(rest: string): Promise<CommandResult> {
   const query = rest.trim();
   if (!query) throw new Error("Usage: /forget <id|query>");
-  const spaceId = activeSpaceId();
-  const memories =
-    useSpaceStore.getState().spaceMemories[spaceId] ??
-    (await useSpaceStore.getState().loadSpaceMemories(spaceId));
+  const scope = memoryScope();
+  const memories = await scopedMemories(scope);
   // First try a full or prefix id match (memories surface their short id in
   // /list memories, so the user might paste either form). Only treat the
   // query as an id prefix when it's specific enough — /list memories shows
@@ -511,7 +548,7 @@ async function runForget(rest: string): Promise<CommandResult> {
   const byId =
     exactId ?? (prefixMatches.length === 1 ? prefixMatches[0] : undefined);
   if (byId) {
-    await useSpaceStore.getState().removeMemory(byId.id, spaceId);
+    await removeScopedMemory(scope, byId.id);
     return ok("Removed memory", byId.content.length > 60 ? byId.content.slice(0, 60) + "…" : byId.content);
   }
   const lower = query.toLowerCase();
@@ -526,7 +563,7 @@ async function runForget(rest: string): Promise<CommandResult> {
     );
   }
   const m = byContent[0]!;
-  await useSpaceStore.getState().removeMemory(m.id, spaceId);
+  await removeScopedMemory(scope, m.id);
   return ok("Removed memory", m.content.length > 60 ? m.content.slice(0, 60) + "…" : m.content);
 }
 

@@ -38,7 +38,14 @@ import {
   imagesFromAttachments,
   inlineTextAttachments,
 } from "@/lib/files";
-import { extractMemories, cancelMemoryExtraction } from "@/lib/memory";
+import {
+  cancelMemoryExtraction,
+  deferMemoryTurn,
+  extractMemories,
+  type MemoryScope,
+} from "@/lib/memory";
+import { selectMemoriesForPrompt } from "@/lib/memoryRules";
+import { useGlobalMemoryStore } from "./globalMemoryStore";
 import { buildCompactedMarkdown } from "@/lib/export";
 import {
   extractSummary,
@@ -740,6 +747,27 @@ async function buildTaskRequest(
 
   let effectiveSystemPrompt: string | null = fallbackPrompt || null;
   const spaceImages: string[] = [];
+
+  // Global memory rides along in every chat that goes through this store
+  // (Private Chat has its own prompt path and never sees it). Gated on the
+  // setting for injection as well as writes — an app-wide "off" that kept
+  // whispering old facts into every prompt would be a surprise.
+  let globalBlock = "";
+  if (settings.global_memory_enabled) {
+    try {
+      const rows = selectMemoriesForPrompt(
+        await useGlobalMemoryStore.getState().ensureLoaded(),
+      );
+      if (rows.length > 0) {
+        globalBlock = "--- Global memory ---\n";
+        globalBlock += "Facts to remember about the user in every chat:\n";
+        for (const m of rows) globalBlock += `- ${m.content}\n`;
+      }
+    } catch (e) {
+      logger.warn("Failed to load global memory", e);
+    }
+  }
+
   if (session.space_id) {
     try {
       // Serve the space context from the per-space cache when warm, so repeat
@@ -764,11 +792,16 @@ async function buildTaskRequest(
         if (f.kind === "image") spaceImages.push(f.data);
       }
       let memoryBlock = "";
-      if (ctx.memories.length > 0) {
+      // Same cap as the extractor sees, so every fact in the prompt is one
+      // the extractor can still correct or retire.
+      const promptMemories = selectMemoriesForPrompt(ctx.memories);
+      if (promptMemories.length > 0) {
         memoryBlock = "--- Space memory ---\n";
         memoryBlock +=
-          "Facts to remember about the user across chats in this space:\n";
-        for (const m of ctx.memories) {
+          "Facts to remember about the user across chats in this space" +
+          (globalBlock ? " (these win over global memory when they conflict)" : "") +
+          ":\n";
+        for (const m of promptMemories) {
           memoryBlock += `- ${m.content}\n`;
         }
       }
@@ -778,12 +811,17 @@ async function buildTaskRequest(
       const base = spaceInstructions || fallbackPrompt;
       const parts: string[] = [];
       if (base) parts.push(base);
+      if (globalBlock) parts.push(globalBlock);
       if (memoryBlock) parts.push(memoryBlock);
       if (filesBlock) parts.push(filesBlock);
       effectiveSystemPrompt = parts.length ? parts.join("\n\n") : null;
     } catch (e) {
       logger.warn("Failed to load space context", e);
     }
+  } else if (globalBlock) {
+    effectiveSystemPrompt = fallbackPrompt
+      ? `${fallbackPrompt}\n\n${globalBlock}`
+      : globalBlock;
   }
 
   if (effectiveSystemPrompt) {
@@ -987,9 +1025,19 @@ function finishRunning(
     if (!running || !buf || !producedContent) return null;
     if (!finishedId) return null;
     const session = get().sessions.find((s) => s.id === finishedId);
-    if (!session?.space_id) return null;
-    const space = useSpaceStore.getState().spaces.find((s) => s.id === session.space_id);
-    if (!space || !space.memory_enabled) return null;
+    if (!session) return null;
+    // Routing: a Space chat writes to that Space's memory (when the Space has
+    // it on); a chat outside any Space writes to global memory (when the
+    // setting is on). Private Chat never reaches this store.
+    let scope: MemoryScope;
+    if (session.space_id) {
+      const space = useSpaceStore.getState().spaces.find((s) => s.id === session.space_id);
+      if (!space || !space.memory_enabled) return null;
+      scope = { kind: "space", spaceId: session.space_id };
+    } else {
+      if (!useSettingsStore.getState().global_memory_enabled) return null;
+      scope = { kind: "global" };
+    }
     // Pull the user message that triggered this turn so the extractor sees
     // both halves of the exchange. `userMsgId` was captured when the task
     // was enqueued, so it's always one of the persisted messages.
@@ -997,14 +1045,16 @@ function finishRunning(
     const userMsg = messages.find((m) => m.id === running.userMsgId);
     if (!userMsg) return null;
     return {
-      spaceId: session.space_id,
+      scope,
       sessionId: finishedId,
-      assistantMessageId: buf.assistantMsgId,
-      userText: userMsg.content,
-      assistantText: buf.content,
       provider: running.request.provider,
       model: running.request.model,
       baseUrl: running.request.base_url,
+      turn: {
+        userText: userMsg.content,
+        assistantText: buf.content,
+        assistantMessageId: buf.assistantMsgId,
+      },
     };
   })();
 
@@ -1054,11 +1104,12 @@ function finishRunning(
     // microtask) or something already running. The extractor is a second full
     // LLM generation against the same model, so firing it now would make it
     // compete with the user's visible turn for the generation slot and inflate
-    // that turn's time-to-first-token. Extraction is best-effort, so dropping
-    // this turn's is acceptable.
+    // that turn's time-to-first-token. Park the turn instead so the next idle
+    // run in this chat reads it alongside the newer one.
     const busy = get().queue.length > 0 || get().runningTask !== null;
     if (busy) {
-      logger.debug("memory extraction skipped — chat busy");
+      deferMemoryTurn(memorySnapshot);
+      logger.debug("memory extraction deferred — chat busy");
     } else {
       void extractMemories(memorySnapshot).catch((e) => {
         logger.warn("memory extraction failed", e);

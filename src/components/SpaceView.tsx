@@ -43,6 +43,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { ChatInput } from "@/components/ChatInput";
 import { ChatLabelDot, ChatLabelSubmenu } from "@/components/ChatLabelMenu";
 import { useConfirm } from "@/components/ConfirmDialog";
+import { MemoryList } from "@/components/MemoryList";
 import { useChatStore } from "@/stores/chatStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useSpaceStore } from "@/stores/spaceStore";
@@ -410,6 +411,7 @@ export function SpaceView() {
                       });
                     })
                   }
+                  onOpenChat={openChat}
                 />
               </TabsContent>
 
@@ -1111,9 +1113,8 @@ function ModelsTab({
 // ---------------------------------------------------------------------------
 //
 // Surfaces the per-space memory the extractor accumulates plus the on/off
-// toggle. Edits are inline and commit on blur (same pattern as the
-// description field above). Manual "Add memory" lets users seed facts the
-// extractor hasn't picked up yet.
+// toggle. The list itself (add / inline edit / delete / search / source
+// link) is the shared `MemoryList`, also used for global memories.
 
 function MemoryTab({
   space,
@@ -1122,6 +1123,7 @@ function MemoryTab({
   onAdd,
   onUpdate,
   onRemove,
+  onOpenChat,
 }: {
   space: { id: string; memory_enabled: boolean };
   memories: SpaceMemory[];
@@ -1129,51 +1131,8 @@ function MemoryTab({
   onAdd: (content: string) => Promise<unknown>;
   onUpdate: (id: string, content: string) => Promise<void>;
   onRemove: (id: string) => Promise<void>;
+  onOpenChat: (sessionId: string) => void;
 }) {
-  const [draft, setDraft] = useState("");
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [editVal, setEditVal] = useState("");
-  const [adding, setAdding] = useState(false);
-
-  const handleAdd = async () => {
-    const trimmed = draft.trim();
-    if (!trimmed) return;
-    setAdding(true);
-    try {
-      await onAdd(trimmed);
-      setDraft("");
-    } catch {
-      // Already surfaced via the call-site toast. Swallow here (so the
-      // rejection doesn't double-report through the global net) and keep
-      // the draft so the text the user typed isn't lost with the failure.
-    } finally {
-      setAdding(false);
-    }
-  };
-
-  const startEdit = (m: SpaceMemory) => {
-    setEditingId(m.id);
-    setEditVal(m.content);
-  };
-
-  const commitEdit = async () => {
-    if (!editingId) return;
-    const trimmed = editVal.trim();
-    const original = memories.find((m) => m.id === editingId);
-    if (trimmed && original && trimmed !== original.content) {
-      try {
-        await onUpdate(editingId, trimmed);
-      } catch {
-        // Already surfaced via the call-site toast. Stay in edit mode with
-        // the draft intact so the user can retry (or Escape to discard) —
-        // exiting here would silently throw the edit away.
-        return;
-      }
-    }
-    setEditingId(null);
-    setEditVal("");
-  };
-
   return (
     <div className="space-y-4">
       {/* Toggle row — mirrors the on/off chip from the meta strip with a
@@ -1196,97 +1155,19 @@ function MemoryTab({
         />
       </div>
 
-      {/* Manual add — gated behind the same toggle so a disabled space
-          doesn't accumulate new rows from any path. */}
-      <div className="space-y-2">
-        <label className="text-xs font-medium text-foreground/65">
-          Add a memory
-        </label>
-        <div className="flex gap-2">
-          <Input
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            placeholder="e.g. Prefers TypeScript over JavaScript."
-            disabled={!space.memory_enabled || adding}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                void handleAdd();
-              }
-            }}
-            className="h-10 flex-1 rounded-xl border-foreground/10 bg-foreground/[0.03]"
-          />
-          <Button
-            size="sm"
-            variant="outline"
-            disabled={!space.memory_enabled || adding || !draft.trim()}
-            onClick={() => void handleAdd()}
-            className="rounded-xl"
-          >
-            <Plus className="h-3.5 w-3.5" />
-            Add
-          </Button>
-        </div>
-      </div>
-
-      {/* List */}
-      {memories.length === 0 ? (
-        <div className="rounded-2xl border border-dashed border-foreground/10 px-6 py-10 text-center">
-          <Brain className="mx-auto mb-3 h-6 w-6 text-foreground/35" />
-          <p className="text-sm text-foreground/55">
-            {space.memory_enabled
-              ? "No memories yet — chat in this space and the extractor will start saving durable facts here."
-              : "Memory is off for this space. Turn it back on to start collecting facts."}
-          </p>
-        </div>
-      ) : (
-        <ul className="divide-y divide-foreground/[0.06] overflow-hidden rounded-xl border border-foreground/10 bg-foreground/[0.02]">
-          {memories.map((m) => (
-            <li
-              key={m.id}
-              className="group flex items-start gap-3 px-4 py-3 text-sm transition-colors hover:bg-foreground/[0.04]"
-            >
-              <Brain className="mt-0.5 h-4 w-4 shrink-0 text-foreground/40" />
-              {editingId === m.id ? (
-                <Textarea
-                  autoFocus
-                  value={editVal}
-                  onChange={(e) => setEditVal(e.target.value)}
-                  onBlur={() => void commitEdit()}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" && !e.shiftKey) {
-                      e.preventDefault();
-                      (e.target as HTMLTextAreaElement).blur();
-                    }
-                    if (e.key === "Escape") {
-                      e.preventDefault();
-                      setEditingId(null);
-                      setEditVal("");
-                    }
-                  }}
-                  className="min-h-[40px] flex-1 rounded-md border-foreground/10 bg-foreground/[0.03] text-sm"
-                />
-              ) : (
-                <button
-                  type="button"
-                  onClick={() => startEdit(m)}
-                  className="min-w-0 flex-1 cursor-text text-left text-foreground/85"
-                  title="Click to edit"
-                >
-                  {m.content}
-                </button>
-              )}
-              <button
-                onClick={() => void onRemove(m.id)}
-                aria-label="Delete memory"
-                className="shrink-0 rounded-md p-1 text-foreground/40 opacity-0 transition-all hover:bg-foreground/10 hover:text-destructive group-hover:opacity-100"
-              >
-                <Trash2 className="h-3.5 w-3.5" />
-              </button>
-            </li>
-          ))}
-        </ul>
-      )}
+      <MemoryList
+        memories={memories}
+        enabled={space.memory_enabled}
+        emptyText={
+          space.memory_enabled
+            ? "No memories yet — chat in this space and the extractor will start saving durable facts here."
+            : "Memory is off for this space. Turn it back on to start collecting facts."
+        }
+        onAdd={onAdd}
+        onUpdate={onUpdate}
+        onRemove={onRemove}
+        onOpenChat={onOpenChat}
+      />
     </div>
   );
 }

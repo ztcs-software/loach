@@ -1,97 +1,189 @@
 import { makeRequestId, startChatStream } from "@/lib/tauri";
 import { logger } from "@/lib/logger";
+import {
+  MAX_MEMORY_CHARS,
+  buildExtractorSystemPrompt,
+  clip,
+  isDuplicate,
+  normalize,
+  parseExtractionJson,
+  selectMemoriesForPrompt,
+} from "@/lib/memoryRules";
+import { useGlobalMemoryStore } from "@/stores/globalMemoryStore";
+import { useSettingsStore } from "@/stores/settingsStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useToastStore } from "@/stores/toastStore";
-import type { ProviderId, SpaceMemory } from "@/types";
+import type { MemoryRow, ProviderId } from "@/types";
 
-/**
- * Cap on how many memories we hand to the extractor model when asking it to
- * dedupe. Beyond this we'd burn the chat model's context for diminishing
- * returns; the local string-similarity check on insert catches anything the
- * model misses. Picked to fit comfortably even in tiny 2K-context Ollama
- * builds when the rest of the prompt is small.
- */
-const MAX_MEMORIES_IN_PROMPT = 60;
+/** Where an extraction run reads and writes: one Space's memory, or the
+ *  global list. Decided by the chat store from the finished session —
+ *  Space chats go to their Space, space-less chats go global. */
+export type MemoryScope =
+  | { kind: "space"; spaceId: string }
+  | { kind: "global" };
 
-/**
- * Cap on how much assistant + user text we feed the extractor. Large code
- * blocks etc. eat the model's context and the durable facts that warrant
- * memory rarely come from the tail of a long answer. Still generous enough
- * to handle a typical multi-paragraph reply.
- */
-const TURN_CHAR_BUDGET = 8_000;
+/** One finished user/assistant exchange the extractor should read. */
+export interface MemoryTurn {
+  userText: string;
+  assistantText: string;
+  assistantMessageId: string;
+}
 
-/** What the extractor model is supposed to return — a list of one-line
- *  facts we should persist. Anything else (commentary, JSON wrappers we
- *  don't expect) gets filtered or ignored downstream. */
-interface ExtractionPayload {
-  memories: string[];
+export interface MemoryExtractionArgs {
+  scope: MemoryScope;
+  sessionId: string;
+  provider: ProviderId;
+  model: string;
+  baseUrl: string;
+  turn: MemoryTurn;
 }
 
 /**
- * One end-to-end run of the memory extractor for a finished assistant turn.
+ * Most turns one extraction run reads. Turns that couldn't be extracted
+ * when they finished (chat still busy, or the run was aborted by the next
+ * send) are parked in `pendingTurns` and folded into the next run for the
+ * same chat, so a fast back-and-forth no longer loses every fact but the
+ * last one. Small so the prompt stays within tiny local contexts.
+ */
+const MAX_TURNS_PER_RUN = 3;
+
+/**
+ * Cap on how much user + assistant text a run feeds the extractor, per
+ * side, split across the turns in the run. Large code blocks etc. eat the
+ * model's context and the durable facts that warrant memory rarely come
+ * from the tail of a long answer. Still generous enough to handle a
+ * typical multi-paragraph reply.
+ */
+const TURN_CHAR_BUDGET = 8_000;
+
+/** How long an Undo-bearing memory toast stays up. Matches the archive
+ *  undo — long enough to read the fact and decide. */
+const UNDO_TOAST_MS = 7000;
+
+/** Turns awaiting extraction, keyed by session id. See MAX_TURNS_PER_RUN. */
+const pendingTurns = new Map<string, MemoryTurn[]>();
+
+/** Park a finished turn for the next extraction run in its chat. Called
+ *  instead of `extractMemories` while the chat still has work queued. Keeps
+ *  only the newest turns so the next run's prompt stays bounded. */
+export function deferMemoryTurn(args: MemoryExtractionArgs): void {
+  const list = [...(pendingTurns.get(args.sessionId) ?? []), args.turn];
+  pendingTurns.set(args.sessionId, list.slice(-(MAX_TURNS_PER_RUN - 1)));
+}
+
+/** Store-agnostic view of one memory scope's CRUD, so the extractor body
+ *  reads the same for a Space and for the global list. */
+interface MemoryOps {
+  list: () => Promise<MemoryRow[]>;
+  add: (
+    content: string,
+    sourceSessionId: string | null,
+    sourceMessageId: string | null,
+  ) => Promise<MemoryRow>;
+  update: (id: string, content: string) => Promise<void>;
+  remove: (id: string) => Promise<void>;
+}
+
+function opsFor(scope: MemoryScope): MemoryOps {
+  if (scope.kind === "global") {
+    const s = () => useGlobalMemoryStore.getState();
+    return {
+      list: () => s().ensureLoaded(),
+      add: (content, source_session_id, source_message_id) =>
+        s().addMemory({ content, source_session_id, source_message_id }),
+      update: (id, content) => s().updateMemory(id, content),
+      remove: (id) => s().removeMemory(id),
+    };
+  }
+  const { spaceId } = scope;
+  const s = () => useSpaceStore.getState();
+  return {
+    list: async () =>
+      s().spaceMemories[spaceId] ?? (await s().loadSpaceMemories(spaceId)),
+    add: (content, source_session_id, source_message_id) =>
+      s().addMemory({
+        space_id: spaceId,
+        content,
+        source_session_id,
+        source_message_id,
+      }),
+    update: (id, content) => s().updateMemory(id, spaceId, content),
+    remove: (id) => s().removeMemory(id, spaceId),
+  };
+}
+
+/**
+ * One end-to-end run of the memory extractor for a finished assistant turn
+ * (plus any turns parked for this chat by `deferMemoryTurn`).
  *
  * Flow:
- *   1. Build a tight extractor prompt that names every existing memory so
- *      the model can dedupe at the LLM level.
+ *   1. Build a tight extractor prompt that numbers the existing memories so
+ *      the model can dedupe, correct, or retire them at the LLM level.
  *   2. Fire a non-displayed chat stream against the same provider/model/
  *      base_url the user is chatting with.
  *   3. Parse the model's JSON output. Tolerant of fenced code blocks and
  *      stray prose around the JSON object.
- *   4. Run a local string-similarity dedupe on each candidate against the
- *      existing memories (belt-and-suspenders for when the model ignores
- *      the dedupe instruction).
- *   5. Insert survivors via the space store, then push one toast per save.
+ *   4. Apply removals and updates by number, then run a local
+ *      string-similarity dedupe on each addition against the (now
+ *      corrected) existing memories — belt-and-suspenders for when the
+ *      model ignores the dedupe instruction.
+ *   5. Persist through the scope's store, then push one toast per change,
+ *      each with an Undo.
  *
  * Errors are caught at the boundary — extraction is best-effort and must
  * never disrupt the user's chat flow.
  */
-export async function extractMemories(args: {
-  spaceId: string;
-  sessionId: string;
-  assistantMessageId: string;
-  userText: string;
-  assistantText: string;
-  provider: ProviderId;
-  model: string;
-  baseUrl: string;
-}): Promise<void> {
-  const {
-    spaceId,
-    sessionId,
-    assistantMessageId,
-    userText,
-    assistantText,
-    provider,
-    model,
-    baseUrl,
-  } = args;
+export async function extractMemories(args: MemoryExtractionArgs): Promise<void> {
+  const { scope, sessionId, provider, model, baseUrl } = args;
+  if (!model) return;
 
-  if (!spaceId || !model) return;
+  const turns = [...(pendingTurns.get(sessionId) ?? []), args.turn].slice(
+    -MAX_TURNS_PER_RUN,
+  );
+  pendingTurns.delete(sessionId);
 
+  const ops = opsFor(scope);
   // Pull the latest cached memories — a stale cache would cause us to
   // re-add a row we just inserted earlier in the same session.
-  const store = useSpaceStore.getState();
-  let existing = store.spaceMemories[spaceId];
-  if (!existing) {
-    existing = await store.loadSpaceMemories(spaceId).catch(() => []);
+  let existing: MemoryRow[] = [];
+  try {
+    existing = await ops.list();
+  } catch (e) {
+    logger.warn("memory list failed before extraction", e);
   }
 
-  const promptMemories = (existing ?? [])
-    .slice(-MAX_MEMORIES_IN_PROMPT)
-    .map((m) => m.content);
+  // Inside a Space the global facts are shown as read-only context so the
+  // model doesn't copy them into the Space; they're only editable through a
+  // global run, so they aren't numbered.
+  let alreadyKnown: string[] = [];
+  if (scope.kind === "space" && useSettingsStore.getState().global_memory_enabled) {
+    try {
+      alreadyKnown = selectMemoriesForPrompt(
+        await useGlobalMemoryStore.getState().ensureLoaded(),
+      ).map((m) => m.content);
+    } catch {
+      /* best-effort context — extraction proceeds without it */
+    }
+  }
 
-  const userTrimmed = clip(userText, TURN_CHAR_BUDGET);
-  const assistantTrimmed = clip(assistantText, TURN_CHAR_BUDGET);
+  const promptRows = selectMemoriesForPrompt(existing);
+  const systemPrompt = buildExtractorSystemPrompt(
+    promptRows.map((m) => m.content),
+    alreadyKnown,
+  );
 
-  const systemPrompt = buildExtractorSystemPrompt(promptMemories);
+  const perSide = Math.floor(TURN_CHAR_BUDGET / turns.length);
   const turnPrompt =
-    `Conversation turn:\n` +
-    `<user>\n${userTrimmed}\n</user>\n\n` +
-    `<assistant>\n${assistantTrimmed}\n</assistant>\n\n` +
-    `Return the JSON object now.`;
+    turns
+      .map(
+        (t, i) =>
+          `Conversation turn ${i + 1} of ${turns.length}:\n` +
+          `<user>\n${clip(t.userText, perSide)}\n</user>\n\n` +
+          `<assistant>\n${clip(t.assistantText, perSide)}\n</assistant>`,
+      )
+      .join("\n\n") + `\n\nReturn the JSON object now.`;
 
-  let raw: string;
+  let raw: string | null;
   try {
     raw = await runOneShotStream({
       provider,
@@ -104,19 +196,61 @@ export async function extractMemories(args: {
     logger.warn("memory extraction stream failed", e);
     return;
   }
+  if (raw === null) {
+    // Aborted by a new user send. Park the turns again so the run that
+    // follows the next reply in this chat picks them up.
+    pendingTurns.set(sessionId, turns.slice(-(MAX_TURNS_PER_RUN - 1)));
+    return;
+  }
 
   const parsed = parseExtractionJson(raw);
-  if (!parsed || parsed.memories.length === 0) return;
+  if (!parsed) return;
 
-  const existingNormalized = (existing ?? []).map((m) => normalize(m.content));
+  const byNumber = (n: number): MemoryRow | undefined => promptRows[n - 1];
+  const latestMessageId = args.turn.assistantMessageId;
+
+  // Removals and updates first so the dedupe list below reflects the
+  // model's corrections — otherwise a reversed preference would be rejected
+  // as a duplicate of the very row it replaces.
+  const removedIds = new Set<string>();
+  for (const n of parsed.remove) {
+    const row = byNumber(n);
+    if (!row || removedIds.has(row.id)) continue;
+    try {
+      await ops.remove(row.id);
+      removedIds.add(row.id);
+      announceRemoved(row, ops);
+    } catch (e) {
+      logger.warn("failed to remove memory", e);
+    }
+  }
+
+  const updatedContent = new Map<string, string>();
+  for (const u of parsed.update) {
+    const row = byNumber(u.n);
+    if (!row || removedIds.has(row.id) || updatedContent.has(row.id)) continue;
+    const content = u.content.trim();
+    if (!content || content.length > MAX_MEMORY_CHARS) continue;
+    if (content === row.content) continue;
+    try {
+      await ops.update(row.id, content);
+      updatedContent.set(row.id, content);
+      announceUpdated(row, content, ops);
+    } catch (e) {
+      logger.warn("failed to update memory", e);
+    }
+  }
+
+  const existingNormalized = existing
+    .filter((m) => !removedIds.has(m.id))
+    .map((m) => normalize(updatedContent.get(m.id) ?? m.content))
+    .concat(alreadyKnown.map(normalize));
   const seenInRun = new Set<string>();
 
-  for (const candidate of parsed.memories) {
+  for (const candidate of parsed.add) {
     const trimmed = candidate.trim();
     if (!trimmed) continue;
-    // Reject pathological outputs — the prompt asks for one-liners; an
-    // entire paragraph is almost always the model leaking context.
-    if (trimmed.length > 280) continue;
+    if (trimmed.length > MAX_MEMORY_CHARS) continue;
 
     const norm = normalize(trimmed);
     if (!norm) continue;
@@ -125,14 +259,9 @@ export async function extractMemories(args: {
 
     seenInRun.add(norm);
     try {
-      const saved = await store.addMemory({
-        space_id: spaceId,
-        content: trimmed,
-        source_session_id: sessionId,
-        source_message_id: assistantMessageId,
-      });
+      const saved = await ops.add(trimmed, sessionId, latestMessageId);
       existingNormalized.push(norm);
-      announceSaved(saved);
+      announceSaved(saved, ops);
     } catch (e) {
       logger.warn("failed to persist memory", e);
     }
@@ -149,8 +278,8 @@ let memoryStopFn: (() => Promise<void>) | null = null;
  *  message so the extractor — a second full generation against the same model
  *  — doesn't keep hogging the generation slot and inflating the new turn's
  *  time-to-first-token. No-op when nothing is running. Best-effort: the Rust
- *  stream is told to cancel and the extractor promise settles empty (its
- *  partial output is never parsed). */
+ *  stream is told to cancel and the extractor re-parks its turns for the next
+ *  run (its partial output is never parsed). */
 export function cancelMemoryExtraction(): void {
   const stop = memoryStopFn;
   memoryStopFn = null;
@@ -159,10 +288,10 @@ export function cancelMemoryExtraction(): void {
 
 /**
  * Issue a single non-streaming chat call against the user-selected model
- * and resolve to the concatenated assistant text. We re-use
- * `startChatStream` so we don't have to duplicate the per-provider request
- * shaping in JS — we just buffer the tokens it emits, ignore the rest, and
- * resolve on `done`.
+ * and resolve to the concatenated assistant text — or `null` when the run
+ * was cancelled. We re-use `startChatStream` so we don't have to duplicate
+ * the per-provider request shaping in JS — we just buffer the tokens it
+ * emits, ignore the rest, and resolve on `done`.
  *
  * Concurrent with the user's next chat: yes, but Ollama serialises
  * generation per-model and the extractor finishes quickly given the small
@@ -175,11 +304,11 @@ async function runOneShotStream(args: {
   baseUrl: string;
   systemPrompt: string;
   userMessage: string;
-}): Promise<string> {
+}): Promise<string | null> {
   const { provider, model, baseUrl, systemPrompt, userMessage } = args;
   const streamId = makeRequestId();
 
-  return new Promise<string>((resolve, reject) => {
+  return new Promise<string | null>((resolve, reject) => {
     let buffer = "";
     let unlistenFn: (() => void) | null = null;
     // This run's own stop handle. Kept separately from the module-global
@@ -257,12 +386,12 @@ async function runOneShotStream(args: {
           cleanup();
           reject(new Error(ev.message));
         } else if (ev.kind === "cancelled") {
-          // Aborted by a new user send (cancelMemoryExtraction). Resolve EMPTY
-          // — never parse the partial output — so the caller saves no memories
-          // and logs no failure.
+          // Aborted by a new user send (cancelMemoryExtraction). Resolve NULL
+          // — never parse the partial output — so the caller saves nothing
+          // and re-parks the turns instead of logging a failure.
           window.clearTimeout(timeoutId);
           cleanup();
-          resolve("");
+          resolve(null);
         }
       },
     )
@@ -294,154 +423,58 @@ async function runOneShotStream(args: {
   });
 }
 
-/**
- * The extractor's system prompt. Spelled out in plain English with a
- * worked example so even smaller local models stick to the JSON shape. We
- * instruct it to:
- *   - Skip one-shot/ephemeral facts ("the user is asking about X today")
- *   - Skip anything already in memory (we list the memories)
- *   - Return an empty list when nothing durable came up
- *   - Output ONLY a JSON object — never prose around it
- */
-function buildExtractorSystemPrompt(existing: string[]): string {
-  const memoryBlock =
-    existing.length === 0
-      ? "(none yet)"
-      : existing.map((m, i) => `${i + 1}. ${m}`).join("\n");
+// ---------------------------------------------------------------------------
+// Toasts. One per change, each with an Undo — the extractor writes silently
+// on the user's behalf, so the chip is both the receipt and the way out
+// when it saved something wrong (or something a fetched page planted).
+// ---------------------------------------------------------------------------
 
-  return [
-    "You are a memory extractor for a chat application.",
-    "Your only job: read one user/assistant turn and decide whether anything in it is a DURABLE fact about the user (preferences, identity, ongoing project, constraints, goals, recurring context) that should be remembered for future chats.",
-    "",
-    "Rules:",
-    "- Return ONLY a single JSON object, no prose, no markdown fences. Shape: {\"memories\": [\"...\", \"...\"]}.",
-    "- Each memory MUST be a single concise sentence (under 200 chars).",
-    "- Do NOT include facts already covered by EXISTING MEMORIES below.",
-    "- Do NOT include ephemeral content: the specific question being asked, generated code, transient errors, or summaries of the assistant's reply.",
-    "- Do NOT speculate. Only record facts the user clearly stated or strongly implied about themselves or their work.",
-    "- If nothing qualifies, return {\"memories\": []}.",
-    "",
-    "EXISTING MEMORIES:",
-    memoryBlock,
-    "",
-    "Examples of GOOD memories:",
-    "- \"Prefers TypeScript over JavaScript for new code.\"",
-    "- \"Works on a Tauri desktop app called Loach.\"",
-    "- \"Lives in Warsaw, Poland.\"",
-    "",
-    "Examples of BAD memories (do NOT extract these):",
-    "- \"Is asking how to center a div.\"",
-    "- \"The function returned an error.\"",
-    "- \"Wants the answer in bullet points.\" (request-scoped, not durable)",
-  ].join("\n");
+function undoFailed(e: unknown) {
+  logger.warn("memory undo failed", e);
 }
 
-/**
- * Best-effort JSON extractor. Models — especially smaller open ones — often
- * wrap JSON in ```json fences or pad it with a sentence or two of prose.
- * We grab the first `{...}` that parses to the shape we expect and drop
- * everything else.
- */
-function parseExtractionJson(raw: string): ExtractionPayload | null {
-  if (!raw) return null;
-  // Strip common code-fence patterns first.
-  let cleaned = raw.trim();
-  cleaned = cleaned.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "");
-
-  // Try a direct parse before scanning for embedded JSON — fast path for
-  // models that follow the prompt.
-  const direct = tryParse(cleaned);
-  if (direct) return direct;
-
-  // Scan for the first balanced `{...}` block. Naïve but fine: the
-  // extractor system prompt forbids nested objects.
-  const start = cleaned.indexOf("{");
-  if (start === -1) return null;
-  let depth = 0;
-  for (let i = start; i < cleaned.length; i++) {
-    const c = cleaned[i];
-    if (c === "{") depth++;
-    else if (c === "}") {
-      depth--;
-      if (depth === 0) {
-        const slice = cleaned.slice(start, i + 1);
-        const parsed = tryParse(slice);
-        if (parsed) return parsed;
-      }
-    }
-  }
-  return null;
-}
-
-function tryParse(s: string): ExtractionPayload | null {
-  try {
-    const obj = JSON.parse(s) as unknown;
-    if (
-      obj &&
-      typeof obj === "object" &&
-      Array.isArray((obj as { memories?: unknown }).memories)
-    ) {
-      const arr = (obj as { memories: unknown[] }).memories;
-      const cleaned = arr.filter((x): x is string => typeof x === "string");
-      return { memories: cleaned };
-    }
-  } catch {
-    /* not JSON */
-  }
-  return null;
-}
-
-/** Lowercased, whitespace-collapsed, punctuation-stripped form used for
- *  similarity comparisons. Keeps "User likes TypeScript." and "user
- *  likes typescript" matching as duplicates. */
-function normalize(s: string): string {
-  return s
-    .toLowerCase()
-    .replace(/[\p{P}\p{S}]+/gu, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-/**
- * Local dedupe layer that runs after the model has done its own pass.
- * Two checks: exact normalized match, and Jaccard token overlap above
- * 0.75 (catches phrasing-only differences like "Lives in Warsaw" vs.
- * "User lives in Warsaw, Poland.").
- */
-function isDuplicate(candidate: string, existing: string[]): boolean {
-  if (!candidate) return true;
-  if (existing.includes(candidate)) return true;
-
-  const candTokens = new Set(candidate.split(" ").filter(Boolean));
-  if (candTokens.size === 0) return true;
-
-  for (const ex of existing) {
-    const exTokens = new Set(ex.split(" ").filter(Boolean));
-    if (exTokens.size === 0) continue;
-    let intersect = 0;
-    for (const t of candTokens) if (exTokens.has(t)) intersect++;
-    const union = candTokens.size + exTokens.size - intersect;
-    const jaccard = union === 0 ? 0 : intersect / union;
-    if (jaccard >= 0.75) return true;
-    // Also flag containment — a shorter memory that's a strict subset of an
-    // existing one is almost always redundant.
-    if (intersect === candTokens.size && candTokens.size >= 3) return true;
-  }
-  return false;
-}
-
-function clip(text: string, max: number): string {
-  if (text.length <= max) return text;
-  return text.slice(0, max) + "…";
-}
-
-/** Push one "Saved to memory" toast per saved row. Mirrors ChatGPT's
- *  pattern — a soft pill in the corner with the saved text underneath
- *  so the user can verify what landed in long-term memory. */
-function announceSaved(memory: SpaceMemory) {
+/** "Saved to memory" pill with the saved text underneath so the user can
+ *  verify what landed in long-term memory. Undo deletes the row. */
+function announceSaved(memory: MemoryRow, ops: MemoryOps) {
   useToastStore.getState().push({
     kind: "memory",
     title: "Saved to memory",
     body: memory.content,
+    durationMs: UNDO_TOAST_MS,
+    action: {
+      label: "Undo",
+      onClick: () => void ops.remove(memory.id).catch(undoFailed),
+    },
+  });
+}
+
+/** Undo restores the previous wording. */
+function announceUpdated(before: MemoryRow, content: string, ops: MemoryOps) {
+  useToastStore.getState().push({
+    kind: "memory",
+    title: "Updated memory",
+    body: content,
+    durationMs: UNDO_TOAST_MS,
+    action: {
+      label: "Undo",
+      onClick: () => void ops.update(before.id, before.content).catch(undoFailed),
+    },
+  });
+}
+
+/** Undo re-adds the row (under a fresh id, same text and source pointers). */
+function announceRemoved(row: MemoryRow, ops: MemoryOps) {
+  useToastStore.getState().push({
+    kind: "memory",
+    title: "Removed memory",
+    body: row.content,
+    durationMs: UNDO_TOAST_MS,
+    action: {
+      label: "Undo",
+      onClick: () =>
+        void ops
+          .add(row.content, row.source_session_id, row.source_message_id)
+          .catch(undoFailed),
+    },
   });
 }

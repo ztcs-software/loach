@@ -64,29 +64,37 @@ export interface Space {
    *  overrides — see `chatStore::readSessionParams`. */
   default_params_json: string | null;
   /** Per-space toggle for the silent-auto-write memory extractor. Default
-   *  on at space creation. When false, no new memories are auto-saved and
-   *  the prompt builder skips the memory block — but existing rows stay
-   *  in the DB so flipping it off doesn't strip context the user might
-   *  still want to consult on the Memory tab. */
+   *  on at space creation. Gates WRITES only: when false, no new memories
+   *  are auto-saved (and manual adds are disabled), but existing rows stay
+   *  in the DB and keep riding along in the prompt so flipping it off
+   *  doesn't silently strip context the user might still want. */
   memory_enabled: boolean;
   created_at: number;
   updated_at: number;
 }
 
-/** One auto-saved (or hand-edited) fact scoped to a Space. The extractor
+/** Fields shared by every memory row, whatever its scope. The extractor
  *  proposes new rows after each assistant turn; the user can edit or delete
  *  any of them from the Memory tab. `source_session_id` / `source_message_id`
  *  point at the chat that produced the fact so the UI can link back to
  *  it; both are null for memories the user authored manually. */
-export interface SpaceMemory {
+export interface MemoryRow {
   id: string;
-  space_id: string;
   content: string;
   source_session_id: string | null;
   source_message_id: string | null;
   created_at: number;
   updated_at: number;
 }
+
+/** One fact scoped to a Space — injected only into chats in that Space. */
+export interface SpaceMemory extends MemoryRow {
+  space_id: string;
+}
+
+/** One fact that rides along in every non-private chat, in or out of a
+ *  Space, while `Settings.global_memory_enabled` is on. */
+export type GlobalMemory = MemoryRow;
 
 export interface SpaceFile {
   id: string;
@@ -440,6 +448,12 @@ export interface Settings {
    *  temporal template variables (`{{CURRENT_DATE}}`, `{{CURRENT_TIME}}`,
    *  `{{CURRENT_WEEKDAY}}`, `{{CURRENT_DATETIME}}`, `{{CURRENT_TIMEZONE}}`). */
   temporal_awareness: boolean;
+  /** Global memory: facts that ride along in every non-private chat rather
+   *  than one Space. Unlike the per-space toggle this gates BOTH writes and
+   *  injection — off means no global block in any prompt and no extraction
+   *  from space-less chats. Off by default: on, every chat (not just Space
+   *  chats) pays the extractor's second generation after each reply. */
+  global_memory_enabled: boolean;
   /** When true, URLs detected in the user's prompt are fetched and their
    *  plain-text content is inlined into the outgoing message. Requires a
    *  network round-trip per URL — default is off so Loach stays offline-first
@@ -542,6 +556,7 @@ export const DEFAULT_SETTINGS: Settings = {
   default_model_preload: false,
   user_name: "",
   temporal_awareness: true,
+  global_memory_enabled: false,
   web_fetch_enabled: false,
   calculate_tool_enabled: false,
   datetime_tool_enabled: false,
@@ -762,6 +777,7 @@ export interface ImportStats {
   spaces: number;
   space_files: number;
   space_memories: number;
+  global_memories: number;
   snippets: number;
   snippet_variables: number;
   snippet_fill_values: number;
