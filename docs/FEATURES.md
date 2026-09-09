@@ -826,6 +826,23 @@ kept in memory, so it never outlives the app); **Deny** tells the model to
 carry on without it. Line endings are preserved: editing or overwriting a
 CRLF file keeps it CRLF.
 
+**Project instructions.** If the folder has a `LOACHFILE.md` at its root,
+its contents are added to the system prompt on every turn, right after the
+note that tells the model where it is — the same idea as a `CLAUDE.md` or
+`AGENTS.md`: the project's own notes on how to work in it (how to run the
+tests, what not to touch, house style). It is read fresh each turn, so an
+edit — yours, or one the model makes through `write_file` — takes effect on
+the next send, and it goes through the same sandbox as everything else, so
+a `LOACHFILE.md` that is a link out of the folder is ignored. The chip
+shows a `LOACHFILE.md` badge while one is present, with its first line in
+the tooltip, and the context usage popover (§2.10) lists it on its own
+row. Anything past 32 KB is cut with a note; local models follow short
+instruction files far better, so keep it brief. A blank file counts as
+none. The model is told to treat the file as the project's instructions and
+to let yours win when the two conflict — a folder you just cloned can say
+anything, and the approval card on every write, move and deletion remains
+the backstop.
+
 Deliberately absent: a shell, a recursive delete, and any way to point the
 tools at a folder other than through the native picker.
 

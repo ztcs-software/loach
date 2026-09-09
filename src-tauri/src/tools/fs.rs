@@ -110,6 +110,15 @@ const MAX_SEARCH_FILE_BYTES: u64 = 512 * 1024;
 /// endings before overwriting it.
 const LINE_ENDING_SNIFF_BYTES: u64 = 64 * 1024;
 
+/// Project instructions file, read from the workspace root on every turn
+/// and appended to the system prompt — the same idea as a `CLAUDE.md` or
+/// `AGENTS.md`: the project's own notes on how to work in the tree.
+pub const INSTRUCTIONS_FILE: &str = "LOACHFILE.md";
+/// How much of `LOACHFILE.md` reaches the prompt. The same cap as a tool
+/// result: past this the file is a document rather than instructions, and
+/// local models follow short instruction files far better anyway.
+const MAX_INSTRUCTIONS_BYTES: usize = crate::providers::MAX_TOOL_RESULT_BYTES;
+
 /// Directories skipped when *walking* (`list_directory`, `find_files`,
 /// `search_files`). Naming one explicitly still works — the user may well
 /// want `read_file(".git/config")` or `search_files` inside `target/` —
@@ -320,6 +329,54 @@ fn sniff_line_ending(path: &Path) -> &'static str {
         return "\n";
     }
     line_ending_of(&String::from_utf8_lossy(&head))
+}
+
+// ---------------------------------------------------------------------------
+// Project instructions
+// ---------------------------------------------------------------------------
+
+/// The workspace's `LOACHFILE.md`, ready for the system prompt, or `None`
+/// when there isn't one worth sending.
+///
+/// Resolved through the same sandbox as every tool path, so a
+/// `LOACHFILE.md` that is a symlink out of the tree is refused rather than
+/// followed. Anything else that can't be used — a directory by that name, a
+/// binary, a blank file, an I/O error — also counts as absent: the file is
+/// a courtesy to the model, not something a turn should fail on.
+///
+/// Reads at most the cap plus one byte, so a runaway file costs one bounded
+/// read; what survives is clipped to [`MAX_INSTRUCTIONS_BYTES`] with a note
+/// that says so and names the real size.
+pub fn read_workspace_instructions(root: &Path) -> Option<String> {
+    let path = resolve_read(root, INSTRUCTIONS_FILE).ok()?;
+    if !path.is_file() {
+        return None;
+    }
+    let file = fs::File::open(&path).ok()?;
+    let total = file.metadata().ok()?.len();
+    let mut bytes = Vec::new();
+    file.take(MAX_INSTRUCTIONS_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.contains(&0) {
+        return None;
+    }
+    if bytes.len() <= MAX_INSTRUCTIONS_BYTES {
+        let text = String::from_utf8_lossy(&bytes);
+        let trimmed = text.trim();
+        return (!trimmed.is_empty()).then(|| trimmed.to_string());
+    }
+    bytes.truncate(MAX_INSTRUCTIONS_BYTES);
+    // A multi-byte character split by the cut comes out of the lossy decode
+    // as a trailing U+FFFD; drop it rather than send the model garbage.
+    let text = String::from_utf8_lossy(&bytes);
+    let body = text.trim_end_matches('\u{FFFD}').trim();
+    Some(format!(
+        "{body}\n\n[{INSTRUCTIONS_FILE} truncated by Loach at {}; the file is {}. \
+         Keep project instructions short.]",
+        human_size(MAX_INSTRUCTIONS_BYTES as u64),
+        human_size(total)
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -1768,5 +1825,72 @@ mod tests {
         assert!(!requires_approval(LIST_DIRECTORY));
         assert!(!requires_approval(FIND_FILES));
         assert!(!requires_approval(SEARCH_FILES));
+    }
+
+    // ---- project instructions ----
+
+    #[test]
+    fn instructions_are_absent_without_a_usable_loachfile() {
+        let (_d, root) = workspace();
+        assert_eq!(read_workspace_instructions(&root), None);
+
+        // Blank is as good as missing: there is nothing to tell the model.
+        fs::write(root.join(INSTRUCTIONS_FILE), "  \n\n").unwrap();
+        assert_eq!(read_workspace_instructions(&root), None);
+
+        // So is a directory that happens to carry the name.
+        fs::remove_file(root.join(INSTRUCTIONS_FILE)).unwrap();
+        fs::create_dir(root.join(INSTRUCTIONS_FILE)).unwrap();
+        assert_eq!(read_workspace_instructions(&root), None);
+    }
+
+    #[test]
+    fn instructions_come_back_verbatim_when_within_the_cap() {
+        let (_d, root) = workspace();
+        fs::write(
+            root.join(INSTRUCTIONS_FILE),
+            "# Project\r\n\r\nRun the tests before you edit.\r\n",
+        )
+        .unwrap();
+        assert_eq!(
+            read_workspace_instructions(&root).as_deref(),
+            Some("# Project\r\n\r\nRun the tests before you edit.")
+        );
+    }
+
+    #[test]
+    fn oversized_instructions_are_clipped_on_a_char_boundary_with_a_note() {
+        let (_d, root) = workspace();
+        // Three-byte characters: the byte cap can't fall between them
+        // evenly, so the clip has to cope with a split sequence.
+        let big = "€".repeat(MAX_INSTRUCTIONS_BYTES);
+        fs::write(root.join(INSTRUCTIONS_FILE), &big).unwrap();
+
+        let out = read_workspace_instructions(&root).expect("present");
+        let (body, note) = out
+            .split_once("\n\n[")
+            .expect("truncation note follows the body");
+        assert!(
+            body.len() <= MAX_INSTRUCTIONS_BYTES,
+            "body over the cap: {} bytes",
+            body.len()
+        );
+        assert!(body.chars().all(|c| c == '€'), "clip split a character");
+        assert!(
+            note.starts_with("LOACHFILE.md truncated by Loach at"),
+            "{note:?}"
+        );
+    }
+
+    /// Unix-only for the same reason as the tool symlink tests above.
+    #[cfg(unix)]
+    #[test]
+    fn instructions_are_not_read_through_a_symlink_out_of_the_workspace() {
+        let (_d, root) = workspace();
+        let outside = tempfile::TempDir::new().unwrap();
+        let secret = outside.path().join("notes.md");
+        fs::write(&secret, "classified\n").unwrap();
+        std::os::unix::fs::symlink(&secret, root.join(INSTRUCTIONS_FILE)).unwrap();
+        assert_eq!(read_workspace_instructions(&root), None);
     }
 }

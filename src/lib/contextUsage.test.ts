@@ -144,3 +144,19 @@ describe("token formatting", () => {
     expect(formatTokens(12345)).toBe("12k");
   });
 });
+
+describe("computeContextUsage — project instructions", () => {
+  it("counts LOACHFILE.md on top of the system prompt", () => {
+    const messages = [msg("user", "hello")];
+    const without = computeContextUsage(messages, "be brief", NO_PARAMS);
+    const withFile = computeContextUsage(
+      messages,
+      "be brief",
+      NO_PARAMS,
+      "x".repeat(400),
+    );
+    expect(without.projectInstructionsTokens).toBe(0);
+    expect(withFile.projectInstructionsTokens).toBe(100);
+    expect(withFile.used).toBe(without.used + 100);
+  });
+});

@@ -15,6 +15,7 @@ import {
   renameFolder as persistFolderName,
   setSessionFolder,
   pickSessionWorkspace,
+  readWorkspaceInstructions,
   clearSessionWorkspace,
   importMessages as tauriImportMessages,
   getSpaceContext,
@@ -202,6 +203,14 @@ interface ChatState {
   pickWorkspace: (sessionId: string) => Promise<string | null>;
   /** Drop this chat's workspace directory. */
   clearWorkspace: (sessionId: string) => Promise<void>;
+  /** Each chat's `LOACHFILE.md` as last read, by session id — null when the
+   *  workspace has none. Drives the chip badge and the context usage row;
+   *  the model's copy is read by the backend on every turn regardless. */
+  workspaceInstructions: Record<string, string | null>;
+  /** Re-read this chat's `LOACHFILE.md`. Cheap, so the composer calls it on
+   *  every chance the file may have changed: opening the chat, picking a
+   *  folder, and the end of a turn (the model may have written it). */
+  refreshWorkspaceInstructions: (sessionId: string) => Promise<void>;
   /** Create a named folder and move `sessionIds` into it in one go. This is
    *  the drag-one-chat-onto-another gesture: both chats land in the new
    *  folder. Returns the folder. */
@@ -1596,6 +1605,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   queue: [],
   unread: {},
   compactingSessionId: null,
+  workspaceInstructions: {},
 
   hydrate: async () => {
     try {
@@ -1870,6 +1880,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
       sessions: s.sessions.map((x) =>
         x.id === sessionId ? { ...x, workspace_root: null } : x,
       ),
+      workspaceInstructions: { ...s.workspaceInstructions, [sessionId]: null },
+    }));
+  },
+
+  refreshWorkspaceInstructions: async (sessionId) => {
+    let text: string | null = null;
+    try {
+      text = await readWorkspaceInstructions(sessionId);
+    } catch (e) {
+      // Display only — a failed read hides the badge, nothing more.
+      logger.warn("couldn't read LOACHFILE.md", e);
+    }
+    set((s) => ({
+      workspaceInstructions: { ...s.workspaceInstructions, [sessionId]: text },
     }));
   },
 

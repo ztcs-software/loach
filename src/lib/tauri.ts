@@ -235,6 +235,15 @@ export function clearSessionWorkspace(sessionId: string): Promise<void> {
   return invoke("clear_session_workspace", { sessionId });
 }
 
+/** The chat's `LOACHFILE.md` as the next turn will see it — clipped the
+ *  same way — or null when the workspace has none. Display only: the chip
+ *  badge and the context usage estimate. The backend re-reads the file on
+ *  every turn regardless. */
+export function readWorkspaceInstructions(sessionId: string): Promise<string | null> {
+  if (!isTauri) return notInTauri(null);
+  return invoke("read_workspace_instructions", { sessionId });
+}
+
 export function exportSession(id: string, format: "json" | "md"): Promise<string> {
   if (!isTauri) return notInTauri("");
   return invoke("export_session", { id, format });

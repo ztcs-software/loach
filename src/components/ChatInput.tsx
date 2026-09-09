@@ -84,6 +84,21 @@ export function ChatInput({ centered = false }: ChatInputProps) {
   // Whether the folder actually reaches the model: the chip warns when the
   // master switch in Settings → Tools has been turned off since.
   const workspaceToolsEnabled = useSettingsStore((s) => s.workspace_tool_enabled);
+  const workspaceInstructions = useChatStore((s) =>
+    s.activeSessionId ? (s.workspaceInstructions[s.activeSessionId] ?? null) : null,
+  );
+  const refreshWorkspaceInstructions = useChatStore(
+    (s) => s.refreshWorkspaceInstructions,
+  );
+  // Keep the LOACHFILE.md badge honest. The file can change under us — the
+  // user edits it, or the model writes it mid-turn — so it is re-read when
+  // this chat is opened or gets a folder, and again once a turn in it ends.
+  // The backend reads its own copy every turn regardless; this only feeds
+  // the chip and the context usage row.
+  useEffect(() => {
+    if (!activeSessionId || !workspaceRoot || streamingThisChat) return;
+    void refreshWorkspaceInstructions(activeSessionId);
+  }, [activeSessionId, workspaceRoot, streamingThisChat, refreshWorkspaceInstructions]);
   const composerDraft = useUIStore((s) => s.composerDraft);
   const composerAttachments = useUIStore((s) => s.composerAttachments);
   const composerInsertSeq = useUIStore((s) => s.composerInsertSeq);
@@ -796,6 +811,7 @@ export function ChatInput({ centered = false }: ChatInputProps) {
               <WorkspaceChip
                 root={workspaceRoot}
                 toolsEnabled={workspaceToolsEnabled}
+                instructions={workspaceInstructions}
                 onRemove={() => void clearWorkspace(activeSessionId)}
               />
             )}

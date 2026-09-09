@@ -70,6 +70,11 @@ export function ContextUsageBar() {
   const space = useSpaceStore((s) =>
     session?.space_id ? s.spaces.find((x) => x.id === session.space_id) : null,
   );
+  const projectInstructions = useChatStore((s) =>
+    s.activeSessionId
+      ? (s.workspaceInstructions[s.activeSessionId] ?? null)
+      : null,
+  );
   const compactingSessionId = useChatStore((s) => s.compactingSessionId);
   const compactContext = useChatStore((s) => s.compactContext);
   const setSessionParams = useChatStore((s) => s.setSessionParams);
@@ -115,7 +120,9 @@ export function ContextUsageBar() {
   // augmentation happens server-side via getSpaceContext; we don't
   // include it in the estimate because the user can't see it from here
   // and double-counting it would mislead. The bar is a hint, not a
-  // billing tool — close enough for sizing decisions.
+  // billing tool — close enough for sizing decisions. The one backend-
+  // appended layer that can be big is the workspace's LOACHFILE.md, so
+  // that is counted from the store's last read of it.
   const effectiveSystemPrompt =
     session?.system_prompt && session.system_prompt.length > 0
       ? session.system_prompt
@@ -128,8 +135,14 @@ export function ContextUsageBar() {
   // bar can't end stale (the failure mode a leading-edge timer throttle has).
   const deferredMessages = useDeferredValue(messages);
   const usage = useMemo(
-    () => computeContextUsage(deferredMessages, effectiveSystemPrompt, params),
-    [deferredMessages, effectiveSystemPrompt, params],
+    () =>
+      computeContextUsage(
+        deferredMessages,
+        effectiveSystemPrompt,
+        params,
+        projectInstructions,
+      ),
+    [deferredMessages, effectiveSystemPrompt, params, projectInstructions],
   );
 
   // Don't show the bar before the user has any conversation to measure —
@@ -331,6 +344,12 @@ const ContextUsagePopover = ({
           label="System prompt"
           value={formatTokens(usage.systemPromptTokens)}
         />
+        {usage.projectInstructionsTokens > 0 && (
+          <Row
+            label="Project instructions (LOACHFILE.md)"
+            value={formatTokens(usage.projectInstructionsTokens)}
+          />
+        )}
         <Row
           label={`Messages (${usage.messageCount})`}
           value={formatTokens(usage.messagesTokens)}

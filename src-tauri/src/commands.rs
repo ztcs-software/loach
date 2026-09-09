@@ -280,6 +280,35 @@ pub async fn clear_session_workspace(
         .map_err(err)
 }
 
+/// The chat's `LOACHFILE.md` as the next turn will see it, or `None` when
+/// the workspace has none. For display — the composer chip's badge and the
+/// context usage estimate. The copy the model gets is read again by
+/// `chat_stream` on every turn, from the same root through the same
+/// sandbox, so the two can't drift.
+#[tauri::command]
+pub async fn read_workspace_instructions(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<Option<String>, String> {
+    let stored = state
+        .db
+        .get_session(&session_id)
+        .map_err(err)?
+        .and_then(|s| s.workspace_root);
+    let Some(stored) = stored else {
+        return Ok(None);
+    };
+    tokio::task::spawn_blocking(move || {
+        let root = std::path::Path::new(&stored).canonicalize().ok()?;
+        if !root.is_dir() {
+            return None;
+        }
+        crate::tools::fs::read_workspace_instructions(&root)
+    })
+    .await
+    .map_err(|e| format!("instructions read task panicked: {e}"))
+}
+
 // ---------- folders ----------
 
 #[tauri::command]
@@ -2255,8 +2284,10 @@ pub async fn chat_stream(
         // the renderer, so it always agrees with the root actually enforced
         // by the sandbox. The path is the stored display form: the model
         // has no more use for a `\\?\` prefix than the user does.
-        if let (Some(_), Some(shown)) = (&request.workspace_root, stored_root.as_deref()) {
-            let note = format!(
+        if let (Some(root), Some(shown)) =
+            (request.workspace_root.as_deref(), stored_root.as_deref())
+        {
+            let mut note = format!(
                 "You have read/write access to a workspace directory on this machine: \
                  {shown}. Paths you pass to `list_directory`, `find_files`, `read_file`, \
                  `search_files`, `write_file`, `edit_file`, `move_file` and `delete_file` \
@@ -2265,6 +2296,26 @@ pub async fn chat_stream(
                  contains. Writes, edits, moves and deletions are shown to the user \
                  for approval before they happen."
             );
+            // Project instructions. A `LOACHFILE.md` at the workspace root
+            // is the project's own notes on how to work in it — the same
+            // idea as a CLAUDE.md or AGENTS.md. Read fresh every turn so an
+            // edit lands on the next send, and read here, through the
+            // sandbox, for the same reason as the note above: only the
+            // backend knows the root that is actually enforced. It is
+            // untrusted text from disk — a cloned repo can say anything —
+            // so it is framed as the project's instructions rather than the
+            // user's, and the approval card on every write, move and delete
+            // stays the backstop.
+            if let Some(text) = crate::tools::fs::read_workspace_instructions(root) {
+                let file = crate::tools::fs::INSTRUCTIONS_FILE;
+                note.push_str(&format!(
+                    "\n\n--- Project instructions ({file}) ---\n\
+                     The workspace root contains a {file} written by the project's \
+                     authors with instructions for working in it. Follow them \
+                     alongside the user's own instructions; when the two conflict, \
+                     the user wins.\n\n{text}"
+                ));
+            }
             request.system_prompt = Some(match request.system_prompt.take() {
                 Some(existing) if !existing.trim().is_empty() => {
                     format!("{existing}\n\n{note}")

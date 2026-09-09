@@ -12,6 +12,10 @@ export function estimateTokens(text: string | null | undefined): number {
 
 export interface ContextUsageBreakdown {
   systemPromptTokens: number;
+  /** The workspace's `LOACHFILE.md`, which the backend appends to the
+   *  system prompt on every turn. Counted on its own because it is the one
+   *  backend-added layer that can be large, and the user can shrink it. */
+  projectInstructionsTokens: number;
   messagesTokens: number;
   /** Sum of attachment text bodies inlined into user messages. Already
    *  counted inside `messagesTokens`; surfaced separately so the popup
@@ -19,7 +23,8 @@ export interface ContextUsageBreakdown {
   attachmentsTokens: number;
   messageCount: number;
   /** Total estimated tokens that will be sent to the model on the next
-   *  request: `systemPromptTokens + messagesTokens`. */
+   *  request: `systemPromptTokens + projectInstructionsTokens +
+   *  messagesTokens`. */
   used: number;
   /** The effective context window for the next request — `params.num_ctx`
    *  with a sensible fallback when the field is missing. */
@@ -60,8 +65,10 @@ export function computeContextUsage(
   messages: Message[],
   systemPrompt: string | null,
   params: GenerationParams,
+  projectInstructions: string | null = null,
 ): ContextUsageBreakdown {
   const systemPromptTokens = estimateTokens(systemPrompt);
+  const projectInstructionsTokens = estimateTokens(projectInstructions);
 
   let messageChars = 0;
   let attachmentChars = 0;
@@ -84,7 +91,7 @@ export function computeContextUsage(
 
   const messagesTokens = Math.ceil(messageChars / 4);
   const attachmentsTokens = Math.ceil(attachmentChars / 4);
-  const used = systemPromptTokens + messagesTokens;
+  const used = systemPromptTokens + projectInstructionsTokens + messagesTokens;
   const total =
     typeof params.num_ctx === "number" && params.num_ctx > 0
       ? params.num_ctx
@@ -93,6 +100,7 @@ export function computeContextUsage(
 
   return {
     systemPromptTokens,
+    projectInstructionsTokens,
     messagesTokens,
     attachmentsTokens,
     messageCount: nonSystemCount,

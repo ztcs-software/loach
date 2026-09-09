@@ -139,6 +139,7 @@ export function ToneChip({
 export function WorkspaceChip({
   root,
   toolsEnabled,
+  instructions,
   onRemove,
 }: {
   root: string;
@@ -146,8 +147,21 @@ export function WorkspaceChip({
    *  but it can be turned off again afterwards — and then the chip would
    *  be promising tools the model doesn't have, so it says so instead. */
   toolsEnabled: boolean;
+  /** The root's `LOACHFILE.md`, when it has one. A badge, with the file's
+   *  first line in the tooltip, so it's visible that the model is being
+   *  briefed by the project and not only by the user. */
+  instructions: string | null;
   onRemove: () => void;
 }) {
+  const firstLine = instructions
+    ?.split(/\r?\n/)
+    .map((l) => l.trim())
+    .find((l) => l.length > 0);
+  const instructionsHint = firstLine
+    ? `\nProject instructions from LOACHFILE.md: ${
+        firstLine.length > 80 ? `${firstLine.slice(0, 80)}…` : firstLine
+      }`
+    : "";
   const hint = toolsEnabled
     ? "The model can list, find, read and search this folder. Writes, edits, moves and deletions ask you first."
     : "Workspace file tools are switched off in Settings → Tools, so the model can't use this folder until they're turned back on.";
@@ -157,10 +171,13 @@ export function WorkspaceChip({
         composerChipClass("config"),
         !toolsEnabled && "border-amber-500/40 text-amber-700 dark:text-amber-300",
       )}
-      title={`Workspace: ${root}\n${hint}`}
+      title={`Workspace: ${root}\n${hint}${instructionsHint}`}
     >
       <FolderOpen className={composerChipIconClass("config")} />
       <span className="max-w-[18rem] truncate">{shortenPath(root)}</span>
+      {instructions && (
+        <span className="text-[10px] tracking-wide opacity-80">LOACHFILE.md</span>
+      )}
       {!toolsEnabled && (
         <span className="text-[10px] uppercase tracking-wider opacity-80">tools off</span>
       )}
