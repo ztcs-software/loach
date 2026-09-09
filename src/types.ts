@@ -499,8 +499,9 @@ export interface Settings {
    *  or merging existing PDFs yet — `merge` returns a not-yet-supported
    *  error. */
   pdf_tool_enabled: boolean;
-  /** One switch for all five workspace filesystem tools. They additionally
-   *  require the chat to have a directory picked — see `Session.workspace_root`. */
+  /** One switch for all eight workspace filesystem tools. They additionally
+   *  require the chat to have a directory picked — see `Session.workspace_root`.
+   *  Picking one turns this on (`chatStore.pickWorkspace`). */
   workspace_tool_enabled: boolean;
   /** Global override for Ollama's `low_vram` option. When `true`, every
    *  Ollama request is sent with `low_vram: true` regardless of per-chat

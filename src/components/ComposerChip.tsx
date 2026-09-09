@@ -138,18 +138,32 @@ export function ToneChip({
  *  project; the whole path stays in the tooltip. */
 export function WorkspaceChip({
   root,
+  toolsEnabled,
   onRemove,
 }: {
   root: string;
+  /** Settings → Tools → Workspace files. Picking a folder switches it on,
+   *  but it can be turned off again afterwards — and then the chip would
+   *  be promising tools the model doesn't have, so it says so instead. */
+  toolsEnabled: boolean;
   onRemove: () => void;
 }) {
+  const hint = toolsEnabled
+    ? "The model can list, find, read and search this folder. Writes, edits, moves and deletions ask you first."
+    : "Workspace file tools are switched off in Settings → Tools, so the model can't use this folder until they're turned back on.";
   return (
     <div
-      className={composerChipClass("config")}
-      title={`Workspace: ${root}\nThe model can read and search this folder. Writes ask you first.`}
+      className={cn(
+        composerChipClass("config"),
+        !toolsEnabled && "border-amber-500/40 text-amber-700 dark:text-amber-300",
+      )}
+      title={`Workspace: ${root}\n${hint}`}
     >
       <FolderOpen className={composerChipIconClass("config")} />
       <span className="max-w-[18rem] truncate">{shortenPath(root)}</span>
+      {!toolsEnabled && (
+        <span className="text-[10px] uppercase tracking-wider opacity-80">tools off</span>
+      )}
       <ChipRemove label="Remove workspace directory" onClick={onRemove} />
     </div>
   );

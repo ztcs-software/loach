@@ -81,6 +81,9 @@ export function ChatInput({ centered = false }: ChatInputProps) {
   );
   const pickWorkspace = useChatStore((s) => s.pickWorkspace);
   const clearWorkspace = useChatStore((s) => s.clearWorkspace);
+  // Whether the folder actually reaches the model: the chip warns when the
+  // master switch in Settings → Tools has been turned off since.
+  const workspaceToolsEnabled = useSettingsStore((s) => s.workspace_tool_enabled);
   const composerDraft = useUIStore((s) => s.composerDraft);
   const composerAttachments = useUIStore((s) => s.composerAttachments);
   const composerInsertSeq = useUIStore((s) => s.composerInsertSeq);
@@ -792,6 +795,7 @@ export function ChatInput({ centered = false }: ChatInputProps) {
             {workspaceRoot && activeSessionId && (
               <WorkspaceChip
                 root={workspaceRoot}
+                toolsEnabled={workspaceToolsEnabled}
                 onRemove={() => void clearWorkspace(activeSessionId)}
               />
             )}

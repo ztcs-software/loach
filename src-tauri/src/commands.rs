@@ -255,7 +255,11 @@ pub async fn pick_session_workspace(
         return Err("that path is not a directory".into());
     }
 
-    let stored = canonical.to_string_lossy().to_string();
+    // Stored — and shown in the composer chip — without Windows' `\\?\`
+    // verbatim prefix. The sandbox needs the canonical form, so
+    // `chat_stream` canonicalizes this string again every turn; the
+    // display form is what a person recognises as their folder.
+    let stored = crate::tools::fs::display_path(&canonical);
     state
         .db
         .set_session_workspace_root(&session_id, Some(&stored))
@@ -2217,44 +2221,53 @@ pub async fn chat_stream(
         // user may have moved or deleted the folder since. A root that no
         // longer resolves to a directory is dropped, which takes the
         // filesystem tools out of the catalogue for this turn instead of
-        // offering the model five tools that would all fail.
+        // offering the model eight tools that would all fail.
+        //
+        // Canonicalized here, every turn, because the row stores the
+        // display form (`C:\Users\…`, no `\\?\` prefix) and the sandbox in
+        // `tools::fs` compares canonical against canonical.
+        //
         // Private Chat never gets a workspace, belt and braces: it already
         // sends no `session_id`, so this is a second lock on the same door.
         // Handing an overlay that promises "nothing leaves this box" the
         // ability to write to disk would be a strange reading of the promise.
-        request.workspace_root = request
+        let stored_root = request
             .session_id
             .as_deref()
             .filter(|_| !request.private)
             .and_then(|sid| db.get_session(sid).ok().flatten())
-            .and_then(|s| s.workspace_root)
-            .map(std::path::PathBuf::from)
-            .filter(|p| {
-                let ok = p.is_dir();
-                if !ok {
+            .and_then(|s| s.workspace_root);
+        request.workspace_root = stored_root.as_deref().and_then(|stored| {
+            match std::path::Path::new(stored).canonicalize() {
+                Ok(p) if p.is_dir() => Some(p),
+                _ => {
                     tracing::warn!(
-                        "workspace root {} is gone; filesystem tools disabled for this turn",
-                        p.display()
+                        "workspace root {stored} is gone; filesystem tools disabled for this turn"
                     );
+                    None
                 }
-                ok
-            });
+            }
+        });
 
         // Tell the model where it is. Without this it has the tools but no
         // idea what project they point at, and it either asks or guesses —
         // both worse than one line of context. Appended by the backend, not
         // the renderer, so it always agrees with the root actually enforced
-        // by the sandbox.
-        if let Some(root) = request.workspace_root.as_deref() {
+        // by the sandbox. The path is the stored display form: the model
+        // has no more use for a `\\?\` prefix than the user does.
+        if let (Some(_), Some(shown)) = (&request.workspace_root, stored_root.as_deref()) {
             let note = format!(
-                "You have read/write access to a workspace directory on this                  machine: {}. Paths you pass to `list_directory`, `read_file`,                  `search_files`, `write_file` and `edit_file` are relative to                  that directory, and nothing outside it is reachable. Start by                  listing or searching before you assume what it contains.                  Writes are shown to the user for approval before they happen.",
-                root.display()
+                "You have read/write access to a workspace directory on this machine: \
+                 {shown}. Paths you pass to `list_directory`, `find_files`, `read_file`, \
+                 `search_files`, `write_file`, `edit_file`, `move_file` and `delete_file` \
+                 are relative to that directory, and nothing outside it is reachable. \
+                 Start by listing, finding or searching before you assume what it \
+                 contains. Writes, edits, moves and deletions are shown to the user \
+                 for approval before they happen."
             );
             request.system_prompt = Some(match request.system_prompt.take() {
                 Some(existing) if !existing.trim().is_empty() => {
-                    format!("{existing}
-
-{note}")
+                    format!("{existing}\n\n{note}")
                 }
                 _ => note,
             });

@@ -34,7 +34,7 @@ pub(super) fn resolve_qualified<'a>(
 /// of in-flight strings before anyone sees the bill. Truncate per call,
 /// tell the model it was truncated so it can decide whether to ask for
 /// a different slice. The UI still receives the full text.
-pub(super) const MAX_TOOL_RESULT_BYTES: usize = 32 * 1024;
+pub(crate) const MAX_TOOL_RESULT_BYTES: usize = 32 * 1024;
 
 /// How long a per-call approval prompt stays open before it counts as a
 /// refusal. The stream is parked between provider turns while it waits, so

@@ -279,15 +279,20 @@ export const TOOL_TOGGLES: {
       <>
         Exposes{" "}
         <span className="font-mono">list_directory</span>,{" "}
+        <span className="font-mono">find_files</span>,{" "}
         <span className="font-mono">read_file</span>,{" "}
         <span className="font-mono">search_files</span>,{" "}
-        <span className="font-mono">write_file</span> and{" "}
-        <span className="font-mono">edit_file</span>, scoped to one directory
+        <span className="font-mono">write_file</span>,{" "}
+        <span className="font-mono">edit_file</span>,{" "}
+        <span className="font-mono">move_file</span> and{" "}
+        <span className="font-mono">delete_file</span>, scoped to one directory
         you choose per chat with the <span className="font-mono">+</span>{" "}
         button next to the message box. Nothing outside that directory is
-        reachable, and chats without one see no file tools at all. Every write
-        and edit asks you first, showing the path and the change. Off by
-        default. In-process — files never leave the machine.
+        reachable, and chats without one see no file tools at all. Every
+        write, edit, move and deletion asks you first, showing the path and
+        the change; deletions take one file or empty directory at a time, and
+        there is no shell. Off until you pick a folder, which switches this
+        on. In-process — files never leave the machine.
       </>
     ),
   },

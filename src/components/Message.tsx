@@ -22,6 +22,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { AttachmentActions } from "./AttachmentActions";
+import { BUILTIN_SERVER_ID, workspaceApproval } from "./WorkspaceApproval";
 import { Markdown, StreamingMarkdown } from "./Markdown";
 import { MarkdownSourceProvider } from "./markdownSource";
 import { lastCodeBlock } from "@/lib/codeBlocks";
@@ -141,26 +142,52 @@ function ApprovalCard({ call }: { call: ToolCallRecord }) {
     void respond(call.id, decision);
   };
   const tool = rawToolName(call.tool);
+  // Workspace file tools get a readable preview — the file, the diff, the
+  // move, the deletion — instead of the arguments as JSON. Deletions are
+  // painted red so they never blend in with the amber of an edit.
+  const builtin = call.server_id === BUILTIN_SERVER_ID;
+  const preview = builtin ? workspaceApproval(tool, call.arguments) : null;
+  const destructive = preview?.destructive === true;
   return (
     <div
       role="group"
       aria-label={`Approve tool call ${tool}`}
-      className="mb-2 rounded-xl border border-amber-500/35 bg-amber-500/[0.07] p-3 text-xs"
+      className={cn(
+        "mb-2 rounded-xl border p-3 text-xs",
+        destructive
+          ? "border-red-500/40 bg-red-500/[0.07]"
+          : "border-amber-500/35 bg-amber-500/[0.07]",
+      )}
     >
       <div className="flex items-center gap-1.5 font-medium text-foreground/85">
-        <ShieldAlert className="h-3.5 w-3.5 shrink-0 text-amber-500" />
+        <ShieldAlert
+          className={cn("h-3.5 w-3.5 shrink-0", destructive ? "text-red-500" : "text-amber-500")}
+        />
         <span className="min-w-0 truncate">
-          Allow <span className="font-semibold">{call.server_name}</span> to run{" "}
-          <span className="font-mono">{tool}</span>?
+          {preview ? (
+            <>Allow the model to {preview.title}?</>
+          ) : (
+            <>
+              Allow <span className="font-semibold">{call.server_name}</span> to run{" "}
+              <span className="font-mono">{tool}</span>?
+            </>
+          )}
         </span>
       </div>
-      <pre className="mt-2 max-h-40 overflow-auto rounded border border-foreground/10 bg-foreground/[0.04] px-2 py-1.5 font-mono text-[11px] leading-snug text-foreground/80 whitespace-pre-wrap break-words">
-        {formatArgs(call.arguments) || "{}"}
-      </pre>
+      {preview ? (
+        preview.body
+      ) : (
+        <pre className="mt-2 max-h-40 overflow-auto rounded border border-foreground/10 bg-foreground/[0.04] px-2 py-1.5 font-mono text-[11px] leading-snug text-foreground/80 whitespace-pre-wrap break-words">
+          {formatArgs(call.arguments) || "{}"}
+        </pre>
+      )}
       <div className="mt-2.5 flex flex-wrap items-center gap-2">
         <Button size="sm" className="h-7 px-3 text-xs" disabled={sent} onClick={() => decide("allow_once")}>
           Allow once
         </Button>
+        {/* A built-in's standing grant lives in memory for this chat only
+            (see `ApprovalRegistry::grant`); an MCP tool's is written to the
+            server's allow-list and outlives the app. Say which. */}
         <Button
           size="sm"
           variant="outline"
@@ -168,7 +195,7 @@ function ApprovalCard({ call }: { call: ToolCallRecord }) {
           disabled={sent}
           onClick={() => decide("allow_always")}
         >
-          Always allow {tool}
+          {builtin ? `Allow ${tool} for this chat` : `Always allow ${tool}`}
         </Button>
         <Button
           size="sm"
@@ -191,6 +218,10 @@ function ToolCallItem({ call }: { call: ToolCallRecord }) {
   const failed = !pending && call.is_error && !denied;
   const argsText = formatArgs(call.arguments);
   const rawTool = rawToolName(call.tool);
+  // Same readable preview the approval card used, so the diff that was
+  // approved can still be seen after the fact.
+  const preview =
+    call.server_id === BUILTIN_SERVER_ID ? workspaceApproval(rawTool, call.arguments) : null;
   return (
     <div
       className={cn(
@@ -232,14 +263,23 @@ function ToolCallItem({ call }: { call: ToolCallRecord }) {
       </button>
       {open && (
         <div className="mt-2 space-y-2 pl-5">
-          <div>
-            <div className="mb-0.5 text-[10.5px] uppercase tracking-wider text-foreground/40">
-              Arguments
+          {preview ? (
+            <div>
+              <div className="text-[10.5px] uppercase tracking-wider text-foreground/40">
+                {preview.title}
+              </div>
+              {preview.body}
             </div>
-            <pre className="max-h-40 overflow-auto rounded border border-foreground/10 bg-foreground/[0.04] px-2 py-1.5 font-mono text-[11px] leading-snug text-foreground/80 whitespace-pre-wrap break-words">
-              {argsText || "{}"}
-            </pre>
-          </div>
+          ) : (
+            <div>
+              <div className="mb-0.5 text-[10.5px] uppercase tracking-wider text-foreground/40">
+                Arguments
+              </div>
+              <pre className="max-h-40 overflow-auto rounded border border-foreground/10 bg-foreground/[0.04] px-2 py-1.5 font-mono text-[11px] leading-snug text-foreground/80 whitespace-pre-wrap break-words">
+                {argsText || "{}"}
+              </pre>
+            </div>
+          )}
           {!pending && (
             <div>
               <div className="mb-0.5 text-[10.5px] uppercase tracking-wider text-foreground/40">

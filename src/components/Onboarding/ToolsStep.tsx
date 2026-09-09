@@ -38,12 +38,16 @@ const UTILITY_TOOLS = TOOL_TOGGLES.filter((t) => t.key !== "web_fetch_enabled");
 type UtilityKey = (typeof UTILITY_TOOLS)[number]["key"];
 
 /** Off in the recommended preset: the four whose outputs only a developer
- *  asks for. Everything else earns its catalogue slot for general chat. */
+ *  asks for, plus the workspace file tools, which switch themselves on the
+ *  moment a folder is picked for a chat and so have nothing to gain from
+ *  being pre-armed here. Everything else earns its catalogue slot for
+ *  general chat. */
 const RECOMMENDED_OFF = new Set<UtilityKey>([
   "hash_tool_enabled",
   "uuid_tool_enabled",
   "base64_tool_enabled",
   "ip_tool_enabled",
+  "workspace_tool_enabled",
 ]);
 
 const RECOMMENDED: Record<string, boolean> = Object.fromEntries(

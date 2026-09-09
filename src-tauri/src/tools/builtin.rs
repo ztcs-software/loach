@@ -157,6 +157,13 @@ const BUILTINS: &[Builtin] = &[
     },
     Builtin {
         setting_key: super::fs::SETTING_KEY,
+        name: super::fs::FIND_FILES,
+        description: super::fs::find_files_description,
+        input_schema: super::fs::find_files_schema,
+        dispatch: Dispatch::Workspace(super::fs::dispatch_find_files),
+    },
+    Builtin {
+        setting_key: super::fs::SETTING_KEY,
         name: super::fs::READ_FILE,
         description: super::fs::read_file_description,
         input_schema: super::fs::read_file_schema,
@@ -182,6 +189,20 @@ const BUILTINS: &[Builtin] = &[
         description: super::fs::edit_file_description,
         input_schema: super::fs::edit_file_schema,
         dispatch: Dispatch::Workspace(super::fs::dispatch_edit_file),
+    },
+    Builtin {
+        setting_key: super::fs::SETTING_KEY,
+        name: super::fs::MOVE_FILE,
+        description: super::fs::move_file_description,
+        input_schema: super::fs::move_file_schema,
+        dispatch: Dispatch::Workspace(super::fs::dispatch_move_file),
+    },
+    Builtin {
+        setting_key: super::fs::SETTING_KEY,
+        name: super::fs::DELETE_FILE,
+        description: super::fs::delete_file_description,
+        input_schema: super::fs::delete_file_schema,
+        dispatch: Dispatch::Workspace(super::fs::dispatch_delete_file),
     },
 ];
 
@@ -229,7 +250,8 @@ pub fn dispatch_builtin(
             Some(root) => f(root, arguments),
             None => McpCallResult {
                 content_text: format!(
-                    "`{name}` needs a workspace directory, and this chat has none.                      Ask the user to pick one with the + button next to the message box."
+                    "`{name}` needs a workspace directory, and this chat has none. \
+                     Ask the user to pick one with the + button next to the message box."
                 ),
                 is_error: true,
                 ..Default::default()

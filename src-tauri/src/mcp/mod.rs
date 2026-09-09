@@ -746,16 +746,22 @@ mod tests {
             crate::tools::builtin::BUILTIN_SERVER_ID,
             crate::tools::fs::WRITE_FILE
         ));
-        assert!(needs_approval(
-            &db,
-            crate::tools::builtin::BUILTIN_SERVER_ID,
-            crate::tools::fs::EDIT_FILE
-        ));
-        assert!(!needs_approval(
-            &db,
-            crate::tools::builtin::BUILTIN_SERVER_ID,
-            crate::tools::fs::READ_FILE
-        ));
+        for mutating in [
+            crate::tools::fs::EDIT_FILE,
+            crate::tools::fs::MOVE_FILE,
+            crate::tools::fs::DELETE_FILE,
+        ] {
+            assert!(
+                needs_approval(&db, crate::tools::builtin::BUILTIN_SERVER_ID, mutating),
+                "{mutating} must prompt"
+            );
+        }
+        for reading in [crate::tools::fs::READ_FILE, crate::tools::fs::FIND_FILES] {
+            assert!(
+                !needs_approval(&db, crate::tools::builtin::BUILTIN_SERVER_ID, reading),
+                "{reading} must not prompt"
+            );
+        }
         assert!(!needs_approval(&db, "no-such-server", "anything"));
     }
 

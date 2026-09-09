@@ -315,7 +315,8 @@ no trace. Open it from the ghost icon in the title bar.
   not exposed to the model inside Private Chat, so a tool call can't
   side-channel the conversation out to a third party. Built-in tools
   (§8.3) still work — they run entirely on your machine, so they can't
-  leak the conversation.
+  leak the conversation. The workspace file tools (§8.4) are the
+  exception: a Private Chat never gets a folder, so it can't write to disk.
 - **No backdrop / Esc close.** The overlay can only be dismissed by the
   explicit `X` in its header. The wipe is destructive; we don't want a
   stray click to throw away the conversation.
@@ -749,7 +750,9 @@ A prompt left unanswered for 10 minutes counts as a denial, and **Stop**
 cancels the reply as usual. Turning **Ask before each tool call** off on
 a server skips the prompt for all of its tools; the server row shows an
 *Auto-approve* badge so the exception stays visible. Built-in tools
-(§8.3) never ask — they run in-process with no network or disk access.
+(§8.3) never ask — they run in-process with no network or disk access —
+except the four workspace file tools that change files (§8.4), which
+always do.
 
 ### 8.3 Built-in tools
 
@@ -758,7 +761,9 @@ same tool-call loop as MCP. Each has its own toggle in **Settings →
 Tools** and all of them are **off by default** — turn on only what you
 want a given model to reach for. They run entirely in Rust on your machine
 (no network, no disk writes beyond a PDF you ask for), so they also work
-inside Private Chat.
+inside Private Chat. The one exception is the workspace file group in
+§8.4, which does touch the disk — inside a folder you pick — and is never
+offered in Private Chat.
 
 - **calculate** — evaluate arithmetic, trig, functions, and constants.
 - **datetime** — parse, format, and do arithmetic on dates/times, with
@@ -779,6 +784,50 @@ inside Private Chat.
   a previewable, savable attachment.
 
 Calls render in the collapsible tool-call block described in §2.1.
+
+### 8.4 Workspace files
+
+Give a chat a folder and the model can work in it — read the project,
+search it, and make changes — the way a coding assistant does, minus the
+shell. Click the **+** button next to the message box and choose **Add
+directory** (the same menu's **Add files** attaches file contents to one
+message instead; the two are not variants of each other). The folder shows
+as a chip above the composer for the rest of the chat; remove it from the
+chip. Picking a folder also switches on **Workspace files** in **Settings
+→ Tools** if it was off, and the chip says so if that switch is later
+turned off again. Forking a chat carries the folder over; exports and
+imports never do — a path means nothing on another machine.
+
+Eight tools appear in the model's catalogue only while a chat has a
+folder; without one the model never sees them. All paths are relative to
+the folder, and nothing outside it is reachable: absolute paths and `..`
+are refused up front, and every path is resolved through symlinks and
+checked against the folder again before it is used, so a link pointing
+elsewhere is refused too.
+
+- **list_directory** — tree of a directory, two levels by default, with
+  dependency and build directories (`node_modules`, `target`, `.git`, …)
+  shown but not descended into.
+- **find_files** — locate files by name with a glob (`*.rs` anywhere,
+  `src/**/*.test.ts` by path).
+- **read_file** — contents with line numbers, paged for long files.
+- **search_files** — regex search across contents, with file and line.
+- **write_file** — create a file or replace one whole.
+- **edit_file** — replace an exact snippet; ambiguous matches are refused.
+- **move_file** — rename or move a file or directory; never overwrites.
+- **delete_file** — remove one file or one empty directory per call.
+
+The four that change files **ask you first, every time**. The consent card
+shows the change itself rather than raw arguments: the full contents of a
+write, a `-`/`+` diff for an edit, `from → to` for a move, and a red
+warning for a deletion. **Allow once** runs that call; **Allow … for this
+chat** stops asking for that tool until the chat is closed (the grant is
+kept in memory, so it never outlives the app); **Deny** tells the model to
+carry on without it. Line endings are preserved: editing or overwriting a
+CRLF file keeps it CRLF.
+
+Deliberately absent: a shell, a recursive delete, and any way to point the
+tools at a folder other than through the native picker.
 
 ---
 
@@ -971,11 +1020,13 @@ still leaves the app in a consistent state.
    second so a model download has the rest of the wizard to make progress.
 3. **Features** — defaults for Temporal awareness, Thinking, and Low VRAM
    (recommends ON / ON / OFF). Committed on Skip as well as Continue.
-4. **Tools** — Web fetch and the twelve in-process utility tools, which
-   before this screen existed were discover-by-accident in Settings. The
+4. **Tools** — Web fetch and the in-process utility tools, which before
+   this screen existed were discover-by-accident in Settings. The
    utilities open on a **Recommended** preset — everything on except the
-   four only a developer asks for (hash, UUID, base64, IP/CIDR) — and
-   **All OFF / Recommended / All ON** buttons flip the set at once.
+   four only a developer asks for (hash, UUID, base64, IP/CIDR) and
+   Workspace files, which switches itself on when a chat gets a folder
+   (§8.4) — and **All OFF / Recommended / All ON** buttons flip the set at
+   once.
    Because the screen *shows* a selection, the write rules differ from
    Features: **Continue** commits the utilities exactly as displayed, while
    **Skip** writes only what was explicitly flipped, since skipping past is

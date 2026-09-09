@@ -1843,6 +1843,24 @@ export const useChatStore = create<ChatState>((set, get) => ({
         x.id === sessionId ? { ...x, workspace_root: root } : x,
       ),
     }));
+    // Picking a folder is the clearest possible request for the file tools,
+    // so a master switch that is still off is turned on here rather than
+    // left for the user to discover in Settings → Tools after the model
+    // shrugs at their first question. Said out loud, because it is a
+    // global setting changed from a per-chat gesture.
+    const settings = useSettingsStore.getState();
+    if (!settings.workspace_tool_enabled) {
+      try {
+        await settings.update("workspace_tool_enabled", true);
+        useToastStore.getState().push({
+          kind: "info",
+          title: "Workspace file tools turned on",
+          body: "The model can now work in this folder. Switch them off any time in Settings → Tools.",
+        });
+      } catch (e) {
+        logger.error("couldn't enable workspace tools after picking a folder", e);
+      }
+    }
     return root;
   },
 
