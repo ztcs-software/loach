@@ -67,7 +67,7 @@ export function SpacesLibrary() {
   const handleDelete = async (space: Space) => {
     const ok = await confirm({
       title: `Delete space “${space.name}”?`,
-      body: "Files and instructions in this space will be removed. Chats inside the space stay, but they lose their space association.",
+      body: "Sources and instructions in this space will be removed. Chats inside the space stay, but they lose their space association.",
       confirmLabel: "Delete space",
       destructive: true,
     });
@@ -96,7 +96,7 @@ export function SpacesLibrary() {
               </h1>
               <p className="mt-2 max-w-xl text-sm text-foreground/55">
                 Group chats around a project. Chats inside Spaces share
-                instructions, reference files and memory. Perfect for ongoing
+                instructions, reference sources and memory. Perfect for ongoing
                 work that needs context every time.
               </p>
             </div>
@@ -117,7 +117,7 @@ export function SpacesLibrary() {
             <EmptyLibraryState
               icon={<Layers className="h-7 w-7 text-foreground/45" />}
               title="No spaces yet"
-              description="Create a space for a project, a topic, or a long-running thread of work. Drop in reference files and Loach will pull from them in every chat inside the space."
+              description="Create a space for a project, a topic, or a long-running thread of work. Drop in reference sources and Loach will pull from them in every chat inside the space."
               cta={
                 <Button
                   onClick={() => setFormOpen(true)}

@@ -427,7 +427,7 @@ or leaves an image on your clipboard.
 ## 3. Spaces
 
 A **Space** is a long-lived workspace that bundles instructions, reference
-files, and a memory store. Every chat created inside a Space inherits that
+sources, and a memory store. Every chat created inside a Space inherits that
 context.
 
 ### 3.1 What a Space holds
@@ -435,7 +435,7 @@ context.
 - **Instructions** — a system prompt that *overrides* any global or per-chat
   prompt when set (the Space is the user explicitly opting into space-level
   guidance).
-- **Reference files** — text files, PDFs and DOCX documents are inlined
+- **Reference sources** — text files, PDFs and DOCX documents are inlined
   into the system prompt of every chat in this Space; images ride along
   with the user turn. **20 MB** per file, **200 MB** total per Space.
 - **Memory** — auto-extracted one-line facts about the user (see §3.3).
@@ -448,10 +448,10 @@ context.
 - Edit name and description from **Edit Space details**; instructions and
   the default model live on their own tabs.
 - Open a Space to see its detail view — **Chats**, **Instructions**,
-  **Files**, **Memory** and **Models**, each on its own tab. Each chat row
+  **Sources**, **Memory** and **Models**, each on its own tab. Each chat row
   in the Chats tab exposes the same `…` action menu as the main sidebar
   (Pin this chat / Unpin, Label, Rename, Move to archive, Delete).
-- Delete a Space and all its associated files / memories cascade out of
+- Delete a Space and all its associated sources / memories cascade out of
   the DB.
 
 ### 3.3 Space Memory
@@ -931,7 +931,7 @@ this?" is answered before you reach for a destructive one:
 
 - **Database** — total bytes on disk (the SQLite file plus its write-ahead
   log) and the path, itemised into chats (with message and chat counts),
-  attachments inlined into messages and snippets, Spaces (with file counts),
+  attachments inlined into messages and snippets, Spaces (with source counts),
   and **Other** (snippets, MCP servers, settings).
 - **Local models** — how many Ollama models are installed and what they
   weigh, as reported by Ollama. Listed for context, not as something Loach
@@ -940,7 +940,7 @@ this?" is answered before you reach for a destructive one:
 Below it sit the actions:
 
 - **Export data** — produces a single JSON blob with every chat, message,
-  folder, Space, file, memory, snippet, snippet variable, MCP server, and
+  folder, Space, source, memory, snippet, snippet variable, MCP server, and
   setting (MCP headers and environment variables are scrubbed). The save
   dialog and the file write happen in Rust; the panel confirms the path
   it saved to.

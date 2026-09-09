@@ -255,7 +255,7 @@ export const useSpaceStore = create<SpaceState>((set, get) => ({
     } catch (e) {
       useToastStore.getState().push({
         kind: "error",
-        title: "Couldn't remove file",
+        title: "Couldn't remove source",
         body: e instanceof Error ? e.message : String(e),
       });
       return;

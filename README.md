@@ -46,7 +46,7 @@ Behind a calm, beautifully crafted UI sits a rich feature set - ready when you n
 - **Low VRAM mode** - global or per-chat toggle that sends Ollama's `low_vram` flag to every request. Useful on lower-spec devices. 
 
 #### Organizing chats & content
-- **Spaces** - group chats around a project, with shared instructions, reference files and memory. 
+- **Spaces** - group chats around a project, with shared instructions, reference sources and memory. 
 - **Chat folders** - drag one chat onto another in the sidebar to group them into a named folder.
 - **Chat labels** - tag a chat with a colour that shows as a dot in the sidebar, Space view and chat menus.
 - **Snippets** - save reusable prompts with an optional pinned model and click `Run` to start a fresh chat pre-filled and ready to send.
@@ -228,7 +228,7 @@ Only one OpenAI-compatible endpoint is active at a time — switch the base URL 
 
 | What | Where |
 |---|---|
-| Chats, messages, folders, spaces (instructions, reference files, memories), snippets, snippet variables and saved fill-ins, MCP servers, app settings | SQLite at `<app-data-dir>/loach.db` |
+| Chats, messages, folders, spaces (instructions, reference sources, memories), snippets, snippet variables and saved fill-ins, MCP servers, app settings | SQLite at `<app-data-dir>/loach.db` |
 | OpenAI API key | OS credential manager (Windows Credential Manager / Linux Secret Service / macOS Keychain) |
 | App-lock hash + hint | OS credential manager — same store, separate entry |
 | Attached files (images, text) | Inlined into the message at send time; no separate file store |

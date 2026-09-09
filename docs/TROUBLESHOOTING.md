@@ -446,11 +446,11 @@ tab.
 delete it. Turning the toggle off only stops *new* writes; existing
 memories still ride along until you remove them.
 
-### Reference files won't add to a Space
+### Reference sources won't add to a Space
 
-**Problem.** Adding a file to a Space fails or silently does nothing.
+**Problem.** Adding a source to a Space fails or silently does nothing.
 
-**Solution.** Per-Space cap is **200 MB** total across all files. Remove
+**Solution.** Per-Space cap is **200 MB** total across all sources. Remove
 older references, or move the content into a smaller text file.
 
 ### Space instructions seem to override my custom instructions

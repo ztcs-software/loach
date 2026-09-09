@@ -175,7 +175,7 @@ export function SpaceView() {
   const handleDeleteSpace = async () => {
     const ok = await confirm({
       title: `Delete space “${space.name}”?`,
-      body: "Files and instructions in this space will be removed. Chats inside the space stay, but they lose their space association.",
+      body: "Sources and instructions in this space will be removed. Chats inside the space stay, but they lose their space association.",
       confirmLabel: "Delete space",
       destructive: true,
     });
@@ -283,7 +283,7 @@ export function SpaceView() {
               </MetaChip>
               {files.length > 0 && (
                 <MetaChip>
-                  {files.length} {files.length === 1 ? "file" : "files"}
+                  {files.length} {files.length === 1 ? "source" : "sources"}
                 </MetaChip>
               )}
               {hasInstructions && <MetaChip>Instructions on</MetaChip>}
@@ -315,7 +315,7 @@ export function SpaceView() {
                 <TabsList>
                   <TabsTrigger value="chats">Chats</TabsTrigger>
                   <TabsTrigger value="instructions">Instructions</TabsTrigger>
-                  <TabsTrigger value="files">Files</TabsTrigger>
+                  <TabsTrigger value="files">Sources</TabsTrigger>
                   <TabsTrigger value="memory">Memory</TabsTrigger>
                   <TabsTrigger value="models">Models</TabsTrigger>
                 </TabsList>
@@ -894,7 +894,7 @@ function FilesTab({
   return (
     <div className="space-y-3">
       <p className="text-xs text-foreground/55">
-        Reference files available to every chat in this space. Text files are
+        Reference sources available to every chat in this space. Text files are
         inlined into the system prompt; images attach to vision-capable
         models. 20&nbsp;MB per file, 200&nbsp;MB total per space.
       </p>
@@ -906,7 +906,7 @@ function FilesTab({
           <span>
             {atCap
               ? `Reached the 200 MB space limit`
-              : `${formatSize(totalBytes)} of 200 MB · ${files.length} ${files.length === 1 ? "file" : "files"}`}
+              : `${formatSize(totalBytes)} of 200 MB · ${files.length} ${files.length === 1 ? "source" : "sources"}`}
           </span>
         </div>
         <Button
@@ -917,7 +917,7 @@ function FilesTab({
           className="rounded-lg"
         >
           <Plus className="h-3.5 w-3.5" />
-          Add file
+          Add source
         </Button>
       </div>
 
