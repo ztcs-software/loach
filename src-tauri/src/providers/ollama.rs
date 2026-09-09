@@ -603,6 +603,8 @@ pub async fn chat_stream(
         cancel: cancel.as_ref(),
         approvals: &approvals,
         stream_id: &req.stream_id,
+        session_id: req.session_id.as_deref(),
+        workspace_root: req.workspace_root.as_deref(),
     };
 
     // Defense-in-depth SSRF guard. Identical rationale to the OpenAI

@@ -4,6 +4,7 @@ import {
   ClipboardCopy,
   ClipboardPaste,
   FileUp,
+  FolderOpen,
   Mic,
   Plus,
   Scissors,
@@ -11,6 +12,12 @@ import {
   TextCursorInput,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Textarea } from "@/components/ui/textarea";
 import { FileChip } from "./FileChip";
 import { useConfirm } from "./ConfirmDialog";
@@ -28,7 +35,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { useToastStore } from "@/stores/toastStore";
 import { cn } from "@/lib/utils";
 import { logger } from "@/lib/logger";
-import { ChipDivider, PersonaChip, ToneChip } from "./ComposerChip";
+import { ChipDivider, PersonaChip, ToneChip, WorkspaceChip } from "./ComposerChip";
 import {
   DEFAULT_PERSONA_ID,
   getPersona,
@@ -66,6 +73,14 @@ export function ChatInput({ centered = false }: ChatInputProps) {
     !!activeSessionId && streamingSessionId === activeSessionId;
   const send = useChatStore((s) => s.sendUserMessage);
   const cancelForSession = useChatStore((s) => s.cancelForSession);
+  // The chat's workspace directory, if it has one. Read off the session
+  // rather than kept locally so it survives a remount and stays in step
+  // with the row the backend reads when the next turn starts.
+  const workspaceRoot = useChatStore(
+    (s) => s.sessions.find((x) => x.id === s.activeSessionId)?.workspace_root ?? null,
+  );
+  const pickWorkspace = useChatStore((s) => s.pickWorkspace);
+  const clearWorkspace = useChatStore((s) => s.clearWorkspace);
   const composerDraft = useUIStore((s) => s.composerDraft);
   const composerAttachments = useUIStore((s) => s.composerAttachments);
   const composerInsertSeq = useUIStore((s) => s.composerInsertSeq);
@@ -118,6 +133,11 @@ export function ChatInput({ centered = false }: ChatInputProps) {
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
+  // Guards the menu item while the native dialog is up. The dialog is modal
+  // to the window, so a second click can't realistically land — but the
+  // command is async and the disabled state also stops the keyboard from
+  // re-triggering it.
+  const [pickingWorkspace, setPickingWorkspace] = useState(false);
   const [ctxMenu, setCtxMenu] = useState<
     { x: number; y: number; selStart: number; selEnd: number } | null
   >(null);
@@ -340,6 +360,24 @@ export function ChatInput({ centered = false }: ChatInputProps) {
   // setting is never touched from here.
   const clearTone = () => {
     if (activeSessionId) setSessionTone(activeSessionId, DEFAULT_TONE_ID);
+  };
+
+  const chooseWorkspace = async () => {
+    if (!activeSessionId) return;
+    setError(null);
+    setPickingWorkspace(true);
+    try {
+      await pickWorkspace(activeSessionId);
+    } catch (e) {
+      // Surfaced in the composer's own error line rather than a toast: the
+      // user is looking here, having just used the menu right beside it.
+      logger.error("workspace pick failed", e);
+      setError(
+        `Couldn't use that folder: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    } finally {
+      setPickingWorkspace(false);
+    }
   };
 
   const onPick = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -736,7 +774,7 @@ export function ChatInput({ centered = false }: ChatInputProps) {
             onDismiss={() => setCommandResult(null)}
           />
         )}
-        {(attachments.length > 0 || activePersona || activeTone) && (
+        {(attachments.length > 0 || activePersona || activeTone || workspaceRoot) && (
           // Config chips first, then payload. The divider marks the lifetime
           // boundary — everything left of it survives the send, everything
           // right of it goes with the message.
@@ -751,9 +789,14 @@ export function ChatInput({ centered = false }: ChatInputProps) {
                 onRemove={clearTone}
               />
             )}
-            {(activePersona || activeTone) && attachments.length > 0 && (
-              <ChipDivider />
+            {workspaceRoot && activeSessionId && (
+              <WorkspaceChip
+                root={workspaceRoot}
+                onRemove={() => void clearWorkspace(activeSessionId)}
+              />
             )}
+            {(activePersona || activeTone || workspaceRoot) &&
+              attachments.length > 0 && <ChipDivider />}
             {attachments.map((a, i) => (
               <FileChip
                 key={`${a.name}-${i}`}
@@ -789,18 +832,51 @@ export function ChatInput({ centered = false }: ChatInputProps) {
             </div>
           )}
 
-          {/* Composer "+" button — opens the OS file picker directly. */}
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            onClick={() => fileInputRef.current?.click()}
-            aria-label="Attach files"
-            title="Attach files"
-            className="rounded-full text-foreground/65 hover:bg-foreground/10 hover:text-foreground"
-          >
-            <Plus className="h-4 w-4" />
-          </Button>
+          {/* Composer "+" menu. Two ways to bring material into a chat, and
+              they are not variants of each other: "Add files" copies the
+              contents into this one message, while "Add directory" grants
+              the model tools over a folder for the rest of the chat. The
+              menu copy leans on that difference — picking the wrong one
+              silently does something quite unlike what was intended. */}
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                aria-label="Add files or a directory"
+                title="Add files or a directory"
+                className="rounded-full text-foreground/65 hover:bg-foreground/10 hover:text-foreground"
+              >
+                <Plus className="h-4 w-4" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start" className="min-w-[248px]">
+              <DropdownMenuItem onSelect={() => fileInputRef.current?.click()}>
+                <FileUp className="mr-2 h-4 w-4" />
+                <div className="min-w-0">
+                  <div>Add files</div>
+                  <p className="text-[11px] text-foreground/50">
+                    Attach their contents to this message
+                  </p>
+                </div>
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                onSelect={() => void chooseWorkspace()}
+                disabled={!activeSessionId || pickingWorkspace}
+              >
+                <FolderOpen className="mr-2 h-4 w-4" />
+                <div className="min-w-0">
+                  <div>{workspaceRoot ? "Change directory" : "Add directory"}</div>
+                  <p className="text-[11px] text-foreground/50">
+                    {activeSessionId
+                      ? "Let the model read and edit files in a folder"
+                      : "Send a message first to start this chat"}
+                  </p>
+                </div>
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
           <input
             ref={fileInputRef}
             type="file"

@@ -212,6 +212,70 @@ pub async fn set_session_folder(
         .map_err(err)
 }
 
+// ---------- workspace directory ----------
+
+/// Open the native folder picker and scope this chat's filesystem tools to
+/// whatever the user chooses. Returns the stored path, or `Ok(None)` when
+/// they cancel.
+///
+/// Picking and storing are one command on purpose. If the renderer could
+/// set a root by path, prompt-injected model output that talked the user
+/// into a click — or a compromised renderer — could aim the tools at
+/// `C:\Users` without the OS dialog ever appearing. Here the only source of
+/// a path is the dialog itself.
+///
+/// The path is canonicalized before it is stored because the sandbox in
+/// `tools::fs` compares canonical against canonical; a root reached through
+/// a symlink would otherwise fail every prefix check it makes.
+#[tauri::command]
+pub async fn pick_session_workspace(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let picked = tauri::async_runtime::spawn_blocking(move || {
+        app.dialog().file().blocking_pick_folder()
+    })
+    .await
+    .map_err(|e| format!("folder dialog task failed: {e}"))?;
+
+    let Some(chosen) = picked else {
+        return Ok(None);
+    };
+    let path = chosen
+        .into_path()
+        .map_err(|e| format!("invalid path returned from dialog: {e}"))?;
+    let canonical = tokio::task::spawn_blocking(move || path.canonicalize())
+        .await
+        .map_err(|e| format!("canonicalize task panicked: {e}"))?
+        .map_err(|e| format!("couldn't resolve that folder: {e}"))?;
+    if !canonical.is_dir() {
+        return Err("that path is not a directory".into());
+    }
+
+    let stored = canonical.to_string_lossy().to_string();
+    state
+        .db
+        .set_session_workspace_root(&session_id, Some(&stored))
+        .map_err(err)?;
+    Ok(Some(stored))
+}
+
+/// Take the workspace directory away from a chat. The filesystem tools
+/// drop out of the model's catalogue on the next turn.
+#[tauri::command]
+pub async fn clear_session_workspace(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<(), String> {
+    state
+        .db
+        .set_session_workspace_root(&session_id, None)
+        .map_err(err)
+}
+
 // ---------- folders ----------
 
 #[tauri::command]
@@ -2144,6 +2208,58 @@ pub async fn chat_stream(
         }
         request.tools = tools;
 
+        // Resolve the chat's workspace directory from its own row. The
+        // renderer sends a session id, never a path — `workspace_root` is
+        // `skip_deserializing` on `ChatRequest` precisely so this is the
+        // only way one can be set.
+        //
+        // Re-checked here rather than trusted from when it was picked: the
+        // user may have moved or deleted the folder since. A root that no
+        // longer resolves to a directory is dropped, which takes the
+        // filesystem tools out of the catalogue for this turn instead of
+        // offering the model five tools that would all fail.
+        // Private Chat never gets a workspace, belt and braces: it already
+        // sends no `session_id`, so this is a second lock on the same door.
+        // Handing an overlay that promises "nothing leaves this box" the
+        // ability to write to disk would be a strange reading of the promise.
+        request.workspace_root = request
+            .session_id
+            .as_deref()
+            .filter(|_| !request.private)
+            .and_then(|sid| db.get_session(sid).ok().flatten())
+            .and_then(|s| s.workspace_root)
+            .map(std::path::PathBuf::from)
+            .filter(|p| {
+                let ok = p.is_dir();
+                if !ok {
+                    tracing::warn!(
+                        "workspace root {} is gone; filesystem tools disabled for this turn",
+                        p.display()
+                    );
+                }
+                ok
+            });
+
+        // Tell the model where it is. Without this it has the tools but no
+        // idea what project they point at, and it either asks or guesses —
+        // both worse than one line of context. Appended by the backend, not
+        // the renderer, so it always agrees with the root actually enforced
+        // by the sandbox.
+        if let Some(root) = request.workspace_root.as_deref() {
+            let note = format!(
+                "You have read/write access to a workspace directory on this                  machine: {}. Paths you pass to `list_directory`, `read_file`,                  `search_files`, `write_file` and `edit_file` are relative to                  that directory, and nothing outside it is reachable. Start by                  listing or searching before you assume what it contains.                  Writes are shown to the user for approval before they happen.",
+                root.display()
+            );
+            request.system_prompt = Some(match request.system_prompt.take() {
+                Some(existing) if !existing.trim().is_empty() => {
+                    format!("{existing}
+
+{note}")
+                }
+                _ => note,
+            });
+        }
+
         // Append built-in tools after the MCP catalogue. Order is safe:
         // MCP qualified names always carry a `<slug>__` prefix, so the
         // bare names used by built-ins (`calculate`, `datetime`, …)
@@ -2152,9 +2268,10 @@ pub async fn chat_stream(
         // Built-ins are purely local (no network, no DB writes), so we
         // expose them in Private Chat too — the privacy guarantee is
         // about data leaving the box, not about hiding local compute.
-        request
-            .tools
-            .extend(crate::tools::builtin::enabled_builtin_defs(&db));
+        request.tools.extend(crate::tools::builtin::enabled_builtin_defs(
+            &db,
+            request.workspace_root.is_some(),
+        ));
 
         let res = match provider.as_str() {
             "ollama" => {

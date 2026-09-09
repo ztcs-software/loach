@@ -108,6 +108,7 @@ export function createSession(args: {
       forked_from_session_id: null,
       label: null,
       folder_id: null,
+      workspace_root: null,
       created_at: now,
       updated_at: now,
     });
@@ -138,6 +139,7 @@ export function forkSession(args: {
       forked_from_session_id: args.source_session_id,
       label: null,
       folder_id: null,
+      workspace_root: null,
       created_at: now,
       updated_at: now,
     });
@@ -212,6 +214,25 @@ export function setSessionFolder(args: {
 }): Promise<void> {
   if (!isTauri) return notInTauri(undefined);
   return invoke("set_session_folder", { args });
+}
+
+/** Open the native folder picker and scope this chat's filesystem tools to
+ *  what the user chooses. Resolves to the stored (canonical) path, or null
+ *  if they cancelled.
+ *
+ *  There is deliberately no "set the workspace to this path" wrapper: the
+ *  backend only accepts a directory that came out of its own dialog, so the
+ *  renderer never names one. See `commands::pick_session_workspace`. */
+export function pickSessionWorkspace(sessionId: string): Promise<string | null> {
+  if (!isTauri) return notInTauri(null);
+  return invoke("pick_session_workspace", { sessionId });
+}
+
+/** Drop a chat's workspace directory. The filesystem tools leave the
+ *  model's catalogue on the next turn. */
+export function clearSessionWorkspace(sessionId: string): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("clear_session_workspace", { sessionId });
 }
 
 export function exportSession(id: string, format: "json" | "md"): Promise<string> {

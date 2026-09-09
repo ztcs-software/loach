@@ -1,6 +1,6 @@
 //! Backend "tools" that augment a chat with out-of-band capabilities.
 //!
-//! Two flavours live here:
+//! Three flavours live here:
 //! * [`fetch_url`] — user-driven URL prefetcher. The frontend scans the
 //!   user message, calls `fetch_url` for each link, and inlines the
 //!   returned text into the outgoing prompt before streaming starts.
@@ -12,6 +12,11 @@
 //!   [`builtin`] is the registry every built-in is registered in; it's
 //!   the only thing `commands::chat_stream` and `mcp::dispatch_tool_call`
 //!   need to talk to.
+//! * Workspace filesystem tools ([`fs`]) — the same model-driven shape,
+//!   but scoped to the directory the user picked for the current chat.
+//!   They are the only built-ins that touch the disk, the only ones that
+//!   need context beyond their arguments, and the only ones whose
+//!   mutating half goes through the per-call approval prompt.
 
 pub mod base64_tool;
 pub mod builtin;
@@ -20,6 +25,7 @@ pub mod count;
 pub mod datetime;
 pub mod diff_text;
 pub mod fetch_url;
+pub mod fs;
 pub mod hash;
 pub mod ip_tool;
 pub mod json_tool;

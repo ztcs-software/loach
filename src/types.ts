@@ -34,6 +34,12 @@ export interface Session {
    *  A dangling id — only reachable via a hand-edited snapshot — renders as
    *  a loose chat; see `Sidebar.tsx`'s grouping. */
   folder_id: string | null;
+  /** Absolute path of the directory this chat's filesystem tools may read
+   *  and write, or null when none is picked — the default for every chat.
+   *  Only `pickSessionWorkspace` can set it, and only from the native
+   *  folder dialog, so the renderer never chooses a path itself. Excluded
+   *  from snapshots: it's machine-local. */
+  workspace_root: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -334,6 +340,11 @@ export interface ChatRequest {
    *  to a user-configured MCP server. Omit (or pass `false`) for regular
    *  chats — defaults on the Rust side via `#[serde(default)]`. */
   private?: boolean;
+  /** Chat this turn belongs to. The backend uses it to look up the
+   *  session's workspace directory; there is no way to pass the directory
+   *  itself, by design. Omitted by the compaction and Private Chat paths,
+   *  neither of which should reach the filesystem tools. */
+  session_id?: string;
 }
 
 export type StreamEvent =
@@ -488,6 +499,9 @@ export interface Settings {
    *  or merging existing PDFs yet — `merge` returns a not-yet-supported
    *  error. */
   pdf_tool_enabled: boolean;
+  /** One switch for all five workspace filesystem tools. They additionally
+   *  require the chat to have a directory picked — see `Session.workspace_root`. */
+  workspace_tool_enabled: boolean;
   /** Global override for Ollama's `low_vram` option. When `true`, every
    *  Ollama request is sent with `low_vram: true` regardless of per-chat
    *  params or per-model Modelfile defaults — handy on memory-constrained
@@ -570,6 +584,7 @@ export const DEFAULT_SETTINGS: Settings = {
   sort_tool_enabled: false,
   ip_tool_enabled: false,
   pdf_tool_enabled: false,
+  workspace_tool_enabled: false,
   low_vram_global: false,
   ollama_keep_alive: "5m",
   thinking_default: true,

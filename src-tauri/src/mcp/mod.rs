@@ -298,12 +298,17 @@ pub async fn dispatch_tool_call(
     server_id: &str,
     name: &str,
     arguments: &Value,
+    workspace_root: Option<&std::path::Path>,
 ) -> Result<McpCallResult> {
     // Built-in tools take a synthetic `server_id` and don't touch the DB
     // or open a network session. Keep the catch ahead of `list_mcp_servers`
     // so they work even when the user has zero MCP servers configured.
+    //
+    // `workspace_root` is only read by the filesystem built-ins; every
+    // other tool ignores it. It comes from the session row, never from the
+    // model's arguments, so a model can't redirect itself at another tree.
     if server_id == crate::tools::builtin::BUILTIN_SERVER_ID {
-        return crate::tools::builtin::dispatch_builtin_guarded(name, arguments)
+        return crate::tools::builtin::dispatch_builtin_guarded(name, arguments, workspace_root)
             .await
             .ok_or_else(|| anyhow!("unknown built-in tool `{name}`"));
     }
@@ -391,14 +396,21 @@ pub async fn dispatch_tool_call(
 }
 
 /// Whether a call to `tool_name` on `server_id` must be confirmed by the
-/// user before it runs. Built-ins never ask (pure local functions); an MCP
-/// server asks unless the user set it to auto-approve or already answered
-/// "Always allow" for this specific tool. A server that has vanished from
-/// the DB doesn't ask either — the dispatch that follows fails on its own,
-/// and a prompt for a call that can't run is noise.
+/// user before it runs. Most built-ins never ask (pure local functions);
+/// an MCP server asks unless the user set it to auto-approve or already
+/// answered "Always allow" for this specific tool. A server that has
+/// vanished from the DB doesn't ask either — the dispatch that follows
+/// fails on its own, and a prompt for a call that can't run is noise.
+///
+/// The one built-in exception is the workspace tools that write to disk.
+/// "Local and in-process" is why the others are safe to run unattended;
+/// it is not why a write is, since a write changes the user's own files.
+/// The per-turn "Always allow" answer is handled by the caller
+/// (`providers::execute_tool_call`) rather than here — built-ins have no
+/// server row to record an allow-list on.
 pub fn needs_approval(db: &Database, server_id: &str, tool_name: &str) -> bool {
     if server_id == crate::tools::builtin::BUILTIN_SERVER_ID {
-        return false;
+        return crate::tools::fs::requires_approval(tool_name);
     }
     let Some(server) = db
         .list_mcp_servers()
@@ -728,6 +740,22 @@ mod tests {
         assert!(!needs_approval(&db, &saved.id, "delete_repo"));
 
         assert!(!needs_approval(&db, crate::tools::builtin::BUILTIN_SERVER_ID, "calculate"));
+        // ... but the workspace tools that write do prompt, on the same path.
+        assert!(needs_approval(
+            &db,
+            crate::tools::builtin::BUILTIN_SERVER_ID,
+            crate::tools::fs::WRITE_FILE
+        ));
+        assert!(needs_approval(
+            &db,
+            crate::tools::builtin::BUILTIN_SERVER_ID,
+            crate::tools::fs::EDIT_FILE
+        ));
+        assert!(!needs_approval(
+            &db,
+            crate::tools::builtin::BUILTIN_SERVER_ID,
+            crate::tools::fs::READ_FILE
+        ));
         assert!(!needs_approval(&db, "no-such-server", "anything"));
     }
 

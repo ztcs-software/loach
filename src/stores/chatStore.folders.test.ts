@@ -53,6 +53,7 @@ function session(id: string, folderId: string | null = null): Session {
     forked_from_session_id: null,
     label: null,
     folder_id: folderId,
+    workspace_root: null,
     created_at: 0,
     updated_at: 0,
   };

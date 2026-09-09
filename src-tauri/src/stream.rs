@@ -131,19 +131,41 @@ pub enum ApprovalDecision {
     Deny,
 }
 
-/// Pending per-call approvals, keyed by `(stream_id, call_id)`. The provider
-/// loop parks a `oneshot` here before it emits `ToolCall { approval_required:
-/// true }`; the `tool_approval_respond` command delivers the user's answer.
-/// Entries are removed on delivery and must be [`forget`](Self::forget)ed on
-/// every other exit path (cancel, timeout) so a stale sender can't linger.
+/// Everything the app knows about tool consent for the current run.
+///
+/// Two halves:
+///
+/// * `inner` — pending per-call approvals, keyed by `(stream_id, call_id)`.
+///   The provider loop parks a `oneshot` here before it emits `ToolCall {
+///   approval_required: true }`; the `tool_approval_respond` command
+///   delivers the user's answer. Entries are removed on delivery and must
+///   be [`forget`](Self::forget)ed on every other exit path (cancel,
+///   timeout) so a stale sender can't linger.
+/// * `grants` — standing "Always allow" answers for built-in tools, keyed
+///   by `(session_id, tool_name)`. MCP tools record that answer on the
+///   server's `allowed_tools` row instead; a built-in has no server row to
+///   write to, so the grant lives here. Being in memory means it lasts for
+///   the rest of this chat but not past a restart, which is the right
+///   lifetime for blanket permission to write to someone's files.
 #[derive(Clone, Default)]
 pub struct ApprovalRegistry {
     inner: Arc<DashMap<String, oneshot::Sender<ApprovalDecision>>>,
+    grants: Arc<DashMap<String, ()>>,
 }
 
 impl ApprovalRegistry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Record "Always allow this tool" for one chat.
+    pub fn grant(&self, session_id: &str, tool_name: &str) {
+        self.grants.insert(Self::key(session_id, tool_name), ());
+    }
+
+    /// Whether this chat already answered "Always allow" for `tool_name`.
+    pub fn granted(&self, session_id: &str, tool_name: &str) -> bool {
+        self.grants.contains_key(&Self::key(session_id, tool_name))
     }
 
     fn key(stream_id: &str, call_id: &str) -> String {
@@ -301,6 +323,19 @@ mod tests {
         reg.forget("s1", "c");
         assert!(!reg.resolve("s1", "c", ApprovalDecision::AllowOnce));
         assert!(rx.await.is_err(), "receiver sees the sender gone");
+    }
+
+    /// Grants are per chat and per tool — one chat saying "always" must not
+    /// speak for another, and allowing `edit_file` must not allow
+    /// `write_file`.
+    #[test]
+    fn grants_are_scoped_to_one_session_and_one_tool() {
+        let reg = ApprovalRegistry::new();
+        assert!(!reg.granted("chat-1", "write_file"));
+        reg.grant("chat-1", "write_file");
+        assert!(reg.granted("chat-1", "write_file"));
+        assert!(!reg.granted("chat-2", "write_file"), "leaked across chats");
+        assert!(!reg.granted("chat-1", "edit_file"), "leaked across tools");
     }
 
     #[test]

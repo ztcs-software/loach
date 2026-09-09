@@ -14,6 +14,8 @@ import {
   listFolders,
   renameFolder as persistFolderName,
   setSessionFolder,
+  pickSessionWorkspace,
+  clearSessionWorkspace,
   importMessages as tauriImportMessages,
   getSpaceContext,
   listMessages,
@@ -195,6 +197,11 @@ interface ChatState {
   setLabel: (id: string, label: ChatLabel | null) => Promise<void>;
   /** File a chat under a folder, or pull it out with `null`. */
   moveToFolder: (id: string, folderId: string | null) => Promise<void>;
+  /** Open the native folder picker and scope this chat's filesystem tools
+   *  to the result. Resolves to the chosen path, or null if cancelled. */
+  pickWorkspace: (sessionId: string) => Promise<string | null>;
+  /** Drop this chat's workspace directory. */
+  clearWorkspace: (sessionId: string) => Promise<void>;
   /** Create a named folder and move `sessionIds` into it in one go. This is
    *  the drag-one-chat-onto-another gesture: both chats land in the new
    *  folder. Returns the folder. */
@@ -1285,6 +1292,10 @@ async function startTask(task: QueueTask, get: Getter, set: Setter) {
         system_prompt: task.request.system_prompt,
         messages: task.request.messages,
         params: task.request.params,
+        // Lets the backend find this chat's workspace directory. Only the
+        // id travels — the path is read from the session row in Rust, so
+        // nothing here can widen what the filesystem tools may touch.
+        session_id: task.sessionId,
       },
       (ev) => {
         // Drop events from a stream whose task is no longer the running one.
@@ -1818,6 +1829,28 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((s) => ({
       sessions: s.sessions.map((x) =>
         x.id === id ? { ...x, folder_id: folderId } : x,
+      ),
+    }));
+  },
+
+  pickWorkspace: async (sessionId) => {
+    const root = await pickSessionWorkspace(sessionId);
+    // null = the user cancelled the dialog, which must not clear an
+    // existing workspace — "I changed my mind" is not "remove it".
+    if (root === null) return null;
+    set((s) => ({
+      sessions: s.sessions.map((x) =>
+        x.id === sessionId ? { ...x, workspace_root: root } : x,
+      ),
+    }));
+    return root;
+  },
+
+  clearWorkspace: async (sessionId) => {
+    await clearSessionWorkspace(sessionId);
+    set((s) => ({
+      sessions: s.sessions.map((x) =>
+        x.id === sessionId ? { ...x, workspace_root: null } : x,
       ),
     }));
   },

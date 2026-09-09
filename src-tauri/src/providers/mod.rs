@@ -57,6 +57,16 @@ pub(super) struct ToolCallCtx<'a> {
     pub cancel: &'a Notify,
     pub approvals: &'a ApprovalRegistry,
     pub stream_id: &'a str,
+    /// The chat this stream belongs to, when there is one. Only the
+    /// compaction stream runs without a session, and it exposes no
+    /// workspace tools, so `None` simply means "no standing grants and no
+    /// workspace" rather than a missing case.
+    pub session_id: Option<&'a str>,
+    /// Directory the workspace filesystem tools are scoped to. Resolved in
+    /// `commands::chat_stream` from the session row — never from anything
+    /// the renderer or the model sent — so neither can point the tools at
+    /// a tree the user didn't pick.
+    pub workspace_root: Option<&'a std::path::Path>,
 }
 
 /// Result of one tool call, ready to append as the `tool` turn.
@@ -81,7 +91,15 @@ pub(super) async fn execute_tool_call(
     tool_name: &str,
     args: &Value,
 ) -> Option<ToolOutcome> {
-    let approval_required = crate::mcp::needs_approval(ctx.db, &tool_def.server_id, tool_name);
+    // A standing "Always allow" from earlier in this chat satisfies the
+    // gate without re-prompting. Only built-ins consult the registry — an
+    // MCP tool's equivalent answer is already folded into `needs_approval`
+    // via the server's allow-list.
+    let already_granted = ctx
+        .session_id
+        .is_some_and(|sid| ctx.approvals.granted(sid, tool_name));
+    let approval_required = !already_granted
+        && crate::mcp::needs_approval(ctx.db, &tool_def.server_id, tool_name);
     let _ = ctx.app.emit(
         ctx.channel,
         StreamEvent::ToolCall {
@@ -126,6 +144,16 @@ pub(super) async fn execute_tool_call(
                     for_model: DENIED_NOTE.to_string(),
                 });
             }
+            ApprovalDecision::AllowAlways
+                if tool_def.server_id == crate::tools::builtin::BUILTIN_SERVER_ID =>
+            {
+                // Built-ins have no server row to hang an allow-list on, so
+                // the grant is remembered in memory against this chat. It
+                // covers the rest of the conversation and dies with the app.
+                if let Some(sid) = ctx.session_id {
+                    ctx.approvals.grant(sid, tool_name);
+                }
+            }
             ApprovalDecision::AllowAlways => {
                 // Best effort: a failed write just means the prompt comes
                 // back next time, which is the safe direction.
@@ -148,7 +176,13 @@ pub(super) async fn execute_tool_call(
     // Honour cancellation while the tool runs — a slow MCP server (GitHub
     // at peak hours, a tool that does its own long fetch) shouldn't lock
     // the user into waiting once they hit Stop.
-    let dispatch = crate::mcp::dispatch_tool_call(ctx.db, &tool_def.server_id, tool_name, args);
+    let dispatch = crate::mcp::dispatch_tool_call(
+        ctx.db,
+        &tool_def.server_id,
+        tool_name,
+        args,
+        ctx.workspace_root,
+    );
     let (content, is_error, attachments) = select! {
         biased;
         _ = ctx.cancel.notified() => return None,
@@ -615,4 +649,19 @@ pub struct ChatRequest {
     /// can't smuggle in a tool definition the backend would honour.
     #[serde(default)]
     pub private: bool,
+    /// Chat this turn belongs to. The frontend sends it so the backend can
+    /// look the session up; it is an id, not a capability, and every use of
+    /// it re-reads the row from the database. `None` for the compaction
+    /// stream, which isn't tied to a visible turn.
+    #[serde(default)]
+    pub session_id: Option<String>,
+    /// Directory the workspace filesystem tools may touch, read out of
+    /// `sessions.workspace_root` by `chat_stream`.
+    ///
+    /// `skip_deserializing` for the same reason `tools` is: this is a
+    /// filesystem capability, and the renderer must not be able to name the
+    /// directory. The only way a path lands here is the user picking it in
+    /// the native folder dialog.
+    #[serde(default, skip_deserializing)]
+    pub workspace_root: Option<std::path::PathBuf>,
 }

@@ -93,6 +93,20 @@ printpdf = { version = "0.12", default-features = false }
 # `tools/calculate.rs` for the two operators we add on top of its defaults.
 exmex = "0.21"
 
+# Backing crates for the workspace filesystem tools (`tools/fs.rs`). Both are
+# already in the tree as transitive dependencies, so declaring them directly
+# costs a feature set, not a new download.
+#
+# `regex` powers `search_files`. Its engine has no backtracking, so a
+# model-supplied pattern can't be made to blow up exponentially the way a
+# PCRE-style engine can — the only unbounded axis is compiled program size,
+# which the call site caps with `size_limit`.
+regex = "1"
+# `walkdir` for the recursive halves of `list_directory` / `search_files`:
+# it never follows symlinks by default, which is what stops a link loop
+# inside the workspace from hanging the walk.
+walkdir = "2"
+
 # Total RAM + free disk for the onboarding model recommendation, which sizes
 # the Ollama catalog against the machine instead of quoting raw GB. Only the
 # `system` and `disk` collectors are compiled in — the default feature set also

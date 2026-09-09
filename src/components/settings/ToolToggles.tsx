@@ -1,12 +1,12 @@
 //! Settings -> Tools: the catalogue of built-in tool switches.
 //!
-//! These thirteen rows are pure data, so they live as an array rendered by one
-//! small component rather than as thirteen near-identical JSX blocks (which is
+//! These fourteen rows are pure data, so they live as an array rendered by one
+//! small component rather than as fourteen near-identical JSX blocks (which is
 //! what they were, at roughly 400 lines).
 
 import type { LucideIcon } from "lucide-react";
 import type { Settings } from "@/types";
-import { ArrowDownAZ, Binary, Braces, Calculator, CalendarClock, Diff, FileText, Fingerprint, Globe, Hash, KeyRound, Network, Ruler } from "lucide-react";
+import { ArrowDownAZ, Binary, Braces, Calculator, CalendarClock, Diff, FileText, Fingerprint, FolderOpen, Globe, Hash, KeyRound, Network, Ruler } from "lucide-react";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -19,7 +19,7 @@ type BooleanSettingKey = {
 /** Every entry in Settings → Tools. These rows are pure data — an icon, a
  *  title, some copy, and the boolean setting they drive — so they're listed
  *  here and rendered by {@link ToolToggleRow} rather than repeated as
- *  thirteen near-identical JSX blocks. Order is the order shown. */
+ *  fourteen near-identical JSX blocks. Order is the order shown. */
 export const TOOL_TOGGLES: {
   key: BooleanSettingKey;
   icon: LucideIcon;
@@ -265,6 +265,29 @@ export const TOOL_TOGGLES: {
         CJK, emoji) become <span className="font-mono">?</span>.
         Image blocks and merging existing PDFs aren't
         supported yet. In-process.
+      </>
+    ),
+  },
+  {
+    key: "workspace_tool_enabled",
+    icon: FolderOpen,
+    title: "Workspace files",
+    blurb: "Let the model work in a folder you pick",
+    ariaOn: "Enable workspace file tools",
+    ariaOff: "Disable workspace file tools",
+    description: (
+      <>
+        Exposes{" "}
+        <span className="font-mono">list_directory</span>,{" "}
+        <span className="font-mono">read_file</span>,{" "}
+        <span className="font-mono">search_files</span>,{" "}
+        <span className="font-mono">write_file</span> and{" "}
+        <span className="font-mono">edit_file</span>, scoped to one directory
+        you choose per chat with the <span className="font-mono">+</span>{" "}
+        button next to the message box. Nothing outside that directory is
+        reachable, and chats without one see no file tools at all. Every write
+        and edit asks you first, showing the path and the change. Off by
+        default. In-process — files never leave the machine.
       </>
     ),
   },

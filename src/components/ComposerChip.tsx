@@ -1,4 +1,4 @@
-import { X } from "lucide-react";
+import { FolderOpen, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { Persona } from "@/lib/personas";
 import type { Tone } from "@/lib/tones";
@@ -127,4 +127,39 @@ export function ToneChip({
       <ChipRemove label={`Remove ${tone.label} tone`} onClick={onRemove} />
     </div>
   );
+}
+
+/** The chat's workspace directory. A config chip, not an attachment one:
+ *  the folder outlives the message the way a persona does — it scopes every
+ *  future turn until it's removed — and nothing about it is sent as payload.
+ *
+ *  Only the last two path segments are shown. A full absolute path is too
+ *  wide for the chip row and the tail is the part that identifies the
+ *  project; the whole path stays in the tooltip. */
+export function WorkspaceChip({
+  root,
+  onRemove,
+}: {
+  root: string;
+  onRemove: () => void;
+}) {
+  return (
+    <div
+      className={composerChipClass("config")}
+      title={`Workspace: ${root}\nThe model can read and search this folder. Writes ask you first.`}
+    >
+      <FolderOpen className={composerChipIconClass("config")} />
+      <span className="max-w-[18rem] truncate">{shortenPath(root)}</span>
+      <ChipRemove label="Remove workspace directory" onClick={onRemove} />
+    </div>
+  );
+}
+
+/** `C:\Users\me\code\loach` → `code/loach`. Splits on both separators so a
+ *  Windows path shortens the same way a POSIX one does, and falls back to
+ *  the original string for anything it can't split (a bare drive root). */
+export function shortenPath(p: string): string {
+  const parts = p.split(/[\\/]+/).filter(Boolean);
+  if (parts.length === 0) return p;
+  return parts.slice(-2).join("/");
 }

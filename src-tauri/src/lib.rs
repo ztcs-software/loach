@@ -283,6 +283,8 @@ pub fn run() {
             commands::update_session_params,
             commands::update_session_label,
             commands::set_session_folder,
+            commands::pick_session_workspace,
+            commands::clear_session_workspace,
             commands::list_folders,
             commands::create_folder,
             commands::rename_folder,

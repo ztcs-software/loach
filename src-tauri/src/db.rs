@@ -77,6 +77,18 @@ pub struct Session {
     /// date-grouped list instead of taking them with it.
     #[serde(default)]
     pub folder_id: Option<String>,
+    /// Absolute, canonical path of the directory this chat's filesystem
+    /// tools are scoped to, or null when the user hasn't picked one — which
+    /// is every chat by default. Written only by
+    /// `commands::pick_session_workspace`, which canonicalizes what the
+    /// native folder picker returned, so the value is always a real
+    /// directory as of the moment it was chosen.
+    ///
+    /// Deliberately scrubbed by [`Database::snapshot`]: it's machine-local
+    /// state, meaningless on another box, and restoring someone else's
+    /// export shouldn't hand their path to your model.
+    #[serde(default)]
+    pub workspace_root: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -780,6 +792,15 @@ impl Database {
             )?;
         }
 
+        // Directory a chat's filesystem tools are scoped to (v1.5). Null on
+        // every existing row, which is the correct default: the workspace
+        // tools stay unavailable until the user picks a folder for that
+        // specific chat. No FK and no index — it's a leaf value read once
+        // per turn by `chat_stream`, never joined on.
+        if !has_column(&conn, "sessions", "workspace_root")? {
+            conn.execute_batch("ALTER TABLE sessions ADD COLUMN workspace_root TEXT;")?;
+        }
+
         // Indexes for the columns added above. Created unconditionally rather
         // than inside each column's probe: `IF NOT EXISTS` makes them cheap
         // no-ops once present, and pairing them with the probe meant a crash
@@ -897,7 +918,7 @@ impl Database {
     pub fn list_sessions(&self) -> Result<Vec<Session>> {
         self.with_read(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, title, provider, model, system_prompt, params_json, space_id, pinned_at, archived_at, forked_from_session_id, label, folder_id, created_at, updated_at
+                "SELECT id, title, provider, model, system_prompt, params_json, space_id, pinned_at, archived_at, forked_from_session_id, label, folder_id, workspace_root, created_at, updated_at
                  FROM sessions ORDER BY updated_at DESC",
             )?;
             let rows = stmt
@@ -915,8 +936,9 @@ impl Database {
                         forked_from_session_id: r.get(9)?,
                         label: r.get(10)?,
                         folder_id: r.get(11)?,
-                        created_at: r.get(12)?,
-                        updated_at: r.get(13)?,
+                        workspace_root: r.get(12)?,
+                        created_at: r.get(13)?,
+                        updated_at: r.get(14)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -953,6 +975,7 @@ impl Database {
             forked_from_session_id: None,
             label: None,
             folder_id: None,
+            workspace_root: None,
             created_at: now,
             updated_at: now,
         })
@@ -1010,8 +1033,8 @@ impl Database {
         tx.execute(
             "INSERT INTO sessions (id, title, provider, model, system_prompt, params_json,
                                    space_id, pinned_at, archived_at, forked_from_session_id,
-                                   folder_id, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, ?8, ?9, ?10, ?10)",
+                                   folder_id, workspace_root, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, ?8, ?9, ?10, ?11, ?11)",
             params![
                 new_id,
                 source.title,
@@ -1022,6 +1045,7 @@ impl Database {
                 source.space_id,
                 source.id,
                 source.folder_id,
+                source.workspace_root,
                 now,
             ],
         )?;
@@ -1076,6 +1100,10 @@ impl Database {
             // conversation, and a branch of it belongs in the same drawer;
             // dropping the fork back into "Today" would make it look lost.
             folder_id: source.folder_id,
+            // Inherited for the same reason: a fork continues the same piece
+            // of work, and the whole point of branching a coding chat is to
+            // try something else against the same project.
+            workspace_root: source.workspace_root,
             created_at: now,
             updated_at: now,
         })
@@ -1172,6 +1200,19 @@ impl Database {
     /// `pin_session`, this deliberately leaves `updated_at` alone: chats
     /// inside a folder are still ordered by it, and filing a chat is not a
     /// reason to shuffle it to the top of its new drawer.
+    /// Point a chat's filesystem tools at `root`, or pass `None` to take the
+    /// directory away. Callers must hand over an already-canonicalized path
+    /// — the sandbox in `tools::fs` compares canonical against canonical,
+    /// and a root stored in any other form would fail every prefix check.
+    pub fn set_session_workspace_root(&self, id: &str, root: Option<&str>) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "UPDATE sessions SET workspace_root = ?1 WHERE id = ?2",
+            params![root, id],
+        )?;
+        Ok(())
+    }
+
     pub fn set_session_folder(&self, id: &str, folder_id: Option<&str>) -> Result<()> {
         let conn = self.conn.lock();
         conn.execute(
@@ -1208,7 +1249,7 @@ impl Database {
     pub fn get_session(&self, id: &str) -> Result<Option<Session>> {
         self.with_read(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, title, provider, model, system_prompt, params_json, space_id, pinned_at, archived_at, forked_from_session_id, label, folder_id, created_at, updated_at
+                "SELECT id, title, provider, model, system_prompt, params_json, space_id, pinned_at, archived_at, forked_from_session_id, label, folder_id, workspace_root, created_at, updated_at
                  FROM sessions WHERE id = ?1",
             )?;
             let mut rows = stmt.query(params![id])?;
@@ -1226,8 +1267,9 @@ impl Database {
                     forked_from_session_id: r.get(9)?,
                     label: r.get(10)?,
                     folder_id: r.get(11)?,
-                    created_at: r.get(12)?,
-                    updated_at: r.get(13)?,
+                    workspace_root: r.get(12)?,
+                    created_at: r.get(13)?,
+                    updated_at: r.get(14)?,
                 }))
             } else {
                 Ok(None)
@@ -2656,12 +2698,26 @@ impl Database {
                 s
             })
             .collect();
+        // Workspace roots are machine-local absolute paths. They mean nothing
+        // on the machine a snapshot is restored to, and carrying them would
+        // let an export hand a recipient's model a directory they never
+        // picked. Scrubbed for the same reason MCP credentials are, one
+        // field up: a snapshot is a portable document, not a copy of this
+        // installation's local state.
+        let sessions: Vec<Session> = self
+            .list_sessions()?
+            .into_iter()
+            .map(|mut s| {
+                s.workspace_root = None;
+                s
+            })
+            .collect();
         Ok(DatabaseSnapshot {
             schema: "loach/v1".to_string(),
             exported_at: Utc::now().timestamp_millis(),
             loach_version: env!("CARGO_PKG_VERSION").to_string(),
             data: SnapshotData {
-                sessions: self.list_sessions()?,
+                sessions,
                 folders: self.list_folders()?,
                 messages: self.all_messages()?,
                 spaces: self.list_spaces()?,
@@ -2738,6 +2794,12 @@ impl Database {
             )?;
         }
 
+        // `workspace_root` is deliberately absent from this column list, so a
+        // restored session always comes back without a directory. `snapshot`
+        // scrubs the field on the way out; omitting it here is the other half
+        // of that, and it also means a hand-edited snapshot can't grant a
+        // model access to a path the user never picked. Don't "complete" this
+        // list.
         for s in &d.sessions {
             tx.execute(
                 "INSERT INTO sessions (id, title, provider, model, system_prompt, params_json,
@@ -3388,6 +3450,51 @@ mod tests {
         let fs = snap.data.mcp_servers.iter().find(|r| r.name == "fs").unwrap();
         assert_eq!(fs.command.as_deref(), Some("npx"));
         assert!(fs.args_json.is_some());
+    }
+
+    /// A workspace root is local to this machine, so it must not travel in
+    /// a snapshot — neither out (someone else's model learning your paths)
+    /// nor back in (a hand-edited export granting a directory nobody picked).
+    #[test]
+    fn snapshot_scrubs_and_never_restores_the_workspace_root() {
+        let (db, _dir) = fresh_db();
+        let s = db
+            .create_session("coding", "ollama", "llama3", None, None)
+            .expect("session");
+        db.set_session_workspace_root(&s.id, Some("/home/me/project"))
+            .expect("set root");
+        assert_eq!(
+            db.get_session(&s.id).unwrap().unwrap().workspace_root.as_deref(),
+            Some("/home/me/project"),
+            "the root should round-trip through the session row"
+        );
+
+        let mut snap = db.snapshot().expect("snapshot");
+        assert!(
+            snap.data.sessions.iter().all(|r| r.workspace_root.is_none()),
+            "workspace_root leaked into the export"
+        );
+
+        // Even if the file is edited to put one back, restore must drop it.
+        snap.data.sessions[0].workspace_root = Some("/etc".to_string());
+        let (db2, _dir2) = fresh_db();
+        db2.restore_snapshot(&snap).expect("restore");
+        assert_eq!(
+            db2.get_session(&s.id).unwrap().unwrap().workspace_root,
+            None,
+            "a hand-edited snapshot granted a workspace root"
+        );
+    }
+
+    #[test]
+    fn workspace_root_clears_back_to_none() {
+        let (db, _dir) = fresh_db();
+        let s = db
+            .create_session("coding", "ollama", "llama3", None, None)
+            .expect("session");
+        db.set_session_workspace_root(&s.id, Some("/tmp/x")).unwrap();
+        db.set_session_workspace_root(&s.id, None).unwrap();
+        assert_eq!(db.get_session(&s.id).unwrap().unwrap().workspace_root, None);
     }
 
     /// A pre-1.5 export has no transport / approval fields at all; it must
