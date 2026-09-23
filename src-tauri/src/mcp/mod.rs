@@ -286,13 +286,9 @@ async fn collect_one(server: &McpServer, slug: &str) -> Result<Vec<McpToolDef>> 
 
 /// Invoke one tool by its `server_id` + raw `name`. Looks the server up
 /// fresh from the DB per call so a URL or header change between the chat
-/// request building and the tool dispatch is reflected immediately. We
-/// deliberately *don't* gate on `server.enabled` — `aggregate_tools`
-/// already filters disabled servers out of the catalog the model sees,
-/// so this path only runs for tools that were exposed when the turn
-/// started, and rechecking here would race the actual `tools/call`
-/// either way. Returns a structured result the chat pipeline can feed
-/// back to the model as a `tool`-role message.
+/// request building and the tool dispatch is reflected immediately, and
+/// refuses a server that is disabled by then. Returns a structured result
+/// the chat pipeline can feed back to the model as a `tool`-role message.
 pub async fn dispatch_tool_call(
     db: &Database,
     server_id: &str,
@@ -317,14 +313,17 @@ pub async fn dispatch_tool_call(
         .into_iter()
         .find(|s| s.id == server_id)
         .ok_or_else(|| anyhow!("MCP server `{server_id}` is no longer configured"))?;
-    // We *don't* recheck `server.enabled` here: `aggregate_tools` already
-    // filters disabled servers out of the catalog the model sees, so this
-    // path is only reached for tools the user had enabled at chat-stream
-    // start. A check here would still race the actual `tools/call` (the
-    // user can flip the toggle during `initialize().await`), so the
-    // honest outcome is the same — let the call run, and let the server
-    // itself fail naturally if the operator killed the integration mid-
-    // conversation.
+    // A disabled row must never run, even for a tool the model was offered
+    // when the turn started. This is the consent gate for stdio: `mcp_save`
+    // skips the native dialog for a row saved *disabled* (it can't run), so
+    // without this check a row re-saved disabled with a new command — say
+    // while an approval card is up — would be spawned here with a command
+    // line nobody confirmed. Checking the row we are about to use is enough:
+    // flipping the toggle after this point only races a command that was
+    // already approved.
+    if !server.enabled {
+        bail!("MCP server `{}` is disabled", server.name);
+    }
     // Reuse an already-initialized session for this server when we have one.
     // Building a fresh one per call meant every `tools/call` paid a DNS
     // resolve, a new TLS handshake, and the two-POST `initialize` dance
@@ -785,5 +784,38 @@ mod tests {
         let mut renamed = stdio.clone();
         renamed.name = "y".into();
         assert_eq!(session_fingerprint(&stdio), session_fingerprint(&renamed));
+    }
+
+    /// Saving a stdio row *disabled* skips the consent dialog, so a tool
+    /// call against it — from a catalogue built before it was switched off,
+    /// or after it was re-saved with a new command — must be refused rather
+    /// than spawn a command line nobody confirmed.
+    #[tokio::test]
+    async fn dispatch_refuses_a_disabled_server_without_spawning_it() {
+        let (db, _dir) = fresh_db();
+        let mut row = http_row("fs");
+        row.transport = "stdio".into();
+        row.url = String::new();
+        row.command = Some("loach-test-no-such-program".into());
+        row.args_json = Some("[]".into());
+        row.enabled = false;
+        let saved = db.upsert_mcp_server(&row).expect("insert");
+
+        let err = dispatch_tool_call(&db, &saved.id, "read_file", &serde_json::json!({}), None)
+            .await
+            .expect_err("a disabled server must not run");
+        assert!(err.to_string().contains("disabled"), "{err:#}");
+
+        // Control: enabled, the same row does try to start its program —
+        // so the refusal above comes from the gate, not from the command.
+        db.upsert_mcp_server(&McpServer {
+            enabled: true,
+            ..saved.clone()
+        })
+        .expect("enable");
+        let err = dispatch_tool_call(&db, &saved.id, "read_file", &serde_json::json!({}), None)
+            .await
+            .expect_err("the program doesn't exist");
+        assert!(!err.to_string().contains("disabled"), "{err:#}");
     }
 }
