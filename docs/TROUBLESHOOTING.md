@@ -85,6 +85,9 @@ If another chat is busy, your message is parked in a FIFO queue.
 - Open the chat that's waiting: its transcript shows a **Waiting for other
   chats to finish…** banner with **Respond now**. That cancels the current
   runner and starts yours.
+- If nothing seems to be generating, the running chat may be waiting on a
+  tool approval card — open it and answer the card (see "The reply is
+  stuck on 'Waiting for your approval…'").
 
 ### The reply stopped halfway and shows an error
 
@@ -374,25 +377,38 @@ an error.
 
 ### A local (stdio) MCP server won't start
 
-**Problem.** Saving or testing a stdio server fails with "couldn't
-start", "exited before replying", or a timeout.
+**Problem.** **Test connection** on a stdio server fails, or a chat shows
+an error for it, with "couldn't start", "exited before replying", or a
+timeout. (Saving doesn't start the server — it first runs when you test
+it, with **Test connection** or `/tools`, or send a message with it
+enabled.)
 
 **Solution.**
 
-1. Read the end of the error — Loach quotes the last lines the server
-   wrote to stderr (`npm ERR! 404`, a Python traceback, "command not
-   found"). That is usually the whole answer.
+1. Read the end of the error — when the server process exits, Loach
+   quotes the last lines it wrote to stderr (`npm ERR! 404`, a Python
+   traceback, "command not found"). That is usually the whole answer. The
+   note in a chat is cut short, so use **Test connection** in
+   **Settings → MCP** to see the full message. A timeout doesn't include
+   stderr; run the command in a terminal to see what it's waiting on.
 2. Make sure the runtime the command needs is installed and on `PATH`
-   for your user: Node.js for `npx`, `uv` for `uvx`. Loach launches the
-   program with your normal environment; if it works in a fresh terminal
-   it should work here.
+   for your user: Node.js for `npx`, `uv` for `uvx`. Loach hands the
+   program its own environment, read when Loach started — if you installed
+   the runtime since, restart Loach.
+   - On macOS and Linux, an app started from the Dock or an app menu
+     doesn't read your shell's startup files, so tools installed through
+     Homebrew, nvm, pyenv and the like can be missing even though they
+     work in a terminal. Run `echo $PATH` in a terminal and add the result
+     to the server's environment variables as `PATH=…`; Loach then finds
+     the command on that `PATH` and the server inherits it.
 3. On Windows, `npx` / `uvx` are `.cmd` shims. Loach resolves them for
    you, but a full path to the `.cmd` file also works.
 4. First runs of `npx -y …` download the package. Startup is allowed
    **60 s**; a slow network can exceed that — run the command once in a
    terminal to warm the cache, then test again.
 5. Put one argument per line. Don't quote arguments the way you would in
-   a shell — Loach passes each line verbatim.
+   a shell — Loach passes each line as one argument, spaces included
+   (only leading and trailing whitespace is trimmed).
 6. If you clicked **Cancel** on the "Run MCP server …?" system dialog,
    nothing was saved or started. Save again and choose **Start server**.
 
@@ -411,13 +427,15 @@ choose **Start server** to enable the row. HTTP servers import enabled.
 **Problem.** The assistant bubble shows an approval card and nothing else
 happens.
 
-**Solution.** The model asked to run an MCP tool and Loach is waiting for
-you — answer **Allow once**, **Always allow**, or **Deny** on the card. A
-prompt left unanswered for 10 minutes is treated as a denial, and the
-Stop button cancels the reply. To stop being asked for a server you
-trust, open it in **Settings → MCP** and turn off **Ask before each tool
-call**; to re-enable prompts for tools you answered "Always allow" for,
-use **Ask again for all** in the same editor.
+**Solution.** The model asked to run an MCP tool, or to change a file in
+the chat's workspace folder, and Loach is waiting for you — answer
+**Allow once**, **Always allow** (**Allow … for this chat** for a file
+change), or **Deny** on the card. A prompt left unanswered for 10 minutes
+is treated as a denial, and the Stop button cancels the reply. Until you
+answer, other chats queue behind this one. To stop being asked for a
+server you trust, open it in **Settings → MCP** and turn off **Ask before
+each tool call**; to re-enable prompts for tools you answered "Always
+allow" for, use **Ask again for all** in the same editor and save.
 
 ---
 
@@ -432,7 +450,9 @@ tab.
 
 - Memory extraction only runs **after a complete assistant reply**.
   Cancelled or errored turns are skipped.
-- The toggle on the Space's Memory tab must be on.
+- The toggle on the Space's Memory tab must be on. Outside a Space,
+  memory stays off until you turn on **Settings → Features → Global
+  memories**.
 - Each candidate fact must be **under 280 characters**. Longer "facts"
   are dropped.
 - Memory uses the same provider/model the chat is using. Tiny models
@@ -442,9 +462,11 @@ tab.
 
 **Problem.** A bad fact landed in long-term memory.
 
-**Solution.** Open the Space's **Memory** tab and click the row to edit or
-delete it. Turning the toggle off only stops *new* writes; existing
-memories still ride along until you remove them.
+**Solution.** Right after it lands, click **Undo** on the "Saved to
+memory" toast. Later, open the Space's **Memory** tab — or, for global
+memory, **Settings → Features → Manage global memories** — and click the
+row to edit or delete it. Turning the toggle off only stops *new* writes;
+existing memories still ride along until you remove them.
 
 ### Reference sources won't add to a Space
 

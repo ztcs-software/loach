@@ -47,6 +47,7 @@ Behind a calm, beautifully crafted UI sits a rich feature set - ready when you n
 
 #### Organizing chats & content
 - **Spaces** - group chats around a project, with shared instructions, reference sources and memory. 
+- **Global memory** - opt-in memory for chats outside Spaces: after each reply Loach notes lasting facts about you, updates or retires ones that changed, and every change comes with an Undo.
 - **Chat folders** - drag one chat onto another in the sidebar to group them into a named folder.
 - **Chat labels** - tag a chat with a colour that shows as a dot in the sidebar, Space view and chat menus.
 - **Snippets** - save reusable prompts with an optional pinned model and click `Run` to start a fresh chat pre-filled and ready to send.
@@ -67,6 +68,7 @@ Behind a calm, beautifully crafted UI sits a rich feature set - ready when you n
 #### Model tools & capabilities
 - **Tools** - let models call local tools including calculate, date/time, count, hash, UUID, base64, JSON, unit convert, text diff, sort, IP math and PDF generation. 
 - **PDF generation** - the built-in pdf tool turns a model's structured spec (headings, lists, tables, page breaks) into a real PDF attached to the reply.
+- **Workspace folders** - give a chat a folder and the model can list, find, read, search and edit the files in it, asking before it writes, edits, moves or deletes anything. A `LOACHFILE.md` at the folder root adds the project's own instructions to every turn.
 - **MCP support** - register Model Context Protocol servers over Streamable HTTP or as local stdio processes (`npx`, `uvx`, …), test the handshake, inspect the tools they provide, and approve each tool call in the chat before it runs. 
 - **Web fetch** - add URLs to messages and they will be fetched, sanitized and inlined to context. 
 - **Temporal awareness** - inject current date, time, weekday and timezone into the system prompt so models can answer to "what day is it today?".

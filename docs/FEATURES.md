@@ -221,6 +221,9 @@ FIFO queue:
 - A waiting chat shows a **Waiting for other chats to finish…** banner in
   its transcript with **Respond now** to jump the queue and cancel the
   current runner (and **Cancel** to withdraw the request).
+- A reply waiting on a tool approval card (§8.2, §8.4) keeps its turn, so
+  other chats queue behind it until you answer the card — or use
+  **Respond now** in a waiting chat, which cancels the waiting reply.
 - A cancelled or errored stream persists the partial output and a visible
   error tail so the bubble is never silently empty.
 
@@ -480,10 +483,12 @@ order, so "prefers A over B" is not mistaken for "prefers B over A").
   stop.
 - **Coverage** — a reply that finishes while more messages are queued, or
   an extraction aborted by the next send, is parked and folded into the
-  next extraction in that chat (up to three turns per run).
+  next extraction in that chat (up to three turns per run). Parked turns
+  are held in memory, so quitting Loach drops them.
 - **Caps** — the newest 60 memories go into both the chat prompt and the
   extractor prompt, so every fact the model sees is one the extractor can
-  still correct. Each fact is rejected if longer than 280 chars.
+  still correct. A fact the extractor saves or rewrites is rejected if
+  longer than 280 chars; facts you add or edit yourself aren't capped.
 
 Memories are silently injected into the system prompt of every chat inside
 the Space as a `--- Space memory ---` bulleted list. Cancel / error turns
@@ -494,11 +499,12 @@ never trigger extraction, since the assistant text is incomplete.
 Settings → Features → **Global memories** (off by default) extends the
 same mechanism to chats outside any Space: after each reply the extractor
 runs against the global list, and a `--- Global memory ---` block is
-injected into every chat, inside or outside a Space (Space facts win on
-conflict). Space chats keep writing to their own Space memory; the global
-facts are shown to their extractor as read-only context so they aren't
-duplicated. **Manage global memories** opens the same editor as a Space's
-Memory tab. Turning the setting off stops both extraction and injection.
+injected into every chat, inside or outside a Space (the prompt tells the
+model that Space facts win on conflict). Space chats keep writing to their
+own Space memory; the global facts are shown to their extractor as
+read-only context so they aren't duplicated. **Manage global memories**
+opens the same editor as a Space's Memory tab. Turning the setting off
+stops both extraction and injection.
 Private Chat never reads or writes memory of either kind.
 
 ---
@@ -708,10 +714,14 @@ Loach speaks two MCP transports. Configure servers in **Settings → MCP**.
   speaks newline-delimited JSON-RPC over its pipes — the way most
   published servers ship. The process stays running between turns and is
   stopped when the server is disabled, edited, or deleted, and when Loach
-  exits. Startup is allowed 60 s (first-run package downloads), each
-  request 30 s, and the last lines of the server's stderr are quoted in
-  errors so a failed launch says why. On Windows a bare `npx` resolves to
-  `npx.cmd` through `PATH`/`PATHEXT`, so commands work as typed.
+  exits. Startup is allowed 60 s (first-run package downloads) and each
+  request 30 s. When the process exits or stops accepting input, the last
+  lines of its stderr are quoted in the error so a failed launch says why
+  (a timeout doesn't include them). On Windows a bare `npx` resolves to
+  `npx.cmd` through Loach's own `PATH`/`PATHEXT`, so commands work as
+  typed; a `PATH` set in the server's environment isn't used for that
+  lookup. On macOS and Linux the command is looked up on the server's
+  `PATH` when you set one in its environment, and on Loach's otherwise.
 
 For each server:
 
@@ -730,13 +740,17 @@ native OS dialog quotes the exact command line (and the *names* of any
 environment variables, never their values) and asks whether to start it.
 The dialog is raised by the Rust side, not by the web view, so a
 compromised renderer can't get a program run without a person clicking
-through it. Approved command lines are remembered for the rest of the
-session, so a test followed by a save asks once. Snapshot imports store
-stdio servers **disabled** for the same reason; enabling one in Settings
-raises the dialog.
+through it. Snapshot imports store stdio servers **disabled** for the
+same reason; enabling one in Settings raises the dialog. Saving a server
+switched off doesn't ask; turning it on does. Approved command lines are
+remembered for the rest of the session, so a test followed by a save asks
+once. The dialog guards changes, not every launch: after a restart, an
+enabled server you already approved starts without asking.
 
 Environment variables are treated like headers: they hold API keys, so
-they are scrubbed from exports, exactly like HTTP headers.
+they are scrubbed from exports, exactly like HTTP headers. Arguments are
+exported as typed, so pass secrets (a database connection string, say)
+through an environment variable rather than an argument.
 
 #### Per-call approvals
 
@@ -746,17 +760,19 @@ wants to run — server, tool, and the arguments — with three answers:
 - **Allow once** — run it this time.
 - **Always allow `<tool>`** — run it, and stop asking for this tool on
   this server. The choice is stored on the server row and listed in its
-  editor under *Always allowed*, where **Ask again for all** clears it.
+  editor under *Always allowed*, where **Ask again for all** clears it
+  once you save the server.
 - **Deny** — the tool does not run. The model is told the user declined
   and continues without the result.
 
 A prompt left unanswered for 10 minutes counts as a denial, and **Stop**
-cancels the reply as usual. Turning **Ask before each tool call** off on
+cancels the reply as usual. While the card waits, other chats queue
+behind the reply (§2.4). Turning **Ask before each tool call** off on
 a server skips the prompt for all of its tools; the server row shows an
 *Auto-approve* badge so the exception stays visible. Built-in tools
 (§8.3) never ask — they run in-process with no network or disk access —
-except the four workspace file tools that change files (§8.4), which
-always do.
+except the four workspace file tools that change files (§8.4), which ask
+unless you've allowed them for the chat.
 
 ### 8.3 Built-in tools
 
@@ -802,7 +818,9 @@ chip. Picking a folder also switches on **Workspace files** in **Settings
 turned off again. While a reply is running in the chat, the folder can't
 be changed or removed — that turn keeps the folder it started with. Forking
 a chat carries the folder over; exports and imports never do — a path means
-nothing on another machine.
+nothing on another machine. If the folder is later moved or deleted, the
+chip still shows it but the model gets no folder tools and no project
+instructions until you pick the folder again.
 
 Eight tools appear in the model's catalogue only while a chat has a
 folder; without one the model never sees them. All paths are relative to
@@ -827,15 +845,21 @@ or moving a link acts on the link itself, never on what it points to.
   Windows and macOS too.
 - **delete_file** — remove one file or one empty directory per call.
 
+`find_files` and `search_files` go at most eight levels below the
+directory they start from; anything deeper isn't found, so point them at a
+subdirectory for deeply nested trees.
+
 The four that change files **ask you first, every time**. The consent card
-shows the change itself rather than raw arguments: the full contents of a
+shows the change itself rather than raw arguments: the contents of a
 write, a `-`/`+` diff for an edit, `from → to` for a move, and a red
-warning for a deletion. **Allow once** runs that call; **Allow … for this
-chat** stops asking for that tool in this chat until you change or remove
-its folder, or quit Loach (the grant is kept in memory, and covers only
-Loach's own tool — never an MCP server's tool of the same name); **Deny**
-tells the model to carry on without it. Line endings are preserved: editing
-or overwriting a CRLF file keeps it CRLF.
+warning for a deletion. A long write is cut at 20,000 characters in the
+card and a long diff at 400 lines, each with a note saying so — the whole
+change is still what gets applied. **Allow once** runs that call;
+**Allow … for this chat** stops asking for that tool in this chat until
+you change or remove its folder, or quit Loach (the grant is kept in
+memory, and covers only Loach's own tool — never an MCP server's tool of
+the same name); **Deny** tells the model to carry on without it. Line
+endings are preserved: editing or overwriting a CRLF file keeps it CRLF.
 
 So is the text encoding. Files that aren't UTF-8 — Windows-1250 or another
 legacy code page, or UTF-16 with a byte-order mark (what PowerShell 5.1
@@ -1305,13 +1329,16 @@ verification happens before the binary is replaced.
   The Tauri global is disabled; the renderer talks to the backend only
   through registered commands.
 - **File I/O is backend-owned** — every save dialog, the Data import
-  dialog, and the actual read / write happen in Rust. The renderer can't
-  pick a path itself (it only learns where a backup landed after the
-  write), so a compromised UI cannot read or overwrite arbitrary files.
+  dialog, the workspace folder picker (§8.4), and the actual read / write
+  happen in Rust. The renderer can't pick a path itself (it only learns
+  where a backup landed after the write), so a compromised UI cannot read
+  or overwrite arbitrary files.
 - **Running a program is backend-gated** — a stdio MCP server's command
-  line is confirmed in a native OS dialog before it is saved or started
-  (§8.2), and every MCP tool call asks in the chat before it runs unless
-  you opted a server out.
+  line is confirmed in a native OS dialog before it can start (§8.2), and
+  every MCP tool call asks in the chat before it runs unless you opted that
+  server or tool out. The in-chat approval cards guard against what the
+  model asks for; they're answered in the app window, so the native dialog
+  is the barrier against a compromised UI, not the cards.
 
 ---
 
