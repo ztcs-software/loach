@@ -16,8 +16,9 @@
 //!
 //! ## The sandbox
 //!
-//! Everything funnels through [`resolve_read`] / [`resolve_target`], which
-//! are the only places a model-supplied string becomes a path. Both:
+//! Everything funnels through [`resolve_read`] / [`resolve_target`] /
+//! [`resolve_entry`], which are the only places a model-supplied string
+//! becomes a path. All three:
 //!
 //!   1. reject absolute paths, drive-qualified paths (`C:foo`), and any
 //!      `..` component *before* touching the filesystem,
@@ -26,7 +27,12 @@
 //!
 //! Step 3 is the one that matters: a symlink inside the workspace pointing
 //! at `/etc` canonicalizes to `/etc`, fails the prefix check, and is
-//! refused. Step 1 alone would not catch it.
+//! refused. Step 1 alone would not catch it. A link whose target doesn't
+//! exist can't be canonicalized at all, and is refused too — writing
+//! through it would create that target, wherever it points.
+//!
+//! Files are read and written in their own text encoding, not assumed to
+//! be UTF-8 — see [`encoding`].
 //!
 //! The root handed to every dispatcher is canonical — `commands::chat_stream`
 //! canonicalizes the stored path each turn — so the prefix comparison is
@@ -43,6 +49,9 @@ use std::path::{Component, Path, PathBuf};
 use serde_json::{json, Value};
 
 use crate::mcp::McpCallResult;
+
+mod encoding;
+use encoding::TextEncoding;
 
 pub const LIST_DIRECTORY: &str = "list_directory";
 pub const FIND_FILES: &str = "find_files";
@@ -107,8 +116,8 @@ const MAX_DEPTH: u32 = 8;
 /// tree costs a stat, not an allocation.
 const MAX_SEARCH_FILE_BYTES: u64 = 512 * 1024;
 /// How much of an existing file `write_file` samples to learn its line
-/// endings before overwriting it.
-const LINE_ENDING_SNIFF_BYTES: u64 = 64 * 1024;
+/// endings and text encoding before overwriting it.
+const FORMAT_SNIFF_BYTES: u64 = 64 * 1024;
 
 /// Project instructions file, read from the workspace root on every turn
 /// and appended to the system prompt — the same idea as a `CLAUDE.md` or
@@ -212,6 +221,12 @@ fn resolve_read(root: &Path, rel: &str) -> Result<PathBuf, String> {
 /// [`vet_relative`], so every one is `Normal` — no `..`, no root — and
 /// appending them to an in-root canonical base therefore cannot leave the
 /// root.
+///
+/// "Doesn't exist" has to mean *nothing* is there. A link whose target is
+/// missing fails to canonicalize exactly like an absent name, but a write
+/// through it creates that target — possibly far outside the root — so a
+/// component that fails to resolve while still having an entry of its own
+/// is refused, not treated as new.
 fn resolve_target(root: &Path, rel: &str) -> Result<PathBuf, String> {
     let vetted = vet_relative(rel)?;
     if vetted.as_os_str().is_empty() {
@@ -238,7 +253,17 @@ fn resolve_target(root: &Path, rel: &str) -> Result<PathBuf, String> {
                     base = canon;
                     continue;
                 }
-                Err(_) => descending = false,
+                Err(_) if fs::symlink_metadata(&next).is_err() => descending = false,
+                // Deliberately silent about where the link points, for the
+                // same reason as `ensure_inside`.
+                Err(_) => {
+                    return Err(format!(
+                        "`{}` is, or goes through, a link that doesn't resolve (its \
+                         target is missing or it loops). Refused: writing through it \
+                         could create a file outside the workspace.",
+                        display_rel(rel)
+                    ))
+                }
             }
         }
         remaining.push(part);
@@ -254,6 +279,30 @@ fn resolve_target(root: &Path, rel: &str) -> Result<PathBuf, String> {
         target.push(part);
     }
     Ok(target)
+}
+
+/// Resolve an existing entry that is about to be moved or deleted *as an
+/// entry*: its directory is canonicalized and prefix-checked like any other
+/// path, but the last component is not followed. A link is therefore the
+/// link itself — deleting one removes the link and leaves what it points
+/// at alone, wherever that is — while anything else resolves exactly as
+/// [`resolve_read`] would. The empty path is the root, as there; callers
+/// refuse it in their own words.
+fn resolve_entry(root: &Path, rel: &str) -> Result<PathBuf, String> {
+    let vetted = vet_relative(rel)?;
+    let (Some(parent), Some(name)) = (vetted.parent(), vetted.file_name()) else {
+        return resolve_read(root, rel);
+    };
+    let unreadable = |e: std::io::Error| format!("`{}` is not readable: {e}", display_rel(rel));
+    let dir = root.join(parent).canonicalize().map_err(unreadable)?;
+    ensure_inside(root, &dir, rel)?;
+    let entry = dir.join(name);
+    let meta = fs::symlink_metadata(&entry).map_err(unreadable)?;
+    if meta.file_type().is_symlink() {
+        return Ok(entry);
+    }
+    // Canonical for everything else, so the name carries its on-disk case.
+    entry.canonicalize().map_err(unreadable)
 }
 
 /// Resolve a file to create or overwrite.
@@ -318,17 +367,49 @@ fn match_line_endings(existing_ending: &str, content: &str) -> String {
     }
 }
 
-/// Line ending of the file at `path`, from its first 64 KiB. Anything that
-/// can't be read counts as LF; the write that follows will report the real
-/// error.
-fn sniff_line_ending(path: &Path) -> &'static str {
+/// Text encoding and line ending of the file at `path`, from its first
+/// 64 KiB. Anything that can't be read, or reads as binary, counts as plain
+/// UTF-8 with LF: the new content then goes to disk exactly as given, and
+/// the write that follows reports any real error.
+fn sniff_format(path: &Path) -> (TextEncoding, &'static str) {
+    const PLAIN: (TextEncoding, &str) = (TextEncoding::Utf8 { bom: false }, "\n");
     let mut head = Vec::new();
     let read = fs::File::open(path)
-        .and_then(|f| f.take(LINE_ENDING_SNIFF_BYTES).read_to_end(&mut head));
+        .and_then(|f| f.take(FORMAT_SNIFF_BYTES).read_to_end(&mut head));
     if read.is_err() {
-        return "\n";
+        return PLAIN;
     }
-    line_ending_of(&String::from_utf8_lossy(&head))
+    let complete = (head.len() as u64) < FORMAT_SNIFF_BYTES;
+    match encoding::decode(&head, complete) {
+        Some(d) => (d.encoding, line_ending_of(&d.text)),
+        None => PLAIN,
+    }
+}
+
+/// Encode a file's new text in the encoding it already has, or explain why
+/// that isn't possible without losing characters.
+fn encode_for(rel: &str, text: &str, enc: TextEncoding) -> Result<Vec<u8>, String> {
+    encoding::encode(text, enc).map_err(|missing| {
+        let shown: Vec<String> = missing.iter().map(|c| format!("`{c}`")).collect();
+        format!(
+            "`{}` is stored as {}, which has no way to write {}. Files keep their \
+             existing encoding, so use characters it supports instead.",
+            display_rel(rel),
+            enc.name(),
+            shown.join(", ")
+        )
+    })
+}
+
+/// What `edit_file` / `write_file` add to their result for a file that
+/// isn't UTF-8, so the model knows its non-ASCII text went through a
+/// conversion.
+fn kept_encoding_note(enc: TextEncoding) -> String {
+    if enc.is_utf8() {
+        String::new()
+    } else {
+        format!(" Kept its {} encoding.", enc.name())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -340,9 +421,11 @@ fn sniff_line_ending(path: &Path) -> &'static str {
 ///
 /// Resolved through the same sandbox as every tool path, so a
 /// `LOACHFILE.md` that is a symlink out of the tree is refused rather than
-/// followed. Anything else that can't be used — a directory by that name, a
-/// binary, a blank file, an I/O error — also counts as absent: the file is
-/// a courtesy to the model, not something a turn should fail on.
+/// followed, and decoded like any file the tools read, so one saved as
+/// Windows-1250 or UTF-16 reads correctly. Anything else that can't be used
+/// — a directory by that name, a binary, a blank file, an I/O error — also
+/// counts as absent: the file is a courtesy to the model, not something a
+/// turn should fail on.
 ///
 /// Reads at most the cap plus one byte, so a runaway file costs one bounded
 /// read; what survives is clipped to [`MAX_INSTRUCTIONS_BYTES`] with a note
@@ -358,18 +441,15 @@ pub fn read_workspace_instructions(root: &Path) -> Option<String> {
     file.take(MAX_INSTRUCTIONS_BYTES as u64 + 1)
         .read_to_end(&mut bytes)
         .ok()?;
-    if bytes.contains(&0) {
-        return None;
-    }
-    if bytes.len() <= MAX_INSTRUCTIONS_BYTES {
-        let text = String::from_utf8_lossy(&bytes);
+    let complete = bytes.len() <= MAX_INSTRUCTIONS_BYTES;
+    bytes.truncate(MAX_INSTRUCTIONS_BYTES);
+    let text = encoding::decode(&bytes, complete)?.text;
+    if complete {
         let trimmed = text.trim();
         return (!trimmed.is_empty()).then(|| trimmed.to_string());
     }
-    bytes.truncate(MAX_INSTRUCTIONS_BYTES);
-    // A multi-byte character split by the cut comes out of the lossy decode
-    // as a trailing U+FFFD; drop it rather than send the model garbage.
-    let text = String::from_utf8_lossy(&bytes);
+    // A multi-byte character split by the cut comes out of the decode as a
+    // trailing U+FFFD; drop it rather than send the model garbage.
     let body = text.trim_end_matches('\u{FFFD}').trim();
     Some(format!(
         "{body}\n\n[{INSTRUCTIONS_FILE} truncated by Loach at {}; the file is {}. \
@@ -507,7 +587,8 @@ pub fn search_files_schema() -> Value {
 
 pub fn write_file_description() -> &'static str {
     "Create a file, or replace an existing file's entire contents, inside \
-     the chat's workspace directory. Missing parent directories are created. \
+     the chat's workspace directory. Missing parent directories are created; \
+     an existing file keeps its line endings and text encoding. \
      The user is asked to approve every write before it happens. To change \
      part of a file, prefer `edit_file` — it is far cheaper than rewriting \
      the whole thing and cannot accidentally drop content you did not read."
@@ -534,7 +615,8 @@ pub fn write_file_schema() -> Value {
 pub fn edit_file_description() -> &'static str {
     "Replace an exact snippet of text in a file inside the chat's workspace \
      directory. Read the file first so `old_text` matches exactly, including \
-     indentation; line endings are handled for you. `old_text` must occur \
+     indentation; line endings and the file's text encoding are handled for \
+     you. `old_text` must occur \
      exactly once unless `replace_all` is true — an ambiguous edit is refused \
      rather than guessed at. The user is asked to approve every edit before \
      it happens."
@@ -570,7 +652,8 @@ pub fn move_file_description() -> &'static str {
     "Move or rename a file or directory inside the chat's workspace \
      directory. Both paths are relative to the workspace root; missing \
      parent directories of `to` are created, and an existing `to` is never \
-     overwritten. The user is asked to approve every move before it happens."
+     overwritten. Moving a symbolic link moves the link itself. The user is \
+     asked to approve every move before it happens."
 }
 
 pub fn move_file_schema() -> Value {
@@ -594,7 +677,8 @@ pub fn move_file_schema() -> Value {
 pub fn delete_file_description() -> &'static str {
     "Delete one file, or one empty directory, inside the chat's workspace \
      directory. Non-empty directories are refused — delete their contents \
-     first — so each approved call removes exactly one thing. The user is \
+     first — so each approved call removes exactly one thing. Deleting a \
+     symbolic link removes the link, not what it points to. The user is \
      asked to approve every deletion before it happens."
 }
 
@@ -675,6 +759,15 @@ fn walk_listing(
         }
         let name = entry.file_name().to_string_lossy().to_string();
         let Ok(ft) = entry.file_type() else { continue };
+        // Listed, never followed: a link can point outside the workspace,
+        // and a link loop would recurse forever. `file_type` doesn't follow
+        // links either, so without this a linked directory read as a file
+        // and was listed with the link's own meaningless size.
+        if ft.is_symlink() {
+            out.push_str(&format!("{indent}{name}  [link]\n"));
+            *count += 1;
+            continue;
+        }
         if ft.is_dir() {
             if SKIPPED_DIRS.contains(&name.as_str()) {
                 out.push_str(&format!("{indent}{name}/  [skipped]\n"));
@@ -683,11 +776,7 @@ fn walk_listing(
             }
             out.push_str(&format!("{indent}{name}/\n"));
             *count += 1;
-            // Don't descend through symlinked directories: they can point
-            // outside the workspace, and a link loop would recurse forever.
-            if !ft.is_symlink()
-                && walk_listing(root, &entry.path(), depth, level + 1, out, count)
-            {
+            if walk_listing(root, &entry.path(), depth, level + 1, out, count) {
                 return true;
             }
         } else {
@@ -838,13 +927,14 @@ pub fn dispatch_read_file(root: &Path, args: &Value) -> McpCallResult {
         Ok(b) => b,
         Err(e) => return err(format!("couldn't read `{}`: {e}", display_rel(rel))),
     };
-    if bytes.contains(&0) {
+    let Some(decoded) = encoding::decode(&bytes, true) else {
         return err(format!(
             "`{}` looks like a binary file — this tool reads text only",
             display_rel(rel)
         ));
-    }
-    let text = String::from_utf8_lossy(&bytes);
+    };
+    let text = &decoded.text;
+    let note = encoding_note(rel, &decoded);
 
     let start = super::lenient_i64(args, "start_line").unwrap_or(1).max(1) as usize;
     let max_lines = super::lenient_i64(args, "max_lines")
@@ -870,11 +960,12 @@ pub fn dispatch_read_file(root: &Path, args: &Value) -> McpCallResult {
 
     // Emit whole lines until the response budget is spent. The first line
     // always goes out, however long, so a request can't stall on it.
+    let budget = MAX_READ_OUTPUT_BYTES - note.len();
     let mut out = String::new();
     let mut end = start - 1;
     for (i, line) in all[start - 1..want_end].iter().enumerate() {
         let row = format!("{:>6}\t{}\n", start + i, clip_line(line));
-        if !out.is_empty() && out.len() + row.len() > MAX_READ_OUTPUT_BYTES {
+        if !out.is_empty() && out.len() + row.len() > budget {
             break;
         }
         out.push_str(&row);
@@ -886,7 +977,30 @@ pub fn dispatch_read_file(root: &Path, args: &Value) -> McpCallResult {
             end + 1
         ));
     }
-    ok(out)
+    ok(format!("{note}{out}"))
+}
+
+/// First line of a `read_file` result for a file that isn't plain UTF-8,
+/// so the model knows what its edits will be written as — or that they
+/// can't be made at all. Empty for UTF-8.
+fn encoding_note(rel: &str, decoded: &encoding::Decoded) -> String {
+    let name = decoded.encoding.name();
+    if !decoded.lossless {
+        return format!(
+            "[`{}` doesn't decode cleanly as {name}: bytes that couldn't be read are \
+             shown as \u{FFFD}. edit_file will refuse to change it, since writing it \
+             back would corrupt them.]\n",
+            display_rel(rel)
+        );
+    }
+    if decoded.encoding.is_utf8() {
+        return String::new();
+    }
+    format!(
+        "[`{}` is stored as {name}, not UTF-8, and is shown decoded. edit_file and \
+         write_file keep that encoding.]\n",
+        display_rel(rel)
+    )
 }
 
 /// Clip one very long line so a minified bundle can't fill the whole
@@ -987,12 +1101,12 @@ pub fn dispatch_search_files(root: &Path, args: &Value) -> McpCallResult {
         }
         let Ok(bytes) = fs::read(path) else { continue };
         files_read += 1;
-        if bytes.contains(&0) {
-            continue;
-        }
-        let Ok(text) = std::str::from_utf8(&bytes) else {
+        // Each file in its own encoding, so a Windows-1250 or UTF-16 file
+        // is searched rather than skipped; only binaries are.
+        let Some(decoded) = encoding::decode(&bytes, true) else {
             continue;
         };
+        let text = decoded.text.as_str();
         let shown = rel_display(root, path);
         for (i, line) in text.lines().enumerate() {
             if match_count >= MAX_SEARCH_MATCHES {
@@ -1051,13 +1165,19 @@ pub fn dispatch_write_file(root: &Path, args: &Value) -> McpCallResult {
         Err(e) => return err(e),
     };
     let existed = path.exists();
-    // Keep an existing file's line endings: a model rewriting a CRLF file
-    // with bare `\n` would otherwise flip every line and drown the real
-    // change in the diff.
-    let content = if existed {
-        match_line_endings(sniff_line_ending(&path), content)
+    // Keep an existing file's line endings and encoding: a model rewriting a
+    // CRLF file with bare `\n` would otherwise flip every line and drown the
+    // real change in the diff, and one rewriting a Windows-1250 file would
+    // quietly turn it into UTF-8 under every program that reads it.
+    let (text, bytes, note) = if existed {
+        let (enc, ending) = sniff_format(&path);
+        let text = match_line_endings(ending, content);
+        match encode_for(rel, &text, enc) {
+            Ok(bytes) => (text, bytes, kept_encoding_note(enc)),
+            Err(e) => return err(e),
+        }
     } else {
-        content.to_string()
+        (content.to_string(), content.as_bytes().to_vec(), String::new())
     };
     if let Some(parent) = path.parent() {
         if let Err(e) = fs::create_dir_all(parent) {
@@ -1067,13 +1187,13 @@ pub fn dispatch_write_file(root: &Path, args: &Value) -> McpCallResult {
             ));
         }
     }
-    match fs::write(&path, &content) {
+    match fs::write(&path, &bytes) {
         Ok(()) => ok(format!(
-            "{} `{}` ({} bytes, {} lines).",
+            "{} `{}` ({} bytes, {} lines).{note}",
             if existed { "Overwrote" } else { "Created" },
             rel_display(root, &path),
-            content.len(),
-            content.lines().count()
+            bytes.len(),
+            text.lines().count()
         )),
         Err(e) => err(format!("couldn't write `{}`: {e}", display_rel(rel))),
     }
@@ -1092,6 +1212,12 @@ pub fn dispatch_edit_file(root: &Path, args: &Value) -> McpCallResult {
     if old_text.is_empty() {
         return err("`old_text` must not be empty — use write_file to create a file");
     }
+    if new_text.len() > MAX_WRITE_BYTES {
+        return err(format!(
+            "`new_text` is {} bytes; the limit is {MAX_WRITE_BYTES}",
+            new_text.len()
+        ));
+    }
     let replace_all = args
         .get("replace_all")
         .and_then(|v| v.as_bool())
@@ -1104,10 +1230,38 @@ pub fn dispatch_edit_file(root: &Path, args: &Value) -> McpCallResult {
     if path.is_dir() {
         return err(format!("`{}` is a directory, not a file", display_rel(rel)));
     }
-    let original = match fs::read_to_string(&path) {
-        Ok(s) => s,
+    // Size first, as in `read_file`: the whole file is about to be held in
+    // memory, and anything past this is a file the model couldn't have read
+    // the text to edit from anyway.
+    let len = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    if len > MAX_READ_FILE_BYTES {
+        return err(format!(
+            "`{}` is {}; edit_file handles files up to {}, the same as read_file.",
+            display_rel(rel),
+            human_size(len),
+            human_size(MAX_READ_FILE_BYTES)
+        ));
+    }
+    let bytes = match fs::read(&path) {
+        Ok(b) => b,
         Err(e) => return err(format!("couldn't read `{}`: {e}", display_rel(rel))),
     };
+    let Some(decoded) = encoding::decode(&bytes, true) else {
+        return err(format!(
+            "`{}` looks like a binary file — edit_file edits text only",
+            display_rel(rel)
+        ));
+    };
+    let enc = decoded.encoding;
+    if !decoded.lossless {
+        return err(format!(
+            "`{}` doesn't decode cleanly as {}, so edit_file can't change it without \
+             corrupting the bytes it couldn't read.",
+            display_rel(rel),
+            enc.name()
+        ));
+    }
+    let original = decoded.text;
 
     // Match on `\n` regardless of what the file uses. `read_file` shows the
     // model lines without their `\r`, so a multi-line `old_text` copied
@@ -1150,17 +1304,28 @@ pub fn dispatch_edit_file(root: &Path, args: &Value) -> McpCallResult {
     } else {
         updated
     };
-    if updated.len() > MAX_WRITE_BYTES {
+    let encoded = match encode_for(rel, &updated, enc) {
+        Ok(b) => b,
+        Err(e) => return err(e),
+    };
+    // Caps growth, not size: any file the model can read it can edit, but
+    // one call may add no more than a whole `write_file` could — which is
+    // what stops `replace_all` of a short snippet with a long one from
+    // multiplying a file.
+    let grown = encoded.len().saturating_sub(bytes.len());
+    if grown > MAX_WRITE_BYTES {
         return err(format!(
-            "the edited file would be {} bytes; the limit is {MAX_WRITE_BYTES}",
-            updated.len()
+            "this edit would grow `{}` by {grown} bytes; one edit may add at most \
+             {MAX_WRITE_BYTES}",
+            display_rel(rel)
         ));
     }
-    match fs::write(&path, &updated) {
+    match fs::write(&path, &encoded) {
         Ok(()) => ok(format!(
-            "Edited `{}` — replaced {hits} occurrence(s). File is now {} lines.",
+            "Edited `{}` — replaced {hits} occurrence(s). File is now {} lines.{}",
             rel_display(root, &path),
-            updated.lines().count()
+            updated.lines().count(),
+            kept_encoding_note(enc)
         )),
         Err(e) => err(format!("couldn't write `{}`: {e}", display_rel(rel))),
     }
@@ -1173,25 +1338,44 @@ pub fn dispatch_move_file(root: &Path, args: &Value) -> McpCallResult {
     let Some(to) = args.get("to").and_then(|v| v.as_str()) else {
         return err("missing required `to` argument (string)");
     };
-    let src = match resolve_read(root, from) {
+    let src = match resolve_entry(root, from) {
         Ok(p) => p,
         Err(e) => return err(e),
     };
     if src == root {
         return err("the workspace root itself can't be moved");
     }
+    // Not followed: a link moves as itself, whatever its target is.
+    let src_is_dir = fs::symlink_metadata(&src).is_ok_and(|m| m.is_dir());
     let dst = match resolve_target(root, to) {
         Ok(p) => p,
         Err(e) => return err(e),
     };
-    if dst.exists() {
+    let dst = if dst == src {
+        // `to` resolved to `from` itself. On a case-insensitive filesystem
+        // (Windows, macOS) that is how a rename changing only case arrives —
+        // `readme.md` → `README.md` — and it is allowed: the one entry is
+        // renamed and nothing is overwritten.
+        match case_renamed(&src, to) {
+            Some(renamed) => renamed,
+            None => {
+                return err(format!(
+                    "`{}` already exists — it is `{}` itself, or a link to it.",
+                    display_rel(to),
+                    display_rel(from)
+                ))
+            }
+        }
+    } else if dst.exists() {
         return err(format!(
             "`{}` already exists — move_file never overwrites. Delete it first \
              or pick another name.",
             display_rel(to)
         ));
-    }
-    if src.is_dir() && dst.starts_with(&src) {
+    } else {
+        dst
+    };
+    if src_is_dir && dst.starts_with(&src) {
         return err(format!(
             "can't move `{}` inside itself",
             display_rel(from)
@@ -1219,22 +1403,56 @@ pub fn dispatch_move_file(root: &Path, args: &Value) -> McpCallResult {
     }
 }
 
+/// The path `src` takes when `to` changes nothing but the case of its own
+/// name, or `None` when `to` asks for anything else.
+fn case_renamed(src: &Path, to: &str) -> Option<PathBuf> {
+    let wanted = vet_relative(to).ok()?.file_name()?.to_os_string();
+    let current = src.file_name()?;
+    let same_letters =
+        wanted.to_string_lossy().to_lowercase() == current.to_string_lossy().to_lowercase();
+    (wanted != current && same_letters).then(|| src.with_file_name(wanted))
+}
+
 pub fn dispatch_delete_file(root: &Path, args: &Value) -> McpCallResult {
     let Some(rel) = args.get("path").and_then(|v| v.as_str()) else {
         return err("missing required `path` argument (string)");
     };
-    let target = match resolve_read(root, rel) {
+    let target = match resolve_entry(root, rel) {
         Ok(p) => p,
         Err(e) => return err(e),
     };
     if target == root {
         return err("the workspace root itself can't be deleted");
     }
-    let meta = match fs::metadata(&target) {
+    // Not followed: for a link, this describes the link.
+    let meta = match fs::symlink_metadata(&target) {
         Ok(m) => m,
         Err(e) => return err(format!("`{}` is not readable: {e}", display_rel(rel))),
     };
     let shown = rel_display(root, &target);
+    if meta.file_type().is_symlink() {
+        // Only the link goes; what it points at — possibly outside the
+        // workspace — is untouched. Windows keeps a link to a directory (and
+        // a junction) as a directory entry, which only `remove_dir` removes.
+        #[cfg(windows)]
+        let dir_link = {
+            use std::os::windows::fs::FileTypeExt;
+            meta.file_type().is_symlink_dir()
+        };
+        #[cfg(not(windows))]
+        let dir_link = false;
+        let removed = if dir_link {
+            fs::remove_dir(&target)
+        } else {
+            fs::remove_file(&target)
+        };
+        return match removed {
+            Ok(()) => ok(format!(
+                "Deleted the link `{shown}`; what it pointed to was not touched."
+            )),
+            Err(e) => err(format!("couldn't delete `{shown}`: {e}")),
+        };
+    }
     if meta.is_dir() {
         let non_empty = fs::read_dir(&target)
             .map(|mut rd| rd.next().is_some())
@@ -1892,5 +2110,342 @@ mod tests {
         fs::write(&secret, "classified\n").unwrap();
         std::os::unix::fs::symlink(&secret, root.join(INSTRUCTIONS_FILE)).unwrap();
         assert_eq!(read_workspace_instructions(&root), None);
+    }
+
+    /// A LOACHFILE.md saved by a Polish Notepad reads as Polish, not as
+    /// replacement characters.
+    #[test]
+    fn instructions_in_a_legacy_encoding_are_decoded() {
+        let (_d, root) = workspace();
+        fs::write(
+            root.join(INSTRUCTIONS_FILE),
+            cp1250("Pisz komentarze po polsku: zażółć.\n"),
+        )
+        .unwrap();
+        assert_eq!(
+            read_workspace_instructions(&root).as_deref(),
+            Some("Pisz komentarze po polsku: zażółć.")
+        );
+    }
+
+    // ---- links -----------------------------------------------------------
+    //
+    // These run on Windows too, unlike the Unix-only tests above: creating a
+    // link there works with Developer Mode (or elevation, as on CI runners),
+    // and where it doesn't the test says so and skips rather than fails.
+
+    /// Make a symlink, or return false where the OS won't allow it.
+    fn try_symlink(target: &Path, link: &Path, dir: bool) -> bool {
+        #[cfg(unix)]
+        let made = {
+            let _ = dir;
+            std::os::unix::fs::symlink(target, link)
+        };
+        #[cfg(windows)]
+        let made = if dir {
+            std::os::windows::fs::symlink_dir(target, link)
+        } else {
+            std::os::windows::fs::symlink_file(target, link)
+        };
+        match made {
+            Ok(()) => true,
+            Err(e) => {
+                eprintln!("skipping: can't create a symlink here ({e})");
+                false
+            }
+        }
+    }
+
+    /// A link whose target doesn't exist can't be canonicalized, which used
+    /// to read as "nothing here yet" — and the write then followed the link
+    /// and created its target outside the workspace.
+    #[test]
+    fn writes_through_a_dangling_link_are_refused() {
+        let (_d, root) = workspace();
+        let outside = tempfile::TempDir::new().unwrap();
+        let planted = outside.path().join("planted.txt");
+        let planted_dir = outside.path().join("newdir");
+        if !try_symlink(&planted, &root.join("innocent.txt"), false)
+            || !try_symlink(&planted_dir, &root.join("dirlink"), true)
+        {
+            return;
+        }
+
+        let w = dispatch_write_file(&root, &json!({ "path": "innocent.txt", "content": "x" }));
+        assert!(w.is_error, "{}", w.content_text);
+        assert!(w.content_text.contains("doesn't resolve"), "{}", w.content_text);
+        let nested =
+            dispatch_write_file(&root, &json!({ "path": "dirlink/a.txt", "content": "x" }));
+        assert!(nested.is_error, "{}", nested.content_text);
+        let m = dispatch_move_file(&root, &json!({ "from": "README.md", "to": "innocent.txt" }));
+        assert!(m.is_error, "{}", m.content_text);
+
+        assert!(!planted.exists(), "a file was created outside the workspace");
+        assert!(!planted_dir.exists(), "a directory was created outside the workspace");
+        assert!(root.join("README.md").exists());
+    }
+
+    /// `delete_file` on a link used to canonicalize it first and delete the
+    /// file it pointed to — the card said one path, the disk lost another.
+    #[test]
+    fn delete_removes_a_link_and_leaves_its_target() {
+        let (_d, root) = workspace();
+        let outside = tempfile::TempDir::new().unwrap();
+        fs::write(outside.path().join("keep.txt"), "outside\n").unwrap();
+        if !try_symlink(&root.join("README.md"), &root.join("alias.md"), false)
+            || !try_symlink(&root.join("src"), &root.join("srclink"), true)
+            || !try_symlink(&outside.path().join("keep.txt"), &root.join("out.txt"), false)
+        {
+            return;
+        }
+
+        for link in ["alias.md", "srclink", "out.txt"] {
+            let r = dispatch_delete_file(&root, &json!({ "path": link }));
+            assert!(!r.is_error, "{link}: {}", r.content_text);
+            assert!(r.content_text.contains("link"), "{}", r.content_text);
+            assert!(fs::symlink_metadata(root.join(link)).is_err(), "{link} still there");
+        }
+        assert!(root.join("README.md").exists(), "the link's target was deleted");
+        assert!(root.join("src/main.rs").exists(), "the linked directory was emptied");
+        assert!(outside.path().join("keep.txt").exists());
+    }
+
+    #[test]
+    fn move_moves_a_link_and_leaves_its_target() {
+        let (_d, root) = workspace();
+        if !try_symlink(&root.join("README.md"), &root.join("alias.md"), false) {
+            return;
+        }
+        let r = dispatch_move_file(&root, &json!({ "from": "alias.md", "to": "docs/alias.md" }));
+        assert!(!r.is_error, "{}", r.content_text);
+        assert!(fs::symlink_metadata(root.join("docs/alias.md"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(root.join("README.md").exists(), "the link's target moved instead");
+    }
+
+    #[test]
+    fn listing_marks_links_without_following_them() {
+        let (_d, root) = workspace();
+        if !try_symlink(&root.join("src"), &root.join("srclink"), true) {
+            return;
+        }
+        let r = dispatch_list_directory(&root, &json!({ "depth": 3 }));
+        assert!(r.content_text.contains("srclink  [link]"), "{}", r.content_text);
+        assert_eq!(r.content_text.matches("main.rs").count(), 1, "{}", r.content_text);
+    }
+
+    // ---- renames and sizes -------------------------------------------------
+
+    /// On Windows and macOS `README.txt` resolves to an existing `readme.txt`,
+    /// which used to trip "already exists" and made case-only renames
+    /// impossible. On a case-sensitive filesystem it's an ordinary rename.
+    #[test]
+    fn a_rename_that_only_changes_case_works() {
+        let (_d, root) = workspace();
+        fs::write(root.join("readme.txt"), "x\n").unwrap();
+        let r = dispatch_move_file(&root, &json!({ "from": "readme.txt", "to": "README.txt" }));
+        assert!(!r.is_error, "{}", r.content_text);
+        let names: Vec<String> = fs::read_dir(&root)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(names.contains(&"README.txt".to_string()), "{names:?}");
+        assert!(!names.contains(&"readme.txt".to_string()), "{names:?}");
+
+        let same =
+            dispatch_move_file(&root, &json!({ "from": "README.txt", "to": "README.txt" }));
+        assert!(same.is_error);
+        assert!(same.content_text.contains("already exists"), "{}", same.content_text);
+    }
+
+    /// The 1 MiB write cap used to apply to the *edited file*, so nothing
+    /// between 1 and 4 MiB — readable by `read_file` — could be edited at all.
+    #[test]
+    fn edit_works_on_a_file_larger_than_one_write() {
+        let (_d, root) = workspace();
+        let body = format!("MARKER\n{}", "let x = 1;\n".repeat(150_000));
+        assert!(body.len() > MAX_WRITE_BYTES);
+        fs::write(root.join("big.js"), &body).unwrap();
+        let r = dispatch_edit_file(
+            &root,
+            &json!({ "path": "big.js", "old_text": "MARKER", "new_text": "MARKED" }),
+        );
+        assert!(!r.is_error, "{}", r.content_text);
+        assert!(fs::read_to_string(root.join("big.js"))
+            .unwrap()
+            .starts_with("MARKED\n"));
+    }
+
+    #[test]
+    fn replace_all_cannot_multiply_a_file() {
+        let (_d, root) = workspace();
+        fs::write(root.join("many.txt"), "x\n".repeat(2_000)).unwrap();
+        let r = dispatch_edit_file(
+            &root,
+            &json!({
+                "path": "many.txt",
+                "old_text": "x",
+                "new_text": "y".repeat(1_000),
+                "replace_all": true
+            }),
+        );
+        assert!(r.is_error);
+        assert!(r.content_text.contains("grow"), "{}", r.content_text);
+        assert_eq!(
+            fs::read_to_string(root.join("many.txt")).unwrap(),
+            "x\n".repeat(2_000)
+        );
+    }
+
+    #[test]
+    fn edit_refuses_a_huge_file_without_reading_it() {
+        let (_d, root) = workspace();
+        // Sparse, as in the read_file test: costs no disk.
+        let f = fs::File::create(root.join("huge.log")).unwrap();
+        f.set_len(MAX_READ_FILE_BYTES + 1).unwrap();
+        let r = dispatch_edit_file(
+            &root,
+            &json!({ "path": "huge.log", "old_text": "a", "new_text": "b" }),
+        );
+        assert!(r.is_error);
+        assert!(r.content_text.contains("handles files up to"), "{}", r.content_text);
+    }
+
+    // ---- text encodings ----------------------------------------------------
+
+    fn cp1250(s: &str) -> Vec<u8> {
+        encoding_rs::WINDOWS_1250.encode(s).0.into_owned()
+    }
+
+    /// A Windows-1250 file used to read as replacement characters, fail every
+    /// edit ("stream did not contain valid UTF-8"), be skipped by search, and
+    /// be silently converted to UTF-8 by an overwrite.
+    #[test]
+    fn a_windows_1250_file_is_read_edited_and_written_in_its_own_encoding() {
+        let (_d, root) = workspace();
+        fs::write(
+            root.join("pl.txt"),
+            cp1250("Zażółć gęślą jaźń\r\ndruga linia\r\n"),
+        )
+        .unwrap();
+
+        let r = dispatch_read_file(&root, &json!({ "path": "pl.txt" }));
+        assert!(!r.is_error, "{}", r.content_text);
+        assert!(r.content_text.contains("windows-1250"), "{}", r.content_text);
+        assert!(
+            r.content_text.contains("     1\tZażółć gęślą jaźń"),
+            "{}",
+            r.content_text
+        );
+
+        let s = dispatch_search_files(&root, &json!({ "pattern": "gęślą" }));
+        assert!(s.content_text.contains("pl.txt:1:"), "{}", s.content_text);
+
+        let e = dispatch_edit_file(
+            &root,
+            &json!({
+                "path": "pl.txt",
+                "old_text": "gęślą jaźń\ndruga",
+                "new_text": "łódź\npierwsza"
+            }),
+        );
+        assert!(!e.is_error, "{}", e.content_text);
+        assert!(
+            e.content_text.contains("Kept its windows-1250 encoding"),
+            "{}",
+            e.content_text
+        );
+        assert_eq!(
+            fs::read(root.join("pl.txt")).unwrap(),
+            cp1250("Zażółć łódź\r\npierwsza linia\r\n"),
+            "the file must stay Windows-1250 and CRLF"
+        );
+
+        let w = dispatch_write_file(&root, &json!({ "path": "pl.txt", "content": "Źdźbło\n" }));
+        assert!(!w.is_error, "{}", w.content_text);
+        assert_eq!(fs::read(root.join("pl.txt")).unwrap(), cp1250("Źdźbło\r\n"));
+    }
+
+    /// A character the file's encoding can't store is refused — never
+    /// written as `?` — and the file is left exactly as it was.
+    #[test]
+    fn text_a_legacy_encoding_cannot_store_is_refused() {
+        let (_d, root) = workspace();
+        let original = cp1250("Zażółć gęślą jaźń\nstrzałka: ->\n");
+        fs::write(root.join("pl.txt"), &original).unwrap();
+        let e = dispatch_edit_file(
+            &root,
+            &json!({ "path": "pl.txt", "old_text": "->", "new_text": "→" }),
+        );
+        assert!(e.is_error);
+        assert!(e.content_text.contains("`→`"), "{}", e.content_text);
+        let w = dispatch_write_file(&root, &json!({ "path": "pl.txt", "content": "emoji 😀\n" }));
+        assert!(w.is_error);
+        assert_eq!(fs::read(root.join("pl.txt")).unwrap(), original);
+    }
+
+    /// PowerShell 5.1 writes UTF-16LE with a BOM; its NUL bytes used to make
+    /// such a file look binary.
+    #[test]
+    fn a_utf16_file_is_text_and_stays_utf16() {
+        let (_d, root) = workspace();
+        let utf16 = |s: &str| -> Vec<u8> {
+            [0xFF, 0xFE]
+                .into_iter()
+                .chain(s.encode_utf16().flat_map(u16::to_le_bytes))
+                .collect()
+        };
+        fs::write(root.join("log.txt"), utf16("Name: Łukasz\r\nStatus: ok\r\n")).unwrap();
+        let r = dispatch_read_file(&root, &json!({ "path": "log.txt" }));
+        assert!(!r.is_error, "{}", r.content_text);
+        assert!(r.content_text.contains("UTF-16LE"), "{}", r.content_text);
+        assert!(r.content_text.contains("     1\tName: Łukasz"), "{}", r.content_text);
+
+        let e = dispatch_edit_file(
+            &root,
+            &json!({ "path": "log.txt", "old_text": "ok", "new_text": "gotowe ✓" }),
+        );
+        assert!(!e.is_error, "{}", e.content_text);
+        assert_eq!(
+            fs::read(root.join("log.txt")).unwrap(),
+            utf16("Name: Łukasz\r\nStatus: gotowe ✓\r\n")
+        );
+    }
+
+    #[test]
+    fn a_utf8_bom_survives_edits_and_overwrites_and_stays_out_of_the_text() {
+        let (_d, root) = workspace();
+        fs::write(root.join("bom.txt"), b"\xEF\xBB\xBFfirst\n").unwrap();
+        let r = dispatch_read_file(&root, &json!({ "path": "bom.txt" }));
+        assert!(r.content_text.starts_with("     1\tfirst"), "{:?}", r.content_text);
+        let e = dispatch_edit_file(
+            &root,
+            &json!({ "path": "bom.txt", "old_text": "first", "new_text": "1st" }),
+        );
+        assert!(!e.is_error, "{}", e.content_text);
+        assert_eq!(fs::read(root.join("bom.txt")).unwrap(), b"\xEF\xBB\xBF1st\n");
+        let w = dispatch_write_file(&root, &json!({ "path": "bom.txt", "content": "new\n" }));
+        assert!(!w.is_error, "{}", w.content_text);
+        assert_eq!(fs::read(root.join("bom.txt")).unwrap(), b"\xEF\xBB\xBFnew\n");
+    }
+
+    /// A file that doesn't decode cleanly can still be read, but an edit
+    /// would write its undecodable bytes back as something else — refused.
+    #[test]
+    fn a_file_that_does_not_decode_cleanly_is_readable_but_not_editable() {
+        let (_d, root) = workspace();
+        let original = b"\xEF\xBB\xBFcaf\xE9 au lait\n".to_vec();
+        fs::write(root.join("mixed.txt"), &original).unwrap();
+        let r = dispatch_read_file(&root, &json!({ "path": "mixed.txt" }));
+        assert!(!r.is_error, "{}", r.content_text);
+        assert!(r.content_text.contains("doesn't decode cleanly"), "{}", r.content_text);
+        let e = dispatch_edit_file(
+            &root,
+            &json!({ "path": "mixed.txt", "old_text": "lait", "new_text": "milk" }),
+        );
+        assert!(e.is_error);
+        assert_eq!(fs::read(root.join("mixed.txt")).unwrap(), original);
     }
 }

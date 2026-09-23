@@ -265,6 +265,10 @@ export interface ToolCallRecord {
   /** True when the user refused the call (or the prompt timed out). The
    *  tool never ran; `result` holds the note the model was given. */
   denied?: boolean;
+  /** True when the reply ended (Stop, error) before this call's result
+   *  arrived. `result` then says whether it could have run — a workspace
+   *  write already under way when Stop landed still finishes on disk. */
+  interrupted?: boolean;
 }
 
 /** Answer to a per-call tool approval prompt. `allow_always` also records

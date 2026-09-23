@@ -812,6 +812,7 @@ export function ChatInput({ centered = false }: ChatInputProps) {
                 root={workspaceRoot}
                 toolsEnabled={workspaceToolsEnabled}
                 instructions={workspaceInstructions}
+                locked={streamingThisChat}
                 onRemove={() => void clearWorkspace(activeSessionId)}
               />
             )}
@@ -881,17 +882,25 @@ export function ChatInput({ centered = false }: ChatInputProps) {
                   </p>
                 </div>
               </DropdownMenuItem>
+              {/* Changing the folder waits for a running reply to end: that
+                  turn keeps the folder it started with (see WorkspaceChip's
+                  `locked`). Adding a first one mid-turn is harmless — it
+                  simply applies from the next turn. */}
               <DropdownMenuItem
                 onSelect={() => void chooseWorkspace()}
-                disabled={!activeSessionId || pickingWorkspace}
+                disabled={
+                  !activeSessionId || pickingWorkspace || (streamingThisChat && !!workspaceRoot)
+                }
               >
                 <FolderOpen className="mr-2 h-4 w-4" />
                 <div className="min-w-0">
                   <div>{workspaceRoot ? "Change directory" : "Add directory"}</div>
                   <p className="text-[11px] text-foreground/50">
-                    {activeSessionId
-                      ? "Let the model read and edit files in a folder"
-                      : "Send a message first to start this chat"}
+                    {!activeSessionId
+                      ? "Send a message first to start this chat"
+                      : streamingThisChat && workspaceRoot
+                        ? "Wait for the reply to finish"
+                        : "Let the model read and edit files in a folder"}
                   </p>
                 </div>
               </DropdownMenuItem>

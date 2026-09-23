@@ -92,12 +92,14 @@ pub(super) async fn execute_tool_call(
     args: &Value,
 ) -> Option<ToolOutcome> {
     // A standing "Always allow" from earlier in this chat satisfies the
-    // gate without re-prompting. Only built-ins consult the registry — an
-    // MCP tool's equivalent answer is already folded into `needs_approval`
-    // via the server's allow-list.
+    // gate without re-prompting. Only built-ins are ever recorded in the
+    // registry — an MCP tool's equivalent answer is already folded into
+    // `needs_approval` via the server's allow-list — and the lookup carries
+    // the server id, so an MCP tool named like a built-in (`write_file`)
+    // can't match a built-in's grant.
     let already_granted = ctx
         .session_id
-        .is_some_and(|sid| ctx.approvals.granted(sid, tool_name));
+        .is_some_and(|sid| ctx.approvals.granted(sid, &tool_def.server_id, tool_name));
     let approval_required = !already_granted
         && crate::mcp::needs_approval(ctx.db, &tool_def.server_id, tool_name);
     let _ = ctx.app.emit(
@@ -151,7 +153,7 @@ pub(super) async fn execute_tool_call(
                 // the grant is remembered in memory against this chat. It
                 // covers the rest of the conversation and dies with the app.
                 if let Some(sid) = ctx.session_id {
-                    ctx.approvals.grant(sid, tool_name);
+                    ctx.approvals.grant(sid, &tool_def.server_id, tool_name);
                 }
             }
             ApprovalDecision::AllowAlways => {

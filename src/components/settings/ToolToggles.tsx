@@ -292,7 +292,9 @@ export const TOOL_TOGGLES: {
         write, edit, move and deletion asks you first, showing the path and
         the change; deletions take one file or empty directory at a time, and
         there is no shell. Off until you pick a folder, which switches this
-        on. In-process — files never leave the machine.
+        on. The tools run in-process, but what they read becomes part of the
+        conversation — with a cloud provider, those file contents are sent to
+        it like any other message.
       </>
     ),
   },

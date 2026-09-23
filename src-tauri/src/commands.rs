@@ -264,11 +264,16 @@ pub async fn pick_session_workspace(
         .db
         .set_session_workspace_root(&session_id, Some(&stored))
         .map_err(err)?;
+    // Any "allow … for this chat" was given for the previous folder; the
+    // new one starts from asking again.
+    state.approvals.revoke_session(&session_id);
     Ok(Some(stored))
 }
 
 /// Take the workspace directory away from a chat. The filesystem tools
-/// drop out of the model's catalogue on the next turn.
+/// drop out of the model's catalogue on the next turn, and the chat's
+/// standing "allow … for this chat" answers go with the folder — so a
+/// folder picked later starts from asking again.
 #[tauri::command]
 pub async fn clear_session_workspace(
     state: State<'_, AppState>,
@@ -277,7 +282,9 @@ pub async fn clear_session_workspace(
     state
         .db
         .set_session_workspace_root(&session_id, None)
-        .map_err(err)
+        .map_err(err)?;
+    state.approvals.revoke_session(&session_id);
+    Ok(())
 }
 
 /// The chat's `LOACHFILE.md` as the next turn will see it, or `None` when

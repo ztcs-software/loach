@@ -957,11 +957,28 @@ function finishRunning(
   if (get().runningTask?.id !== forTask) return;
   const running = get().runningTask;
   const buf = runningBuffers;
+  let settledToolsJson: string | null = null;
   if (running && buf) {
-    // A stream that ends (Stop, error) while a consent prompt is open
-    // leaves that call unanswered forever — never persist it as still
-    // waiting, or the transcript would show a dead prompt after reload.
-    for (const c of buf.toolCalls) delete c.awaiting_approval;
+    // A stream that ends (Stop, error) with a call still open leaves it
+    // without a result forever: a consent prompt nobody can answer any
+    // more, or a tool whose result will never be delivered (the listener
+    // is already gone). Settle each one, or the bubble — and the transcript
+    // after a reload — shows a dead prompt or a spinner that never stops.
+    // Say plainly whether it can have run: a workspace write that was under
+    // way when Stop landed finishes on disk regardless.
+    let settled = false;
+    for (const c of buf.toolCalls) {
+      if (c.result === null) {
+        c.result = c.awaiting_approval
+          ? "Not run — the reply ended before you answered."
+          : "The reply ended while this was running, so it may or may not have completed.";
+        c.is_error = false;
+        c.interrupted = true;
+        settled = true;
+      }
+      delete c.awaiting_approval;
+    }
+    if (settled) settledToolsJson = JSON.stringify(buf.toolCalls);
     // Persist the partial assistant reply. If the DB write fails (disk
     // full, lock contention, file permissions, …) the bubble we just
     // streamed exists in memory but won't survive a reload — so surface
@@ -1091,11 +1108,17 @@ function finishRunning(
       delete streamingByMessage[finishedMsgId];
     }
     let messages = s.messages;
-    if (finishedId && finishedMsgId && finishedMetricsJson) {
+    if (finishedId && finishedMsgId && (finishedMetricsJson || settledToolsJson)) {
       messages = {
         ...messages,
         [finishedId]: (messages[finishedId] ?? []).map((m) =>
-          m.id === finishedMsgId ? { ...m, metrics_json: finishedMetricsJson } : m,
+          m.id === finishedMsgId
+            ? {
+                ...m,
+                ...(finishedMetricsJson ? { metrics_json: finishedMetricsJson } : {}),
+                ...(settledToolsJson ? { tool_calls_json: settledToolsJson } : {}),
+              }
+            : m,
         ),
       };
     }

@@ -6,6 +6,7 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
+  CircleStop,
   Copy,
   File,
   FileText,
@@ -215,6 +216,7 @@ function ToolCallItem({ call }: { call: ToolCallRecord }) {
   const [open, setOpen] = useState(false);
   const pending = call.result === null;
   const denied = !pending && call.denied === true;
+  const interrupted = !pending && call.interrupted === true;
   const failed = !pending && call.is_error && !denied;
   const argsText = formatArgs(call.arguments);
   const rawTool = rawToolName(call.tool);
@@ -247,6 +249,8 @@ function ToolCallItem({ call }: { call: ToolCallRecord }) {
           <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-foreground/55" />
         ) : denied ? (
           <Ban className="h-3.5 w-3.5 shrink-0 text-foreground/45" />
+        ) : interrupted ? (
+          <CircleStop className="h-3.5 w-3.5 shrink-0 text-foreground/45" />
         ) : failed ? (
           <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-red-400" />
         ) : (
@@ -255,9 +259,9 @@ function ToolCallItem({ call }: { call: ToolCallRecord }) {
         <span className="min-w-0 truncate font-mono text-foreground/80">
           {rawTool}
         </span>
-        {denied && (
+        {(denied || interrupted) && (
           <span className="ml-auto shrink-0 text-[10.5px] uppercase tracking-wider text-foreground/45">
-            Denied
+            {denied ? "Denied" : "Interrupted"}
           </span>
         )}
       </button>
@@ -283,7 +287,7 @@ function ToolCallItem({ call }: { call: ToolCallRecord }) {
           {!pending && (
             <div>
               <div className="mb-0.5 text-[10.5px] uppercase tracking-wider text-foreground/40">
-                {denied ? "Not run" : failed ? "Error" : "Result"}
+                {denied ? "Not run" : interrupted ? "Interrupted" : failed ? "Error" : "Result"}
               </div>
               <pre
                 className={cn(

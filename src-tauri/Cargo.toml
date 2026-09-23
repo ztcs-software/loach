@@ -111,6 +111,13 @@ walkdir = "2"
 # model reads them — the sandbox keeps comparing the verbatim forms.
 glob = "0.3"
 dunce = "1"
+# `chardetng` + `encoding_rs` let the same tools read and edit files that
+# aren't UTF-8 (Windows-1250, UTF-16, …) and write them back in their own
+# encoding — see `tools/fs/encoding.rs`. encoding_rs is already in the tree
+# (lopdf, allsorts); chardetng is the detector Firefox uses for unlabelled
+# pages, and adds nothing else (its rayon feature is opt-in and left off).
+encoding_rs = "0.8"
+chardetng = "1"
 
 # Total RAM + free disk for the onboarding model recommendation, which sizes
 # the Ollama catalog against the machine instead of quoting raw GB. Only the

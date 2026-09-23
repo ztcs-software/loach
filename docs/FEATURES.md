@@ -94,6 +94,10 @@ transcript of messages.
   answer — **Called <tool> tool** for one call, **Called N tools** for
   more — styled like the Thinking block. Expand it to
   see each call's name, arguments, and result (or error, or *Denied*).
+  A call still open when the reply ends — you pressed Stop, or it failed —
+  is marked *Interrupted*, saying whether it can have run: one stopped
+  while running may still have finished (a workspace write that was under
+  way completes on disk regardless).
   An MCP call that needs your approval shows an **approval card** above
   the block — server, tool, arguments, and **Allow once / Always allow /
   Deny** — and the reply waits until you answer (§8.2).
@@ -795,19 +799,23 @@ message instead; the two are not variants of each other). The folder shows
 as a chip above the composer for the rest of the chat; remove it from the
 chip. Picking a folder also switches on **Workspace files** in **Settings
 → Tools** if it was off, and the chip says so if that switch is later
-turned off again. Forking a chat carries the folder over; exports and
-imports never do — a path means nothing on another machine.
+turned off again. While a reply is running in the chat, the folder can't
+be changed or removed — that turn keeps the folder it started with. Forking
+a chat carries the folder over; exports and imports never do — a path means
+nothing on another machine.
 
 Eight tools appear in the model's catalogue only while a chat has a
 folder; without one the model never sees them. All paths are relative to
 the folder, and nothing outside it is reachable: absolute paths and `..`
 are refused up front, and every path is resolved through symlinks and
 checked against the folder again before it is used, so a link pointing
-elsewhere is refused too.
+elsewhere is refused too — as is a link whose target doesn't exist, since
+writing through it would create that target wherever it points. Deleting
+or moving a link acts on the link itself, never on what it points to.
 
 - **list_directory** — tree of a directory, two levels by default, with
   dependency and build directories (`node_modules`, `target`, `.git`, …)
-  shown but not descended into.
+  shown but not descended into, and links marked rather than followed.
 - **find_files** — locate files by name with a glob (`*.rs` anywhere,
   `src/**/*.test.ts` by path).
 - **read_file** — contents with line numbers, paged for long files.
@@ -815,16 +823,33 @@ elsewhere is refused too.
 - **write_file** — create a file or replace one whole.
 - **edit_file** — replace an exact snippet; ambiguous matches are refused.
 - **move_file** — rename or move a file or directory; never overwrites.
+  A rename that only changes case (`readme.md` → `README.md`) works on
+  Windows and macOS too.
 - **delete_file** — remove one file or one empty directory per call.
 
 The four that change files **ask you first, every time**. The consent card
 shows the change itself rather than raw arguments: the full contents of a
 write, a `-`/`+` diff for an edit, `from → to` for a move, and a red
 warning for a deletion. **Allow once** runs that call; **Allow … for this
-chat** stops asking for that tool until the chat is closed (the grant is
-kept in memory, so it never outlives the app); **Deny** tells the model to
-carry on without it. Line endings are preserved: editing or overwriting a
-CRLF file keeps it CRLF.
+chat** stops asking for that tool in this chat until you change or remove
+its folder, or quit Loach (the grant is kept in memory, and covers only
+Loach's own tool — never an MCP server's tool of the same name); **Deny**
+tells the model to carry on without it. Line endings are preserved: editing
+or overwriting a CRLF file keeps it CRLF.
+
+So is the text encoding. Files that aren't UTF-8 — Windows-1250 or another
+legacy code page, or UTF-16 with a byte-order mark (what PowerShell 5.1
+writes by default) — are read, searched and edited in their own encoding
+and written back in it, byte-order mark included; only the edited text
+changes. A legacy encoding is recognised from the file's contents, so it is
+a best guess, and `read_file` tells the model which one it used. A change
+the encoding can't store (an emoji in a Windows-1250 file) is refused rather
+than written as `?`, and a file that doesn't decode cleanly can be read but
+not edited.
+
+The tools run inside Loach, but what they read becomes part of the
+conversation: with a cloud provider, those file contents are sent to it
+like any other message.
 
 **Project instructions.** If the folder has a `LOACHFILE.md` at its root,
 its contents are added to the system prompt on every turn, right after the

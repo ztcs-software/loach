@@ -142,11 +142,15 @@ pub enum ApprovalDecision {
 ///   be [`forget`](Self::forget)ed on every other exit path (cancel,
 ///   timeout) so a stale sender can't linger.
 /// * `grants` — standing "Always allow" answers for built-in tools, keyed
-///   by `(session_id, tool_name)`. MCP tools record that answer on the
-///   server's `allowed_tools` row instead; a built-in has no server row to
-///   write to, so the grant lives here. Being in memory means it lasts for
-///   the rest of this chat but not past a restart, which is the right
-///   lifetime for blanket permission to write to someone's files.
+///   by `(session_id, server_id, tool_name)`. MCP tools record that answer
+///   on the server's `allowed_tools` row instead; a built-in has no server
+///   row to write to, so the grant lives here. The server id is part of the
+///   key so an MCP tool that shares a bare name with a built-in — the
+///   filesystem MCP server has its own `write_file` — never rides on the
+///   built-in's grant. Being in memory means it lasts for the rest of this
+///   chat but not past a restart, which is the right lifetime for blanket
+///   permission to write to someone's files; changing the chat's folder
+///   ends it sooner ([`revoke_session`](Self::revoke_session)).
 #[derive(Clone, Default)]
 pub struct ApprovalRegistry {
     inner: Arc<DashMap<String, oneshot::Sender<ApprovalDecision>>>,
@@ -159,13 +163,29 @@ impl ApprovalRegistry {
     }
 
     /// Record "Always allow this tool" for one chat.
-    pub fn grant(&self, session_id: &str, tool_name: &str) {
-        self.grants.insert(Self::key(session_id, tool_name), ());
+    pub fn grant(&self, session_id: &str, server_id: &str, tool_name: &str) {
+        self.grants
+            .insert(Self::grant_key(session_id, server_id, tool_name), ());
     }
 
-    /// Whether this chat already answered "Always allow" for `tool_name`.
-    pub fn granted(&self, session_id: &str, tool_name: &str) -> bool {
-        self.grants.contains_key(&Self::key(session_id, tool_name))
+    /// Whether this chat already answered "Always allow" for this server's
+    /// `tool_name`.
+    pub fn granted(&self, session_id: &str, server_id: &str, tool_name: &str) -> bool {
+        self.grants
+            .contains_key(&Self::grant_key(session_id, server_id, tool_name))
+    }
+
+    /// Drop every standing grant one chat holds. Called when the chat's
+    /// workspace folder is changed or removed: "allow `write_file` for this
+    /// chat" was an answer about the folder on screen at the time, not
+    /// about whichever one is picked next.
+    pub fn revoke_session(&self, session_id: &str) {
+        let prefix = format!("{session_id}\u{1f}");
+        self.grants.retain(|k, _| !k.starts_with(&prefix));
+    }
+
+    fn grant_key(session_id: &str, server_id: &str, tool_name: &str) -> String {
+        format!("{session_id}\u{1f}{server_id}\u{1f}{tool_name}")
     }
 
     fn key(stream_id: &str, call_id: &str) -> String {
@@ -325,17 +345,36 @@ mod tests {
         assert!(rx.await.is_err(), "receiver sees the sender gone");
     }
 
-    /// Grants are per chat and per tool — one chat saying "always" must not
-    /// speak for another, and allowing `edit_file` must not allow
-    /// `write_file`.
+    /// Grants are per chat, per server and per tool — one chat saying
+    /// "always" must not speak for another, allowing `edit_file` must not
+    /// allow `write_file`, and allowing the built-in `write_file` must not
+    /// allow an MCP server's tool of the same name.
     #[test]
-    fn grants_are_scoped_to_one_session_and_one_tool() {
+    fn grants_are_scoped_to_one_session_one_server_and_one_tool() {
         let reg = ApprovalRegistry::new();
-        assert!(!reg.granted("chat-1", "write_file"));
-        reg.grant("chat-1", "write_file");
-        assert!(reg.granted("chat-1", "write_file"));
-        assert!(!reg.granted("chat-2", "write_file"), "leaked across chats");
-        assert!(!reg.granted("chat-1", "edit_file"), "leaked across tools");
+        let builtin = "__builtin__";
+        assert!(!reg.granted("chat-1", builtin, "write_file"));
+        reg.grant("chat-1", builtin, "write_file");
+        assert!(reg.granted("chat-1", builtin, "write_file"));
+        assert!(!reg.granted("chat-2", builtin, "write_file"), "leaked across chats");
+        assert!(!reg.granted("chat-1", builtin, "edit_file"), "leaked across tools");
+        assert!(
+            !reg.granted("chat-1", "filesystem-mcp", "write_file"),
+            "leaked to an MCP tool with the same name"
+        );
+    }
+
+    #[test]
+    fn revoking_a_session_drops_only_its_grants() {
+        let reg = ApprovalRegistry::new();
+        reg.grant("chat-1", "__builtin__", "write_file");
+        reg.grant("chat-1", "__builtin__", "delete_file");
+        reg.grant("chat-10", "__builtin__", "write_file");
+        reg.revoke_session("chat-1");
+        assert!(!reg.granted("chat-1", "__builtin__", "write_file"));
+        assert!(!reg.granted("chat-1", "__builtin__", "delete_file"));
+        // A chat whose id merely starts with the revoked one keeps its own.
+        assert!(reg.granted("chat-10", "__builtin__", "write_file"));
     }
 
     #[test]

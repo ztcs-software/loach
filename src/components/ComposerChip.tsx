@@ -50,9 +50,11 @@ export function composerChipIconClass(variant: ComposerChipVariant) {
 export function ChipRemove({
   label,
   onClick,
+  disabled = false,
 }: {
   label: string;
   onClick: () => void;
+  disabled?: boolean;
 }) {
   return (
     <button
@@ -64,7 +66,8 @@ export function ChipRemove({
         onClick();
       }}
       aria-label={label}
-      className="-mr-1 grid h-5 w-5 shrink-0 place-items-center rounded-full text-foreground/50 transition-colors hover:bg-foreground/10 hover:text-foreground"
+      disabled={disabled}
+      className="-mr-1 grid h-5 w-5 shrink-0 place-items-center rounded-full text-foreground/50 transition-colors hover:bg-foreground/10 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-foreground/50"
     >
       <X className="h-3 w-3" />
     </button>
@@ -140,6 +143,7 @@ export function WorkspaceChip({
   root,
   toolsEnabled,
   instructions,
+  locked,
   onRemove,
 }: {
   root: string;
@@ -151,6 +155,11 @@ export function WorkspaceChip({
    *  first line in the tooltip, so it's visible that the model is being
    *  briefed by the project and not only by the user. */
   instructions: string | null;
+  /** A reply is running in this chat. That turn resolved its folder when it
+   *  started and keeps using it, so removing the folder now would only take
+   *  effect afterwards — while the approval cards went on showing paths in
+   *  a folder the chip no longer names. The ✕ waits for the turn to end. */
+  locked: boolean;
   onRemove: () => void;
 }) {
   const firstLine = instructions
@@ -162,9 +171,11 @@ export function WorkspaceChip({
         firstLine.length > 80 ? `${firstLine.slice(0, 80)}…` : firstLine
       }`
     : "";
-  const hint = toolsEnabled
-    ? "The model can list, find, read and search this folder. Writes, edits, moves and deletions ask you first."
-    : "Workspace file tools are switched off in Settings → Tools, so the model can't use this folder until they're turned back on.";
+  const hint =
+    (toolsEnabled
+      ? "The model can list, find, read and search this folder. Writes, edits, moves and deletions ask you first."
+      : "Workspace file tools are switched off in Settings → Tools, so the model can't use this folder until they're turned back on.") +
+    (locked ? "\nThe folder can't be changed or removed while a reply is running." : "");
   return (
     <div
       className={cn(
@@ -181,7 +192,7 @@ export function WorkspaceChip({
       {!toolsEnabled && (
         <span className="text-[10px] uppercase tracking-wider opacity-80">tools off</span>
       )}
-      <ChipRemove label="Remove workspace directory" onClick={onRemove} />
+      <ChipRemove label="Remove workspace directory" onClick={onRemove} disabled={locked} />
     </div>
   );
 }

@@ -211,8 +211,39 @@ describe("per-call tool approvals", () => {
     const records = JSON.parse(persisted!) as ToolCallRecord[];
     expect(records[0].id).toBe("call_0_0");
     expect(records[0].awaiting_approval).toBeUndefined();
+    // Settled as never run — in SQLite and in the live bubble alike.
+    expect(records[0]).toMatchObject({ interrupted: true, is_error: false });
+    expect(records[0].result).toMatch(/^Not run/);
+    expect(toolCalls("sess-A")[0]).toMatchObject({ interrupted: true });
+    expect(toolCalls("sess-A")[0].awaiting_approval).toBeUndefined();
     // Nothing is streaming, so a stray click has nowhere to go.
     await get().respondToolApproval("call_0_0", "allow_once");
     expect(mocks.respond).not.toHaveBeenCalled();
+  });
+
+  // Stop unlistens before the backend can report the result, so a call
+  // that was already running used to stay "Calling …" with a spinner for
+  // good — even when it was a workspace write that did finish on disk.
+  it("settles a call that was running when the stream stopped as possibly completed", async () => {
+    const p = startConnected();
+    await tick();
+    const stream = mocks.streams[0];
+    stream.onEvent({ ...CALL, id: "call_0_0" });
+    stream.onEvent({ ...CALL, id: "call_0_1" });
+    stream.onEvent({ kind: "tool_result", id: "call_0_0", content: "done", is_error: false });
+    await tick();
+
+    await get().cancelForSession("sess-A");
+    await tick();
+    await p;
+
+    const records = JSON.parse(mocks.updates.at(-1)!.tool_calls_json!) as ToolCallRecord[];
+    const finished = records.find((c) => c.id === "call_0_0")!;
+    const cut = records.find((c) => c.id === "call_0_1")!;
+    expect(finished).toMatchObject({ result: "done" });
+    expect(finished.interrupted).toBeUndefined();
+    expect(cut).toMatchObject({ interrupted: true, is_error: false });
+    expect(cut.result).toMatch(/may or may not have completed/);
+    expect(toolCalls("sess-A").every((c) => c.result !== null)).toBe(true);
   });
 });
