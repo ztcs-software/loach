@@ -1,0 +1,88 @@
+# Pantry — notes for the assistant
+
+<!--
+  Sample LOACHFILE.md. Copy it to the root of a workspace folder, name it
+  LOACHFILE.md, and rewrite it for your project — Pantry is made up.
+
+  - Plain Markdown, no special syntax. Loach adds the whole file to the
+    system prompt on every turn, this comment included, so delete this
+    block once you've adapted it.
+  - It's read fresh each turn: an edit applies on your next send.
+  - The first line shows in the tooltip of the LOACHFILE.md badge on the
+    "Working in" notice, so make it say what the file is.
+  - Anything past 32 KB is cut, but aim for a page: local models follow
+    short instruction files far more reliably than long ones.
+  - The model can list, find, read, search, write, edit, move and delete
+    files in the folder, but it has no shell. Ask it to tell you which
+    command to run, not to run it.
+  - It's guidance, not a sandbox. Every write, edit, move and delete
+    still asks you first, and your own instructions win when they
+    conflict with this file.
+-->
+
+Pantry is a small web app for tracking what's in the kitchen: a
+TypeScript + Express API in `server/`, a React front end in `web/`, and
+SQLite for storage.
+
+## Where things live
+
+- `server/src/routes/` — one file per resource (`items.ts`, `shelves.ts`).
+- `server/src/db/schema.sql` — the current schema. Migrations are in
+  `server/src/db/migrations/`, numbered `0001_*.sql`, `0002_*.sql`, …
+- `web/src/components/` — React components, one per file, PascalCase.
+- `shared/types.ts` — types used by both sides. Change them here; never
+  redefine them locally.
+
+## Before you change anything
+
+- Start with `search_files` or `find_files`, then `read_file`. Don't
+  guess at what a file contains.
+- Use `edit_file` for changes to an existing file. Use `write_file` only
+  for new files or when replacing most of one.
+- Keep changes to what I asked for. Don't reformat or tidy code you
+  weren't asked to touch.
+
+## Don't touch
+
+- Existing migrations. Add a new one with the next number instead.
+- `package-lock.json` and `web/dist/` — generated.
+- `.env` — private. Don't read it, and don't quote it if you see it.
+- `vendor/` — third-party code, copied in on purpose.
+
+## Checking your work
+
+You can't run commands. When a change is done, tell me what to run:
+
+- `npm test` — unit tests (Vitest), from the repo root.
+- `npm run lint` — ESLint and Prettier.
+- `npm run dev` — starts the API and the web app on http://localhost:5173.
+
+When you add a function with real logic in it, add a test beside it
+(`foo.ts` → `foo.test.ts`).
+
+## House style
+
+- TypeScript strict mode; no `any`. Use `unknown` and narrow it.
+- Named exports only.
+- Dates are stored as ISO 8601 strings in UTC and formatted only in `web/`.
+- User-facing text is British English ("colour", "organise").
+- Comments explain why, not what.
+
+## Words we use
+
+- **Item** — a thing in the pantry. Has a quantity and an optional expiry.
+- **Shelf** — where an item is kept (Fridge, Freezer, Cupboard). An item
+  is on exactly one shelf.
+- **Low stock** — quantity at or below the item's `threshold`. Not the
+  same as empty.
+
+## How to answer
+
+- Lead with what you changed and why, in a sentence or two.
+- If a request could mean two things, ask before editing files.
+- Mention problems you noticed but didn't fix, rather than fixing them.
+
+## This file
+
+If something here turns out to be wrong or out of date, say so and offer
+an edit to `LOACHFILE.md`.
