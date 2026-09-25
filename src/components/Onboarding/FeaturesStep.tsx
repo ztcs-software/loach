@@ -1,14 +1,16 @@
 import { useState } from "react";
-import { Brain, Clock, MemoryStick } from "lucide-react";
+import { BookMarked, Brain, Clock, MemoryStick } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useOnboardingStore } from "@/stores/onboardingStore";
 import { StepShell } from "./StepShell";
 
 /**
- * Feature toggles. Three defaults that are easier to set once at onboarding
+ * Feature toggles. Four defaults that are easier to set once at onboarding
  * than to discover later in Settings:
  *
+ *   - Global memories: OFF by default. When on, every reply costs a
+ *     second, hidden extraction call, so it's opt-in.
  *   - Temporal awareness (date/time injection): ON by default. Cheap
  *     and fixes the "what's today's date?" surprise.
  *   - Thinking: ON by default. Reasoning models default to thinking
@@ -16,20 +18,24 @@ import { StepShell } from "./StepShell";
  *   - Low VRAM: OFF by default. Hurts speed if you don't need it; the
  *     in-chat toggle is right there if a model OOMs.
  *
- * All three are committed to settings on Continue *and* on Skip —
- * establishing defaults is the wizard's job, and none of these three reaches
- * the network or changes what the model is allowed to do. Web fetch used to
- * live here and needed a carve-out for exactly that reason; it now sits on
- * the Tools step, which writes nothing the user didn't touch.
+ * All four are committed to settings on Continue *and* on Skip —
+ * establishing defaults is the wizard's job, and none of these reaches the
+ * network or changes what the model is allowed to do (global memory's extra
+ * call goes to the provider the chat already uses, and Skip writes it OFF).
+ * Web fetch used to live here and needed a carve-out for exactly that
+ * reason; it now sits on the Tools step, which writes nothing the user
+ * didn't touch.
  */
 
 interface DraftFeatures {
+  global_memory_enabled: boolean;
   temporal_awareness: boolean;
   thinking_default: boolean;
   low_vram_global: boolean;
 }
 
 const RECOMMENDED: DraftFeatures = {
+  global_memory_enabled: false,
   temporal_awareness: true,
   thinking_default: true,
   low_vram_global: false,
@@ -50,6 +56,7 @@ export function FeaturesStep({ onClose }: { onClose: () => void }) {
 
   const commit = async () => {
     await Promise.all([
+      update("global_memory_enabled", draft.global_memory_enabled),
       update("temporal_awareness", draft.temporal_awareness),
       update("thinking_default", draft.thinking_default),
       update("low_vram_global", draft.low_vram_global),
@@ -70,6 +77,13 @@ export function FeaturesStep({ onClose }: { onClose: () => void }) {
       onClose={onClose}
     >
       <div className="space-y-2">
+        <FeatureRow
+          icon={<BookMarked className="h-4 w-4" />}
+          title="Global memories"
+          description="Remember durable facts about you across every chat, not just chats inside a Space. When on, every reply triggers a second, hidden model call to extract facts. Never used in Private Chat."
+          checked={draft.global_memory_enabled}
+          onChange={(v) => set("global_memory_enabled", v)}
+        />
         <FeatureRow
           icon={<Clock className="h-4 w-4" />}
           title="Temporal awareness"

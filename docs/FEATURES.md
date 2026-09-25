@@ -1104,8 +1104,9 @@ still leaves the app in a consistent state.
 2. **Provider** — pick Ollama or add an OpenAI key. This is the only
    required step; the X / Esc on it routes through a confirm dialog. It sits
    second so a model download has the rest of the wizard to make progress.
-3. **Features** — defaults for Temporal awareness, Thinking, and Low VRAM
-   (recommends ON / ON / OFF). Committed on Skip as well as Continue.
+3. **Features** — defaults for Global memories, Temporal awareness,
+   Thinking, and Low VRAM (recommends OFF / ON / ON / OFF). Committed on
+   Skip as well as Continue.
 4. **Tools** — Web fetch and the in-process utility tools, which before
    this screen existed were discover-by-accident in Settings. The
    utilities open on a **Recommended** preset — everything on except the
