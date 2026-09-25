@@ -111,6 +111,18 @@ const MAX_SEARCH_MATCHES: usize = 100;
 /// search can't eat the 20 s built-in timeout on a large tree.
 const MAX_SEARCH_FILES: usize = 2_000;
 const MAX_DEPTH: u32 = 8;
+/// Appended when a walk reached [`MAX_DEPTH`] with more below it, so "no
+/// match" isn't read as "not there".
+const DEPTH_NOTE: &str = "[directories more than 8 levels below the search path weren't \
+                          searched — pass one of them as `path` to look inside]";
+
+/// Whether a walk stopped above this entry's contents: a directory at the
+/// depth limit that isn't empty.
+fn cut_by_depth(entry: &walkdir::DirEntry) -> bool {
+    entry.depth() == MAX_DEPTH as usize
+        && entry.file_type().is_dir()
+        && fs::read_dir(entry.path()).is_ok_and(|mut d| d.next().is_some())
+}
 /// Largest file `search_files` will open. Checked against the directory
 /// entry's size *before* the file is read, so a multi-gigabyte log in the
 /// tree costs a stat, not an allocation.
@@ -851,6 +863,7 @@ pub fn dispatch_find_files(root: &Path, args: &Value) -> McpCallResult {
     let mut found: Vec<String> = Vec::new();
     let mut visited = 0usize;
     let mut hit_cap = false;
+    let mut too_deep = false;
     let walker = walkdir::WalkDir::new(&base)
         .max_depth(MAX_DEPTH as usize)
         .follow_links(false)
@@ -860,6 +873,7 @@ pub fn dispatch_find_files(root: &Path, args: &Value) -> McpCallResult {
         if entry.depth() == 0 {
             continue;
         }
+        too_deep = too_deep || cut_by_depth(&entry);
         visited += 1;
         if visited > MAX_FIND_VISITED || found.len() >= MAX_FIND_RESULTS {
             hit_cap = true;
@@ -880,6 +894,9 @@ pub fn dispatch_find_files(root: &Path, args: &Value) -> McpCallResult {
     }
 
     if found.is_empty() {
+        if too_deep {
+            return ok(format!("No files match `{pattern}`.\n{DEPTH_NOTE}"));
+        }
         return ok(format!("No files match `{pattern}`."));
     }
     found.sort();
@@ -892,6 +909,8 @@ pub fn dispatch_find_files(root: &Path, args: &Value) -> McpCallResult {
         text.push_str(
             "\n[stopped at the result cap — narrow the pattern or pass `path` to search a subdirectory]\n",
         );
+    } else if too_deep {
+        text.push_str(&format!("\n{DEPTH_NOTE}\n"));
     }
     ok(text)
 }
@@ -1056,6 +1075,7 @@ pub fn dispatch_search_files(root: &Path, args: &Value) -> McpCallResult {
     let mut files_read = 0usize;
     let mut hit_match_cap = false;
     let mut hit_file_cap = false;
+    let mut too_deep = false;
 
     let walker = walkdir::WalkDir::new(&base)
         .max_depth(MAX_DEPTH as usize)
@@ -1074,6 +1094,7 @@ pub fn dispatch_search_files(root: &Path, args: &Value) -> McpCallResult {
             hit_file_cap = true;
             break;
         }
+        too_deep = too_deep || cut_by_depth(&entry);
         // Skips symlinks as well as directories, and that is load-bearing:
         // with `follow_links(false)` walkdir reports a symlink's own type,
         // so `is_file()` is false for one. Without that, `fs::read` below
@@ -1134,6 +1155,9 @@ pub fn dispatch_search_files(root: &Path, args: &Value) -> McpCallResult {
                  Pass `path` or `extensions` to narrow the search."
             ));
         }
+        if too_deep {
+            return ok(format!("No matches for `{pattern}`.\n{DEPTH_NOTE}"));
+        }
         return ok(format!("No matches for `{pattern}`."));
     }
     let mut text = format!("{match_count} match(es) for `{pattern}`:\n{matches}");
@@ -1143,6 +1167,8 @@ pub fn dispatch_search_files(root: &Path, args: &Value) -> McpCallResult {
         text.push_str(&format!(
             "\n[stopped after {MAX_SEARCH_FILES} files — pass `path` or `extensions` to narrow the search]\n"
         ));
+    } else if too_deep {
+        text.push_str(&format!("\n{DEPTH_NOTE}\n"));
     }
     ok(text)
 }
@@ -1744,6 +1770,32 @@ mod tests {
             "node_modules was descended into: {}",
             r.content_text
         );
+    }
+
+    /// A file below the depth limit isn't found, but the answer says the
+    /// walk stopped there instead of reading as "not in the workspace"; a
+    /// deeper `path` reaches it, and a shallow tree gets no note.
+    #[test]
+    fn find_and_search_say_when_the_depth_limit_cut_them_short() {
+        let (_d, root) = workspace();
+        let deep_dir = "a/b/c/d/e/f/g/h/i";
+        fs::create_dir_all(root.join(deep_dir)).unwrap();
+        fs::write(root.join(deep_dir).join("deep.txt"), "needle\n").unwrap();
+
+        let find = dispatch_find_files(&root, &json!({ "pattern": "deep.txt" }));
+        assert!(find.content_text.contains("No files match"), "{}", find.content_text);
+        assert!(find.content_text.contains("weren't searched"), "{}", find.content_text);
+        let search = dispatch_search_files(&root, &json!({ "pattern": "needle" }));
+        assert!(search.content_text.contains("No matches"), "{}", search.content_text);
+        assert!(search.content_text.contains("weren't searched"), "{}", search.content_text);
+
+        let closer = dispatch_find_files(&root, &json!({ "pattern": "deep.txt", "path": "a/b" }));
+        assert!(closer.content_text.contains("deep.txt"), "{}", closer.content_text);
+        assert!(!closer.content_text.contains("weren't searched"), "{}", closer.content_text);
+
+        let (_d2, shallow) = workspace();
+        let plain = dispatch_find_files(&shallow, &json!({ "pattern": "*.nothing" }));
+        assert!(!plain.content_text.contains("weren't searched"), "{}", plain.content_text);
     }
 
     #[test]

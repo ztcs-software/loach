@@ -472,6 +472,9 @@ can also **update** one that changed (a reversed preference, a move) or
 **remove** one that no longer holds, instead of piling up contradictions.
 New facts are deduped locally too (token overlap that also checks word
 order, so "prefers A over B" is not mistaken for "prefers B over A").
+The extractor is told that what you ask for in a chat is a task, not a
+fact about you, and a "fact" that just reports a request ("User requested
+a Python file…", "Is asking how to…") is dropped locally as well.
 
 - **Toast for every change** — "Saved to memory" / "Updated memory" /
   "Removed memory" pills with the fact and an **Undo** button.
@@ -488,7 +491,10 @@ order, so "prefers A over B" is not mistaken for "prefers B over A").
 - **Caps** — the newest 60 memories go into both the chat prompt and the
   extractor prompt, so every fact the model sees is one the extractor can
   still correct. A fact the extractor saves or rewrites is rejected if
-  longer than 280 chars; facts you add or edit yourself aren't capped.
+  longer than 280 chars; facts you add or edit yourself aren't capped. One
+  run removes or rewrites at most three existing facts, and their toasts
+  are shown last, so their **Undo** stays on screen however many new facts
+  the same run saves.
 
 Memories are silently injected into the system prompt of every chat inside
 the Space as a `--- Space memory ---` bulleted list. Cancel / error turns
@@ -713,15 +719,19 @@ Loach speaks two MCP transports. Configure servers in **Settings → MCP**.
   variables layered over Loach's own. Loach starts the program and
   speaks newline-delimited JSON-RPC over its pipes — the way most
   published servers ship. The process stays running between turns and is
-  stopped when the server is disabled, edited, or deleted, and when Loach
-  exits. Startup is allowed 60 s (first-run package downloads) and each
-  request 30 s. When the process exits or stops accepting input, the last
+  stopped — together with every process it started, such as the `node`
+  behind `npx` — when the server is disabled, edited, or deleted, and when
+  Loach exits. Startup is allowed 60 s (first-run package downloads) and
+  each request 30 s. When the process exits or stops accepting input, the last
   lines of its stderr are quoted in the error so a failed launch says why
   (a timeout doesn't include them). On Windows a bare `npx` resolves to
   `npx.cmd` through Loach's own `PATH`/`PATHEXT`, so commands work as
   typed; a `PATH` set in the server's environment isn't used for that
-  lookup. On macOS and Linux the command is looked up on the server's
-  `PATH` when you set one in its environment, and on Loach's otherwise.
+  lookup. On macOS and Linux the server gets the `PATH` your login shell
+  builds — the one a terminal sees, read once per launch — followed by
+  Loach's own, so tools installed through Homebrew, nvm or `~/.local/bin`
+  are found even when Loach was started from the Dock or an app menu. A
+  `PATH` set in the server's environment replaces both.
 
 For each server:
 
@@ -736,11 +746,17 @@ For each server:
 **Running a local program needs consent.** When a stdio configuration is
 saved or tested for the first time — and again whenever its command,
 arguments, or environment change, or a disabled server is turned on — a
-native OS dialog quotes the exact command line (and the *names* of any
-environment variables, never their values) and asks whether to start it.
-The dialog is raised by the Rust side, not by the web view, so a
-compromised renderer can't get a program run without a person clicking
-through it. Snapshot imports store stdio servers **disabled** for the
+native OS dialog shows the program and each argument on a line of its own
+(quoted when it contains spaces), plus the names of any environment
+variables, and asks whether to start it. Values stay hidden, since that is
+where API keys go — except for variables that change what runs (`PATH`,
+`NODE_OPTIONS`, `PYTHONPATH`, `LD_PRELOAD`, package-index settings and the
+like), which are shown in full. A command line too long to show in full is
+refused rather than cut short, and so are control characters and
+invisible or text-reordering Unicode anywhere in the command, arguments or
+environment. The dialog is raised by the Rust side, not by the web view,
+so a compromised renderer can't get a program run without a person
+clicking through it. Snapshot imports store stdio servers **disabled** for the
 same reason; enabling one in Settings raises the dialog. Saving a server
 switched off doesn't ask; turning it on does. Approved command lines are
 remembered for the rest of the session, so a test followed by a save asks
@@ -815,12 +831,13 @@ message instead; the two are not variants of each other). The folder shows
 as a chip above the composer for the rest of the chat; remove it from the
 chip. Picking a folder also switches on **Workspace files** in **Settings
 → Tools** if it was off, and the chip says so if that switch is later
-turned off again. While a reply is running in the chat, the folder can't
-be changed or removed — that turn keeps the folder it started with. Forking
-a chat carries the folder over; exports and imports never do — a path means
-nothing on another machine. If the folder is later moved or deleted, the
-chip still shows it but the model gets no folder tools and no project
-instructions until you pick the folder again.
+turned off again — while it's off, the model gets neither the tools nor
+the folder's note and `LOACHFILE.md`. While a reply is running in the
+chat, the folder can't be changed or removed — that turn keeps the folder
+it started with. Forking a chat carries the folder over; exports and
+imports never do — a path means nothing on another machine. If the folder
+is later moved or deleted, the chip still shows it but the model gets no
+folder tools and no project instructions until you pick the folder again.
 
 Eight tools appear in the model's catalogue only while a chat has a
 folder; without one the model never sees them. All paths are relative to
@@ -846,8 +863,9 @@ or moving a link acts on the link itself, never on what it points to.
 - **delete_file** — remove one file or one empty directory per call.
 
 `find_files` and `search_files` go at most eight levels below the
-directory they start from; anything deeper isn't found, so point them at a
-subdirectory for deeply nested trees.
+directory they start from. When a walk stops above deeper directories,
+the result says so, so the model can point `path` at a subdirectory
+rather than conclude the file isn't there.
 
 The four that change files **ask you first, every time**. The consent card
 shows the change itself rather than raw arguments: the contents of a

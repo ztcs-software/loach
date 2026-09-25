@@ -344,6 +344,10 @@ export interface ChatRequest {
    *  to a user-configured MCP server. Omit (or pass `false`) for regular
    *  chats — defaults on the Rust side via `#[serde(default)]`. */
   private?: boolean;
+  /** Background-task marker (compaction, memory extraction): the backend
+   *  offers no tools at all, so the model can't stall on an approval card
+   *  nobody is looking at. */
+  no_tools?: boolean;
   /** Chat this turn belongs to. The backend uses it to look up the
    *  session's workspace directory; there is no way to pass the directory
    *  itself, by design. Omitted by the compaction and Private Chat paths,
@@ -782,6 +786,19 @@ export interface McpTestResult {
   protocol_version: string | null;
   tools: McpTool[];
   error: string | null;
+}
+
+/** Result of `mcp_tools` — the catalogue a chat turn would get, from the
+ *  running servers. `errors` pairs a server name with why its tools
+ *  couldn't be listed. */
+export interface McpToolsOverview {
+  tools: Array<{
+    server_id: string;
+    server_name: string;
+    name: string;
+    description: string | null;
+  }>;
+  errors: Array<[server: string, error: string]>;
 }
 
 // ---------------------------------------------------------------------------

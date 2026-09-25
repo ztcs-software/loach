@@ -4,6 +4,7 @@ import {
   MAX_MEMORY_CHARS,
   buildExtractorSystemPrompt,
   clip,
+  describesRequest,
   isDuplicate,
   normalize,
   parseExtractionJson,
@@ -46,6 +47,14 @@ export interface MemoryExtractionArgs {
  * last one. Small so the prompt stays within tiny local contexts.
  */
 const MAX_TURNS_PER_RUN = 3;
+
+/**
+ * Most existing memories one run may remove or rewrite, together. A turn
+ * rarely invalidates more than a fact or two; the cap bounds what one
+ * hallucinated (or injected) `remove` list can wipe, and keeps every such
+ * change's Undo toast on screen — see the announcement order below.
+ */
+const MAX_EDITS_PER_RUN = 3;
 
 /**
  * Cap on how much user + assistant text a run feeds the extractor, per
@@ -123,10 +132,10 @@ function opsFor(scope: MemoryScope): MemoryOps {
  *      base_url the user is chatting with.
  *   3. Parse the model's JSON output. Tolerant of fenced code blocks and
  *      stray prose around the JSON object.
- *   4. Apply removals and updates by number, then run a local
- *      string-similarity dedupe on each addition against the (now
- *      corrected) existing memories — belt-and-suspenders for when the
- *      model ignores the dedupe instruction.
+ *   4. Apply removals and updates by number, then drop additions that only
+ *      report what the user asked for and run a local string-similarity
+ *      dedupe on the rest against the (now corrected) existing memories —
+ *      belt-and-suspenders for when the model ignores those instructions.
  *   5. Persist through the scope's store, then push one toast per change,
  *      each with an Undo.
  *
@@ -181,7 +190,10 @@ export async function extractMemories(args: MemoryExtractionArgs): Promise<void>
           `<user>\n${clip(t.userText, perSide)}\n</user>\n\n` +
           `<assistant>\n${clip(t.assistantText, perSide)}\n</assistant>`,
       )
-      .join("\n\n") + `\n\nReturn the JSON object now.`;
+      .join("\n\n") +
+    // The reminder sits last, where small models weigh instructions most;
+    // without it they tend to save the request itself as a "fact".
+    `\n\nReturn the JSON object now. Only durable facts about the user belong in it — never what they asked for in these turns.`;
 
   let raw: string | null;
   try {
@@ -209,17 +221,26 @@ export async function extractMemories(args: MemoryExtractionArgs): Promise<void>
   const byNumber = (n: number): MemoryRow | undefined => promptRows[n - 1];
   const latestMessageId = args.turn.assistantMessageId;
 
+  // Toasts go out once everything is applied, additions first: the toast
+  // stack evicts its oldest entries, so the removals and rewrites — whose
+  // Undo can't be redone by hand — are pushed last and stay on screen.
+  const addToasts: (() => void)[] = [];
+  const editToasts: (() => void)[] = [];
+  let edits = 0;
+
   // Removals and updates first so the dedupe list below reflects the
   // model's corrections — otherwise a reversed preference would be rejected
   // as a duplicate of the very row it replaces.
   const removedIds = new Set<string>();
   for (const n of parsed.remove) {
+    if (edits >= MAX_EDITS_PER_RUN) break;
     const row = byNumber(n);
     if (!row || removedIds.has(row.id)) continue;
     try {
       await ops.remove(row.id);
       removedIds.add(row.id);
-      announceRemoved(row, ops);
+      edits++;
+      editToasts.push(() => announceRemoved(row, ops));
     } catch (e) {
       logger.warn("failed to remove memory", e);
     }
@@ -227,6 +248,7 @@ export async function extractMemories(args: MemoryExtractionArgs): Promise<void>
 
   const updatedContent = new Map<string, string>();
   for (const u of parsed.update) {
+    if (edits >= MAX_EDITS_PER_RUN) break;
     const row = byNumber(u.n);
     if (!row || removedIds.has(row.id) || updatedContent.has(row.id)) continue;
     const content = u.content.trim();
@@ -235,7 +257,8 @@ export async function extractMemories(args: MemoryExtractionArgs): Promise<void>
     try {
       await ops.update(row.id, content);
       updatedContent.set(row.id, content);
-      announceUpdated(row, content, ops);
+      edits++;
+      editToasts.push(() => announceUpdated(row, content, ops));
     } catch (e) {
       logger.warn("failed to update memory", e);
     }
@@ -254,6 +277,7 @@ export async function extractMemories(args: MemoryExtractionArgs): Promise<void>
 
     const norm = normalize(trimmed);
     if (!norm) continue;
+    if (describesRequest(norm)) continue;
     if (seenInRun.has(norm)) continue;
     if (isDuplicate(norm, existingNormalized)) continue;
 
@@ -261,11 +285,13 @@ export async function extractMemories(args: MemoryExtractionArgs): Promise<void>
     try {
       const saved = await ops.add(trimmed, sessionId, latestMessageId);
       existingNormalized.push(norm);
-      announceSaved(saved, ops);
+      addToasts.push(() => announceSaved(saved, ops));
     } catch (e) {
       logger.warn("failed to persist memory", e);
     }
   }
+
+  for (const announce of [...addToasts, ...editToasts]) announce();
 }
 
 // Handle to the in-flight extractor stream's `stop()` (which routes through
@@ -373,6 +399,7 @@ async function runOneShotStream(args: {
           // ignore the field on the Rust side.
           think: false,
         },
+        no_tools: true,
       },
       (ev) => {
         if (ev.kind === "token") {

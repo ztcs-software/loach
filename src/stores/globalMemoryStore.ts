@@ -39,9 +39,13 @@ export const useGlobalMemoryStore = create<GlobalMemoryState>((set, get) => ({
 
   ensureLoaded: async () => get().memories ?? (await get().load()),
 
+  // The three writes below patch the cache only once it has been loaded.
+  // Seeding an unloaded cache with a single row (`/remember` before anything
+  // else read the list) would make `ensureLoaded` treat that row as the
+  // whole list and hide every other global fact for the rest of the session.
   addMemory: async (args) => {
     const memory = await addGlobalMemory(args);
-    set((s) => ({ memories: [...(s.memories ?? []), memory] }));
+    set((s) => (s.memories ? { memories: [...s.memories, memory] } : s));
     return memory;
   },
 
@@ -49,15 +53,21 @@ export const useGlobalMemoryStore = create<GlobalMemoryState>((set, get) => ({
     const trimmed = content.trim();
     await updateGlobalMemory({ id, content: trimmed });
     const now = Date.now();
-    set((s) => ({
-      memories: (s.memories ?? []).map((m) =>
-        m.id === id ? { ...m, content: trimmed, updated_at: now } : m,
-      ),
-    }));
+    set((s) =>
+      s.memories
+        ? {
+            memories: s.memories.map((m) =>
+              m.id === id ? { ...m, content: trimmed, updated_at: now } : m,
+            ),
+          }
+        : s,
+    );
   },
 
   removeMemory: async (id) => {
     await removeGlobalMemory({ id });
-    set((s) => ({ memories: (s.memories ?? []).filter((m) => m.id !== id) }));
+    set((s) =>
+      s.memories ? { memories: s.memories.filter((m) => m.id !== id) } : s,
+    );
   },
 }));

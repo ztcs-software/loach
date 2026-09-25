@@ -395,12 +395,13 @@ enabled.)
    for your user: Node.js for `npx`, `uv` for `uvx`. Loach hands the
    program its own environment, read when Loach started — if you installed
    the runtime since, restart Loach.
-   - On macOS and Linux, an app started from the Dock or an app menu
-     doesn't read your shell's startup files, so tools installed through
-     Homebrew, nvm, pyenv and the like can be missing even though they
-     work in a terminal. Run `echo $PATH` in a terminal and add the result
-     to the server's environment variables as `PATH=…`; Loach then finds
-     the command on that `PATH` and the server inherits it.
+   - On macOS and Linux, Loach asks your login shell for its `PATH` once
+     per launch, so tools installed through Homebrew, nvm, pyenv and the
+     like are found even when Loach was started from the Dock or an app
+     menu. If one still isn't — your shell took over 10 s to start, or
+     sets `PATH` somewhere a login shell doesn't read — run `echo $PATH`
+     in a terminal and add the result to the server's environment
+     variables as `PATH=…`; Loach then uses that `PATH` instead.
 3. On Windows, `npx` / `uvx` are `.cmd` shims. Loach resolves them for
    you, but a full path to the `.cmd` file also works.
 4. First runs of `npx -y …` download the package. Startup is allowed

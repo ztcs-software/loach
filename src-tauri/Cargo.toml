@@ -131,8 +131,18 @@ sysinfo = { version = "0.38", default-features = false, features = ["system", "d
 # crate is already in the tree (sysinfo pulls it in), so declaring it directly
 # costs a feature set, not a new download. Linux reads nvidia-smi / sysfs and
 # macOS needs nothing — see src/gpu.rs.
+#
+# `Win32_System_JobObjects` + `Win32_Security` (for `CreateJobObjectW`'s
+# signature) put each stdio MCP server in a job, so stopping the server stops
+# every process it started — see `mcp/stdio.rs`.
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D12"] }
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D12", "Win32_System_JobObjects", "Win32_Security"] }
+
+# `killpg` for the same purpose on macOS / Linux: a stdio MCP server runs in
+# its own process group and the whole group is stopped with it. Already in
+# the tree through tokio.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 # Only used by the db.rs test suite, which opens a fresh database in a

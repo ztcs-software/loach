@@ -687,6 +687,7 @@ ${transcript}
           system_prompt: null,
           messages: [{ role: "user", content: summaryPrompt, images: [] }],
           params,
+          no_tools: true,
         },
         (ev) => {
           if (ev.kind === "token") {

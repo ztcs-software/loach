@@ -811,7 +811,8 @@ export function ChatInput({ centered = false }: ChatInputProps) {
               <WorkspaceChip
                 root={workspaceRoot}
                 toolsEnabled={workspaceToolsEnabled}
-                instructions={workspaceInstructions}
+                // With the switch off the backend sends no LOACHFILE.md either.
+                instructions={workspaceToolsEnabled ? workspaceInstructions : null}
                 locked={streamingThisChat}
                 onRemove={() => void clearWorkspace(activeSessionId)}
               />

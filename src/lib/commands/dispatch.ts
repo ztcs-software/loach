@@ -1,6 +1,6 @@
 import { useChatStore } from "@/stores/chatStore";
 import { useGlobalMemoryStore } from "@/stores/globalMemoryStore";
-import { connectionLabel, inputFromView, useMcpStore } from "@/stores/mcpStore";
+import { connectionLabel, useMcpStore } from "@/stores/mcpStore";
 import { useModelsStore } from "@/stores/modelsStore";
 import { usePrivateChatStore } from "@/stores/privateChatStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -14,7 +14,7 @@ import type { MemoryScope } from "@/lib/memory";
 import {
   clearSessionMessages,
   fetchUrl,
-  mcpTest,
+  mcpTools,
 } from "@/lib/tauri";
 import type {
   GenerationParams,
@@ -593,25 +593,23 @@ async function runSpace(rest: string): Promise<CommandResult> {
 async function runTools(): Promise<CommandResult> {
   const servers = useMcpStore.getState().servers.filter((s) => s.enabled);
   if (servers.length === 0) return ok("No enabled MCP servers", "Configure one in Settings → MCP.");
-  // Probe each server in parallel — mcpTest never throws (failures land in
-  // `error`) so Promise.all is safe.
-  const probes = await Promise.all(
-    servers.map(async (s) => ({
-      server: s,
-      result: await mcpTest(inputFromView(s, { enabled: true })),
-    })),
-  );
+  // The catalogue a chat turn would get, from the servers already running —
+  // probing each with `mcp_test` started a second copy of every stdio
+  // server and asked for consent all over again.
+  const { tools, errors } = await mcpTools();
   const items: CommandResultItem[] = [];
-  for (const { server, result } of probes) {
-    if (!result.ok) {
-      items.push({ label: server.name, detail: "error", hint: result.error ?? "Probe failed" });
+  for (const server of servers) {
+    const error = errors.find(([name]) => name === server.name)?.[1];
+    if (error) {
+      items.push({ label: server.name, detail: "error", hint: error });
       continue;
     }
-    if (result.tools.length === 0) {
+    const own = tools.filter((t) => t.server_id === server.id);
+    if (own.length === 0) {
       items.push({ label: server.name, detail: "0 tools" });
       continue;
     }
-    for (const t of result.tools) {
+    for (const t of own) {
       items.push({
         label: t.name,
         detail: server.name,

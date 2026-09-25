@@ -70,8 +70,11 @@ export function ContextUsageBar() {
   const space = useSpaceStore((s) =>
     session?.space_id ? s.spaces.find((x) => x.id === session.space_id) : null,
   );
+  // Counted only while Workspace files is on — the backend drops the
+  // folder, and with it LOACHFILE.md, when the switch is off.
+  const workspaceToolsEnabled = useSettingsStore((s) => s.workspace_tool_enabled);
   const projectInstructions = useChatStore((s) =>
-    s.activeSessionId
+    workspaceToolsEnabled && s.activeSessionId
       ? (s.workspaceInstructions[s.activeSessionId] ?? null)
       : null,
   );

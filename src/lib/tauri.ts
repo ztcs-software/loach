@@ -11,6 +11,7 @@ import type {
   McpServer,
   McpServerInput,
   McpTestResult,
+  McpToolsOverview,
   ToolApprovalDecision,
   Message,
   MessageHit,
@@ -1116,6 +1117,13 @@ export function mcpTest(input: McpServerInput): Promise<McpTestResult> {
     });
   }
   return invoke<McpTestResult>("mcp_test", { input });
+}
+
+/** The tools the enabled servers expose, from the same running servers a
+ *  chat send uses — no extra processes, no consent dialogs. */
+export function mcpTools(): Promise<McpToolsOverview> {
+  if (!isTauri) return Promise.resolve({ tools: [], errors: [] });
+  return invoke<McpToolsOverview>("mcp_tools");
 }
 
 // ------------ data (export / import / wipe) ------------

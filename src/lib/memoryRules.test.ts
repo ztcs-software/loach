@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   buildExtractorSystemPrompt,
+  describesRequest,
   isDuplicate,
   normalize,
   parseExtractionJson,
@@ -40,6 +41,27 @@ describe("isDuplicate", () => {
     expect(isDuplicate("uses neovim as the main editor", existing)).toBe(false);
   });
 
+  it("does NOT flag a negated fact as a duplicate of its positive form", () => {
+    // Both directions, English and Polish, including a contraction — the
+    // correction used to be dropped, keeping the fact it contradicts.
+    const dup = (a: string, b: string) => isDuplicate(normalize(a), [normalize(b)]);
+    expect(dup("Is not a fan of Python", "Is a fan of Python")).toBe(false);
+    expect(dup("Is a fan of Python", "Is not a fan of Python")).toBe(false);
+    expect(dup("Doesn't use Windows at work", "Uses Windows at work")).toBe(false);
+    expect(dup("Nie mieszka w Warszawie", "Mieszka w Warszawie")).toBe(false);
+    expect(dup("Nigdy nie pije kawy", "Pije kawę codziennie")).toBe(false);
+    // Same polarity still dedupes.
+    expect(dup("Does not like olives", "Does not like olives at all")).toBe(true);
+    expect(dup("Nie mieszka w Warszawie", "Nie mieszka już w Warszawie")).toBe(true);
+  });
+
+  it("keeps C#, C++ and C apart", () => {
+    const dup = (a: string, b: string) => isDuplicate(normalize(a), [normalize(b)]);
+    expect(dup("Prefers C# over Java", "Prefers C++ over Java")).toBe(false);
+    expect(dup("Prefers C over Java", "Prefers C# over Java")).toBe(false);
+    expect(dup("Prefers C# over Java.", "prefers c# over java")).toBe(true);
+  });
+
   it("treats empty candidates as duplicates so they are never saved", () => {
     expect(isDuplicate("", existing)).toBe(true);
   });
@@ -47,6 +69,27 @@ describe("isDuplicate", () => {
   it("falls back to the bag-of-words result for one-word memories", () => {
     expect(isDuplicate("vegetarian", ["vegetarian"])).toBe(true);
     expect(isDuplicate("vegetarian", ["vegan"])).toBe(false);
+  });
+});
+
+describe("describesRequest", () => {
+  const req = (s: string) => describesRequest(normalize(s));
+
+  it("flags additions that report what the user asked for", () => {
+    // Saved verbatim by a local model for a "make a Hello World file" turn.
+    expect(req('User requested the creation of a Python file with "Hello World" code.')).toBe(true);
+    expect(req("Asked how to center a div.")).toBe(true);
+    expect(req("The user is asking about Rust lifetimes.")).toBe(true);
+    expect(req("Has requested a bash script for backups.")).toBe(true);
+    expect(req("Użytkownik poprosił o skrypt w Pythonie.")).toBe(true);
+  });
+
+  it("keeps durable facts, including preferences phrased as a request", () => {
+    expect(req("Prefers TypeScript over JavaScript for new code.")).toBe(false);
+    expect(req("Works on a request queue for a Tauri app.")).toBe(false);
+    expect(req("Asked to be called Andy.")).toBe(false);
+    expect(req("Requested that answers be in Polish.")).toBe(false);
+    expect(req("Wants answers in Polish.")).toBe(false);
   });
 });
 

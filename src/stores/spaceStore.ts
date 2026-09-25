@@ -274,15 +274,17 @@ export const useSpaceStore = create<SpaceState>((set, get) => ({
     return memories;
   },
 
+  // The memory writes patch a Space's cached list only once it has been
+  // loaded: seeding an unloaded one with a single row would make the
+  // extractor (which reads the cache first) see that row as the whole list.
   addMemory: async (args) => {
     const memory = await addSpaceMemory(args);
     invalidateSpaceContext(args.space_id);
-    set((s) => ({
-      spaceMemories: {
-        ...s.spaceMemories,
-        [args.space_id]: [...(s.spaceMemories[args.space_id] ?? []), memory],
-      },
-    }));
+    set((s) => {
+      const list = s.spaceMemories[args.space_id];
+      if (!list) return s;
+      return { spaceMemories: { ...s.spaceMemories, [args.space_id]: [...list, memory] } };
+    });
     return memory;
   },
 
@@ -291,14 +293,18 @@ export const useSpaceStore = create<SpaceState>((set, get) => ({
     await updateSpaceMemory({ id, space_id: spaceId, content: trimmed });
     invalidateSpaceContext(spaceId);
     const now = Date.now();
-    set((s) => ({
-      spaceMemories: {
-        ...s.spaceMemories,
-        [spaceId]: (s.spaceMemories[spaceId] ?? []).map((m) =>
-          m.id === id ? { ...m, content: trimmed, updated_at: now } : m,
-        ),
-      },
-    }));
+    set((s) => {
+      const list = s.spaceMemories[spaceId];
+      if (!list) return s;
+      return {
+        spaceMemories: {
+          ...s.spaceMemories,
+          [spaceId]: list.map((m) =>
+            m.id === id ? { ...m, content: trimmed, updated_at: now } : m,
+          ),
+        },
+      };
+    });
   },
 
   // Unlike the other delete/remove actions this one does NOT toast on failure
@@ -308,11 +314,12 @@ export const useSpaceStore = create<SpaceState>((set, get) => ({
   removeMemory: async (id, spaceId) => {
     await removeSpaceMemory({ id, space_id: spaceId });
     invalidateSpaceContext(spaceId);
-    set((s) => ({
-      spaceMemories: {
-        ...s.spaceMemories,
-        [spaceId]: (s.spaceMemories[spaceId] ?? []).filter((m) => m.id !== id),
-      },
-    }));
+    set((s) => {
+      const list = s.spaceMemories[spaceId];
+      if (!list) return s;
+      return {
+        spaceMemories: { ...s.spaceMemories, [spaceId]: list.filter((m) => m.id !== id) },
+      };
+    });
   },
 }));

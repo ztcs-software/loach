@@ -1,7 +1,7 @@
 /**
  * Pure, store-free helpers behind the memory extractor (`memory.ts`): the
  * extractor prompt, the tolerant JSON parser for the model's reply, the
- * local dedupe pass, and the prompt-injection cap. Kept apart from
+ * local dedupe and request filters, and the prompt-injection cap. Kept apart from
  * `memory.ts` so they can be unit-tested without mocking the Tauri bridge
  * or the stores.
  */
@@ -49,6 +49,8 @@ export function selectMemoriesForPrompt<T extends { created_at: number }>(
  * examples so even smaller local models stick to the JSON shape. We
  * instruct it to:
  *   - Skip one-shot/ephemeral facts ("the user is asking about X today")
+ *   - Skip the task itself — what the user asks for is not a fact about
+ *     them, and small models otherwise save "Requested a Python file…"
  *   - Skip anything already in memory (we list the memories, numbered)
  *   - Correct or retire a listed memory the turn shows has changed, rather
  *     than adding a second, contradicting one
@@ -78,13 +80,16 @@ export function buildExtractorSystemPrompt(
 
   return [
     "You are a memory extractor for a chat application.",
-    "Your only job: read the conversation turn(s) and decide whether they contain DURABLE facts about the user (preferences, identity, ongoing project, constraints, goals, recurring context) that should be remembered for future chats — and whether any EXISTING MEMORY has changed.",
+    "Your only job: read the conversation turn(s) and decide whether they contain DURABLE facts about the user (preferences, identity, projects they work on, constraints, goals, recurring context) that should be remembered for future chats — and whether any EXISTING MEMORY has changed.",
+    "Most turns contain no such facts. Returning empty lists is the normal, expected answer.",
     "",
     "Rules:",
     "- Return ONLY a single JSON object, no prose, no markdown fences. Shape: {\"add\": [\"...\"], \"update\": [{\"n\": 2, \"content\": \"...\"}], \"remove\": [5]}.",
     "- \"add\": new durable facts. Each MUST be a single concise sentence (under 200 chars).",
     "- \"update\": when a turn shows an EXISTING MEMORY has changed (a preference reversed, a move to a new city, a project renamed), put the corrected sentence here with that memory's number. NEVER add a second memory that contradicts an existing one.",
     "- \"remove\": numbers of EXISTING MEMORIES the turn shows are no longer true and have no replacement.",
+    "- Before adding a fact, ask: would it still be true, and worth knowing, in an unrelated chat a month from now? If not, leave it out.",
+    "- What the user asks for in this chat (code, a file, a script, an explanation, a fix) is a TASK, not a fact about them. Never record it, whether phrased as \"wants...\", \"requested...\" or \"asked...\", and don't infer a preference from it either: asking for Python code once doesn't mean they prefer Python.",
     "- Do NOT add facts already covered by EXISTING MEMORIES or ALREADY KNOWN facts.",
     "- Do NOT include ephemeral content: the specific question being asked, generated code, transient errors, or summaries of the assistant's reply.",
     "- Do NOT speculate. Only record facts the user clearly stated or strongly implied about themselves or their work.",
@@ -103,6 +108,8 @@ export function buildExtractorSystemPrompt(
     "",
     "Examples of BAD additions (do NOT extract these):",
     "- \"Is asking how to center a div.\"",
+    "- \"Wants a Python script that prints \\\"Hello World\\\" to a file.\" (a task, not a fact)",
+    "- \"Requested the creation of a config file.\" (a task, not a fact)",
     "- \"The function returned an error.\"",
     "- \"Wants the answer in bullet points.\" (request-scoped, not durable)",
   ].join("\n");
@@ -184,10 +191,14 @@ function tryParse(s: string): ExtractionPayload | null {
 
 /** Lowercased, whitespace-collapsed, punctuation-stripped form used for
  *  similarity comparisons. Keeps "User likes TypeScript." and "user
- *  likes typescript" matching as duplicates. */
+ *  likes typescript" matching as duplicates. A `#` or `+` glued to a word
+ *  is spelled out first, so C#, C++ and C don't all collapse to "c". */
 export function normalize(s: string): string {
   return s
     .toLowerCase()
+    .replace(/([\p{L}\p{N}])([#+]+)/gu, (_, ch: string, marks: string) =>
+      ch + marks.replace(/#/g, "sharp").replace(/\+/g, "plus"),
+    )
     .replace(/[\p{P}\p{S}]+/gu, " ")
     .replace(/\s+/g, " ")
     .trim();
@@ -201,7 +212,9 @@ export function normalize(s: string): string {
  * Warsaw, Poland.") — confirmed by a word-ORDER check: a bag of words
  * can't tell "Prefers TypeScript over JavaScript" from its reversal, so a
  * candidate only counts as a duplicate when at least half of its adjacent
- * word pairs also appear in the existing memory.
+ * word pairs also appear in the existing memory. A negated fact is never a
+ * duplicate of its positive form ("Nie mieszka w Warszawie" vs. "Mieszka
+ * w Warszawie"): dropping it would keep exactly the fact it contradicts.
  */
 export function isDuplicate(candidate: string, existing: string[]): boolean {
   if (!candidate) return true;
@@ -210,8 +223,10 @@ export function isDuplicate(candidate: string, existing: string[]): boolean {
   const candTokens = tokenSet(candidate);
   if (candTokens.size === 0) return true;
   const candBigrams = bigramSet(candidate);
+  const candNegated = isNegated(candidate);
 
   for (const ex of existing) {
+    if (isNegated(ex) !== candNegated) continue;
     const exTokens = tokenSet(ex);
     if (exTokens.size === 0) continue;
     let intersect = 0;
@@ -233,8 +248,44 @@ export function isDuplicate(candidate: string, existing: string[]): boolean {
   return false;
 }
 
+/** Opening of a fact that reports a request, English and Polish, as it
+ *  looks after `normalize`: optional subject, optional auxiliary, verb. */
+const REQUEST_REPORT =
+  /^(?:(?:the )?user |użytkownik |użytkowniczka )?(?:(?:is|was|has|had) )?(?:asked|asks|asking|requested|requests|requesting|prosi|prosił|prosiła|poprosił|poprosiła|pyta|pytał|pytała|zapytał|zapytała)(?= |$)(?! to be | that )/u;
+
+/**
+ * Local backstop for the prompt's "a request is not a fact" rule, which
+ * small models ignore: an addition that opens by reporting what the user
+ * asked for in the chat ("User requested a Python file…", "Is asking how
+ * to…", "Użytkownik poprosił o…") is about the conversation, not the user.
+ * "Asked to be called Andy" and "Requested that answers be in Polish" are
+ * durable preferences, so a `to be` / `that` continuation is spared.
+ * "Wants…" isn't matched at all: "Wants answers in Polish" is durable too,
+ * so those are left to the prompt. Takes `normalize`d input.
+ */
+export function describesRequest(s: string): boolean {
+  return REQUEST_REPORT.test(s);
+}
+
 function tokenSet(s: string): Set<string> {
   return new Set(s.split(" ").filter(Boolean));
+}
+
+/** Negation words, English and Polish, as they look after `normalize`. */
+const NEGATIONS = new Set([
+  "not", "no", "never", "nor", "cannot", "without",
+  "dont", "doesnt", "didnt", "isnt", "arent", "wasnt", "werent",
+  "cant", "wont", "hasnt", "havent", "hadnt",
+  "nie", "nigdy",
+]);
+
+/** Whether a normalized fact is negated. `normalize` turns "doesn't" into
+ *  "doesn t", so a lone `t` after a word ending in `n` counts too. */
+function isNegated(s: string): boolean {
+  const words = s.split(" ");
+  return words.some(
+    (w, i) => NEGATIONS.has(w) || (w === "t" && i > 0 && words[i - 1].endsWith("n")),
+  );
 }
 
 function bigramSet(s: string): Set<string> {

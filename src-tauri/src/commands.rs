@@ -1884,12 +1884,31 @@ async fn validate_mcp_input(
     Ok(resolved)
 }
 
+/// A character the consent dialog can't show faithfully: control
+/// characters (a NUL truncates what the OS runs; a newline fakes a line
+/// break), and invisible or text-reordering Unicode — zero-width spaces,
+/// bidi overrides — that makes the text on screen differ from what runs.
+fn unreviewable_char(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{00AD}'
+                | '\u{061C}'
+                | '\u{180E}'
+                | '\u{200B}'..='\u{200F}'
+                | '\u{202A}'..='\u{202E}'
+                | '\u{2060}'..='\u{2064}'
+                | '\u{2066}'..='\u{2069}'
+                | '\u{FEFF}'
+        )
+}
+
 /// Structural checks for a stdio row. There is no host to screen here;
-/// what we can refuse is the shape — a command or argument carrying a NUL
-/// (the OS truncates at it, so what runs would differ from what the user
-/// reviewed), control characters in environment names, and sizes no real
-/// server needs. Consent to run the command *at all* is the native
-/// dialog's job — see `confirm_stdio_spawn`.
+/// what we can refuse is the shape — characters the consent dialog can't
+/// show faithfully ([`unreviewable_char`]) anywhere in the command,
+/// arguments or environment, and sizes no real server needs. Consent to
+/// run the command *at all* is the native dialog's job — see
+/// `confirm_stdio_spawn`.
 fn validate_stdio_fields(input: &McpServerInput) -> Result<(), McpImportRejection> {
     use McpImportRejection::Rejected;
     const MAX_COMMAND_BYTES: usize = 1024;
@@ -1901,9 +1920,10 @@ fn validate_stdio_fields(input: &McpServerInput) -> Result<(), McpImportRejectio
     if command.is_empty() {
         return Err(Rejected("command is required for a stdio server".into()));
     }
-    if command.len() > MAX_COMMAND_BYTES || command.chars().any(char::is_control) {
+    if command.len() > MAX_COMMAND_BYTES || command.chars().any(unreviewable_char) {
         return Err(Rejected(format!(
-            "command must be a single line under {MAX_COMMAND_BYTES} bytes"
+            "command must be a single line under {MAX_COMMAND_BYTES} bytes, with no \
+             control or invisible characters"
         )));
     }
     if let Some(args) = input.args.as_ref() {
@@ -1913,9 +1933,13 @@ fn validate_stdio_fields(input: &McpServerInput) -> Result<(), McpImportRejectio
                 args.len()
             )));
         }
-        if args.iter().any(|a| a.len() > MAX_STR_BYTES || a.contains('\0')) {
+        if args
+            .iter()
+            .any(|a| a.len() > MAX_STR_BYTES || a.chars().any(unreviewable_char))
+        {
             return Err(Rejected(format!(
-                "Each argument must be under {MAX_STR_BYTES} bytes and contain no NUL."
+                "Each argument must be under {MAX_STR_BYTES} bytes, with no control or \
+                 invisible characters."
             )));
         }
     }
@@ -1929,15 +1953,16 @@ fn validate_stdio_fields(input: &McpServerInput) -> Result<(), McpImportRejectio
         for (k, v) in env {
             if k.is_empty()
                 || k.contains('=')
-                || k.chars().any(|c| c.is_control() || c.is_whitespace())
+                || k.chars().any(|c| unreviewable_char(c) || c.is_whitespace())
             {
                 return Err(Rejected(format!(
                     "Invalid environment variable name `{k}`."
                 )));
             }
-            if v.len() > MAX_STR_BYTES || v.contains('\0') {
+            if v.len() > MAX_STR_BYTES || v.chars().any(unreviewable_char) {
                 return Err(Rejected(format!(
-                    "Value for `{k}` must be under {MAX_STR_BYTES} bytes and contain no NUL."
+                    "Value for `{k}` must be under {MAX_STR_BYTES} bytes, with no control or \
+                     invisible characters."
                 )));
             }
         }
@@ -1969,40 +1994,105 @@ fn validate_allowed_tools(input: &McpServerInput) -> Result<(), McpImportRejecti
     Ok(())
 }
 
-/// Longest command line the consent dialog will quote before eliding.
-const CONSENT_LINE_MAX_CHARS: usize = 1500;
+/// Longest program + arguments + shown environment the consent dialog will
+/// quote. Longer is refused rather than cut: the cut-off tail is exactly
+/// where a line nobody reviewed would hide.
+const CONSENT_MAX_CHARS: usize = 1500;
+
+/// Environment variables that change *what runs* rather than configure the
+/// server: the program search path, interpreter preload / option hooks,
+/// module search paths and package indexes. Their values are shown in the
+/// consent dialog; every other value stays hidden, since that is where API
+/// keys go. Not exhaustive — it covers the runtimes stdio servers ship on.
+fn env_changes_what_runs(name: &str) -> bool {
+    let n = name.to_ascii_uppercase();
+    matches!(
+        n.as_str(),
+        "PATH"
+            | "PATHEXT"
+            | "COMSPEC"
+            | "BASH_ENV"
+            | "ENV"
+            | "NODE_OPTIONS"
+            | "NODE_PATH"
+            | "PYTHONPATH"
+            | "PYTHONHOME"
+            | "PYTHONSTARTUP"
+            | "PERL5OPT"
+            | "PERL5LIB"
+            | "RUBYOPT"
+            | "RUBYLIB"
+            | "JAVA_TOOL_OPTIONS"
+            | "_JAVA_OPTIONS"
+            | "JDK_JAVA_OPTIONS"
+    ) || ["LD_", "DYLD_", "NPM_CONFIG_", "UV_", "PIP_"]
+        .iter()
+        .any(|p| n.starts_with(p))
+}
+
+/// The consent dialog's text for `draft`: the program and each argument on
+/// a line of its own (quoted when it holds whitespace, so `a b` and `a`,
+/// `b` can't look alike), environment variable names, and the values of
+/// the ones that change what runs. Errs when that doesn't fit in
+/// [`CONSENT_MAX_CHARS`].
+fn stdio_consent_text(draft: &McpServer) -> Result<String, String> {
+    let shown = |s: &str| {
+        if s.is_empty() || s.chars().any(char::is_whitespace) {
+            format!("\"{s}\"")
+        } else {
+            s.to_string()
+        }
+    };
+    let mut listing = format!("Program: {}", shown(draft.command.as_deref().unwrap_or("")));
+    let args = draft.args();
+    if !args.is_empty() {
+        listing.push_str("\nArguments:");
+        for a in &args {
+            listing.push_str("\n    ");
+            listing.push_str(&shown(a));
+        }
+    }
+    let env = draft.env();
+    if !env.is_empty() {
+        let vars: Vec<String> = env
+            .iter()
+            .map(|(k, v)| {
+                if env_changes_what_runs(k) {
+                    format!("{k}={}", shown(v))
+                } else {
+                    format!("{k} (value hidden)")
+                }
+            })
+            .collect();
+        listing.push_str("\nEnvironment: ");
+        listing.push_str(&vars.join(", "));
+    }
+    let chars = listing.chars().count();
+    if chars > CONSENT_MAX_CHARS {
+        return Err(format!(
+            "This command line is too long to show for review ({chars} characters; the \
+             limit is {CONSENT_MAX_CHARS}). Shorten it — for example, point the server at \
+             a config file instead of passing everything as arguments."
+        ));
+    }
+    Ok(format!(
+        "Loach will start this program on your computer, with your user account's \
+         permissions:\n\n{listing}\n\n\
+         It can do anything you can — read and change files, reach the network, run \
+         other programs. Only continue if you trust where this server configuration \
+         came from."
+    ))
+}
 
 /// Native consent dialog for running a stdio server. Owned by the backend
 /// for the same reason the file dialogs are: a compromised renderer can
 /// call `mcp_save` / `mcp_test` with any command line it likes, and the one
-/// click it cannot fake is a click on an OS dialog. The dialog shows the
-/// exact program, arguments and environment variable *names* (never values
-/// — those are the API keys) so the user reviews what will run.
+/// click it cannot fake is a click on an OS dialog. The text comes from
+/// [`stdio_consent_text`], so the user reviews what will actually run.
 async fn confirm_stdio_spawn(app: &AppHandle, draft: &McpServer) -> Result<(), String> {
     use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
-    let mut line = draft.command.clone().unwrap_or_default();
-    for a in draft.args() {
-        line.push(' ');
-        line.push_str(&a);
-    }
-    if line.chars().count() > CONSENT_LINE_MAX_CHARS {
-        line = line.chars().take(CONSENT_LINE_MAX_CHARS).collect::<String>() + "…";
-    }
-    let env = draft.env();
-    let env_note = if env.is_empty() {
-        String::new()
-    } else {
-        let names: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
-        format!("\n\nEnvironment variables set: {}", names.join(", "))
-    };
-    let body = format!(
-        "Loach will start this program on your computer, with your user account's \
-         permissions:\n\n{line}{env_note}\n\n\
-         It can do anything you can — read and change files, reach the network, run \
-         other programs. Only continue if you trust where this server configuration \
-         came from."
-    );
+    let body = stdio_consent_text(draft)?;
     let title = format!("Run MCP server \"{}\"?", draft.name);
 
     // Blocking native call — off the async runtime, like the file dialogs.
@@ -2155,6 +2245,24 @@ pub async fn mcp_test(
     Ok(mcp::test_server(&draft, &pinned).await)
 }
 
+/// The tool catalogue a chat turn would get right now, for `/tools`.
+/// Comes from the same cache and server pool as a chat send, so listing
+/// starts no second copy of a stdio server and raises no consent dialog —
+/// enabled servers were approved when they were saved. `errors` pairs a
+/// server name with why its tools couldn't be listed.
+#[derive(Debug, Serialize)]
+pub struct McpToolsOverview {
+    pub tools: Vec<crate::mcp::types::McpToolDef>,
+    pub errors: Vec<(String, String)>,
+}
+
+#[tauri::command]
+pub async fn mcp_tools(state: State<'_, AppState>) -> Result<McpToolsOverview, String> {
+    let (tools, errors) =
+        crate::mcp::aggregate_tools_cached(&state.db, &state.mcp_tools_cache).await;
+    Ok(McpToolsOverview { tools, errors })
+}
+
 // ---------- chat streaming ----------
 
 #[derive(Debug, Serialize)]
@@ -2197,8 +2305,9 @@ pub async fn chat_stream(
         // autonomously forward prompt content to a user-configured MCP
         // server, which contradicts the "nothing leaves this box" promise
         // the overlay makes. Empty `tools` short-circuits the catalogue so
-        // the model never sees a function it could call.
-        let (tools, errors) = if request.private {
+        // the model never sees a function it could call. Background tasks
+        // (`no_tools`) skip it for the reason given on the field.
+        let (tools, errors) = if request.private || request.no_tools {
             (Vec::new(), Vec::new())
         } else {
             let agg_fut = crate::mcp::aggregate_tools_cached(&db, &mcp_cache);
@@ -2267,10 +2376,20 @@ pub async fn chat_stream(
         // sends no `session_id`, so this is a second lock on the same door.
         // Handing an overlay that promises "nothing leaves this box" the
         // ability to write to disk would be a strange reading of the promise.
+        //
+        // With Settings → Tools → Workspace files off, the folder doesn't
+        // count at all: no tools, and no note or LOACHFILE.md in the prompt
+        // telling the model about tools it doesn't have.
+        let workspace_tools_on = db
+            .get_setting(crate::tools::fs::SETTING_KEY)
+            .ok()
+            .flatten()
+            .as_deref()
+            == Some("true");
         let stored_root = request
             .session_id
             .as_deref()
-            .filter(|_| !request.private)
+            .filter(|_| !request.private && workspace_tools_on)
             .and_then(|sid| db.get_session(sid).ok().flatten())
             .and_then(|s| s.workspace_root);
         request.workspace_root = stored_root.as_deref().and_then(|stored| {
@@ -2339,10 +2458,12 @@ pub async fn chat_stream(
         // Built-ins are purely local (no network, no DB writes), so we
         // expose them in Private Chat too — the privacy guarantee is
         // about data leaving the box, not about hiding local compute.
-        request.tools.extend(crate::tools::builtin::enabled_builtin_defs(
-            &db,
-            request.workspace_root.is_some(),
-        ));
+        if !request.no_tools {
+            request.tools.extend(crate::tools::builtin::enabled_builtin_defs(
+                &db,
+                request.workspace_root.is_some(),
+            ));
+        }
 
         let res = match provider.as_str() {
             "ollama" => {
@@ -3072,5 +3193,69 @@ pub fn updater_supported() -> bool {
     #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
     {
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn stdio_input(command: &str, args: &[&str], env: &[(&str, &str)]) -> McpServerInput {
+        serde_json::from_value(json!({
+            "name": "fs",
+            "transport": "stdio",
+            "command": command,
+            "args": args,
+            "env": env.iter().copied().collect::<HashMap<_, _>>(),
+        }))
+        .expect("input")
+    }
+
+    /// Anything the consent dialog can't show as it will run is refused
+    /// up front: control characters, bidi overrides and zero-width
+    /// characters, in the command, an argument, or an environment value.
+    #[test]
+    fn stdio_fields_refuse_characters_the_dialog_cant_show() {
+        assert!(validate_stdio_fields(&stdio_input("npx", &["-y", "server"], &[])).is_ok());
+        for bad in ["a\nb", "a\u{202E}b", "a\u{200B}b", "a\0b", "a\tb"] {
+            assert!(validate_stdio_fields(&stdio_input(bad, &[], &[])).is_err(), "command {bad:?}");
+            assert!(validate_stdio_fields(&stdio_input("npx", &[bad], &[])).is_err(), "arg {bad:?}");
+            assert!(
+                validate_stdio_fields(&stdio_input("npx", &[], &[("K", bad)])).is_err(),
+                "env value {bad:?}"
+            );
+        }
+        // Ordinary non-ASCII text is fine.
+        assert!(validate_stdio_fields(&stdio_input("npx", &[r"C:\Użytkownicy\Ja"], &[])).is_ok());
+    }
+
+    /// One argument per line, quoted when it holds whitespace, so `a b`
+    /// and `a`, `b` read differently; values shown only for variables that
+    /// change what runs.
+    #[test]
+    fn consent_text_shows_each_argument_and_only_the_env_values_that_matter() {
+        let draft = stdio_input(
+            "npx",
+            &["-y", "a b"],
+            &[("GITHUB_TOKEN", "ghp_secret"), ("NODE_OPTIONS", "--require evil.js")],
+        )
+        .to_draft();
+        let text = stdio_consent_text(&draft).expect("fits");
+        assert!(text.contains("Program: npx\nArguments:\n    -y\n    \"a b\""), "{text}");
+        assert!(text.contains("GITHUB_TOKEN (value hidden)"), "{text}");
+        assert!(!text.contains("ghp_secret"), "{text}");
+        assert!(text.contains("NODE_OPTIONS=\"--require evil.js\""), "{text}");
+
+        let split = stdio_input("npx", &["a", "b"], &[]).to_draft();
+        assert_ne!(stdio_consent_text(&split).unwrap(), stdio_consent_text(&draft).unwrap());
+    }
+
+    /// A command line too long to review is refused, never cut short.
+    #[test]
+    fn consent_text_refuses_what_it_cant_show_in_full() {
+        let long = "x".repeat(CONSENT_MAX_CHARS);
+        let err = stdio_consent_text(&stdio_input("npx", &[&long], &[]).to_draft()).unwrap_err();
+        assert!(err.contains("too long"), "{err}");
     }
 }

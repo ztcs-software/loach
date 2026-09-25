@@ -651,6 +651,13 @@ pub struct ChatRequest {
     /// can't smuggle in a tool definition the backend would honour.
     #[serde(default)]
     pub private: bool,
+    /// Background-task marker (compaction, memory extraction). When `true`,
+    /// `chat_stream` offers no tools at all — no MCP, no built-ins. Nobody
+    /// is watching these streams, so a call that needs approval would wait
+    /// on a card no one can see, and an MCP error notice would land in the
+    /// summary text.
+    #[serde(default)]
+    pub no_tools: bool,
     /// Chat this turn belongs to. The frontend sends it so the backend can
     /// look the session up; it is an id, not a capability, and every use of
     /// it re-reads the row from the database. `None` for the compaction

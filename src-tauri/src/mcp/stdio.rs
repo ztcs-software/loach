@@ -3,9 +3,9 @@
 //! Loach spawns the server as a child process and exchanges newline-
 //! delimited JSON-RPC over its stdin / stdout, the way Claude Desktop,
 //! LM Studio and Jan do. One [`StdioSession`] owns one child; dropping the
-//! session kills the process (`kill_on_drop`), and a process that exits
-//! on its own flips [`StdioSession::is_alive`] so the pool in `mod.rs`
-//! respawns it on the next call.
+//! session kills the process and everything it started ([`ProcessTree`]),
+//! and a process that exits on its own flips [`StdioSession::is_alive`] so
+//! the pool in `mod.rs` respawns it on the next call.
 //!
 //! What the child sees:
 //!   - Loach's own environment, plus the row's `env` map layered on top —
@@ -69,6 +69,8 @@ pub struct StdioSession {
     /// Held only for its `kill_on_drop` and `try_wait` — all I/O goes
     /// through the pipes we took out of it.
     child: Child,
+    /// Stops the processes the child started when the session drops.
+    _tree: ProcessTree,
     stdin: Arc<tokio::sync::Mutex<ChildStdin>>,
     pending: Pending,
     alive: Arc<AtomicBool>,
@@ -86,7 +88,102 @@ impl Drop for StdioSession {
         // pipes close, but aborting is immediate and leaves nothing parked.
         self.reader.abort();
         self.stderr_pump.abort();
-        // `kill_on_drop` covers the child itself when `self.child` drops.
+        // `kill_on_drop` covers the child itself when `self.child` drops,
+        // and `_tree` everything the child started.
+    }
+}
+
+/// Every process a server starts, so stopping the server stops them too.
+/// `npx.cmd` is `cmd.exe` → `node` (npx) → `node` (the server): killing
+/// only the direct child — all `kill_on_drop` does — left the server
+/// running, still holding its ports and files.
+///
+/// Windows: a job object with kill-on-close. Processes the child starts
+/// join it on their own, and the OS closes the handle if Loach dies, so a
+/// crash doesn't strand them either. Only a grandchild started in the
+/// moment between spawn and assignment could escape; `cmd.exe` takes far
+/// longer than that to launch anything.
+///
+/// The job handle is kept as an integer: a kernel handle is valid from any
+/// thread, and a raw pointer field would make every session `!Send`.
+#[cfg(windows)]
+struct ProcessTree(Option<isize>);
+
+#[cfg(windows)]
+impl ProcessTree {
+    fn adopt(child: &Child) -> Self {
+        use windows::Win32::Foundation::{CloseHandle, HANDLE};
+        use windows::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+            SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        };
+        let Some(process) = child.raw_handle() else {
+            return Self(None);
+        };
+        // SAFETY: plain Win32 calls on handles we own; `info` outlives the
+        // call that reads it.
+        unsafe {
+            let Ok(job) = CreateJobObjectW(None, windows::core::PCWSTR::null()) else {
+                return Self(None);
+            };
+            let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            let limited = SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                std::ptr::from_ref(&info).cast(),
+                std::mem::size_of_val(&info) as u32,
+            );
+            if limited.is_err() || AssignProcessToJobObject(job, HANDLE(process)).is_err() {
+                let _ = CloseHandle(job);
+                tracing::warn!("MCP: couldn't put a stdio server in a job; only its own process will be stopped");
+                return Self(None);
+            }
+            Self(Some(job.0 as isize))
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ProcessTree {
+    fn drop(&mut self) {
+        if let Some(job) = self.0.take() {
+            // Closing the last handle to a kill-on-close job ends every
+            // process in it.
+            // SAFETY: `job` came from `CreateJobObjectW` and is closed once.
+            unsafe {
+                let _ = windows::Win32::Foundation::CloseHandle(
+                    windows::Win32::Foundation::HANDLE(job as *mut std::ffi::c_void),
+                );
+            }
+        }
+    }
+}
+
+/// Unix: the child leads its own process group (`process_group(0)` at
+/// spawn), and dropping this kills the whole group.
+#[cfg(unix)]
+struct ProcessTree(Option<libc::pid_t>);
+
+#[cfg(unix)]
+impl ProcessTree {
+    fn adopt(child: &Child) -> Self {
+        // The group id of a group leader is its pid.
+        Self(child.id().and_then(|pid| libc::pid_t::try_from(pid).ok()))
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ProcessTree {
+    fn drop(&mut self) {
+        if let Some(pgid) = self.0.take() {
+            // SAFETY: only sends a signal; a group that is already gone
+            // (ESRCH) is fine.
+            unsafe {
+                libc::killpg(pgid, libc::SIGKILL);
+            }
+        }
     }
 }
 
@@ -117,6 +214,18 @@ impl StdioSession {
             // a console child of a GUI process otherwise pops a terminal.
             cmd.creation_flags(0x0800_0000);
         }
+        #[cfg(unix)]
+        {
+            // Its own process group, so `ProcessTree` can stop the group.
+            cmd.process_group(0);
+            // The PATH a terminal would see, unless the row sets its own.
+            // std looks the program up on the child's PATH once it's set.
+            if !server.env().iter().any(|(k, _)| k == "PATH") {
+                if let Some(path) = login_shell_path().await {
+                    cmd.env("PATH", path);
+                }
+            }
+        }
 
         let mut child = cmd.spawn().with_context(|| {
             format!(
@@ -124,6 +233,7 @@ impl StdioSession {
                 server.name
             )
         })?;
+        let tree = ProcessTree::adopt(&child);
         let stdin = child.stdin.take().context("child stdin not piped")?;
         let stdout = child.stdout.take().context("child stdout not piped")?;
         let stderr = child.stderr.take().context("child stderr not piped")?;
@@ -144,6 +254,7 @@ impl StdioSession {
 
         Ok(Self {
             child,
+            _tree: tree,
             stdin,
             pending,
             alive,
@@ -512,6 +623,81 @@ fn resolve_program(command: &str) -> std::ffi::OsString {
     command.into()
 }
 
+/// How long the login shell gets to report its environment.
+#[cfg(unix)]
+const LOGIN_SHELL_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Brackets the `env` dump so anything the shell's startup files print
+/// around it is ignored.
+#[cfg(any(unix, test))]
+const ENV_MARK: &str = "__LOACH_ENV_7F3C__";
+
+/// PATH for stdio servers on macOS / Linux: the login shell's, followed by
+/// any of Loach's own entries it lacks. `None` when the shell couldn't be
+/// asked; the server then inherits Loach's PATH as before.
+///
+/// An app started from the Dock or a desktop launcher inherits the
+/// session's bare PATH, not the one the shell builds from `.zprofile`,
+/// `.zshrc`, `.bashrc`… — so `npx` from Homebrew or nvm and `uvx` from
+/// `~/.local/bin` weren't found, and even a full path failed once its
+/// `#!/usr/bin/env node` line looked for `node`. The shell is asked once
+/// per launch, interactive and login like a terminal (VS Code does the
+/// same), and the answer — or the failure — is kept.
+#[cfg(unix)]
+async fn login_shell_path() -> Option<std::ffi::OsString> {
+    static PATH: tokio::sync::OnceCell<Option<std::ffi::OsString>> =
+        tokio::sync::OnceCell::const_new();
+    PATH.get_or_init(|| async {
+        let shell = std::env::var_os("SHELL")
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "/bin/sh".into());
+        let script = format!("printf '%s' {ENV_MARK}; env; printf '%s' {ENV_MARK}");
+        let mut cmd = Command::new(&shell);
+        cmd.args(["-i", "-l", "-c", script.as_str()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        let out = match tokio::time::timeout(LOGIN_SHELL_TIMEOUT, cmd.output()).await {
+            Ok(Ok(out)) => out,
+            _ => {
+                tracing::warn!("MCP: couldn't read PATH from the login shell {shell:?}");
+                return None;
+            }
+        };
+        let shell_path = path_from_env_dump(&String::from_utf8_lossy(&out.stdout))?;
+        Some(merge_paths(
+            std::ffi::OsStr::new(&shell_path),
+            std::env::var_os("PATH").as_deref(),
+        ))
+    })
+    .await
+    .clone()
+}
+
+/// The `PATH=` line between the two [`ENV_MARK`]s of an `env` dump.
+#[cfg(any(unix, test))]
+fn path_from_env_dump(stdout: &str) -> Option<String> {
+    let (_, rest) = stdout.split_once(ENV_MARK)?;
+    let (dump, _) = rest.split_once(ENV_MARK)?;
+    dump.lines()
+        .find_map(|l| l.strip_prefix("PATH="))
+        .filter(|p| !p.is_empty())
+        .map(str::to_string)
+}
+
+/// `first`'s entries, then `then`'s that `first` doesn't already have.
+#[cfg(any(unix, test))]
+fn merge_paths(first: &std::ffi::OsStr, then: Option<&std::ffi::OsStr>) -> std::ffi::OsString {
+    let mut dirs: Vec<std::path::PathBuf> = std::env::split_paths(first).collect();
+    for d in then.map(std::env::split_paths).into_iter().flatten() {
+        if !dirs.contains(&d) {
+            dirs.push(d);
+        }
+    }
+    std::env::join_paths(dirs).unwrap_or_else(|_| first.to_os_string())
+}
+
 /// Probe a stdio server: spawn, handshake, list tools, then drop (kill)
 /// it. Never panics; any failure is packaged into `McpTestResult::failure`.
 pub async fn test_server(server: &McpServer) -> McpTestResult {
@@ -598,6 +784,84 @@ mod tests {
         assert_eq!(buf, b"last-no-newline");
         buf.clear();
         assert_eq!(read_line_capped(&mut reader, &mut buf, 1024).await.unwrap(), 0);
+    }
+
+    /// Stopping a server stops what it started. The script leaves a
+    /// grandchild behind that writes a marker after ~2 s, while the direct
+    /// child just waits; the session is dropped well before the marker is
+    /// due. Killing only the direct child — all `kill_on_drop` did — let the
+    /// grandchild live on and write it.
+    #[tokio::test]
+    async fn dropping_a_session_stops_the_processes_it_started() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let marker = dir.path().join("marker.txt");
+        #[cfg(windows)]
+        let (command, args) = {
+            std::fs::write(
+                dir.path().join("inner.cmd"),
+                "@ping -n 3 127.0.0.1 >nul\r\n@echo x>\"%~dp0marker.txt\"\r\n",
+            )
+            .unwrap();
+            let outer = dir.path().join("outer.cmd");
+            std::fs::write(
+                &outer,
+                "@start \"\" /b cmd /d /c \"%~dp0inner.cmd\"\r\n@ping -n 30 127.0.0.1 >nul\r\n",
+            )
+            .unwrap();
+            (outer.display().to_string(), Vec::<String>::new())
+        };
+        #[cfg(unix)]
+        let (command, args) = (
+            "sh".to_string(),
+            vec![
+                "-c".to_string(),
+                format!("(sleep 2; touch '{}') & sleep 30", marker.display()),
+            ],
+        );
+        let server = McpServer {
+            id: "tree-test".into(),
+            name: "tree-test".into(),
+            transport: "stdio".into(),
+            url: String::new(),
+            headers_json: None,
+            command: Some(command),
+            args_json: Some(serde_json::to_string(&args).unwrap()),
+            env_json: None,
+            auto_approve: false,
+            allowed_tools_json: None,
+            enabled: true,
+            created_at: 0,
+            updated_at: 0,
+        };
+
+        let session = StdioSession::spawn(&server).await.expect("spawn");
+        // Give the grandchild time to start before the tree is stopped.
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        drop(session);
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        assert!(!marker.exists(), "a process the server started outlived it");
+    }
+
+    /// Whatever a shell's startup files print around the dump is ignored;
+    /// only the `PATH=` line between the marks counts.
+    #[test]
+    fn path_is_read_from_between_the_marks() {
+        let out = format!(
+            "Welcome back!\nPATH=/decoy\n{ENV_MARK}HOME=/home/u\nPATH=/opt/homebrew/bin:/usr/bin\n\
+             SHELL=/bin/zsh\n{ENV_MARK}bye\n"
+        );
+        assert_eq!(path_from_env_dump(&out).as_deref(), Some("/opt/homebrew/bin:/usr/bin"));
+        assert_eq!(path_from_env_dump("no marks, PATH=/usr/bin"), None);
+        assert_eq!(path_from_env_dump(&format!("{ENV_MARK}HOME=/h\n{ENV_MARK}")), None);
+    }
+
+    /// The shell's PATH leads; Loach's own entries follow, without repeats.
+    #[test]
+    fn merged_path_puts_the_shell_first_without_duplicates() {
+        let join = |d: &[&str]| std::env::join_paths(d).unwrap();
+        let merged = merge_paths(&join(&["/opt/homebrew/bin", "/usr/bin"]), Some(&join(&["/usr/bin", "/bin"])));
+        assert_eq!(merged, join(&["/opt/homebrew/bin", "/usr/bin", "/bin"]));
+        assert_eq!(merge_paths(&join(&["/a"]), None), join(&["/a"]));
     }
 
     #[tokio::test]
