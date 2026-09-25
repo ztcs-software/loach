@@ -35,7 +35,8 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { useToastStore } from "@/stores/toastStore";
 import { cn } from "@/lib/utils";
 import { logger } from "@/lib/logger";
-import { ChipDivider, PersonaChip, ToneChip, WorkspaceChip } from "./ComposerChip";
+import { ChipDivider, PersonaChip, ToneChip } from "./ComposerChip";
+import { WorkspaceNotice } from "./WorkspaceNotice";
 import {
   DEFAULT_PERSONA_ID,
   getPersona,
@@ -81,7 +82,7 @@ export function ChatInput({ centered = false }: ChatInputProps) {
   );
   const pickWorkspace = useChatStore((s) => s.pickWorkspace);
   const clearWorkspace = useChatStore((s) => s.clearWorkspace);
-  // Whether the folder actually reaches the model: the chip warns when the
+  // Whether the folder actually reaches the model: the notice warns when the
   // master switch in Settings → Tools has been turned off since.
   const workspaceToolsEnabled = useSettingsStore((s) => s.workspace_tool_enabled);
   const workspaceInstructions = useChatStore((s) =>
@@ -94,7 +95,7 @@ export function ChatInput({ centered = false }: ChatInputProps) {
   // user edits it, or the model writes it mid-turn — so it is re-read when
   // this chat is opened or gets a folder, and again once a turn in it ends.
   // The backend reads its own copy every turn regardless; this only feeds
-  // the chip and the context usage row.
+  // the workspace notice and the context usage row.
   useEffect(() => {
     if (!activeSessionId || !workspaceRoot || streamingThisChat) return;
     void refreshWorkspaceInstructions(activeSessionId);
@@ -792,7 +793,7 @@ export function ChatInput({ centered = false }: ChatInputProps) {
             onDismiss={() => setCommandResult(null)}
           />
         )}
-        {(attachments.length > 0 || activePersona || activeTone || workspaceRoot) && (
+        {(attachments.length > 0 || activePersona || activeTone) && (
           // Config chips first, then payload. The divider marks the lifetime
           // boundary — everything left of it survives the send, everything
           // right of it goes with the message.
@@ -807,17 +808,7 @@ export function ChatInput({ centered = false }: ChatInputProps) {
                 onRemove={clearTone}
               />
             )}
-            {workspaceRoot && activeSessionId && (
-              <WorkspaceChip
-                root={workspaceRoot}
-                toolsEnabled={workspaceToolsEnabled}
-                // With the switch off the backend sends no LOACHFILE.md either.
-                instructions={workspaceToolsEnabled ? workspaceInstructions : null}
-                locked={streamingThisChat}
-                onRemove={() => void clearWorkspace(activeSessionId)}
-              />
-            )}
-            {(activePersona || activeTone || workspaceRoot) &&
+            {(activePersona || activeTone) &&
               attachments.length > 0 && <ChipDivider />}
             {attachments.map((a, i) => (
               <FileChip
@@ -838,7 +829,7 @@ export function ChatInput({ centered = false }: ChatInputProps) {
         )}
         <div
           className={cn(
-            "glass-prompt relative flex items-end gap-2 rounded-[28px] px-4 py-3 transition-all",
+            "glass-prompt relative flex flex-col rounded-[28px] px-4 py-3 transition-all",
             dragging && "drop-zone-target",
           )}
         >
@@ -854,202 +845,219 @@ export function ChatInput({ centered = false }: ChatInputProps) {
             </div>
           )}
 
-          {/* Composer "+" menu. Two ways to bring material into a chat, and
-              they are not variants of each other: "Add files" copies the
-              contents into this one message, while "Add directory" grants
-              the model tools over a folder for the rest of the chat. The
-              menu copy leans on that difference — picking the wrong one
-              silently does something quite unlike what was intended. */}
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
+          {/* The chat's folder, named inside the bar right above the text
+              it scopes. Clearing it waits for a running reply to end — see
+              WorkspaceNotice's `locked`. */}
+          {workspaceRoot && activeSessionId && (
+            <WorkspaceNotice
+              root={workspaceRoot}
+              toolsEnabled={workspaceToolsEnabled}
+              // With the switch off the backend sends no LOACHFILE.md either.
+              instructions={workspaceToolsEnabled ? workspaceInstructions : null}
+              locked={streamingThisChat}
+              hidden={dragging}
+              onRemove={() => void clearWorkspace(activeSessionId)}
+            />
+          )}
+
+          <div className="flex items-end gap-2">
+            {/* Composer "+" menu. Two ways to bring material into a chat, and
+                they are not variants of each other: "Add files" copies the
+                contents into this one message, while "Add directory" grants
+                the model tools over a folder for the rest of the chat. The
+                menu copy leans on that difference — picking the wrong one
+                silently does something quite unlike what was intended. */}
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  aria-label="Add files or a directory"
+                  title="Add files or a directory"
+                  className="rounded-full text-foreground/65 hover:bg-foreground/10 hover:text-foreground"
+                >
+                  <Plus className="h-4 w-4" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="min-w-[248px]">
+                <DropdownMenuItem onSelect={() => fileInputRef.current?.click()}>
+                  <FileUp className="mr-2 h-4 w-4" />
+                  <div className="min-w-0">
+                    <div>Add files</div>
+                    <p className="text-[11px] text-foreground/50">
+                      Attach their contents to this message
+                    </p>
+                  </div>
+                </DropdownMenuItem>
+                {/* Changing the folder waits for a running reply to end: that
+                    turn keeps the folder it started with (see WorkspaceNotice's
+                    `locked`). Adding a first one mid-turn is harmless — it
+                    simply applies from the next turn. */}
+                <DropdownMenuItem
+                  onSelect={() => void chooseWorkspace()}
+                  disabled={
+                    !activeSessionId || pickingWorkspace || (streamingThisChat && !!workspaceRoot)
+                  }
+                >
+                  <FolderOpen className="mr-2 h-4 w-4" />
+                  <div className="min-w-0">
+                    <div>{workspaceRoot ? "Change directory" : "Add directory"}</div>
+                    <p className="text-[11px] text-foreground/50">
+                      {!activeSessionId
+                        ? "Send a message first to start this chat"
+                        : streamingThisChat && workspaceRoot
+                          ? "Wait for the reply to finish"
+                          : "Let the model read and edit files in a folder"}
+                    </p>
+                  </div>
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              accept="*/*"
+              className="hidden"
+              onChange={onPick}
+            />
+
+            <Textarea
+              ref={textareaRef}
+              // Not left to the placeholder: it is the only thing naming this
+              // control, and it swaps to "Replying — press the Stop button…"
+              // mid-stream, so the composer's accessible name would change
+              // under the user. A fixed label keeps it stable; the placeholder
+              // stays as the visible status hint.
+              aria-label="Message"
+              value={text}
+              onChange={(e) => {
+                // Mirror every keystroke into the persisted draft. ChatInput is
+                // mounted at several sites (hero composer, normal composer,
+                // SpaceView) and switching sessions / entering a Space remounts
+                // it; without this the in-progress draft re-seeds from a stale
+                // composerDraft on remount and is silently lost.
+                setText(e.target.value);
+                setComposerDraft(e.target.value);
+              }}
+              onKeyDown={(e) => {
+                if (e.nativeEvent.isComposing) return;
+                // Palette navigation. Order matters: Tab/Enter accept the
+                // highlighted entry into the textarea (no message send);
+                // Enter without an open palette still sends, so unknown
+                // commands fall through to submit() and the "ignore
+                // unknown" rule kicks in inside there.
+                if (paletteOpen) {
+                  if (e.key === "ArrowDown") {
+                    e.preventDefault();
+                    setPaletteIndex((i) => (i + 1) % paletteEntries.length);
+                    return;
+                  }
+                  if (e.key === "ArrowUp") {
+                    e.preventDefault();
+                    setPaletteIndex(
+                      (i) => (i - 1 + paletteEntries.length) % paletteEntries.length,
+                    );
+                    return;
+                  }
+                  // Tab always autocompletes the highlighted entry. Enter only
+                  // autocompletes when doing so would change the text — i.e. it
+                  // completes a partial command (`/he` → `/help`) or steps into
+                  // a subcommand. Once the typed text already equals the entry
+                  // (a complete command such as `/new`), Enter falls through to
+                  // `submit()` so the command actually dispatches. Without that
+                  // fall-through, fully-typed no-arg commands could never run:
+                  // every Enter re-selected the same text and never reached
+                  // `submit()`. Shift+Enter still inserts a newline (handled
+                  // by the Enter branch below, which leaves Shift+Enter alone).
+                  if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) {
+                    const entry = paletteEntries[paletteIndex];
+                    if (e.key === "Tab" || (entry && entry.insertText !== text)) {
+                      e.preventDefault();
+                      if (entry) acceptPaletteEntry(entry);
+                      return;
+                    }
+                    // Enter on an already-complete command → fall through.
+                  }
+                  if (e.key === "Escape") {
+                    e.preventDefault();
+                    setPaletteDismissed(true);
+                    return;
+                  }
+                }
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  void submit();
+                }
+              }}
+              onPaste={(e) => void onPaste(e)}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                const el = textareaRef.current;
+                setCtxMenu({
+                  x: e.clientX,
+                  y: e.clientY,
+                  selStart: el?.selectionStart ?? 0,
+                  selEnd: el?.selectionEnd ?? 0,
+                });
+              }}
+              placeholder={placeholder}
+              className={cn(
+                "min-h-[28px] max-h-[220px] flex-1 resize-none border-none bg-transparent backdrop-blur-none px-1 py-1.5 text-[15px] leading-relaxed text-foreground placeholder:text-foreground/40 shadow-none ring-0 outline-none focus-visible:ring-0 focus-visible:border-none focus-visible:outline-none focus-visible:bg-transparent rounded-none scrollbar-hidden transition-opacity",
+                dragging && "opacity-0",
+              )}
+              rows={1}
+            />
+
+            {/* Voice dictation — hidden entirely when the platform doesn't
+                expose the Web Speech API (most Linux WebKit builds). Sits
+                immediately to the left of the primary send button so the
+                two related actions (speak / send) are co-located on the
+                right edge of the composer, mirroring the placement used by
+                ChatGPT, Claude, and Gemini. When recording, the icon
+                pulses and the button background tints rose to make the
+                live state unmissable. */}
+            {speechSupported && (
               <Button
                 type="button"
                 variant="ghost"
                 size="icon"
-                aria-label="Add files or a directory"
-                title="Add files or a directory"
-                className="rounded-full text-foreground/65 hover:bg-foreground/10 hover:text-foreground"
-              >
-                <Plus className="h-4 w-4" />
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="start" className="min-w-[248px]">
-              <DropdownMenuItem onSelect={() => fileInputRef.current?.click()}>
-                <FileUp className="mr-2 h-4 w-4" />
-                <div className="min-w-0">
-                  <div>Add files</div>
-                  <p className="text-[11px] text-foreground/50">
-                    Attach their contents to this message
-                  </p>
-                </div>
-              </DropdownMenuItem>
-              {/* Changing the folder waits for a running reply to end: that
-                  turn keeps the folder it started with (see WorkspaceChip's
-                  `locked`). Adding a first one mid-turn is harmless — it
-                  simply applies from the next turn. */}
-              <DropdownMenuItem
-                onSelect={() => void chooseWorkspace()}
-                disabled={
-                  !activeSessionId || pickingWorkspace || (streamingThisChat && !!workspaceRoot)
-                }
-              >
-                <FolderOpen className="mr-2 h-4 w-4" />
-                <div className="min-w-0">
-                  <div>{workspaceRoot ? "Change directory" : "Add directory"}</div>
-                  <p className="text-[11px] text-foreground/50">
-                    {!activeSessionId
-                      ? "Send a message first to start this chat"
-                      : streamingThisChat && workspaceRoot
-                        ? "Wait for the reply to finish"
-                        : "Let the model read and edit files in a folder"}
-                  </p>
-                </div>
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
-          <input
-            ref={fileInputRef}
-            type="file"
-            multiple
-            accept="*/*"
-            className="hidden"
-            onChange={onPick}
-          />
-
-          <Textarea
-            ref={textareaRef}
-            // Not left to the placeholder: it is the only thing naming this
-            // control, and it swaps to "Replying — press the Stop button…"
-            // mid-stream, so the composer's accessible name would change
-            // under the user. A fixed label keeps it stable; the placeholder
-            // stays as the visible status hint.
-            aria-label="Message"
-            value={text}
-            onChange={(e) => {
-              // Mirror every keystroke into the persisted draft. ChatInput is
-              // mounted at several sites (hero composer, normal composer,
-              // SpaceView) and switching sessions / entering a Space remounts
-              // it; without this the in-progress draft re-seeds from a stale
-              // composerDraft on remount and is silently lost.
-              setText(e.target.value);
-              setComposerDraft(e.target.value);
-            }}
-            onKeyDown={(e) => {
-              if (e.nativeEvent.isComposing) return;
-              // Palette navigation. Order matters: Tab/Enter accept the
-              // highlighted entry into the textarea (no message send);
-              // Enter without an open palette still sends, so unknown
-              // commands fall through to submit() and the "ignore
-              // unknown" rule kicks in inside there.
-              if (paletteOpen) {
-                if (e.key === "ArrowDown") {
-                  e.preventDefault();
-                  setPaletteIndex((i) => (i + 1) % paletteEntries.length);
-                  return;
-                }
-                if (e.key === "ArrowUp") {
-                  e.preventDefault();
-                  setPaletteIndex(
-                    (i) => (i - 1 + paletteEntries.length) % paletteEntries.length,
-                  );
-                  return;
-                }
-                // Tab always autocompletes the highlighted entry. Enter only
-                // autocompletes when doing so would change the text — i.e. it
-                // completes a partial command (`/he` → `/help`) or steps into
-                // a subcommand. Once the typed text already equals the entry
-                // (a complete command such as `/new`), Enter falls through to
-                // `submit()` so the command actually dispatches. Without that
-                // fall-through, fully-typed no-arg commands could never run:
-                // every Enter re-selected the same text and never reached
-                // `submit()`. Shift+Enter still inserts a newline (handled
-                // by the Enter branch below, which leaves Shift+Enter alone).
-                if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) {
-                  const entry = paletteEntries[paletteIndex];
-                  if (e.key === "Tab" || (entry && entry.insertText !== text)) {
-                    e.preventDefault();
-                    if (entry) acceptPaletteEntry(entry);
-                    return;
-                  }
-                  // Enter on an already-complete command → fall through.
-                }
-                if (e.key === "Escape") {
-                  e.preventDefault();
-                  setPaletteDismissed(true);
-                  return;
-                }
-              }
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                void submit();
-              }
-            }}
-            onPaste={(e) => void onPaste(e)}
-            onContextMenu={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              const el = textareaRef.current;
-              setCtxMenu({
-                x: e.clientX,
-                y: e.clientY,
-                selStart: el?.selectionStart ?? 0,
-                selEnd: el?.selectionEnd ?? 0,
-              });
-            }}
-            placeholder={placeholder}
-            className={cn(
-              "min-h-[28px] max-h-[220px] flex-1 resize-none border-none bg-transparent backdrop-blur-none px-1 py-1.5 text-[15px] leading-relaxed text-foreground placeholder:text-foreground/40 shadow-none ring-0 outline-none focus-visible:ring-0 focus-visible:border-none focus-visible:outline-none focus-visible:bg-transparent rounded-none scrollbar-hidden transition-opacity",
-              dragging && "opacity-0",
-            )}
-            rows={1}
-          />
-
-          {/* Voice dictation — hidden entirely when the platform doesn't
-              expose the Web Speech API (most Linux WebKit builds). Sits
-              immediately to the left of the primary send button so the
-              two related actions (speak / send) are co-located on the
-              right edge of the composer, mirroring the placement used by
-              ChatGPT, Claude, and Gemini. When recording, the icon
-              pulses and the button background tints rose to make the
-              live state unmissable. */}
-          {speechSupported && (
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              onClick={listening ? stopDictation : startDictation}
-              aria-label={listening ? "Stop voice dictation" : "Start voice dictation"}
-              aria-pressed={listening}
-              title={listening ? "Stop dictation" : "Voice dictation"}
-              className={cn(
-                "relative rounded-full transition-colors",
-                listening
-                  ? "bg-rose-500/15 text-rose-300 hover:bg-rose-500/25 hover:text-rose-200"
-                  : "text-foreground/65 hover:bg-foreground/10 hover:text-foreground",
-              )}
-            >
-              <Mic
+                onClick={listening ? stopDictation : startDictation}
+                aria-label={listening ? "Stop voice dictation" : "Start voice dictation"}
+                aria-pressed={listening}
+                title={listening ? "Stop dictation" : "Voice dictation"}
                 className={cn(
-                  "h-4 w-4 transition-transform",
-                  listening && "animate-pulse",
+                  "relative rounded-full transition-colors",
+                  listening
+                    ? "bg-rose-500/15 text-rose-300 hover:bg-rose-500/25 hover:text-rose-200"
+                    : "text-foreground/65 hover:bg-foreground/10 hover:text-foreground",
                 )}
-              />
-              {listening && (
-                <span
-                  aria-hidden
-                  className="pointer-events-none absolute inset-0 rounded-full ring-2 ring-rose-500/40 ring-offset-0 animate-pulse"
+              >
+                <Mic
+                  className={cn(
+                    "h-4 w-4 transition-transform",
+                    listening && "animate-pulse",
+                  )}
                 />
-              )}
-            </Button>
-          )}
+                {listening && (
+                  <span
+                    aria-hidden
+                    className="pointer-events-none absolute inset-0 rounded-full ring-2 ring-rose-500/40 ring-offset-0 animate-pulse"
+                  />
+                )}
+              </Button>
+            )}
 
-          <PrimaryButton
-            streaming={streamingThisChat}
-            disabled={primaryDisabled}
-            ariaLabel={primaryAriaLabel}
-            title={primaryTitle}
-            onClick={onPrimaryClick}
-          />
+            <PrimaryButton
+              streaming={streamingThisChat}
+              disabled={primaryDisabled}
+              ariaLabel={primaryAriaLabel}
+              title={primaryTitle}
+              onClick={onPrimaryClick}
+            />
+          </div>
 
         </div>
         {error && (

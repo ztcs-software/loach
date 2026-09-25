@@ -237,8 +237,8 @@ export function clearSessionWorkspace(sessionId: string): Promise<void> {
 }
 
 /** The chat's `LOACHFILE.md` as the next turn will see it — clipped the
- *  same way — or null when the workspace has none. Display only: the chip
- *  badge and the context usage estimate. The backend re-reads the file on
+ *  same way — or null when the workspace has none. Display only: the
+ *  workspace badge and the context usage estimate. The backend re-reads the file on
  *  every turn regardless. */
 export function readWorkspaceInstructions(sessionId: string): Promise<string | null> {
   if (!isTauri) return notInTauri(null);

@@ -288,7 +288,7 @@ pub async fn clear_session_workspace(
 }
 
 /// The chat's `LOACHFILE.md` as the next turn will see it, or `None` when
-/// the workspace has none. For display — the composer chip's badge and the
+/// the workspace has none. For display — the composer's workspace badge and the
 /// context usage estimate. The copy the model gets is read again by
 /// `chat_stream` on every turn, from the same root through the same
 /// sandbox, so the two can't drift.

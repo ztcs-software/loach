@@ -827,16 +827,17 @@ Give a chat a folder and the model can work in it — read the project,
 search it, and make changes — the way a coding assistant does, minus the
 shell. Click the **+** button next to the message box and choose **Add
 directory** (the same menu's **Add files** attaches file contents to one
-message instead; the two are not variants of each other). The folder shows
-as a chip above the composer for the rest of the chat; remove it from the
-chip. Picking a folder also switches on **Workspace files** in **Settings
-→ Tools** if it was off, and the chip says so if that switch is later
-turned off again — while it's off, the model gets neither the tools nor
+message instead; the two are not variants of each other). For the rest of
+the chat the message box reads "Working in *folder*" just above where you
+type; remove the folder with the ✕ beside it. Picking a folder also switches
+on **Workspace files** in **Settings → Tools** if it was off, and the
+notice says so if that switch is later turned off again — while it's off,
+the model gets neither the tools nor
 the folder's note and `LOACHFILE.md`. While a reply is running in the
 chat, the folder can't be changed or removed — that turn keeps the folder
 it started with. Forking a chat carries the folder over; exports and
 imports never do — a path means nothing on another machine. If the folder
-is later moved or deleted, the chip still shows it but the model gets no
+is later moved or deleted, the notice still shows it but the model gets no
 folder tools and no project instructions until you pick the folder again.
 
 Eight tools appear in the model's catalogue only while a chat has a
@@ -900,8 +901,8 @@ note that tells the model where it is — the same idea as a `CLAUDE.md` or
 tests, what not to touch, house style). It is read fresh each turn, so an
 edit — yours, or one the model makes through `write_file` — takes effect on
 the next send, and it goes through the same sandbox as everything else, so
-a `LOACHFILE.md` that is a link out of the folder is ignored. The chip
-shows a `LOACHFILE.md` badge while one is present, with its first line in
+a `LOACHFILE.md` that is a link out of the folder is ignored. The
+"Working in" notice shows a `LOACHFILE.md` badge while one is present, with its first line in
 the tooltip, and the context usage popover (§2.10) lists it on its own
 row. Anything past 32 KB is cut with a note; local models follow short
 instruction files far better, so keep it brief. A blank file counts as

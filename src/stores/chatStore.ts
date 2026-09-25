@@ -204,7 +204,7 @@ interface ChatState {
   /** Drop this chat's workspace directory. */
   clearWorkspace: (sessionId: string) => Promise<void>;
   /** Each chat's `LOACHFILE.md` as last read, by session id — null when the
-   *  workspace has none. Drives the chip badge and the context usage row;
+   *  workspace has none. Drives the workspace badge and the context usage row;
    *  the model's copy is read by the backend on every turn regardless. */
   workspaceInstructions: Record<string, string | null>;
   /** Re-read this chat's `LOACHFILE.md`. Cheap, so the composer calls it on
