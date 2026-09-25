@@ -829,7 +829,8 @@ shell. Click the **+** button next to the message box and choose **Add
 directory** (the same menu's **Add files** attaches file contents to one
 message instead; the two are not variants of each other). For the rest of
 the chat the message box reads "Working in *folder*" just above where you
-type; remove the folder with the ✕ beside it. Picking a folder also switches
+type; click the folder's name to open it in your file manager, or remove
+it with the ✕ beside it. Picking a folder also switches
 on **Workspace files** in **Settings → Tools** if it was off, and the
 notice says so if that switch is later turned off again — while it's off,
 the model gets neither the tools nor

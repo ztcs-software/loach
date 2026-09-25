@@ -2580,6 +2580,7 @@ dependencies = [
  "libc",
  "natord",
  "once_cell",
+ "open",
  "parking_lot",
  "printpdf",
  "r2d2",

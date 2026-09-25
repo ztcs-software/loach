@@ -35,6 +35,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { useToastStore } from "@/stores/toastStore";
 import { cn } from "@/lib/utils";
 import { logger } from "@/lib/logger";
+import { openSessionWorkspace } from "@/lib/tauri";
 import { ChipDivider, PersonaChip, ToneChip } from "./ComposerChip";
 import { WorkspaceNotice } from "./WorkspaceNotice";
 import {
@@ -396,6 +397,19 @@ export function ChatInput({ centered = false }: ChatInputProps) {
       );
     } finally {
       setPickingWorkspace(false);
+    }
+  };
+
+  const openWorkspace = async () => {
+    if (!activeSessionId) return;
+    setError(null);
+    try {
+      await openSessionWorkspace(activeSessionId);
+    } catch (e) {
+      logger.error("workspace open failed", e);
+      setError(
+        `Couldn't open that folder: ${e instanceof Error ? e.message : String(e)}`,
+      );
     }
   };
 
@@ -856,6 +870,7 @@ export function ChatInput({ centered = false }: ChatInputProps) {
               instructions={workspaceToolsEnabled ? workspaceInstructions : null}
               locked={streamingThisChat}
               hidden={dragging}
+              onOpen={() => void openWorkspace()}
               onRemove={() => void clearWorkspace(activeSessionId)}
             />
           )}

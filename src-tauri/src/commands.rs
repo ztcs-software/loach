@@ -287,6 +287,33 @@ pub async fn clear_session_workspace(
     Ok(())
 }
 
+/// Show the chat's workspace directory in the OS file manager. Takes a
+/// session id rather than a path for the same reason picking does: the
+/// only directory this can open is one the user chose in the native dialog.
+#[tauri::command]
+pub async fn open_session_workspace(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<(), String> {
+    let stored = state
+        .db
+        .get_session(&session_id)
+        .map_err(err)?
+        .and_then(|s| s.workspace_root)
+        .ok_or("this chat has no workspace directory")?;
+    tokio::task::spawn_blocking(move || {
+        // The folder may have been moved or deleted since it was picked.
+        // Checked here so the composer can say so plainly, and so a path
+        // that now names a file is never handed to the shell to run.
+        if !std::path::Path::new(&stored).is_dir() {
+            return Err("the folder no longer exists — pick it again".to_string());
+        }
+        open::that_detached(&stored).map_err(|e| format!("couldn't open the folder: {e}"))
+    })
+    .await
+    .map_err(|e| format!("open folder task panicked: {e}"))?
+}
+
 /// The chat's `LOACHFILE.md` as the next turn will see it, or `None` when
 /// the workspace has none. For display — the composer's workspace badge and the
 /// context usage estimate. The copy the model gets is read again by

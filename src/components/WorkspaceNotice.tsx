@@ -15,6 +15,7 @@ export function WorkspaceNotice({
   instructions,
   locked,
   hidden,
+  onOpen,
   onRemove,
 }: {
   root: string;
@@ -34,6 +35,8 @@ export function WorkspaceNotice({
   /** Files are being dragged over the composer; fades out with the textarea
    *  so the drop hint has the bar to itself. */
   hidden: boolean;
+  /** Show the folder in the OS file manager. */
+  onOpen: () => void;
   onRemove: () => void;
 }) {
   const firstLine = instructions
@@ -64,9 +67,17 @@ export function WorkspaceNotice({
       />
       <span className="min-w-0 truncate">
         Working in{" "}
-        <span className={cn("font-medium", toolsEnabled && "text-foreground/85")}>
+        <button
+          type="button"
+          onClick={onOpen}
+          title={`Open ${root}`}
+          className={cn(
+            "rounded-sm font-medium underline-offset-2 hover:underline focus-visible:underline focus-visible:outline-none",
+            toolsEnabled && "text-foreground/85 hover:text-foreground",
+          )}
+        >
           {folderName(root)}
-        </span>
+        </button>
       </span>
       {instructions && (
         <span className="shrink-0 text-[10px] tracking-wide opacity-80">LOACHFILE.md</span>

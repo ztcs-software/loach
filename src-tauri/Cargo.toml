@@ -59,6 +59,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 once_cell = "1"
 dashmap = "6"
 parking_lot = "0.12"
+# Opens a chat's workspace folder in the OS file manager. Already in the
+# tree through tauri-plugin-shell, with the same feature, so it adds no
+# crate: on Windows a folder goes to the shell API rather than a spawned
+# `cmd` / PowerShell line.
+open = { version = "5", features = ["shellexecute-on-windows"] }
 
 
 # Backing crates for the rest of the built-in tools. Each is small,

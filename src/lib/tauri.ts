@@ -236,6 +236,14 @@ export function clearSessionWorkspace(sessionId: string): Promise<void> {
   return invoke("clear_session_workspace", { sessionId });
 }
 
+/** Show a chat's workspace directory in the OS file manager. By session id,
+ *  like picking — the renderer never names a path. Rejects when the folder
+ *  no longer exists. */
+export function openSessionWorkspace(sessionId: string): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("open_session_workspace", { sessionId });
+}
+
 /** The chat's `LOACHFILE.md` as the next turn will see it — clipped the
  *  same way — or null when the workspace has none. Display only: the
  *  workspace badge and the context usage estimate. The backend re-reads the file on
