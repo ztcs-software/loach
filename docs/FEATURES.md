@@ -2,8 +2,8 @@
 
 A native desktop chat client for local and OpenAI-compatible language models.
 Loach runs as a Tauri 2 app on Windows, Linux and macOS, stores everything
-locally in SQLite, and treats the OS credential store as the only place
-secrets ever land.
+locally in SQLite, and keeps the OpenAI-compatible API key and the app-lock
+hash in the OS credential store.
 
 This document is the source of truth for the public documentation website. Each
 section describes a user-visible feature, what problem it solves, and the
@@ -1336,12 +1336,17 @@ verification happens before the binary is replaced.
 
 ## 18. Storage and privacy posture
 
-- **Everything except secrets lives in a local SQLite database** under the
-  user's app-data directory. Foreign keys are on; backups round-trip
-  schema constraints.
-- **API keys, app-lock hashes** — OS credential store only (Windows
-  Credential Manager / Linux Secret Service / macOS Keychain via the
-  `keyring` crate).
+- **Everything except the OpenAI-compatible API key and the app-lock hash
+  lives in a local SQLite database** under the user's app-data directory.
+  Foreign keys are on; backups round-trip schema constraints.
+- **OpenAI-compatible API key, app-lock hash** — OS credential store
+  (Windows Credential Manager / Linux Secret Service / macOS Keychain via
+  the `keyring` crate).
+- **MCP credentials are not in the credential store.** A server's HTTP
+  headers (an `Authorization` token, say) and a stdio server's environment
+  variables are stored in the SQLite database as plain text, alongside the
+  rest of its configuration. They are scrubbed from exports (§8.2), but
+  anyone who can read the app-data directory can read them.
 - **No telemetry** — Loach makes no outbound network requests beyond
   the providers the user configures, the optional URL fetches the user
   triggers, the MCP servers the user wires up, and the in-app updater

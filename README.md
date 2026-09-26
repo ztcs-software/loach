@@ -26,7 +26,7 @@ Run local LLMs with [Ollama](https://ollama.com) or connect any OpenAI-compatibl
 
 Loach is an all-in-one desktop AI workspace built around a single idea: talking to an LLM should feel effortless. Simple from the first click and ready to grow with you as your needs do. It talks to a local Ollama server and accepts any OpenAI-compatible endpoint as a provider, including llama.cpp, LM Studio, vLLM and LiteLLM.
 
-With local models, including Qwen, Gemma, DeepSeek, GPT-OSS and Mistral, all your data stays safe and private. There is no telemetry, no required network access, no paid subscriptions or usage limits. Optional API keys live in your OS credential manager. 
+With local models, including Qwen, Gemma, DeepSeek, GPT-OSS and Mistral, all your data stays safe and private. There is no telemetry, no required network access, no paid subscriptions or usage limits. An optional OpenAI-compatible API key lives in your OS credential manager. 
 
 Behind a calm, beautifully crafted UI sits a rich feature set - ready when you need it, out of the way when you don't. 
 
@@ -230,7 +230,7 @@ Only one OpenAI-compatible endpoint is active at a time — switch the base URL 
 
 | What | Where |
 |---|---|
-| Chats, messages, folders, spaces (instructions, reference sources, memories), snippets, snippet variables and saved fill-ins, MCP servers, app settings | SQLite at `<app-data-dir>/loach.db` |
+| Chats, messages, folders, spaces (instructions, reference sources, memories), snippets, snippet variables and saved fill-ins, MCP servers (including their headers and environment variables, in plain text), app settings | SQLite at `<app-data-dir>/loach.db` |
 | OpenAI API key | OS credential manager (Windows Credential Manager / Linux Secret Service / macOS Keychain) |
 | App-lock hash + hint | OS credential manager — same store, separate entry |
 | Attached files (images, text) | Inlined into the message at send time; no separate file store |

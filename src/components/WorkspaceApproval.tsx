@@ -185,6 +185,14 @@ function DiffPreview({ oldText, newText }: { oldText: string; newText: string })
               {l.kind === "del" ? "- " : l.kind === "add" ? "+ " : "  "}
             </span>
             {l.text}
+            {l.noEol && (
+              <span
+                className="ml-2 select-none italic text-foreground/50"
+                title="This text doesn't end with a line break, so whatever follows it in the file continues on this line."
+              >
+                (no line break after this)
+              </span>
+            )}
           </div>
         ))}
         {hidden > 0 && (

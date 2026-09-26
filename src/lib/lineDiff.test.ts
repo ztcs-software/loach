@@ -45,6 +45,39 @@ describe("diffLines", () => {
     expect(render("a\r\nb\r\n", "a\nb\n")).toEqual([" a", " b"]);
   });
 
+  // Removing the snippet's final line break makes edit_file join the file's
+  // next line onto it (`// check auth` + `if (!isAdmin) …` → one comment),
+  // so it must never read as "no change".
+  it("shows a removed trailing line break as a change", () => {
+    expect(diffLines("// check auth\n", "// check auth")).toEqual([
+      { kind: "del", text: "// check auth" },
+      { kind: "add", text: "// check auth", noEol: true },
+    ]);
+  });
+
+  it("shows an added trailing line break as a change", () => {
+    expect(diffLines("x", "x\n")).toEqual([
+      { kind: "del", text: "x", noEol: true },
+      { kind: "add", text: "x" },
+    ]);
+  });
+
+  it("still matches the lines both sides share when only the final break differs", () => {
+    expect(diffLines("a\nb\n", "a\nb\nc")).toEqual([
+      { kind: "same", text: "a" },
+      { kind: "same", text: "b" },
+      { kind: "add", text: "c", noEol: true },
+    ]);
+  });
+
+  it("adds no marker when both sides agree about the final break", () => {
+    expect(diffLines("x\ny", "x\ny\nz")).toEqual([
+      { kind: "same", text: "x" },
+      { kind: "same", text: "y" },
+      { kind: "add", text: "z" },
+    ]);
+  });
+
   it("falls back to remove-all/add-all rather than building a huge table", () => {
     const left = Array.from({ length: 700 }, (_, i) => `l${i}`).join("\n");
     const right = Array.from({ length: 700 }, (_, i) => `r${i}`).join("\n");
