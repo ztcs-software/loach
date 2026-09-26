@@ -290,7 +290,8 @@ export const TOOL_TOGGLES: {
         button next to the message box. Nothing outside that directory is
         reachable, and chats without one see no file tools at all. Every
         write, edit, move and deletion asks you first, showing the path and
-        the change; deletions take one file or empty directory at a time, and
+        the change, unless you allow that tool for the chat; deletions take
+        one file or empty directory at a time, and
         there is no shell. Off until you pick a folder, which switches this
         on. The tools run in-process, but what they read becomes part of the
         conversation — with a cloud provider, those file contents are sent to

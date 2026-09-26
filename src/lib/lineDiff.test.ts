@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { diffLines, splitLines } from "./lineDiff";
+import { diffLines, foldUnchanged, splitLines, type DiffLine } from "./lineDiff";
 
 const render = (old: string, next: string) =>
   diffLines(old, next).map((l) => `${{ same: " ", add: "+", del: "-" }[l.kind]}${l.text}`);
@@ -78,6 +78,18 @@ describe("diffLines", () => {
     ]);
   });
 
+  it("diffs one changed line in a long snippet as one pair, not a rewrite", () => {
+    const lines = Array.from({ length: 700 }, (_, i) => `l${i}`);
+    const edited = [...lines];
+    edited[350] = "changed";
+    const out = diffLines(lines.join("\n"), edited.join("\n"));
+    expect(out.filter((l) => l.kind !== "same")).toEqual([
+      { kind: "del", text: "l350" },
+      { kind: "add", text: "changed" },
+    ]);
+    expect(out).toHaveLength(701);
+  });
+
   it("falls back to remove-all/add-all rather than building a huge table", () => {
     const left = Array.from({ length: 700 }, (_, i) => `l${i}`).join("\n");
     const right = Array.from({ length: 700 }, (_, i) => `r${i}`).join("\n");
@@ -85,5 +97,41 @@ describe("diffLines", () => {
     expect(out).toHaveLength(1400);
     expect(out.slice(0, 700).every((l) => l.kind === "del")).toBe(true);
     expect(out.slice(700).every((l) => l.kind === "add")).toBe(true);
+  });
+});
+
+describe("foldUnchanged", () => {
+  const same = (n: number, from = 0): DiffLine[] =>
+    Array.from({ length: n }, (_, i) => ({ kind: "same", text: `s${from + i}` }));
+
+  it("keeps three lines of context either side of a change and folds the rest", () => {
+    const lines: DiffLine[] = [
+      ...same(10),
+      { kind: "del", text: "old" },
+      { kind: "add", text: "new" },
+      ...same(10, 10),
+    ];
+    expect(foldUnchanged(lines)).toEqual([
+      { kind: "fold", count: 7 },
+      ...same(3, 7),
+      { kind: "del", text: "old" },
+      { kind: "add", text: "new" },
+      ...same(3, 10),
+      { kind: "fold", count: 7 },
+    ]);
+  });
+
+  it("leaves a short run between two changes whole", () => {
+    const lines: DiffLine[] = [
+      { kind: "del", text: "a" },
+      ...same(7),
+      { kind: "add", text: "b" },
+    ];
+    expect(foldUnchanged(lines)).toEqual(lines);
+  });
+
+  it("leaves a diff with no change in it whole", () => {
+    const lines = same(50);
+    expect(foldUnchanged(lines)).toBe(lines);
   });
 });

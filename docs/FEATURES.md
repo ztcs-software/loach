@@ -158,8 +158,9 @@ The input box at the bottom of every chat.
 - **Slash commands** — type `/` at the start of the composer to open the
   command palette and run chat actions, switch model, fetch a URL, and
   more without leaving the keyboard (see §2.9).
-- **File picker** (`+` icon) — opens the file dialog directly. Drag and
-  drop also works anywhere in the window.
+- **`+` menu** — **Add files** opens the file dialog (drag and drop also
+  works anywhere in the window); **Add directory** gives the chat a
+  workspace folder, and reads **Change directory** once it has one (§8.4).
 - **Suggestion chips** — on the welcome hero screen of an empty chat,
   shortcuts seed the composer with starter prompts ("Explain a concept",
   "Write code", "Summarize a file", "Brainstorm").
@@ -474,7 +475,12 @@ New facts are deduped locally too (token overlap that also checks word
 order, so "prefers A over B" is not mistaken for "prefers B over A").
 The extractor is told that what you ask for in a chat is a task, not a
 fact about you, and a "fact" that just reports a request ("User requested
-a Python file…", "Is asking how to…") is dropped locally as well.
+a Python file…", "Is asking how to…") is dropped locally as well. It reads
+what you typed, not the files you attached or the pages Loach fetched for
+the turn — text you didn't write isn't a fact about you, and it's where an
+injected "remember that I…" would hide. Facts you added yourself (in the
+Memory tab or with `/remember`) are shown to it as read-only: it can't
+rewrite or remove them, only avoid repeating them.
 
 - **Toast for every change** — "Saved to memory" / "Updated memory" /
   "Removed memory" pills with the fact and an **Undo** button.
@@ -492,9 +498,9 @@ a Python file…", "Is asking how to…") is dropped locally as well.
   extractor prompt, so every fact the model sees is one the extractor can
   still correct. A fact the extractor saves or rewrites is rejected if
   longer than 280 chars; facts you add or edit yourself aren't capped. One
-  run removes or rewrites at most three existing facts, and their toasts
-  are shown last, so their **Undo** stays on screen however many new facts
-  the same run saves.
+  run saves at most five new facts and removes or rewrites at most three
+  existing ones, and the removals' and rewrites' toasts are shown last, so
+  their **Undo** stays on screen.
 
 Memories are silently injected into the system prompt of every chat inside
 the Space as a `--- Space memory ---` bulleted list. Cancel / error turns
@@ -683,6 +689,11 @@ setting.
 
 Capabilities Loach offers to the models. Opt-in in **Settings → Tools**.
 
+Whichever tools a model uses, one reply may go back to them for at most
+10 rounds; past that Loach ends the reply with "Stopped after 10 tool-use
+turns". Each tool result the model gets back is capped at 32 KB, with a
+note saying so — the chat shows the whole result.
+
 ### 8.1 Web fetch
 
 When a prompt contains an `http(s)://` URL, Loach downloads the page,
@@ -718,11 +729,16 @@ Loach speaks two MCP transports. Configure servers in **Settings → MCP**.
   path), one argument per line, and optional `NAME=value` environment
   variables layered over Loach's own. Loach starts the program and
   speaks newline-delimited JSON-RPC over its pipes — the way most
-  published servers ship. The process stays running between turns and is
-  stopped — together with every process it started, such as the `node`
-  behind `npx` — when the server is disabled, edited, or deleted, and when
-  Loach exits. Startup is allowed 60 s (first-run package downloads) and
-  each request 30 s. When the process exits or stops accepting input, the last
+  published servers ship. The process stays running between turns. When
+  the server is disabled, edited or deleted, Loach closes its input and
+  gives it two seconds to exit, as the MCP spec asks; one that doesn't is
+  stopped together with every process it started, such as the `node`
+  behind `npx`, while one that exits by itself keeps what it deliberately
+  left running (the browser `mcp-remote` opens to sign in, say). When Loach
+  itself exits, servers are stopped at once. Startup is allowed 60 s
+  (first-run package downloads) and each request 30 s; a request that runs
+  out of time fails, but the server keeps running — it may still be working
+  on it. When the process exits or stops accepting input, the last
   lines of its stderr are quoted in the error so a failed launch says why
   (a timeout doesn't include them). On Windows a bare `npx` resolves to
   `npx.cmd` through Loach's own `PATH`/`PATHEXT`, so commands work as
@@ -743,25 +759,29 @@ For each server:
 - **Ask before each tool call** — the per-call approval switch, on by
   default (see below).
 
-**Running a local program needs consent.** When a stdio configuration is
-saved or tested for the first time — and again whenever its command,
-arguments, or environment change, or a disabled server is turned on — a
-native OS dialog shows the program and each argument on a line of its own
-(quoted when it contains spaces), plus the names of any environment
-variables, and asks whether to start it. Values stay hidden, since that is
-where API keys go — except for variables that change what runs (`PATH`,
-`NODE_OPTIONS`, `PYTHONPATH`, `LD_PRELOAD`, package-index settings and the
-like), which are shown in full. A command line too long to show in full is
-refused rather than cut short, and so are control characters and
-invisible or text-reordering Unicode anywhere in the command, arguments or
-environment. The dialog is raised by the Rust side, not by the web view,
-so a compromised renderer can't get a program run without a person
-clicking through it. Snapshot imports store stdio servers **disabled** for the
+**Running a local program needs consent.** Testing a stdio configuration,
+saving a new one switched on, changing its command, arguments or environment,
+and turning a disabled one on each raise a native OS dialog first. It shows
+the program and each argument on a line of its own (quoted when it
+contains spaces) and the environment variables with their values — except
+variables whose names say they hold a credential (`…TOKEN`, `…_KEY`,
+`…SECRET`, `…PASSWORD`, `…AUTH…` and the like), which read *value hidden*.
+Variables that change what runs (`PATH`, `NODE_OPTIONS`, `PYTHONPATH`,
+`LD_PRELOAD`, package-index settings and the like) are always shown in
+full. A command line too long to show in full is refused rather than cut
+short, and so are control characters and invisible or text-reordering
+Unicode anywhere in the command, arguments or environment, and variable
+names that aren't plain ASCII. **Cancel** is the dialog's default button,
+so pressing Enter declines; only clicking **Start server** starts the
+program. The dialog is raised by the Rust side, not by the web view, so a
+compromised renderer can't get a program run without a person clicking
+through it. Snapshot imports store stdio servers **disabled** for the
 same reason; enabling one in Settings raises the dialog. Saving a server
 switched off doesn't ask; turning it on does. Approved command lines are
 remembered for the rest of the session, so a test followed by a save asks
 once. The dialog guards changes, not every launch: after a restart, an
-enabled server you already approved starts without asking.
+enabled server you already approved starts without asking — though
+**Test connection** asks again.
 
 Environment variables are treated like headers: they hold API keys, so
 they are scrubbed from exports, exactly like HTTP headers. Arguments are
@@ -781,14 +801,17 @@ wants to run — server, tool, and the arguments — with three answers:
 - **Deny** — the tool does not run. The model is told the user declined
   and continues without the result.
 
-A prompt left unanswered for 10 minutes counts as a denial, and **Stop**
-cancels the reply as usual. While the card waits, other chats queue
-behind the reply (§2.4). Turning **Ask before each tool call** off on
+A prompt left unanswered for 10 minutes doesn't run either: the call is
+marked *No answer*, and the model is told nobody answered — not that you
+declined. **Stop** cancels the reply as usual. While the card waits, other
+chats queue behind the reply (§2.4); if it's waiting in a chat you aren't
+looking at, a notice says so with a way there, and a chat queued behind it
+names the chat it's waiting on. Turning **Ask before each tool call** off on
 a server skips the prompt for all of its tools; the server row shows an
 *Auto-approve* badge so the exception stays visible. Built-in tools
-(§8.3) never ask — they run in-process with no network or disk access —
-except the four workspace file tools that change files (§8.4), which ask
-unless you've allowed them for the chat.
+(§8.3) never ask — they run in-process, with no network access — except
+the four workspace file tools that change files (§8.4), which ask unless
+you've allowed them for the chat.
 
 ### 8.3 Built-in tools
 
@@ -849,6 +872,12 @@ checked against the folder again before it is used, so a link pointing
 elsewhere is refused too — as is a link whose target doesn't exist, since
 writing through it would create that target wherever it points. Deleting
 or moving a link acts on the link itself, never on what it points to.
+Names that would be misread are refused as well: control and
+text-direction characters anywhere (a right-to-left mark can make
+`txt.exe` look like `exe.txt` on the approval card), and on Windows a `:`
+(a hidden data stream such as `setup.exe:Zone.Identifier`), a reserved
+device name (`CON`, `nul.txt`, `COM1`) or a name ending in a dot or a
+space — Windows tools can't open or delete those afterwards.
 
 - **list_directory** — tree of a directory, two levels by default, with
   dependency and build directories (`node_modules`, `target`, `.git`, …)
@@ -867,19 +896,35 @@ or moving a link acts on the link itself, never on what it points to.
 `find_files` and `search_files` go at most eight levels below the
 directory they start from. When a walk stops above deeper directories,
 the result says so, so the model can point `path` at a subdirectory
-rather than conclude the file isn't there.
+rather than conclude the file isn't there. Other limits: `read_file` and
+`edit_file` handle files up to 4 MB, one write or edit may add at most
+1 MB, `search_files` skips files over 512 KB and stops after 2,000 files
+or 100 matches, `list_directory` stops at 500 entries and `find_files` at
+200 results — each says so when it stops early.
 
-The four that change files **ask you first, every time**. The consent card
-shows the change itself rather than raw arguments: the contents of a
-write, a `-`/`+` diff for an edit, `from → to` for a move, and a red
-warning for a deletion. A long write is cut at 20,000 characters in the
-card and a long diff at 400 lines, each with a note saying so — the whole
-change is still what gets applied. **Allow once** runs that call;
+The four that change files ask you first, unless you've allowed that tool
+for the chat. The consent card shows the change itself rather than raw
+arguments: the contents of a write — saying whether it creates a new file
+or replaces an existing one, and how big that one is — a `-`/`+` diff for
+an edit, `from → to` for a move, and a red warning for a deletion. The
+path is shown in full. In a diff, runs of unchanged lines are folded down
+to three lines of context around each change, and when an edit adds or
+removes the line break at the end of its text, the line is marked *no line
+break after this* — without one, the file's next line joins it. A long
+write is cut at 20,000 characters in the card and a long diff at 400 rows,
+each with a note saying what's below the cut and a **Show all** link — the
+whole change is still what gets applied. **Allow once** runs that call;
 **Allow … for this chat** stops asking for that tool in this chat until
 you change or remove its folder, or quit Loach (the grant is kept in
 memory, and covers only Loach's own tool — never an MCP server's tool of
 the same name); **Deny** tells the model to carry on without it. Line
 endings are preserved: editing or overwriting a CRLF file keeps it CRLF.
+
+Writes and edits replace the file rather than rewriting it in place. A
+file that is also hard-linked from elsewhere — a pnpm or uv package store,
+say — gets its own new copy, and the other links keep the old contents;
+a write that fails partway leaves the old file intact. Permissions carry
+over (a script stays executable), and a read-only file is refused.
 
 So is the text encoding. Files that aren't UTF-8 — Windows-1250 or another
 legacy code page, or UTF-16 with a byte-order mark (what PowerShell 5.1
@@ -909,8 +954,9 @@ row. Anything past 32 KB is cut with a note; local models follow short
 instruction files far better, so keep it brief. A blank file counts as
 none. The model is told to treat the file as the project's instructions and
 to let yours win when the two conflict — a folder you just cloned can say
-anything, and the approval card on every write, move and deletion remains
-the backstop.
+anything, and the approval card on writes, moves and deletions remains
+the backstop. A sample to start from is in
+[`docs/LOACHFILE.md.sample`](LOACHFILE.md.sample).
 
 Deliberately absent: a shell, a recursive delete, and any way to point the
 tools at a folder other than through the native picker.
@@ -1084,9 +1130,9 @@ Below it sit the actions:
   when a lock is configured.
 - **Archive all chats** — parks every live chat in the archive (§2.7).
 - **Erase & Reset → Remove my data** — drops chats, folders, Spaces (with
-  their files and memories), snippets, snippet variables and saved
-  fill-ins, and MCP servers, but keeps app settings and the stored OpenAI
-  key. Gated on the app-lock credentials.
+  their sources and memories), global memories, snippets, snippet variables
+  and saved fill-ins, and MCP servers, but keeps app settings and the stored
+  OpenAI key. Gated on the app-lock credentials.
 - **Erase & Reset → Factory reset** — the same wipe + clear all settings +
   remove the OpenAI key and the app lock from the credential store.
   Re-fires onboarding on next launch. Irreversible.

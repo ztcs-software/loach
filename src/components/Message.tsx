@@ -147,7 +147,7 @@ function ApprovalCard({ call }: { call: ToolCallRecord }) {
   // move, the deletion — instead of the arguments as JSON. Deletions are
   // painted red so they never blend in with the amber of an edit.
   const builtin = call.server_id === BUILTIN_SERVER_ID;
-  const preview = builtin ? workspaceApproval(tool, call.arguments) : null;
+  const preview = builtin ? workspaceApproval(tool, call.arguments, call.existing_bytes) : null;
   const destructive = preview?.destructive === true;
   return (
     <div
@@ -160,11 +160,13 @@ function ApprovalCard({ call }: { call: ToolCallRecord }) {
           : "border-amber-500/35 bg-amber-500/[0.07]",
       )}
     >
-      <div className="flex items-center gap-1.5 font-medium text-foreground/85">
+      <div className="flex items-start gap-1.5 font-medium text-foreground/85">
         <ShieldAlert
-          className={cn("h-3.5 w-3.5 shrink-0", destructive ? "text-red-500" : "text-amber-500")}
+          className={cn("mt-px h-3.5 w-3.5 shrink-0", destructive ? "text-red-500" : "text-amber-500")}
         />
-        <span className="min-w-0 truncate">
+        {/* Wraps rather than truncates: for a write or an edit the path is
+            here, and a cut-off path hides exactly the file name. */}
+        <span className="min-w-0 [overflow-wrap:anywhere]">
           {preview ? (
             <>Allow the model to {preview.title}?</>
           ) : (
@@ -223,7 +225,9 @@ function ToolCallItem({ call }: { call: ToolCallRecord }) {
   // Same readable preview the approval card used, so the diff that was
   // approved can still be seen after the fact.
   const preview =
-    call.server_id === BUILTIN_SERVER_ID ? workspaceApproval(rawTool, call.arguments) : null;
+    call.server_id === BUILTIN_SERVER_ID
+      ? workspaceApproval(rawTool, call.arguments, call.existing_bytes)
+      : null;
   return (
     <div
       className={cn(
@@ -261,7 +265,7 @@ function ToolCallItem({ call }: { call: ToolCallRecord }) {
         </span>
         {(denied || interrupted) && (
           <span className="ml-auto shrink-0 text-[10.5px] uppercase tracking-wider text-foreground/45">
-            {denied ? "Denied" : "Interrupted"}
+            {denied ? (call.timed_out ? "No answer" : "Denied") : "Interrupted"}
           </span>
         )}
       </button>

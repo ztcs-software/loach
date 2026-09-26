@@ -64,7 +64,15 @@ vi.mock("@/lib/tauri", async (importOriginal) => {
   };
 });
 
+// The toast store arms its dismiss timers on `window`; the node environment
+// has none.
+vi.stubGlobal("window", {
+  setTimeout: (...args: Parameters<typeof setTimeout>) => setTimeout(...args),
+  clearTimeout: (id: Parameters<typeof clearTimeout>[0]) => clearTimeout(id),
+});
+
 import { useChatStore, __testing } from "./chatStore";
+import { useToastStore } from "./toastStore";
 
 globalThis.requestAnimationFrame = ((cb: FrameRequestCallback) =>
   setTimeout(() => cb(0), 0) as unknown as number) as typeof requestAnimationFrame;
@@ -219,6 +227,49 @@ describe("per-call tool approvals", () => {
     // Nothing is streaming, so a stray click has nowhere to go.
     await get().respondToolApproval("call_0_0", "allow_once");
     expect(mocks.respond).not.toHaveBeenCalled();
+  });
+
+  // Every other chat queues behind a parked approval, so one waiting in a
+  // chat the user isn't looking at has to say so.
+  it("tells the user when a chat they aren't looking at is waiting for an answer", async () => {
+    useChatStore.setState({ sessions: [{ id: "sess-A", title: "Pantry" }] } as never);
+    useToastStore.getState().clear();
+    const p = startConnected();
+    await tick();
+    const stream = mocks.streams[0];
+
+    stream.onEvent({ ...CALL, approval_required: true });
+    expect(useToastStore.getState().toasts).toHaveLength(0);
+
+    useChatStore.setState({ activeSessionId: "sess-B" } as never);
+    stream.onEvent({ ...CALL, id: "call_1_0", approval_required: true });
+    const toasts = useToastStore.getState().toasts;
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0].title).toContain("Pantry");
+    expect(toasts[0].action?.label).toBe("Open");
+
+    stream.onEvent({ kind: "done" });
+    await tick();
+    await p;
+  });
+
+  it("keeps what a write would replace, and a prompt nobody answered", async () => {
+    const p = startConnected();
+    await tick();
+    const stream = mocks.streams[0];
+    stream.onEvent({ ...CALL, existing_bytes: 2048, approval_required: true });
+    stream.onEvent({
+      kind: "tool_result",
+      id: "call_0_0",
+      content: "The user didn't answer the approval prompt in time.",
+      is_error: true,
+      denied: true,
+      timed_out: true,
+    });
+    stream.onEvent({ kind: "done" });
+    await tick();
+    await p;
+    expect(toolCalls("sess-A")[0]).toMatchObject({ existing_bytes: 2048, denied: true, timed_out: true });
   });
 
   // Stop unlistens before the backend can report the result, so a call

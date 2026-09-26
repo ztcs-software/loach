@@ -77,14 +77,18 @@ pub enum StreamEvent {
     },
     /// The model asked to invoke an MCP tool. Emitted once per call, BEFORE
     /// the dispatcher actually runs the tool, so the UI can render a "calling
-    /// `<tool>`…" placeholder before the result lands. `id` is the
-    /// provider's call id (OpenAI provides one; for Ollama we synthesise
-    /// `call_<turn>_<index>`), used by the frontend to pair the call with
-    /// its matching `ToolResult`.
+    /// `<tool>`…" placeholder before the result lands. `id` is Loach's own
+    /// `call_<turn>_<index>`, unique within the stream, which the frontend
+    /// pairs the call with its `ToolResult` and the approval answer by —
+    /// never the provider's id, which some servers leave empty or repeat.
     ///
     /// `approval_required` tells the UI to render the consent prompt: the
     /// backend is parked waiting for `tool_approval_respond` (or a Stop, or
     /// the approval timeout) before it will dispatch this call.
+    ///
+    /// `existing_bytes` is set for the built-in `write_file` only: the size
+    /// of the file the write would replace, or `null` when it would create
+    /// one, so the approval card can say which.
     ToolCall {
         id: String,
         server_id: String,
@@ -92,6 +96,8 @@ pub enum StreamEvent {
         tool: String,
         arguments: serde_json::Value,
         approval_required: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        existing_bytes: Option<Option<u64>>,
     },
     /// Outcome of a `ToolCall`. `is_error` mirrors the MCP `isError` flag;
     /// `content` is the concatenated text content (or a stringified
@@ -106,8 +112,9 @@ pub enum StreamEvent {
     /// model as part of the next turn's context.
     ///
     /// `denied` marks a call the user refused at the consent prompt (or
-    /// that timed out waiting for one). It never ran; `content` carries the
-    /// note the model was given so it can continue without the result.
+    /// that timed out waiting for one — then `timed_out` is set too, since
+    /// nobody actually said no). It never ran; `content` carries the note
+    /// the model was given so it can continue without the result.
     ToolResult {
         id: String,
         content: String,
@@ -115,6 +122,7 @@ pub enum StreamEvent {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         attachments: Vec<crate::mcp::Attachment>,
         denied: bool,
+        timed_out: bool,
     },
 }
 

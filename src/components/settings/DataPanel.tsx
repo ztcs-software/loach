@@ -481,7 +481,8 @@ function EraseDialog({
             body={
               <>
                 Delete all <strong>chats</strong>, <strong>spaces</strong>,{" "}
-                <strong>snippets</strong>, and <strong>MCP servers</strong>.
+                <strong>global memories</strong>, <strong>snippets</strong>, and{" "}
+                <strong>MCP servers</strong>.
                 Keeps your settings (theme, provider URLs, system prompt) and
                 your stored OpenAI API key.
               </>

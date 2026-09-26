@@ -57,6 +57,14 @@ const MAX_TURNS_PER_RUN = 3;
 const MAX_EDITS_PER_RUN = 3;
 
 /**
+ * Most new memories one run may save. Even a turn full of introductions
+ * rarely states more; without a cap one hallucinated (or injected) list of
+ * forty "facts" pushed the user's older memories out of the prompt window
+ * and evicted most of its own Undo toasts before anyone could read them.
+ */
+const MAX_ADDS_PER_RUN = 5;
+
+/**
  * Cap on how much user + assistant text a run feeds the extractor, per
  * side, split across the turns in the run. Large code blocks etc. eat the
  * model's context and the durable facts that warrant memory rarely come
@@ -175,10 +183,17 @@ export async function extractMemories(args: MemoryExtractionArgs): Promise<void>
     }
   }
 
+  // The extractor only numbers — and so can only rewrite or retire — what
+  // an extraction wrote (the rows with a source message). A memory the user
+  // added by hand, in the Memory tab or with /remember, is read-only
+  // context: otherwise one turn, or a page it quoted, could talk the model
+  // into "correcting" what the user said about themselves.
   const promptRows = selectMemoriesForPrompt(existing);
+  const editable = promptRows.filter((m) => m.source_message_id !== null);
+  const usersOwn = promptRows.filter((m) => m.source_message_id === null).map((m) => m.content);
   const systemPrompt = buildExtractorSystemPrompt(
-    promptRows.map((m) => m.content),
-    alreadyKnown,
+    editable.map((m) => m.content),
+    [...usersOwn, ...alreadyKnown],
   );
 
   const perSide = Math.floor(TURN_CHAR_BUDGET / turns.length);
@@ -218,7 +233,7 @@ export async function extractMemories(args: MemoryExtractionArgs): Promise<void>
   const parsed = parseExtractionJson(raw);
   if (!parsed) return;
 
-  const byNumber = (n: number): MemoryRow | undefined => promptRows[n - 1];
+  const byNumber = (n: number): MemoryRow | undefined => editable[n - 1];
   const latestMessageId = args.turn.assistantMessageId;
 
   // Toasts go out once everything is applied, additions first: the toast
@@ -269,8 +284,10 @@ export async function extractMemories(args: MemoryExtractionArgs): Promise<void>
     .map((m) => normalize(updatedContent.get(m.id) ?? m.content))
     .concat(alreadyKnown.map(normalize));
   const seenInRun = new Set<string>();
+  let adds = 0;
 
   for (const candidate of parsed.add) {
+    if (adds >= MAX_ADDS_PER_RUN) break;
     const trimmed = candidate.trim();
     if (!trimmed) continue;
     if (trimmed.length > MAX_MEMORY_CHARS) continue;
@@ -284,6 +301,7 @@ export async function extractMemories(args: MemoryExtractionArgs): Promise<void>
     seenInRun.add(norm);
     try {
       const saved = await ops.add(trimmed, sessionId, latestMessageId);
+      adds++;
       existingNormalized.push(norm);
       addToasts.push(() => announceSaved(saved, ops));
     } catch (e) {

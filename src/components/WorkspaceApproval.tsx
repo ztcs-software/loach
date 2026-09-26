@@ -13,10 +13,10 @@
  * the JSON view.
  */
 
-import type { ReactNode } from "react";
-import { ArrowRight, FilePlus, Pencil, Trash2 } from "lucide-react";
-import { diffLines, splitLines } from "@/lib/lineDiff";
-import { cn } from "@/lib/utils";
+import { useMemo, useState, type ReactNode } from "react";
+import { ArrowRight, FilePlus, FileWarning, Pencil, Trash2 } from "lucide-react";
+import { diffLines, foldUnchanged, splitLines } from "@/lib/lineDiff";
+import { cn, formatBytes } from "@/lib/utils";
 
 /** Synthetic server id the backend gives built-in tools
  *  (`tools::builtin::BUILTIN_SERVER_ID`). */
@@ -30,17 +30,23 @@ export interface WorkspaceApproval {
   destructive: boolean;
 }
 
-/** Characters of a `write_file` payload shown before the preview is cut.
- *  The full content is still written; this only bounds the card. */
+/** Characters of a `write_file` payload shown before the preview is cut —
+ *  until "Show all". The full content is still written; this only bounds
+ *  the card. */
 const MAX_PREVIEW_CHARS = 20_000;
-/** Diff rows shown before the rest is summarised. */
+/** Diff rows shown before the rest is summarised — until "Show all". */
 const MAX_DIFF_LINES = 400;
 
 /** Build the preview for a built-in workspace tool call, or `null` when
  *  `tool` isn't one of the mutating workspace tools (or its arguments
  *  aren't the shape the backend would accept — the backend will refuse
- *  the call, and the JSON view shows why). */
-export function workspaceApproval(tool: string, args: unknown): WorkspaceApproval | null {
+ *  the call, and the JSON view shows why). `existingBytes` is the backend's
+ *  word on what a `write_file` replaces (`ToolCallRecord.existing_bytes`). */
+export function workspaceApproval(
+  tool: string,
+  args: unknown,
+  existingBytes?: number | null,
+): WorkspaceApproval | null {
   const o = argsObject(args);
   if (!o) return null;
   switch (tool) {
@@ -54,7 +60,7 @@ export function workspaceApproval(tool: string, args: unknown): WorkspaceApprova
             write <Mono>{path}</Mono>
           </>
         ),
-        body: <WritePreview content={content} />,
+        body: <WritePreview content={content} existingBytes={existingBytes} />,
         destructive: false,
       };
     }
@@ -133,23 +139,41 @@ function Mono({ children }: { children: ReactNode }) {
   return <span className="font-mono">{children}</span>;
 }
 
-function WritePreview({ content }: { content: string }) {
-  const lines = splitLines(content).length;
-  const bytes = new TextEncoder().encode(content).length;
-  const clipped = content.length > MAX_PREVIEW_CHARS;
+function WritePreview({
+  content,
+  existingBytes,
+}: {
+  content: string;
+  existingBytes?: number | null;
+}) {
+  const [showAll, setShowAll] = useState(false);
+  const lines = useMemo(() => splitLines(content).length, [content]);
+  const bytes = useMemo(() => new TextEncoder().encode(content).length, [content]);
+  const clipped = !showAll && content.length > MAX_PREVIEW_CHARS;
   const shown = clipped ? content.slice(0, MAX_PREVIEW_CHARS) : content;
+  const size = `${lines} ${lines === 1 ? "line" : "lines"} · ${bytes} bytes`;
   return (
     <div className="mt-2">
-      <div className="mb-1 flex items-center gap-1.5 text-[10.5px] uppercase tracking-wider text-foreground/45">
-        <FilePlus className="h-3 w-3" />
-        New contents · {lines} {lines === 1 ? "line" : "lines"} · {bytes} bytes
-      </div>
+      {/* An overwrite must not read like a new file: say what it replaces.
+          `undefined` is a record saved before the backend reported it. */}
+      {typeof existingBytes === "number" ? (
+        <div className="mb-1 flex items-center gap-1.5 text-[10.5px] uppercase tracking-wider text-amber-700 dark:text-amber-300">
+          <FileWarning className="h-3 w-3" />
+          Replaces the existing file ({formatBytes(existingBytes)}) · new contents {size}
+        </div>
+      ) : (
+        <div className="mb-1 flex items-center gap-1.5 text-[10.5px] uppercase tracking-wider text-foreground/45">
+          <FilePlus className="h-3 w-3" />
+          {existingBytes === null ? "New file" : "New contents"} · {size}
+        </div>
+      )}
       <pre className="max-h-72 overflow-auto rounded border border-foreground/10 bg-foreground/[0.04] px-2 py-1.5 font-mono text-[11px] leading-snug text-foreground/80 whitespace-pre-wrap break-words">
         {shown}
         {clipped && (
           <span className="block pt-1 italic text-foreground/50">
             … preview cut at {MAX_PREVIEW_CHARS.toLocaleString()} characters; the whole file is
-            written.
+            written.{" "}
+            <ShowAll onClick={() => setShowAll(true)} />
           </span>
         )}
       </pre>
@@ -158,11 +182,21 @@ function WritePreview({ content }: { content: string }) {
 }
 
 function DiffPreview({ oldText, newText }: { oldText: string; newText: string }) {
-  const all = diffLines(oldText, newText);
-  const rows = all.slice(0, MAX_DIFF_LINES);
-  const hidden = all.length - rows.length;
-  const removed = all.filter((l) => l.kind === "del").length;
-  const added = all.filter((l) => l.kind === "add").length;
+  const [showAll, setShowAll] = useState(false);
+  const { rows, removed, added } = useMemo(() => {
+    const all = diffLines(oldText, newText);
+    return {
+      rows: foldUnchanged(all),
+      removed: all.filter((l) => l.kind === "del").length,
+      added: all.filter((l) => l.kind === "add").length,
+    };
+  }, [oldText, newText]);
+  const shown = showAll ? rows : rows.slice(0, MAX_DIFF_LINES);
+  // Say what is past the cut, so "−700 +700" with only removals on screen
+  // can't hide that the additions are further down.
+  const rest = rows.slice(shown.length);
+  const restRemoved = rest.filter((l) => l.kind === "del").length;
+  const restAdded = rest.filter((l) => l.kind === "add").length;
   return (
     <div className="mt-2">
       <div className="mb-1 flex items-center gap-1.5 text-[10.5px] uppercase tracking-wider text-foreground/45">
@@ -172,36 +206,56 @@ function DiffPreview({ oldText, newText }: { oldText: string; newText: string })
         <span className="text-emerald-700 dark:text-emerald-300">+{added}</span>
       </div>
       <pre className="max-h-72 overflow-auto rounded border border-foreground/10 bg-foreground/[0.04] py-1 font-mono text-[11px] leading-snug text-foreground/80">
-        {rows.map((l, i) => (
-          <div
-            key={i}
-            className={cn(
-              "whitespace-pre-wrap break-words px-2",
-              l.kind === "del" && "bg-red-500/15 text-red-800 dark:text-red-200",
-              l.kind === "add" && "bg-emerald-500/15 text-emerald-800 dark:text-emerald-200",
-            )}
-          >
-            <span className="select-none text-foreground/40">
-              {l.kind === "del" ? "- " : l.kind === "add" ? "+ " : "  "}
-            </span>
-            {l.text}
-            {l.noEol && (
-              <span
-                className="ml-2 select-none italic text-foreground/50"
-                title="This text doesn't end with a line break, so whatever follows it in the file continues on this line."
-              >
-                (no line break after this)
+        {shown.map((l, i) =>
+          l.kind === "fold" ? (
+            <div key={i} className="select-none px-2 italic text-foreground/45">
+              ⋯ {l.count} unchanged {l.count === 1 ? "line" : "lines"}
+            </div>
+          ) : (
+            <div
+              key={i}
+              className={cn(
+                "whitespace-pre-wrap break-words px-2",
+                l.kind === "del" && "bg-red-500/15 text-red-800 dark:text-red-200",
+                l.kind === "add" && "bg-emerald-500/15 text-emerald-800 dark:text-emerald-200",
+              )}
+            >
+              <span className="select-none text-foreground/40">
+                {l.kind === "del" ? "- " : l.kind === "add" ? "+ " : "  "}
               </span>
-            )}
-          </div>
-        ))}
-        {hidden > 0 && (
+              {l.text}
+              {l.noEol && (
+                <span
+                  className="ml-2 select-none italic text-foreground/50"
+                  title="This text doesn't end with a line break, so whatever follows it in the file continues on this line."
+                >
+                  (no line break after this)
+                </span>
+              )}
+            </div>
+          ),
+        )}
+        {rest.length > 0 && (
           <div className="px-2 pt-1 italic text-foreground/50">
-            … {hidden} more {hidden === 1 ? "line" : "lines"}
+            … {rest.length} more {rest.length === 1 ? "row" : "rows"} ({restRemoved} removed,{" "}
+            {restAdded} added).{" "}
+            <ShowAll onClick={() => setShowAll(true)} />
           </div>
         )}
       </pre>
     </div>
+  );
+}
+
+function ShowAll({ onClick }: { onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="not-italic font-medium text-foreground/75 underline underline-offset-2 hover:text-foreground"
+    >
+      Show all
+    </button>
   );
 }
 

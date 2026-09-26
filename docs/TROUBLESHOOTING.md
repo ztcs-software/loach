@@ -86,8 +86,9 @@ If another chat is busy, your message is parked in a FIFO queue.
   chats to finish…** banner with **Respond now**. That cancels the current
   runner and starts yours.
 - If nothing seems to be generating, the running chat may be waiting on a
-  tool approval card — open it and answer the card (see "The reply is
-  stuck on 'Waiting for your approval…'").
+  tool approval card. The banner then reads **Waiting for your approval of
+  a tool call in "…"** and offers **Go to it** — answer the card there (see
+  "The reply is stuck on 'Waiting for your approval…'").
 
 ### The reply stopped halfway and shows an error
 
@@ -410,8 +411,12 @@ enabled.)
 5. Put one argument per line. Don't quote arguments the way you would in
    a shell — Loach passes each line as one argument, spaces included
    (only leading and trailing whitespace is trimmed).
-6. If you clicked **Cancel** on the "Run MCP server …?" system dialog,
-   nothing was saved or started. Save again and choose **Start server**.
+6. If you clicked **Cancel** on the "Run MCP server …?" system dialog —
+   or pressed Enter, which picks Cancel — nothing was saved or started.
+   Save again and click **Start server**.
+7. A tool call that times out doesn't stop the server; it may still be
+   working. If every call times out, disable and re-enable the server to
+   restart it.
 
 ### A server imported from a backup is disabled and won't turn on
 
@@ -432,11 +437,35 @@ happens.
 the chat's workspace folder, and Loach is waiting for you — answer
 **Allow once**, **Always allow** (**Allow … for this chat** for a file
 change), or **Deny** on the card. A prompt left unanswered for 10 minutes
-is treated as a denial, and the Stop button cancels the reply. Until you
-answer, other chats queue behind this one. To stop being asked for a
+isn't run — the call is marked *No answer* — and the Stop button cancels
+the reply. Until you answer, other chats queue behind this one; if the
+card is in a chat you aren't looking at, Loach shows a notice with an
+**Open** button. To stop being asked for a
 server you trust, open it in **Settings → MCP** and turn off **Ask before
 each tool call**; to re-enable prompts for tools you answered "Always
 allow" for, use **Ask again for all** in the same editor and save.
+
+### "Stopped after 10 tool-use turns"
+
+**Problem.** A reply ends with this error while the model is still calling
+tools.
+
+**Solution.** One reply may go back to its tools at most 10 times, so a
+model stuck in a loop can't run forever. Either it was stuck, or the task
+needs more steps than that. Send a follow-up ("continue") to give it
+another 10 rounds, or break the task into smaller requests. With the
+workspace tools, pointing it at the right files up front (or putting that
+in `LOACHFILE.md`) saves rounds spent searching.
+
+### The model can't use a file or folder name on Windows
+
+**Problem.** A workspace tool refuses a path with "contains `:`", "ends
+with a dot or a space", or "is a device name Windows reserves".
+
+**Solution.** Those names are refused on purpose: a `:` names a hidden
+data stream, and `CON`, `nul.txt` or a trailing dot would be created as
+files that Explorer and most tools can't open or delete. Ask the model to
+pick another name.
 
 ---
 

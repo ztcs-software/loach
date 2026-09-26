@@ -40,6 +40,7 @@ import { useToastStore } from "./toastStore";
 import {
   imagesFromAttachments,
   inlineTextAttachments,
+  stripInlinedAttachments,
 } from "@/lib/files";
 import {
   cancelMemoryExtraction,
@@ -923,6 +924,21 @@ type Setter = (
  *  half-written turn. */
 type FinishReason = "done" | "cancelled" | "error";
 
+/** A tool call is waiting for an answer in a chat the user isn't looking
+ *  at. Every other chat's reply queues behind it until it's answered or the
+ *  prompt times out, ten minutes on — so say so, with a way there. */
+function announceApprovalElsewhere(sessionId: string, get: Getter) {
+  if (get().activeSessionId === sessionId) return;
+  const title = get().sessions.find((s) => s.id === sessionId)?.title || "Another chat";
+  useToastStore.getState().push({
+    kind: "info",
+    title: `“${title}” is waiting for your approval`,
+    body: "Replies in other chats wait until you answer it.",
+    action: { label: "Open", onClick: () => void get().selectSession(sessionId) },
+    durationMs: 15_000,
+  });
+}
+
 /** Called when a stream ends (done event, manual cancel, or error).
  *  Persists the partial assistant reply, tears down the active stream
  *  handle, clears running state, and kicks the next waiting task.
@@ -1085,7 +1101,11 @@ function finishRunning(
       model: running.request.model,
       baseUrl: running.request.base_url,
       turn: {
-        userText: userMsg.content,
+        // What the user typed, not the attachments and fetched pages the
+        // send inlined after it: the extractor records what "the user
+        // stated", and text from a web page or a file isn't that — it's
+        // exactly where an injected "remember that I …" would come from.
+        userText: stripInlinedAttachments(userMsg.content),
         assistantText: buf.content,
         assistantMessageId: buf.assistantMsgId,
       },
@@ -1367,9 +1387,11 @@ async function startTask(task: QueueTask, get: Getter, set: Setter) {
             result: null,
             is_error: false,
             ...(ev.approval_required ? { awaiting_approval: true } : {}),
+            ...(ev.existing_bytes !== undefined ? { existing_bytes: ev.existing_bytes } : {}),
           });
           pendingDirty.toolCalls = true;
           scheduleFlush(get, set);
+          if (ev.approval_required) announceApprovalElsewhere(task.sessionId, get);
         } else if (ev.kind === "tool_result") {
           const existing = buf.toolCalls.find((c) => c.id === ev.id);
           if (existing) {
@@ -1378,6 +1400,7 @@ async function startTask(task: QueueTask, get: Getter, set: Setter) {
             // A result — including a denial — ends the wait either way.
             delete existing.awaiting_approval;
             if (ev.denied) existing.denied = true;
+            if (ev.timed_out) existing.timed_out = true;
           } else {
             // Defensive: a tool_result without a matching tool_call should
             // never happen (Rust emits the pair), but if it does, surface

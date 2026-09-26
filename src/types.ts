@@ -265,6 +265,11 @@ export interface ToolCallRecord {
   /** True when the user refused the call (or the prompt timed out). The
    *  tool never ran; `result` holds the note the model was given. */
   denied?: boolean;
+  /** With `denied`: nobody answered the prompt before it timed out. */
+  timed_out?: boolean;
+  /** `write_file` only: size of the file the write replaces, or `null`
+   *  when it creates one. Absent on records saved before it existed. */
+  existing_bytes?: number | null;
   /** True when the reply ended (Stop, error) before this call's result
    *  arrived. `result` then says whether it could have run — a workspace
    *  write already under way when Stop landed still finishes on disk. */
@@ -384,6 +389,8 @@ export type StreamEvent =
       tool: string;
       arguments: unknown;
       approval_required?: boolean;
+      /** `write_file` only — see `ToolCallRecord.existing_bytes`. */
+      existing_bytes?: number | null;
     }
   /** Outcome of a tool call. `id` pairs with the matching `tool_call`. */
   | {
@@ -400,6 +407,8 @@ export type StreamEvent =
       /** The user refused the call at the consent prompt (or it timed
        *  out). The tool never ran. */
       denied?: boolean;
+      /** With `denied`: the prompt timed out unanswered. */
+      timed_out?: boolean;
     };
 
 export type ThemeChoice = "light" | "dark" | "system";

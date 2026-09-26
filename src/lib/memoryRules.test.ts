@@ -161,13 +161,13 @@ describe("buildExtractorSystemPrompt", () => {
     const prompt = buildExtractorSystemPrompt(["First fact.", "Second fact."]);
     expect(prompt).toContain("1. First fact.");
     expect(prompt).toContain("2. Second fact.");
-    expect(prompt).not.toContain("ALREADY KNOWN (global facts");
+    expect(prompt).not.toContain("ALREADY KNOWN (");
   });
 
   it("marks an empty list and lists already-known facts as uneditable", () => {
     const prompt = buildExtractorSystemPrompt([], ["Global fact."]);
     expect(prompt).toContain("(none yet)");
-    expect(prompt).toContain("ALREADY KNOWN (global facts");
+    expect(prompt).toContain("ALREADY KNOWN (never repeat these, and they cannot be updated or removed here)");
     expect(prompt).toContain("- Global fact.");
   });
 });

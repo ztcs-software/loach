@@ -1978,7 +1978,10 @@ fn validate_stdio_fields(input: &McpServerInput) -> Result<(), McpImportRejectio
             )));
         }
         for (k, v) in env {
+            // ASCII only: which Unicode look-alike of `NODE_OPTIONS` Windows
+            // would fold onto the real name isn't something to guess at.
             if k.is_empty()
+                || !k.is_ascii()
                 || k.contains('=')
                 || k.chars().any(|c| unreviewable_char(c) || c.is_whitespace())
             {
@@ -2029,8 +2032,9 @@ const CONSENT_MAX_CHARS: usize = 1500;
 /// Environment variables that change *what runs* rather than configure the
 /// server: the program search path, interpreter preload / option hooks,
 /// module search paths and package indexes. Their values are shown in the
-/// consent dialog; every other value stays hidden, since that is where API
-/// keys go. Not exhaustive — it covers the runtimes stdio servers ship on.
+/// consent dialog even when the name looks like a credential
+/// ([`env_looks_secret`]) — `NPM_CONFIG_*` can set Node's options as well
+/// as hold a token.
 fn env_changes_what_runs(name: &str) -> bool {
     let n = name.to_ascii_uppercase();
     matches!(
@@ -2057,11 +2061,37 @@ fn env_changes_what_runs(name: &str) -> bool {
         .any(|p| n.starts_with(p))
 }
 
+/// Whether a variable's name says it holds a credential — the only values
+/// the consent dialog hides. Deciding by what *is* secret rather than by
+/// what changes what runs means a variable nobody listed (`HTTPS_PROXY`
+/// with `NODE_EXTRA_CA_CERTS` to swap the package `npx` downloads,
+/// `DOTNET_STARTUP_HOOKS`, `GIT_SSH_COMMAND`, …) is on screen by default.
+fn env_looks_secret(name: &str) -> bool {
+    let n = name.to_ascii_uppercase();
+    [
+        "TOKEN",
+        "SECRET",
+        "PASSWORD",
+        "PASSWD",
+        "PASSPHRASE",
+        "API_KEY",
+        "APIKEY",
+        "ACCESS_KEY",
+        "PRIVATE_KEY",
+        "CREDENTIAL",
+        "COOKIE",
+        "AUTH",
+    ]
+    .iter()
+    .any(|w| n.contains(w))
+        || n.ends_with("_KEY")
+        || n.ends_with("_PAT")
+}
+
 /// The consent dialog's text for `draft`: the program and each argument on
 /// a line of its own (quoted when it holds whitespace, so `a b` and `a`,
-/// `b` can't look alike), environment variable names, and the values of
-/// the ones that change what runs. Errs when that doesn't fit in
-/// [`CONSENT_MAX_CHARS`].
+/// `b` can't look alike), and the environment with every value shown
+/// except credentials. Errs when that doesn't fit in [`CONSENT_MAX_CHARS`].
 fn stdio_consent_text(draft: &McpServer) -> Result<String, String> {
     let shown = |s: &str| {
         if s.is_empty() || s.chars().any(char::is_whitespace) {
@@ -2084,7 +2114,7 @@ fn stdio_consent_text(draft: &McpServer) -> Result<String, String> {
         let vars: Vec<String> = env
             .iter()
             .map(|(k, v)| {
-                if env_changes_what_runs(k) {
+                if env_changes_what_runs(k) || !env_looks_secret(k) {
                     format!("{k}={}", shown(v))
                 } else {
                     format!("{k} (value hidden)")
@@ -2116,32 +2146,52 @@ fn stdio_consent_text(draft: &McpServer) -> Result<String, String> {
 /// call `mcp_save` / `mcp_test` with any command line it likes, and the one
 /// click it cannot fake is a click on an OS dialog. The text comes from
 /// [`stdio_consent_text`], so the user reviews what will actually run.
+///
+/// Cancel is the first button, which every platform makes the default, so
+/// Enter declines — otherwise a renderer could raise the dialog just as the
+/// user pressed Enter in the chat and have that keypress approve it. Built
+/// on rfd directly because tauri-plugin-dialog can't do that safely: it
+/// reports Esc as a click on the *second* button, which would then be
+/// "Start server".
 async fn confirm_stdio_spawn(app: &AppHandle, draft: &McpServer) -> Result<(), String> {
-    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
-
     let body = stdio_consent_text(draft)?;
     let title = format!("Run MCP server \"{}\"?", draft.name);
 
-    // Blocking native call — off the async runtime, like the file dialogs.
-    let app = app.clone();
-    let ok = tauri::async_runtime::spawn_blocking(move || {
-        app.dialog()
-            .message(body)
-            .title(title)
-            .kind(MessageDialogKind::Warning)
-            .buttons(MessageDialogButtons::OkCancelCustom(
-                "Start server".into(),
-                "Cancel".into(),
+    // rfd shows dialogs from the main thread (macOS and GTK require it);
+    // the future it hands back can be awaited anywhere.
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.run_on_main_thread(move || {
+        let answer = rfd::AsyncMessageDialog::new()
+            .set_level(rfd::MessageLevel::Warning)
+            .set_title(title)
+            .set_description(body)
+            .set_buttons(rfd::MessageButtons::OkCancelCustom(
+                CONSENT_CANCEL.into(),
+                CONSENT_START.into(),
             ))
-            .blocking_show()
+            .show();
+        let _ = tx.send(answer);
     })
-    .await
-    .map_err(|e| format!("consent dialog task failed: {e}"))?;
-    if ok {
+    .map_err(|e| format!("couldn't show the consent dialog: {e}"))?;
+    let answer = rx
+        .await
+        .map_err(|_| "the consent dialog couldn't be shown".to_string())?
+        .await;
+    if consent_given(&answer) {
         Ok(())
     } else {
         Err("Cancelled — the server was not started.".into())
     }
+}
+
+/// The consent dialog's buttons. See [`confirm_stdio_spawn`] for the order.
+const CONSENT_CANCEL: &str = "Cancel";
+const CONSENT_START: &str = "Start server";
+
+/// Only a click on the start button is consent. Esc, closing the window and
+/// Enter (which lands on Cancel) all come back as something else.
+fn consent_given(answer: &rfd::MessageDialogResult) -> bool {
+    matches!(answer, rfd::MessageDialogResult::Custom(label) if label == CONSENT_START)
 }
 
 /// Show the consent dialog for `draft` unless this exact command line was
@@ -3255,27 +3305,52 @@ mod tests {
         }
         // Ordinary non-ASCII text is fine.
         assert!(validate_stdio_fields(&stdio_input("npx", &[r"C:\Użytkownicy\Ja"], &[])).is_ok());
+        // …but not in a variable's name, where a look-alike of a real one
+        // could slip past the dialog.
+        assert!(validate_stdio_fields(&stdio_input("npx", &[], &[("NODE_OPTİONS", "x")])).is_err());
     }
 
     /// One argument per line, quoted when it holds whitespace, so `a b`
-    /// and `a`, `b` read differently; values shown only for variables that
-    /// change what runs.
+    /// and `a`, `b` read differently; every environment value shown except
+    /// credentials — and what changes what runs is shown even then.
     #[test]
-    fn consent_text_shows_each_argument_and_only_the_env_values_that_matter() {
+    fn consent_text_shows_each_argument_and_every_value_but_credentials() {
         let draft = stdio_input(
             "npx",
             &["-y", "a b"],
-            &[("GITHUB_TOKEN", "ghp_secret"), ("NODE_OPTIONS", "--require evil.js")],
+            &[
+                ("GITHUB_TOKEN", "ghp_secret"),
+                ("BRAVE_API_KEY", "brave_secret"),
+                ("NODE_OPTIONS", "--require evil.js"),
+                ("HTTPS_PROXY", "http://attacker:8080"),
+                ("DOTNET_STARTUP_HOOKS", "evil.dll"),
+                ("NPM_CONFIG_TOKEN", "npm_shown"),
+            ],
         )
         .to_draft();
         let text = stdio_consent_text(&draft).expect("fits");
         assert!(text.contains("Program: npx\nArguments:\n    -y\n    \"a b\""), "{text}");
         assert!(text.contains("GITHUB_TOKEN (value hidden)"), "{text}");
-        assert!(!text.contains("ghp_secret"), "{text}");
+        assert!(text.contains("BRAVE_API_KEY (value hidden)"), "{text}");
+        assert!(!text.contains("ghp_secret") && !text.contains("brave_secret"), "{text}");
         assert!(text.contains("NODE_OPTIONS=\"--require evil.js\""), "{text}");
+        assert!(text.contains("HTTPS_PROXY=http://attacker:8080"), "{text}");
+        assert!(text.contains("DOTNET_STARTUP_HOOKS=evil.dll"), "{text}");
+        assert!(text.contains("NPM_CONFIG_TOKEN=npm_shown"), "{text}");
 
         let split = stdio_input("npx", &["a", "b"], &[]).to_draft();
         assert_ne!(stdio_consent_text(&split).unwrap(), stdio_consent_text(&draft).unwrap());
+    }
+
+    /// Only a click on "Start server" starts anything — not Enter (which
+    /// lands on the default, Cancel), not Esc or closing the window.
+    #[test]
+    fn only_the_start_button_is_consent() {
+        use rfd::MessageDialogResult as R;
+        assert!(consent_given(&R::Custom(CONSENT_START.into())));
+        for other in [R::Custom(CONSENT_CANCEL.into()), R::Cancel, R::Ok, R::Yes, R::No] {
+            assert!(!consent_given(&other), "{other:?}");
+        }
     }
 
     /// A command line too long to review is refused, never cut short.

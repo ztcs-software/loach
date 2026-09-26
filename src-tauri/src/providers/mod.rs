@@ -48,6 +48,14 @@ const DENIED_NOTE: &str =
     "The user declined to run this tool. Do not call it again; continue without \
      its result, or ask the user how they would like to proceed.";
 
+/// What the model is told when nobody answered the prompt in time. Not a
+/// refusal — the user may just have been away — so it isn't told to give
+/// the tool up for good, only not to retry it unasked.
+const UNANSWERED_NOTE: &str =
+    "The user didn't answer the approval prompt in time, so this tool was not run. \
+     Don't retry it on your own; continue without its result, or ask the user \
+     whether to try again.";
+
 /// Everything the per-call helper needs from the provider loop, bundled so
 /// both providers pass one struct instead of six references.
 pub(super) struct ToolCallCtx<'a> {
@@ -102,6 +110,21 @@ pub(super) async fn execute_tool_call(
         .is_some_and(|sid| ctx.approvals.granted(sid, &tool_def.server_id, tool_name));
     let approval_required = !already_granted
         && crate::mcp::needs_approval(ctx.db, &tool_def.server_id, tool_name);
+    // For a write, whether it would replace a file and how big that file
+    // is, so the card can't pass an overwrite off as a new file.
+    let existing_bytes = match ctx.workspace_root {
+        Some(root)
+            if tool_def.server_id == crate::tools::builtin::BUILTIN_SERVER_ID
+                && tool_name == crate::tools::fs::WRITE_FILE =>
+        {
+            let (root, args) = (root.to_path_buf(), args.clone());
+            tokio::task::spawn_blocking(move || crate::tools::fs::write_target_size(&root, &args))
+                .await
+                .ok()
+                .flatten()
+        }
+        _ => None,
+    };
     let _ = ctx.app.emit(
         ctx.channel,
         StreamEvent::ToolCall {
@@ -111,12 +134,13 @@ pub(super) async fn execute_tool_call(
             tool: tool_def.qualified_name.clone(),
             arguments: args.clone(),
             approval_required,
+            existing_bytes,
         },
     );
 
     if approval_required {
         let rx = ctx.approvals.register(ctx.stream_id, call_id);
-        let decision = select! {
+        let (decision, timed_out) = select! {
             biased;
             _ = ctx.cancel.notified() => {
                 ctx.approvals.forget(ctx.stream_id, call_id);
@@ -124,26 +148,28 @@ pub(super) async fn execute_tool_call(
             }
             // A dropped sender can only mean the registry was cleared out
             // from under us — treat it as a refusal.
-            d = rx => d.unwrap_or(ApprovalDecision::Deny),
+            d = rx => (d.unwrap_or(ApprovalDecision::Deny), false),
             _ = tokio::time::sleep(APPROVAL_TIMEOUT) => {
                 ctx.approvals.forget(ctx.stream_id, call_id);
-                ApprovalDecision::Deny
+                (ApprovalDecision::Deny, true)
             }
         };
         match decision {
             ApprovalDecision::Deny => {
+                let note = if timed_out { UNANSWERED_NOTE } else { DENIED_NOTE };
                 let _ = ctx.app.emit(
                     ctx.channel,
                     StreamEvent::ToolResult {
                         id: call_id.to_string(),
-                        content: DENIED_NOTE.to_string(),
+                        content: note.to_string(),
                         is_error: true,
                         attachments: Vec::new(),
                         denied: true,
+                        timed_out,
                     },
                 );
                 return Some(ToolOutcome {
-                    for_model: DENIED_NOTE.to_string(),
+                    for_model: note.to_string(),
                 });
             }
             ApprovalDecision::AllowAlways
@@ -206,6 +232,7 @@ pub(super) async fn execute_tool_call(
             is_error,
             attachments,
             denied: false,
+            timed_out: false,
         },
     );
     Some(ToolOutcome { for_model })

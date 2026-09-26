@@ -50,7 +50,7 @@ export function WorkspaceNotice({
     : "";
   const hint =
     (toolsEnabled
-      ? "The model can list, find, read and search this folder. Writes, edits, moves and deletions ask you first."
+      ? "The model can list, find, read and search this folder. Writes, edits, moves and deletions ask you first, unless you've allowed them for this chat."
       : "Workspace file tools are switched off in Settings → Tools, so the model can't use this folder until they're turned back on.") +
     (locked ? "\nThe folder can't be changed or removed while a reply is running." : "");
   return (

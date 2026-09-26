@@ -15,9 +15,9 @@
   - The model can list, find, read, search, write, edit, move and delete
     files in the folder, but it has no shell. Ask it to tell you which
     command to run, not to run it.
-  - It's guidance, not a sandbox. Every write, edit, move and delete
-    still asks you first, and your own instructions win when they
-    conflict with this file.
+  - It's guidance, not a sandbox. Writes, edits, moves and deletes
+    still ask you first (unless you allowed that tool for the chat), and
+    your own instructions win when they conflict with this file.
 -->
 
 Pantry is a small web app for tracking what's in the kitchen: a

@@ -753,6 +753,7 @@ pub async fn chat_stream(
                                     is_error: true,
                                     attachments: Vec::new(),
                                     denied: false,
+                                    timed_out: false,
                                 },
                             );
                             messages.push(json!({

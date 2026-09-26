@@ -20,8 +20,9 @@
 //! [`resolve_entry`], which are the only places a model-supplied string
 //! becomes a path. All three:
 //!
-//!   1. reject absolute paths, drive-qualified paths (`C:foo`), and any
-//!      `..` component *before* touching the filesystem,
+//!   1. reject absolute paths, drive-qualified paths (`C:foo`), any `..`
+//!      component, and names Windows would misread (`a.txt:stream`, `CON`,
+//!      `name.`) *before* touching the filesystem,
 //!   2. canonicalize, so symlinks are resolved rather than trusted, and
 //!   3. re-check the canonical result is still under the canonical root.
 //!
@@ -167,7 +168,8 @@ const SKIPPED_DIRS: &[&str] = &[
 /// Vet the *shape* of a model-supplied relative path before it is joined
 /// to anything. Returns the cleaned relative path.
 ///
-/// Rejects absolute paths, Windows drive/root prefixes, and `..`. The `..`
+/// Rejects absolute paths, Windows drive/root prefixes, `..`, and names the
+/// tools can't safely use ([`unusable_name`]). The `..`
 /// check is not the security boundary on its own (the canonical prefix
 /// check below is), but rejecting it here produces a message the model can
 /// act on instead of a confusing "outside the workspace" after the fact.
@@ -180,7 +182,15 @@ fn vet_relative(rel: &str) -> Result<PathBuf, String> {
     let mut out = PathBuf::new();
     for c in p.components() {
         match c {
-            Component::Normal(part) => out.push(part),
+            Component::Normal(part) => {
+                if let Some(why) = unusable_name(part) {
+                    return Err(format!(
+                        "`{}` {why}. Pick a different name.",
+                        display_rel(rel)
+                    ));
+                }
+                out.push(part)
+            }
             // `./foo` is harmless — drop the segment and carry on.
             Component::CurDir => {}
             Component::ParentDir => {
@@ -198,6 +208,57 @@ fn vet_relative(rel: &str) -> Result<PathBuf, String> {
         }
     }
     Ok(out)
+}
+
+/// Why `part` can't be a name the tools open or create, or `None` when it's
+/// fine.
+///
+/// Everywhere: control characters, and the bidi controls that reorder how
+/// text is displayed — `\u{202E}` turns `txt.exe` into what reads as
+/// `exe.txt` on the approval card.
+///
+/// On Windows, three more, because the root is a `\\?\` path and that
+/// prefix switches off Win32's own name checks:
+///   - a `:` — `a.txt:x` is a hidden data stream on `a.txt` (and
+///     `setup.exe:Zone.Identifier` is the mark-of-the-web), while in
+///     `x/C:foo` the component parses as a drive-relative path that
+///     `PathBuf::push` lets replace everything before it, so the card and
+///     the write would disagree about which file is meant;
+///   - a reserved device name (`CON`, `nul.txt`, `COM1`), and
+///   - a trailing dot or space — both are created literally through `\\?\`
+///     and ordinary tools can't open or delete them afterwards.
+fn unusable_name(part: &std::ffi::OsStr) -> Option<&'static str> {
+    let name = part.to_string_lossy();
+    if name
+        .chars()
+        .any(|c| c.is_control() || matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'))
+    {
+        return Some("contains a control or text-direction character");
+    }
+    #[cfg(windows)]
+    {
+        if name.contains(':') {
+            return Some("contains `:`, which Windows reads as a drive or a hidden data stream");
+        }
+        if name.ends_with('.') || name.ends_with(' ') {
+            return Some("ends with a dot or a space, which Windows can't keep in a name");
+        }
+        // `nul.txt` and `NUL .tar.gz` are the device too: only the part
+        // before the first dot counts, trailing spaces ignored.
+        let stem = name.split('.').next().unwrap_or("").trim_end().to_uppercase();
+        let numbered = |prefix: &str| {
+            stem.strip_prefix(prefix).is_some_and(|n| {
+                matches!(n, "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³")
+            })
+        };
+        if matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$")
+            || numbered("COM")
+            || numbered("LPT")
+        {
+            return Some("is a device name Windows reserves (CON, NUL, COM1, …)");
+        }
+    }
+    None
 }
 
 /// Confirm `candidate` — already canonical — sits inside `root`.
@@ -421,6 +482,70 @@ fn kept_encoding_note(enc: TextEncoding) -> String {
         String::new()
     } else {
         format!(" Kept its {} encoding.", enc.name())
+    }
+}
+
+/// Give `path` the contents `bytes` by writing a new file beside it and
+/// renaming that over the target, rather than rewriting it in place.
+///
+/// In place, a hardlink wrote through: it canonicalizes to its name inside
+/// the workspace, but its data is shared with every other name for the
+/// same file — a pnpm or uv store outside the folder, say — and all of
+/// them changed. The rename gives the workspace name a file of its own and
+/// leaves the other links as they were. It also means a write that fails
+/// halfway (disk full, a scanner holding the file) leaves the old contents
+/// intact instead of a truncated file.
+///
+/// An existing file's permissions carry over (an executable script stays
+/// executable), and a read-only one is refused, as an in-place write was.
+fn replace_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+
+    let existing = match fs::metadata(path) {
+        Ok(m) => Some(m),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e),
+    };
+    if existing.as_ref().is_some_and(|m| m.permissions().readonly()) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "the file is read-only",
+        ));
+    }
+    let tmp = path.with_file_name(format!(
+        ".loach-write-{}-{}.tmp",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    let written = (|| {
+        let mut f = fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        drop(f);
+        if let Some(m) = &existing {
+            fs::set_permissions(&tmp, m.permissions())?;
+        }
+        fs::rename(&tmp, path)
+    })();
+    if written.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    written
+}
+
+/// For the approval card: the size of the file a `write_file` call would
+/// replace, `Some(None)` when it would create a new one, and `None` when
+/// its path doesn't resolve — the call itself is refused then, with the
+/// reason.
+pub fn write_target_size(root: &Path, args: &Value) -> Option<Option<u64>> {
+    let rel = args.get("path")?.as_str()?;
+    let path = resolve_write(root, rel).ok()?;
+    match fs::metadata(&path) {
+        Ok(m) => Some(Some(m.len())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(None),
+        Err(_) => None,
     }
 }
 
@@ -1213,7 +1338,7 @@ pub fn dispatch_write_file(root: &Path, args: &Value) -> McpCallResult {
             ));
         }
     }
-    match fs::write(&path, &bytes) {
+    match replace_file(&path, &bytes) {
         Ok(()) => ok(format!(
             "{} `{}` ({} bytes, {} lines).{note}",
             if existed { "Overwrote" } else { "Created" },
@@ -1320,6 +1445,20 @@ pub fn dispatch_edit_file(root: &Path, args: &Value) -> McpCallResult {
         ));
     }
 
+    // Bound the result before building it. `replace` allocates the whole
+    // new text up front, so a short snippet swapped for a long one across
+    // thousands of hits could ask for gigabytes — and a failed allocation
+    // aborts the app, which the panic guard around built-ins can't catch.
+    // `hits` is exactly what `replace` / `replacen` will substitute. The
+    // check on the encoded bytes below stays the precise one.
+    let replaced = if replace_all { hits } else { 1 };
+    let text_growth = new_n
+        .len()
+        .saturating_mul(replaced)
+        .saturating_sub(old_n.len().saturating_mul(replaced));
+    if text_growth > MAX_WRITE_BYTES {
+        return err(too_much_growth(rel, text_growth));
+    }
     let updated = if replace_all {
         haystack.replace(old_n.as_str(), &new_n)
     } else {
@@ -1340,13 +1479,9 @@ pub fn dispatch_edit_file(root: &Path, args: &Value) -> McpCallResult {
     // multiplying a file.
     let grown = encoded.len().saturating_sub(bytes.len());
     if grown > MAX_WRITE_BYTES {
-        return err(format!(
-            "this edit would grow `{}` by {grown} bytes; one edit may add at most \
-             {MAX_WRITE_BYTES}",
-            display_rel(rel)
-        ));
+        return err(too_much_growth(rel, grown));
     }
-    match fs::write(&path, &encoded) {
+    match replace_file(&path, &encoded) {
         Ok(()) => ok(format!(
             "Edited `{}` — replaced {hits} occurrence(s). File is now {} lines.{}",
             rel_display(root, &path),
@@ -1355,6 +1490,14 @@ pub fn dispatch_edit_file(root: &Path, args: &Value) -> McpCallResult {
         )),
         Err(e) => err(format!("couldn't write `{}`: {e}", display_rel(rel))),
     }
+}
+
+fn too_much_growth(rel: &str, grown: usize) -> String {
+    format!(
+        "this edit would grow `{}` by {grown} bytes; one edit may add at most \
+         {MAX_WRITE_BYTES}",
+        display_rel(rel)
+    )
 }
 
 pub fn dispatch_move_file(root: &Path, args: &Value) -> McpCallResult {
@@ -1663,6 +1806,133 @@ mod tests {
         // And the real thing: a canonical temp dir reads like a normal path.
         let (_d, root) = workspace();
         assert!(!display_path(&root).starts_with(r"\\?\"));
+    }
+
+    /// Through the `\\?\` root Windows applies none of its own name checks,
+    /// so these would reach the disk literally — a hidden data stream, a
+    /// file Explorer can't delete, or (`x/C:foo`) a drive-relative path
+    /// that swaps the file the approval card named for another one.
+    #[cfg(windows)]
+    #[test]
+    fn names_windows_would_misread_are_refused() {
+        let (_d, root) = workspace();
+        let before: Vec<_> = fs::read_dir(&root).unwrap().flatten().map(|e| e.file_name()).collect();
+        for attempt in [
+            "x/C:foo",
+            "notes/C:uninstall.exe",
+            "sub/C:",
+            "a.txt:hidden",
+            "setup.exe:Zone.Identifier",
+            "CON",
+            "nul.txt",
+            "Com1",
+            "LPT9.log",
+            "trail.",
+            "space /f.txt",
+            "dir./f.txt",
+        ] {
+            let w = dispatch_write_file(&root, &json!({ "path": attempt, "content": "x" }));
+            assert!(w.is_error, "write to {attempt:?} should be refused");
+            let r = dispatch_read_file(&root, &json!({ "path": attempt }));
+            assert!(r.is_error, "read of {attempt:?} should be refused");
+        }
+        // `::$DATA` names the file's own contents: deleting "that" would
+        // delete README.md itself.
+        let d = dispatch_delete_file(&root, &json!({ "path": "README.md::$DATA" }));
+        assert!(d.is_error, "{}", d.content_text);
+        assert!(root.join("README.md").exists());
+        let after: Vec<_> = fs::read_dir(&root).unwrap().flatten().map(|e| e.file_name()).collect();
+        assert_eq!(before, after, "a refused name still created something");
+
+        // Near misses are ordinary names.
+        for fine in ["console.log", "com10.txt", "conf.d/app.toml", ".env"] {
+            let w = dispatch_write_file(&root, &json!({ "path": fine, "content": "x" }));
+            assert!(!w.is_error, "{fine}: {}", w.content_text);
+        }
+    }
+
+    /// A right-to-left override makes the approval card show a different
+    /// name from the one written (`\u{202E}txt.exe` reads as `exe.txt`).
+    #[test]
+    fn text_direction_characters_in_names_are_refused() {
+        let (_d, root) = workspace();
+        let w = dispatch_write_file(&root, &json!({ "path": "\u{202E}txt.exe", "content": "x" }));
+        assert!(w.is_error, "{}", w.content_text);
+        let w = dispatch_write_file(&root, &json!({ "path": "a\tb.txt", "content": "x" }));
+        assert!(w.is_error, "{}", w.content_text);
+    }
+
+    /// A hardlink canonicalizes to its name inside the workspace, but shares
+    /// its data with the other names. Writes and edits must give the
+    /// workspace name its own file rather than change the shared one — a
+    /// package store outside the folder, in real life.
+    #[test]
+    fn writes_leave_other_hardlinks_to_the_file_alone() {
+        let (_d, root) = workspace();
+        let outside = tempfile::TempDir::new().unwrap();
+        let shared = outside.path().join("store.js");
+        fs::write(&shared, "export const v = 1;\n").unwrap();
+        fs::hard_link(&shared, root.join("linked.js")).expect("hardlink");
+
+        let e = dispatch_edit_file(
+            &root,
+            &json!({ "path": "linked.js", "old_text": "v = 1", "new_text": "v = 2" }),
+        );
+        assert!(!e.is_error, "{}", e.content_text);
+        let w = dispatch_write_file(&root, &json!({ "path": "linked.js", "content": "// mine\n" }));
+        assert!(!w.is_error, "{}", w.content_text);
+
+        assert_eq!(fs::read_to_string(root.join("linked.js")).unwrap(), "// mine\n");
+        assert_eq!(fs::read_to_string(&shared).unwrap(), "export const v = 1;\n");
+        let leftovers: Vec<_> = fs::read_dir(&root)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with(".loach-write-"))
+            .collect();
+        assert!(leftovers.is_empty(), "temp files left behind");
+    }
+
+    #[test]
+    fn read_only_files_are_not_written() {
+        let (_d, root) = workspace();
+        let path = root.join("README.md");
+        let mut perms = fs::metadata(&path).unwrap().permissions();
+        perms.set_readonly(true);
+        fs::set_permissions(&path, perms.clone()).unwrap();
+
+        let w = dispatch_write_file(&root, &json!({ "path": "README.md", "content": "gone\n" }));
+        assert!(w.is_error, "{}", w.content_text);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "# Title\nsecond line\n");
+
+        #[allow(clippy::permissions_set_readonly_false)]
+        perms.set_readonly(false);
+        fs::set_permissions(&path, perms).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writes_keep_the_file_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_d, root) = workspace();
+        let script = root.join("run.sh");
+        fs::write(&script, "#!/bin/sh\necho old\n").unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let w = dispatch_write_file(&root, &json!({ "path": "run.sh", "content": "#!/bin/sh\necho new\n" }));
+        assert!(!w.is_error, "{}", w.content_text);
+        assert_eq!(fs::metadata(&script).unwrap().permissions().mode() & 0o777, 0o755);
+    }
+
+    #[test]
+    fn write_target_size_tells_a_new_file_from_an_overwrite() {
+        let (_d, root) = workspace();
+        assert_eq!(write_target_size(&root, &json!({ "path": "new.txt" })), Some(None));
+        assert_eq!(
+            write_target_size(&root, &json!({ "path": "README.md" })),
+            Some(Some("# Title\nsecond line\n".len() as u64))
+        );
+        assert_eq!(write_target_size(&root, &json!({ "path": "../outside.txt" })), None);
+        assert_eq!(write_target_size(&root, &json!({})), None);
     }
 
     // ---- reading -------------------------------------------------------

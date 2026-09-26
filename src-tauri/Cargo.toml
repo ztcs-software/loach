@@ -64,6 +64,11 @@ parking_lot = "0.12"
 # crate: on Windows a folder goes to the shell API rather than a spawned
 # `cmd` / PowerShell line.
 open = { version = "5", features = ["shellexecute-on-windows"] }
+# The stdio MCP consent dialog, built on rfd directly rather than through
+# tauri-plugin-dialog, whose builder can't make Cancel the default button
+# (see `commands::confirm_stdio_spawn`). Already in the tree through that
+# plugin, which also switches on the per-platform backend features.
+rfd = { version = "0.16", default-features = false }
 
 
 # Backing crates for the rest of the built-in tools. Each is small,

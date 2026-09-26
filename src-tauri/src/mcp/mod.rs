@@ -216,7 +216,9 @@ async fn collect_one(server: &McpServer, slug: &str) -> Result<Vec<McpToolDef>> 
         match session.list_tools_raw().await {
             Ok(r) => r,
             Err(e) => {
-                *pooled = None;
+                if !pooled.as_ref().is_some_and(|p| keeps_session(p, &e)) {
+                    *pooled = None;
+                }
                 return Err(e);
             }
         }
@@ -368,7 +370,13 @@ pub async fn dispatch_tool_call(
                     // only a SHOULD; SDKs answer 400 for "not initialized"),
                     // and keeping a session it rejects makes every later call
                     // fail identically until the TTL ages it out.
-                    *pooled = None;
+                    //
+                    // Except a stdio server that is merely slow: dropping its
+                    // session stops the process, and with it whatever the
+                    // call was still doing — over one late reply.
+                    if !keeps_session(p, &e) {
+                        *pooled = None;
+                    }
                     return Err(e);
                 }
                 tracing::debug!(
@@ -383,15 +391,25 @@ pub async fn dispatch_tool_call(
     let mut session = open_session(&server).await?;
     let out = session.call_tool(name, arguments).await;
     // Only pool a session that actually worked; a freshly built one that
-    // fails is a genuine failure and is never retried.
-    if out.is_ok() {
-        *pooled = Some(PooledSession {
-            fingerprint,
-            created_at: Instant::now(),
-            session,
-        });
+    // fails is a genuine failure and is never retried. A slow reply isn't a
+    // failed session, though — see `keeps_session`.
+    let fresh = PooledSession {
+        fingerprint,
+        created_at: Instant::now(),
+        session,
+    };
+    if out.as_ref().err().is_none_or(|e| keeps_session(&fresh, e)) {
+        *pooled = Some(fresh);
     }
     out
+}
+
+/// Whether a pooled session survives `err` from a call on it: only a stdio
+/// server that is still running and just didn't answer in time. Stopping it
+/// would stop whatever it was still doing — a long download, a sign-in page
+/// it opened — over one late reply; the reply, when it comes, is ignored.
+fn keeps_session(p: &PooledSession, err: &anyhow::Error) -> bool {
+    matches!(p.session, Session::Stdio(_)) && p.is_fresh() && stdio::is_reply_timeout(err)
 }
 
 /// Whether a call to `tool_name` on `server_id` must be confirmed by the
@@ -399,7 +417,10 @@ pub async fn dispatch_tool_call(
 /// an MCP server asks unless the user set it to auto-approve or already
 /// answered "Always allow" for this specific tool. A server that has
 /// vanished from the DB doesn't ask either — the dispatch that follows
-/// fails on its own, and a prompt for a call that can't run is noise.
+/// fails on its own, and a prompt for a call that can't run is noise. A
+/// failed *read* does ask: it says nothing about what the user allowed, and
+/// the dispatch re-reads the row, so a transient error here (a busy read
+/// pool) would otherwise run the tool unasked.
 ///
 /// The one built-in exception is the workspace tools that write to disk.
 /// "Local and in-process" is why the others are safe to run unattended;
@@ -411,11 +432,20 @@ pub fn needs_approval(db: &Database, server_id: &str, tool_name: &str) -> bool {
     if server_id == crate::tools::builtin::BUILTIN_SERVER_ID {
         return crate::tools::fs::requires_approval(tool_name);
     }
-    let Some(server) = db
-        .list_mcp_servers()
-        .ok()
-        .and_then(|rows| rows.into_iter().find(|s| s.id == server_id))
-    else {
+    server_needs_approval(db.list_mcp_servers(), server_id, tool_name)
+}
+
+/// [`needs_approval`] for an MCP server, given the result of reading the
+/// server rows — split out so the failed-read branch can be tested.
+fn server_needs_approval(rows: Result<Vec<McpServer>>, server_id: &str, tool_name: &str) -> bool {
+    let rows = match rows {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!("MCP: couldn't read the server list to check approval, asking: {e:#}");
+            return true;
+        }
+    };
+    let Some(server) = rows.into_iter().find(|s| s.id == server_id) else {
         return false;
     };
     !(server.auto_approve || server.allowed_tools().iter().any(|t| t == tool_name))
@@ -762,6 +792,13 @@ mod tests {
             );
         }
         assert!(!needs_approval(&db, "no-such-server", "anything"));
+    }
+
+    /// Not being able to read the rows is not an answer: ask.
+    #[test]
+    fn a_failed_server_read_asks_rather_than_runs() {
+        let rows: Result<Vec<McpServer>> = Err(anyhow!("database is busy"));
+        assert!(server_needs_approval(rows, "any-server", "delete_repo"));
     }
 
     /// A pooled session is keyed on the whole connection config, so an

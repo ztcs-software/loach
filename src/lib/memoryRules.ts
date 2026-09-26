@@ -58,7 +58,8 @@ export function selectMemoriesForPrompt<T extends { created_at: number }>(
  *   - Output ONLY a JSON object — never prose around it
  *
  * `alreadyKnown` is context the model must not repeat but also can't edit
- * here — the global memories, when extracting for a Space.
+ * here — the memories the user added by hand, and the global memories when
+ * extracting for a Space.
  */
 export function buildExtractorSystemPrompt(
   existing: string[],
@@ -74,7 +75,7 @@ export function buildExtractorSystemPrompt(
       ? []
       : [
           "",
-          "ALREADY KNOWN (global facts — never repeat these, and they cannot be edited here):",
+          "ALREADY KNOWN (never repeat these, and they cannot be updated or removed here):",
           ...alreadyKnown.map((m) => `- ${m}`),
         ];
 

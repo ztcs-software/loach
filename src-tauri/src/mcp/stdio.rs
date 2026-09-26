@@ -3,9 +3,11 @@
 //! Loach spawns the server as a child process and exchanges newline-
 //! delimited JSON-RPC over its stdin / stdout, the way Claude Desktop,
 //! LM Studio and Jan do. One [`StdioSession`] owns one child; dropping the
-//! session kills the process and everything it started ([`ProcessTree`]),
-//! and a process that exits on its own flips [`StdioSession::is_alive`] so
-//! the pool in `mod.rs` respawns it on the next call.
+//! session stops it the way the MCP spec asks — stdin closed, a moment to
+//! exit, and only then a kill of the process and everything it started
+//! ([`shut_down`], [`ProcessTree`]) — and a process that exits on its own
+//! flips [`StdioSession::is_alive`] so the pool in `mod.rs` respawns it on
+//! the next call.
 //!
 //! What the child sees:
 //!   - Loach's own environment, plus the row's `env` map layered on top —
@@ -48,6 +50,29 @@ const START_TIMEOUT: Duration = Duration::from_secs(60);
 /// transport so a tool call behaves identically whichever way it is wired.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How long a server gets to exit once its stdin is closed, before it is
+/// killed with everything it started.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
+
+/// Marks a request the server didn't answer within its timeout. It may
+/// still be working on it — so unlike a dead process, this is no reason
+/// to stop the server (see `mcp::dispatch_tool_call`).
+#[derive(Debug)]
+pub struct ReplyTimeout;
+
+impl std::fmt::Display for ReplyTimeout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("it may still be working on it")
+    }
+}
+
+impl std::error::Error for ReplyTimeout {}
+
+/// True when `err` is a [`ReplyTimeout`].
+pub fn is_reply_timeout(err: &anyhow::Error) -> bool {
+    err.chain().any(|c| c.is::<ReplyTimeout>())
+}
+
 /// Longest stdout line we'll buffer. A JSON-RPC message is one line, so
 /// this is the per-message cap; matches the HTTP transport's body cap. A
 /// server that streams past it (a runaway log to stdout, a hostile binary)
@@ -66,31 +91,78 @@ type StderrTail = Arc<Mutex<Vec<u8>>>;
 /// A live stdio MCP server: the child plus the reader task that pairs its
 /// replies to our outstanding requests.
 pub struct StdioSession {
-    /// Held only for its `kill_on_drop` and `try_wait` — all I/O goes
-    /// through the pipes we took out of it.
-    child: Child,
-    /// Stops the processes the child started when the session drops.
-    _tree: ProcessTree,
+    /// Taken by `Drop` and handed to [`shut_down`]; `Some` for as long as
+    /// the session exists.
+    process: Option<Process>,
     stdin: Arc<tokio::sync::Mutex<ChildStdin>>,
     pending: Pending,
     alive: Arc<AtomicBool>,
     stderr_tail: StderrTail,
-    reader: tokio::task::JoinHandle<()>,
-    stderr_pump: tokio::task::JoinHandle<()>,
     next_id: i64,
     /// For error messages.
     label: String,
 }
 
+/// What stopping a server needs, apart from its stdin.
+struct Process {
+    /// Held for `try_wait` / `wait` and its `kill_on_drop` — all I/O goes
+    /// through the pipes we took out of it.
+    child: Child,
+    /// Stops the processes the child started.
+    tree: ProcessTree,
+    reader: tokio::task::JoinHandle<()>,
+    stderr_pump: tokio::task::JoinHandle<()>,
+}
+
 impl Drop for StdioSession {
     fn drop(&mut self) {
-        // The pumps would end on their own once the child is killed and the
-        // pipes close, but aborting is immediate and leaves nothing parked.
-        self.reader.abort();
-        self.stderr_pump.abort();
-        // `kill_on_drop` covers the child itself when `self.child` drops,
-        // and `_tree` everything the child started.
+        let Some(process) = self.process.take() else {
+            return;
+        };
+        match tokio::runtime::Handle::try_current() {
+            Ok(rt) => {
+                rt.spawn(shut_down(process, self.stdin.clone()));
+            }
+            // Off the runtime — app exit, from `RunEvent::Exit` — nothing
+            // would be left to wait out a graceful exit, so stop it now:
+            // dropping `child` (kill_on_drop) and `tree` does that.
+            Err(_) => {
+                process.reader.abort();
+                process.stderr_pump.abort();
+            }
+        }
     }
+}
+
+/// Stop a server the way the MCP spec asks for stdio: close its stdin,
+/// give it [`SHUTDOWN_GRACE`] to exit, and only then kill it.
+///
+/// A server that exits on its own is taken at its word, and whatever it
+/// left running is released rather than killed — `mcp-remote` opens the
+/// browser to sign in, and a browser that wasn't running yet starts as its
+/// descendant. One that doesn't exit in time is killed together with
+/// everything it started.
+async fn shut_down(process: Process, stdin: Arc<tokio::sync::Mutex<ChildStdin>>) {
+    let Process {
+        mut child,
+        tree,
+        reader,
+        stderr_pump,
+    } = process;
+    // The reader holds a handle to stdin too (it answers the server's
+    // pings); the pipe closes only once both are gone.
+    reader.abort();
+    let _ = reader.await;
+    drop(stdin);
+    let exited = matches!(
+        tokio::time::timeout(SHUTDOWN_GRACE, child.wait()).await,
+        Ok(Ok(_))
+    );
+    stderr_pump.abort();
+    if exited {
+        tree.release();
+    }
+    // Otherwise `child` (kill_on_drop) and `tree` drop here and stop it all.
 }
 
 /// Every process a server starts, so stopping the server stops them too.
@@ -143,6 +215,32 @@ impl ProcessTree {
             Self(Some(job.0 as isize))
         }
     }
+
+    /// Let go of the job without ending what is still in it: kill-on-close
+    /// is switched off before the handle closes.
+    fn release(mut self) {
+        use windows::Win32::Foundation::{CloseHandle, HANDLE};
+        use windows::Win32::System::JobObjects::{
+            JobObjectExtendedLimitInformation, SetInformationJobObject,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        };
+        if let Some(job) = self.0.take() {
+            let job = HANDLE(job as *mut std::ffi::c_void);
+            let info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+            // SAFETY: `job` came from `CreateJobObjectW` and is closed once;
+            // `info` outlives the call that reads it. If clearing the limit
+            // fails, closing still kills the rest — the old behaviour.
+            unsafe {
+                let _ = SetInformationJobObject(
+                    job,
+                    JobObjectExtendedLimitInformation,
+                    std::ptr::from_ref(&info).cast(),
+                    std::mem::size_of_val(&info) as u32,
+                );
+                let _ = CloseHandle(job);
+            }
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -171,6 +269,11 @@ impl ProcessTree {
     fn adopt(child: &Child) -> Self {
         // The group id of a group leader is its pid.
         Self(child.id().and_then(|pid| libc::pid_t::try_from(pid).ok()))
+    }
+
+    /// Let go of the group without signalling what is still in it.
+    fn release(mut self) {
+        self.0.take();
     }
 }
 
@@ -253,14 +356,16 @@ impl StdioSession {
         let stderr_pump = tokio::spawn(pump_stderr(stderr, stderr_tail.clone()));
 
         Ok(Self {
-            child,
-            _tree: tree,
+            process: Some(Process {
+                child,
+                tree,
+                reader,
+                stderr_pump,
+            }),
             stdin,
             pending,
             alive,
             stderr_tail,
-            reader,
-            stderr_pump,
             next_id: 1,
             label: server.name.clone(),
         })
@@ -366,11 +471,11 @@ impl StdioSession {
                     .lock()
                     .expect("stdio pending map poisoned")
                     .remove(&id);
-                bail!(
+                Err(anyhow::Error::new(ReplyTimeout).context(format!(
                     "MCP server `{}` did not reply to `{method}` within {}s",
                     self.label,
                     timeout.as_secs()
-                )
+                )))
             }
         }
     }
@@ -398,7 +503,7 @@ impl StdioSession {
     /// nothing useful to add.
     fn stderr_suffix(&mut self) -> String {
         let mut out = String::new();
-        if let Ok(Some(status)) = self.child.try_wait() {
+        if let Some(Ok(Some(status))) = self.process.as_mut().map(|p| p.child.try_wait()) {
             out.push_str(&format!(" ({status})"));
         }
         let tail = self
@@ -786,10 +891,30 @@ mod tests {
         assert_eq!(read_line_capped(&mut reader, &mut buf, 1024).await.unwrap(), 0);
     }
 
-    /// Stopping a server stops what it started. The script leaves a
-    /// grandchild behind that writes a marker after ~2 s, while the direct
-    /// child just waits; the session is dropped well before the marker is
-    /// due. Killing only the direct child — all `kill_on_drop` did — let the
+    /// A stdio row running `command` with `args`, for the process tests.
+    fn script_server(command: String, args: Vec<String>) -> McpServer {
+        McpServer {
+            id: "tree-test".into(),
+            name: "tree-test".into(),
+            transport: "stdio".into(),
+            url: String::new(),
+            headers_json: None,
+            command: Some(command),
+            args_json: Some(serde_json::to_string(&args).unwrap()),
+            env_json: None,
+            auto_approve: false,
+            allowed_tools_json: None,
+            enabled: true,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    /// Stopping a server that ignores its closed stdin stops what it
+    /// started. The script leaves a grandchild behind that writes a marker
+    /// after ~5 s, while the direct child just waits; the session is dropped
+    /// long before, and the grace period runs out before the marker is due.
+    /// Killing only the direct child — all `kill_on_drop` did — let the
     /// grandchild live on and write it.
     #[tokio::test]
     async fn dropping_a_session_stops_the_processes_it_started() {
@@ -799,7 +924,7 @@ mod tests {
         let (command, args) = {
             std::fs::write(
                 dir.path().join("inner.cmd"),
-                "@ping -n 3 127.0.0.1 >nul\r\n@echo x>\"%~dp0marker.txt\"\r\n",
+                "@ping -n 6 127.0.0.1 >nul\r\n@echo x>\"%~dp0marker.txt\"\r\n",
             )
             .unwrap();
             let outer = dir.path().join("outer.cmd");
@@ -815,31 +940,63 @@ mod tests {
             "sh".to_string(),
             vec![
                 "-c".to_string(),
-                format!("(sleep 2; touch '{}') & sleep 30", marker.display()),
+                format!("(sleep 5; touch '{}') & sleep 30", marker.display()),
             ],
         );
-        let server = McpServer {
-            id: "tree-test".into(),
-            name: "tree-test".into(),
-            transport: "stdio".into(),
-            url: String::new(),
-            headers_json: None,
-            command: Some(command),
-            args_json: Some(serde_json::to_string(&args).unwrap()),
-            env_json: None,
-            auto_approve: false,
-            allowed_tools_json: None,
-            enabled: true,
-            created_at: 0,
-            updated_at: 0,
-        };
 
-        let session = StdioSession::spawn(&server).await.expect("spawn");
+        let session = StdioSession::spawn(&script_server(command, args)).await.expect("spawn");
         // Give the grandchild time to start before the tree is stopped.
         tokio::time::sleep(Duration::from_millis(700)).await;
         drop(session);
-        tokio::time::sleep(Duration::from_secs(4)).await;
+        tokio::time::sleep(Duration::from_secs(7)).await;
         assert!(!marker.exists(), "a process the server started outlived it");
+    }
+
+    /// A server that exits once its stdin closes has shut down properly, and
+    /// what it chose to leave running — a browser it opened to sign in — is
+    /// released rather than killed with it.
+    #[tokio::test]
+    async fn a_server_that_exits_on_its_own_keeps_what_it_left_running() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let marker = dir.path().join("marker.txt");
+        #[cfg(windows)]
+        let (command, args) = {
+            std::fs::write(
+                dir.path().join("inner.cmd"),
+                "@ping -n 3 127.0.0.1 >nul\r\n@echo x>\"%~dp0marker.txt\"\r\n",
+            )
+            .unwrap();
+            let outer = dir.path().join("outer.cmd");
+            // `set /p` returns as soon as stdin reaches end-of-file.
+            std::fs::write(
+                &outer,
+                "@start \"\" /b cmd /d /c \"%~dp0inner.cmd\"\r\n@set /p _=\r\n",
+            )
+            .unwrap();
+            (outer.display().to_string(), Vec::<String>::new())
+        };
+        #[cfg(unix)]
+        let (command, args) = (
+            "sh".to_string(),
+            vec![
+                "-c".to_string(),
+                format!("(sleep 2; touch '{}') & read _; exit 0", marker.display()),
+            ],
+        );
+
+        let session = StdioSession::spawn(&script_server(command, args)).await.expect("spawn");
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        drop(session);
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        assert!(marker.exists(), "what the server left running was killed");
+    }
+
+    #[test]
+    fn a_reply_timeout_is_recognised_through_its_context() {
+        let e = anyhow::Error::new(ReplyTimeout).context("MCP server `x` did not reply");
+        assert!(is_reply_timeout(&e));
+        assert!(format!("{e:#}").contains("did not reply"));
+        assert!(!is_reply_timeout(&anyhow!("process has exited")));
     }
 
     /// Whatever a shell's startup files print around the dump is ignored;

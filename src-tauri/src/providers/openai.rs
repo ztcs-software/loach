@@ -358,9 +358,8 @@ pub async fn chat_stream(
                     .iter()
                     .enumerate()
                     .map(|(idx, c)| {
-                        let id = c.id.clone().unwrap_or_else(|| format!("call_{turn}_{idx}"));
                         json!({
-                            "id": id,
+                            "id": wire_call_id(c.id.as_deref(), turn, idx),
                             "type": "function",
                             "function": {
                                 "name": c.name,
@@ -380,10 +379,13 @@ pub async fn chat_stream(
                 }));
 
                 for (idx, call) in calls.iter().enumerate() {
-                    let call_id = call
-                        .id
-                        .clone()
-                        .unwrap_or_else(|| format!("call_{turn}_{idx}"));
+                    // Two ids. The provider's goes back to the provider as
+                    // `tool_call_id`; the UI and the approval prompt get
+                    // Loach's own, unique within the stream — some servers
+                    // send an empty id or reuse one across turns, and a
+                    // repeat made an approval card impossible to answer.
+                    let call_id = wire_call_id(call.id.as_deref(), turn, idx);
+                    let event_id = format!("call_{turn}_{idx}");
                     let (tool_def, tool_name) = match resolve_qualified(&req.tools, &call.name) {
                         Some(pair) => pair,
                         None => {
@@ -394,11 +396,12 @@ pub async fn chat_stream(
                             let _ = app.emit(
                                 &channel,
                                 StreamEvent::ToolResult {
-                                    id: call_id.clone(),
+                                    id: event_id,
                                     content: msg.clone(),
                                     is_error: true,
                                     attachments: Vec::new(),
                                     denied: false,
+                                    timed_out: false,
                                 },
                             );
                             messages.push(json!({
@@ -417,7 +420,7 @@ pub async fn chat_stream(
                     // emits ToolResult. `None` = cancelled mid-way.
                     let Some(outcome) = super::execute_tool_call(
                         &tool_ctx,
-                        &call_id,
+                        &event_id,
                         tool_def,
                         &tool_name,
                         &args,
@@ -759,7 +762,9 @@ async fn run_one_turn(
                                                     });
                                                 }
                                                 let slot = &mut accum[idx];
-                                                if let Some(id) = tc.id {
+                                                // An empty id in a later frame
+                                                // mustn't wipe the real one.
+                                                if let Some(id) = tc.id.filter(|id| !id.is_empty()) {
                                                     slot.id = Some(id);
                                                 }
                                                 if let Some(f) = tc.function {
@@ -906,6 +911,15 @@ fn openai_tool_def(def: &McpToolDef) -> Value {
     }
     function.insert("parameters".into(), def.input_schema.clone());
     json!({ "type": "function", "function": function })
+}
+
+/// The id a tool call goes back to the provider under, in the assistant
+/// turn's `tool_calls` and the `tool` message's `tool_call_id`: the
+/// provider's own, or `call_<turn>_<index>` when it sent none (or `""`).
+fn wire_call_id(id: Option<&str>, turn: u32, idx: usize) -> String {
+    id.filter(|id| !id.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("call_{turn}_{idx}"))
 }
 
 /// Parse a model-emitted tool-call argument string. The protocol promises
@@ -1117,6 +1131,15 @@ mod tests {
         // mid-char.
         let evil = format!("UklGR{}", "é".repeat(12));
         assert_eq!(sniff_image_mime(&evil), "image/png");
+    }
+
+    // --- wire_call_id ---------------------------------------------------------
+
+    #[test]
+    fn wire_call_id_keeps_the_providers_id_and_fills_in_a_missing_one() {
+        assert_eq!(wire_call_id(Some("call_abc"), 2, 1), "call_abc");
+        assert_eq!(wire_call_id(None, 2, 1), "call_2_1");
+        assert_eq!(wire_call_id(Some(""), 0, 3), "call_0_3", "an empty id counts as none");
     }
 
     // --- parse_args -----------------------------------------------------------

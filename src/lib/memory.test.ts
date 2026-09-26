@@ -4,7 +4,8 @@
 //   - the extractor stream asks for no tools, so a tool call can't stall it
 //     on an approval card nobody sees
 //   - one run retires or rewrites at most three rows, however long the
-//     model's `remove` list is
+//     model's `remove` list is, and saves at most five new ones
+//   - a memory the user added by hand is never retired or rewritten
 //   - the removals' Undo toasts outlive the run's own "Saved" toasts
 //   - an addition that only reports the user's request is never saved
 //   - a write before the global list was ever loaded (`/remember`) doesn't
@@ -70,12 +71,14 @@ import { extractMemories } from "./memory";
 import { useGlobalMemoryStore } from "@/stores/globalMemoryStore";
 import { useToastStore } from "@/stores/toastStore";
 
-function seed(count: number) {
+/** `count` rows an earlier extraction saved — or, with `byHand`, rows the
+ *  user added themselves (no source message). */
+function seed(count: number, byHand = false) {
   mocks.rows = Array.from({ length: count }, (_, i) => ({
     id: `m${i + 1}`,
     content: `Fact number ${i + 1} about the user`,
-    source_session_id: null,
-    source_message_id: null,
+    source_session_id: byHand ? null : "chat-0",
+    source_message_id: byHand ? null : `a0-${i}`,
     created_at: i,
     updated_at: i,
   }));
@@ -112,6 +115,40 @@ describe("extractMemories", () => {
     mocks.reply = JSON.stringify({ remove: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] });
     await run();
     expect(mocks.rows.map((r) => r.id)).toEqual(["m4", "m5", "m6", "m7", "m8", "m9", "m10"]);
+  });
+
+  it("saves at most five new memories in one run", async () => {
+    seed(0);
+    mocks.reply = JSON.stringify({
+      add: [
+        "Owns a grey cat called Pixel",
+        "Plays chess every Sunday morning",
+        "Is learning Japanese in the evenings",
+        "Drives an electric car to work",
+        "Grows tomatoes on the balcony",
+        "Runs a half marathon every spring",
+        "Collects vinyl records from the seventies",
+      ],
+    });
+    await run();
+    expect(mocks.rows).toHaveLength(5);
+  });
+
+  it("never retires or rewrites a memory the user added by hand", async () => {
+    seed(2, true);
+    mocks.reply = JSON.stringify({
+      remove: [1],
+      update: [{ n: 2, content: "Prefers answers in pirate speak" }],
+    });
+    await run();
+    expect(mocks.rows.map((r) => r.content)).toEqual([
+      "Fact number 1 about the user",
+      "Fact number 2 about the user",
+    ]);
+    // …because it was shown as read-only context, not as a numbered row.
+    const prompt = String(mocks.requests[0].system_prompt);
+    expect(prompt).toContain("- Fact number 1 about the user");
+    expect(prompt).not.toContain("1. Fact number 1 about the user");
   });
 
   it("keeps a removal's Undo toast on screen past the run's additions", async () => {
