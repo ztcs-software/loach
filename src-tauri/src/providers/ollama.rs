@@ -605,6 +605,7 @@ pub async fn chat_stream(
         stream_id: &req.stream_id,
         session_id: req.session_id.as_deref(),
         workspace_root: req.workspace_root.as_deref(),
+        approval_wait_ms: Default::default(),
     };
 
     // Defense-in-depth SSRF guard. Identical rationale to the OpenAI
@@ -685,7 +686,10 @@ pub async fn chat_stream(
                 body["think"] = json!(t);
             }
         }
-        if let Some(tools) = tools_json.as_ref() {
+        // The last round goes out without tools, so a model still reaching
+        // for them answers with what it has — rather than asking for calls
+        // that would run (and be approved) with nothing left to read them.
+        if let Some(tools) = tools_json.as_ref().filter(|_| turn + 1 < MAX_TOOL_TURNS) {
             body["tools"] = tools.clone();
         }
 
@@ -713,11 +717,21 @@ pub async fn chat_stream(
         match outcome {
             TurnOutcome::Done => {
                 let tokens_for_metrics = reported_tokens.unwrap_or(total_tokens);
-                emit_metrics(&app, &channel, tokens_for_metrics, reported_eval_ns, start);
+                emit_metrics(
+                    &app,
+                    &channel,
+                    tokens_for_metrics,
+                    reported_eval_ns,
+                    start,
+                    tool_ctx.approval_wait(),
+                );
                 let _ = app.emit(&channel, StreamEvent::Done);
                 registry.finish(&req.stream_id);
                 return Ok(());
             }
+            // Asked for tools on the last round anyway: nothing would read
+            // their results, so don't run them.
+            TurnOutcome::Tools(_) if turn + 1 == MAX_TOOL_TURNS => break,
             TurnOutcome::Tools(calls) => {
                 // Append the assistant turn including the tool_calls block,
                 // so subsequent /api/chat calls see the full conversation.
@@ -1112,8 +1126,11 @@ fn emit_metrics(
     tokens: u32,
     eval_ns: Option<u64>,
     start: Instant,
+    waited: Duration,
 ) {
     let elapsed = start.elapsed().as_millis() as u64;
+    // The wall-clock fallback leaves out time parked on approval prompts.
+    let generating = elapsed.saturating_sub(waited.as_millis() as u64);
     // Prefer Ollama's own `eval_duration` (pure decode time) so the rate
     // reflects generation speed, not the wall clock — which also folds in model
     // load, prompt evaluation, and any tool round-trips, understating tok/s
@@ -1124,7 +1141,7 @@ fn emit_metrics(
         Some(ns) if ns > 0 && tokens > 0 => {
             (tokens as f64) * 1_000_000_000.0 / (ns as f64)
         }
-        _ if elapsed > 0 => (tokens as f64) * 1000.0 / (elapsed as f64),
+        _ if generating > 0 => (tokens as f64) * 1000.0 / (generating as f64),
         _ => 0.0,
     };
     let _ = app.emit(

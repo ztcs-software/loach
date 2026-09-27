@@ -5,6 +5,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { useChatStore } from "@/stores/chatStore";
+import { selectMemoriesForPrompt } from "@/lib/memoryRules";
 import { cn } from "@/lib/utils";
 import type { MemoryRow } from "@/types";
 
@@ -29,8 +30,8 @@ export function MemoryList({
   enabled: boolean;
   emptyText: string;
   onAdd: (content: string) => Promise<unknown>;
-  onUpdate: (id: string, content: string) => Promise<void>;
-  onRemove: (id: string) => Promise<void>;
+  onUpdate: (id: string, content: string) => Promise<unknown>;
+  onRemove: (id: string) => Promise<unknown>;
   /** Navigate to the chat a memory was extracted from. */
   onOpenChat: (sessionId: string) => void;
 }) {
@@ -49,6 +50,15 @@ export function MemoryList({
     () => new Map(sessions.map((s) => [s.id, s.title])),
     [sessions],
   );
+
+  // Which rows reach the model: a long list is cut to the newest that fit
+  // (`selectMemoriesForPrompt`). The rest are kept, and marked, so an old
+  // fact that stopped counting doesn't look like it still does.
+  const inPrompt = useMemo(
+    () => new Set(selectMemoriesForPrompt(memories).map((m) => m.id)),
+    [memories],
+  );
+  const leftOut = memories.length - inPrompt.size;
 
   // Newest first — the rows most likely to need a look are the ones the
   // extractor just wrote.
@@ -181,6 +191,13 @@ export function MemoryList({
             </Button>
           </div>
 
+          {leftOut > 0 && (
+            <p className="px-1 text-xs text-foreground/55">
+              The model is sent the newest {inPrompt.size} of these {memories.length}{" "}
+              memories. Older ones stay here, marked <em>not sent</em>, until newer ones
+              are removed.
+            </p>
+          )}
           {visible.length === 0 ? (
             <p className="px-1 text-sm text-foreground/55">
               No memories match "{query.trim()}".
@@ -229,6 +246,14 @@ export function MemoryList({
                       )}
                       <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] text-foreground/45">
                         <span>{formatDate(m.created_at)}</span>
+                        {!inPrompt.has(m.id) && (
+                          <span
+                            className="italic text-amber-700 dark:text-amber-300"
+                            title="Only the newest memories fit in the prompt; this one isn't sent to the model."
+                          >
+                            not sent
+                          </span>
+                        )}
                         {m.source_session_id && sourceTitle !== undefined && (
                           <button
                             type="button"

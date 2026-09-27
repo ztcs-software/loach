@@ -88,17 +88,36 @@ export function deferMemoryTurn(args: MemoryExtractionArgs): void {
   pendingTurns.set(args.sessionId, list.slice(-(MAX_TURNS_PER_RUN - 1)));
 }
 
+/** Forget turns parked for a chat: all of them when the chat is deleted,
+ *  or the one whose reply is being replaced by Regenerate. A parked turn is
+ *  read by a later run, and those words are no longer in the chat. */
+export function dropMemoryTurns(sessionId: string, assistantMessageId?: string): void {
+  if (assistantMessageId === undefined) {
+    pendingTurns.delete(sessionId);
+    return;
+  }
+  const left = (pendingTurns.get(sessionId) ?? []).filter(
+    (t) => t.assistantMessageId !== assistantMessageId,
+  );
+  if (left.length > 0) pendingTurns.set(sessionId, left);
+  else pendingTurns.delete(sessionId);
+}
+
 /** Store-agnostic view of one memory scope's CRUD, so the extractor body
  *  reads the same for a Space and for the global list. */
 interface MemoryOps {
   list: () => Promise<MemoryRow[]>;
+  /** `restore` puts a removed row back under its old id and date. */
   add: (
     content: string,
     sourceSessionId: string | null,
     sourceMessageId: string | null,
+    restore?: { id: string; created_at: number },
   ) => Promise<MemoryRow>;
-  update: (id: string, content: string) => Promise<void>;
-  remove: (id: string) => Promise<void>;
+  /** `false` when the row was already gone. */
+  update: (id: string, content: string) => Promise<boolean>;
+  /** `false` when the row was already gone. */
+  remove: (id: string) => Promise<boolean>;
 }
 
 function opsFor(scope: MemoryScope): MemoryOps {
@@ -106,8 +125,14 @@ function opsFor(scope: MemoryScope): MemoryOps {
     const s = () => useGlobalMemoryStore.getState();
     return {
       list: () => s().ensureLoaded(),
-      add: (content, source_session_id, source_message_id) =>
-        s().addMemory({ content, source_session_id, source_message_id }),
+      add: (content, source_session_id, source_message_id, restore) =>
+        s().addMemory({
+          content,
+          source_session_id,
+          source_message_id,
+          restore_id: restore?.id,
+          restore_created_at: restore?.created_at,
+        }),
       update: (id, content) => s().updateMemory(id, content),
       remove: (id) => s().removeMemory(id),
     };
@@ -117,12 +142,14 @@ function opsFor(scope: MemoryScope): MemoryOps {
   return {
     list: async () =>
       s().spaceMemories[spaceId] ?? (await s().loadSpaceMemories(spaceId)),
-    add: (content, source_session_id, source_message_id) =>
+    add: (content, source_session_id, source_message_id, restore) =>
       s().addMemory({
         space_id: spaceId,
         content,
         source_session_id,
         source_message_id,
+        restore_id: restore?.id,
+        restore_created_at: restore?.created_at,
       }),
     update: (id, content) => s().updateMemory(id, spaceId, content),
     remove: (id) => s().removeMemory(id, spaceId),
@@ -252,7 +279,9 @@ export async function extractMemories(args: MemoryExtractionArgs): Promise<void>
     const row = byNumber(n);
     if (!row || removedIds.has(row.id)) continue;
     try {
-      await ops.remove(row.id);
+      // Gone already (the user deleted it while this run was out): there
+      // is nothing to announce, or to put back.
+      if (!(await ops.remove(row.id))) continue;
       removedIds.add(row.id);
       edits++;
       editToasts.push(() => announceRemoved(row, ops));
@@ -270,7 +299,7 @@ export async function extractMemories(args: MemoryExtractionArgs): Promise<void>
     if (!content || content.length > MAX_MEMORY_CHARS) continue;
     if (content === row.content) continue;
     try {
-      await ops.update(row.id, content);
+      if (!(await ops.update(row.id, content))) continue;
       updatedContent.set(row.id, content);
       edits++;
       editToasts.push(() => announceUpdated(row, content, ops));
@@ -476,6 +505,11 @@ async function runOneShotStream(args: {
 
 function undoFailed(e: unknown) {
   logger.warn("memory undo failed", e);
+  useToastStore.getState().push({
+    kind: "error",
+    title: "Couldn't undo",
+    body: e instanceof Error ? e.message : String(e),
+  });
 }
 
 /** "Saved to memory" pill with the saved text underneath so the user can
@@ -507,7 +541,8 @@ function announceUpdated(before: MemoryRow, content: string, ops: MemoryOps) {
   });
 }
 
-/** Undo re-adds the row (under a fresh id, same text and source pointers). */
+/** Undo puts the row back as it was — its id, text, source pointers and
+ *  creation date — so it returns to its place in the list. */
 function announceRemoved(row: MemoryRow, ops: MemoryOps) {
   useToastStore.getState().push({
     kind: "memory",
@@ -518,7 +553,10 @@ function announceRemoved(row: MemoryRow, ops: MemoryOps) {
       label: "Undo",
       onClick: () =>
         void ops
-          .add(row.content, row.source_session_id, row.source_message_id)
+          .add(row.content, row.source_session_id, row.source_message_id, {
+            id: row.id,
+            created_at: row.created_at,
+          })
           .catch(undoFailed),
     },
   });

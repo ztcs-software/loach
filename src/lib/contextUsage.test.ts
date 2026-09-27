@@ -159,4 +159,12 @@ describe("computeContextUsage — project instructions", () => {
     expect(withFile.projectInstructionsTokens).toBe(100);
     expect(withFile.used).toBe(without.used + 100);
   });
+
+  it("counts the memory lists the send prepends", () => {
+    const messages = [msg("user", "hello")];
+    const without = computeContextUsage(messages, "be brief", NO_PARAMS);
+    const withMemories = computeContextUsage(messages, "be brief", NO_PARAMS, null, "m".repeat(800));
+    expect(withMemories.memoriesTokens).toBe(200);
+    expect(withMemories.used).toBe(without.used + 200);
+  });
 });

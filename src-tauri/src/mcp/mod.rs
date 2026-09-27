@@ -152,12 +152,22 @@ pub struct CachedTools {
 }
 
 /// Process-lifetime cache of the aggregated MCP tool catalogue, parked on
-/// `AppState`. `None` = empty/invalidated, so the next read repopulates it.
-pub type ToolsCache = Arc<tokio::sync::Mutex<Option<CachedTools>>>;
+/// `AppState`.
+pub type ToolsCache = Arc<tokio::sync::Mutex<ToolsCacheState>>;
+
+#[derive(Default)]
+pub struct ToolsCacheState {
+    /// `None` = empty/invalidated, so the next read repopulates it.
+    entry: Option<CachedTools>,
+    /// Bumped by every [`invalidate_tools_cache`]. A probe started before an
+    /// invalidation stores nothing: its catalogue is from before the change
+    /// — a deleted server's tools, a renamed one's old slug.
+    generation: u64,
+}
 
 /// Construct a fresh, empty tool cache for `AppState`.
 pub fn new_tools_cache() -> ToolsCache {
-    Arc::new(tokio::sync::Mutex::new(None))
+    Arc::default()
 }
 
 /// [`aggregate_tools`] for the chat hot path, served from `cache` when the
@@ -175,22 +185,27 @@ pub async fn aggregate_tools_cached(
     db: &Database,
     cache: &ToolsCache,
 ) -> (Vec<McpToolDef>, Vec<(String, String)>) {
-    {
+    let generation = {
         let guard = cache.lock().await;
-        if let Some(entry) = guard.as_ref() {
+        if let Some(entry) = guard.entry.as_ref() {
             if entry.cached_at.elapsed() < TOOLS_CACHE_TTL {
                 return (entry.tools.clone(), entry.errors.clone());
             }
         }
-    }
+        guard.generation
+    };
     let (tools, errors) = aggregate_tools(db).await;
     {
         let mut guard = cache.lock().await;
-        *guard = Some(CachedTools {
-            cached_at: Instant::now(),
-            tools: tools.clone(),
-            errors: errors.clone(),
-        });
+        // The config changed while this probe ran: its result is still the
+        // answer for this send, but it mustn't be kept for the next one.
+        if guard.generation == generation {
+            guard.entry = Some(CachedTools {
+                cached_at: Instant::now(),
+                tools: tools.clone(),
+                errors: errors.clone(),
+            });
+        }
     }
     (tools, errors)
 }
@@ -201,8 +216,18 @@ pub async fn aggregate_tools_cached(
 /// would keep seeing the pre-change tool set (including stale slugs, which
 /// derive from server names) for up to [`TOOLS_CACHE_TTL`].
 pub async fn invalidate_tools_cache(cache: &ToolsCache) {
-    *cache.lock().await = None;
+    let mut guard = cache.lock().await;
+    guard.entry = None;
+    guard.generation += 1;
 }
+
+/// Most tools one server may add to the catalogue. Large gateways expose a
+/// few dozen; past this the definitions crowd out the conversation.
+const MAX_TOOLS_PER_SERVER: usize = 200;
+/// Longest tool description passed on to the model, in characters.
+const MAX_TOOL_DESCRIPTION_CHARS: usize = 2_000;
+/// Largest input schema accepted for one tool, serialised.
+const MAX_TOOL_SCHEMA_BYTES: usize = 16 * 1024;
 
 async fn collect_one(server: &McpServer, slug: &str) -> Result<Vec<McpToolDef>> {
     let raws = if server.is_stdio() {
@@ -237,6 +262,30 @@ async fn collect_one(server: &McpServer, slug: &str) -> Result<Vec<McpToolDef>> 
     let server_name = server.name.clone();
     let mut out: Vec<McpToolDef> = Vec::new();
     for t in raws {
+        // Every definition kept rides along in every chat request, so an
+        // untrusted server gets bounds: this many tools, descriptions cut
+        // to a paragraph, and schemas that are JSON objects of sane size —
+        // a non-object makes stricter providers reject the whole request.
+        if out.len() >= MAX_TOOLS_PER_SERVER {
+            tracing::warn!(
+                "MCP aggregate: server `{}` exposes more than {MAX_TOOLS_PER_SERVER} tools — \
+                 keeping the first {MAX_TOOLS_PER_SERVER}",
+                server_name
+            );
+            break;
+        }
+        if let Some(schema) = t.input_schema.as_ref() {
+            let size = serde_json::to_vec(schema).map(|v| v.len()).unwrap_or(usize::MAX);
+            if !schema.is_object() || size > MAX_TOOL_SCHEMA_BYTES {
+                tracing::warn!(
+                    "MCP aggregate: server `{}` gives tool `{}` an input schema that isn't a \
+                     JSON object under {MAX_TOOL_SCHEMA_BYTES} bytes — skipping",
+                    server_name,
+                    t.name
+                );
+                continue;
+            }
+        }
         // Sanitise the raw tool name too. Some MCP servers expose tools
         // named `repo.search` or `notebook/list` — perfectly legal in MCP,
         // but both OpenAI and Ollama reject anything outside
@@ -277,7 +326,14 @@ async fn collect_one(server: &McpServer, slug: &str) -> Result<Vec<McpToolDef>> 
             server_name: server_name.clone(),
             name: raw,
             qualified_name: qualified,
-            description: t.description,
+            description: t.description.map(|d| {
+                if d.chars().count() > MAX_TOOL_DESCRIPTION_CHARS {
+                    let cut: String = d.chars().take(MAX_TOOL_DESCRIPTION_CHARS).collect();
+                    format!("{cut}…")
+                } else {
+                    d
+                }
+            }),
             input_schema: t.input_schema.unwrap_or_else(|| {
                 serde_json::json!({"type": "object", "properties": {}})
             }),

@@ -34,14 +34,26 @@ vi.mock("@/lib/tauri", async (importOriginal) => {
   return {
     ...actual,
     listGlobalMemories: vi.fn(async () => [...mocks.rows]),
-    addGlobalMemory: vi.fn(async (args: { content: string }) => {
-      const r = row(args.content);
-      mocks.rows.push(r);
-      return r;
+    addGlobalMemory: vi.fn(
+      async (args: { content: string; restore_id?: string; restore_created_at?: number }) => {
+        const r = row(args.content);
+        if (args.restore_id) {
+          r.id = args.restore_id;
+          r.created_at = args.restore_created_at ?? r.created_at;
+        }
+        mocks.rows.push(r);
+        return r;
+      },
+    ),
+    updateGlobalMemory: vi.fn(async (args: { id: string; content: string }) => {
+      const row = mocks.rows.find((r) => r.id === args.id);
+      if (row) row.content = args.content;
+      return row !== undefined;
     }),
-    updateGlobalMemory: vi.fn(async () => {}),
     removeGlobalMemory: vi.fn(async (args: { id: string }) => {
+      const before = mocks.rows.length;
       mocks.rows = mocks.rows.filter((r) => r.id !== args.id);
+      return mocks.rows.length < before;
     }),
     startChatStream: vi.fn(
       async (request: Record<string, unknown>, onEvent: (ev: unknown) => void) => {
@@ -68,6 +80,7 @@ vi.stubGlobal("window", {
 });
 
 import { extractMemories } from "./memory";
+import { listGlobalMemories, removeGlobalMemory } from "@/lib/tauri";
 import { useGlobalMemoryStore } from "@/stores/globalMemoryStore";
 import { useToastStore } from "@/stores/toastStore";
 
@@ -181,7 +194,42 @@ describe("extractMemories", () => {
   });
 });
 
+describe("memory toasts", () => {
+  it("puts a removed memory back where it was on Undo", async () => {
+    seed(3);
+    mocks.reply = JSON.stringify({ remove: [2] });
+    await run();
+    const toast = useToastStore.getState().toasts.find((t) => t.title === "Removed memory");
+    expect(toast).toBeDefined();
+    toast!.action!.onClick();
+    await vi.waitFor(() => expect(mocks.rows.map((r) => r.id)).toContain("m2"));
+    expect(mocks.rows.find((r) => r.id === "m2")!.created_at).toBe(1);
+  });
+
+  it("announces nothing for a row that was already gone", async () => {
+    seed(2);
+    vi.mocked(removeGlobalMemory).mockResolvedValueOnce(false);
+    mocks.reply = JSON.stringify({ remove: [1] });
+    await run();
+    const titles = useToastStore.getState().toasts.map((t) => t.title);
+    expect(titles).not.toContain("Removed memory");
+  });
+});
+
 describe("global memory cache", () => {
+  it("a write that lands while the list is being read isn't lost", async () => {
+    seed(2);
+    const stale = [...mocks.rows];
+    let release!: () => void;
+    vi.mocked(listGlobalMemories).mockImplementationOnce(
+      () => new Promise((resolve) => (release = () => resolve(stale))),
+    );
+    const loaded = useGlobalMemoryStore.getState().ensureLoaded();
+    await useGlobalMemoryStore.getState().addMemory({ content: "Remembered mid-load" });
+    release();
+    expect((await loaded).map((r) => r.content)).toContain("Remembered mid-load");
+  });
+
   it("a write before the first load doesn't hide the rest of the list", async () => {
     seed(3);
     await useGlobalMemoryStore.getState().addMemory({ content: "Remembered by hand" });

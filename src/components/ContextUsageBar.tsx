@@ -4,6 +4,8 @@ import { useChatStore } from "@/stores/chatStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useModelsStore } from "@/stores/modelsStore";
 import { useSpaceStore } from "@/stores/spaceStore";
+import { useGlobalMemoryStore } from "@/stores/globalMemoryStore";
+import { selectMemoriesForPrompt } from "@/lib/memoryRules";
 import { DEFAULT_PARAMS, type GenerationParams, type Message } from "@/types";
 import {
   computeContextUsage,
@@ -78,6 +80,21 @@ export function ContextUsageBar() {
       ? (s.workspaceInstructions[s.activeSessionId] ?? null)
       : null,
   );
+  // The memory lists the send prepends: global memory when it's on, and the
+  // Space's own — each cut the way the send cuts it. Counted from what the
+  // stores have loaded; a list not loaded yet counts as empty.
+  const globalMemoryOn = useSettingsStore((s) => s.global_memory_enabled);
+  const globalMemories = useGlobalMemoryStore((s) => s.memories);
+  const spaceMemories = useSpaceStore((s) =>
+    session?.space_id ? s.spaceMemories[session.space_id] : undefined,
+  );
+  const memoryText = useMemo(() => {
+    const rows = [
+      ...(globalMemoryOn && globalMemories ? selectMemoriesForPrompt(globalMemories) : []),
+      ...(spaceMemories ? selectMemoriesForPrompt(spaceMemories) : []),
+    ];
+    return rows.length > 0 ? rows.map((m) => `- ${m.content}`).join("\n") : null;
+  }, [globalMemoryOn, globalMemories, spaceMemories]);
   const compactingSessionId = useChatStore((s) => s.compactingSessionId);
   const compactContext = useChatStore((s) => s.compactContext);
   const setSessionParams = useChatStore((s) => s.setSessionParams);
@@ -144,8 +161,9 @@ export function ContextUsageBar() {
         effectiveSystemPrompt,
         params,
         projectInstructions,
+        memoryText,
       ),
-    [deferredMessages, effectiveSystemPrompt, params, projectInstructions],
+    [deferredMessages, effectiveSystemPrompt, params, projectInstructions, memoryText],
   );
 
   // Don't show the bar before the user has any conversation to measure —
@@ -352,6 +370,9 @@ const ContextUsagePopover = ({
             label="Project instructions (LOACHFILE.md)"
             value={formatTokens(usage.projectInstructionsTokens)}
           />
+        )}
+        {usage.memoriesTokens > 0 && (
+          <Row label="Memories" value={formatTokens(usage.memoriesTokens)} />
         )}
         <Row
           label={`Messages (${usage.messageCount})`}

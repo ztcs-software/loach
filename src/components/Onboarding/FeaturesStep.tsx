@@ -80,14 +80,14 @@ export function FeaturesStep({ onClose }: { onClose: () => void }) {
         <FeatureRow
           icon={<BookMarked className="h-4 w-4" />}
           title="Global memories"
-          description="Remember durable facts about you across every chat, not just chats inside a Space. When on, every reply triggers a second, hidden model call to extract facts. Never used in Private Chat."
+          description="Remember durable facts about you across every chat, not just chats inside a Space. When on, every reply triggers a second, hidden model call to extract facts, and the facts go with every chat — local or cloud provider alike. Never used in Private Chat."
           checked={draft.global_memory_enabled}
           onChange={(v) => set("global_memory_enabled", v)}
         />
         <FeatureRow
           icon={<Clock className="h-4 w-4" />}
           title="Temporal awareness"
-          description="Inject the current date, time, weekday, and timezone into every chat so the model can answer 'what's today's date?' correctly."
+          description="Inject the current date, weekday, and timezone into every chat so the model can answer 'what's today's date?' correctly."
           checked={draft.temporal_awareness}
           onChange={(v) => set("temporal_awareness", v)}
         />

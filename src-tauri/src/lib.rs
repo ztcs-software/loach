@@ -320,6 +320,7 @@ pub fn run() {
             commands::openai_list_models,
             commands::chat_stream,
             commands::chat_cancel,
+            commands::chat_cancel_all,
             commands::ollama_unload_model,
             commands::ollama_preload_model,
             commands::ollama_show_model,
@@ -381,6 +382,7 @@ pub fn run() {
                 // them now rather than rely on each one noticing its stdin
                 // closing once we're gone.
                 crate::mcp::drop_all_sessions();
+                crate::mcp::stdio::kill_all_now();
             }
         });
 }

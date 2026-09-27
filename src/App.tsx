@@ -70,7 +70,7 @@ import { SquarePen } from "lucide-react";
 import { resolveDefaultModelChoice, useChatStore } from "@/stores/chatStore";
 import { useModelsStore } from "@/stores/modelsStore";
 import { useSettingsStore } from "@/stores/settingsStore";
-import { ollamaPreloadModel, ollamaStart } from "@/lib/tauri";
+import { chatCancelAll, ollamaPreloadModel, ollamaStart } from "@/lib/tauri";
 import { logger } from "@/lib/logger";
 import { useSnippetStore } from "@/stores/snippetStore";
 import { useSnippetVarStore } from "@/stores/snippetVarStore";
@@ -81,6 +81,9 @@ import { useAutoLock } from "@/lib/autoLock";
 import { useCanvasStore } from "@/stores/canvasStore";
 import { cn } from "@/lib/utils";
 import { DEFAULT_PARAMS } from "@/types";
+
+/** Set once the leftover-stream sweep has run for this page load. */
+let staleStreamsStopped = false;
 
 export default function App() {
   const hydrateSettings = useSettingsStore((s) => s.hydrate);
@@ -137,6 +140,15 @@ export default function App() {
     lockUntilHydrated();
     void hydrateSecurity();
   }, [hydrateSecurity]);
+
+  // A window reload leaves the backend running whatever chat streams the
+  // old page started, with nothing listening to them. Stop them before
+  // this page starts any of its own — once per page load.
+  useEffect(() => {
+    if (staleStreamsStopped) return;
+    staleStreamsStopped = true;
+    chatCancelAll().catch((e) => logger.warn("couldn't stop leftover chat streams", e));
+  }, []);
 
   // Re-lock triggers (idle timeout / minimize). Self-gating: does nothing
   // until a lock is configured AND the user has opted into a trigger, so

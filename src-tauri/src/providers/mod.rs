@@ -75,6 +75,17 @@ pub(super) struct ToolCallCtx<'a> {
     /// the renderer or the model sent — so neither can point the tools at
     /// a tree the user didn't pick.
     pub workspace_root: Option<&'a std::path::Path>,
+    /// Milliseconds this stream has spent parked on approval prompts. The
+    /// tokens-per-second figure leaves them out: minutes of the user reading
+    /// a card aren't generation time.
+    pub approval_wait_ms: std::sync::atomic::AtomicU64,
+}
+
+impl ToolCallCtx<'_> {
+    /// Total time spent waiting for approval answers so far.
+    pub fn approval_wait(&self) -> Duration {
+        Duration::from_millis(self.approval_wait_ms.load(std::sync::atomic::Ordering::Relaxed))
+    }
 }
 
 /// Result of one tool call, ready to append as the `tool` turn.
@@ -99,32 +110,45 @@ pub(super) async fn execute_tool_call(
     tool_name: &str,
     args: &Value,
 ) -> Option<ToolOutcome> {
+    // What a workspace tool that changes files is about to touch, read off
+    // the disk once: for a write, whether it replaces a file and how big
+    // that is (so the card can't pass an overwrite off as a new file), and
+    // for any of them whether it reaches into a `.git` directory.
+    let builtin = tool_def.server_id == crate::tools::builtin::BUILTIN_SERVER_ID;
+    let (existing_bytes, in_git_dir) = match ctx.workspace_root {
+        Some(root) if builtin && crate::tools::fs::requires_approval(tool_name) => {
+            let (root, args) = (root.to_path_buf(), args.clone());
+            let is_write = tool_name == crate::tools::fs::WRITE_FILE;
+            tokio::task::spawn_blocking(move || {
+                let size = is_write
+                    .then(|| crate::tools::fs::write_target_size(&root, &args))
+                    .flatten();
+                (size, crate::tools::fs::touches_git_dir(&root, &args))
+            })
+            .await
+            .unwrap_or((None, false))
+        }
+        _ => (None, false),
+    };
     // A standing "Always allow" from earlier in this chat satisfies the
     // gate without re-prompting. Only built-ins are ever recorded in the
     // registry — an MCP tool's equivalent answer is already folded into
     // `needs_approval` via the server's allow-list — and the lookup carries
     // the server id, so an MCP tool named like a built-in (`write_file`)
-    // can't match a built-in's grant.
-    let already_granted = ctx
-        .session_id
-        .is_some_and(|sid| ctx.approvals.granted(sid, &tool_def.server_id, tool_name));
+    // can't match a built-in's grant. It carries the folder too, so an
+    // answer given to a turn still working in the chat's previous folder
+    // can't cover the next one; and it never covers `.git`.
+    let scope = ctx.workspace_root.map(|p| p.to_string_lossy()).unwrap_or_default();
+    let already_granted = !in_git_dir
+        && ctx.session_id.is_some_and(|sid| {
+            ctx.approvals
+                .granted(sid, &scope, &tool_def.server_id, tool_name)
+        });
     let approval_required = !already_granted
         && crate::mcp::needs_approval(ctx.db, &tool_def.server_id, tool_name);
-    // For a write, whether it would replace a file and how big that file
-    // is, so the card can't pass an overwrite off as a new file.
-    let existing_bytes = match ctx.workspace_root {
-        Some(root)
-            if tool_def.server_id == crate::tools::builtin::BUILTIN_SERVER_ID
-                && tool_name == crate::tools::fs::WRITE_FILE =>
-        {
-            let (root, args) = (root.to_path_buf(), args.clone());
-            tokio::task::spawn_blocking(move || crate::tools::fs::write_target_size(&root, &args))
-                .await
-                .ok()
-                .flatten()
-        }
-        _ => None,
-    };
+    // Parked before the card is announced, so an answer can never arrive
+    // ahead of the entry it resolves.
+    let rx = approval_required.then(|| ctx.approvals.register(ctx.stream_id, call_id));
     let _ = ctx.app.emit(
         ctx.channel,
         StreamEvent::ToolCall {
@@ -138,8 +162,8 @@ pub(super) async fn execute_tool_call(
         },
     );
 
-    if approval_required {
-        let rx = ctx.approvals.register(ctx.stream_id, call_id);
+    if let Some(rx) = rx {
+        let waiting_since = std::time::Instant::now();
         let (decision, timed_out) = select! {
             biased;
             _ = ctx.cancel.notified() => {
@@ -154,6 +178,10 @@ pub(super) async fn execute_tool_call(
                 (ApprovalDecision::Deny, true)
             }
         };
+        ctx.approval_wait_ms.fetch_add(
+            waiting_since.elapsed().as_millis() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         match decision {
             ApprovalDecision::Deny => {
                 let note = if timed_out { UNANSWERED_NOTE } else { DENIED_NOTE };
@@ -172,14 +200,13 @@ pub(super) async fn execute_tool_call(
                     for_model: note.to_string(),
                 });
             }
-            ApprovalDecision::AllowAlways
-                if tool_def.server_id == crate::tools::builtin::BUILTIN_SERVER_ID =>
-            {
+            ApprovalDecision::AllowAlways if builtin => {
                 // Built-ins have no server row to hang an allow-list on, so
-                // the grant is remembered in memory against this chat. It
-                // covers the rest of the conversation and dies with the app.
+                // the grant is remembered in memory against this chat and
+                // folder. It covers the rest of the conversation and dies
+                // with the app.
                 if let Some(sid) = ctx.session_id {
-                    ctx.approvals.grant(sid, &tool_def.server_id, tool_name);
+                    ctx.approvals.grant(sid, &scope, &tool_def.server_id, tool_name);
                 }
             }
             ApprovalDecision::AllowAlways => {
@@ -216,7 +243,20 @@ pub(super) async fn execute_tool_call(
         _ = ctx.cancel.notified() => return None,
         r = dispatch => match r {
             Ok(r) => (r.content_text, r.is_error, r.attachments),
-            Err(e) => (format!("tool call failed: {e:#}"), true, Vec::new()),
+            Err(e) => {
+                // The whole error, a stdio server's stderr tail included,
+                // goes to the log. The model — and the transcript, and so
+                // exports — get it cut before the stderr, which can quote
+                // anything the server printed, a key in a URL included.
+                // Settings → MCP → Test connection shows it in full.
+                let full = format!("{e:#}");
+                tracing::warn!("tool `{}` failed: {full}", tool_def.qualified_name);
+                (
+                    format!("tool call failed: {}", crate::mcp::stdio::without_stderr(&full)),
+                    true,
+                    Vec::new(),
+                )
+            }
         },
     };
 

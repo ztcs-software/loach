@@ -1129,8 +1129,8 @@ function MemoryTab({
   memories: SpaceMemory[];
   onToggle: (enabled: boolean) => Promise<void>;
   onAdd: (content: string) => Promise<unknown>;
-  onUpdate: (id: string, content: string) => Promise<void>;
-  onRemove: (id: string) => Promise<void>;
+  onUpdate: (id: string, content: string) => Promise<unknown>;
+  onRemove: (id: string) => Promise<unknown>;
   onOpenChat: (sessionId: string) => void;
 }) {
   return (

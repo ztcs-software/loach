@@ -109,7 +109,7 @@ async function scopedMemories(scope: MemoryScope): Promise<MemoryRow[]> {
   );
 }
 
-function removeScopedMemory(scope: MemoryScope, id: string): Promise<void> {
+function removeScopedMemory(scope: MemoryScope, id: string): Promise<boolean> {
   if (scope.kind === "global") {
     return useGlobalMemoryStore.getState().removeMemory(id);
   }

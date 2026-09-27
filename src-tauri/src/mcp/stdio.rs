@@ -73,6 +73,17 @@ pub fn is_reply_timeout(err: &anyhow::Error) -> bool {
     err.chain().any(|c| c.is::<ReplyTimeout>())
 }
 
+/// Starts the stderr tail [`StdioSession::stderr_suffix`] appends to an
+/// error message.
+const STDERR_MARK: &str = " — stderr: ";
+
+/// `message` without the stderr tail an error from this module may carry —
+/// for text that leaves the log (the model, the transcript). A server's
+/// stderr can print anything, credentials included.
+pub fn without_stderr(message: &str) -> &str {
+    message.find(STDERR_MARK).map_or(message, |at| &message[..at])
+}
+
 /// Longest stdout line we'll buffer. A JSON-RPC message is one line, so
 /// this is the per-message cap; matches the HTTP transport's body cap. A
 /// server that streams past it (a runaway log to stdout, a hostile binary)
@@ -264,16 +275,36 @@ impl Drop for ProcessTree {
 #[cfg(unix)]
 struct ProcessTree(Option<libc::pid_t>);
 
+/// Every live server's process group, kept outside the session pool so
+/// [`kill_all_now`] can reach one whose session is locked by a call in
+/// flight. (Windows needs no list: the OS closes the job handles, and so
+/// stops the jobs, when Loach exits.)
+#[cfg(unix)]
+static LIVE_GROUPS: Mutex<Vec<libc::pid_t>> = Mutex::new(Vec::new());
+
 #[cfg(unix)]
 impl ProcessTree {
     fn adopt(child: &Child) -> Self {
         // The group id of a group leader is its pid.
-        Self(child.id().and_then(|pid| libc::pid_t::try_from(pid).ok()))
+        let pgid = child.id().and_then(|pid| libc::pid_t::try_from(pid).ok());
+        if let Some(g) = pgid {
+            LIVE_GROUPS.lock().expect("live groups poisoned").push(g);
+        }
+        Self(pgid)
+    }
+
+    fn forget(pgid: libc::pid_t) {
+        LIVE_GROUPS
+            .lock()
+            .expect("live groups poisoned")
+            .retain(|&g| g != pgid);
     }
 
     /// Let go of the group without signalling what is still in it.
     fn release(mut self) {
-        self.0.take();
+        if let Some(pgid) = self.0.take() {
+            Self::forget(pgid);
+        }
     }
 }
 
@@ -281,11 +312,26 @@ impl ProcessTree {
 impl Drop for ProcessTree {
     fn drop(&mut self) {
         if let Some(pgid) = self.0.take() {
+            Self::forget(pgid);
             // SAFETY: only sends a signal; a group that is already gone
             // (ESRCH) is fine.
             unsafe {
                 libc::killpg(pgid, libc::SIGKILL);
             }
+        }
+    }
+}
+
+/// Stop every stdio server's process group now — for app exit. Clearing
+/// the pool reaches only the sessions no call is holding; one that is
+/// mid-call would be cleared by a task that never runs once the app is
+/// gone, and its server would outlive Loach.
+pub fn kill_all_now() {
+    #[cfg(unix)]
+    for pgid in LIVE_GROUPS.lock().expect("live groups poisoned").drain(..) {
+        // SAFETY: only sends a signal to a group we started.
+        unsafe {
+            libc::killpg(pgid, libc::SIGKILL);
         }
     }
 }
@@ -440,12 +486,16 @@ impl StdioSession {
             .lock()
             .expect("stdio pending map poisoned")
             .insert(id, tx);
+        let mut in_flight = InFlight {
+            pending: self.pending.clone(),
+            stdin: self.stdin.clone(),
+            id,
+            unanswered: false,
+            // The spec forbids cancelling `initialize`.
+            cancellable: method != "initialize",
+        };
 
         if let Err(e) = self.write_frame(&frame).await {
-            self.pending
-                .lock()
-                .expect("stdio pending map poisoned")
-                .remove(&id);
             let suffix = self.stderr_suffix();
             return Err(e
                 .context(format!(
@@ -455,22 +505,24 @@ impl StdioSession {
                 .context(PreExecutionFailure));
         }
 
+        in_flight.unanswered = true;
         match tokio::time::timeout(timeout, rx).await {
-            Ok(Ok(resp)) => Ok(resp),
+            Ok(Ok(resp)) => {
+                in_flight.unanswered = false;
+                Ok(resp)
+            }
             // Sender dropped: the reader task cleared the map because the
-            // process went away.
+            // process went away — nobody left to tell.
             Ok(Err(_)) => {
+                in_flight.unanswered = false;
                 let suffix = self.stderr_suffix();
                 bail!(
                     "MCP server `{}` exited before replying to `{method}`{suffix}",
                     self.label
                 )
             }
+            // `in_flight` tells the server to stop as it drops.
             Err(_) => {
-                self.pending
-                    .lock()
-                    .expect("stdio pending map poisoned")
-                    .remove(&id);
                 Err(anyhow::Error::new(ReplyTimeout).context(format!(
                     "MCP server `{}` did not reply to `{method}` within {}s",
                     self.label,
@@ -503,6 +555,11 @@ impl StdioSession {
     /// nothing useful to add.
     fn stderr_suffix(&mut self) -> String {
         let mut out = String::new();
+        // Windows only: on Unix `try_wait` reaps the child, and a reaped
+        // group leader frees its process-group id for reuse — the `killpg`
+        // that stops the server later could then land on an unrelated
+        // group. An unreaped leader keeps the id reserved.
+        #[cfg(windows)]
         if let Some(Ok(Some(status))) = self.process.as_mut().map(|p| p.child.try_wait()) {
             out.push_str(&format!(" ({status})"));
         }
@@ -517,10 +574,51 @@ impl StdioSession {
             // Last few lines only; the whole ring is for the log.
             let last: Vec<&str> = text.lines().rev().take(5).collect();
             let last: Vec<&str> = last.into_iter().rev().collect();
-            out.push_str(" — stderr: ");
+            out.push_str(STDERR_MARK);
             out.push_str(&last.join(" | "));
         }
         out
+    }
+}
+
+/// One request waiting for its reply. Dropping it — on every way `request`
+/// ends, including its future being dropped when the user presses Stop —
+/// clears the request's pending entry, and when the server got the request
+/// but never answered, tells it to stop working on it
+/// (`notifications/cancelled`), as the spec asks of a client that no
+/// longer wants the result.
+struct InFlight {
+    pending: Pending,
+    stdin: Arc<tokio::sync::Mutex<ChildStdin>>,
+    id: i64,
+    unanswered: bool,
+    cancellable: bool,
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        self.pending
+            .lock()
+            .expect("stdio pending map poisoned")
+            .remove(&self.id);
+        if !(self.unanswered && self.cancellable) {
+            return;
+        }
+        let Ok(rt) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let frame = json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/cancelled",
+            "params": { "requestId": self.id, "reason": "The client no longer needs the result." },
+        });
+        let stdin = self.stdin.clone();
+        rt.spawn(async move {
+            let line = format!("{frame}\n");
+            let mut w = stdin.lock().await;
+            let _ = w.write_all(line.as_bytes()).await;
+            let _ = w.flush().await;
+        });
     }
 }
 

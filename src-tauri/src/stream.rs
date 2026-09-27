@@ -8,13 +8,35 @@ use tokio::sync::{oneshot, Notify};
 #[derive(Clone)]
 pub struct StreamRegistry {
     inner: Arc<DashMap<String, Arc<Notify>>>,
+    /// Which of `inner` are chat streams, as opposed to model pulls and
+    /// creates — the ones [`cancel_chats`](Self::cancel_chats) stops.
+    chats: Arc<dashmap::DashSet<String>>,
 }
 
 impl StreamRegistry {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(DashMap::new()),
+            chats: Arc::new(dashmap::DashSet::new()),
         }
+    }
+
+    /// [`register`](Self::register) for a chat stream.
+    pub fn register_chat(&self, id: String) -> Arc<Notify> {
+        self.chats.insert(id.clone());
+        self.register(id)
+    }
+
+    /// Cancel every chat stream. The renderer reloaded: nothing listens to
+    /// them any more, and one left running would go on generating — and
+    /// calling tools, on a standing "allow" — with nobody watching and no
+    /// Stop button to press. Returns how many there were.
+    pub fn cancel_chats(&self) -> usize {
+        let ids: Vec<String> = self.chats.iter().map(|id| id.key().clone()).collect();
+        for id in &ids {
+            self.cancel(id);
+        }
+        ids.len()
     }
 
     /// Insert a Notify for `id` and return a handle. If `id` is already
@@ -40,6 +62,7 @@ impl StreamRegistry {
     }
 
     pub fn cancel(&self, id: &str) {
+        self.chats.remove(id);
         if let Some((_, n)) = self.inner.remove(id) {
             // `notify_one` stores a permit if no waiter is registered yet,
             // so a cancel issued in the tiny window between `register()`
@@ -51,6 +74,7 @@ impl StreamRegistry {
     }
 
     pub fn finish(&self, id: &str) {
+        self.chats.remove(id);
         self.inner.remove(id);
     }
 }
@@ -150,14 +174,17 @@ pub enum ApprovalDecision {
 ///   be [`forget`](Self::forget)ed on every other exit path (cancel,
 ///   timeout) so a stale sender can't linger.
 /// * `grants` — standing "Always allow" answers for built-in tools, keyed
-///   by `(session_id, server_id, tool_name)`. MCP tools record that answer
+///   by `(session_id, scope, server_id, tool_name)`, `scope` being the
+///   workspace folder the answer was about. MCP tools record that answer
 ///   on the server's `allowed_tools` row instead; a built-in has no server
 ///   row to write to, so the grant lives here. The server id is part of the
 ///   key so an MCP tool that shares a bare name with a built-in — the
 ///   filesystem MCP server has its own `write_file` — never rides on the
-///   built-in's grant. Being in memory means it lasts for the rest of this
-///   chat but not past a restart, which is the right lifetime for blanket
-///   permission to write to someone's files; changing the chat's folder
+///   built-in's grant; the folder, so an answer a turn gives while still
+///   working in the chat's previous folder can't carry over to the next.
+///   Being in memory means it lasts for the rest of this chat but not past
+///   a restart, which is the right lifetime for blanket permission to write
+///   to someone's files; changing the chat's folder or deleting the chat
 ///   ends it sooner ([`revoke_session`](Self::revoke_session)).
 #[derive(Clone, Default)]
 pub struct ApprovalRegistry {
@@ -170,17 +197,23 @@ impl ApprovalRegistry {
         Self::default()
     }
 
-    /// Record "Always allow this tool" for one chat.
-    pub fn grant(&self, session_id: &str, server_id: &str, tool_name: &str) {
+    /// Record "Always allow this tool" for one chat, in one `scope` — the
+    /// workspace folder the answer was given about.
+    pub fn grant(&self, session_id: &str, scope: &str, server_id: &str, tool_name: &str) {
         self.grants
-            .insert(Self::grant_key(session_id, server_id, tool_name), ());
+            .insert(Self::grant_key(session_id, scope, server_id, tool_name), ());
     }
 
     /// Whether this chat already answered "Always allow" for this server's
-    /// `tool_name`.
-    pub fn granted(&self, session_id: &str, server_id: &str, tool_name: &str) -> bool {
+    /// `tool_name` in this `scope`.
+    pub fn granted(&self, session_id: &str, scope: &str, server_id: &str, tool_name: &str) -> bool {
         self.grants
-            .contains_key(&Self::grant_key(session_id, server_id, tool_name))
+            .contains_key(&Self::grant_key(session_id, scope, server_id, tool_name))
+    }
+
+    /// Drop every standing grant — the workspace tools were switched off.
+    pub fn revoke_all(&self) {
+        self.grants.clear();
     }
 
     /// Drop every standing grant one chat holds. Called when the chat's
@@ -192,8 +225,8 @@ impl ApprovalRegistry {
         self.grants.retain(|k, _| !k.starts_with(&prefix));
     }
 
-    fn grant_key(session_id: &str, server_id: &str, tool_name: &str) -> String {
-        format!("{session_id}\u{1f}{server_id}\u{1f}{tool_name}")
+    fn grant_key(session_id: &str, scope: &str, server_id: &str, tool_name: &str) -> String {
+        format!("{session_id}\u{1f}{scope}\u{1f}{server_id}\u{1f}{tool_name}")
     }
 
     fn key(stream_id: &str, call_id: &str) -> String {
@@ -329,6 +362,21 @@ mod tests {
         assert!(woke.is_err(), "no permit should exist after finish()");
     }
 
+    /// After a reload the chat streams are stopped; a model pull running
+    /// through the same registry is not a chat and carries on.
+    #[tokio::test]
+    async fn cancel_chats_stops_chat_streams_only() {
+        use std::time::Duration;
+        use tokio::time::timeout;
+        let reg = StreamRegistry::new();
+        let chat = reg.register_chat("chat-stream".into());
+        let pull = reg.register("model-pull".into());
+        assert_eq!(reg.cancel_chats(), 1);
+        assert!(timeout(Duration::from_millis(50), chat.notified()).await.is_ok());
+        assert!(timeout(Duration::from_millis(50), pull.notified()).await.is_err());
+        assert_eq!(reg.cancel_chats(), 0, "a cancelled stream is forgotten");
+    }
+
     /// A registered approval receives exactly the decision delivered to
     /// its (stream, call) pair, and a second delivery finds nothing.
     #[tokio::test]
@@ -353,21 +401,26 @@ mod tests {
         assert!(rx.await.is_err(), "receiver sees the sender gone");
     }
 
-    /// Grants are per chat, per server and per tool — one chat saying
-    /// "always" must not speak for another, allowing `edit_file` must not
-    /// allow `write_file`, and allowing the built-in `write_file` must not
-    /// allow an MCP server's tool of the same name.
+    /// Grants are per chat, per folder, per server and per tool — one chat
+    /// saying "always" must not speak for another, an answer about one
+    /// folder must not cover the next, allowing `edit_file` must not allow
+    /// `write_file`, and allowing the built-in `write_file` must not allow
+    /// an MCP server's tool of the same name.
     #[test]
-    fn grants_are_scoped_to_one_session_one_server_and_one_tool() {
+    fn grants_are_scoped_to_one_session_folder_server_and_tool() {
         let reg = ApprovalRegistry::new();
-        let builtin = "__builtin__";
-        assert!(!reg.granted("chat-1", builtin, "write_file"));
-        reg.grant("chat-1", builtin, "write_file");
-        assert!(reg.granted("chat-1", builtin, "write_file"));
-        assert!(!reg.granted("chat-2", builtin, "write_file"), "leaked across chats");
-        assert!(!reg.granted("chat-1", builtin, "edit_file"), "leaked across tools");
+        let (builtin, ws) = ("__builtin__", r"C:\code\app");
+        assert!(!reg.granted("chat-1", ws, builtin, "write_file"));
+        reg.grant("chat-1", ws, builtin, "write_file");
+        assert!(reg.granted("chat-1", ws, builtin, "write_file"));
+        assert!(!reg.granted("chat-2", ws, builtin, "write_file"), "leaked across chats");
         assert!(
-            !reg.granted("chat-1", "filesystem-mcp", "write_file"),
+            !reg.granted("chat-1", r"C:\code\other", builtin, "write_file"),
+            "leaked across folders"
+        );
+        assert!(!reg.granted("chat-1", ws, builtin, "edit_file"), "leaked across tools");
+        assert!(
+            !reg.granted("chat-1", ws, "filesystem-mcp", "write_file"),
             "leaked to an MCP tool with the same name"
         );
     }
@@ -375,14 +428,16 @@ mod tests {
     #[test]
     fn revoking_a_session_drops_only_its_grants() {
         let reg = ApprovalRegistry::new();
-        reg.grant("chat-1", "__builtin__", "write_file");
-        reg.grant("chat-1", "__builtin__", "delete_file");
-        reg.grant("chat-10", "__builtin__", "write_file");
+        reg.grant("chat-1", "ws", "__builtin__", "write_file");
+        reg.grant("chat-1", "ws", "__builtin__", "delete_file");
+        reg.grant("chat-10", "ws", "__builtin__", "write_file");
         reg.revoke_session("chat-1");
-        assert!(!reg.granted("chat-1", "__builtin__", "write_file"));
-        assert!(!reg.granted("chat-1", "__builtin__", "delete_file"));
+        assert!(!reg.granted("chat-1", "ws", "__builtin__", "write_file"));
+        assert!(!reg.granted("chat-1", "ws", "__builtin__", "delete_file"));
         // A chat whose id merely starts with the revoked one keeps its own.
-        assert!(reg.granted("chat-10", "__builtin__", "write_file"));
+        assert!(reg.granted("chat-10", "ws", "__builtin__", "write_file"));
+        reg.revoke_all();
+        assert!(!reg.granted("chat-10", "ws", "__builtin__", "write_file"));
     }
 
     #[test]

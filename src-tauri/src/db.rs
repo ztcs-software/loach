@@ -1195,24 +1195,25 @@ impl Database {
         Ok(())
     }
 
+    /// Point a chat's filesystem tools at `root`, or pass `None` to take the
+    /// directory away. `root` is the display form of a canonical path (no
+    /// `\\?\` prefix); `commands::chat_stream` canonicalizes it again every
+    /// turn before the sandbox compares anything against it. `false` when no
+    /// chat has `id`.
+    pub fn set_session_workspace_root(&self, id: &str, root: Option<&str>) -> Result<bool> {
+        let conn = self.conn.lock();
+        let changed = conn.execute(
+            "UPDATE sessions SET workspace_root = ?1 WHERE id = ?2",
+            params![root, id],
+        )?;
+        Ok(changed > 0)
+    }
+
     /// File the chat under `folder_id`, or pull it back out to the loose
     /// list with `None`. Like `update_session_label` and unlike
     /// `pin_session`, this deliberately leaves `updated_at` alone: chats
     /// inside a folder are still ordered by it, and filing a chat is not a
     /// reason to shuffle it to the top of its new drawer.
-    /// Point a chat's filesystem tools at `root`, or pass `None` to take the
-    /// directory away. Callers must hand over an already-canonicalized path
-    /// — the sandbox in `tools::fs` compares canonical against canonical,
-    /// and a root stored in any other form would fail every prefix check.
-    pub fn set_session_workspace_root(&self, id: &str, root: Option<&str>) -> Result<()> {
-        let conn = self.conn.lock();
-        conn.execute(
-            "UPDATE sessions SET workspace_root = ?1 WHERE id = ?2",
-            params![root, id],
-        )?;
-        Ok(())
-    }
-
     pub fn set_session_folder(&self, id: &str, folder_id: Option<&str>) -> Result<()> {
         let conn = self.conn.lock();
         conn.execute(
@@ -2050,7 +2051,7 @@ impl Database {
             let mut stmt = conn.prepare(
                 "SELECT id, space_id, content, source_session_id, source_message_id,
                         created_at, updated_at
-                 FROM space_memories WHERE space_id = ?1 ORDER BY created_at ASC",
+                 FROM space_memories WHERE space_id = ?1 ORDER BY created_at ASC, rowid ASC",
             )?;
             let rows = stmt
                 .query_map(params![space_id], |r| {
@@ -2069,21 +2070,29 @@ impl Database {
         })
     }
 
+    /// `restore` puts back a memory that was removed (the Undo on a
+    /// "Removed memory" toast) under its old id and creation time, so it
+    /// returns to its place in the list, and in the newest-first window the
+    /// prompt takes, rather than coming back as the newest fact.
     pub fn add_space_memory(
         &self,
         space_id: &str,
         content: &str,
         source_session_id: Option<&str>,
         source_message_id: Option<&str>,
+        restore: Option<(&str, i64)>,
     ) -> Result<SpaceMemory> {
-        let id = Uuid::new_v4().to_string();
         let now = Utc::now().timestamp_millis();
+        let (id, created_at) = match restore {
+            Some((id, created_at)) => (id.to_string(), created_at),
+            None => (Uuid::new_v4().to_string(), now),
+        };
         let conn = self.conn.lock();
         conn.execute(
             "INSERT INTO space_memories (id, space_id, content, source_session_id,
                                           source_message_id, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
-            params![id, space_id, content, source_session_id, source_message_id, now],
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![id, space_id, content, source_session_id, source_message_id, created_at, now],
         )?;
         Ok(SpaceMemory {
             id,
@@ -2091,32 +2100,34 @@ impl Database {
             content: content.to_string(),
             source_session_id: source_session_id.map(|s| s.to_string()),
             source_message_id: source_message_id.map(|s| s.to_string()),
-            created_at: now,
+            created_at,
             updated_at: now,
         })
     }
 
-    pub fn update_space_memory(&self, id: &str, space_id: &str, content: &str) -> Result<()> {
+    /// `false` when no memory in `space_id` has `id` (it was deleted first).
+    pub fn update_space_memory(&self, id: &str, space_id: &str, content: &str) -> Result<bool> {
         // Scope by space_id — see the comment on `update_message` for the
         // same defense-in-depth rationale.
         let now = Utc::now().timestamp_millis();
         let conn = self.conn.lock();
-        conn.execute(
+        let changed = conn.execute(
             "UPDATE space_memories
              SET content = ?1, updated_at = ?2
              WHERE id = ?3 AND space_id = ?4",
             params![content, now, id, space_id],
         )?;
-        Ok(())
+        Ok(changed > 0)
     }
 
-    pub fn remove_space_memory(&self, id: &str, space_id: &str) -> Result<()> {
+    /// `false` when there was nothing to remove.
+    pub fn remove_space_memory(&self, id: &str, space_id: &str) -> Result<bool> {
         let conn = self.conn.lock();
-        conn.execute(
+        let changed = conn.execute(
             "DELETE FROM space_memories WHERE id = ?1 AND space_id = ?2",
             params![id, space_id],
         )?;
-        Ok(())
+        Ok(changed > 0)
     }
 
     /// Read every memory across every space — used by the export path.
@@ -2125,7 +2136,7 @@ impl Database {
         let mut stmt = conn.prepare(
             "SELECT id, space_id, content, source_session_id, source_message_id,
                     created_at, updated_at
-             FROM space_memories ORDER BY space_id, created_at",
+             FROM space_memories ORDER BY space_id, created_at, rowid",
         )?;
         let rows = stmt
             .query_map([], |r| {
@@ -2150,7 +2161,7 @@ impl Database {
             let mut stmt = conn.prepare(
                 "SELECT id, content, source_session_id, source_message_id,
                         created_at, updated_at
-                 FROM global_memories ORDER BY created_at ASC",
+                 FROM global_memories ORDER BY created_at ASC, rowid ASC",
             )?;
             let rows = stmt
                 .query_map([], |r| {
@@ -2168,45 +2179,52 @@ impl Database {
         })
     }
 
+    /// `restore` as in [`add_space_memory`](Self::add_space_memory).
     pub fn add_global_memory(
         &self,
         content: &str,
         source_session_id: Option<&str>,
         source_message_id: Option<&str>,
+        restore: Option<(&str, i64)>,
     ) -> Result<GlobalMemory> {
-        let id = Uuid::new_v4().to_string();
         let now = Utc::now().timestamp_millis();
+        let (id, created_at) = match restore {
+            Some((id, created_at)) => (id.to_string(), created_at),
+            None => (Uuid::new_v4().to_string(), now),
+        };
         let conn = self.conn.lock();
         conn.execute(
             "INSERT INTO global_memories (id, content, source_session_id,
                                           source_message_id, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
-            params![id, content, source_session_id, source_message_id, now],
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![id, content, source_session_id, source_message_id, created_at, now],
         )?;
         Ok(GlobalMemory {
             id,
             content: content.to_string(),
             source_session_id: source_session_id.map(|s| s.to_string()),
             source_message_id: source_message_id.map(|s| s.to_string()),
-            created_at: now,
+            created_at,
             updated_at: now,
         })
     }
 
-    pub fn update_global_memory(&self, id: &str, content: &str) -> Result<()> {
+    /// `false` when no memory has `id` (it was deleted first).
+    pub fn update_global_memory(&self, id: &str, content: &str) -> Result<bool> {
         let now = Utc::now().timestamp_millis();
         let conn = self.conn.lock();
-        conn.execute(
+        let changed = conn.execute(
             "UPDATE global_memories SET content = ?1, updated_at = ?2 WHERE id = ?3",
             params![content, now, id],
         )?;
-        Ok(())
+        Ok(changed > 0)
     }
 
-    pub fn remove_global_memory(&self, id: &str) -> Result<()> {
+    /// `false` when there was nothing to remove.
+    pub fn remove_global_memory(&self, id: &str) -> Result<bool> {
         let conn = self.conn.lock();
-        conn.execute("DELETE FROM global_memories WHERE id = ?1", params![id])?;
-        Ok(())
+        let changed = conn.execute("DELETE FROM global_memories WHERE id = ?1", params![id])?;
+        Ok(changed > 0)
     }
 
     // ------------ snippets ------------
@@ -2695,6 +2713,11 @@ impl Database {
                 // stdio servers take their API keys through the environment
                 // map, so it is credentials in the same sense.
                 s.env_json = None;
+                // Arguments are the configuration and stay — but a password
+                // in a connection URL (the reference Postgres server takes
+                // `postgresql://user:pass@host/db` as its one argument) or
+                // after a `--token` doesn't.
+                s.args_json = s.args_json.as_deref().and_then(redact_args_json);
                 s
             })
             .collect();
@@ -3276,6 +3299,78 @@ fn build_snippet(text: &str, needle: &str) -> Option<String> {
     Some(out.split_whitespace().collect::<Vec<_>>().join(" "))
 }
 
+/// Stands in for a secret [`redact_args_json`] leaves out of an export.
+const REDACTED: &str = "REDACTED";
+
+/// A stdio server's `args_json` as it goes into an export: a password in a
+/// URL (`scheme://user:pass@host`) and the value of a flag whose name says
+/// it holds a credential (`--token x`, `--api-key=x`) are replaced with
+/// [`REDACTED`]; everything else is kept as typed. A value that doesn't
+/// parse as a list of strings is dropped whole — it's not a shape Loach
+/// writes, so nothing in it can be told apart from a secret.
+fn redact_args_json(json: &str) -> Option<String> {
+    let args: Vec<String> = serde_json::from_str(json).ok()?;
+    let secret_flag = |name: &str| {
+        let n = name.to_ascii_lowercase();
+        ["token", "secret", "password", "passwd", "apikey", "api-key", "api_key", "auth"]
+            .iter()
+            .any(|w| n.contains(w))
+    };
+    let mut out = Vec::with_capacity(args.len());
+    let mut value_is_secret = false;
+    for arg in args {
+        if std::mem::take(&mut value_is_secret) {
+            out.push(REDACTED.to_string());
+            continue;
+        }
+        if let Some(flag) = arg.strip_prefix('-') {
+            let flag = flag.trim_start_matches('-');
+            match flag.split_once('=') {
+                Some((name, _)) if secret_flag(name) => {
+                    let keep = arg.len() - flag.len() + name.len() + 1;
+                    out.push(format!("{}{REDACTED}", &arg[..keep]));
+                    continue;
+                }
+                None if secret_flag(flag) => value_is_secret = true,
+                _ => {}
+            }
+        }
+        out.push(redact_url_password(&arg));
+    }
+    serde_json::to_string(&out).ok()
+}
+
+/// `text` with the password of any `scheme://user:pass@host` in it
+/// replaced by [`REDACTED`].
+fn redact_url_password(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find("://") {
+        let (head, tail) = rest.split_at(at + 3);
+        out.push_str(head);
+        // The authority ends at the first `/`, `?` or `#`; its userinfo, if
+        // any, before the last `@` in it.
+        let authority_end = tail.find(['/', '?', '#']).unwrap_or(tail.len());
+        match tail[..authority_end].rfind('@') {
+            Some(at_sign) => {
+                let userinfo = &tail[..at_sign];
+                match userinfo.split_once(':') {
+                    Some((user, _)) => {
+                        out.push_str(user);
+                        out.push(':');
+                        out.push_str(REDACTED);
+                    }
+                    None => out.push_str(userinfo),
+                }
+                rest = &tail[at_sign..];
+            }
+            None => rest = tail,
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Authoritative "does this column exist?" check via `PRAGMA table_info`.
 /// Used by `migrate()` to decide whether to run an `ALTER TABLE ADD COLUMN`.
 /// Returns an `Err` only on genuine query failures (bad table name,
@@ -3450,6 +3545,39 @@ mod tests {
         let fs = snap.data.mcp_servers.iter().find(|r| r.name == "fs").unwrap();
         assert_eq!(fs.command.as_deref(), Some("npx"));
         assert!(fs.args_json.is_some());
+    }
+
+    /// Arguments are exported as typed — except a password in a URL or
+    /// the value of a credential flag.
+    #[test]
+    fn exported_arguments_lose_their_passwords() {
+        let args = serde_json::to_string(&[
+            "-y",
+            "@modelcontextprotocol/server-postgres",
+            "postgresql://app:hunter2@db.local:5432/shop",
+            "--token",
+            "ghp_abc",
+            "--api-key=sk-123",
+            "https://example.com/a@b",
+            "--verbose",
+        ])
+        .unwrap();
+        let out: Vec<String> =
+            serde_json::from_str(&redact_args_json(&args).expect("a list of strings")).unwrap();
+        assert_eq!(
+            out,
+            [
+                "-y",
+                "@modelcontextprotocol/server-postgres",
+                "postgresql://app:REDACTED@db.local:5432/shop",
+                "--token",
+                "REDACTED",
+                "--api-key=REDACTED",
+                "https://example.com/a@b",
+                "--verbose",
+            ]
+        );
+        assert_eq!(redact_args_json("not json"), None);
     }
 
     /// A workspace root is local to this machine, so it must not travel in
@@ -3923,9 +4051,9 @@ mod tests {
         assert!(db.list_global_memories().unwrap().is_empty());
 
         let a = db
-            .add_global_memory("Prefers TypeScript.", Some("sess-1"), Some("msg-1"))
+            .add_global_memory("Prefers TypeScript.", Some("sess-1"), Some("msg-1"), None)
             .unwrap();
-        let b = db.add_global_memory("Lives in Warsaw.", None, None).unwrap();
+        let b = db.add_global_memory("Lives in Warsaw.", None, None, None).unwrap();
 
         let listed = db.list_global_memories().unwrap();
         assert_eq!(listed.len(), 2);

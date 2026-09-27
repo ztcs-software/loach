@@ -73,7 +73,7 @@ export function FeaturesTab() {
                         Temporal awareness
                       </Label>
                       <p className="mt-1 text-[11px] text-foreground/50">
-                        Enable to inject current date, time, weekday and
+                        Enable to inject the current date, weekday and
                         timezone into every chat so models can answer questions
                         like "What day is it today?".
                       </p>
@@ -138,7 +138,9 @@ export function FeaturesTab() {
                         save here; Space chats keep their own memory but see
                         these too. Off by default — when on, every reply
                         triggers a second, hidden model call to extract facts.
-                        Never used in Private Chat.
+                        They're sent with every chat, whichever provider it
+                        uses — a fact learned talking to a local model also
+                        reaches a cloud one. Never used in Private Chat.
                       </p>
                     </div>
                     <Switch

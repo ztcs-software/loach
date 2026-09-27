@@ -45,6 +45,7 @@ import {
 import {
   cancelMemoryExtraction,
   deferMemoryTurn,
+  dropMemoryTurns,
   extractMemories,
   type MemoryScope,
 } from "@/lib/memory";
@@ -1637,12 +1638,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
     try {
       await toolApprovalRespond(stream.streamId, callId, decision);
     } catch (e) {
-      // The backend will time the prompt out as a denial; tell the user
-      // why their click didn't take.
+      // Put the card back so the answer can be given again — the call is
+      // still parked — unless the stream moved on meanwhile.
+      if (runningBuffers === buf && record.result === null) {
+        record.awaiting_approval = true;
+        pendingDirty.toolCalls = true;
+        scheduleFlush(get, set);
+      }
       useToastStore.getState().push({
         kind: "error",
         title: "Couldn't send your answer",
-        body: e instanceof Error ? e.message : String(e),
+        body: `${e instanceof Error ? e.message : String(e)} — try again.`,
       });
     }
   },
@@ -1909,11 +1915,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (!settings.workspace_tool_enabled) {
       try {
         await settings.update("workspace_tool_enabled", true);
-        useToastStore.getState().push({
-          kind: "info",
-          title: "Workspace file tools turned on",
-          body: "The model can now work in this folder. Switch them off any time in Settings → Tools.",
-        });
+        // `update` reports its own failure (a toast) and reverts rather
+        // than throwing, so read the switch back before claiming it's on.
+        if (useSettingsStore.getState().workspace_tool_enabled) {
+          useToastStore.getState().push({
+            kind: "info",
+            title: "Workspace file tools turned on",
+            body: "The model can now work in this folder. Switch them off any time in Settings → Tools.",
+          });
+        }
       } catch (e) {
         logger.error("couldn't enable workspace tools after picking a folder", e);
       }
@@ -2033,6 +2043,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // session that still exists in the DB.
     await get().cancelForSession(id);
     await deleteSession(id);
+    dropMemoryTurns(id);
     const wasActive = get().activeSessionId === id;
     set((s) => {
       const sessions = s.sessions.filter((x) => x.id !== id);
@@ -2190,6 +2201,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   importMessages: async (id, parsed, hidden) => {
     if (parsed.length === 0) return;
+    // Rows appended below a reply that is still streaming would push it off
+    // the end of the transcript — and with it any approval card it shows,
+    // while the backend stays parked on that card.
+    if (get().streamingSessionId === id) {
+      throw new Error("Wait for the reply to finish before importing context.");
+    }
     // One round-trip inserts the whole batch under a shared `import_group`
     // (timestamps stepped monotonically in the backend). We append to the
     // local cache only after it resolves so a backend failure doesn't leave
@@ -2441,6 +2458,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // import group the import-card renderer treats as atomic; deleting it here
     // would desync the rendered card from its remaining DB rows.
     if (last.import_group != null) return;
+    // As on a send: stop an extraction still competing for the model, and
+    // don't let one read the reply this replaces later.
+    cancelMemoryExtraction();
+    dropMemoryTurns(sessionId, last.id);
 
     const session = state.sessions.find((s) => s.id === sessionId);
     if (!session || !session.model) return;

@@ -38,7 +38,8 @@ The default backend. Loach talks to a local `ollama serve` process over HTTP.
   does the same thing at startup, if nothing is already running. Off by
   default (starting a background service is the user's call) and limited
   to a base URL that points at this computer — a remote Ollama isn't
-  Loach's to start. The button above works either way.
+  Loach's to start. The button above has the same limit: it refuses a
+  base URL on another machine.
 - **Streaming**, **multimodal images**, and **thinking-mode reasoning** are
   passed through to the daemon when the chosen model supports them.
 
@@ -53,15 +54,19 @@ plus vLLM, LM Studio, LiteLLM, OpenRouter, Groq, and other proxies.
   vLLM, or LiteLLM.
 - **API key** — saved into the OS credential manager (Windows Credential
   Manager, Linux Secret Service, macOS Keychain). Never written to disk in
-  plain text, never shipped to the renderer.
+  plain text, never shipped to the renderer. Sent only over `https://`, or
+  over `http://` to this computer (`localhost`, `127.0.0.1`, `::1`) — an
+  `http://` server elsewhere on the network gets no key, so one that
+  requires it answers 401.
 - **Catalog listing** — fetched with the saved key, or without one when the
   base URL points somewhere other than the OpenAI default (local servers
   such as LM Studio and `llama-server` accept keyless requests). The Models
   tab shows the section only when the listing returned something, rather
   than spamming 401s.
 - **Test connection** — calls the endpoint's `/models` listing with the
-  stored key and reports the model count (or a readable error) so the user
-  can verify a base URL + key pair before opening a chat. Disabled while
+  stored key (when the rule above lets it be sent) and reports the model
+  count (or a readable error) so the user can verify a base URL + key pair
+  before opening a chat. Disabled while
   there's an unsaved key in the input.
 
 ### 1.3 Model picker
@@ -236,17 +241,18 @@ FIFO queue:
 - **Per-row menu** — **Pin this chat** / **Unpin**, **Label**, **Rename**,
   **Remove from folder** (when filed), **Move to archive**, **Delete**.
 - **Right-click** anywhere on the row opens the same menu.
-- **Spaces icon** marks chats that belong to a Space.
+- **Spaces icon** marks chats that belong to a Space (not shown on pinned
+  or forked chats, whose own icon takes the slot).
 - **Colour labels** — tag a chat Red, Amber, Green, Blue, Purple or Pink
   from the **Label** submenu of any chat menu (sidebar row, chat header,
-  or Space view). The colour renders as a dot at the start of the row and
-  follows the chat everywhere it's listed. **No label** clears it.
+  or Space view). The colour renders as a dot at the start of the row in
+  the sidebar and in the Space view. **No label** clears it.
 - **Folders** — drag one chat row onto another to group them. Loach asks
   for a folder name and files both chats into a **Folders** section that
   sits between Pinned and the date groups (if the target already sits in a
   folder, the dragged chat joins that folder). Folders are flat — they never
-  nest — start collapsed, and remember which ones you left open between
-  launches.
+  nest. A new folder opens expanded, and Loach remembers which folders you
+  left open between launches.
   - Drop a chat on a folder to file it; drop it on a date caption (Today,
     Yesterday, …) to take it back out, or use **Remove from folder** in
     the row menu.
@@ -276,9 +282,9 @@ pending restore.
 - **Export context** — opens a dialog with the transcript rendered as
   Markdown and a **Copy** button. A **Compact context** toggle in the
   dialog shows a summarised version instead of the verbatim transcript
-  (your chat isn't changed). The Markdown is assembled in Rust; nothing is
-  written to disk — paste it wherever you need it. Also reachable as
-  `/export`.
+  (your chat isn't changed). The verbatim Markdown is assembled in Rust and
+  the compact one in the renderer; nothing is written to disk — paste it
+  wherever you need it. Also reachable as `/export`.
 - **Import context** — paste exported JSON/Markdown or any plain text;
   it's parsed into messages and appended to the current chat. A **Hide
   from transcript** toggle folds the imported messages into a single
@@ -390,9 +396,10 @@ popover, or the `/compact` command) summarises the older turns with the chat's o
 model and tucks the summary into the system prompt. The original messages
 aren't deleted — they stay in the transcript for scrollback, marked with a
 compaction divider, but are dropped from what the model sees on the next
-turn so the freed context goes to new conversation. Compaction is only
-offered once a chat is large enough to benefit (at least six messages and
-a quarter of the window in use).
+turn so the freed context goes to new conversation. The popover button is
+only enabled once a chat is large enough to benefit (at least six messages
+and a quarter of the window in use); `/compact` checks only the
+six-message minimum.
 
 ### 2.11 Pinned responses
 
@@ -419,8 +426,9 @@ exactly like every other turn.
 - **As text** — the message as written. **Copy** puts it on the clipboard,
   or hand it to **Facebook**, **X**, **Reddit** or **LinkedIn**: Loach
   opens that network's composer in your browser with the text pre-filled,
-  trimmed to the length each one accepts. The clipboard always gets the
-  full text.
+  trimmed to the length each one accepts. Facebook's share link needs a
+  URL, so it carries Loach's GitHub page with your text in a separate
+  quote field. The clipboard always gets the full text.
 - **As image** — the same message drawn as a chat-bubble PNG that follows
   your current light/dark theme, captioned **Prompt** or **AI Response**
   and footed with "Shared from Loach". **Copy** puts the image on the
@@ -465,7 +473,8 @@ context.
 
 ### 3.3 Space Memory
 
-Optional per-Space auto-memory. After every assistant reply in a Space, Loach
+Per-Space auto-memory, on by default for a new Space. After every
+assistant reply in a Space, Loach
 fires a one-shot LLM call (against the same provider/model the user is
 chatting with) and asks it to extract durable, single-sentence facts about
 the user. The existing memories are shown to the extractor numbered, so it
@@ -486,7 +495,8 @@ rewrite or remove them, only avoid repeating them.
   "Removed memory" pills with the fact and an **Undo** button.
 - **Memory tab** — review, edit, or delete any row, add facts manually,
   search, see when each was saved and jump to the chat it came from, or
-  clear the whole list.
+  clear the whole list. Facts too old to fit the prompt (below) are marked
+  *not sent*.
 - **Per-Space toggle** — turn extraction off without wiping existing rows.
   Existing memories continue to ride along in every chat; only new writes
   stop.
@@ -494,13 +504,15 @@ rewrite or remove them, only avoid repeating them.
   an extraction aborted by the next send, is parked and folded into the
   next extraction in that chat (up to three turns per run). Parked turns
   are held in memory, so quitting Loach drops them.
-- **Caps** — the newest 60 memories go into both the chat prompt and the
-  extractor prompt, so every fact the model sees is one the extractor can
-  still correct. A fact the extractor saves or rewrites is rejected if
+- **Caps** — the newest memories go into both the chat prompt and the
+  extractor prompt, up to 60 of them and about 6,000 characters (roughly
+  1,500 tokens) per list, so every fact the model sees is one the extractor
+  can still correct. A fact the extractor saves or rewrites is rejected if
   longer than 280 chars; facts you add or edit yourself aren't capped. One
   run saves at most five new facts and removes or rewrites at most three
   existing ones, and the removals' and rewrites' toasts are shown last, so
-  their **Undo** stays on screen.
+  their **Undo** stays on screen. **Undo** on a removal puts the fact back
+  where it was, with its original date.
 
 Memories are silently injected into the system prompt of every chat inside
 the Space as a `--- Space memory ---` bulleted list. Cancel / error turns
@@ -516,7 +528,9 @@ model that Space facts win on conflict). Space chats keep writing to their
 own Space memory; the global facts are shown to their extractor as
 read-only context so they aren't duplicated. **Manage global memories**
 opens the same editor as a Space's Memory tab. Turning the setting off
-stops both extraction and injection.
+stops both extraction and injection. Global facts go with every chat
+whichever provider it uses, so one learned talking to a local model also
+reaches a cloud one.
 Private Chat never reads or writes memory of either kind.
 
 ---
@@ -575,9 +589,11 @@ For a single Ollama model, the editor lets you:
 - **Inspect** the system prompt, the prompt template and the parsed
   PARAMETER block, plus the live Modelfile behind **Show live Modelfile**.
 - **Edit** any of those fields in the form.
-- **Save as new model** writes a *new* derived model via `POST /api/create`
-  (with a **Preview Modelfile** toggle) — Loach never overwrites the base,
-  so the FROM line always points at something you can revert to.
+- **Save as new model** writes a derived model via `POST /api/create`
+  (with a **Preview Modelfile** toggle) under the tag you type — a new
+  `<name>-custom` tag is suggested. If a model with that tag already
+  exists, Ollama replaces it without asking — to keep the original to
+  revert to, save under a tag that isn't taken.
 - **Duplicate…** (in the tile's `⋯` menu on the list view) — copy under a
   new tag without changes.
 - **Delete** — irreversible removal of the local copy.
@@ -590,8 +606,9 @@ For a single Ollama model, the editor lets you:
 The **Save as new model** form refuses to compile a Modelfile that would inject
 additional directives via a malicious base tag, system block, or template
 block. The base tag is matched against a conservative `[A-Za-z0-9._/-]`
-allowlist; SYSTEM and TEMPLATE bodies are rejected if they contain `"""`
-(which the Ollama parser would treat as an early block-end).
+allowlist plus one `:tag` suffix; SYSTEM and TEMPLATE bodies are rejected
+if they contain `"""` (which the Ollama parser would treat as an early
+block-end).
 
 ---
 
@@ -690,9 +707,11 @@ setting.
 Capabilities Loach offers to the models. Opt-in in **Settings → Tools**.
 
 Whichever tools a model uses, one reply may go back to them for at most
-10 rounds; past that Loach ends the reply with "Stopped after 10 tool-use
-turns". Each tool result the model gets back is capped at 32 KB, with a
-note saying so — the chat shows the whole result.
+10 rounds. The last round goes out without tools, so a model still
+reaching for one answers with what it has; if it asks for tools anyway,
+they aren't run and the reply ends with "Stopped after 10 tool-use turns".
+Each tool result the model gets back is capped at 32 KB, with a note
+saying so — the chat shows the whole result.
 
 ### 8.1 Web fetch
 
@@ -703,14 +722,15 @@ strips HTML to readable text, and appends it as a fenced block.
   HTTP calls.
 - **Per-message cap of 5 URLs**, deduped.
 - **30 s total timeout** per URL, **10 s connect timeout**.
-- **5 MB body cap** and ~12,000 chars of extracted text per fetch.
+- **5 MB body cap** — a longer page is cut there and marked truncated —
+  and ~12,000 chars of extracted text per fetch.
 - **SSRF guard** — only `http`/`https` schemes; the resolved IP must not
   land on loopback, RFC1918 private ranges, link-local, or any other
   special-use range. A hostname that DNS-resolves to a private address is
   rejected. Redirects are walked manually and re-screened per hop.
-- **Failures are silent per-URL** — a dead link does not block the send;
-  the failure is rendered as a short `Failed to fetch <url>: …` stub so the
-  model knows we tried.
+- **A failed URL doesn't block the send** — the reply's tool-call block
+  shows the failure and why, and the model gets a short
+  `Failed to fetch <url>: …` stub so it knows Loach tried.
 - **Shown on the reply** — the URLs Loach fetched for a turn appear as
   small chips on the assistant message.
 
@@ -738,9 +758,13 @@ Loach speaks two MCP transports. Configure servers in **Settings → MCP**.
   itself exits, servers are stopped at once. Startup is allowed 60 s
   (first-run package downloads) and each request 30 s; a request that runs
   out of time fails, but the server keeps running — it may still be working
-  on it. When the process exits or stops accepting input, the last
-  lines of its stderr are quoted in the error so a failed launch says why
-  (a timeout doesn't include them). On Windows a bare `npx` resolves to
+  on it — and is told the result is no longer wanted
+  (`notifications/cancelled`), as it is when you press **Stop** mid-call.
+  When the process exits or stops accepting input, **Test connection**
+  quotes the last lines of its stderr so a failed launch says why (a
+  timeout doesn't include them). In a chat the error stops short of the
+  stderr — it can print anything, keys included, and the chat's text goes
+  to the model and into exports — and the full text is in Loach's log. On Windows a bare `npx` resolves to
   `npx.cmd` through Loach's own `PATH`/`PATHEXT`, so commands work as
   typed; a `PATH` set in the server's environment isn't used for that
   lookup. On macOS and Linux the server gets the `PATH` your login shell
@@ -781,12 +805,17 @@ switched off doesn't ask; turning it on does. Approved command lines are
 remembered for the rest of the session, so a test followed by a save asks
 once. The dialog guards changes, not every launch: after a restart, an
 enabled server you already approved starts without asking — though
-**Test connection** asks again.
+**Test connection** asks again. When **Ask before each tool call** is off,
+the dialog says so: agreeing to run the program then also means its tools
+run unasked. A server's name is shown in the dialog too, so it follows the
+same rules: one line, at most 100 characters, nothing invisible.
 
 Environment variables are treated like headers: they hold API keys, so
 they are scrubbed from exports, exactly like HTTP headers. Arguments are
-exported as typed, so pass secrets (a database connection string, say)
-through an environment variable rather than an argument.
+exported as typed, except a password in a URL
+(`postgresql://user:…@host`) and the value of a flag like `--token` or
+`--api-key=…`, which read `REDACTED` — re-enter them after an import. An
+environment variable is still the better place for a secret.
 
 #### Per-call approvals
 
@@ -797,7 +826,9 @@ wants to run — server, tool, and the arguments — with three answers:
 - **Always allow `<tool>`** — run it, and stop asking for this tool on
   this server. The choice is stored on the server row and listed in its
   editor under *Always allowed*, where **Ask again for all** clears it
-  once you save the server.
+  once you save the server. It's an answer about that program or
+  endpoint: saving the server with a different command, arguments,
+  environment or URL clears the list.
 - **Deny** — the tool does not run. The model is told the user declined
   and continues without the result.
 
@@ -850,7 +881,10 @@ Give a chat a folder and the model can work in it — read the project,
 search it, and make changes — the way a coding assistant does, minus the
 shell. Click the **+** button next to the message box and choose **Add
 directory** (the same menu's **Add files** attaches file contents to one
-message instead; the two are not variants of each other). For the rest of
+message instead; the two are not variants of each other). A chat needs
+its first message before it can have a folder, and the picker refuses a
+whole drive (`C:\`, `/`) and Loach's own data folder, whose `loach.db`
+holds every chat. For the rest of
 the chat the message box reads "Working in *folder*" just above where you
 type; click the folder's name to open it in your file manager, or remove
 it with the ✕ beside it. Picking a folder also switches
@@ -915,9 +949,13 @@ write is cut at 20,000 characters in the card and a long diff at 400 rows,
 each with a note saying what's below the cut and a **Show all** link — the
 whole change is still what gets applied. **Allow once** runs that call;
 **Allow … for this chat** stops asking for that tool in this chat until
-you change or remove its folder, or quit Loach (the grant is kept in
-memory, and covers only Loach's own tool — never an MCP server's tool of
-the same name); **Deny** tells the model to carry on without it. Line
+you change or remove its folder, delete the chat, switch the workspace
+tools off, or quit Loach (the grant is kept in memory, is tied to the
+folder it was given for, and covers only Loach's own tool — never an MCP
+server's tool of the same name). It never covers anything inside a `.git`
+directory: a change there shows in no `git status` or diff, and a hook
+or setting there runs commands the next time you use git, so those
+always ask. **Deny** tells the model to carry on without it. Line
 endings are preserved: editing or overwriting a CRLF file keeps it CRLF.
 
 Writes and edits replace the file rather than rewriting it in place. A
@@ -952,8 +990,11 @@ a `LOACHFILE.md` that is a link out of the folder is ignored. The
 the tooltip, and the context usage popover (§2.10) lists it on its own
 row. Anything past 32 KB is cut with a note; local models follow short
 instruction files far better, so keep it brief. A blank file counts as
-none. The model is told to treat the file as the project's instructions and
-to let yours win when the two conflict — a folder you just cloned can say
+none. The file goes in fenced between clear start and end markers, ahead
+of your own instructions, and the model is told it's the project's text
+rather than yours: it can't grant permissions, yours win when the two
+conflict, and anything in it asking to send files or data elsewhere is to
+be ignored unless you ask for that too — a folder you just cloned can say
 anything, and the approval card on writes, moves and deletions remains
 the backstop. A sample to start from is in
 [`docs/LOACHFILE.md.sample`](LOACHFILE.md.sample).
@@ -999,8 +1040,8 @@ scope, so you can type `in:messages borrow` by hand, or `notes in:spaces`
 with the token last, and the dropdown label follows either way. Clearing the
 token from the text returns to *everywhere*.
 
-The palette is suppressed while onboarding or the lock screen owns the
-window.
+The palette is suppressed while onboarding, the lock screen or Private
+Chat owns the window.
 
 ---
 
@@ -1035,7 +1076,8 @@ wins when both would be open.
 In **Settings → Appearance**:
 
 - **Theme** — *Solid* (calm flat background, azure accent) or *Aurora*
-  (animated glass-mesh gradient, warm orange accent).
+  (blurred mesh gradient under translucent glass panels, warm orange
+  accent).
 - **Color mode** — Light, System, Dark.
 - **Font size** — Small, Normal, Large. Applied as a CSS scale to both
   rem-based and pixel-based text sizes.
@@ -1087,8 +1129,8 @@ triggers close it, both in the **Auto-lock** card that appears in
 **Settings → Security** once a lock is configured:
 
 - **Lock after inactivity** — off, 1, 5, 15 or 30 minutes with no typing,
-  clicking, scrolling or touch. A reply already streaming keeps running
-  behind the lock screen. The countdown is a deadline checked periodically
+  clicking, scrolling, touch or mouse movement. A reply already streaming
+  keeps running behind the lock screen. The countdown is a deadline checked periodically
   rather than one long timer, so a machine that sleeps through the interval
   is over the threshold the moment it wakes; the trade is that the lock can
   land up to 15 seconds late.
@@ -1113,7 +1155,8 @@ this?" is answered before you reach for a destructive one:
 - **Database** — total bytes on disk (the SQLite file plus its write-ahead
   log) and the path, itemised into chats (with message and chat counts),
   attachments inlined into messages and snippets, Spaces (with source counts),
-  and **Other** (snippets, MCP servers, settings).
+  and **Other** (snippets, snippet variables, global memories, MCP servers,
+  settings).
 - **Local models** — how many Ollama models are installed and what they
   weigh, as reported by Ollama. Listed for context, not as something Loach
   can reclaim: they're stored by Ollama, outside the app-data folder above.
@@ -1135,7 +1178,7 @@ Below it sit the actions:
   OpenAI key. Gated on the app-lock credentials.
 - **Erase & Reset → Factory reset** — the same wipe + clear all settings +
   remove the OpenAI key and the app lock from the credential store.
-  Re-fires onboarding on next launch. Irreversible.
+  Loach then reloads straight into onboarding. Irreversible.
 
 ---
 
@@ -1303,12 +1346,13 @@ authored (custom instructions, Space instructions, snippets, per-chat):
 ### 15.1 Temporal awareness
 
 When **Settings → Features → Temporal awareness** is on, Loach prepends a
-short "Current date / time / timezone" preamble to every system prompt if
-the prompt doesn't already use a `{{CURRENT_*}}` placeholder. Authors who
-need the values inline drop the placeholders in directly; everyone else
-gets the auto preamble. The Features tab also includes an expandable
-**"Template variables"** cheat sheet listing every placeholder with an
-example value.
+short preamble with the current date, weekday and timezone (not the time)
+to every system prompt if the prompt doesn't already use a
+`{{CURRENT_*}}` placeholder. Authors who need the values inline — the time
+included — drop the placeholders in directly; everyone else gets the auto
+preamble. The Features tab also includes an expandable **"Template
+variables"** cheat sheet listing the five `{{CURRENT_*}}` placeholders with
+an example value (`{{USER_NAME}}` isn't in it).
 
 ---
 
@@ -1329,9 +1373,11 @@ model so it loads into VRAM ahead of your first real prompt. Pins VRAM even
 if you open Loach just to read old chats, so the toggle is opt-in.
 
 **Keep model loaded** (**Settings → Features**) — how long Ollama keeps a
-model resident after a reply: **5 min** (default), **30 min**, **1 hour**
-or **Always**. Sent as `keep_alive` with every request, so it overrides the
-daemon's own `OLLAMA_KEEP_ALIVE`.
+model resident after a reply: **5 min** (shown by default), **30 min**,
+**1 hour** or **Always**. Until you pick an option, Loach sends nothing and
+the daemon's own `OLLAMA_KEEP_ALIVE` (or Ollama's 5-minute default)
+applies. Once you pick one — 5 min included — it's sent as `keep_alive`
+with every request, so it overrides `OLLAMA_KEEP_ALIVE`.
 
 ---
 
@@ -1416,10 +1462,14 @@ verification happens before the binary is replaced.
 
 ## 19. Keyboard reference
 
-Press `Cmd/Ctrl + /` at any time to see these shortcuts as an in-app cheat
-sheet, grouped into Navigation, Chat, Layout, Security and Help. The dialog
-and the handler read the same table, so the keys listed there are the keys
-the app actually listens for.
+Press `Cmd/Ctrl + /` to open an in-app cheat sheet of the nine app-wide
+shortcuts (the first nine below), grouped into Navigation, Chat, Layout,
+Security and Help; the composer and palette keys after them aren't in it.
+The dialog reads the same table as the shortcut handler, so the keys listed
+there are the keys the app actually listens for (`Cmd/Ctrl + K` is handled
+by the search palette's own listener). The app-wide shortcuts are off
+while onboarding or Private Chat is open — except `Cmd/Ctrl + Shift + L` —
+and while the lock screen is up.
 
 - `Cmd/Ctrl + K` — global search palette.
 - `Cmd/Ctrl + N` — start a new chat.

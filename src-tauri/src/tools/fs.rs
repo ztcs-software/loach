@@ -103,9 +103,10 @@ const MAX_LINE_CHARS: usize = 2_000;
 const MAX_WRITE_BYTES: usize = 1024 * 1024;
 const MAX_LIST_ENTRIES: usize = 500;
 const MAX_FIND_RESULTS: usize = 200;
-/// Directory entries `find_files` will look at before giving up. Bounds
-/// the wall-clock on a huge tree so the call answers with a hint instead
-/// of tripping the 20 s built-in timeout.
+/// Directory entries `find_files` and `search_files` will look at before
+/// giving up. Bounds the wall-clock on a huge tree so the call answers with
+/// a hint instead of tripping the 20 s built-in timeout — for a search whose
+/// `extensions` match nothing, counting files read alone never stopped it.
 const MAX_FIND_VISITED: usize = 50_000;
 const MAX_SEARCH_MATCHES: usize = 100;
 /// Files opened during one `search_files` call. Bounds the wall-clock so a
@@ -390,6 +391,16 @@ fn resolve_write(root: &Path, rel: &str) -> Result<PathBuf, String> {
     Ok(target)
 }
 
+/// `Some(reason)` when `path` exists but is neither a regular file nor a
+/// directory — a FIFO, socket or device node. Opening a FIFO waits for a
+/// writer that may never come, so a call would hang until its timeout and
+/// leave the thread blocked behind it.
+fn not_a_regular_file(path: &Path, rel: &str) -> Option<String> {
+    let meta = fs::metadata(path).ok()?;
+    (!meta.is_file() && !meta.is_dir())
+        .then(|| format!("`{}` is not a regular file", display_rel(rel)))
+}
+
 /// Normalise a path for messages so Windows and POSIX read the same.
 fn display_rel(rel: &str) -> String {
     rel.replace('\\', "/")
@@ -420,13 +431,54 @@ pub fn display_path(p: &Path) -> String {
 // Line endings
 // ---------------------------------------------------------------------------
 
-/// The line ending a file uses, judged by its first line break. Files with
-/// no line break at all count as LF.
+/// The line ending a file mostly uses — by count, not by its first line,
+/// which in a mixed file can be the odd one out. Ties, and files with no
+/// line break at all, count as LF.
 fn line_ending_of(text: &str) -> &'static str {
-    match text.find('\n') {
-        Some(i) if text.as_bytes()[..i].ends_with(b"\r") => "\r\n",
-        _ => "\n",
+    let crlf = text.matches("\r\n").count();
+    let lf = text.matches('\n').count() - crlf;
+    if crlf > lf {
+        "\r\n"
+    } else {
+        "\n"
     }
+}
+
+/// `text` with every CRLF folded to LF, remembering where each fold was so
+/// a position in the folded text can be mapped back to the original.
+struct FoldedCrlf {
+    text: String,
+    /// Positions, in `text`, of the `\n`s that were a `\r\n`.
+    folds: Vec<usize>,
+}
+
+impl FoldedCrlf {
+    fn new(original: &str) -> Self {
+        let mut folds = Vec::new();
+        for (removed, (at, _)) in original.match_indices("\r\n").enumerate() {
+            folds.push(at - removed);
+        }
+        Self {
+            text: original.replace("\r\n", "\n"),
+            folds,
+        }
+    }
+
+    /// Where the character at `pos` in the folded text starts in the
+    /// original — for a folded `\n`, at its `\r`, so a range never splits a
+    /// CRLF pair. `text.len()` maps to the end of the original.
+    fn original_at(&self, pos: usize) -> usize {
+        pos + self.folds.partition_point(|&f| f < pos)
+    }
+}
+
+/// Whether `needle` also occurs in `hay` overlapping the match at `first`
+/// — the second match `match_indices` skips.
+fn occurs_again(hay: &str, first: usize, needle: &str) -> bool {
+    let Some(c) = hay[first..].chars().next() else {
+        return false;
+    };
+    hay[first + c.len_utf8()..].contains(needle)
 }
 
 /// Bring `content` — which models almost always emit with bare `\n` — into
@@ -533,6 +585,30 @@ fn replace_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         let _ = fs::remove_file(&tmp);
     }
     written
+}
+
+/// Whether a call's `path` — or either end of a move — lies inside a `.git`
+/// directory, as written or once links are resolved. A standing "Allow …
+/// for this chat" never covers those: a change there shows in no `git
+/// status` or diff, and a hook or config setting there runs commands the
+/// next time the user runs git — a way out of the folder that a grant given
+/// for ordinary edits was never meant to open.
+pub fn touches_git_dir(root: &Path, args: &Value) -> bool {
+    let has_git = |p: &Path| {
+        p.components().any(|c| {
+            matches!(c, Component::Normal(n) if n.to_string_lossy().eq_ignore_ascii_case(".git"))
+        })
+    };
+    ["path", "from", "to"]
+        .iter()
+        .filter_map(|key| args.get(*key)?.as_str())
+        .any(|rel| {
+            has_git(Path::new(rel.trim()))
+                || resolve_target(root, rel)
+                    .ok()
+                    .and_then(|p| p.strip_prefix(root).ok().map(has_git))
+                    .unwrap_or(false)
+        })
 }
 
 /// For the approval card: the size of the file a `write_file` call would
@@ -851,7 +927,7 @@ pub fn dispatch_list_directory(root: &Path, args: &Value) -> McpCallResult {
 
     let mut out = String::new();
     let mut count = 0usize;
-    let truncated = walk_listing(root, &dir, depth, 0, &mut out, &mut count);
+    let truncated = walk_listing(&dir, depth, 0, &mut out, &mut count);
 
     if out.is_empty() {
         return ok(format!("`{}` is empty.", rel_or_root(root, &dir)));
@@ -867,7 +943,6 @@ pub fn dispatch_list_directory(root: &Path, args: &Value) -> McpCallResult {
 
 /// Depth-first listing. Returns true when the entry cap cut it short.
 fn walk_listing(
-    root: &Path,
     dir: &Path,
     depth: u32,
     level: u32,
@@ -906,14 +981,14 @@ fn walk_listing(
             continue;
         }
         if ft.is_dir() {
-            if SKIPPED_DIRS.contains(&name.as_str()) {
+            if is_skipped_dir(&name) {
                 out.push_str(&format!("{indent}{name}/  [skipped]\n"));
                 *count += 1;
                 continue;
             }
             out.push_str(&format!("{indent}{name}/\n"));
             *count += 1;
-            if walk_listing(root, &entry.path(), depth, level + 1, out, count) {
+            if walk_listing(&entry.path(), depth, level + 1, out, count) {
                 return true;
             }
         } else {
@@ -950,7 +1025,17 @@ fn human_size(bytes: u64) -> String {
 fn walk_allows(entry: &walkdir::DirEntry) -> bool {
     entry.depth() == 0
         || !entry.file_type().is_dir()
-        || !SKIPPED_DIRS.contains(&entry.file_name().to_string_lossy().as_ref())
+        || !is_skipped_dir(&entry.file_name().to_string_lossy())
+}
+
+/// Whether a walk leaves `name` alone ([`SKIPPED_DIRS`]). Case-blind where
+/// the filesystem is, so `Node_Modules` on Windows is skipped too.
+fn is_skipped_dir(name: &str) -> bool {
+    if cfg!(any(windows, target_os = "macos")) {
+        SKIPPED_DIRS.iter().any(|d| d.eq_ignore_ascii_case(name))
+    } else {
+        SKIPPED_DIRS.contains(&name)
+    }
 }
 
 pub fn dispatch_find_files(root: &Path, args: &Value) -> McpCallResult {
@@ -967,8 +1052,8 @@ pub fn dispatch_find_files(root: &Path, args: &Value) -> McpCallResult {
     };
     // A bare name pattern (`*.rs`) is matched against each entry's own
     // name, so it finds files at any depth; a pattern with a `/` is matched
-    // against the path relative to the search root, where `*` stops at a
-    // separator and `**` is the way across directories.
+    // against the entry's path, where `*` stops at a separator and `**` is
+    // the way across directories.
     let name_only = !pattern.contains('/');
     let opts = glob::MatchOptions {
         case_sensitive: false,
@@ -1004,12 +1089,16 @@ pub fn dispatch_find_files(root: &Path, args: &Value) -> McpCallResult {
             hit_cap = true;
             break;
         }
-        let candidate = if name_only {
-            entry.file_name().to_string_lossy().into_owned()
+        let hit = if name_only {
+            glob.matches_with(&entry.file_name().to_string_lossy(), opts)
         } else {
-            rel_display(&base, entry.path())
+            // Relative to the workspace root, as the description says — or
+            // to `path`, since a model searching inside `src` often writes
+            // the pattern relative to that.
+            glob.matches_with(&rel_display(root, entry.path()), opts)
+                || glob.matches_with(&rel_display(&base, entry.path()), opts)
         };
-        if glob.matches_with(&candidate, opts) {
+        if hit {
             let mut shown = rel_display(root, entry.path());
             if entry.file_type().is_dir() {
                 shown.push('/');
@@ -1054,6 +1143,9 @@ pub fn dispatch_read_file(root: &Path, args: &Value) -> McpCallResult {
             display_rel(rel)
         ));
     }
+    if let Some(e) = not_a_regular_file(&path, rel) {
+        return err(e);
+    }
 
     // Size first, so a huge file is refused with a stat rather than after
     // being pulled into memory.
@@ -1078,7 +1170,7 @@ pub fn dispatch_read_file(root: &Path, args: &Value) -> McpCallResult {
         ));
     };
     let text = &decoded.text;
-    let note = encoding_note(rel, &decoded);
+    let note = encoding_note(rel.trim(), &decoded);
 
     let start = super::lenient_i64(args, "start_line").unwrap_or(1).max(1) as usize;
     let max_lines = super::lenient_i64(args, "max_lines")
@@ -1088,8 +1180,9 @@ pub fn dispatch_read_file(root: &Path, args: &Value) -> McpCallResult {
     let all: Vec<&str> = text.lines().collect();
     let total = all.len();
     if total == 0 {
-        // Say so explicitly: an empty result reads like a failed call.
-        return ok(format!("`{}` is empty (0 bytes).", display_rel(rel)));
+        // Say so explicitly: an empty result reads like a failed call. The
+        // size is the file's, so a byte-order mark alone reads as 3 bytes.
+        return ok(format!("`{}` is empty ({} bytes).", display_rel(rel), bytes.len()));
     }
     if start > total {
         return err(format!(
@@ -1104,7 +1197,7 @@ pub fn dispatch_read_file(root: &Path, args: &Value) -> McpCallResult {
 
     // Emit whole lines until the response budget is spent. The first line
     // always goes out, however long, so a request can't stall on it.
-    let budget = MAX_READ_OUTPUT_BYTES - note.len();
+    let budget = MAX_READ_OUTPUT_BYTES.saturating_sub(note.len());
     let mut out = String::new();
     let mut end = start - 1;
     for (i, line) in all[start - 1..want_end].iter().enumerate() {
@@ -1198,6 +1291,7 @@ pub fn dispatch_search_files(root: &Path, args: &Value) -> McpCallResult {
     let mut matches = String::new();
     let mut match_count = 0usize;
     let mut files_read = 0usize;
+    let mut visited = 0usize;
     let mut hit_match_cap = false;
     let mut hit_file_cap = false;
     let mut too_deep = false;
@@ -1215,7 +1309,8 @@ pub fn dispatch_search_files(root: &Path, args: &Value) -> McpCallResult {
             hit_match_cap = true;
             break;
         }
-        if files_read >= MAX_SEARCH_FILES {
+        visited += 1;
+        if files_read >= MAX_SEARCH_FILES || visited > MAX_FIND_VISITED {
             hit_file_cap = true;
             break;
         }
@@ -1276,8 +1371,9 @@ pub fn dispatch_search_files(root: &Path, args: &Value) -> McpCallResult {
     if match_count == 0 {
         if hit_file_cap {
             return ok(format!(
-                "No matches for `{pattern}` in the first {MAX_SEARCH_FILES} files. \
-                 Pass `path` or `extensions` to narrow the search."
+                "No matches for `{pattern}` in the part of the tree searched — a search \
+                 stops after {MAX_SEARCH_FILES} files or {MAX_FIND_VISITED} entries. \
+                 Pass `path` or `extensions` to narrow it."
             ));
         }
         if too_deep {
@@ -1290,7 +1386,7 @@ pub fn dispatch_search_files(root: &Path, args: &Value) -> McpCallResult {
         text.push_str("\n[stopped at the result cap — narrow the pattern or pass `path` to search a subdirectory]\n");
     } else if hit_file_cap {
         text.push_str(&format!(
-            "\n[stopped after {MAX_SEARCH_FILES} files — pass `path` or `extensions` to narrow the search]\n"
+            "\n[stopped after {MAX_SEARCH_FILES} files or {MAX_FIND_VISITED} entries — pass `path` or `extensions` to narrow the search]\n"
         ));
     } else if too_deep {
         text.push_str(&format!("\n{DEPTH_NOTE}\n"));
@@ -1315,6 +1411,9 @@ pub fn dispatch_write_file(root: &Path, args: &Value) -> McpCallResult {
         Ok(p) => p,
         Err(e) => return err(e),
     };
+    if let Some(e) = not_a_regular_file(&path, rel) {
+        return err(e);
+    }
     let existed = path.exists();
     // Keep an existing file's line endings and encoding: a model rewriting a
     // CRLF file with bare `\n` would otherwise flip every line and drown the
@@ -1381,6 +1480,9 @@ pub fn dispatch_edit_file(root: &Path, args: &Value) -> McpCallResult {
     if path.is_dir() {
         return err(format!("`{}` is a directory, not a file", display_rel(rel)));
     }
+    if let Some(e) = not_a_regular_file(&path, rel) {
+        return err(e);
+    }
     // Size first, as in `read_file`: the whole file is about to be held in
     // memory, and anything past this is a file the model couldn't have read
     // the text to edit from anyway.
@@ -1414,22 +1516,19 @@ pub fn dispatch_edit_file(root: &Path, args: &Value) -> McpCallResult {
     }
     let original = decoded.text;
 
-    // Match on `\n` regardless of what the file uses. `read_file` shows the
-    // model lines without their `\r`, so a multi-line `old_text` copied
-    // from it can never match a CRLF file byte for byte; normalise both
-    // sides, edit, then restore the file's own ending. A CRLF file with a
-    // few stray bare `\n` lines comes out uniformly CRLF — the one case
-    // where this touches lines the model didn't.
-    let crlf = line_ending_of(&original) == "\r\n";
-    let haystack = if crlf {
-        original.replace("\r\n", "\n")
-    } else {
-        original
-    };
+    // Match on `\n` whatever the file uses: `read_file` shows the model
+    // lines without their `\r`, so a multi-line `old_text` copied from it
+    // can't match a CRLF line byte for byte. The search runs over a copy
+    // with every CRLF folded to LF, and each match is mapped back to its
+    // exact bytes in the file, so the edit is spliced into the original —
+    // every line outside it keeps its own ending, even in a file that
+    // mixes them.
+    let folded = FoldedCrlf::new(&original);
     let old_n = old_text.replace("\r\n", "\n");
     let new_n = new_text.replace("\r\n", "\n");
 
-    let hits = haystack.matches(old_n.as_str()).count();
+    let spans: Vec<usize> = folded.text.match_indices(old_n.as_str()).map(|(i, _)| i).collect();
+    let hits = spans.len();
     if hits == 0 {
         return err(format!(
             "`old_text` does not appear in `{}`. Read the file and copy the \
@@ -1437,38 +1536,56 @@ pub fn dispatch_edit_file(root: &Path, args: &Value) -> McpCallResult {
             display_rel(rel)
         ));
     }
-    if hits > 1 && !replace_all {
+    // `match_indices` doesn't count overlapping matches: `}\n}` occurs
+    // twice in `}\n}\n}` but is found once, and the edit would silently
+    // pick the first. Uniqueness has to rule those out too.
+    if !replace_all && (hits > 1 || occurs_again(&folded.text, spans[0], &old_n)) {
         return err(format!(
-            "`old_text` appears {hits} times in `{}`. Include more surrounding \
+            "`old_text` appears {} times in `{}`. Include more surrounding \
              context so it matches exactly once, or pass `replace_all: true`.",
+            hits.max(2),
             display_rel(rel)
         ));
     }
 
-    // Bound the result before building it. `replace` allocates the whole
-    // new text up front, so a short snippet swapped for a long one across
-    // thousands of hits could ask for gigabytes — and a failed allocation
-    // aborts the app, which the panic guard around built-ins can't catch.
-    // `hits` is exactly what `replace` / `replacen` will substitute. The
-    // check on the encoded bytes below stays the precise one.
-    let replaced = if replace_all { hits } else { 1 };
-    let text_growth = new_n
-        .len()
-        .saturating_mul(replaced)
-        .saturating_sub(old_n.len().saturating_mul(replaced));
+    // Bound the result before building it. The replacement is assembled in
+    // full before it's written, so a short snippet swapped for a long one
+    // across thousands of hits could ask for gigabytes — and a failed
+    // allocation aborts the app, which the panic guard around built-ins
+    // can't catch. The new text is counted as if every line break became
+    // CRLF; the check on the encoded bytes below stays the precise one.
+    let chosen = if replace_all { &spans[..] } else { &spans[..1] };
+    let new_max = new_n.len() + new_n.matches('\n').count();
+    let text_growth = new_max
+        .saturating_mul(chosen.len())
+        .saturating_sub(old_n.len().saturating_mul(chosen.len()));
     if text_growth > MAX_WRITE_BYTES {
         return err(too_much_growth(rel, text_growth));
     }
-    let updated = if replace_all {
-        haystack.replace(old_n.as_str(), &new_n)
-    } else {
-        haystack.replacen(old_n.as_str(), &new_n, 1)
-    };
-    let updated = if crlf {
-        updated.replace('\n', "\r\n")
-    } else {
-        updated
-    };
+    let usual_ending = line_ending_of(&original);
+    let mut updated = String::with_capacity(original.len() + text_growth);
+    let mut copied = 0;
+    for &at in chosen {
+        let (start, end) = (folded.original_at(at), folded.original_at(at + old_n.len()));
+        // New lines take the ending of the text they replace, or the file's
+        // usual one when that text had no line break of its own.
+        let replaced = &original[start..end];
+        let ending = if replaced.contains("\r\n") {
+            "\r\n"
+        } else if replaced.contains('\n') {
+            "\n"
+        } else {
+            usual_ending
+        };
+        updated.push_str(&original[copied..start]);
+        if ending == "\r\n" {
+            updated.push_str(&new_n.replace('\n', "\r\n"));
+        } else {
+            updated.push_str(&new_n);
+        }
+        copied = end;
+    }
+    updated.push_str(&original[copied..]);
     let encoded = match encode_for(rel, &updated, enc) {
         Ok(b) => b,
         Err(e) => return err(e),
@@ -1520,7 +1637,8 @@ pub fn dispatch_move_file(root: &Path, args: &Value) -> McpCallResult {
         Ok(p) => p,
         Err(e) => return err(e),
     };
-    let dst = if dst == src {
+    let case_only = dst == src;
+    let dst = if case_only {
         // `to` resolved to `from` itself. On a case-insensitive filesystem
         // (Windows, macOS) that is how a rename changing only case arrives —
         // `readme.md` → `README.md` — and it is allowed: the one entry is
@@ -1536,11 +1654,7 @@ pub fn dispatch_move_file(root: &Path, args: &Value) -> McpCallResult {
             }
         }
     } else if dst.exists() {
-        return err(format!(
-            "`{}` already exists — move_file never overwrites. Delete it first \
-             or pick another name.",
-            display_rel(to)
-        ));
+        return err(already_exists(to));
     } else {
         dst
     };
@@ -1558,17 +1672,89 @@ pub fn dispatch_move_file(root: &Path, args: &Value) -> McpCallResult {
             ));
         }
     }
-    match fs::rename(&src, &dst) {
+    // The check above gives the friendly answer; the rename itself refuses
+    // too, so a file that appears at `to` in the meantime still isn't
+    // overwritten. A case-only rename is the one entry renaming itself.
+    let moved = if case_only {
+        fs::rename(&src, &dst)
+    } else {
+        rename_no_replace(&src, &dst)
+    };
+    match moved {
         Ok(()) => ok(format!(
             "Moved `{}` to `{}`.",
             rel_display(root, &src),
             rel_display(root, &dst)
         )),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => err(already_exists(to)),
         Err(e) => err(format!(
             "couldn't move `{}` to `{}`: {e}",
             display_rel(from),
             display_rel(to)
         )),
+    }
+}
+
+fn already_exists(to: &str) -> String {
+    format!(
+        "`{}` already exists — move_file never overwrites. Delete it first \
+         or pick another name.",
+        display_rel(to)
+    )
+}
+
+/// `fs::rename`, except that an existing `dst` is an `AlreadyExists` error
+/// rather than replaced — atomically, where the platform can: `fs::rename`
+/// replaces a file on every platform, so checking first and renaming after
+/// still let one that appeared in between be overwritten. A filesystem that
+/// can't refuse atomically (some network shares) gets the check-then-rename.
+fn rename_no_replace(src: &Path, dst: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        use windows::core::HSTRING;
+        use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVE_FILE_FLAGS};
+        let (from, to) = (HSTRING::from(src), HSTRING::from(dst));
+        // No MOVEFILE_REPLACE_EXISTING, so an existing `dst` fails.
+        // SAFETY: both strings outlive the call.
+        unsafe { MoveFileExW(&from, &to, MOVE_FILE_FLAGS(0)) }
+            // The HRESULT wraps a Win32 error code in its low 16 bits.
+            .map_err(|e| std::io::Error::from_raw_os_error(e.code().0 & 0xFFFF))
+    }
+    #[cfg(unix)]
+    {
+        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+        {
+            use std::ffi::CString;
+            use std::os::unix::ffi::OsStrExt;
+            let from = CString::new(src.as_os_str().as_bytes())?;
+            let to = CString::new(dst.as_os_str().as_bytes())?;
+            // SAFETY: two NUL-terminated paths that outlive the call.
+            #[cfg(target_os = "linux")]
+            let refused = unsafe {
+                libc::renameat2(
+                    libc::AT_FDCWD,
+                    from.as_ptr(),
+                    libc::AT_FDCWD,
+                    to.as_ptr(),
+                    libc::RENAME_NOREPLACE,
+                )
+            };
+            // SAFETY: as above.
+            #[cfg(target_os = "macos")]
+            let refused =
+                unsafe { libc::renamex_np(from.as_ptr(), to.as_ptr(), libc::RENAME_EXCL) };
+            if refused == 0 {
+                return Ok(());
+            }
+            let e = std::io::Error::last_os_error();
+            if !matches!(e.raw_os_error(), Some(libc::EINVAL | libc::ENOSYS | libc::ENOTSUP)) {
+                return Err(e);
+            }
+        }
+        if dst.symlink_metadata().is_ok() {
+            return Err(std::io::ErrorKind::AlreadyExists.into());
+        }
+        fs::rename(src, dst)
     }
 }
 
@@ -1923,6 +2109,17 @@ mod tests {
         assert_eq!(fs::metadata(&script).unwrap().permissions().mode() & 0o777, 0o755);
     }
 
+    /// No standing grant covers `.git`: hooks and config there run commands.
+    #[test]
+    fn calls_into_a_git_directory_are_recognised() {
+        let (_d, root) = workspace();
+        fs::create_dir_all(root.join(".git/hooks")).unwrap();
+        assert!(touches_git_dir(&root, &json!({ "path": ".git/hooks/pre-commit" })));
+        assert!(touches_git_dir(&root, &json!({ "from": "README.md", "to": ".GIT/config" })));
+        assert!(!touches_git_dir(&root, &json!({ "path": "src/main.rs" })));
+        assert!(!touches_git_dir(&root, &json!({ "path": ".gitignore" })));
+    }
+
     #[test]
     fn write_target_size_tells_a_new_file_from_an_overwrite() {
         let (_d, root) = workspace();
@@ -2108,6 +2305,14 @@ mod tests {
         assert!(r.content_text.contains("No files match"), "{}", r.content_text);
         let r = dispatch_find_files(&root, &json!({ "pattern": "*.rs", "path": "src" }));
         assert!(r.content_text.contains("src/main.rs"));
+        // A slashed pattern matches relative to the root, as described…
+        let r = dispatch_find_files(&root, &json!({ "pattern": "src/*.rs", "path": "src" }));
+        assert!(r.content_text.contains("src/main.rs"), "{}", r.content_text);
+        // …or relative to `path`.
+        fs::create_dir_all(root.join("src/util")).unwrap();
+        fs::write(root.join("src/util/x.rs"), "").unwrap();
+        let r = dispatch_find_files(&root, &json!({ "pattern": "util/*.rs", "path": "src" }));
+        assert!(r.content_text.contains("src/util/x.rs"), "{}", r.content_text);
     }
 
     #[test]
@@ -2257,6 +2462,55 @@ mod tests {
         assert_eq!(fs::read_to_string(root.join("README.md")).unwrap(), "# T\ns line\n");
     }
 
+    /// A file that mixes endings keeps them: the edit is spliced into the
+    /// original bytes, so only the replaced text changes — whichever ending
+    /// the file's first line happens to use.
+    #[test]
+    fn edit_leaves_the_line_endings_outside_it_alone() {
+        let (_d, root) = workspace();
+        // Mostly LF with one CRLF line: a multi-line snippet across that
+        // line still matches, and takes the ending of the text it replaces.
+        fs::write(root.join("mixed.txt"), "a\nb\r\nc\nd\n").unwrap();
+        let r = dispatch_edit_file(
+            &root,
+            &json!({ "path": "mixed.txt", "old_text": "b\nc", "new_text": "B\nC" }),
+        );
+        assert!(!r.is_error, "{}", r.content_text);
+        assert_eq!(fs::read_to_string(root.join("mixed.txt")).unwrap(), "a\nB\r\nC\nd\n");
+
+        // First line CRLF, the rest LF: a one-word edit changes one word,
+        // not every line ending in the file.
+        fs::write(root.join("first.txt"), "x\r\ny\nz\n").unwrap();
+        let r = dispatch_edit_file(
+            &root,
+            &json!({ "path": "first.txt", "old_text": "z", "new_text": "Z" }),
+        );
+        assert!(!r.is_error, "{}", r.content_text);
+        assert_eq!(fs::read_to_string(root.join("first.txt")).unwrap(), "x\r\ny\nZ\n");
+    }
+
+    #[test]
+    fn line_ending_of_goes_by_majority() {
+        assert_eq!(line_ending_of("a\r\nb\nc\nd\n"), "\n");
+        assert_eq!(line_ending_of("a\nb\r\nc\r\n"), "\r\n");
+        assert_eq!(line_ending_of("no break"), "\n");
+    }
+
+    /// `}\n}` occurs twice in `}\n}\n}`, overlapping — one `match_indices`
+    /// hit, but not a unique one.
+    #[test]
+    fn an_overlapping_second_match_makes_an_edit_ambiguous() {
+        let (_d, root) = workspace();
+        fs::write(root.join("braces.txt"), "}\n}\n}\n").unwrap();
+        let r = dispatch_edit_file(
+            &root,
+            &json!({ "path": "braces.txt", "old_text": "}\n}", "new_text": "} // end" }),
+        );
+        assert!(r.is_error, "{}", r.content_text);
+        assert!(r.content_text.contains("times"), "{}", r.content_text);
+        assert_eq!(fs::read_to_string(root.join("braces.txt")).unwrap(), "}\n}\n}\n");
+    }
+
     #[test]
     fn ambiguous_edit_is_refused_rather_than_guessed() {
         let (_d, root) = workspace();
@@ -2329,6 +2583,21 @@ mod tests {
 
         let missing = dispatch_move_file(&root, &json!({ "from": "nope.txt", "to": "x.txt" }));
         assert!(missing.is_error);
+    }
+
+    /// The rename itself refuses an existing target — not only the check
+    /// before it, which a file appearing in between would slip past.
+    #[test]
+    fn the_rename_itself_never_replaces_a_file() {
+        let (_d, root) = workspace();
+        let err = rename_no_replace(&root.join("README.md"), &root.join("src/main.rs"))
+            .expect_err("an existing target must be refused");
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        assert!(root.join("README.md").exists());
+        assert!(fs::read_to_string(root.join("src/main.rs")).unwrap().contains("fn main"));
+
+        rename_no_replace(&root.join("README.md"), &root.join("NOTES.md")).expect("free target");
+        assert!(root.join("NOTES.md").exists() && !root.join("README.md").exists());
     }
 
     #[test]
@@ -2639,6 +2908,41 @@ mod tests {
 
     fn cp1250(s: &str) -> Vec<u8> {
         encoding_rs::WINDOWS_1250.encode(s).0.into_owned()
+    }
+
+    /// The encoding note quotes the path, and its length used to come off
+    /// the output budget unchecked: a path padded with spaces (trimmed away
+    /// before it's resolved) underflowed it — a panic in debug, and the
+    /// whole file returned uncapped in release.
+    #[test]
+    fn a_padded_path_cannot_blow_the_read_budget() {
+        let (_d, root) = workspace();
+        let body: String = (0..3000).map(|i| format!("wiersz {i} zażółć\n")).collect();
+        fs::write(root.join("pl.txt"), cp1250(&body)).unwrap();
+        let padded = format!("pl.txt{}", " ".repeat(40_000));
+        let r = dispatch_read_file(&root, &json!({ "path": padded }));
+        assert!(!r.is_error, "{}", r.content_text);
+        assert!(r.content_text.len() <= MAX_READ_OUTPUT_BYTES + 1024, "{}", r.content_text.len());
+        assert!(r.content_text.contains("start_line"), "a long file still pages");
+    }
+
+    /// Opening a FIFO blocks until something writes to it; the tools must
+    /// refuse one rather than hang.
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_is_refused_rather_than_opened() {
+        use std::os::unix::ffi::OsStrExt;
+        let (_d, root) = workspace();
+        let fifo = root.join("pipe");
+        let c = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        // SAFETY: a NUL-terminated path that outlives the call.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0, "mkfifo");
+        let r = dispatch_read_file(&root, &json!({ "path": "pipe" }));
+        assert!(r.is_error && r.content_text.contains("not a regular file"), "{}", r.content_text);
+        let e = dispatch_edit_file(&root, &json!({ "path": "pipe", "old_text": "a", "new_text": "b" }));
+        assert!(e.is_error, "{}", e.content_text);
+        let w = dispatch_write_file(&root, &json!({ "path": "pipe", "content": "x" }));
+        assert!(w.is_error, "{}", w.content_text);
     }
 
     /// A Windows-1250 file used to read as replacement characters, fail every

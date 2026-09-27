@@ -165,8 +165,10 @@ function ApprovalCard({ call }: { call: ToolCallRecord }) {
           className={cn("mt-px h-3.5 w-3.5 shrink-0", destructive ? "text-red-500" : "text-amber-500")}
         />
         {/* Wraps rather than truncates: for a write or an edit the path is
-            here, and a cut-off path hides exactly the file name. */}
-        <span className="min-w-0 [overflow-wrap:anywhere]">
+            here, and a cut-off path hides exactly the file name. An alert,
+            so a screen reader announces the question when the card
+            appears — the reply is stalled until it is answered. */}
+        <span role="alert" className="min-w-0 [overflow-wrap:anywhere]">
           {preview ? (
             <>Allow the model to {preview.title}?</>
           ) : (
@@ -273,7 +275,10 @@ function ToolCallItem({ call }: { call: ToolCallRecord }) {
         <div className="mt-2 space-y-2 pl-5">
           {preview ? (
             <div>
-              <div className="text-[10.5px] uppercase tracking-wider text-foreground/40">
+              {/* Not uppercased: the title carries a path, and `README.md`
+                  and `readme.md` are different files on a case-sensitive
+                  filesystem. */}
+              <div className="text-[10.5px] text-foreground/45 [overflow-wrap:anywhere]">
                 {preview.title}
               </div>
               {preview.body}

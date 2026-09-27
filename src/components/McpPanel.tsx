@@ -281,6 +281,21 @@ function parseKvLines(text: string, separators: string[]): Record<string, string
   return out;
 }
 
+/** The first non-blank line `parseKvLines` would drop — no separator, or
+ *  nothing before it — so a save can say so rather than lose it. */
+function unparsedKvLine(text: string, separators: string[]): string | null {
+  for (const line of text.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const at = separators
+      .map((ch) => trimmed.indexOf(ch))
+      .filter((i) => i !== -1)
+      .reduce((a, b) => Math.min(a, b), Infinity);
+    if (!(at > 0 && at !== Infinity)) return trimmed;
+  }
+  return null;
+}
+
 function kvToLines(map: Record<string, string>, sep: string): string {
   return Object.entries(map)
     .map(([k, v]) => `${k}${sep}${v}`)
@@ -318,6 +333,10 @@ function McpEditor({ initial, onCancel, onSaved }: EditorProps) {
       enabled,
     };
     if (transport === "stdio") {
+      const bad = unparsedKvLine(envText, ["="]);
+      if (bad !== null) {
+        throw new Error(`Environment line “${bad}” needs NAME=value.`);
+      }
       return {
         ...base,
         command: command.trim(),
@@ -328,6 +347,10 @@ function McpEditor({ initial, onCancel, onSaved }: EditorProps) {
         // `=` only: an env value routinely contains `:` (paths, URLs).
         env: parseKvLines(envText, ["="]),
       };
+    }
+    const bad = unparsedKvLine(headersText, [":", "="]);
+    if (bad !== null) {
+      throw new Error(`Header line “${bad}” needs Name: value.`);
     }
     return {
       ...base,
@@ -470,8 +493,8 @@ function McpEditor({ initial, onCancel, onSaved }: EditorProps) {
               placeholder={"-y\n@modelcontextprotocol/server-filesystem\nC:\\Users\\you\\Documents"}
             />
             <p className="mt-1.5 text-[11px] text-foreground/50">
-              One argument per line — no shell quoting needed, spaces are
-              kept as typed.
+              One argument per line — no shell quoting needed. Spaces inside
+              an argument are kept; only the ends of each line are trimmed.
             </p>
           </div>
 

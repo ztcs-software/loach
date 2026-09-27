@@ -1,13 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ollamaListModels, ollamaProbe, openaiListModels } from "./tauri";
 import { useSettingsStore } from "@/stores/settingsStore";
-import type { ModelInfo } from "@/types";
+import { DEFAULT_SETTINGS, type ModelInfo } from "@/types";
 
 /**
  * Load the installed model lists for both providers, for a model picker.
  *
  * Probes Ollama first (so a dead server shows as down rather than as an empty
- * list) and only asks the OpenAI-compatible endpoint when a key is set.
+ * list) and asks the OpenAI-compatible endpoint when a key is set or the base
+ * URL points somewhere other than the public default — the same rule as the
+ * Models tab, since a local server (llama-server, LM Studio) needs no key.
  * Refreshes itself once the settings store hydrates, re-runs whenever a base
  * URL or the key-set flag changes, and re-runs once more when onboarding
  * finishes.
@@ -50,7 +52,12 @@ export function useProviderModels() {
         } else {
           setOllamaModels([]);
         }
-        if (openaiKeySet) {
+        // A key, or a server of the user's own: local ones (llama-server,
+        // LM Studio, vLLM) take no key, and gating on the key alone hid
+        // their models here while the Models tab listed them.
+        const wantOpenai =
+          openaiKeySet || openaiBaseUrl !== DEFAULT_SETTINGS.openai_base_url;
+        if (wantOpenai) {
           const m = await openaiListModels(openaiBaseUrl).catch(() => []);
           if (id !== reqId.current) return;
           setOpenaiModels(m);
@@ -58,8 +65,8 @@ export function useProviderModels() {
           // Clear, don't just skip. Removing the key flips `openai_key_set`,
           // which re-runs this — but without an else the last list survived for
           // the component's lifetime, and the pickers render it whether or not
-          // a key is set. Picking one of those pinned the session to a provider
-          // that can only fail at send time with an auth error. Functional so
+          // it can be reached. Picking one of those pinned the session to a
+          // provider that can only fail at send time with an auth error. Functional so
           // an already-empty list keeps its identity: this branch runs on every
           // keyless refresh, and a fresh `[]` re-rendered each picker for nothing.
           setOpenaiModels((prev) => (prev.length === 0 ? prev : []));

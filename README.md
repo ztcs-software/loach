@@ -71,7 +71,7 @@ Behind a calm, beautifully crafted UI sits a rich feature set - ready when you n
 - **Workspace folders** - give a chat a folder and the model can list, find, read, search and edit the files in it, asking before it writes, edits, moves or deletes anything unless you allow that for the chat. A `LOACHFILE.md` at the folder root adds the project's own instructions to every turn.
 - **MCP support** - register Model Context Protocol servers over Streamable HTTP or as local stdio processes (`npx`, `uvx`, …), test the handshake, inspect the tools they provide, and approve each tool call in the chat before it runs. 
 - **Web fetch** - add URLs to messages and they will be fetched, sanitized and inlined to context. 
-- **Temporal awareness** - inject current date, time, weekday and timezone into the system prompt so models can answer to "what day is it today?".
+- **Temporal awareness** - inject current date, weekday and timezone into the system prompt so models can answer to "what day is it today?".
 
 #### Viewing content
 - **Code canvas** - open any code block in a wider view that's resizable and updates live as the model streams, with copy, export and Open in VS Code actions.
@@ -230,7 +230,7 @@ Only one OpenAI-compatible endpoint is active at a time — switch the base URL 
 
 | What | Where |
 |---|---|
-| Chats, messages, folders, spaces (instructions, reference sources, memories), snippets, snippet variables and saved fill-ins, MCP servers (including their headers and environment variables, in plain text), app settings | SQLite at `<app-data-dir>/loach.db` |
+| Chats, messages, folders, spaces (instructions, reference sources, memories), global memories, snippets, snippet variables and saved fill-ins, MCP servers (including their headers and environment variables, in plain text), app settings | SQLite at `<app-data-dir>/loach.db` |
 | OpenAI API key | OS credential manager (Windows Credential Manager / Linux Secret Service / macOS Keychain) |
 | App-lock hash + hint | OS credential manager — same store, separate entry |
 | Attached files (images, text) | Inlined into the message at send time; no separate file store |

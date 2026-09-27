@@ -9,14 +9,19 @@
 /**
  * Cap on how many memories go into a prompt — both the block the chat
  * model sees on every turn and the EXISTING MEMORIES list the extractor
- * dedupes against. The same number in both places on purpose: the
+ * dedupes against. The same selection in both places on purpose: the
  * extractor can only update or retire a memory it was shown, so showing the
  * chat model a wider window than the extractor would let stale facts ride
- * along that the extractor can never correct. Picked to fit comfortably
- * even in tiny 2K-context Ollama builds when the rest of the prompt is
- * small.
+ * along that the extractor can never correct.
  */
 export const MAX_MEMORIES_IN_PROMPT = 60;
+
+/**
+ * …and on how much text they add up to, since a fact typed by hand has no
+ * length limit. About 1,500 tokens per list — global and Space memory each
+ * get one — so a long list can't crowd a small context window.
+ */
+export const MAX_MEMORY_PROMPT_CHARS = 6_000;
 
 /** Longest fact we accept from the extractor. The prompt asks for one-liners;
  *  an entire paragraph is almost always the model leaking context. */
@@ -31,17 +36,28 @@ export interface ExtractionPayload {
 }
 
 /**
- * Pick the memories that go into a prompt when a scope holds more than the
- * cap: the newest `cap` rows, still in chronological order so the model
- * reads them the same way the Memory tab lists them. Under the cap the
- * input is returned as-is.
+ * Pick the memories that go into a prompt: the newest rows that fit both
+ * `cap` and `charBudget`, still in chronological order so the model reads
+ * them the same way the Memory tab lists them. Input that fits is returned
+ * as-is. The newest row always goes in, however long.
  */
-export function selectMemoriesForPrompt<T extends { created_at: number }>(
+export function selectMemoriesForPrompt<T extends { created_at: number; content: string }>(
   rows: T[],
   cap: number = MAX_MEMORIES_IN_PROMPT,
+  charBudget: number = MAX_MEMORY_PROMPT_CHARS,
 ): T[] {
-  if (rows.length <= cap) return rows;
-  return [...rows].sort((a, b) => a.created_at - b.created_at).slice(-cap);
+  const total = rows.reduce((n, r) => n + r.content.length, 0);
+  if (rows.length <= cap && total <= charBudget) return rows;
+  const newestFirst = [...rows].sort((a, b) => b.created_at - a.created_at);
+  const kept: T[] = [];
+  let used = 0;
+  for (const r of newestFirst) {
+    if (kept.length >= cap) break;
+    if (kept.length > 0 && used + r.content.length > charBudget) break;
+    kept.push(r);
+    used += r.content.length;
+  }
+  return kept.reverse();
 }
 
 /**
@@ -125,8 +141,10 @@ export function buildExtractorSystemPrompt(
  */
 export function parseExtractionJson(raw: string): ExtractionPayload | null {
   if (!raw) return null;
-  // Strip common code-fence patterns first.
-  let cleaned = raw.trim();
+  // A reasoning model may think out loud first — the providers pass
+  // `<think>` through — and what it weighed isn't its answer. Then strip
+  // common code-fence patterns.
+  let cleaned = raw.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
   cleaned = cleaned.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "");
 
   // Try a direct parse before scanning for embedded JSON — fast path for
@@ -134,20 +152,19 @@ export function parseExtractionJson(raw: string): ExtractionPayload | null {
   const direct = tryParse(cleaned);
   if (direct) return direct;
 
-  // Scan for the first balanced `{...}` block that parses. Braces inside
-  // string values are rare enough in one-line facts to ignore.
-  const start = cleaned.indexOf("{");
-  if (start === -1) return null;
-  let depth = 0;
-  for (let i = start; i < cleaned.length; i++) {
-    const c = cleaned[i];
-    if (c === "{") depth++;
-    else if (c === "}") {
-      depth--;
-      if (depth === 0) {
-        const slice = cleaned.slice(start, i + 1);
-        const parsed = tryParse(slice);
+  // Scan for the first balanced `{...}` block that parses, trying every
+  // `{` as a start — a brace in prose ahead of the object (`Format: {x} ->
+  // {…}`) must not sink it. Braces inside string values are rare enough in
+  // one-line facts to ignore.
+  for (let start = cleaned.indexOf("{"); start !== -1; start = cleaned.indexOf("{", start + 1)) {
+    let depth = 0;
+    for (let i = start; i < cleaned.length; i++) {
+      const c = cleaned[i];
+      if (c === "{") depth++;
+      else if (c === "}" && --depth === 0) {
+        const parsed = tryParse(cleaned.slice(start, i + 1));
         if (parsed) return parsed;
+        break;
       }
     }
   }
@@ -196,6 +213,9 @@ function tryParse(s: string): ExtractionPayload | null {
  *  is spelled out first, so C#, C++ and C don't all collapse to "c". */
 export function normalize(s: string): string {
   return s
+    // One form per character: a decomposed "café" (e + combining accent)
+    // must compare equal to the composed one.
+    .normalize("NFKC")
     .toLowerCase()
     .replace(/([\p{L}\p{N}])([#+]+)/gu, (_, ch: string, marks: string) =>
       ch + marks.replace(/#/g, "sharp").replace(/\+/g, "plus"),
@@ -207,10 +227,12 @@ export function normalize(s: string): string {
 
 /**
  * Local dedupe layer that runs after the model has done its own pass. Both
- * inputs are `normalize`d. Two bag-of-words checks — exact match, and
- * Jaccard token overlap above 0.75 or strict containment (catches
- * phrasing-only differences like "Lives in Warsaw" vs. "User lives in
- * Warsaw, Poland.") — confirmed by a word-ORDER check: a bag of words
+ * inputs are `normalize`d. Two checks — exact match, and Jaccard token
+ * overlap above 0.75 or the candidate appearing whole, as a phrase, inside
+ * an existing memory (catches phrasing-only differences like "Lives in
+ * Warsaw" vs. "User lives in Warsaw, Poland."; as a phrase, because loose
+ * words would make "Has a dog" a copy of "Has a cat and wants a dog") —
+ * confirmed by a word-ORDER check: a bag of words
  * can't tell "Prefers TypeScript over JavaScript" from its reversal, so a
  * candidate only counts as a duplicate when at least half of its adjacent
  * word pairs also appear in the existing memory. A negated fact is never a
@@ -236,7 +258,7 @@ export function isDuplicate(candidate: string, existing: string[]): boolean {
     const jaccard = union === 0 ? 0 : intersect / union;
     const bagMatch =
       jaccard >= 0.75 ||
-      (intersect === candTokens.size && candTokens.size >= 3);
+      (candTokens.size >= 3 && ` ${ex} `.includes(` ${candidate} `));
     if (!bagMatch) continue;
 
     // Sentences too short to have word pairs fall back to the bag result.

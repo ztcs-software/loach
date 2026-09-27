@@ -41,6 +41,20 @@ describe("isDuplicate", () => {
     expect(isDuplicate("uses neovim as the main editor", existing)).toBe(false);
   });
 
+  // Every word of these appears in the existing memory, but not as the
+  // phrase — they are new facts, not copies.
+  it("does not flag a short fact whose words are scattered through a longer one", () => {
+    const dup = (a: string, b: string) => isDuplicate(normalize(a), [normalize(b)]);
+    expect(dup("Has a dog", "Has a cat and wants a dog")).toBe(false);
+    expect(dup("Lives in Berlin", "Lives in Warsaw but plans to move to Berlin")).toBe(false);
+  });
+
+  it("treats composed and decomposed accents as the same text", () => {
+    expect(isDuplicate(normalize("Likes café au lait"), [normalize("Likes café au lait")])).toBe(
+      true,
+    );
+  });
+
   it("does NOT flag a negated fact as a duplicate of its positive form", () => {
     // Both directions, English and Polish, including a contraction — the
     // correction used to be dropped, keeping the fact it contradicts.
@@ -135,6 +149,15 @@ describe("parseExtractionJson", () => {
     });
   });
 
+  it("finds the object after a brace in prose, or after a think block", () => {
+    expect(
+      parseExtractionJson('Format: {x} -> {"add":["Likes tea"],"update":[],"remove":[]}')?.add,
+    ).toEqual(["Likes tea"]);
+    expect(
+      parseExtractionJson('<think>{"answer": 1} maybe</think>\n{"add":["Owns a bike"]}')?.add,
+    ).toEqual(["Owns a bike"]);
+  });
+
   it("returns null for prose or unrelated JSON", () => {
     expect(parseExtractionJson("")).toBeNull();
     expect(parseExtractionJson("Nothing to remember here.")).toBeNull();
@@ -143,7 +166,7 @@ describe("parseExtractionJson", () => {
 });
 
 describe("selectMemoriesForPrompt", () => {
-  const row = (id: number, created_at: number) => ({ id, created_at });
+  const row = (id: number, created_at: number, content = "fact") => ({ id, created_at, content });
 
   it("returns the input untouched when under the cap", () => {
     const rows = [row(1, 10), row(2, 20)];
@@ -153,6 +176,16 @@ describe("selectMemoriesForPrompt", () => {
   it("keeps the newest rows, in chronological order, when over the cap", () => {
     const rows = [row(1, 10), row(4, 40), row(2, 20), row(3, 30)];
     expect(selectMemoriesForPrompt(rows, 2).map((r) => r.id)).toEqual([3, 4]);
+  });
+
+  // A fact typed by hand has no length limit, so a count alone doesn't
+  // bound what the prompt carries.
+  it("also stops at the character budget, newest first", () => {
+    const long = "x".repeat(400);
+    const rows = [row(1, 10, long), row(2, 20, long), row(3, 30, long)];
+    expect(selectMemoriesForPrompt(rows, 60, 1_000).map((r) => r.id)).toEqual([2, 3]);
+    // The newest row always goes in, however long.
+    expect(selectMemoriesForPrompt([row(9, 1, "y".repeat(5_000))], 60, 1_000)).toHaveLength(1);
   });
 });
 

@@ -23,7 +23,8 @@ use crate::mcp::{McpCallResult, McpToolDef};
 /// Hard ceiling on a single built-in tool call. Built-ins are pure CPU and
 /// should return in well under a second; this only exists so a pathological
 /// model-supplied input (e.g. a giant `diff_text`) can't pin a worker
-/// indefinitely.
+/// indefinitely. The workspace tools that change files are exempt — see
+/// [`dispatch_builtin_guarded`].
 const BUILTIN_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Synthetic `server_id` stamped on every built-in [`McpToolDef`]. The
@@ -145,7 +146,7 @@ const BUILTINS: &[Builtin] = &[
         input_schema: super::pdf::input_schema,
         dispatch: Dispatch::Pure(super::pdf::dispatch),
     },
-    // Workspace filesystem tools. All five share one settings toggle and one
+    // Workspace filesystem tools. All eight share one settings toggle and one
     // extra gate the rows above don't have: they are only offered when the
     // chat has a workspace root. See `tools/fs.rs`.
     Builtin {
@@ -284,15 +285,21 @@ pub async fn dispatch_builtin_guarded(
     // matters here in the first place: they are the only built-ins that do
     // real I/O rather than pure CPU work.
     let root_owned: Option<PathBuf> = workspace_root.map(|p| p.to_path_buf());
-    let outcome = tokio::time::timeout(
-        BUILTIN_TIMEOUT,
-        tokio::task::spawn_blocking(move || {
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                dispatch_builtin(&name_owned, &args_owned, root_owned.as_deref())
-            }))
-        }),
-    )
-    .await;
+    let task = tokio::task::spawn_blocking(move || {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            dispatch_builtin(&name_owned, &args_owned, root_owned.as_deref())
+        }))
+    });
+    // A write, edit, move or delete runs to the end. The blocking task can't
+    // be stopped once started, so a timeout would only tell the model the
+    // change failed while it still landed on disk — and a retry would apply
+    // it twice. Each touches one bounded file, so the wait is short unless
+    // the disk itself is stuck.
+    let outcome = if crate::tools::fs::requires_approval(name) {
+        Ok(task.await)
+    } else {
+        tokio::time::timeout(BUILTIN_TIMEOUT, task).await
+    };
 
     let error_result = |msg: String| {
         Some(McpCallResult {
@@ -327,7 +334,7 @@ pub async fn dispatch_builtin_guarded(
 /// Every settings key managed by this module. `commands::set_setting`
 /// uses this to whitelist writes without listing the keys by hand.
 ///
-/// Keys repeat — the five workspace tools share one — but every consumer
+/// Keys repeat — the eight workspace tools share one — but every consumer
 /// is a membership test, so deduplicating would cost more than it saves.
 pub fn setting_keys() -> impl Iterator<Item = &'static str> {
     BUILTINS.iter().map(|b| b.setting_key)
@@ -351,7 +358,7 @@ mod tests {
     }
 
     /// One toggle per tool, with the workspace group as the single
-    /// deliberate exception: those five rows are one capability and share
+    /// deliberate exception: those eight rows are one capability and share
     /// `fs::SETTING_KEY`.
     #[test]
     fn setting_keys_are_unique_outside_the_workspace_group() {

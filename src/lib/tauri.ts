@@ -826,16 +826,20 @@ export function addSpaceMemory(args: {
   content: string;
   source_session_id?: string | null;
   source_message_id?: string | null;
+  /** Undo of a removal: put the memory back under its old id and creation
+   *  time, so it returns to its place rather than as the newest fact. */
+  restore_id?: string;
+  restore_created_at?: number;
 }): Promise<SpaceMemory> {
   if (!isTauri) {
     const now = Date.now();
     return notInTauri<SpaceMemory>({
-      id: mockId("mock-mem"),
+      id: args.restore_id ?? mockId("mock-mem"),
       space_id: args.space_id,
       content: args.content,
       source_session_id: args.source_session_id ?? null,
       source_message_id: args.source_message_id ?? null,
-      created_at: now,
+      created_at: args.restore_created_at ?? now,
       updated_at: now,
     });
   }
@@ -848,16 +852,17 @@ export function updateSpaceMemory(args: {
    *  space. Same defense-in-depth shape as `updateMessage`. */
   space_id: string;
   content: string;
-}): Promise<void> {
-  if (!isTauri) return notInTauri(undefined);
+}): Promise<boolean> {
+  if (!isTauri) return notInTauri(true);
   return invoke("update_space_memory", { args });
 }
 
+/** `false` when the memory was already gone. */
 export function removeSpaceMemory(args: {
   id: string;
   space_id: string;
-}): Promise<void> {
-  if (!isTauri) return notInTauri(undefined);
+}): Promise<boolean> {
+  if (!isTauri) return notInTauri(true);
   return invoke("remove_space_memory", { args });
 }
 
@@ -872,31 +877,37 @@ export function addGlobalMemory(args: {
   content: string;
   source_session_id?: string | null;
   source_message_id?: string | null;
+  /** Undo of a removal: put the memory back under its old id and creation
+   *  time, so it returns to its place rather than as the newest fact. */
+  restore_id?: string;
+  restore_created_at?: number;
 }): Promise<GlobalMemory> {
   if (!isTauri) {
     const now = Date.now();
     return notInTauri<GlobalMemory>({
-      id: mockId("mock-gmem"),
+      id: args.restore_id ?? mockId("mock-gmem"),
       content: args.content,
       source_session_id: args.source_session_id ?? null,
       source_message_id: args.source_message_id ?? null,
-      created_at: now,
+      created_at: args.restore_created_at ?? now,
       updated_at: now,
     });
   }
   return invoke("add_global_memory", { args });
 }
 
+/** `false` when the memory was already gone. */
 export function updateGlobalMemory(args: {
   id: string;
   content: string;
-}): Promise<void> {
-  if (!isTauri) return notInTauri(undefined);
+}): Promise<boolean> {
+  if (!isTauri) return notInTauri(true);
   return invoke("update_global_memory", { args });
 }
 
-export function removeGlobalMemory(args: { id: string }): Promise<void> {
-  if (!isTauri) return notInTauri(undefined);
+/** `false` when the memory was already gone. */
+export function removeGlobalMemory(args: { id: string }): Promise<boolean> {
+  if (!isTauri) return notInTauri(true);
   return invoke("remove_global_memory", { args });
 }
 
@@ -1053,6 +1064,15 @@ export async function startChatStream(
     },
     unlisten,
   };
+}
+
+/** Stop every chat stream the backend is still running. Called once at
+ *  startup: after a window reload nothing is listening to a stream begun
+ *  before it, and one left alone would carry on unseen — through its
+ *  approval prompts, and through any tool the chat was allowed to use. */
+export async function chatCancelAll(): Promise<void> {
+  if (!isTauri) return;
+  await invoke("chat_cancel_all");
 }
 
 export function makeRequestId(): string {

@@ -144,9 +144,11 @@ sysinfo = { version = "0.38", default-features = false, features = ["system", "d
 #
 # `Win32_System_JobObjects` + `Win32_Security` (for `CreateJobObjectW`'s
 # signature) put each stdio MCP server in a job, so stopping the server stops
-# every process it started — see `mcp/stdio.rs`.
+# every process it started — see `mcp/stdio.rs`. `Win32_Storage_FileSystem`
+# is for `MoveFileExW`, the rename behind `move_file` that refuses to
+# overwrite (`tools/fs.rs`).
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D12", "Win32_System_JobObjects", "Win32_Security"] }
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D12", "Win32_System_JobObjects", "Win32_Security", "Win32_Storage_FileSystem"] }
 
 # `killpg` for the same purpose on macOS / Linux: a stdio MCP server runs in
 # its own process group and the whole group is stopped with it. Already in

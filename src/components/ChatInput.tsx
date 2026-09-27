@@ -413,6 +413,19 @@ export function ChatInput({ centered = false }: ChatInputProps) {
     }
   };
 
+  const removeWorkspace = async () => {
+    if (!activeSessionId) return;
+    setError(null);
+    try {
+      await clearWorkspace(activeSessionId);
+    } catch (e) {
+      logger.error("workspace remove failed", e);
+      setError(
+        `Couldn't remove the folder: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+  };
+
   const onPick = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!e.target.files) return;
     await ingest(Array.from(e.target.files));
@@ -871,7 +884,7 @@ export function ChatInput({ centered = false }: ChatInputProps) {
               locked={streamingThisChat}
               hidden={dragging}
               onOpen={() => void openWorkspace()}
-              onRemove={() => void clearWorkspace(activeSessionId)}
+              onRemove={() => void removeWorkspace()}
             />
           )}
 

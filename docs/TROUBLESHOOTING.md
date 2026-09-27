@@ -21,7 +21,7 @@ dropdown is empty even though `ollama list` works in a terminal.
    needs to be active; on Linux, the `ollama` service must be started; on
    macOS, launch the Ollama menu-bar app or run `ollama serve` from a
    terminal.
-2. Open **Settings → Providers → Ollama** and check the **Base URL**.
+2. Open **Settings → Providers** and check the **Ollama base URL**.
    The default is `http://localhost:11434`. If you run Ollama on another
    machine or a custom port, change it here.
 3. Click **Refresh** in the Models tab. The list re-queries Ollama's
@@ -36,20 +36,29 @@ dropdown is empty even though `ollama list` works in a terminal.
 
 **Solution.**
 
-1. Re-enter the key in **Settings → Providers → OpenAI**. Keys are stored
-   in the operating system's credential store, not on disk, so a copy-paste
-   that picked up a trailing space will silently fail.
+1. Re-enter the key under **OpenAI API key** in **Settings → Providers**.
+   Keys are stored in the operating system's credential store, not on
+   disk. Leading and trailing spaces are trimmed before saving, so a
+   sloppy copy-paste isn't the problem — a truncated one can be.
 2. Confirm the key is active on your OpenAI dashboard and has not been
    rotated.
 3. If you're using a custom OpenAI-compatible endpoint (vLLM, LM Studio,
-   LiteLLM, OpenRouter, Groq), make sure the **Base URL** ends with `/v1`
-   and that the endpoint accepts the same `Authorization: Bearer …` header
-   the real OpenAI API uses.
+   LiteLLM, OpenRouter, Groq), make sure the **API base URL** is the one
+   its docs give — usually ending in `/v1` (LiteLLM's is
+   `http://localhost:4000`; the presets dropdown next to the field fills
+   in the common ones) — and that the endpoint accepts the same
+   `Authorization: Bearer …` header the real OpenAI API uses.
+4. A server on another machine reached over plain `http://` never gets the
+   key: Loach only sends it over `https://`, or over `http://` to this
+   computer, so it can't be read off the network. Put the server behind
+   HTTPS, or turn off its key requirement if it's on a network you trust.
 
 ### Key won't save on Linux
 
-**Problem.** The OpenAI key field clears every time you reopen Settings, or
-saving the key throws an error.
+**Problem.** Saving the OpenAI key throws an error, or when you reopen
+Settings the key field shows the `sk-…` placeholder instead of
+`•••••••• (stored)`. (The field itself is always blank — a saved key is
+never shown back.)
 
 **Solution.** Loach uses the system Secret Service to store secrets. On
 minimal Linux installs (server-style, some tiling window managers) there is
@@ -92,13 +101,14 @@ If another chat is busy, your message is parked in a FIFO queue.
 
 ### The reply stopped halfway and shows an error
 
-**Problem.** A streaming reply was cancelled or errored, and the bubble
-ends with a red error line.
+**Problem.** A streaming reply errored, and the bubble ends with an italic
+error line starting with ⚠.
 
 **Solution.** Whatever streamed before the failure is kept — open the
 message's `…` menu and use **Copy message** if you want to preserve it. To get a
 full answer, send the same prompt again, or click **Regenerate** if it's
-visible. If errors repeat, see the connection or VRAM sections below.
+visible. If errors repeat, see the connection section above or the VRAM
+section below.
 
 ### I see no "thinking" trace even though the model supports reasoning
 
@@ -113,8 +123,8 @@ above the answer.
    it doesn't, the Thinking row in the Parameters sidebar is disabled with
    "This model doesn't support a thinking step". Many tags of the same base
    model differ on this.
-3. Thinking is **Ollama-only**. OpenAI providers ignore the toggle even
-   when it's on.
+3. Thinking is **Ollama-only**. In a chat on an OpenAI-compatible
+   provider the toggle is disabled and reads off.
 
 ### A formula shows as raw TeX instead of rendering
 
@@ -151,13 +161,14 @@ includes any queueing or model-load time.
 
 **Problem.** The model is technically responding but the quality is poor.
 
-**Solution.** Open the **Parameters** sidebar:
+**Solution.** Open the **Parameters** sidebar. **Temperature**, **Max
+Tokens** and **Repeat Penalty** only appear in its **Advanced** view:
 
-- Lower **temperature** for more focused answers, raise it for more variety.
-- Raise **max tokens** if the answer keeps cutting off.
-- Raise **num_ctx** if the model is forgetting earlier turns. Higher
-  num_ctx uses more VRAM.
-- Increase **repeat_penalty** (try 1.1–1.3) if the model loops.
+- Lower **Temperature** for more focused answers, raise it for more variety.
+- Raise **Max Tokens** if the answer keeps cutting off.
+- Raise **Context Length** if the model is forgetting earlier turns. A
+  longer context uses more VRAM.
+- Increase **Repeat Penalty** (try 1.1–1.3) if the model loops.
 - Click **Reset to defaults** (or **Reset to model defaults**) at the bottom
   of the panel to discard per-chat overrides and fall back to the model's
   defaults.
@@ -178,7 +189,7 @@ error.
    and a leaner KV cache.
 2. Lower **Context Length** in the same panel — a smaller context window
    uses dramatically less VRAM.
-3. Lower the **GPU layer count** (Advanced view) to push more of the model
+3. Lower **GPU Layers** (Advanced view) to push more of the model
    onto CPU/RAM at the cost of speed.
 4. Pick a smaller quantization (for example `q4_K_M` instead of `q8_0`)
    or a smaller parameter size.
@@ -219,7 +230,8 @@ runtime memory figures to size against.
 **Solution.**
 
 - In **Settings → Appearance**, switch the theme from **Aurora** to
-  **Solid**. Aurora's animated gradient is heavy on weak GPUs.
+  **Solid**. Aurora's heavily blurred gradient and translucent panels are
+  heavy on weak GPUs.
 - Close very long chats while testing — extremely long transcripts cost
   more to re-render on every token.
 
@@ -253,8 +265,9 @@ Ollama 0.5+:
 - **`OLLAMA_KEEP_ALIVE=30m`** (or `-1` for "until unloaded") — how long Ollama
   keeps a model resident after a request, so a reply after a pause skips the
   cold reload. Loach also exposes this under **Settings → Features → Keep
-  model loaded** (5 min, 30 min, 1 hour, Always), which is sent with every
-  request and overrides the env default.
+  model loaded** (5 min, 30 min, 1 hour, Always). Until you pick an option
+  there, Loach sends nothing and this env default applies; once you pick
+  one, it's sent with every request and overrides the env default.
 - **`OLLAMA_NUM_PARALLEL=1`** — caps concurrent requests per model. The default
   splits VRAM across parallel slots; pinning it to 1 gives a single chat the
   whole budget (and the largest usable context).
@@ -334,27 +347,37 @@ not the page content.
    Web fetch**.
 2. Only `http://` and `https://` URLs are fetched.
 3. Up to **5 URLs per message** are followed. Extras are ignored.
+4. **Private Chat** never fetches URLs, whatever the setting says.
 
 ### "Refusing to fetch …" for `localhost`, `192.168.x`, or my office VPN
 
 **Problem.** Loach refuses to fetch an internal URL.
 
 **Solution.** This is intentional. The SSRF guard rejects any URL whose
-resolved IP lands on loopback, link-local, or private RFC1918 ranges, even
-if the hostname looks public but resolves there via DNS. To share internal
-content with a model, copy the page text and paste it into the chat
-instead.
+resolved IP lands on loopback, link-local, private RFC1918 ranges,
+carrier-grade NAT (`100.64.0.0/10`, which Tailscale uses) or IPv6
+unique-local addresses (`fc00::/7`), even if the hostname looks public but
+resolves there via DNS. To share internal content with a model, copy the
+page text and paste it into the chat instead.
 
-### A URL fetch silently produces a "Failed to fetch" stub
+### A URL fetch failed or came back cut short
 
 **Problem.** The model is told a URL was attempted but no content came
-back.
+back — the reply's tool-call block shows a red warning — or only part of
+the page arrived.
 
-**Solution.** The fetch hit a limit:
+**Solution.** Expand the tool-call block on the reply and open its
+`web_fetch` entry to read the reason. A fetch fails on:
 
 - **30 s total timeout** or **10 s connect timeout**,
-- **5 MB body cap**,
-- A non-2xx HTTP response.
+- A non-2xx HTTP response,
+- More than **10 redirects**,
+- A DNS lookup failure or a TLS / certificate error,
+- The rate limit of **60 URLs per 60 seconds**, shared across all chats.
+
+A body over the **5 MB cap** isn't a failure: the page is cut off at the
+cap and the entry says "truncated by Loach" (so does a page whose
+extracted text runs past ~12,000 characters).
 
 Try the URL in a browser. If it works there but not in Loach, the page is
 likely slow, large, or blocks non-browser user agents.
@@ -386,12 +409,13 @@ enabled.)
 
 **Solution.**
 
-1. Read the end of the error — when the server process exits, Loach
-   quotes the last lines it wrote to stderr (`npm ERR! 404`, a Python
-   traceback, "command not found"). That is usually the whole answer. The
-   note in a chat is cut short, so use **Test connection** in
-   **Settings → MCP** to see the full message. A timeout doesn't include
-   stderr; run the command in a terminal to see what it's waiting on.
+1. Use **Test connection** in **Settings → MCP**: when the server
+   process exits, it quotes the last lines the server wrote to stderr
+   (`npm ERR! 404`, a Python traceback, "command not found"). That is
+   usually the whole answer. An error in a chat stops short of the stderr,
+   which can print anything — keys included — and would otherwise be sent
+   to the model and saved with the chat. A timeout doesn't include stderr
+   either; run the command in a terminal to see what it's waiting on.
 2. Make sure the runtime the command needs is installed and on `PATH`
    for your user: Node.js for `npx`, `uv` for `uvx`. Loach hands the
    program its own environment, read when Loach started — if you installed
@@ -426,7 +450,14 @@ up switched off, and flipping the toggle opens a system dialog.
 **Solution.** That is deliberate: a backup can't prove *you* configured
 that command on this machine, so imported stdio servers arrive disabled
 and the first enable asks you to confirm the command line. Review it and
-choose **Start server** to enable the row. HTTP servers import enabled.
+choose **Start server** to enable the row. HTTP servers import enabled —
+unless their host couldn't be looked up during the import (offline, off
+the VPN), in which case they arrive switched off too; turn them on once
+the host is reachable again.
+
+Backups never contain MCP headers or environment variables, so after an
+import, re-enter any `Authorization` header or API-key variable a server
+needs.
 
 ### The reply is stuck on "Waiting for your approval…"
 
@@ -451,7 +482,9 @@ allow" for, use **Ask again for all** in the same editor and save.
 tools.
 
 **Solution.** One reply may go back to its tools at most 10 times, so a
-model stuck in a loop can't run forever. Either it was stuck, or the task
+model stuck in a loop can't run forever. The last round is sent without
+tools so the model can wrap up; this error means it asked for them
+anyway, and those calls weren't run. Either it was stuck, or the task
 needs more steps than that. Send a follow-up ("continue") to give it
 another 10 rounds, or break the task into smaller requests. With the
 workspace tools, pointing it at the right files up front (or putting that
@@ -483,7 +516,7 @@ tab.
 - The toggle on the Space's Memory tab must be on. Outside a Space,
   memory stays off until you turn on **Settings → Features → Global
   memories**.
-- Each candidate fact must be **under 280 characters**. Longer "facts"
+- Each candidate fact must be **at most 280 characters**. Longer "facts"
   are dropped.
 - Memory uses the same provider/model the chat is using. Tiny models
   often return empty extractions; try a larger one.
@@ -578,8 +611,8 @@ lock is configured:
 
 - **Lock after inactivity** — set it to **Off**, or to a longer interval,
   if a 1- or 5-minute timeout is catching you while you read a long reply.
-  Only typing, clicking, scrolling and touch count as activity; watching a
-  reply stream does not.
+  Typing, clicking, scrolling, touch and moving the mouse over Loach count
+  as activity; watching a reply stream does not.
 - **Lock when minimized** — turn it off if you routinely minimize Loach
   while it works. Note that native save / open dialogs don't trigger it,
   so exporting or attaching a file is safe either way.
@@ -612,11 +645,13 @@ past the interval locks the moment it wakes.
 directives.
 
 - The **base tag** must only contain letters, digits, `.`, `_`, `/`, or
-  `-`. No spaces, no quotes.
+  `-`, plus one `:` before the tag (so `llama3.1:8b` is fine). No spaces,
+  no quotes.
 - The **SYSTEM** and **TEMPLATE** bodies cannot contain `"""`. If you need
   a triple-quote in your system prompt, rephrase.
-- **Save as new model** always writes a **new** model. To replace one, save under a
-  new name and then delete the old one.
+- **Save as new model** writes under the tag you type. If a model with that
+  tag already exists, it's replaced without asking — pick a tag that
+  isn't taken if you want to keep the old one.
 
 ### A model pull is stuck
 
@@ -625,9 +660,10 @@ directives.
 **Solution.**
 
 1. Click the ✕ on the progress chip and start the pull again.
-2. Confirm Ollama is still reachable — the model picker in the chat header
-   shows a red status when it isn't, and **Settings → Providers → Test
-   connection** checks the base URL.
+2. Confirm Ollama is still reachable — when it isn't, the model picker in
+   the chat header shows an amber warning next to **Ollama**, "Not
+   running" and a **Start Ollama** button, and **Settings → Providers →
+   Test connection** checks the base URL.
 3. Check disk space on the drive Ollama uses for its model cache.
 
 ### Can't delete a model
@@ -636,8 +672,8 @@ directives.
 
 **Solution.** The toast quotes Ollama's own error — Loach never blocks a
 delete itself. Check that Ollama is still reachable (the chat-header model
-picker shows a red status when it isn't) and that the tag matches what
-`ollama list` shows, then retry from the Models tab.
+picker shows an amber warning and "Not running" when it isn't) and that
+the tag matches what `ollama list` shows, then retry from the Models tab.
 
 ---
 
@@ -725,11 +761,13 @@ API key. To clear everything, including the key and the app lock, use
 
 ### Aurora theme tears or stutters
 
-**Problem.** The animated background pulses or drops frames.
+**Problem.** The background or the translucent panels flicker or drop
+frames while you scroll or resize.
 
 **Solution.** Switch to the **Solid** theme in **Settings → Appearance**.
-Aurora relies on GPU compositing; integrated GPUs and remote desktop
-sessions don't always cope.
+Aurora's background is a static gradient under a large blur, with
+translucent panels that blur what's behind them — all GPU compositing that
+integrated GPUs and remote desktop sessions don't always cope with.
 
 ### Font size change didn't fully apply
 
@@ -737,8 +775,11 @@ sessions don't always cope.
 
 **Solution.** Native dialogs (file pickers, the MCP consent prompt) follow
 the OS font scale, not Loach's; everything Loach draws itself, including
-the title bar, follows the in-app setting. Adjust your system display
-scaling alongside the in-app setting if you need everything uniform.
+the title bar, follows the in-app setting, apart from a few fixed sizes —
+the onboarding step titles, the percentage in the context-usage popover,
+and the "Aa" previews in the font-size picker itself. Adjust your system
+display scaling alongside the in-app setting if you need everything
+uniform.
 
 ---
 
@@ -748,9 +789,9 @@ scaling alongside the in-app setting if you need everything uniform.
 
 **Problem.** The shortcut doesn't open the global search.
 
-**Solution.** The palette is suppressed while the **onboarding wizard**
-or the **lock screen** owns the window. Finish onboarding or unlock the
-app first.
+**Solution.** The palette is suppressed while the **onboarding wizard**,
+the **lock screen** or **Private Chat** owns the window. Finish
+onboarding, unlock the app or close Private Chat first.
 
 ### Search doesn't find a phrase I know I wrote
 

@@ -232,6 +232,7 @@ pub async fn chat_stream(
         stream_id: &req.stream_id,
         session_id: req.session_id.as_deref(),
         workspace_root: req.workspace_root.as_deref(),
+        approval_wait_ms: Default::default(),
     };
 
     // Defense-in-depth SSRF guard. The shared HTTP client is intentionally
@@ -317,6 +318,14 @@ pub async fn chat_stream(
         }
         if let Some(tools) = tools_json.as_ref() {
             body["tools"] = tools.clone();
+            // The last round may not call them, so a model still reaching
+            // for tools answers with what it has — rather than asking for
+            // calls that would run (and be approved) with nothing left to
+            // read them. The tools stay declared: strict servers reject
+            // tool-call history without them.
+            if turn + 1 == MAX_TOOL_TURNS {
+                body["tool_choice"] = json!("none");
+            }
         }
 
         let outcome = match run_one_turn(
@@ -344,11 +353,15 @@ pub async fn chat_stream(
                 // sent one; fall back to our chunk-counter approximation
                 // for compat shims that don't honour `include_usage`.
                 let tokens_for_metrics = reported_tokens.unwrap_or(total_tokens);
-                emit_metrics(&app, &channel, tokens_for_metrics, start);
+                emit_metrics(&app, &channel, tokens_for_metrics, start, tool_ctx.approval_wait());
                 let _ = app.emit(&channel, StreamEvent::Done);
                 registry.finish(&req.stream_id);
                 return Ok(());
             }
+            // Asked for tools on the last round anyway (a server that
+            // ignores `tool_choice`): nothing would read their results, so
+            // don't run them.
+            TurnOutcome::Tools(_) if turn + 1 == MAX_TOOL_TURNS => break,
             TurnOutcome::Tools(calls) => {
                 // Assistant turn carrying the tool calls. OpenAI requires
                 // the tool_calls array (with `id` and the `function` object)
@@ -881,10 +894,14 @@ fn decide_outcome(accum: Vec<AccumTool>) -> TurnOutcome {
     }
 }
 
-fn emit_metrics(app: &AppHandle, channel: &str, tokens: u32, start: Instant) {
+/// `waited` — time parked on approval prompts — is left out of the rate
+/// (a user reading a card isn't the model generating) but kept in
+/// `elapsed_ms`, which stays the reply's full wall-clock.
+fn emit_metrics(app: &AppHandle, channel: &str, tokens: u32, start: Instant, waited: Duration) {
     let elapsed = start.elapsed().as_millis() as u64;
-    let tps = if elapsed > 0 {
-        (tokens as f64) * 1000.0 / (elapsed as f64)
+    let generating = elapsed.saturating_sub(waited.as_millis() as u64);
+    let tps = if generating > 0 {
+        (tokens as f64) * 1000.0 / (generating as f64)
     } else {
         0.0
     };
