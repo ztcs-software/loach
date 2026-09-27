@@ -12,15 +12,18 @@ that reproduce it are usually enough to file a useful bug report.
 
 ### Ollama is installed but Loach can't see it
 
-**Problem.** The Providers panel says Ollama isn't reachable, or the model
-dropdown is empty even though `ollama list` works in a terminal.
+**Problem.** **Test connection** in **Settings → Providers** says
+**Connection failed**, the model picker lists Ollama as **Not running**, or
+the model dropdown is empty even though `ollama list` works in a terminal.
 
 **Solution.**
 
-1. Make sure `ollama serve` is running. On Windows, the Ollama tray icon
-   needs to be active; on Linux, the `ollama` service must be started; on
-   macOS, launch the Ollama menu-bar app or run `ollama serve` from a
-   terminal.
+1. Make sure Ollama is running. If it's installed on this computer, click
+   **Start Ollama** in the model picker, or turn on **Auto-launch Ollama** in
+   **Settings → Providers** so Loach starts it each time it opens.
+   Otherwise: on Windows, the Ollama tray icon needs to be active; on Linux,
+   the `ollama` service must be started; on macOS, launch the Ollama
+   menu-bar app or run `ollama serve` from a terminal.
 2. Open **Settings → Providers** and check the **Ollama base URL**.
    The default is `http://localhost:11434`. If you run Ollama on another
    machine or a custom port, change it here.
@@ -52,6 +55,8 @@ dropdown is empty even though `ollama list` works in a terminal.
    key: Loach only sends it over `https://`, or over `http://` to this
    computer, so it can't be read off the network. Put the server behind
    HTTPS, or turn off its key requirement if it's on a network you trust.
+   The error then reads just like a wrong key ("API key invalid or
+   expired"), so rule this out before re-entering the key.
 
 ### Key won't save on Linux
 
@@ -123,8 +128,11 @@ above the answer.
    it doesn't, the Thinking row in the Parameters sidebar is disabled with
    "This model doesn't support a thinking step". Many tags of the same base
    model differ on this.
-3. Thinking is **Ollama-only**. In a chat on an OpenAI-compatible
-   provider the toggle is disabled and reads off.
+3. The Thinking toggle is **Ollama-only**. In a chat on an
+   OpenAI-compatible provider it's disabled and reads off; a thinking block
+   still appears there only if the server streams its reasoning as a
+   separate `reasoning_content` field (some DeepSeek, vLLM and llama.cpp
+   setups do).
 
 ### A formula shows as raw TeX instead of rendering
 
@@ -137,13 +145,16 @@ source, not typeset math.
   error on hover — that keeps a half-typed formula quiet while it streams
   rather than flashing an error. Hover it to see what KaTeX objected to.
 - **`$…$` didn't typeset.** Single dollars are treated as currency unless
-  the span reads as math: it has to hug both delimiters, stay on one line,
-  not follow a word character, and not be chased by a digit. "$5 and $10"
+  the span reads as math: it has to hug both delimiters, stay on one line
+  and under 200 characters, not follow a word character, and not be chased
+  by a digit. "$5 and $10"
   and "US$5" stay prose by design. Ask the model for `$$…$$`, `\(…\)` or
   a ```` ```math ```` fence if you need the ambiguous case.
 - **Nothing renders at all.** Math is on with no setting to find, so this
   is more likely a delimiter the model didn't emit — check the raw text
-  via **Copy message**.
+  via **Copy message**. Math inside backticks or a code fence (such as
+  ```` ```latex ````) stays code on purpose; only ```` ```math ```` fences
+  typeset.
 
 ### The metrics chip's numbers don't match my provider
 
@@ -152,8 +163,9 @@ with what the backend or your provider's dashboard reports.
 
 **Solution.** The chip appears once a reply finishes and counts
 **completion tokens only**. Ollama reports the count itself; OpenAI-compatible
-endpoints only do so when they send a `usage` block — most proxies don't,
-in which case Loach counts streamed chunks as an approximation. The rate
+endpoints only do so when they honour Loach's request for a `usage` block —
+older proxies ignore it, in which case Loach counts streamed chunks as an
+approximation. The rate
 falls back to wall-clock timing when the backend reports none, so it
 includes any queueing or model-load time.
 
@@ -168,10 +180,12 @@ Tokens** and **Repeat Penalty** only appear in its **Advanced** view:
 - Raise **Max Tokens** if the answer keeps cutting off.
 - Raise **Context Length** if the model is forgetting earlier turns. A
   longer context uses more VRAM.
-- Increase **Repeat Penalty** (try 1.1–1.3) if the model loops.
-- Click **Reset to defaults** (or **Reset to model defaults**) at the bottom
-  of the panel to discard per-chat overrides and fall back to the model's
-  defaults.
+- Increase **Repeat Penalty** (default 1.1; try up to 1.3) if the model
+  loops. On an OpenAI-compatible chat, Context Length and Repeat Penalty
+  are ignored — use **Frequency Penalty** for loops instead.
+- Click **Reset to defaults** (or **Reset to model defaults**) below the
+  sliders to discard per-chat overrides and fall back to the Space's and
+  model's defaults.
 
 ---
 
@@ -179,8 +193,9 @@ Tokens** and **Repeat Penalty** only appear in its **Advanced** view:
 
 ### Ollama crashes with "out of memory" or the model fails to load
 
-**Problem.** A pull works but loading or chatting fails with a CUDA / VRAM
-error.
+**Problem.** A pull works, but the model fails to load or the reply fails
+with "the upstream server returned an error" (Ollama's own log shows the
+CUDA / out-of-memory message).
 
 **Solution.**
 
@@ -189,8 +204,9 @@ error.
    and a leaner KV cache.
 2. Lower **Context Length** in the same panel — a smaller context window
    uses dramatically less VRAM.
-3. Lower **GPU Layers** (Advanced view) to push more of the model
-   onto CPU/RAM at the cost of speed.
+3. Set **GPU Layers** (Advanced view; blank means auto, 0 means CPU only)
+   below the model's layer count to push more of it onto CPU/RAM at the
+   cost of speed.
 4. Pick a smaller quantization (for example `q4_K_M` instead of `q8_0`)
    or a smaller parameter size.
 
@@ -200,14 +216,15 @@ error.
 for what your hardware actually manages, or names a constraint you don't
 recognise.
 
-**Solution.** The card names the number it used — "Based on 8 GB VRAM ·
-NVIDIA GeForce RTX 4060", or a RAM figure when there's no usable GPU
-reading. Which one you get:
+**Solution.** The card names the number it used — "Based on 8.0 GB VRAM ·
+NVIDIA GeForce RTX 4060 · 120 GB free on disk", or a RAM figure when
+there's no usable GPU reading. Which one you get:
 
 - **Windows** reads dedicated video memory directly, for any vendor.
 - **Linux** reads `nvidia-smi`, then the amdgpu sysfs node. **Intel Arc
-  isn't covered** and falls back to system RAM, which under-reports what
-  the card can do — pick a larger variant by hand if you have one.
+  isn't covered** and falls back to system RAM, which is usually more than
+  the card holds — so the pick can overflow it. If Ollama runs on your Arc,
+  choose a variant that fits its VRAM by hand.
 - **macOS** deliberately uses system RAM: Apple Silicon shares it with the
   GPU, so a separate figure would double-count.
 - Adapters under 1 GB — and, on Windows, any adapter that reports unified
@@ -232,8 +249,9 @@ runtime memory figures to size against.
 - In **Settings → Appearance**, switch the theme from **Aurora** to
   **Solid**. Aurora's heavily blurred gradient and translucent panels are
   heavy on weak GPUs.
-- Close very long chats while testing — extremely long transcripts cost
-  more to re-render on every token.
+- Long chats mount only their latest 50 messages; **Show earlier
+  messages**, **Search in chat** or jumping to an old pinned response
+  mounts more. Switch to another chat and back to collapse them again.
 
 ### The first reply takes forever, even on a fast model
 
@@ -242,8 +260,10 @@ streaming starts; subsequent replies are instant.
 
 **Solution.** Ollama loads the model into VRAM on first use. To preload at
 launch, turn on **Preload on startup** under **Settings → General → Default
-model**. The first
-chat will start fast, at the cost of pinning VRAM as soon as Loach opens.
+model** (available when the default model is an Ollama model). Only that
+model is warmed, at the cost of pinning VRAM as soon as Loach opens, and it
+stays loaded only as long as **Keep model loaded** allows (5 minutes by
+default).
 
 ### Making Ollama generate faster
 
@@ -266,8 +286,10 @@ Ollama 0.5+:
   keeps a model resident after a request, so a reply after a pause skips the
   cold reload. Loach also exposes this under **Settings → Features → Keep
   model loaded** (5 min, 30 min, 1 hour, Always). Until you pick an option
-  there, Loach sends nothing and this env default applies; once you pick
-  one, it's sent with every request and overrides the env default.
+  there, Loach sends nothing and this env default applies — even though the
+  control already shows **5 min** highlighted. Once you click any option,
+  it's sent with every request and overrides the env default, and there's
+  no way back to "unset", so pick the one that matches your env var.
 - **`OLLAMA_NUM_PARALLEL=1`** — caps concurrent requests per model. The default
   splits VRAM across parallel slots; pinning it to 1 gives a single chat the
   whole budget (and the largest usable context).
@@ -318,7 +340,9 @@ file in Word or LibreOffice and **Save As → Word Document (.docx)**.
 **truncated** pill, and only part of it reached the model.
 
 **Solution.** Per-file cap is **200,000 characters**; total inlined content
-per message is **500,000 characters**. Either:
+per message is **500,000 characters**, counting your prompt and fetched pages
+too. Files past that per-message budget are clipped or left out without a
+**truncated** pill — only the model is told. Either:
 
 - Trim the document to the parts you actually need, or
 - Send several focused messages, each with a different excerpt.
@@ -393,8 +417,8 @@ an error.
    support the legacy two-endpoint SSE transport. If the server is
    distributed as a command to run (`npx …`, `uvx …`), add it as a
    **Local process (stdio)** server instead.
-2. If the server requires auth, add an `Authorization` header in the
-   server's row.
+2. If the server requires auth, open it in **Settings → MCP** and add an
+   `Authorization: Bearer …` line under **Headers**.
 3. Check that the response body fits under **4 MiB** — misconfigured
    servers that dump full schemas can exceed this.
 4. Per-request timeout is **30 s**.
@@ -427,8 +451,8 @@ enabled.)
      sets `PATH` somewhere a login shell doesn't read — run `echo $PATH`
      in a terminal and add the result to the server's environment
      variables as `PATH=…`; Loach then uses that `PATH` instead.
-3. On Windows, `npx` / `uvx` are `.cmd` shims. Loach resolves them for
-   you, but a full path to the `.cmd` file also works.
+3. On Windows, `npx` is a `.cmd` shim (`uvx` an `.exe`). Loach finds
+   either on `PATH` for you, but a full path also works.
 4. First runs of `npx -y …` download the package. Startup is allowed
    **60 s**; a slow network can exceed that — run the command once in a
    terminal to warm the cache, then test again.
@@ -455,9 +479,10 @@ unless their host couldn't be looked up during the import (offline, off
 the VPN), in which case they arrive switched off too; turn them on once
 the host is reachable again.
 
-Backups never contain MCP headers or environment variables, so after an
-import, re-enter any `Authorization` header or API-key variable a server
-needs.
+Backups never contain MCP headers or environment variables, and a password
+in a connection URL or the value after a `--token`-style argument comes back
+as `REDACTED` — so after an import, re-enter any `Authorization` header,
+API-key variable or redacted argument a server needs.
 
 ### The reply is stuck on "Waiting for your approval…"
 
@@ -481,10 +506,10 @@ allow" for, use **Ask again for all** in the same editor and save.
 **Problem.** A reply ends with this error while the model is still calling
 tools.
 
-**Solution.** One reply may go back to its tools at most 10 times, so a
-model stuck in a loop can't run forever. The last round is sent without
-tools so the model can wrap up; this error means it asked for them
-anyway, and those calls weren't run. Either it was stuck, or the task
+**Solution.** Each reply gets at most 10 rounds with the model, so a
+model stuck in a loop can't run forever: tools can run in the first nine,
+and the tenth is sent without tools so the model can wrap up; this error
+means it asked for them anyway, and those calls weren't run. Either it was stuck, or the task
 needs more steps than that. Send a follow-up ("continue") to give it
 another 10 rounds, or break the task into smaller requests. With the
 workspace tools, pointing it at the right files up front (or putting that
@@ -527,15 +552,18 @@ tab.
 
 **Solution.** Right after it lands, click **Undo** on the "Saved to
 memory" toast. Later, open the Space's **Memory** tab — or, for global
-memory, **Settings → Features → Manage global memories** — and click the
-row to edit or delete it. Turning the toggle off only stops *new* writes;
-existing memories still ride along until you remove them.
+memory, **Settings → Features → Manage global memories** — and click a
+memory's text to edit it, or hover the row and click the trash icon to
+delete it. Turning a Space's memory toggle off only stops *new* writes; its
+existing memories still ride along until you remove them. Turning off
+**Global memories** stops both.
 
 ### Reference sources won't add to a Space
 
 **Problem.** Adding a source to a Space fails or silently does nothing.
 
-**Solution.** Per-Space cap is **200 MB** total across all sources. Remove
+**Solution.** Each file can be at most **20 MB**, and a Space's sources at
+most **200 MB** in total. Remove
 older references, or move the content into a smaller text file.
 
 ### Space instructions seem to override my custom instructions
@@ -646,7 +674,8 @@ directives.
 
 - The **base tag** must only contain letters, digits, `.`, `_`, `/`, or
   `-`, plus one `:` before the tag (so `llama3.1:8b` is fine). No spaces,
-  no quotes.
+  no quotes, and at most one `/` — so a Hugging Face pull such as
+  `hf.co/user/repo:Q4_K_M` can't be used as a base.
 - The **SYSTEM** and **TEMPLATE** bodies cannot contain `"""`. If you need
   a triple-quote in your system prompt, rephrase.
 - **Save as new model** writes under the tag you type. If a model with that
@@ -711,13 +740,14 @@ manager instead would leave its database describing a version that's no
 longer on disk. AppImage installs replace themselves in place and never
 prompt.
 
-### "Up to date" but I see a newer version on GitHub
+### "You're on the latest version" but I see a newer version on GitHub
 
 **Problem.** The updater says there's nothing new even though a newer
 release exists.
 
-**Solution.** The updater only reads **published** releases, not drafts.
-Wait until the release is published, or download manually from GitHub.
+**Solution.** The updater only sees the newest **published stable**
+release. Drafts aren't offered, and neither are pre-releases (versions with
+a suffix such as `-beta-1` or `-rc-1`) — download those from GitHub.
 
 ### Update download or signature fails
 
@@ -726,9 +756,10 @@ Wait until the release is published, or download manually from GitHub.
 **Solution.**
 
 1. Re-run the check — transient network failures are common.
-2. If the error mentions signature verification, the release is most
-   likely mid-publish (assets uploaded but not yet signed). Wait a few
-   minutes and retry.
+2. If the error mentions signature verification, the downloaded file
+   didn't match what the release signed — usually a corrupted or
+   intercepted download (a proxy or antivirus rewriting it). Retry, and if
+   it keeps failing, install from the releases page.
 3. As a fallback, download the installer for your platform directly from
    the releases page.
 
@@ -837,8 +868,11 @@ free of malware"*.
 subscribe to the Apple Developer Program), so Gatekeeper blocks it on
 first launch. Bypass it once and the app runs normally afterwards:
 
-- **Right-click** `Loach.app` in **Applications** → **Open** → click
-  **Open** in the prompt, or
+- For *"Apple cannot verify…"*: on macOS 14 and earlier, **right-click**
+  `Loach.app` in **Applications** → **Open** → click **Open** in the
+  prompt; on macOS 15 and later, try to open it once, then click **Open
+  Anyway** in **System Settings → Privacy & Security**. Or, for either
+  message:
 - Run `xattr -cr /Applications/Loach.app` in **Terminal** and launch
   normally.
 
@@ -854,10 +888,10 @@ blocked the same way, the same workaround applies.
 Intel Macs aren't supported. Build from source if you need to run on
 Intel — see the README "Build from source" section.
 
-### Windows: "Credential Manager access denied"
+### Windows: saving a key or the app lock fails on a managed machine
 
 **Problem.** Saving keys or app-lock credentials fails on a managed
-Windows machine.
+Windows machine with a platform or storage error.
 
 **Solution.** Some corporate group policies block apps from writing to
 Credential Manager. Loach cannot store secrets without it. Ask your IT

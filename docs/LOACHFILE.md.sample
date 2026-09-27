@@ -4,12 +4,14 @@
   Sample LOACHFILE.md. Copy it to the root of a workspace folder, name it
   LOACHFILE.md, and rewrite it for your project — Pantry is made up.
 
-  - Plain Markdown, no special syntax. Loach adds the whole file to the
-    system prompt on every turn, this comment included, so delete this
-    block once you've adapted it.
+  - Plain Markdown, no special syntax. While Workspace files is on in
+    Settings → Tools, Loach adds the whole file to the system prompt on
+    every turn, this comment included, so delete this block once you've
+    adapted it.
   - It's read fresh each turn: an edit applies on your next send.
-  - The first line shows in the tooltip of the LOACHFILE.md badge on the
-    "Working in" notice, so make it say what the file is.
+  - The first line (up to 80 characters) shows in the tooltip of the
+    "Working in" notice, next to its LOACHFILE.md badge, so make it say
+    what the file is.
   - Anything past 32 KB is cut, but aim for a page: local models follow
     short instruction files far more reliably than long ones.
   - The model can list, find, read, search, write, edit, move and delete

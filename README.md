@@ -40,7 +40,7 @@ Behind a calm, beautifully crafted UI sits a rich feature set - ready when you n
 - **Provider selection** - switch between Ollama local models and any OpenAI-compatible endpoint (OpenAI API, llama.cpp, LM Studio etc.) from the chat header.
 - **Local model management** - pull, copy, customize and delete local models from inside the app. 
 - **Start Ollama from Loach** - launch the Ollama server from the model picker when it isn't running, or have Loach start it for you at launch (opt-in).
-- **Default model selector** - pick a model new chats open with, per provider - no need to re-select on each fresh conversation.
+- **Default model selector** - pick the model new chats open with - a specific one, or whichever you used last (overall or per provider) - no need to re-select on each fresh conversation.
 - **Model preloading** - optionally warm your default local model into VRAM at launch so the first message streams faster. 
 - **Per-chat parameters** - set temperature, top_k, top_p, min_p, max tokens, context length, per-chat system prompts and more. Layered over Modelfile and per-model defaults.
 - **Low VRAM mode** - global or per-chat toggle that sends Ollama's `low_vram` flag to every request. Useful on lower-spec devices. 
@@ -49,7 +49,7 @@ Behind a calm, beautifully crafted UI sits a rich feature set - ready when you n
 - **Spaces** - group chats around a project, with shared instructions, reference sources and memory. 
 - **Global memory** - opt-in memory for chats outside Spaces: after each reply Loach notes lasting facts about you, updates or retires ones that changed, and every change comes with an Undo.
 - **Chat folders** - drag one chat onto another in the sidebar to group them into a named folder.
-- **Chat labels** - tag a chat with a colour that shows as a dot in the sidebar, Space view and chat menus.
+- **Chat labels** - tag a chat with a colour from any chat menu; it shows as a dot next to the chat in the sidebar and Space view.
 - **Snippets** - save reusable prompts with an optional pinned model and click `Run` to start a fresh chat pre-filled and ready to send.
 - **Custom snippet variables** - parameterize snippets with static globals and prompt-on-use placeholders that fill in when you run them.
 - **Fork chats** - branch any conversation into a new copy that links back to its source.
@@ -61,7 +61,7 @@ Behind a calm, beautifully crafted UI sits a rich feature set - ready when you n
 #### Composing & steering a chat
 - **Slash commands** - type `/` in the composer for a command palette: `/fork`, `/regenerate`, `/compact`, `/private`, `/model`, `/persona`, `/snippet`, `/remember` and more.
 - **Personas and Tones** - pick a role (Code Reviewer, Translator, ELI5...) and delivery style (Formal, Casual, Direct, Detailed...).
-- **Context management** - a live bar under the composer shows how full the context window is, with one-click compaction that summarizes older turns to free space.
+- **Context management** - a live bar under the composer shows how full the context window is; click it for a breakdown and to compact older turns into a summary that frees space.
 - **Import / export context** - copy a chat's context as Markdown, optionally summarized to compact it, and paste it - or any text - back into any chat's context.
 - **LaTeX math** - replies typeset with KaTeX: `$$…$$`, `$…$`, `\(…\)`, `\[…\]` and ` ```math ` fences render out of the box. `$` doubles as a currency sign, so `$…$` only typesets when the span actually reads as math - "it costs $5 and $10" stays prose. KaTeX ships inside the app (no network access) and is only read from disk the first time a reply contains math.
 
@@ -69,8 +69,8 @@ Behind a calm, beautifully crafted UI sits a rich feature set - ready when you n
 - **Tools** - let models call local tools including calculate, date/time, count, hash, UUID, base64, JSON, unit convert, text diff, sort, IP math and PDF generation. 
 - **PDF generation** - the built-in pdf tool turns a model's structured spec (headings, lists, tables, page breaks) into a real PDF attached to the reply.
 - **Workspace folders** - give a chat a folder and the model can list, find, read, search and edit the files in it, asking before it writes, edits, moves or deletes anything unless you allow that for the chat. A `LOACHFILE.md` at the folder root adds the project's own instructions to every turn.
-- **MCP support** - register Model Context Protocol servers over Streamable HTTP or as local stdio processes (`npx`, `uvx`, …), test the handshake, inspect the tools they provide, and approve each tool call in the chat before it runs. 
-- **Web fetch** - add URLs to messages and they will be fetched, sanitized and inlined to context. 
+- **MCP support** - register Model Context Protocol servers over Streamable HTTP or as local stdio processes (`npx`, `uvx`, …), test the handshake, inspect the tools they provide, and approve each tool call in the chat before it runs - or mark trusted tools as Always allow. 
+- **Web fetch** - opt-in: add URLs to messages (up to 5) and they will be fetched, sanitized and inlined to context. 
 - **Temporal awareness** - inject current date, weekday and timezone into the system prompt so models can answer to "what day is it today?".
 
 #### Viewing content
@@ -79,7 +79,7 @@ Behind a calm, beautifully crafted UI sits a rich feature set - ready when you n
 - **Share a message** - copy any message as text or as a rendered chat-bubble image, save the image as a PNG, or open a pre-filled post on Facebook, X, Reddit or LinkedIn.
 
 #### App, data & updates 
-- **Data management** - make backups of your content to JSON file, restore data or permanently delete it with a few clicks, with a storage breakdown showing what your chats, attachments and Spaces actually weigh on disk. 
+- **Data management** - make backups of your content to JSON file (MCP headers, environment variables and chats' workspace folders are left out), restore data or permanently delete it with a few clicks, with a storage breakdown showing what your chats, attachments and Spaces actually weigh on disk. 
 - **App lock** - optional PIN, password or PIN + password gate at launch, with opt-in auto-lock after inactivity or on minimize and a lock-now shortcut; credentials are hashed and stored in OS credential manager.
 - **Themes** - glassy, gradient Aurora or flat Solid, both available in Dark and Light variants.
 - **OTA updates** - get new features, bug fixes, performance improvements and security patches directly from the app, with an opt-in check at launch that tells you when a new version is out.
@@ -122,7 +122,7 @@ Builds target **glibc 2.35**, which makes **Ubuntu 22.04** and **Debian 12** the
 
 The macOS build is **Apple Silicon (M-series CPUs) only** and is currently not notarized in the Apple Developer Program. On first launch macOS will block the app with a *"Loach is damaged and can't be opened"* or *"Apple cannot verify..."* warning. Bypass it once and the app runs normally:
 
-- **Right-click** `Loach.app` in **Applications** → **Open** → click **Open** in the prompt, or
+- For *"Apple cannot verify..."*: on macOS 14 and earlier, **right-click** `Loach.app` in **Applications** → **Open** → click **Open** in the prompt; on macOS 15 and later, try to open it once, then click **Open Anyway** in **System Settings → Privacy & Security**. Or, for either warning:
 - Open **Terminal** and run:
   ```bash
   xattr -cr /Applications/Loach.app
@@ -161,10 +161,10 @@ The Vite dev server runs on `http://localhost:1420` and the Tauri shell embeds i
 #### Build production installers
 
 ```bash
-npm run tauri build
+npm run tauri -- build --no-sign
 ```
 
-Outputs land in `src-tauri/target/release/bundle/`:
+`--no-sign` skips the signed updater artifacts, which need the release signing key (`TAURI_SIGNING_PRIVATE_KEY`); without it the build fails after bundling. Outputs land in `src-tauri/target/release/bundle/`:
 
 - **Windows**: `.exe` (NSIS)
 - **Linux**: `.deb`, `.rpm` and `.AppImage`
@@ -185,7 +185,7 @@ ollama pull gemma4:e4b      # or any other tag
 
 Loach probes `http://localhost:11434` on launch. Pulled models appear in the chat header dropdown automatically; the **Models** library tab also lets you pull new tags and customise existing ones from inside the app.
 
-You don't have to run `ollama serve` yourself either - when nothing is answering, the model picker offers a **Start Ollama** button, and **Settings → Providers** can start it automatically every time Loach opens.
+You don't have to run `ollama serve` yourself either - when nothing is answering, the model picker offers a **Start Ollama** button, and **Settings → Providers** can start it automatically every time Loach opens (when Ollama is installed on this computer).
 
 ### Using with OpenAI-compatible endpoints
 
@@ -233,12 +233,12 @@ Only one OpenAI-compatible endpoint is active at a time — switch the base URL 
 | Chats, messages, folders, spaces (instructions, reference sources, memories), global memories, snippets, snippet variables and saved fill-ins, MCP servers (including their headers and environment variables, in plain text), app settings | SQLite at `<app-data-dir>/loach.db` |
 | OpenAI API key | OS credential manager (Windows Credential Manager / Linux Secret Service / macOS Keychain) |
 | App-lock hash + hint | OS credential manager — same store, separate entry |
-| Attached files (images, text) | Inlined into the message at send time; no separate file store |
+| Attached files (images, text, PDF, DOCX) and PDFs the pdf tool generates | Stored with their message in `loach.db`; no separate file store |
 | App data dir on Windows | `%APPDATA%\dev.loach.app\` |
 | App data dir on Linux | `~/.local/share/dev.loach.app/` |
 | App data dir on macOS | `~/Library/Application Support/dev.loach.app/` |
 
-Loach launches and works completely offline as long as you stick to local providers. The **Models** library, **Spaces**, **Snippets**, search, parameter sidebar, app lock, and chat history are all available without network access. Only chat generations against remote endpoints (OpenAI, Groq, OpenRouter, …) require internet connection.
+Loach launches and works completely offline as long as you stick to local providers. The **Models** library, **Spaces**, **Snippets**, search, parameter sidebar, app lock, and chat history are all available without network access. Only chat generations against remote endpoints (OpenAI, Groq, OpenRouter, …), model pulls, web fetch, remote MCP servers and update checks require internet connection.
 
 ---
 
