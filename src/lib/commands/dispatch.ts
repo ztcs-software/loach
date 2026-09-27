@@ -523,6 +523,12 @@ async function runRemember(rest: string): Promise<CommandResult> {
     });
     return ok("Saved to global memory", preview);
   }
+  const space = useSpaceStore.getState().spaces.find((s) => s.id === scope.spaceId);
+  if (space && !space.memory_enabled) {
+    throw new Error(
+      `Memory is off for “${space.name}”. Turn it on in the space's Memory tab.`,
+    );
+  }
   await useSpaceStore.getState().addMemory({
     space_id: scope.spaceId,
     content: fact,

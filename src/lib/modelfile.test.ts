@@ -35,6 +35,8 @@ describe("buildModelfile", () => {
     for (const tag of [
       "llama3.1:8b-instruct-q4_K_M",
       "library/qwen2.5:7b",
+      "hf.co/bartowski/Llama-3.2-3B-Instruct-GGUF:Q4_K_M", // Hugging Face pull
+      "registry.example.com/team/model:latest",
       "gemma3",
       "x_y-z.0",
     ]) {
@@ -48,8 +50,14 @@ describe("buildModelfile", () => {
       "llama 3.1", // whitespace
       "llama\nFROM evil", // newline = second directive
       "a;b",
-      "a/b/c", // at most one registry path segment
+      'a/"b"', // quotes
+      "hf.co/user/repo name:Q4", // whitespace inside a path segment
+      "hf.co/user/repo\nSYSTEM x", // newline after a multi-segment path
+      "a//b", // empty path segment
+      "/a", // leading slash
+      "a/", // trailing slash
       "a:b:c", // at most one tag separator
+      "a:b/c", // path after the tag
       "x".repeat(256), // length cap
     ]) {
       expect(() => buildModelfile(form({ from: tag })), tag).toThrow();

@@ -48,6 +48,34 @@ describe("formatProviderError", () => {
     expect(out).not.toContain("rate limited");
   });
 
+  it("keeps the withheld-key hint instead of reading as a wrong key", () => {
+    const out = formatProviderError({
+      provider: "openai",
+      baseUrl: "http://192.168.1.20:8000/v1",
+      raw:
+        'OpenAI HTTP 401 Unauthorized: {"error":"missing key"} (API key withheld because the ' +
+        "base URL is http:// to a non-loopback host — switch to https:// to authenticate)",
+    });
+    expect(out).toContain("API key withheld");
+    expect(out).toContain("https://");
+    expect(out).not.toContain("invalid or expired");
+  });
+
+  it("classifies out-of-memory errors ahead of the generic 5xx rule", () => {
+    for (const body of [
+      "llama runner process has terminated: cudaMalloc failed: out of memory",
+      "model requires more system memory (5.6 GiB) than is available (3.2 GiB)",
+      "llama runner process has terminated: error loading model: unable to allocate CUDA0 buffer",
+    ]) {
+      const out = formatProviderError({
+        provider: "ollama",
+        raw: `Ollama HTTP 500 Internal Server Error: {"error":"${body}"}`,
+      });
+      expect(out, body).toContain("ran out of memory");
+      expect(out, body).not.toContain("upstream server");
+    }
+  });
+
   it("classifies context-window overflows", () => {
     const out = formatProviderError({
       provider: "openai",

@@ -55,8 +55,9 @@ the model dropdown is empty even though `ollama list` works in a terminal.
    key: Loach only sends it over `https://`, or over `http://` to this
    computer, so it can't be read off the network. Put the server behind
    HTTPS, or turn off its key requirement if it's on a network you trust.
-   The error then reads just like a wrong key ("API key invalid or
-   expired"), so rule this out before re-entering the key.
+   When the server rejects the request for that reason, the error says so
+   ("API key withheld because the base URL is http:// to another
+   machine") rather than "API key invalid or expired".
 
 ### Key won't save on Linux
 
@@ -194,8 +195,7 @@ Tokens** and **Repeat Penalty** only appear in its **Advanced** view:
 ### Ollama crashes with "out of memory" or the model fails to load
 
 **Problem.** A pull works, but the model fails to load or the reply fails
-with "the upstream server returned an error" (Ollama's own log shows the
-CUDA / out-of-memory message).
+with "ran out of memory loading or running the model".
 
 **Solution.**
 
@@ -673,9 +673,9 @@ past the interval locks the moment it wakes.
 directives.
 
 - The **base tag** must only contain letters, digits, `.`, `_`, `/`, or
-  `-`, plus one `:` before the tag (so `llama3.1:8b` is fine). No spaces,
-  no quotes, and at most one `/` — so a Hugging Face pull such as
-  `hf.co/user/repo:Q4_K_M` can't be used as a base.
+  `-`, plus one `:` before the tag (so `llama3.1:8b` and a Hugging Face
+  pull such as `hf.co/user/repo:Q4_K_M` are fine). No spaces, no quotes,
+  and no empty path segments (`a//b`, or a leading or trailing `/`).
 - The **SYSTEM** and **TEMPLATE** bodies cannot contain `"""`. If you need
   a triple-quote in your system prompt, rephrase.
 - **Save as new model** writes under the tag you type. If a model with that

@@ -75,16 +75,17 @@ export function buildModelfile(form: ModelfileForm): string {
 
 /**
  * Conservative allowlist for Ollama model identifiers. Real tags look like
- * `llama3.1:8b-instruct-q4_K_M` or `library/qwen2.5:7b` or a 64-char digest;
- * we permit letters, digits, dot/underscore/dash, an optional registry path
- * with one `/`, and one optional `:tag` suffix.
+ * `llama3.1:8b-instruct-q4_K_M`, `library/qwen2.5:7b`,
+ * `hf.co/user/repo:Q4_K_M` or a 64-char digest; we permit letters, digits,
+ * dot/underscore/dash, any number of non-empty `/`-separated path segments,
+ * and one optional `:tag` suffix.
  *
  * Notably forbids whitespace (which would let a newline inject another
- * directive after `FROM …\n`) and shell metacharacters.
+ * directive after `FROM …\n`), quotes and shell metacharacters.
  */
 function isValidModelTag(value: string): boolean {
   if (value.length === 0 || value.length > 255) return false;
-  return /^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)?(?::[A-Za-z0-9._-]+)?$/.test(
+  return /^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*(?::[A-Za-z0-9._-]+)?$/.test(
     value,
   );
 }

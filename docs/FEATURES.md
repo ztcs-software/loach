@@ -384,8 +384,8 @@ Commands are grouped the way `/help` lists them:
   (expand a saved snippet into the composer).
 - **Memory & spaces** — `/remember <fact>`, `/forget <id|query>`,
   `/space <name>`. Inside a Space the memory commands act on that Space's
-  memory; outside one they act on the global list (`/remember` needs
-  Global memories turned on).
+  memory; outside one they act on the global list. `/remember` needs that
+  memory turned on — the Space's memory toggle, or Global memories.
 - **Tools & web** — `/tools` (list tools from enabled MCP servers),
   `/web-fetch on|off`, `/fetch <url>`, `/thinking on|off`.
 - **App** — `/settings [tab]` (general, providers, features, tools,
@@ -520,7 +520,7 @@ rewrite or remove them, only avoid repeating them.
   *not sent*.
 - **Per-Space toggle** — turn extraction off without wiping existing rows.
   Existing memories continue to ride along in every chat; automatic
-  extraction and the Memory tab's **Add** stop (`/remember` still saves).
+  extraction, the Memory tab's **Add** and `/remember` stop.
 - **Coverage** — a reply that finishes while more messages are queued, or
   an extraction aborted by the next send, is parked and folded into the
   next extraction in that chat (up to three turns per run). Parked turns
@@ -627,9 +627,10 @@ For a single Ollama model, the editor lets you:
 
 The **Save as new model** form refuses to compile a Modelfile that would inject
 additional directives via a malicious base tag, system block, or template
-block. The base tag may use letters, digits, `.`, `_` and `-`, at most one `/`
-and one `:tag` suffix (so a two-slash name such as `hf.co/user/repo:Q4_K_M`
-can't be used as a base); SYSTEM and TEMPLATE bodies are rejected
+block. The base tag may use letters, digits, `.`, `_` and `-` in any number
+of `/`-separated segments (so a Hugging Face pull such as
+`hf.co/user/repo:Q4_K_M` works), plus one `:tag` suffix — no whitespace or
+quotes. SYSTEM and TEMPLATE bodies are rejected
 if they contain `"""` (which the Ollama parser would treat as an early
 block-end).
 
@@ -691,9 +692,8 @@ Every chat has a slide-out **parameters panel** on the right. Two modes:
   repeat_penalty, frequency and presence penalties, GPU layer count, and
   seed.
 
-**Private Chat** (§2.8) reuses the Simple view, but sends only the values
-you change there (plus the Low VRAM pin); everything else is left to
-Ollama's own defaults, which can differ from what the panel shows.
+**Private Chat** (§2.8) reuses the Simple view and sends exactly the values
+it shows: the merge below, minus the per-model preferences (layer 4).
 
 The parameter merge order, top to bottom (later layers win):
 

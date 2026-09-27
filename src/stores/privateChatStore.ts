@@ -10,8 +10,10 @@ import {
 } from "@/lib/files";
 import { getPersona } from "@/lib/personas";
 import { getTone } from "@/lib/tones";
+import { useModelsStore } from "./modelsStore";
 import { useSettingsStore } from "./settingsStore";
 import {
+  DEFAULT_PARAMS,
   type Attachment,
   type ChatMessageIn,
   type GenerationParams,
@@ -85,6 +87,28 @@ interface PrivateChatState {
 
 function randomId(): string {
   return `pm_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/** The params a Private Chat request sends — and, from the same call, the
+ *  values its parameters panel shows. `chatStore.readSessionParams`' merge
+ *  minus the layers Private Chat doesn't use (per-model Thinking pref, Space
+ *  defaults): DEFAULT_PARAMS < global Thinking default < Modelfile defaults
+ *  < panel overrides, then the global Low-VRAM pin on top. Sending only the
+ *  overrides left the rest to Ollama's own defaults, which didn't match the
+ *  panel (it showed an 8K context while Ollama used its own). */
+export function effectivePrivateParams(
+  overrides: Partial<GenerationParams>,
+  modelDefaults: Partial<GenerationParams> | undefined,
+  settings: { thinking_default: boolean; low_vram_global: boolean },
+): GenerationParams {
+  const merged: GenerationParams = {
+    ...DEFAULT_PARAMS,
+    think: settings.thinking_default,
+    ...modelDefaults,
+    ...overrides,
+  };
+  if (settings.low_vram_global) merged.low_vram = true;
+  return merged;
 }
 
 /** Compose the effective system prompt the model should see, layering in
@@ -266,16 +290,13 @@ export const usePrivateChatStore = create<PrivateChatState>((set, get) => ({
       thinkingDirty: false,
     };
 
-    // Apply the global Low-VRAM pin (Settings → Features) when the user
-    // hasn't set anything in the per-chat panel. Per-chat override wins —
-    // toggling Low VRAM off in the Private Chat sidebar stores `undefined`,
-    // so the only ambiguity is "untouched", which is when the global
-    // default should kick in. Ollama is the only provider Private Chat
-    // talks to, so no provider gate is needed here.
-    const params =
-      state.params.low_vram === undefined && settings.low_vram_global
-        ? { ...state.params, low_vram: true }
-        : state.params;
+    // Ollama is the only provider Private Chat talks to, so the Ollama-only
+    // layers (Thinking default, Modelfile defaults, Low-VRAM pin) always apply.
+    const params = effectivePrivateParams(
+      state.params,
+      useModelsStore.getState().modelDefaults[state.model],
+      settings,
+    );
 
     // Update helper that mutates only the assistant placeholder. Identity
     // stability matters less here than in the main chat (no global runner,

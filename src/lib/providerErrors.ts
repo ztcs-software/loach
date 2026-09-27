@@ -32,6 +32,23 @@ interface Mapping {
 }
 
 const MAPPINGS: Mapping[] = [
+  // The backend's own hint on a 401/403 when it withheld the bearer over
+  // cleartext to a non-loopback host (`providers/openai.rs`). Ahead of the
+  // status rules, or it reads just like a wrong key.
+  {
+    match: ["api key withheld"],
+    build: () =>
+      "API key withheld because the base URL is http:// to another machine. Switch to https:// to authenticate.",
+  },
+  // Out of memory while loading or running the model. Ollama reports it as a
+  // 500 whose body carries the runner's text ("cudaMalloc failed: out of
+  // memory", "model requires more system memory … than is available",
+  // "unable to allocate CUDA0 buffer"), so it must beat the generic 5xx rule.
+  {
+    match: ["out of memory", "requires more system memory", "cudamalloc", "unable to allocate"],
+    build: () =>
+      "ran out of memory loading or running the model. Lower the context length or pick a smaller model.",
+  },
   // Network connectivity. `os error 61` is BSD/macOS ECONNREFUSED; `os error
   // 10061` is Windows WSAECONNREFUSED; the reqwest stringification always
   // includes the human "Connection refused" tail too. The TLS/cert family is
