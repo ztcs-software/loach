@@ -827,7 +827,15 @@ async function buildTaskRequest(
       useSpaceStore.setState((s) => ({
         spaceMemories: { ...s.spaceMemories, [session.space_id!]: ctx.memories },
       }));
-      const base = spaceInstructions || fallbackPrompt;
+      // Space instructions replace the per-chat prompt, but a compaction
+      // summary parked there stands in for the turns `chatHistory` no longer
+      // sends — keep it, or the model sees neither the summary nor them.
+      const summary = spaceInstructions
+        ? extractSummary(session.system_prompt ?? null)
+        : null;
+      const base = summary
+        ? `${SUMMARY_START_TAG}\n${summary}\n${SUMMARY_END_TAG}\n\n${spaceInstructions}`
+        : spaceInstructions || fallbackPrompt;
       const parts: string[] = [];
       if (base) parts.push(base);
       if (globalBlock) parts.push(globalBlock);

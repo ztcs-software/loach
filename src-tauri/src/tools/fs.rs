@@ -1039,6 +1039,12 @@ fn is_skipped_dir(name: &str) -> bool {
 }
 
 pub fn dispatch_find_files(root: &Path, args: &Value) -> McpCallResult {
+    find_files(root, args, MAX_FIND_VISITED)
+}
+
+/// [`dispatch_find_files`] with the entry cap passed in, so a test can reach
+/// it without building a 50,000-entry tree.
+fn find_files(root: &Path, args: &Value, max_visited: usize) -> McpCallResult {
     let Some(pattern) = args.get("pattern").and_then(|v| v.as_str()) else {
         return err("missing required `pattern` argument (string)");
     };
@@ -1072,7 +1078,8 @@ pub fn dispatch_find_files(root: &Path, args: &Value) -> McpCallResult {
 
     let mut found: Vec<String> = Vec::new();
     let mut visited = 0usize;
-    let mut hit_cap = false;
+    let mut hit_result_cap = false;
+    let mut hit_entry_cap = false;
     let mut too_deep = false;
     let walker = walkdir::WalkDir::new(&base)
         .max_depth(MAX_DEPTH as usize)
@@ -1085,8 +1092,12 @@ pub fn dispatch_find_files(root: &Path, args: &Value) -> McpCallResult {
         }
         too_deep = too_deep || cut_by_depth(&entry);
         visited += 1;
-        if visited > MAX_FIND_VISITED || found.len() >= MAX_FIND_RESULTS {
-            hit_cap = true;
+        if found.len() >= MAX_FIND_RESULTS {
+            hit_result_cap = true;
+            break;
+        }
+        if visited > max_visited {
+            hit_entry_cap = true;
             break;
         }
         let hit = if name_only {
@@ -1108,6 +1119,12 @@ pub fn dispatch_find_files(root: &Path, args: &Value) -> McpCallResult {
     }
 
     if found.is_empty() {
+        if hit_entry_cap {
+            return ok(format!(
+                "No files match `{pattern}` in the part of the tree searched — a search \
+                 stops after {max_visited} entries. Pass `path` to narrow it."
+            ));
+        }
         if too_deep {
             return ok(format!("No files match `{pattern}`.\n{DEPTH_NOTE}"));
         }
@@ -1119,10 +1136,14 @@ pub fn dispatch_find_files(root: &Path, args: &Value) -> McpCallResult {
         text.push_str(f);
         text.push('\n');
     }
-    if hit_cap {
+    if hit_result_cap {
         text.push_str(
             "\n[stopped at the result cap — narrow the pattern or pass `path` to search a subdirectory]\n",
         );
+    } else if hit_entry_cap {
+        text.push_str(&format!(
+            "\n[stopped after {max_visited} entries — pass `path` to search a subdirectory]\n"
+        ));
     } else if too_deep {
         text.push_str(&format!("\n{DEPTH_NOTE}\n"));
     }
@@ -2296,6 +2317,30 @@ mod tests {
         let bad = dispatch_find_files(&root, &json!({ "pattern": "[unclosed" }));
         assert!(bad.is_error);
         assert!(bad.content_text.contains("invalid glob"));
+    }
+
+    /// A walk the entry cap cut short says so — with no match, where "no
+    /// files match" would read as "not in the workspace", and with some,
+    /// where it wasn't the result cap that stopped it.
+    #[test]
+    fn find_files_says_when_the_entry_cap_cut_it_short() {
+        let (_d, root) = workspace();
+        for i in 0..10 {
+            fs::write(root.join(format!("f{i}.txt")), "").unwrap();
+        }
+
+        let none = find_files(&root, &json!({ "pattern": "*.nothing" }), 5);
+        assert!(none.content_text.contains("stops after 5 entries"), "{}", none.content_text);
+
+        // At most three of the first five entries aren't `.txt`.
+        let some = find_files(&root, &json!({ "pattern": "*.txt" }), 5);
+        assert!(some.content_text.contains("match(es) for `*.txt`"), "{}", some.content_text);
+        assert!(some.content_text.contains("stopped after 5 entries"), "{}", some.content_text);
+        assert!(!some.content_text.contains("result cap"), "{}", some.content_text);
+
+        // Under the cap, a miss is a plain miss.
+        let plain = dispatch_find_files(&root, &json!({ "pattern": "*.nothing" }));
+        assert_eq!(plain.content_text, "No files match `*.nothing`.");
     }
 
     #[test]

@@ -73,6 +73,25 @@ pub fn is_reply_timeout(err: &anyhow::Error) -> bool {
     err.chain().any(|c| c.is::<ReplyTimeout>())
 }
 
+/// Marks a reply too big to take in (over [`MAX_LINE_BYTES`]). The server
+/// did answer and is still running, so this fails the call only — no
+/// reason to stop the server either.
+#[derive(Debug)]
+pub struct ReplyTooLong;
+
+impl std::fmt::Display for ReplyTooLong {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the server is still running")
+    }
+}
+
+impl std::error::Error for ReplyTooLong {}
+
+/// True when `err` is a [`ReplyTooLong`].
+pub fn is_reply_too_long(err: &anyhow::Error) -> bool {
+    err.chain().any(|c| c.is::<ReplyTooLong>())
+}
+
 /// Starts the stderr tail [`StdioSession::stderr_suffix`] appends to an
 /// error message.
 const STDERR_MARK: &str = " — stderr: ";
@@ -528,7 +547,8 @@ impl StdioSession {
             // couldn't take the answer in.
             Ok(Ok(Err(why))) => {
                 in_flight.unanswered = false;
-                bail!("MCP server `{}`: {why}", self.label)
+                Err(anyhow::Error::new(ReplyTooLong)
+                    .context(format!("MCP server `{}`: {why}", self.label)))
             }
             // Sender dropped: the reader task cleared the map because the
             // process went away — nobody left to tell.

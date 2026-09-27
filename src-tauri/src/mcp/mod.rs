@@ -124,8 +124,13 @@ pub async fn aggregate_tools(
                 // hand the UI a Display-formatted string so internal span
                 // paths / source locations don't leak into the chat
                 // surface or the MCP status panel.
+                //
+                // Cut before a stdio server's stderr, too: this list feeds
+                // the chat's "couldn't be reached" notice and `/tools`, and
+                // stderr can print anything, a token included. The log line
+                // keeps it; Test connection shows it in full.
                 tracing::warn!("MCP aggregate: `{name}` failed: {e:#}");
-                errors.push((name, format!("{e}")));
+                errors.push((name, stdio::without_stderr(&format!("{e}")).to_string()));
             }
         }
     }
@@ -461,11 +466,14 @@ pub async fn dispatch_tool_call(
 }
 
 /// Whether a pooled session survives `err` from a call on it: only a stdio
-/// server that is still running and just didn't answer in time. Stopping it
-/// would stop whatever it was still doing — a long download, a sign-in page
-/// it opened — over one late reply; the reply, when it comes, is ignored.
+/// server that is still running and just didn't answer in time, or answered
+/// with more than Loach reads in one go. Stopping it would stop whatever it
+/// was still doing — a long download, a sign-in page it opened — over one
+/// reply; a late one, when it comes, is ignored.
 fn keeps_session(p: &PooledSession, err: &anyhow::Error) -> bool {
-    matches!(p.session, Session::Stdio(_)) && p.is_fresh() && stdio::is_reply_timeout(err)
+    matches!(p.session, Session::Stdio(_))
+        && p.is_fresh()
+        && (stdio::is_reply_timeout(err) || stdio::is_reply_too_long(err))
 }
 
 /// Whether a call to `tool_name` on `server_id` must be confirmed by the
@@ -923,5 +931,69 @@ mod tests {
             .await
             .expect_err("the program doesn't exist");
         assert!(!err.to_string().contains("disabled"), "{err:#}");
+    }
+
+    /// A stdio row running a shell `script` — `cmd /c` on Windows, `sh -c`
+    /// elsewhere.
+    fn stdio_row(name: &str, windows: &str, unix: &str) -> McpServer {
+        let (command, script) = if cfg!(windows) { ("cmd", windows) } else { ("sh", unix) };
+        let flags: &[&str] = if cfg!(windows) { &["/d", "/c"] } else { &["-c"] };
+        let mut args: Vec<&str> = flags.to_vec();
+        args.push(script);
+        McpServer {
+            transport: "stdio".into(),
+            url: String::new(),
+            command: Some(command.into()),
+            args_json: Some(serde_json::to_string(&args).unwrap()),
+            ..http_row(name)
+        }
+    }
+
+    /// A reply over 4 MiB fails that call only: like a late reply, it
+    /// leaves a stdio server running. A server that went away doesn't keep
+    /// its session.
+    #[tokio::test]
+    async fn a_stdio_session_survives_an_oversized_or_late_reply() {
+        // Waits on stdin, so it runs until the session is dropped.
+        let row = stdio_row("big", "set /p _=", "read _");
+        let pooled = PooledSession {
+            fingerprint: session_fingerprint(&row),
+            created_at: Instant::now(),
+            session: Session::Stdio(StdioSession::spawn(&row).await.expect("spawn")),
+        };
+        let too_long = anyhow::Error::new(stdio::ReplyTooLong)
+            .context("MCP server `big`: its reply was over 4 MiB");
+        let late = anyhow::Error::new(stdio::ReplyTimeout)
+            .context("MCP server `big` did not reply to `tools/call` within 30s");
+        assert!(keeps_session(&pooled, &too_long));
+        assert!(keeps_session(&pooled, &late));
+        assert!(!keeps_session(
+            &pooled,
+            &anyhow!("MCP server `big` exited before replying to `tools/call`")
+        ));
+    }
+
+    /// A stdio server that dies while starting leaves its stderr — which can
+    /// print anything, a token included — out of the errors the chat notice
+    /// and `/tools` show. Test connection still shows it.
+    #[tokio::test]
+    async fn aggregate_errors_leave_out_a_dying_servers_stderr() {
+        let (db, _dir) = fresh_db();
+        let row = stdio_row(
+            "dies",
+            "echo token-123 1>&2 & ping -n 2 127.0.0.1 >nul",
+            "echo token-123 >&2; sleep 1",
+        );
+        let saved = db.upsert_mcp_server(&row).expect("insert");
+
+        // Control: the stderr is there to leak.
+        let test = stdio::test_server(&saved).await;
+        let shown = test.error.unwrap_or_default();
+        assert!(shown.contains("token-123"), "{shown}");
+
+        let (_, errors) = aggregate_tools(&db).await;
+        let (_, e) = errors.first().expect("the server failed to start");
+        assert!(e.contains("exited before replying"), "{e}");
+        assert!(!e.contains("token-123"), "{e}");
     }
 }
