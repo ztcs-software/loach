@@ -108,6 +108,32 @@ export function diffLines(oldText: string, newText: string): DiffLine[] {
   return out;
 }
 
+/**
+ * Characters that change how text displays without showing up themselves:
+ * bidi controls (which can make code read in a different order than it
+ * runs), zero-width spaces, line and paragraph separators, and control
+ * characters other than tab and line breaks.
+ */
+const HIDDEN_CHAR =
+  /([\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\u061C\u200B\u200E\u200F\u2028-\u202E\u2060\u2066-\u2069\uFEFF])/;
+
+/**
+ * `text` split so every hidden character stands on its own, as a
+ * `{ hidden: "U+202E" }` piece the approval card draws as a visible tag —
+ * what the user approves must read the way it will be written.
+ */
+export function splitHidden(text: string): Array<string | { hidden: string }> {
+  if (!HIDDEN_CHAR.test(text)) return [text];
+  return text
+    .split(HIDDEN_CHAR)
+    .map((piece, i) =>
+      i % 2 === 1
+        ? { hidden: `U+${piece.codePointAt(0)!.toString(16).toUpperCase().padStart(4, "0")}` }
+        : piece,
+    )
+    .filter((piece) => piece !== "");
+}
+
 /** A row of the diff as the card shows it: a line, or a fold standing in
  *  for a run of unchanged lines. */
 export type DiffRow = DiffLine | { kind: "fold"; count: number };

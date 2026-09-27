@@ -109,11 +109,16 @@ export function MemoryList({
     setEditVal("");
   };
 
+  // With a search typed in, the button clears what the search shows — the
+  // rows on screen — not the whole list behind it.
+  const filtering = query.trim().length > 0;
   const clearAll = async () => {
+    const targets = filtering ? visible : memories;
+    const n = targets.length;
     const ok = await confirm({
-      title: "Delete all memories?",
-      body: `${memories.length} ${memories.length === 1 ? "memory" : "memories"} will be removed. This can't be undone.`,
-      confirmLabel: "Delete all",
+      title: filtering ? "Delete the matching memories?" : "Delete all memories?",
+      body: `${n} ${n === 1 ? "memory" : "memories"} will be removed. This can't be undone.`,
+      confirmLabel: filtering ? "Delete matching" : "Delete all",
       destructive: true,
     });
     if (!ok) return;
@@ -121,7 +126,7 @@ export function MemoryList({
     try {
       // Sequential on purpose: each removal updates the store, and a failure
       // mid-way leaves the survivors listed rather than half-vanished.
-      for (const m of memories) await onRemove(m.id);
+      for (const m of targets) await onRemove(m.id);
     } finally {
       setClearing(false);
     }
@@ -182,12 +187,12 @@ export function MemoryList({
             <Button
               size="sm"
               variant="ghost"
-              disabled={clearing}
+              disabled={clearing || (filtering && visible.length === 0)}
               onClick={() => void clearAll()}
               className="rounded-xl text-foreground/55 hover:text-destructive"
             >
               <Trash2 className="h-3.5 w-3.5" />
-              Clear all
+              {filtering ? `Clear ${visible.length} shown` : "Clear all"}
             </Button>
           </div>
 

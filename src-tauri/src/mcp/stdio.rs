@@ -86,9 +86,14 @@ pub fn without_stderr(message: &str) -> &str {
 
 /// Longest stdout line we'll buffer. A JSON-RPC message is one line, so
 /// this is the per-message cap; matches the HTTP transport's body cap. A
-/// server that streams past it (a runaway log to stdout, a hostile binary)
-/// gets its session torn down rather than growing our heap.
+/// line past it (a screenshot tool's base64 image, a runaway log) is
+/// skipped to its newline rather than grown into — and the request it
+/// answers, when it can be told, fails saying why ([`LineRead::TooLong`]).
 const MAX_LINE_BYTES: usize = 4 * 1024 * 1024;
+
+/// How much of the start and the end of an over-long line is kept, to find
+/// the id of the request it answers.
+const ID_SEARCH_BYTES: usize = 4 * 1024;
 
 /// How much of the child's stderr we keep for diagnostics.
 const STDERR_TAIL_BYTES: usize = 8 * 1024;
@@ -96,7 +101,9 @@ const STDERR_TAIL_BYTES: usize = 8 * 1024;
 const CLIENT_NAME: &str = "loach";
 const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-type Pending = Arc<Mutex<HashMap<i64, oneshot::Sender<JsonRpcResponse>>>>;
+/// Requests waiting for their reply. The reader delivers either the reply
+/// or why Loach couldn't read one — a reply too big to take in.
+type Pending = Arc<Mutex<HashMap<i64, oneshot::Sender<Result<JsonRpcResponse, String>>>>>;
 type StderrTail = Arc<Mutex<Vec<u8>>>;
 
 /// A live stdio MCP server: the child plus the reader task that pairs its
@@ -357,6 +364,12 @@ impl StdioSession {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        // Start in the user's home folder, not wherever Loach itself was
+        // launched from (its install directory, or `/` from the Finder), so
+        // relative paths in a server's arguments mean the same thing every run.
+        if let Some(home) = std::env::home_dir() {
+            cmd.current_dir(home);
+        }
         #[cfg(windows)]
         {
             // CREATE_NO_WINDOW — same reason as `ollama_launch::spawn_serve`:
@@ -507,9 +520,15 @@ impl StdioSession {
 
         in_flight.unanswered = true;
         match tokio::time::timeout(timeout, rx).await {
-            Ok(Ok(resp)) => {
+            Ok(Ok(Ok(resp))) => {
                 in_flight.unanswered = false;
                 Ok(resp)
+            }
+            // The server did answer, and is still running: Loach just
+            // couldn't take the answer in.
+            Ok(Ok(Err(why))) => {
+                in_flight.unanswered = false;
+                bail!("MCP server `{}`: {why}", self.label)
             }
             // Sender dropped: the reader task cleared the map because the
             // process went away — nobody left to tell.
@@ -636,9 +655,34 @@ async fn pump_stdout(
     let mut buf: Vec<u8> = Vec::new();
     loop {
         buf.clear();
+        // One big reply shouldn't keep megabytes allocated for the life of
+        // the session.
+        buf.shrink_to(64 * 1024);
         match read_line_capped(&mut reader, &mut buf, MAX_LINE_BYTES).await {
-            Ok(0) => break,
-            Ok(_) => {}
+            Ok(LineRead::Eof) => break,
+            Ok(LineRead::Line) => {}
+            Ok(LineRead::TooLong { head, tail }) => {
+                let waiter = reply_id(&head, &tail).and_then(|id| {
+                    pending
+                        .lock()
+                        .expect("stdio pending map poisoned")
+                        .remove(&id)
+                });
+                match waiter {
+                    Some(tx) => {
+                        let _ = tx.send(Err(format!(
+                            "its reply was over {} MiB, more than Loach reads in one go — \
+                             ask the tool for less at a time",
+                            MAX_LINE_BYTES / (1024 * 1024)
+                        )));
+                    }
+                    None => tracing::warn!(
+                        "MCP stdio `{label}`: skipped an over-long stdout line that answers no \
+                         request in flight"
+                    ),
+                }
+                continue;
+            }
             Err(e) => {
                 tracing::warn!("MCP stdio `{label}`: stdout read failed: {e:#}");
                 break;
@@ -666,7 +710,7 @@ async fn pump_stdout(
                     .remove(&id);
                 match (waiter, serde_json::from_value::<JsonRpcResponse>(msg)) {
                     (Some(tx), Ok(resp)) => {
-                        let _ = tx.send(resp);
+                        let _ = tx.send(Ok(resp));
                     }
                     (Some(_), Err(e)) => {
                         tracing::warn!("MCP stdio `{label}`: malformed response for id {id}: {e}");
@@ -764,34 +808,86 @@ fn server_request_reply(method: &str, id: Value) -> Value {
     }
 }
 
-/// `read_until('\n')` with a byte ceiling. Returns the number of bytes
-/// read (0 at EOF), failing — rather than allocating without bound — when
-/// a line exceeds `max`.
+/// What one [`read_line_capped`] produced.
+#[derive(Debug, PartialEq, Eq)]
+enum LineRead {
+    /// End of the stream, with nothing left over.
+    Eof,
+    /// A line — or the unterminated rest of the stream — now in the buffer.
+    Line,
+    /// A line longer than the cap, read through to its newline and dropped
+    /// rather than buffered. `head` and `tail` are its first and last
+    /// [`ID_SEARCH_BYTES`], which is where a reply's `id` sits.
+    TooLong { head: Vec<u8>, tail: Vec<u8> },
+}
+
+/// `read_until('\n')` with a byte ceiling: a line past `max` is consumed
+/// without being kept — the stream stays in step, the heap stays small.
 async fn read_line_capped<R: AsyncBufReadExt + Unpin>(
     reader: &mut R,
     buf: &mut Vec<u8>,
     max: usize,
-) -> Result<usize> {
-    let mut total = 0usize;
+) -> Result<LineRead> {
+    let mut too_long: Option<(Vec<u8>, Vec<u8>)> = None;
     loop {
         let chunk = reader.fill_buf().await?;
         if chunk.is_empty() {
-            return Ok(total);
+            return Ok(match too_long {
+                Some((head, tail)) => LineRead::TooLong { head, tail },
+                None if buf.is_empty() => LineRead::Eof,
+                None => LineRead::Line,
+            });
         }
         let (take, done) = match chunk.iter().position(|&b| b == b'\n') {
             Some(i) => (i + 1, true),
             None => (chunk.len(), false),
         };
-        if total + take > max {
-            bail!("MCP server sent a {max}+ byte line — refusing to buffer further");
+        let part = &chunk[..take];
+        match too_long.as_mut() {
+            Some((_, tail)) => keep_last(tail, part),
+            None if buf.len() + take > max => {
+                buf.extend_from_slice(part);
+                let head = buf[..buf.len().min(ID_SEARCH_BYTES)].to_vec();
+                let mut tail = Vec::new();
+                keep_last(&mut tail, buf);
+                buf.clear();
+                too_long = Some((head, tail));
+            }
+            None => buf.extend_from_slice(part),
         }
-        buf.extend_from_slice(&chunk[..take]);
         reader.consume(take);
-        total += take;
         if done {
-            return Ok(total);
+            return Ok(match too_long {
+                Some((head, tail)) => LineRead::TooLong { head, tail },
+                None => LineRead::Line,
+            });
         }
     }
+}
+
+/// Append `bytes` to `tail`, keeping only its last [`ID_SEARCH_BYTES`].
+fn keep_last(tail: &mut Vec<u8>, bytes: &[u8]) {
+    tail.extend_from_slice(bytes);
+    if tail.len() > ID_SEARCH_BYTES {
+        tail.drain(..tail.len() - ID_SEARCH_BYTES);
+    }
+}
+
+/// The `id` of the reply a dropped over-long line was, if its first or last
+/// few KB name one — `"id": 7` usually sits at one end of the object.
+fn reply_id(head: &[u8], tail: &[u8]) -> Option<i64> {
+    let value_after = |text: &str, at: usize| -> Option<i64> {
+        let rest = text[at + "\"id\"".len()..].trim_start().strip_prefix(':')?.trim_start();
+        let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        digits.parse().ok()
+    };
+    // The last `"id"` near the end, the first near the start: whichever end
+    // the object's own id was written at, nested ids lie between.
+    let tail = String::from_utf8_lossy(tail);
+    let head = String::from_utf8_lossy(head);
+    tail.rmatch_indices("\"id\"")
+        .find_map(|(at, _)| value_after(&tail, at))
+        .or_else(|| head.match_indices("\"id\"").find_map(|(at, _)| value_after(&head, at)))
 }
 
 /// Windows: `CreateProcess` finds `foo.exe` on `PATH` for a bare `foo`,
@@ -800,7 +896,7 @@ async fn read_line_capped<R: AsyncBufReadExt + Unpin>(
 /// `PATH` × `PATHEXT` ourselves so `npx` works as typed. Anything with an
 /// extension or a directory separator is passed through untouched.
 #[cfg(windows)]
-fn resolve_program(command: &str) -> std::ffi::OsString {
+pub(crate) fn resolve_program(command: &str) -> std::ffi::OsString {
     use std::path::Path;
     let p = Path::new(command);
     if p.extension().is_some() || command.contains(['\\', '/']) {
@@ -822,7 +918,7 @@ fn resolve_program(command: &str) -> std::ffi::OsString {
 }
 
 #[cfg(not(windows))]
-fn resolve_program(command: &str) -> std::ffi::OsString {
+pub(crate) fn resolve_program(command: &str) -> std::ffi::OsString {
     command.into()
 }
 
@@ -977,16 +1073,16 @@ mod tests {
         let data: &[u8] = b"first\nsecond line\nlast-no-newline";
         let mut reader = BufReader::new(data);
         let mut buf = Vec::new();
-        assert_eq!(read_line_capped(&mut reader, &mut buf, 1024).await.unwrap(), 6);
+        assert_eq!(read_line_capped(&mut reader, &mut buf, 1024).await.unwrap(), LineRead::Line);
         assert_eq!(buf, b"first\n");
         buf.clear();
-        assert_eq!(read_line_capped(&mut reader, &mut buf, 1024).await.unwrap(), 12);
+        assert_eq!(read_line_capped(&mut reader, &mut buf, 1024).await.unwrap(), LineRead::Line);
         assert_eq!(buf, b"second line\n");
         buf.clear();
-        assert_eq!(read_line_capped(&mut reader, &mut buf, 1024).await.unwrap(), 15);
+        assert_eq!(read_line_capped(&mut reader, &mut buf, 1024).await.unwrap(), LineRead::Line);
         assert_eq!(buf, b"last-no-newline");
         buf.clear();
-        assert_eq!(read_line_capped(&mut reader, &mut buf, 1024).await.unwrap(), 0);
+        assert_eq!(read_line_capped(&mut reader, &mut buf, 1024).await.unwrap(), LineRead::Eof);
     }
 
     /// A stdio row running `command` with `args`, for the process tests.
@@ -1120,12 +1216,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_line_capped_refuses_oversized_lines() {
-        let data = vec![b'x'; 100];
-        let mut reader = BufReader::new(data.as_slice());
+    async fn read_line_capped_skips_an_oversized_line_and_keeps_reading() {
+        // One reply far past the cap, then an ordinary one: the big line is
+        // dropped without being buffered, and the stream stays in step.
+        let big = format!("{{\"jsonrpc\":\"2.0\",\"result\":\"{}\",\"id\":7}}\n", "x".repeat(20_000));
+        let data = format!("{big}{{\"jsonrpc\":\"2.0\",\"id\":8,\"result\":{{}}}}\n");
+        let mut reader = BufReader::with_capacity(512, data.as_bytes());
         let mut buf = Vec::new();
-        let err = read_line_capped(&mut reader, &mut buf, 32).await.unwrap_err();
-        assert!(err.to_string().contains("32+ byte line"), "{err}");
+        match read_line_capped(&mut reader, &mut buf, 1024).await.unwrap() {
+            LineRead::TooLong { head, tail } => {
+                assert!(head.len() <= ID_SEARCH_BYTES && tail.len() <= ID_SEARCH_BYTES);
+                assert_eq!(reply_id(&head, &tail), Some(7));
+            }
+            other => panic!("expected TooLong, got {other:?}"),
+        }
+        assert!(buf.is_empty(), "the oversized line was buffered");
+        assert_eq!(read_line_capped(&mut reader, &mut buf, 1024).await.unwrap(), LineRead::Line);
+        assert!(String::from_utf8_lossy(&buf).contains("\"id\":8"));
+    }
+
+    /// The object's own id, not one nested in its result — at whichever end
+    /// the server wrote it.
+    #[test]
+    fn reply_id_prefers_the_ids_at_the_ends() {
+        assert_eq!(reply_id(b"{\"jsonrpc\":\"2.0\",\"id\": 12,\"result\":{", b"...]}}"), Some(12));
+        assert_eq!(
+            reply_id(b"{\"result\":{\"content\":[{\"id\":99", b"...}]},\"id\":3}\n"),
+            Some(3)
+        );
+        assert_eq!(reply_id(b"{\"result\":\"x", b"xxx\"}"), None);
     }
 
     #[cfg(windows)]

@@ -2176,7 +2176,16 @@ fn stdio_consent_text(draft: &McpServer) -> Result<String, String> {
             s.to_string()
         }
     };
-    let mut listing = format!("Program: {}", shown(draft.command.as_deref().unwrap_or("")));
+    let command = draft.command.as_deref().unwrap_or("");
+    let mut listing = format!("Program: {}", shown(command));
+    // A bare `npx` is looked up on PATH when the server starts (Windows);
+    // name the file that lookup lands on, so a look-alike earlier on PATH
+    // can't pass for the real one.
+    let resolved = crate::mcp::stdio::resolve_program(command.trim());
+    if resolved.as_os_str() != std::ffi::OsStr::new(command.trim()) {
+        listing.push_str("\nFound at: ");
+        listing.push_str(&shown(&resolved.to_string_lossy()));
+    }
     let args = draft.args();
     if !args.is_empty() {
         listing.push_str("\nArguments:");
@@ -2386,7 +2395,7 @@ pub async fn mcp_save(
 pub async fn mcp_delete(state: State<'_, AppState>, id: String) -> Result<(), String> {
     state.db.delete_mcp_server(&id).map_err(err)?;
     crate::mcp::invalidate_tools_cache(&state.mcp_tools_cache).await;
-    crate::mcp::drop_session(&id);
+    crate::mcp::forget_session(&id);
     Ok(())
 }
 
@@ -3486,7 +3495,8 @@ mod tests {
         )
         .to_draft();
         let text = stdio_consent_text(&draft).expect("fits");
-        assert!(text.contains("Program: npx\nArguments:\n    -y\n    \"a b\""), "{text}");
+        assert!(text.contains("Program: npx\n"), "{text}");
+        assert!(text.contains("Arguments:\n    -y\n    \"a b\""), "{text}");
         assert!(text.contains("GITHUB_TOKEN (value hidden)"), "{text}");
         assert!(text.contains("BRAVE_API_KEY (value hidden)"), "{text}");
         assert!(!text.contains("ghp_secret") && !text.contains("brave_secret"), "{text}");
@@ -3497,6 +3507,23 @@ mod tests {
 
         let split = stdio_input("npx", &["a", "b"], &[]).to_draft();
         assert_ne!(stdio_consent_text(&split).unwrap(), stdio_consent_text(&draft).unwrap());
+    }
+
+    /// The dialog names the file a bare command resolves to on PATH, which
+    /// is what actually starts; a full path is shown once, as typed.
+    #[cfg(windows)]
+    #[test]
+    fn consent_text_names_the_file_a_bare_command_runs() {
+        let text = stdio_consent_text(&stdio_input("cmd", &[], &[]).to_draft()).unwrap();
+        let found = text
+            .lines()
+            .find_map(|l| l.strip_prefix("Found at: "))
+            .unwrap_or_else(|| panic!("{text}"));
+        assert!(found.to_lowercase().ends_with(r"\cmd.exe"), "{text}");
+
+        let text = stdio_consent_text(&stdio_input(r"C:\tools\server.exe", &[], &[]).to_draft())
+            .unwrap();
+        assert!(!text.contains("Found at"), "{text}");
     }
 
     /// "Always allow" answers belong to the program or endpoint they were

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { diffLines, foldUnchanged, splitLines, type DiffLine } from "./lineDiff";
+import { diffLines, foldUnchanged, splitHidden, splitLines, type DiffLine } from "./lineDiff";
 
 const render = (old: string, next: string) =>
   diffLines(old, next).map((l) => `${{ same: " ", add: "+", del: "-" }[l.kind]}${l.text}`);
@@ -133,5 +133,23 @@ describe("foldUnchanged", () => {
   it("leaves a diff with no change in it whole", () => {
     const lines = same(50);
     expect(foldUnchanged(lines)).toBe(lines);
+  });
+});
+
+describe("splitHidden", () => {
+  it("leaves ordinary text, tabs and line breaks alone", () => {
+    expect(splitHidden("let a = 1;\tb\r\n")).toEqual(["let a = 1;\tb\r\n"]);
+  });
+
+  // "Trojan Source": a right-to-left override makes the line display in a
+  // different order from the one it runs in.
+  it("sets bidi controls and zero-width characters apart", () => {
+    expect(splitHidden("if (admin\u202E) {\u200B}")).toEqual([
+      "if (admin",
+      { hidden: "U+202E" },
+      ") {",
+      { hidden: "U+200B" },
+      "}",
+    ]);
   });
 });

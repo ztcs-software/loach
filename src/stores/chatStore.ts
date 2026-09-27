@@ -836,6 +836,13 @@ async function buildTaskRequest(
       effectiveSystemPrompt = parts.length ? parts.join("\n\n") : null;
     } catch (e) {
       logger.warn("Failed to load space context", e);
+      // This turn goes out without the Space's own instructions and memory,
+      // but the global facts don't depend on them and still apply.
+      if (globalBlock) {
+        effectiveSystemPrompt = fallbackPrompt
+          ? `${fallbackPrompt}\n\n${globalBlock}`
+          : globalBlock;
+      }
     }
   } else if (globalBlock) {
     effectiveSystemPrompt = fallbackPrompt
@@ -1562,7 +1569,7 @@ function resetForTests() {
   pendingDirty.toolCalls = false;
   pendingDirty.attachments = false;
 }
-export const __testing = { startTask, resetForTests };
+export const __testing = { startTask, resetForTests, buildTaskRequest };
 
 /**
  * Resolve the user's "Default model" preference into a concrete

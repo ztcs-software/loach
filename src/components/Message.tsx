@@ -242,6 +242,7 @@ function ToolCallItem({ call }: { call: ToolCallRecord }) {
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
         className="flex w-full items-center gap-1.5 text-left text-foreground/70 transition-colors hover:text-foreground"
       >
         {open ? (
@@ -364,6 +365,7 @@ function ToolCallsBlock({
       <button
         type="button"
         onClick={() => setOpen(!open)}
+        aria-expanded={open}
         className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground/70 transition-colors"
       >
         {open ? (
@@ -464,6 +466,7 @@ function ThinkingBlock({ text, isStreaming }: { text: string; isStreaming?: bool
       <button
         type="button"
         onClick={() => setOpen(!open)}
+        aria-expanded={open}
         className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground/70 transition-colors"
       >
         {open ? (

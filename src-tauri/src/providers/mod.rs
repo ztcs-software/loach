@@ -65,10 +65,10 @@ pub(super) struct ToolCallCtx<'a> {
     pub cancel: &'a Notify,
     pub approvals: &'a ApprovalRegistry,
     pub stream_id: &'a str,
-    /// The chat this stream belongs to, when there is one. Only the
-    /// compaction stream runs without a session, and it exposes no
-    /// workspace tools, so `None` simply means "no standing grants and no
-    /// workspace" rather than a missing case.
+    /// The chat this stream belongs to, when there is one. Private Chat,
+    /// compaction and memory extraction run without one — none of them is
+    /// offered workspace tools — so `None` simply means "no standing grants
+    /// and no workspace" rather than a missing case.
     pub session_id: Option<&'a str>,
     /// Directory the workspace filesystem tools are scoped to. Resolved in
     /// `commands::chat_stream` from the session row — never from anything

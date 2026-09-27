@@ -50,7 +50,7 @@ describe("isDuplicate", () => {
   });
 
   it("treats composed and decomposed accents as the same text", () => {
-    expect(isDuplicate(normalize("Likes café au lait"), [normalize("Likes café au lait")])).toBe(
+    expect(isDuplicate(normalize("Likes cafe\u0301 au lait"), [normalize("Likes café au lait")])).toBe(
       true,
     );
   });

@@ -495,7 +495,8 @@ rewrite or remove them, only avoid repeating them.
   "Removed memory" pills with the fact and an **Undo** button.
 - **Memory tab** — review, edit, or delete any row, add facts manually,
   search, see when each was saved and jump to the chat it came from, or
-  clear the whole list. Facts too old to fit the prompt (below) are marked
+  clear the whole list — while a search is typed, **Clear** removes only
+  the facts it shows. Facts too old to fit the prompt (below) are marked
   *not sent*.
 - **Per-Space toggle** — turn extraction off without wiping existing rows.
   Existing memories continue to ride along in every chat; only new writes
@@ -749,7 +750,9 @@ Loach speaks two MCP transports. Configure servers in **Settings → MCP**.
   path), one argument per line, and optional `NAME=value` environment
   variables layered over Loach's own. Loach starts the program and
   speaks newline-delimited JSON-RPC over its pipes — the way most
-  published servers ship. The process stays running between turns. When
+  published servers ship. It starts in your home folder, so a relative
+  path in its arguments means the same thing however Loach was launched.
+  The process stays running between turns. When
   the server is disabled, edited or deleted, Loach closes its input and
   gives it two seconds to exit, as the MCP spec asks; one that doesn't is
   stopped together with every process it started, such as the `node`
@@ -760,6 +763,8 @@ Loach speaks two MCP transports. Configure servers in **Settings → MCP**.
   out of time fails, but the server keeps running — it may still be working
   on it — and is told the result is no longer wanted
   (`notifications/cancelled`), as it is when you press **Stop** mid-call.
+  A single reply over 4 MiB fails that call only — the server keeps
+  running, and the model is told to ask for less at a time.
   When the process exits or stops accepting input, **Test connection**
   quotes the last lines of its stderr so a failed launch says why (a
   timeout doesn't include them). In a chat the error stops short of the
@@ -792,9 +797,10 @@ variables whose names say they hold a credential (`…TOKEN`, `…_KEY`,
 `…SECRET`, `…PASSWORD`, `…AUTH…` and the like), which read *value hidden*.
 Variables that change what runs (`PATH`, `NODE_OPTIONS`, `PYTHONPATH`,
 `LD_PRELOAD`, package-index settings and the like) are always shown in
-full. A command line too long to show in full is refused rather than cut
-short, and so are control characters and invisible or text-reordering
-Unicode anywhere in the command, arguments or environment, and variable
+full. On Windows, when a bare command such as `npx` is found on `PATH`,
+the dialog also names the file that will run (`…\nodejs\npx.cmd`). A command
+line too long to show in full is refused rather than cut short, and so are
+control characters and invisible or text-reordering Unicode anywhere in the command, arguments or environment, and variable
 names that aren't plain ASCII. **Cancel** is the dialog's default button,
 so pressing Enter declines; only clicking **Start server** starts the
 program. The dialog is raised by the Rust side, not by the web view, so a

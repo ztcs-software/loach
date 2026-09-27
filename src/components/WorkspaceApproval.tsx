@@ -15,7 +15,7 @@
 
 import { useMemo, useState, type ReactNode } from "react";
 import { ArrowRight, FilePlus, FileWarning, Pencil, Trash2 } from "lucide-react";
-import { diffLines, foldUnchanged, splitLines } from "@/lib/lineDiff";
+import { diffLines, foldUnchanged, splitHidden, splitLines } from "@/lib/lineDiff";
 import { cn, formatBytes } from "@/lib/utils";
 
 /** Synthetic server id the backend gives built-in tools
@@ -101,9 +101,13 @@ export function workspaceApproval(
         ),
         body: (
           <div className="mt-2 flex flex-wrap items-center gap-1.5 font-mono text-[11px] text-foreground/80">
-            <span className="rounded bg-foreground/[0.06] px-1.5 py-0.5">{from}</span>
+            <span className="rounded bg-foreground/[0.06] px-1.5 py-0.5">
+              <Revealed text={from} />
+            </span>
             <ArrowRight className="h-3 w-3 shrink-0 text-foreground/50" />
-            <span className="rounded bg-foreground/[0.06] px-1.5 py-0.5">{to}</span>
+            <span className="rounded bg-foreground/[0.06] px-1.5 py-0.5">
+              <Revealed text={to} />
+            </span>
           </div>
         ),
         destructive: false,
@@ -136,7 +140,32 @@ export function workspaceApproval(
 }
 
 function Mono({ children }: { children: ReactNode }) {
-  return <span className="font-mono">{children}</span>;
+  return <span className="font-mono">{typeof children === "string" ? <Revealed text={children} /> : children}</span>;
+}
+
+/** `text` with every character that would otherwise display as nothing —
+ *  or reorder what's around it — drawn as a visible `U+202E` tag
+ *  (`splitHidden`), so what the user approves reads the way it's written. */
+function Revealed({ text }: { text: string }) {
+  const pieces = splitHidden(text);
+  if (pieces.length === 1 && typeof pieces[0] === "string") return <>{text}</>;
+  return (
+    <>
+      {pieces.map((piece, i) =>
+        typeof piece === "string" ? (
+          piece
+        ) : (
+          <span
+            key={i}
+            className="mx-px rounded-sm bg-amber-500/25 px-0.5 font-mono text-[10px] text-amber-800 dark:text-amber-200"
+            title="An invisible character: it changes how the text around it displays"
+          >
+            {piece.hidden}
+          </span>
+        ),
+      )}
+    </>
+  );
 }
 
 function WritePreview({
@@ -168,7 +197,7 @@ function WritePreview({
         </div>
       )}
       <pre className="max-h-72 overflow-auto rounded border border-foreground/10 bg-foreground/[0.04] px-2 py-1.5 font-mono text-[11px] leading-snug text-foreground/80 whitespace-pre-wrap break-words">
-        {shown}
+        <Revealed text={shown} />
         {clipped && (
           <span className="block pt-1 italic text-foreground/50">
             … preview cut at {MAX_PREVIEW_CHARS.toLocaleString()} characters; the whole file is
@@ -223,7 +252,7 @@ function DiffPreview({ oldText, newText }: { oldText: string; newText: string })
               <span className="select-none text-foreground/40">
                 {l.kind === "del" ? "- " : l.kind === "add" ? "+ " : "  "}
               </span>
-              {l.text}
+              <Revealed text={l.text} />
               {l.noEol && (
                 <span
                   className="ml-2 select-none italic text-foreground/50"

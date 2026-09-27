@@ -569,21 +569,34 @@ async fn ensure_pooled<'a>(
 }
 
 /// Forget (and for stdio: kill) the pooled session for one server. Called
-/// after every config save or delete so a disabled or reconfigured server's
-/// process doesn't linger. Never blocks the caller: if a tool call on that
+/// after every config save so a disabled or reconfigured server's process
+/// doesn't linger. Never blocks the caller: if a tool call on that
 /// server is mid-flight the slot is cleared once it finishes.
 pub fn drop_session(server_id: &str) {
     let slot = session_slot(server_id);
     clear_slot(slot);
 }
 
-/// [`drop_session`] for every server — snapshot restore, data wipe, and
+/// [`drop_session`] for a server that no longer exists: its slot leaves the
+/// pool too, rather than staying behind for the life of the app.
+pub fn forget_session(server_id: &str) {
+    let slot = {
+        let pool = SESSION_POOL.get_or_init(Default::default);
+        let mut map = pool.lock().expect("MCP session pool mutex poisoned");
+        map.remove(server_id)
+    };
+    if let Some(slot) = slot {
+        clear_slot(slot);
+    }
+}
+
+/// [`forget_session`] for every server — snapshot restore, data wipe, and
 /// app exit, when the whole table changes under us.
 pub fn drop_all_sessions() {
     let slots: Vec<SessionSlot> = {
         let pool = SESSION_POOL.get_or_init(Default::default);
-        let map = pool.lock().expect("MCP session pool mutex poisoned");
-        map.values().cloned().collect()
+        let mut map = pool.lock().expect("MCP session pool mutex poisoned");
+        map.drain().map(|(_, slot)| slot).collect()
     };
     for slot in slots {
         clear_slot(slot);

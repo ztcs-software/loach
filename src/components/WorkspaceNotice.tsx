@@ -1,3 +1,4 @@
+import { useId } from "react";
 import { FolderOpen } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { ChipRemove } from "./ComposerChip";
@@ -48,6 +49,7 @@ export function WorkspaceNotice({
         firstLine.length > 80 ? `${firstLine.slice(0, 80)}…` : firstLine
       }`
     : "";
+  const hintId = useId();
   const hint =
     (toolsEnabled
       ? "The model can list, find, read and search this folder. Writes, edits, moves and deletions ask you first, unless you've allowed them for this chat."
@@ -61,6 +63,9 @@ export function WorkspaceNotice({
         hidden && "opacity-0",
       )}
       title={`Workspace: ${root}\n${hint}${instructionsHint}`}
+      // Faded out under a file drag: out of the tab order and the
+      // accessibility tree too, not just out of sight.
+      inert={hidden}
     >
       <FolderOpen
         className={cn("h-3.5 w-3.5 shrink-0", toolsEnabled && "text-primary")}
@@ -71,6 +76,7 @@ export function WorkspaceNotice({
           type="button"
           onClick={onOpen}
           title={`Open ${root}`}
+          aria-describedby={hintId}
           className={cn(
             "rounded-sm font-medium underline-offset-2 hover:underline focus-visible:underline focus-visible:outline-none",
             toolsEnabled && "text-foreground/85 hover:text-foreground",
@@ -86,6 +92,9 @@ export function WorkspaceNotice({
         <span className="shrink-0 text-[10px] uppercase tracking-wider opacity-80">tools off</span>
       )}
       <ChipRemove label="Remove workspace directory" onClick={onRemove} disabled={locked} />
+      {/* The `title` above is a mouse-only tooltip; this is the same
+          explanation for a screen reader, read with the folder's button. */}
+      <span id={hintId} className="sr-only">{`${hint}${instructionsHint}`}</span>
     </div>
   );
 }

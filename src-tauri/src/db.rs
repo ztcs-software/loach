@@ -77,12 +77,12 @@ pub struct Session {
     /// date-grouped list instead of taking them with it.
     #[serde(default)]
     pub folder_id: Option<String>,
-    /// Absolute, canonical path of the directory this chat's filesystem
-    /// tools are scoped to, or null when the user hasn't picked one — which
-    /// is every chat by default. Written only by
-    /// `commands::pick_session_workspace`, which canonicalizes what the
-    /// native folder picker returned, so the value is always a real
-    /// directory as of the moment it was chosen.
+    /// Absolute path of the directory this chat's filesystem tools are
+    /// scoped to, or null when the user hasn't picked one — which is every
+    /// chat by default. Set by `commands::pick_session_workspace` from what
+    /// the native folder picker returned (canonicalized, stored without the
+    /// `\\?\` prefix), and copied to a fork of the chat; so the value was a
+    /// real directory the user chose, as of the moment they chose it.
     ///
     /// Deliberately scrubbed by [`Database::snapshot`]: it's machine-local
     /// state, meaningless on another box, and restoring someone else's
