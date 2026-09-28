@@ -8,6 +8,7 @@ import { useGlobalMemoryStore } from "@/stores/globalMemoryStore";
 import { selectMemoriesForPrompt } from "@/lib/memoryRules";
 import { DEFAULT_PARAMS, type GenerationParams, type Message } from "@/types";
 import {
+  baseSystemPrompt,
   computeContextUsage,
   formatTokens,
 } from "@/lib/contextUsage";
@@ -136,17 +137,18 @@ export function ContextUsageBar() {
   );
 
   // The system prompt the request will actually send is the per-session
-  // value when set, otherwise the global default. Space-level prompt
+  // value when set, otherwise the global default, with any compaction
+  // summary in front — the same pick the send makes. Space-level prompt
   // augmentation happens server-side via getSpaceContext; we don't
   // include it in the estimate because the user can't see it from here
   // and double-counting it would mislead. The bar is a hint, not a
   // billing tool — close enough for sizing decisions. The one backend-
   // appended layer that can be big is the workspace's LOACHFILE.md, so
   // that is counted from the store's last read of it.
-  const effectiveSystemPrompt =
-    session?.system_prompt && session.system_prompt.length > 0
-      ? session.system_prompt
-      : globalSystemPrompt || "";
+  const effectiveSystemPrompt = baseSystemPrompt(
+    session?.system_prompt ?? null,
+    globalSystemPrompt,
+  );
 
   // Defer the recompute: `messages` changes identity on every streaming flush
   // and computeContextUsage rescans the whole transcript. useDeferredValue lets

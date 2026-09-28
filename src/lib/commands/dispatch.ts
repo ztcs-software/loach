@@ -9,7 +9,12 @@ import { useSpaceStore } from "@/stores/spaceStore";
 import { useUIStore, type SettingsTab } from "@/stores/uiStore";
 import { DEFAULT_PERSONA_ID, PERSONAS } from "@/lib/personas";
 import { expandAndPrimeSnippet } from "@/lib/runSnippet";
-import { stripSummaryBlock } from "@/lib/contextUsage";
+import {
+  extractSummary,
+  stripSummaryBlock,
+  SUMMARY_END_TAG,
+  SUMMARY_START_TAG,
+} from "@/lib/contextUsage";
 import type { MemoryScope } from "@/lib/memory";
 import {
   clearSessionMessages,
@@ -466,13 +471,19 @@ async function runInstructions(rest: string): Promise<CommandResult> {
     }
     return listItems("Chat instructions", [{ label: current }]);
   }
+  // Setting and clearing replace only that own text. A compaction summary
+  // parked in the same field stands in for the turns `chatHistory` no longer
+  // sends, so dropping it would leave the model with neither.
+  const summary = extractSummary(session.system_prompt ?? null);
+  const withSummary = (own: string) =>
+    summary ? `${SUMMARY_START_TAG}\n${summary}\n${SUMMARY_END_TAG}\n\n${own}` : own;
   if (value.toLowerCase() === "clear") {
-    await useChatStore.getState().setSessionSystemPrompt(session.id, "");
+    await useChatStore.getState().setSessionSystemPrompt(session.id, withSummary(""));
     return ok("Cleared instructions");
   }
   // We deliberately keep the user's raw text (including newlines after the
   // first space) — that's why `rest` was preserved verbatim in the parser.
-  await useChatStore.getState().setSessionSystemPrompt(session.id, value);
+  await useChatStore.getState().setSessionSystemPrompt(session.id, withSummary(value));
   return ok("Saved instructions", value.length > 80 ? value.slice(0, 80) + "…" : value);
 }
 

@@ -152,6 +152,26 @@ export function extractSummary(prompt: string | null): string | null {
   return m ? m[1].trim() : null;
 }
 
+/** The base system prompt a chat sends, before the memory, persona and tone
+ *  layers: the Space's instructions when set, else the per-chat instructions,
+ *  else the global Custom instructions. The per-chat check looks only at the
+ *  user's own text — a compaction summary parked in `sessionPrompt` isn't an
+ *  instruction, and counting it as one shut the global Custom instructions
+ *  out of every compacted chat. The summary then goes back in front of
+ *  whichever prompt wins: it stands in for the turns no longer sent. */
+export function baseSystemPrompt(
+  sessionPrompt: string | null,
+  globalPrompt: string,
+  spaceInstructions = "",
+): string {
+  const prompt =
+    spaceInstructions || stripSummaryBlock(sessionPrompt).trim() || globalPrompt;
+  const summary = extractSummary(sessionPrompt);
+  if (!summary) return prompt;
+  const block = `${SUMMARY_START_TAG}\n${summary}\n${SUMMARY_END_TAG}`;
+  return prompt ? `${block}\n\n${prompt}` : block;
+}
+
 /** Format an integer token count compactly: 1234 → "1.2k", 12345 → "12k". */
 export function formatTokens(n: number): string {
   if (n < 1000) return `${n}`;

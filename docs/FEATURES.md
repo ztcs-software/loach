@@ -413,7 +413,9 @@ context length.
 
 When a chat grows long, **Compact context** (the button in the bar's
 popover, or the `/compact` command) summarises the older turns with the chat's own
-model and tucks the summary into the system prompt. The original messages
+model and tucks the summary into the system prompt. The summary doesn't
+count as the chat's own instructions: it rides along with whichever ones
+apply — the Space's, the chat's, or your Custom instructions (§15). The original messages
 aren't deleted — they stay in the transcript for scrollback, marked with a
 compaction divider, but are dropped from what the model sees on the next
 turn so the freed context goes to new conversation. The popover button is

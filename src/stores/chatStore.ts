@@ -53,6 +53,7 @@ import { selectMemoriesForPrompt } from "@/lib/memoryRules";
 import { useGlobalMemoryStore } from "./globalMemoryStore";
 import { buildCompactedMarkdown } from "@/lib/export";
 import {
+  baseSystemPrompt,
   extractSummary,
   stripSummaryBlock,
   SUMMARY_END_TAG,
@@ -759,10 +760,10 @@ async function buildTaskRequest(
       : settings.openai_base_url;
   const params = readSessionParams(session);
 
-  const fallbackPrompt =
-    session.system_prompt && session.system_prompt.length > 0
-      ? session.system_prompt
-      : settings.global_system_prompt || "";
+  const fallbackPrompt = baseSystemPrompt(
+    session.system_prompt,
+    settings.global_system_prompt,
+  );
 
   let effectiveSystemPrompt: string | null = fallbackPrompt || null;
   const spaceImages: string[] = [];
@@ -829,13 +830,13 @@ async function buildTaskRequest(
       }));
       // Space instructions replace the per-chat prompt, but a compaction
       // summary parked there stands in for the turns `chatHistory` no longer
-      // sends — keep it, or the model sees neither the summary nor them.
-      const summary = spaceInstructions
-        ? extractSummary(session.system_prompt ?? null)
-        : null;
-      const base = summary
-        ? `${SUMMARY_START_TAG}\n${summary}\n${SUMMARY_END_TAG}\n\n${spaceInstructions}`
-        : spaceInstructions || fallbackPrompt;
+      // sends — `baseSystemPrompt` keeps it, or the model sees neither the
+      // summary nor them.
+      const base = baseSystemPrompt(
+        session.system_prompt,
+        settings.global_system_prompt,
+        spaceInstructions,
+      );
       const parts: string[] = [];
       if (base) parts.push(base);
       if (globalBlock) parts.push(globalBlock);
