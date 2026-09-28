@@ -111,12 +111,13 @@ With each stable release we publish pre-built `.exe`, `.deb`, `.rpm`, `.AppImage
 
 ### Install on Linux
 
-All three Linux packages — `.AppImage`, `.deb` and `.rpm` — support in-app updates. Deb and rpm installs download the signed package and elevate through `pkexec` so the package database stays consistent; there's no apt/yum repository, so `apt upgrade` won't see new versions.
+From the folder you downloaded the package to:
+
+- **Debian / Ubuntu (`.deb`)**: `sudo apt install ./Loach_*_amd64.deb`
+- **Fedora / RHEL / openSUSE (`.rpm`)**: `sudo dnf install ./Loach-*.x86_64.rpm` (or `sudo zypper install ./Loach-*.x86_64.rpm`)
+- **Any distro (`.AppImage`)**: `chmod +x Loach_*_amd64.AppImage && ./Loach_*_amd64.AppImage`
 
 Builds target **glibc 2.35**, which makes **Ubuntu 22.04** and **Debian 12** the oldest supported distributions.
-
-> [!NOTE]
->If you installed **v1.2.3 or earlier** from a `.deb` or `.rpm`, that build hides the Updates panel. Download a newer package once from the releases page and in-app updates take over from there.
 
 ### Install on macOS
 
