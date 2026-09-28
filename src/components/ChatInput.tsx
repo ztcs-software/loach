@@ -30,6 +30,7 @@ import {
   FileTooLargeError,
 } from "@/lib/files";
 import { useChatStore } from "@/stores/chatStore";
+import { usePrivateChatStore } from "@/stores/privateChatStore";
 import { useUIStore } from "@/stores/uiStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useToastStore } from "@/stores/toastStore";
@@ -284,9 +285,18 @@ export function ChatInput({ centered = false }: ChatInputProps) {
     const hasFiles = (e: DragEvent) =>
       !!e.dataTransfer && e.dataTransfer.types.includes("Files");
 
+    // Private Chat covers this composer without unmounting it, and these
+    // listeners are on the window — so a file dropped onto the overlay was
+    // attached here, to the regular chat behind it, and saved (and read by
+    // the memory extractor) with that chat's next send. Refuse drops while
+    // it's open; the events stay cancelled, as before, so they never fall
+    // through to the webview's own file handling.
+    const privateChatOpen = () => usePrivateChatStore.getState().open;
+
     const onDragEnter = (e: DragEvent) => {
       if (!hasFiles(e)) return;
       e.preventDefault();
+      if (privateChatOpen()) return;
       depth += 1;
       if (depth === 1) setDragging(true);
     };
@@ -294,9 +304,11 @@ export function ChatInput({ centered = false }: ChatInputProps) {
       if (!hasFiles(e)) return;
       // Must preventDefault on dragover for the subsequent `drop` event to
       // fire. Setting the dropEffect here also changes the OS cursor to the
-      // "copy" affordance.
+      // "copy" affordance (or "not allowed" under Private Chat).
       e.preventDefault();
-      if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
+      if (e.dataTransfer) {
+        e.dataTransfer.dropEffect = privateChatOpen() ? "none" : "copy";
+      }
     };
     const onDragLeave = (e: DragEvent) => {
       if (!hasFiles(e)) return;
@@ -308,6 +320,7 @@ export function ChatInput({ centered = false }: ChatInputProps) {
       e.preventDefault();
       depth = 0;
       setDragging(false);
+      if (privateChatOpen()) return;
       const files = e.dataTransfer?.files;
       if (files && files.length) await ingest(Array.from(files));
     };

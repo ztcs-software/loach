@@ -79,6 +79,7 @@ import { useSecurityStore, lockUntilHydrated } from "@/stores/securityStore";
 import { useUIStore } from "@/stores/uiStore";
 import { useAutoLock } from "@/lib/autoLock";
 import { useCanvasStore } from "@/stores/canvasStore";
+import { usePrivateChatStore } from "@/stores/privateChatStore";
 import { cn } from "@/lib/utils";
 import { DEFAULT_PARAMS } from "@/types";
 
@@ -106,6 +107,7 @@ export default function App() {
   const sidebarTab = useUIStore((s) => s.sidebarTab);
   const canvasOpen = useCanvasStore((s) => s.isOpen);
   const paramsOpen = useUIStore((s) => s.paramsOpen);
+  const privateChatOpen = usePrivateChatStore((s) => s.open);
   const session = useChatStore((s) =>
     s.activeSessionId ? s.sessions.find((x) => x.id === s.activeSessionId) : undefined,
   );
@@ -352,7 +354,12 @@ export default function App() {
       ) : (
       <div className="relative flex h-full flex-col overflow-hidden text-foreground">
         <TitleBar />
-        <div className="flex min-h-0 flex-1">
+        {/* Private Chat covers this area but leaves it mounted. Inert while
+            it's open so Tab can't walk focus out of the overlay into the
+            regular chat's composer behind it — text typed there, unseen,
+            would be sent to that chat, saved, and read by its memory
+            extractor. */}
+        <div className="flex min-h-0 flex-1" inert={privateChatOpen}>
           <Sidebar />
           {viewingSpaceId ? (
             <ErrorBoundary name="Space">
