@@ -47,7 +47,7 @@ Behind a calm, beautifully crafted UI sits a rich feature set - ready when you n
 
 #### Organizing chats & content
 - **Spaces** - group chats around a project, with shared instructions, reference sources and memory. 
-- **Global memory** - opt-in memory for chats outside Spaces: after each reply Loach notes lasting facts about you, updates or retires ones that changed, and every change comes with an Undo.
+- **Global memories** - opt-in (**Settings → Features**): after each reply outside a Space, Loach notes lasting facts about you and updates or retires ones that changed, with an Undo on every change; the facts go with you into every chat, Spaces included. Space memory works the same way, and both have a searchable editor that links each fact back to the chat it came from.
 - **Chat folders** - drag one chat onto another in the sidebar to group them into a named folder.
 - **Chat labels** - tag a chat with a colour from any chat menu; it shows as a dot next to the chat in the sidebar and Space view.
 - **Snippets** - save reusable prompts with an optional pinned model and click `Run` to start a fresh chat pre-filled and ready to send.
@@ -68,8 +68,8 @@ Behind a calm, beautifully crafted UI sits a rich feature set - ready when you n
 #### Model tools & capabilities
 - **Tools** - let models call local tools including calculate, date/time, count, hash, UUID, base64, JSON, unit convert, text diff, sort, IP math and PDF generation. 
 - **PDF generation** - the built-in pdf tool turns a model's structured spec (headings, lists, tables, page breaks) into a real PDF attached to the reply.
-- **Workspace folders** - give a chat a folder and the model can list, find, read, search and edit the files in it, asking before it writes, edits, moves or deletes anything unless you allow that for the chat. A `LOACHFILE.md` at the folder root adds the project's own instructions to every turn.
-- **MCP support** - register Model Context Protocol servers over Streamable HTTP or as local stdio processes (`npx`, `uvx`, …), test the handshake, inspect the tools they provide, and approve each tool call in the chat before it runs - or mark trusted tools as Always allow. 
+- **Work in folders** - add a folder to a chat from the composer's **+** menu and the model can list, find, read, search and edit the files in it - sandboxed to that folder, with no shell - showing you the change and asking before it writes, edits, moves or deletes anything unless you allow that tool for the chat. A `LOACHFILE.md` at the folder root adds the project's own instructions to every turn ([sample](docs/LOACHFILE.md.sample)). With a cloud provider, files the model reads are sent to it like any other message.
+- **MCP support** - register Model Context Protocol servers over Streamable HTTP or as local stdio processes (`npx`, `uvx`, …; a native dialog asks before any local program starts), test the handshake, inspect the tools they provide, and approve each tool call in the chat before it runs - or mark trusted tools as Always allow. 
 - **Web fetch** - opt-in: add URLs to messages (up to 5) and they will be fetched, sanitized and inlined to context. 
 - **Temporal awareness** - inject current date, weekday and timezone into the system prompt so models can answer to "what day is it today?".
 
@@ -222,6 +222,7 @@ Only one OpenAI-compatible endpoint is active at a time — switch the base URL 
 | Math | `remark-math` + `rehype-katex` + KaTeX, lazy-loaded from the bundle on first use |
 | Document parsing | `pdfjs-dist` (PDF) + `mammoth` (DOCX) |
 | PDF generation | `printpdf` 0.12 with bundled Liberation Sans fonts, subset at render time (Unicode-capable output) |
+| Workspace files | `walkdir` + `glob` + `regex` (no backtracking), `encoding_rs` + `chardetng` to edit non-UTF-8 files in their own encoding |
 | System tray | Tauri 2 built-in (`tray-icon` feature) |
 | Bundle targets | `.exe` (NSIS) on Windows; `.deb` / `.rpm` / `.AppImage` on Linux; `.dmg` + `.app` on macOS (Apple Silicon) |
 
@@ -239,7 +240,7 @@ Only one OpenAI-compatible endpoint is active at a time — switch the base URL 
 | App data dir on Linux | `~/.local/share/dev.loach.app/` |
 | App data dir on macOS | `~/Library/Application Support/dev.loach.app/` |
 
-Loach launches and works completely offline as long as you stick to local providers. The **Models** library, **Spaces**, **Snippets**, search, parameter sidebar, app lock, and chat history are all available without network access. Only chat generations against remote endpoints (OpenAI, Groq, OpenRouter, …), model pulls, web fetch, remote MCP servers and update checks require internet connection.
+Loach launches and works completely offline as long as you stick to local providers. The **Models** library, **Spaces**, **Snippets**, search, parameter sidebar, app lock, and chat history are all available without network access. Only chat generations against remote endpoints (OpenAI, Groq, OpenRouter, …), model pulls, web fetch, remote MCP servers (and the first launch of an `npx`/`uvx` one, which downloads its package) and update checks require internet connection.
 
 ---
 
