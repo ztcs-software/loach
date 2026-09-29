@@ -34,6 +34,12 @@ export interface Session {
    *  A dangling id — only reachable via a hand-edited snapshot — renders as
    *  a loose chat; see `Sidebar.tsx`'s grouping. */
   folder_id: string | null;
+  /** Absolute path of the directory this chat's filesystem tools may read
+   *  and write, or null when none is picked — the default for every chat.
+   *  Only `pickSessionWorkspace` can set it, and only from the native
+   *  folder dialog, so the renderer never chooses a path itself. Excluded
+   *  from snapshots: it's machine-local. */
+  workspace_root: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -64,29 +70,37 @@ export interface Space {
    *  overrides — see `chatStore::readSessionParams`. */
   default_params_json: string | null;
   /** Per-space toggle for the silent-auto-write memory extractor. Default
-   *  on at space creation. When false, no new memories are auto-saved and
-   *  the prompt builder skips the memory block — but existing rows stay
-   *  in the DB so flipping it off doesn't strip context the user might
-   *  still want to consult on the Memory tab. */
+   *  on at space creation. Gates WRITES only: when false, no new memories
+   *  are auto-saved (and manual adds are disabled), but existing rows stay
+   *  in the DB and keep riding along in the prompt so flipping it off
+   *  doesn't silently strip context the user might still want. */
   memory_enabled: boolean;
   created_at: number;
   updated_at: number;
 }
 
-/** One auto-saved (or hand-edited) fact scoped to a Space. The extractor
+/** Fields shared by every memory row, whatever its scope. The extractor
  *  proposes new rows after each assistant turn; the user can edit or delete
  *  any of them from the Memory tab. `source_session_id` / `source_message_id`
  *  point at the chat that produced the fact so the UI can link back to
  *  it; both are null for memories the user authored manually. */
-export interface SpaceMemory {
+export interface MemoryRow {
   id: string;
-  space_id: string;
   content: string;
   source_session_id: string | null;
   source_message_id: string | null;
   created_at: number;
   updated_at: number;
 }
+
+/** One fact scoped to a Space — injected only into chats in that Space. */
+export interface SpaceMemory extends MemoryRow {
+  space_id: string;
+}
+
+/** One fact that rides along in every non-private chat, in or out of a
+ *  Space, while `Settings.global_memory_enabled` is on. */
+export type GlobalMemory = MemoryRow;
 
 export interface SpaceFile {
   id: string;
@@ -242,7 +256,29 @@ export interface ToolCallRecord {
   /** Mirrors MCP's `isError`. True for either a tool-reported failure
    *  (the tool ran but said "no") or a transport/dispatch error. */
   is_error: boolean;
+  /** True while the backend is parked on the per-call consent prompt for
+   *  this call. Cleared when the user answers (locally, the moment they
+   *  click) or when the `tool_result` lands. Only meaningful on the
+   *  currently-streaming message — `finishRunning` clears it before the
+   *  record is persisted. */
+  awaiting_approval?: boolean;
+  /** True when the user refused the call (or the prompt timed out). The
+   *  tool never ran; `result` holds the note the model was given. */
+  denied?: boolean;
+  /** With `denied`: nobody answered the prompt before it timed out. */
+  timed_out?: boolean;
+  /** `write_file` only: size of the file the write replaces, or `null`
+   *  when it creates one. Absent on records saved before it existed. */
+  existing_bytes?: number | null;
+  /** True when the reply ended (Stop, error) before this call's result
+   *  arrived. `result` then says whether it could have run — a workspace
+   *  write already under way when Stop landed still finishes on disk. */
+  interrupted?: boolean;
 }
+
+/** Answer to a per-call tool approval prompt. `allow_always` also records
+ *  the tool on the server's allow-list so it never asks again. */
+export type ToolApprovalDecision = "allow_once" | "allow_always" | "deny";
 
 export interface ModelInfo {
   id: string;
@@ -313,6 +349,15 @@ export interface ChatRequest {
    *  to a user-configured MCP server. Omit (or pass `false`) for regular
    *  chats — defaults on the Rust side via `#[serde(default)]`. */
   private?: boolean;
+  /** Background-task marker (compaction, memory extraction): the backend
+   *  offers no tools at all, so the model can't stall on an approval card
+   *  nobody is looking at. */
+  no_tools?: boolean;
+  /** Chat this turn belongs to. The backend uses it to look up the
+   *  session's workspace directory; there is no way to pass the directory
+   *  itself, by design. Omitted by the compaction and Private Chat paths,
+   *  neither of which should reach the filesystem tools. */
+  session_id?: string;
 }
 
 export type StreamEvent =
@@ -333,7 +378,9 @@ export type StreamEvent =
       tokens_per_second: number;
     }
   /** Model asked to invoke an MCP tool. Emitted BEFORE the dispatcher
-   *  runs the tool — the UI uses this to render a "calling X…" block. */
+   *  runs the tool — the UI uses this to render a "calling X…" block.
+   *  `approval_required` means the backend is waiting on
+   *  `tool_approval_respond` before it will run the call. */
   | {
       kind: "tool_call";
       id: string;
@@ -341,6 +388,9 @@ export type StreamEvent =
       server_name: string;
       tool: string;
       arguments: unknown;
+      approval_required?: boolean;
+      /** `write_file` only — see `ToolCallRecord.existing_bytes`. */
+      existing_bytes?: number | null;
     }
   /** Outcome of a tool call. `id` pairs with the matching `tool_call`. */
   | {
@@ -354,6 +404,11 @@ export type StreamEvent =
        *  file-card renderers handle display. Optional with default `[]`
        *  so prior tool_result events deserialise unchanged. */
       attachments?: Attachment[];
+      /** The user refused the call at the consent prompt (or it timed
+       *  out). The tool never ran. */
+      denied?: boolean;
+      /** With `denied`: the prompt timed out unanswered. */
+      timed_out?: boolean;
     };
 
 export type ThemeChoice = "light" | "dark" | "system";
@@ -421,6 +476,12 @@ export interface Settings {
    *  temporal template variables (`{{CURRENT_DATE}}`, `{{CURRENT_TIME}}`,
    *  `{{CURRENT_WEEKDAY}}`, `{{CURRENT_DATETIME}}`, `{{CURRENT_TIMEZONE}}`). */
   temporal_awareness: boolean;
+  /** Global memory: facts that ride along in every non-private chat rather
+   *  than one Space. Unlike the per-space toggle this gates BOTH writes and
+   *  injection — off means no global block in any prompt and no extraction
+   *  from space-less chats. Off by default: on, every chat (not just Space
+   *  chats) pays the extractor's second generation after each reply. */
+  global_memory_enabled: boolean;
   /** When true, URLs detected in the user's prompt are fetched and their
    *  plain-text content is inlined into the outgoing message. Requires a
    *  network round-trip per URL — default is off so Loach stays offline-first
@@ -455,6 +516,10 @@ export interface Settings {
    *  or merging existing PDFs yet — `merge` returns a not-yet-supported
    *  error. */
   pdf_tool_enabled: boolean;
+  /** One switch for all eight workspace filesystem tools. They additionally
+   *  require the chat to have a directory picked — see `Session.workspace_root`.
+   *  Picking one turns this on (`chatStore.pickWorkspace`). */
+  workspace_tool_enabled: boolean;
   /** Global override for Ollama's `low_vram` option. When `true`, every
    *  Ollama request is sent with `low_vram: true` regardless of per-chat
    *  params or per-model Modelfile defaults — handy on memory-constrained
@@ -523,6 +588,7 @@ export const DEFAULT_SETTINGS: Settings = {
   default_model_preload: false,
   user_name: "",
   temporal_awareness: true,
+  global_memory_enabled: false,
   web_fetch_enabled: false,
   calculate_tool_enabled: false,
   datetime_tool_enabled: false,
@@ -536,6 +602,7 @@ export const DEFAULT_SETTINGS: Settings = {
   sort_tool_enabled: false,
   ip_tool_enabled: false,
   pdf_tool_enabled: false,
+  workspace_tool_enabled: false,
   low_vram_global: false,
   ollama_keep_alive: "5m",
   thinking_default: true,
@@ -666,16 +733,31 @@ export type AdminEvent =
 // MCP (Model Context Protocol)
 // ---------------------------------------------------------------------------
 
-/** An MCP server row as persisted in SQLite. Loach only speaks the
- *  Streamable-HTTP transport — one endpoint URL plus an optional map of
- *  request headers (typically auth). The `headers_json` blob arrives as a
- *  JSON string and is parsed lazily in `mcpStore`. */
+/** How Loach reaches an MCP server: POST JSON-RPC to a URL (Streamable
+ *  HTTP), or spawn a local process and talk over its pipes (stdio). */
+export type McpTransport = "http" | "stdio";
+
+/** An MCP server row as persisted in SQLite. Which connection fields are
+ *  meaningful depends on `transport`: `url` + `headers_json` for HTTP,
+ *  `command` + `args_json` + `env_json` for stdio. The JSON blobs arrive as
+ *  strings and are parsed lazily in `mcpStore`. */
 export interface McpServer {
   id: string;
   name: string;
+  transport: McpTransport;
   url: string;
   /** JSON-encoded `Record<string, string>`. */
   headers_json: string | null;
+  command: string | null;
+  /** JSON-encoded `string[]`. */
+  args_json: string | null;
+  /** JSON-encoded `Record<string, string>`. */
+  env_json: string | null;
+  /** When true, tool calls from this server skip the per-call prompt. */
+  auto_approve: boolean;
+  /** JSON-encoded `string[]` of raw tool names the user answered "Always
+   *  allow" for from the in-chat prompt. */
+  allowed_tools_json: string | null;
   enabled: boolean;
   created_at: number;
   updated_at: number;
@@ -683,12 +765,18 @@ export interface McpServer {
 
 /** Shape the Settings editor hands to `mcp_save` / `mcp_test`. Strings are
  *  trimmed and validated on the Rust side; `id` being undefined means
- *  "create new". */
+ *  "create new". `transport` defaults to `"http"` when omitted. */
 export interface McpServerInput {
   id?: string;
   name: string;
-  url: string;
+  transport?: McpTransport;
+  url?: string;
   headers?: Record<string, string>;
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  auto_approve?: boolean;
+  allowed_tools?: string[];
   enabled?: boolean;
 }
 
@@ -709,6 +797,19 @@ export interface McpTestResult {
   error: string | null;
 }
 
+/** Result of `mcp_tools` — the catalogue a chat turn would get, from the
+ *  running servers. `errors` pairs a server name with why its tools
+ *  couldn't be listed. */
+export interface McpToolsOverview {
+  tools: Array<{
+    server_id: string;
+    server_name: string;
+    name: string;
+    description: string | null;
+  }>;
+  errors: Array<[server: string, error: string]>;
+}
+
 // ---------------------------------------------------------------------------
 // Data tab (export / import / wipe)
 // ---------------------------------------------------------------------------
@@ -722,6 +823,7 @@ export interface ImportStats {
   spaces: number;
   space_files: number;
   space_memories: number;
+  global_memories: number;
   snippets: number;
   snippet_variables: number;
   snippet_fill_values: number;

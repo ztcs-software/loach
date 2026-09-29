@@ -49,6 +49,7 @@ function session(id: string, updatedAt: number, archived = false): Session {
     forked_from_session_id: null,
     label: null,
     folder_id: null,
+    workspace_root: null,
     created_at: 0,
     updated_at: updatedAt,
   };

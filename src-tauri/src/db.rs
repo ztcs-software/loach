@@ -77,6 +77,18 @@ pub struct Session {
     /// date-grouped list instead of taking them with it.
     #[serde(default)]
     pub folder_id: Option<String>,
+    /// Absolute path of the directory this chat's filesystem tools are
+    /// scoped to, or null when the user hasn't picked one — which is every
+    /// chat by default. Set by `commands::pick_session_workspace` from what
+    /// the native folder picker returned (canonicalized, stored without the
+    /// `\\?\` prefix), and copied to a fork of the chat; so the value was a
+    /// real directory the user chose, as of the moment they chose it.
+    ///
+    /// Deliberately scrubbed by [`Database::snapshot`]: it's machine-local
+    /// state, meaningless on another box, and restoring someone else's
+    /// export shouldn't hand their path to your model.
+    #[serde(default)]
+    pub workspace_root: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -146,6 +158,20 @@ pub struct SpaceMemory {
     pub updated_at: i64,
 }
 
+/// One free-text fact that rides along in every non-private chat rather
+/// than one Space. Same shape as `SpaceMemory` minus the scope column.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct GlobalMemory {
+    pub id: String,
+    pub content: String,
+    #[serde(default)]
+    pub source_session_id: Option<String>,
+    #[serde(default)]
+    pub source_message_id: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SpaceFile {
     pub id: String,
@@ -206,28 +232,112 @@ pub struct SnippetFillValue {
     pub updated_at: i64,
 }
 
-/// A user-configured MCP (Model Context Protocol) server. Loach only
-/// speaks the Streamable-HTTP transport — one URL, POST JSON-RPC bodies,
-/// optional auth headers. The underlying SQLite table still carries the
-/// (now-unused) `transport` / `command` / `args_json` / `env_json` columns
-/// from an earlier revision so migrations stay a no-op; new writes leave
-/// them NULL.
+/// A user-configured MCP (Model Context Protocol) server. Two transports:
+///
+///   - **Streamable HTTP** — one URL, POST JSON-RPC bodies, optional auth
+///     headers. `command` / `args_json` / `env_json` stay NULL.
+///   - **stdio** — Loach spawns `command args…` as a child process and
+///     speaks newline-delimited JSON-RPC over its pipes. `url` /
+///     `headers_json` stay empty.
+///
+/// The per-call approval state lives on the row too: `auto_approve` skips
+/// the consent prompt for every tool on the server, and `allowed_tools_json`
+/// remembers the individual tools the user chose "Always allow" for.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct McpServer {
     pub id: String,
     pub name: String,
-    /// The endpoint URL (Streamable HTTP).
+    /// `"http"` or `"stdio"`. Defaults to `"http"` on deserialise so a
+    /// snapshot exported by a build that predates stdio support imports
+    /// unchanged.
+    #[serde(default = "default_transport")]
+    pub transport: String,
+    /// The endpoint URL (Streamable HTTP). Empty for stdio rows.
     pub url: String,
     /// JSON-encoded `{k: v}` map of request headers (typically
     /// `Authorization`, `X-API-Key`, etc.). Null means no headers.
     #[serde(default)]
     pub headers_json: Option<String>,
+    /// stdio: the executable to run — a bare name looked up on `PATH`
+    /// (`npx`, `uvx`, `node`) or a full path.
+    #[serde(default)]
+    pub command: Option<String>,
+    /// stdio: JSON-encoded `string[]` of arguments.
+    #[serde(default)]
+    pub args_json: Option<String>,
+    /// stdio: JSON-encoded `{k: v}` map of environment variables layered
+    /// over Loach's own environment. This is where stdio servers take
+    /// their API keys, so it is scrubbed from exports like `headers_json`.
+    #[serde(default)]
+    pub env_json: Option<String>,
+    /// When `true`, tool calls from this server run without asking the
+    /// user first. Off by default — every call prompts unless the user
+    /// has chosen "Always allow" for that specific tool.
+    #[serde(default)]
+    pub auto_approve: bool,
+    /// JSON-encoded `string[]` of raw tool names the user has approved
+    /// permanently from the in-chat prompt. Null / empty = none.
+    #[serde(default)]
+    pub allowed_tools_json: Option<String>,
     /// When `false` the server is kept in the config but not surfaced to the
     /// model — lets users disable a flaky integration without losing its
     /// config.
     pub enabled: bool,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+fn default_transport() -> String {
+    "http".to_string()
+}
+
+/// Decode a JSON `string[]` blob, tolerating null / blank / malformed
+/// input as "no entries" so a hand-edited row can't crash a chat send.
+pub fn json_string_list(json: Option<&str>) -> Vec<String> {
+    match json {
+        Some(s) if !s.trim().is_empty() => serde_json::from_str(s).unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+impl McpServer {
+    pub fn is_stdio(&self) -> bool {
+        self.transport == "stdio"
+    }
+
+    /// stdio argument vector (empty for HTTP rows).
+    pub fn args(&self) -> Vec<String> {
+        json_string_list(self.args_json.as_deref())
+    }
+
+    /// stdio environment overrides, sorted by name so two rows with the
+    /// same variables in a different order fingerprint identically.
+    pub fn env(&self) -> Vec<(String, String)> {
+        let map: std::collections::BTreeMap<String, String> = match self.env_json.as_deref() {
+            Some(s) if !s.trim().is_empty() => serde_json::from_str(s).unwrap_or_default(),
+            _ => Default::default(),
+        };
+        map.into_iter().collect()
+    }
+
+    /// Tools the user has permanently approved from the in-chat prompt.
+    pub fn allowed_tools(&self) -> Vec<String> {
+        json_string_list(self.allowed_tools_json.as_deref())
+    }
+
+    /// Canonical identity of *what would be executed* for a stdio row:
+    /// command + args + env, order-independent for env. The spawn-consent
+    /// dialog is keyed on this, so a rename or an enable/disable toggle
+    /// doesn't count as a new program while any change to the command
+    /// line or environment does.
+    pub fn stdio_fingerprint(&self) -> String {
+        serde_json::to_string(&(
+            self.command.as_deref().unwrap_or("").trim(),
+            self.args(),
+            self.env(),
+        ))
+        .unwrap_or_default()
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -508,10 +618,10 @@ impl Database {
             -- (global to this install); we don't track per-project scope
             -- because Loach is a chat app, not a per-repo CLI.
             --
-            -- `transport`, `command`, `args_json`, `env_json` are holdovers
-            -- from when we also spoke stdio + SSE. Kept here so existing
-            -- databases migrate cleanly; new rows leave them unset and the
-            -- Rust struct no longer reads them.
+            -- `transport` is 'http' or 'stdio'. HTTP rows fill `url` +
+            -- `headers_json`; stdio rows fill `command` + `args_json` +
+            -- `env_json`. `auto_approve` / `allowed_tools_json` (added by
+            -- migration below) hold the per-call approval state.
             CREATE TABLE IF NOT EXISTS mcp_servers (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
@@ -587,6 +697,22 @@ impl Database {
         if !has_column(&conn, "messages", "tool_calls_json")? {
             conn.execute_batch(
                 "ALTER TABLE messages ADD COLUMN tool_calls_json TEXT;",
+            )?;
+        }
+
+        // Per-call tool approvals (v1.5). `auto_approve` lets a server skip
+        // the in-chat consent prompt entirely; `allowed_tools_json` holds
+        // the tools the user answered "Always allow" for. Both default to
+        // the strict setting on existing rows, so upgrading turns the
+        // prompt ON for every already-configured server.
+        if !has_column(&conn, "mcp_servers", "auto_approve")? {
+            conn.execute_batch(
+                "ALTER TABLE mcp_servers ADD COLUMN auto_approve INTEGER NOT NULL DEFAULT 0;",
+            )?;
+        }
+        if !has_column(&conn, "mcp_servers", "allowed_tools_json")? {
+            conn.execute_batch(
+                "ALTER TABLE mcp_servers ADD COLUMN allowed_tools_json TEXT;",
             )?;
         }
 
@@ -666,6 +792,15 @@ impl Database {
             )?;
         }
 
+        // Directory a chat's filesystem tools are scoped to (v1.5). Null on
+        // every existing row, which is the correct default: the workspace
+        // tools stay unavailable until the user picks a folder for that
+        // specific chat. No FK and no index — it's a leaf value read once
+        // per turn by `chat_stream`, never joined on.
+        if !has_column(&conn, "sessions", "workspace_root")? {
+            conn.execute_batch("ALTER TABLE sessions ADD COLUMN workspace_root TEXT;")?;
+        }
+
         // Indexes for the columns added above. Created unconditionally rather
         // than inside each column's probe: `IF NOT EXISTS` makes them cheap
         // no-ops once present, and pairing them with the probe meant a crash
@@ -725,6 +860,23 @@ impl Database {
             "#,
         )?;
 
+        // Global (Space-independent) memory rows. A separate table rather
+        // than a nullable `space_id` on `space_memories`, so the per-space
+        // scoping on update / delete stays a plain equality check and no
+        // table rebuild is needed to relax the NOT NULL.
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS global_memories (
+                id TEXT PRIMARY KEY,
+                content TEXT NOT NULL,
+                source_session_id TEXT,
+                source_message_id TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            "#,
+        )?;
+
         // Custom snippet variables.
         //   `snippet_variables` — user-defined KEY=VALUE pairs substituted into
         //   snippet bodies at expansion time. UNIQUE on `key` so the same name
@@ -766,7 +918,7 @@ impl Database {
     pub fn list_sessions(&self) -> Result<Vec<Session>> {
         self.with_read(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, title, provider, model, system_prompt, params_json, space_id, pinned_at, archived_at, forked_from_session_id, label, folder_id, created_at, updated_at
+                "SELECT id, title, provider, model, system_prompt, params_json, space_id, pinned_at, archived_at, forked_from_session_id, label, folder_id, workspace_root, created_at, updated_at
                  FROM sessions ORDER BY updated_at DESC",
             )?;
             let rows = stmt
@@ -784,8 +936,9 @@ impl Database {
                         forked_from_session_id: r.get(9)?,
                         label: r.get(10)?,
                         folder_id: r.get(11)?,
-                        created_at: r.get(12)?,
-                        updated_at: r.get(13)?,
+                        workspace_root: r.get(12)?,
+                        created_at: r.get(13)?,
+                        updated_at: r.get(14)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -822,6 +975,7 @@ impl Database {
             forked_from_session_id: None,
             label: None,
             folder_id: None,
+            workspace_root: None,
             created_at: now,
             updated_at: now,
         })
@@ -879,8 +1033,8 @@ impl Database {
         tx.execute(
             "INSERT INTO sessions (id, title, provider, model, system_prompt, params_json,
                                    space_id, pinned_at, archived_at, forked_from_session_id,
-                                   folder_id, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, ?8, ?9, ?10, ?10)",
+                                   folder_id, workspace_root, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, ?8, ?9, ?10, ?11, ?11)",
             params![
                 new_id,
                 source.title,
@@ -891,6 +1045,7 @@ impl Database {
                 source.space_id,
                 source.id,
                 source.folder_id,
+                source.workspace_root,
                 now,
             ],
         )?;
@@ -945,6 +1100,10 @@ impl Database {
             // conversation, and a branch of it belongs in the same drawer;
             // dropping the fork back into "Today" would make it look lost.
             folder_id: source.folder_id,
+            // Inherited for the same reason: a fork continues the same piece
+            // of work, and the whole point of branching a coding chat is to
+            // try something else against the same project.
+            workspace_root: source.workspace_root,
             created_at: now,
             updated_at: now,
         })
@@ -1036,6 +1195,20 @@ impl Database {
         Ok(())
     }
 
+    /// Point a chat's filesystem tools at `root`, or pass `None` to take the
+    /// directory away. `root` is the display form of a canonical path (no
+    /// `\\?\` prefix); `commands::chat_stream` canonicalizes it again every
+    /// turn before the sandbox compares anything against it. `false` when no
+    /// chat has `id`.
+    pub fn set_session_workspace_root(&self, id: &str, root: Option<&str>) -> Result<bool> {
+        let conn = self.conn.lock();
+        let changed = conn.execute(
+            "UPDATE sessions SET workspace_root = ?1 WHERE id = ?2",
+            params![root, id],
+        )?;
+        Ok(changed > 0)
+    }
+
     /// File the chat under `folder_id`, or pull it back out to the loose
     /// list with `None`. Like `update_session_label` and unlike
     /// `pin_session`, this deliberately leaves `updated_at` alone: chats
@@ -1077,7 +1250,7 @@ impl Database {
     pub fn get_session(&self, id: &str) -> Result<Option<Session>> {
         self.with_read(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, title, provider, model, system_prompt, params_json, space_id, pinned_at, archived_at, forked_from_session_id, label, folder_id, created_at, updated_at
+                "SELECT id, title, provider, model, system_prompt, params_json, space_id, pinned_at, archived_at, forked_from_session_id, label, folder_id, workspace_root, created_at, updated_at
                  FROM sessions WHERE id = ?1",
             )?;
             let mut rows = stmt.query(params![id])?;
@@ -1095,8 +1268,9 @@ impl Database {
                     forked_from_session_id: r.get(9)?,
                     label: r.get(10)?,
                     folder_id: r.get(11)?,
-                    created_at: r.get(12)?,
-                    updated_at: r.get(13)?,
+                    workspace_root: r.get(12)?,
+                    created_at: r.get(13)?,
+                    updated_at: r.get(14)?,
                 }))
             } else {
                 Ok(None)
@@ -1374,6 +1548,8 @@ impl Database {
                     "SELECT COALESCE(SUM(LENGTH(CAST(value AS BLOB))), 0) FROM snippet_variables",
                 )? + scalar(
                     "SELECT COALESCE(SUM(LENGTH(CAST(value AS BLOB))), 0) FROM snippet_fill_values",
+                )? + scalar(
+                    "SELECT COALESCE(SUM(LENGTH(CAST(content AS BLOB))), 0) FROM global_memories",
                 )? + scalar(
                     "SELECT COALESCE(SUM(LENGTH(CAST(name AS BLOB))
                                        + LENGTH(CAST(COALESCE(url, '') AS BLOB))
@@ -1875,7 +2051,7 @@ impl Database {
             let mut stmt = conn.prepare(
                 "SELECT id, space_id, content, source_session_id, source_message_id,
                         created_at, updated_at
-                 FROM space_memories WHERE space_id = ?1 ORDER BY created_at ASC",
+                 FROM space_memories WHERE space_id = ?1 ORDER BY created_at ASC, rowid ASC",
             )?;
             let rows = stmt
                 .query_map(params![space_id], |r| {
@@ -1894,21 +2070,29 @@ impl Database {
         })
     }
 
+    /// `restore` puts back a memory that was removed (the Undo on a
+    /// "Removed memory" toast) under its old id and creation time, so it
+    /// returns to its place in the list, and in the newest-first window the
+    /// prompt takes, rather than coming back as the newest fact.
     pub fn add_space_memory(
         &self,
         space_id: &str,
         content: &str,
         source_session_id: Option<&str>,
         source_message_id: Option<&str>,
+        restore: Option<(&str, i64)>,
     ) -> Result<SpaceMemory> {
-        let id = Uuid::new_v4().to_string();
         let now = Utc::now().timestamp_millis();
+        let (id, created_at) = match restore {
+            Some((id, created_at)) => (id.to_string(), created_at),
+            None => (Uuid::new_v4().to_string(), now),
+        };
         let conn = self.conn.lock();
         conn.execute(
             "INSERT INTO space_memories (id, space_id, content, source_session_id,
                                           source_message_id, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
-            params![id, space_id, content, source_session_id, source_message_id, now],
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![id, space_id, content, source_session_id, source_message_id, created_at, now],
         )?;
         Ok(SpaceMemory {
             id,
@@ -1916,32 +2100,34 @@ impl Database {
             content: content.to_string(),
             source_session_id: source_session_id.map(|s| s.to_string()),
             source_message_id: source_message_id.map(|s| s.to_string()),
-            created_at: now,
+            created_at,
             updated_at: now,
         })
     }
 
-    pub fn update_space_memory(&self, id: &str, space_id: &str, content: &str) -> Result<()> {
+    /// `false` when no memory in `space_id` has `id` (it was deleted first).
+    pub fn update_space_memory(&self, id: &str, space_id: &str, content: &str) -> Result<bool> {
         // Scope by space_id — see the comment on `update_message` for the
         // same defense-in-depth rationale.
         let now = Utc::now().timestamp_millis();
         let conn = self.conn.lock();
-        conn.execute(
+        let changed = conn.execute(
             "UPDATE space_memories
              SET content = ?1, updated_at = ?2
              WHERE id = ?3 AND space_id = ?4",
             params![content, now, id, space_id],
         )?;
-        Ok(())
+        Ok(changed > 0)
     }
 
-    pub fn remove_space_memory(&self, id: &str, space_id: &str) -> Result<()> {
+    /// `false` when there was nothing to remove.
+    pub fn remove_space_memory(&self, id: &str, space_id: &str) -> Result<bool> {
         let conn = self.conn.lock();
-        conn.execute(
+        let changed = conn.execute(
             "DELETE FROM space_memories WHERE id = ?1 AND space_id = ?2",
             params![id, space_id],
         )?;
-        Ok(())
+        Ok(changed > 0)
     }
 
     /// Read every memory across every space — used by the export path.
@@ -1950,7 +2136,7 @@ impl Database {
         let mut stmt = conn.prepare(
             "SELECT id, space_id, content, source_session_id, source_message_id,
                     created_at, updated_at
-             FROM space_memories ORDER BY space_id, created_at",
+             FROM space_memories ORDER BY space_id, created_at, rowid",
         )?;
         let rows = stmt
             .query_map([], |r| {
@@ -1966,6 +2152,79 @@ impl Database {
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+
+    // ------------ global memories ------------
+
+    pub fn list_global_memories(&self) -> Result<Vec<GlobalMemory>> {
+        self.with_read(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, content, source_session_id, source_message_id,
+                        created_at, updated_at
+                 FROM global_memories ORDER BY created_at ASC, rowid ASC",
+            )?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok(GlobalMemory {
+                        id: r.get(0)?,
+                        content: r.get(1)?,
+                        source_session_id: r.get(2)?,
+                        source_message_id: r.get(3)?,
+                        created_at: r.get(4)?,
+                        updated_at: r.get(5)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+    }
+
+    /// `restore` as in [`add_space_memory`](Self::add_space_memory).
+    pub fn add_global_memory(
+        &self,
+        content: &str,
+        source_session_id: Option<&str>,
+        source_message_id: Option<&str>,
+        restore: Option<(&str, i64)>,
+    ) -> Result<GlobalMemory> {
+        let now = Utc::now().timestamp_millis();
+        let (id, created_at) = match restore {
+            Some((id, created_at)) => (id.to_string(), created_at),
+            None => (Uuid::new_v4().to_string(), now),
+        };
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO global_memories (id, content, source_session_id,
+                                          source_message_id, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![id, content, source_session_id, source_message_id, created_at, now],
+        )?;
+        Ok(GlobalMemory {
+            id,
+            content: content.to_string(),
+            source_session_id: source_session_id.map(|s| s.to_string()),
+            source_message_id: source_message_id.map(|s| s.to_string()),
+            created_at,
+            updated_at: now,
+        })
+    }
+
+    /// `false` when no memory has `id` (it was deleted first).
+    pub fn update_global_memory(&self, id: &str, content: &str) -> Result<bool> {
+        let now = Utc::now().timestamp_millis();
+        let conn = self.conn.lock();
+        let changed = conn.execute(
+            "UPDATE global_memories SET content = ?1, updated_at = ?2 WHERE id = ?3",
+            params![content, now, id],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// `false` when there was nothing to remove.
+    pub fn remove_global_memory(&self, id: &str) -> Result<bool> {
+        let conn = self.conn.lock();
+        let changed = conn.execute("DELETE FROM global_memories WHERE id = ?1", params![id])?;
+        Ok(changed > 0)
     }
 
     // ------------ snippets ------------
@@ -2198,14 +2457,12 @@ impl Database {
     }
 
     // ------------ mcp servers ------------
-    //
-    // Only the HTTP transport is supported, so every row has a URL and the
-    // legacy stdio-flavoured columns stay NULL.
 
     pub fn list_mcp_servers(&self) -> Result<Vec<McpServer>> {
         self.with_read(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, name, url, headers_json, enabled, created_at, updated_at
+                "SELECT id, name, transport, url, headers_json, command, args_json, env_json,
+                        auto_approve, allowed_tools_json, enabled, created_at, updated_at
                  FROM mcp_servers ORDER BY name ASC",
             )?;
             let rows = stmt
@@ -2213,11 +2470,19 @@ impl Database {
                     Ok(McpServer {
                         id: r.get(0)?,
                         name: r.get(1)?,
-                        url: r.get::<_, Option<String>>(2)?.unwrap_or_default(),
-                        headers_json: r.get(3)?,
-                        enabled: r.get::<_, i64>(4)? != 0,
-                        created_at: r.get(5)?,
-                        updated_at: r.get(6)?,
+                        transport: r
+                            .get::<_, Option<String>>(2)?
+                            .unwrap_or_else(default_transport),
+                        url: r.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                        headers_json: r.get(4)?,
+                        command: r.get(5)?,
+                        args_json: r.get(6)?,
+                        env_json: r.get(7)?,
+                        auto_approve: r.get::<_, i64>(8)? != 0,
+                        allowed_tools_json: r.get(9)?,
+                        enabled: r.get::<_, i64>(10)? != 0,
+                        created_at: r.get(11)?,
+                        updated_at: r.get(12)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -2225,86 +2490,116 @@ impl Database {
         })
     }
 
-    /// Upsert: create a new row if `id` is empty, otherwise update the
-    /// existing one. Returns the row as it now stands in the DB.
-    pub fn upsert_mcp_server(
-        &self,
-        id: Option<&str>,
-        name: &str,
-        url: &str,
-        headers_json: Option<&str>,
-        enabled: bool,
-    ) -> Result<McpServer> {
+    /// Upsert: create a new row when `row.id` is empty, otherwise update
+    /// the existing one. The timestamps on `row` are ignored — the DB owns
+    /// them. Returns the row as it now stands.
+    pub fn upsert_mcp_server(&self, row: &McpServer) -> Result<McpServer> {
         let now = Utc::now().timestamp_millis();
         let conn = self.conn.lock();
+        let enabled = if row.enabled { 1_i64 } else { 0_i64 };
+        let auto_approve = if row.auto_approve { 1_i64 } else { 0_i64 };
 
-        match id {
-            Some(id) if !id.is_empty() => {
-                let affected = conn.execute(
-                    "UPDATE mcp_servers SET name = ?1, url = ?2, headers_json = ?3,
-                                             enabled = ?4, updated_at = ?5
-                     WHERE id = ?6",
-                    params![
-                        name,
-                        url,
-                        headers_json,
-                        if enabled { 1_i64 } else { 0_i64 },
-                        now,
-                        id,
-                    ],
-                )?;
-                if affected == 0 {
-                    // The row is gone — deleted in another window, or the id
-                    // came from a hand-edited import. Without this check the
-                    // UPDATE quietly changed nothing and the SELECT below
-                    // failed with rusqlite's bare "Query returned no rows",
-                    // which is what the user saw as their save error.
-                    return Err(anyhow::anyhow!(
-                        "MCP server `{name}` no longer exists — it may have been deleted in another window. Add it again."
-                    ));
-                }
-                let mut stmt =
-                    conn.prepare("SELECT created_at FROM mcp_servers WHERE id = ?1")?;
-                let created_at: i64 = stmt.query_row(params![id], |r| r.get(0))?;
-                Ok(McpServer {
-                    id: id.to_string(),
-                    name: name.to_string(),
-                    url: url.to_string(),
-                    headers_json: headers_json.map(|s| s.to_string()),
+        if !row.id.is_empty() {
+            let affected = conn.execute(
+                "UPDATE mcp_servers SET name = ?1, transport = ?2, url = ?3, headers_json = ?4,
+                                         command = ?5, args_json = ?6, env_json = ?7,
+                                         auto_approve = ?8, allowed_tools_json = ?9,
+                                         enabled = ?10, updated_at = ?11
+                 WHERE id = ?12",
+                params![
+                    row.name,
+                    row.transport,
+                    row.url,
+                    row.headers_json,
+                    row.command,
+                    row.args_json,
+                    row.env_json,
+                    auto_approve,
+                    row.allowed_tools_json,
                     enabled,
-                    created_at,
-                    updated_at: now,
-                })
+                    now,
+                    row.id,
+                ],
+            )?;
+            if affected == 0 {
+                // The row is gone — deleted in another window, or the id
+                // came from a hand-edited import. Without this check the
+                // UPDATE quietly changed nothing and the SELECT below
+                // failed with rusqlite's bare "Query returned no rows",
+                // which is what the user saw as their save error.
+                return Err(anyhow::anyhow!(
+                    "MCP server `{}` no longer exists — it may have been deleted in another window. Add it again.",
+                    row.name
+                ));
             }
-            _ => {
-                let new_id = Uuid::new_v4().to_string();
-                // The legacy `transport` column is NOT NULL; hard-code it to
-                // 'http' so inserts succeed on databases that were created
-                // before the stdio/sse removal.
-                conn.execute(
-                    "INSERT INTO mcp_servers (id, name, transport, url, headers_json,
-                                               enabled, created_at, updated_at)
-                     VALUES (?1, ?2, 'http', ?3, ?4, ?5, ?6, ?6)",
-                    params![
-                        new_id,
-                        name,
-                        url,
-                        headers_json,
-                        if enabled { 1_i64 } else { 0_i64 },
-                        now,
-                    ],
-                )?;
-                Ok(McpServer {
-                    id: new_id,
-                    name: name.to_string(),
-                    url: url.to_string(),
-                    headers_json: headers_json.map(|s| s.to_string()),
-                    enabled,
-                    created_at: now,
-                    updated_at: now,
-                })
-            }
+            let mut stmt = conn.prepare("SELECT created_at FROM mcp_servers WHERE id = ?1")?;
+            let created_at: i64 = stmt.query_row(params![row.id], |r| r.get(0))?;
+            return Ok(McpServer {
+                created_at,
+                updated_at: now,
+                ..row.clone()
+            });
         }
+
+        let new_id = Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO mcp_servers (id, name, transport, url, headers_json, command, args_json,
+                                      env_json, auto_approve, allowed_tools_json, enabled,
+                                      created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12)",
+            params![
+                new_id,
+                row.name,
+                row.transport,
+                row.url,
+                row.headers_json,
+                row.command,
+                row.args_json,
+                row.env_json,
+                auto_approve,
+                row.allowed_tools_json,
+                enabled,
+                now,
+            ],
+        )?;
+        Ok(McpServer {
+            id: new_id,
+            created_at: now,
+            updated_at: now,
+            ..row.clone()
+        })
+    }
+
+    /// Remember an "Always allow" answer from the in-chat approval prompt:
+    /// append `tool` to the server's allowed list. Idempotent. Returns
+    /// `false` when the server no longer exists (deleted mid-turn), which
+    /// the caller treats as "nothing to remember" rather than an error.
+    pub fn add_mcp_allowed_tool(&self, server_id: &str, tool: &str) -> Result<bool> {
+        let conn = self.conn.lock();
+        let current: Option<Option<String>> = conn
+            .query_row(
+                "SELECT allowed_tools_json FROM mcp_servers WHERE id = ?1",
+                params![server_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(current) = current else {
+            return Ok(false);
+        };
+        let mut list = json_string_list(current.as_deref());
+        if list.iter().any(|t| t == tool) {
+            return Ok(true);
+        }
+        list.push(tool.to_string());
+        conn.execute(
+            "UPDATE mcp_servers SET allowed_tools_json = ?1, updated_at = ?2 WHERE id = ?3",
+            params![
+                serde_json::to_string(&list)?,
+                Utc::now().timestamp_millis(),
+                server_id
+            ],
+        )?;
+        Ok(true)
     }
 
     pub fn delete_mcp_server(&self, id: &str) -> Result<()> {
@@ -2388,8 +2683,8 @@ impl Database {
     /// a schema bump.
     ///
     /// **MCP credentials are scrubbed.** Each `mcp_servers` row's
-    /// `headers_json` carries the user's bearer tokens / API keys for
-    /// that integration. A snapshot is meant to be portable (backup,
+    /// `headers_json` (HTTP) or `env_json` (stdio) carries the user's
+    /// bearer tokens / API keys for that integration. A snapshot is meant to be portable (backup,
     /// support handoff, hand-edited gist) so shipping credentials in
     /// plaintext would silently leak them whenever the user shared a
     /// dump. We blank the field at export time; the user must
@@ -2415,6 +2710,28 @@ impl Database {
             .into_iter()
             .map(|mut s| {
                 s.headers_json = None;
+                // stdio servers take their API keys through the environment
+                // map, so it is credentials in the same sense.
+                s.env_json = None;
+                // Arguments are the configuration and stay — but a password
+                // in a connection URL (the reference Postgres server takes
+                // `postgresql://user:pass@host/db` as its one argument) or
+                // after a `--token` doesn't.
+                s.args_json = s.args_json.as_deref().and_then(redact_args_json);
+                s
+            })
+            .collect();
+        // Workspace roots are machine-local absolute paths. They mean nothing
+        // on the machine a snapshot is restored to, and carrying them would
+        // let an export hand a recipient's model a directory they never
+        // picked. Scrubbed for the same reason MCP credentials are, one
+        // field up: a snapshot is a portable document, not a copy of this
+        // installation's local state.
+        let sessions: Vec<Session> = self
+            .list_sessions()?
+            .into_iter()
+            .map(|mut s| {
+                s.workspace_root = None;
                 s
             })
             .collect();
@@ -2423,12 +2740,13 @@ impl Database {
             exported_at: Utc::now().timestamp_millis(),
             loach_version: env!("CARGO_PKG_VERSION").to_string(),
             data: SnapshotData {
-                sessions: self.list_sessions()?,
+                sessions,
                 folders: self.list_folders()?,
                 messages: self.all_messages()?,
                 spaces: self.list_spaces()?,
                 space_files: self.all_space_files()?,
                 space_memories: self.all_space_memories()?,
+                global_memories: self.list_global_memories()?,
                 snippets: self.list_snippets()?,
                 snippet_variables: self.list_snippet_variables()?,
                 snippet_fill_values: self.all_snippet_fill_values()?,
@@ -2473,6 +2791,7 @@ impl Database {
             DELETE FROM messages;
             DELETE FROM space_files;
             DELETE FROM space_memories;
+            DELETE FROM global_memories;
             DELETE FROM sessions;
             DELETE FROM folders;
             DELETE FROM spaces;
@@ -2498,6 +2817,12 @@ impl Database {
             )?;
         }
 
+        // `workspace_root` is deliberately absent from this column list, so a
+        // restored session always comes back without a directory. `snapshot`
+        // scrubs the field on the way out; omitting it here is the other half
+        // of that, and it also means a hand-edited snapshot can't grant a
+        // model access to a path the user never picked. Don't "complete" this
+        // list.
         for s in &d.sessions {
             tx.execute(
                 "INSERT INTO sessions (id, title, provider, model, system_prompt, params_json,
@@ -2591,6 +2916,22 @@ impl Database {
             )?;
         }
 
+        for mem in &d.global_memories {
+            tx.execute(
+                "INSERT INTO global_memories (id, content, source_session_id,
+                                              source_message_id, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    mem.id,
+                    mem.content,
+                    mem.source_session_id,
+                    mem.source_message_id,
+                    mem.created_at,
+                    mem.updated_at,
+                ],
+            )?;
+        }
+
         for f in &d.space_files {
             tx.execute(
                 "INSERT INTO space_files (id, space_id, name, mime, kind, data, size, position, created_at)
@@ -2628,17 +2969,22 @@ impl Database {
         }
 
         for mcp in &d.mcp_servers {
-            // Legacy `transport` column is NOT NULL — hard-code 'http' so
-            // inserts succeed on databases that still carry the older schema.
             tx.execute(
-                "INSERT INTO mcp_servers (id, name, transport, url, headers_json,
+                "INSERT INTO mcp_servers (id, name, transport, url, headers_json, command,
+                                           args_json, env_json, auto_approve, allowed_tools_json,
                                            enabled, created_at, updated_at)
-                 VALUES (?1, ?2, 'http', ?3, ?4, ?5, ?6, ?7)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                 params![
                     mcp.id,
                     mcp.name,
+                    mcp.transport,
                     mcp.url,
                     mcp.headers_json,
+                    mcp.command,
+                    mcp.args_json,
+                    mcp.env_json,
+                    if mcp.auto_approve { 1_i64 } else { 0_i64 },
+                    mcp.allowed_tools_json,
                     if mcp.enabled { 1_i64 } else { 0_i64 },
                     mcp.created_at,
                     mcp.updated_at,
@@ -2682,6 +3028,7 @@ impl Database {
             spaces: d.spaces.len(),
             space_files: d.space_files.len(),
             space_memories: d.space_memories.len(),
+            global_memories: d.global_memories.len(),
             snippets: d.snippets.len(),
             snippet_variables: d.snippet_variables.len(),
             snippet_fill_values: d.snippet_fill_values.len(),
@@ -2748,6 +3095,7 @@ impl Database {
             DELETE FROM messages;
             DELETE FROM space_files;
             DELETE FROM space_memories;
+            DELETE FROM global_memories;
             DELETE FROM sessions;
             DELETE FROM folders;
             DELETE FROM spaces;
@@ -2788,6 +3136,7 @@ impl Database {
             DELETE FROM messages;
             DELETE FROM space_files;
             DELETE FROM space_memories;
+            DELETE FROM global_memories;
             DELETE FROM sessions;
             DELETE FROM folders;
             DELETE FROM spaces;
@@ -2827,6 +3176,9 @@ pub struct SnapshotData {
     /// that predate the memory feature so loading them stays a no-op.
     #[serde(default)]
     pub space_memories: Vec<SpaceMemory>,
+    /// Global memory rows. Empty on exports that predate the feature.
+    #[serde(default)]
+    pub global_memories: Vec<GlobalMemory>,
     pub snippets: Vec<Snippet>,
     /// User-defined `{{KEY}}` global variables. Defaults to empty on older
     /// exports that predate the feature so loading them stays a no-op.
@@ -2850,6 +3202,7 @@ pub struct ImportStats {
     pub spaces: usize,
     pub space_files: usize,
     pub space_memories: usize,
+    pub global_memories: usize,
     pub snippets: usize,
     pub snippet_variables: usize,
     pub snippet_fill_values: usize,
@@ -2946,6 +3299,78 @@ fn build_snippet(text: &str, needle: &str) -> Option<String> {
     Some(out.split_whitespace().collect::<Vec<_>>().join(" "))
 }
 
+/// Stands in for a secret [`redact_args_json`] leaves out of an export.
+const REDACTED: &str = "REDACTED";
+
+/// A stdio server's `args_json` as it goes into an export: a password in a
+/// URL (`scheme://user:pass@host`) and the value of a flag whose name says
+/// it holds a credential (`--token x`, `--api-key=x`) are replaced with
+/// [`REDACTED`]; everything else is kept as typed. A value that doesn't
+/// parse as a list of strings is dropped whole — it's not a shape Loach
+/// writes, so nothing in it can be told apart from a secret.
+fn redact_args_json(json: &str) -> Option<String> {
+    let args: Vec<String> = serde_json::from_str(json).ok()?;
+    let secret_flag = |name: &str| {
+        let n = name.to_ascii_lowercase();
+        ["token", "secret", "password", "passwd", "apikey", "api-key", "api_key", "auth"]
+            .iter()
+            .any(|w| n.contains(w))
+    };
+    let mut out = Vec::with_capacity(args.len());
+    let mut value_is_secret = false;
+    for arg in args {
+        if std::mem::take(&mut value_is_secret) {
+            out.push(REDACTED.to_string());
+            continue;
+        }
+        if let Some(flag) = arg.strip_prefix('-') {
+            let flag = flag.trim_start_matches('-');
+            match flag.split_once('=') {
+                Some((name, _)) if secret_flag(name) => {
+                    let keep = arg.len() - flag.len() + name.len() + 1;
+                    out.push(format!("{}{REDACTED}", &arg[..keep]));
+                    continue;
+                }
+                None if secret_flag(flag) => value_is_secret = true,
+                _ => {}
+            }
+        }
+        out.push(redact_url_password(&arg));
+    }
+    serde_json::to_string(&out).ok()
+}
+
+/// `text` with the password of any `scheme://user:pass@host` in it
+/// replaced by [`REDACTED`].
+fn redact_url_password(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find("://") {
+        let (head, tail) = rest.split_at(at + 3);
+        out.push_str(head);
+        // The authority ends at the first `/`, `?` or `#`; its userinfo, if
+        // any, before the last `@` in it.
+        let authority_end = tail.find(['/', '?', '#']).unwrap_or(tail.len());
+        match tail[..authority_end].rfind('@') {
+            Some(at_sign) => {
+                let userinfo = &tail[..at_sign];
+                match userinfo.split_once(':') {
+                    Some((user, _)) => {
+                        out.push_str(user);
+                        out.push(':');
+                        out.push_str(REDACTED);
+                    }
+                    None => out.push_str(userinfo),
+                }
+                rest = &tail[at_sign..];
+            }
+            None => rest = tail,
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Authoritative "does this column exist?" check via `PRAGMA table_info`.
 /// Used by `migrate()` to decide whether to run an `ALTER TABLE ADD COLUMN`.
 /// Returns an `Err` only on genuine query failures (bad table name,
@@ -3002,6 +3427,214 @@ mod tests {
         let db = Database::open(&path).expect("open");
         db.migrate().expect("migrate");
         (db, dir)
+    }
+
+    /// An unsaved MCP row of either transport, minimal but valid.
+    fn mcp_draft(name: &str, transport: &str) -> McpServer {
+        let stdio = transport == "stdio";
+        McpServer {
+            id: String::new(),
+            name: name.to_string(),
+            transport: transport.to_string(),
+            url: if stdio { String::new() } else { "http://localhost:3000/mcp".into() },
+            headers_json: if stdio { None } else { Some(r#"{"Authorization":"Bearer x"}"#.into()) },
+            command: if stdio { Some("npx".into()) } else { None },
+            args_json: if stdio {
+                Some(r#"["-y","@modelcontextprotocol/server-filesystem"]"#.into())
+            } else {
+                None
+            },
+            env_json: if stdio { Some(r#"{"B":"2","A":"1"}"#.into()) } else { None },
+            auto_approve: false,
+            allowed_tools_json: None,
+            enabled: true,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    /// stdio fields and the per-call approval state survive the insert →
+    /// list → update round-trip; the decoded accessors give the editor and
+    /// the spawner what they need without touching JSON.
+    #[test]
+    fn mcp_server_round_trips_stdio_fields_and_approval_state() {
+        let (db, _dir) = fresh_db();
+        let saved = db.upsert_mcp_server(&mcp_draft("fs", "stdio")).expect("insert");
+        assert!(!saved.id.is_empty());
+
+        let rows = db.list_mcp_servers().expect("list");
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert!(row.is_stdio());
+        assert_eq!(row.command.as_deref(), Some("npx"));
+        assert_eq!(row.args(), vec!["-y", "@modelcontextprotocol/server-filesystem"]);
+        // Sorted by name so the fingerprint is order-independent.
+        assert_eq!(
+            row.env(),
+            vec![("A".to_string(), "1".to_string()), ("B".to_string(), "2".to_string())]
+        );
+        assert!(!row.auto_approve, "prompting is the default");
+        assert!(row.allowed_tools().is_empty());
+
+        let updated = db
+            .upsert_mcp_server(&McpServer {
+                auto_approve: true,
+                ..row.clone()
+            })
+            .expect("update");
+        assert_eq!(updated.id, row.id, "update keeps the id");
+        assert!(db.list_mcp_servers().unwrap()[0].auto_approve);
+
+        // HTTP rows decode to empty stdio accessors rather than failing.
+        let http = db.upsert_mcp_server(&mcp_draft("gh", "http")).expect("insert http");
+        assert!(!http.is_stdio());
+        assert!(http.args().is_empty());
+        assert!(http.env().is_empty());
+    }
+
+    /// The consent dialog is keyed on what would *run*: a rename, an
+    /// enable flip, or the same env in a different order is the same
+    /// program; a changed argument is not.
+    #[test]
+    fn stdio_fingerprint_tracks_the_command_line_only() {
+        let a = mcp_draft("fs", "stdio");
+        let mut b = a.clone();
+        b.name = "renamed".into();
+        b.enabled = false;
+        b.env_json = Some(r#"{"A":"1","B":"2"}"#.into());
+        assert_eq!(a.stdio_fingerprint(), b.stdio_fingerprint());
+
+        b.args_json = Some(r#"["-y","@modelcontextprotocol/server-everything"]"#.into());
+        assert_ne!(a.stdio_fingerprint(), b.stdio_fingerprint());
+
+        let mut c = a.clone();
+        c.env_json = Some(r#"{"A":"1","B":"2","NODE_OPTIONS":"--require x"}"#.into());
+        assert_ne!(a.stdio_fingerprint(), c.stdio_fingerprint(), "env changes what runs");
+    }
+
+    /// "Always allow" appends once, ignores repeats, and reports a vanished
+    /// server as `false` rather than an error.
+    #[test]
+    fn add_mcp_allowed_tool_is_idempotent_and_tolerates_missing_rows() {
+        let (db, _dir) = fresh_db();
+        let saved = db.upsert_mcp_server(&mcp_draft("gh", "http")).expect("insert");
+        assert!(db.add_mcp_allowed_tool(&saved.id, "search").unwrap());
+        assert!(db.add_mcp_allowed_tool(&saved.id, "search").unwrap());
+        assert!(db.add_mcp_allowed_tool(&saved.id, "list_issues").unwrap());
+        assert_eq!(
+            db.list_mcp_servers().unwrap()[0].allowed_tools(),
+            vec!["search", "list_issues"]
+        );
+        assert!(!db.add_mcp_allowed_tool("no-such-server", "search").unwrap());
+    }
+
+    /// stdio servers take their API keys through `env_json`; an export
+    /// must scrub it exactly as it scrubs HTTP headers.
+    #[test]
+    fn snapshot_scrubs_stdio_env_like_http_headers() {
+        let (db, _dir) = fresh_db();
+        db.upsert_mcp_server(&mcp_draft("fs", "stdio")).expect("insert stdio");
+        db.upsert_mcp_server(&mcp_draft("gh", "http")).expect("insert http");
+        let snap = db.snapshot().expect("snapshot");
+        assert_eq!(snap.data.mcp_servers.len(), 2);
+        for row in &snap.data.mcp_servers {
+            assert!(row.headers_json.is_none(), "{}: headers leaked", row.name);
+            assert!(row.env_json.is_none(), "{}: env leaked", row.name);
+        }
+        // The non-secret command line still round-trips.
+        let fs = snap.data.mcp_servers.iter().find(|r| r.name == "fs").unwrap();
+        assert_eq!(fs.command.as_deref(), Some("npx"));
+        assert!(fs.args_json.is_some());
+    }
+
+    /// Arguments are exported as typed — except a password in a URL or
+    /// the value of a credential flag.
+    #[test]
+    fn exported_arguments_lose_their_passwords() {
+        let args = serde_json::to_string(&[
+            "-y",
+            "@modelcontextprotocol/server-postgres",
+            "postgresql://app:hunter2@db.local:5432/shop",
+            "--token",
+            "ghp_abc",
+            "--api-key=sk-123",
+            "https://example.com/a@b",
+            "--verbose",
+        ])
+        .unwrap();
+        let out: Vec<String> =
+            serde_json::from_str(&redact_args_json(&args).expect("a list of strings")).unwrap();
+        assert_eq!(
+            out,
+            [
+                "-y",
+                "@modelcontextprotocol/server-postgres",
+                "postgresql://app:REDACTED@db.local:5432/shop",
+                "--token",
+                "REDACTED",
+                "--api-key=REDACTED",
+                "https://example.com/a@b",
+                "--verbose",
+            ]
+        );
+        assert_eq!(redact_args_json("not json"), None);
+    }
+
+    /// A workspace root is local to this machine, so it must not travel in
+    /// a snapshot — neither out (someone else's model learning your paths)
+    /// nor back in (a hand-edited export granting a directory nobody picked).
+    #[test]
+    fn snapshot_scrubs_and_never_restores_the_workspace_root() {
+        let (db, _dir) = fresh_db();
+        let s = db
+            .create_session("coding", "ollama", "llama3", None, None)
+            .expect("session");
+        db.set_session_workspace_root(&s.id, Some("/home/me/project"))
+            .expect("set root");
+        assert_eq!(
+            db.get_session(&s.id).unwrap().unwrap().workspace_root.as_deref(),
+            Some("/home/me/project"),
+            "the root should round-trip through the session row"
+        );
+
+        let mut snap = db.snapshot().expect("snapshot");
+        assert!(
+            snap.data.sessions.iter().all(|r| r.workspace_root.is_none()),
+            "workspace_root leaked into the export"
+        );
+
+        // Even if the file is edited to put one back, restore must drop it.
+        snap.data.sessions[0].workspace_root = Some("/etc".to_string());
+        let (db2, _dir2) = fresh_db();
+        db2.restore_snapshot(&snap).expect("restore");
+        assert_eq!(
+            db2.get_session(&s.id).unwrap().unwrap().workspace_root,
+            None,
+            "a hand-edited snapshot granted a workspace root"
+        );
+    }
+
+    #[test]
+    fn workspace_root_clears_back_to_none() {
+        let (db, _dir) = fresh_db();
+        let s = db
+            .create_session("coding", "ollama", "llama3", None, None)
+            .expect("session");
+        db.set_session_workspace_root(&s.id, Some("/tmp/x")).unwrap();
+        db.set_session_workspace_root(&s.id, None).unwrap();
+        assert_eq!(db.get_session(&s.id).unwrap().unwrap().workspace_root, None);
+    }
+
+    /// A pre-1.5 export has no transport / approval fields at all; it must
+    /// still deserialise (as an HTTP row that prompts) and restore.
+    #[test]
+    fn legacy_mcp_snapshot_rows_default_to_http_and_prompting() {
+        let raw = r#"{"id":"m1","name":"old","url":"http://localhost:1/mcp",
+                      "headers_json":null,"enabled":true,"created_at":1,"updated_at":1}"#;
+        let row: McpServer = serde_json::from_str(raw).expect("legacy row parses");
+        assert_eq!(row.transport, "http");
+        assert!(!row.auto_approve);
+        assert!(row.command.is_none());
     }
 
     /// Guards the `storage_stats` SQL. Every bucket names tables and columns
@@ -3410,5 +4043,41 @@ mod tests {
         assert_eq!(all[0].id, sn.id);
         assert_eq!(all[0].title, "Greet");
         assert_eq!(all[0].provider.as_deref(), Some("ollama"));
+    }
+
+    #[test]
+    fn global_memory_crud_roundtrip() {
+        let (db, _dir) = fresh_db();
+        assert!(db.list_global_memories().unwrap().is_empty());
+
+        let a = db
+            .add_global_memory("Prefers TypeScript.", Some("sess-1"), Some("msg-1"), None)
+            .unwrap();
+        let b = db.add_global_memory("Lives in Warsaw.", None, None, None).unwrap();
+
+        let listed = db.list_global_memories().unwrap();
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].id, a.id);
+        assert_eq!(listed[0].source_session_id.as_deref(), Some("sess-1"));
+        assert_eq!(listed[1].source_session_id, None);
+
+        db.update_global_memory(&b.id, "Lives in Berlin.").unwrap();
+        let listed = db.list_global_memories().unwrap();
+        assert_eq!(listed[1].content, "Lives in Berlin.");
+        assert!(listed[1].updated_at >= listed[1].created_at);
+
+        db.remove_global_memory(&a.id).unwrap();
+        let listed = db.list_global_memories().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, b.id);
+
+        // Global rows ride the export/import path alongside space memories.
+        let snapshot = db.snapshot().unwrap();
+        assert_eq!(snapshot.data.global_memories.len(), 1);
+        db.wipe_all().unwrap();
+        assert!(db.list_global_memories().unwrap().is_empty());
+        let stats = db.restore_snapshot(&snapshot).unwrap();
+        assert_eq!(stats.global_memories, 1);
+        assert_eq!(db.list_global_memories().unwrap()[0].content, "Lives in Berlin.");
     }
 }

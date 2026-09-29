@@ -1,5 +1,5 @@
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ArrowDown, ChevronDown, ChevronUp, Hourglass, Import, Pin, Search, Sparkles, Trash2, Zap, X } from "lucide-react";
+import { ArrowDown, ChevronDown, ChevronUp, Hourglass, Import, Pin, Search, ShieldAlert, Sparkles, Trash2, Zap, X } from "lucide-react";
 import { MessageItem } from "./Message";
 import { Button } from "@/components/ui/button";
 import { useConfirm } from "@/components/ConfirmDialog";
@@ -100,6 +100,24 @@ export function ChatCanvas() {
     !!s.activeSessionId &&
     s.queue.some((t) => t.sessionId === s.activeSessionId),
   );
+  // What this chat is waiting on, when it's another chat's tool call parked
+  // on its approval prompt: that chat's title. Otherwise the wait could run
+  // the full ten-minute approval timeout with nothing saying why.
+  const approvalBlocking = useChatStore((s) => {
+    const sid = s.streamingSessionId;
+    if (!sid || sid === s.activeSessionId) return null;
+    const json = s.messages[sid]?.at(-1)?.tool_calls_json;
+    if (!json) return null;
+    try {
+      const calls = JSON.parse(json) as Array<{ awaiting_approval?: boolean }>;
+      if (!calls.some((c) => c.awaiting_approval)) return null;
+    } catch {
+      return null;
+    }
+    return s.sessions.find((x) => x.id === sid)?.title || "another chat";
+  });
+  const streamingSessionId = useChatStore((s) => s.streamingSessionId);
+  const selectSession = useChatStore((s) => s.selectSession);
   const promoteSession = useChatStore((s) => s.promoteSession);
   const cancelForSession = useChatStore((s) => s.cancelForSession);
   const removeImportGroup = useChatStore((s) => s.removeImportGroup);
@@ -680,6 +698,10 @@ export function ChatCanvas() {
                 is thinking). */}
             {waitingHere && sessionId && (
               <WaitingForOtherChats
+                approvalIn={approvalBlocking}
+                onOpenApproval={() => {
+                  if (streamingSessionId) void selectSession(streamingSessionId);
+                }}
                 onRespondNow={() => void promoteSession(sessionId)}
                 onCancel={() => void cancelForSession(sessionId)}
               />
@@ -932,12 +954,18 @@ function highlightTextNodes(
 /**
  * Shown on a chat whose prompt is waiting behind another chat's reply.
  * "Respond now" cancels the currently-running chat (in whichever session
- * that is) and promotes this chat to the front of the queue.
+ * that is) and promotes this chat to the front of the queue. When that
+ * reply is itself waiting for the user to approve a tool call, `approvalIn`
+ * names its chat and a button goes there.
  */
 function WaitingForOtherChats({
+  approvalIn,
+  onOpenApproval,
   onRespondNow,
   onCancel,
 }: {
+  approvalIn: string | null;
+  onOpenApproval: () => void;
   onRespondNow: () => void;
   onCancel: () => void;
 }) {
@@ -949,9 +977,24 @@ function WaitingForOtherChats({
         </div>
         <div className="flex min-w-0 max-w-[78%] flex-col gap-2">
           <div className="rounded-3xl rounded-tl-lg border border-dashed border-foreground/15 bg-foreground/[0.04] px-4 py-2.5 text-sm text-foreground/70 backdrop-blur-xl">
-            Waiting for other chats to finish…
+            {approvalIn
+              ? `Waiting for your approval of a tool call in “${approvalIn}”…`
+              : "Waiting for other chats to finish…"}
           </div>
           <div className="flex items-center gap-2 pl-1">
+            {approvalIn && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={onOpenApproval}
+                className="h-7 gap-1.5 rounded-full bg-foreground/[0.06] px-3 text-[11px] font-medium text-foreground/75 hover:bg-foreground/10 hover:text-foreground"
+                title="Open the chat that is waiting for your approval"
+              >
+                <ShieldAlert className="h-3 w-3" />
+                Go to it
+              </Button>
+            )}
             <Button
               type="button"
               variant="ghost"

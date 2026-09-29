@@ -1,20 +1,42 @@
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use serde::Serialize;
-use tokio::sync::Notify;
+use serde::{Deserialize, Serialize};
+use tokio::sync::{oneshot, Notify};
 
 /// Tracks in-flight streaming generations so we can cancel them from the frontend.
 #[derive(Clone)]
 pub struct StreamRegistry {
     inner: Arc<DashMap<String, Arc<Notify>>>,
+    /// Which of `inner` are chat streams, as opposed to model pulls and
+    /// creates — the ones [`cancel_chats`](Self::cancel_chats) stops.
+    chats: Arc<dashmap::DashSet<String>>,
 }
 
 impl StreamRegistry {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(DashMap::new()),
+            chats: Arc::new(dashmap::DashSet::new()),
         }
+    }
+
+    /// [`register`](Self::register) for a chat stream.
+    pub fn register_chat(&self, id: String) -> Arc<Notify> {
+        self.chats.insert(id.clone());
+        self.register(id)
+    }
+
+    /// Cancel every chat stream. The renderer reloaded: nothing listens to
+    /// them any more, and one left running would go on generating — and
+    /// calling tools, on a standing "allow" — with nobody watching and no
+    /// Stop button to press. Returns how many there were.
+    pub fn cancel_chats(&self) -> usize {
+        let ids: Vec<String> = self.chats.iter().map(|id| id.key().clone()).collect();
+        for id in &ids {
+            self.cancel(id);
+        }
+        ids.len()
     }
 
     /// Insert a Notify for `id` and return a handle. If `id` is already
@@ -40,6 +62,7 @@ impl StreamRegistry {
     }
 
     pub fn cancel(&self, id: &str) {
+        self.chats.remove(id);
         if let Some((_, n)) = self.inner.remove(id) {
             // `notify_one` stores a permit if no waiter is registered yet,
             // so a cancel issued in the tiny window between `register()`
@@ -51,6 +74,7 @@ impl StreamRegistry {
     }
 
     pub fn finish(&self, id: &str) {
+        self.chats.remove(id);
         self.inner.remove(id);
     }
 }
@@ -77,16 +101,27 @@ pub enum StreamEvent {
     },
     /// The model asked to invoke an MCP tool. Emitted once per call, BEFORE
     /// the dispatcher actually runs the tool, so the UI can render a "calling
-    /// `<tool>`…" placeholder before the result lands. `id` is the
-    /// provider's call id (OpenAI provides one; for Ollama we synthesise
-    /// `call_<turn>_<index>`), used by the frontend to pair the call with
-    /// its matching `ToolResult`.
+    /// `<tool>`…" placeholder before the result lands. `id` is Loach's own
+    /// `call_<turn>_<index>`, unique within the stream, which the frontend
+    /// pairs the call with its `ToolResult` and the approval answer by —
+    /// never the provider's id, which some servers leave empty or repeat.
+    ///
+    /// `approval_required` tells the UI to render the consent prompt: the
+    /// backend is parked waiting for `tool_approval_respond` (or a Stop, or
+    /// the approval timeout) before it will dispatch this call.
+    ///
+    /// `existing_bytes` is set for the built-in `write_file` only: the size
+    /// of the file the write would replace, or `null` when it would create
+    /// one, so the approval card can say which.
     ToolCall {
         id: String,
         server_id: String,
         server_name: String,
         tool: String,
         arguments: serde_json::Value,
+        approval_required: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        existing_bytes: Option<Option<u64>>,
     },
     /// Outcome of a `ToolCall`. `is_error` mirrors the MCP `isError` flag;
     /// `content` is the concatenated text content (or a stringified
@@ -99,13 +134,125 @@ pub enum StreamEvent {
     /// frontend appends them to the running assistant message so they
     /// render as file cards in the chat; they're **not** fed back to the
     /// model as part of the next turn's context.
+    ///
+    /// `denied` marks a call the user refused at the consent prompt (or
+    /// that timed out waiting for one — then `timed_out` is set too, since
+    /// nobody actually said no). It never ran; `content` carries the note
+    /// the model was given so it can continue without the result.
     ToolResult {
         id: String,
         content: String,
         is_error: bool,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         attachments: Vec<crate::mcp::Attachment>,
+        denied: bool,
+        timed_out: bool,
     },
+}
+
+/// The user's answer to a per-call tool approval prompt. Wire form is the
+/// snake_case string the frontend sends (`allow_once` / `allow_always` /
+/// `deny`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalDecision {
+    AllowOnce,
+    /// Run it now and remember the tool on the server's allow-list so it
+    /// never asks again.
+    AllowAlways,
+    Deny,
+}
+
+/// Everything the app knows about tool consent for the current run.
+///
+/// Two halves:
+///
+/// * `inner` — pending per-call approvals, keyed by `(stream_id, call_id)`.
+///   The provider loop parks a `oneshot` here before it emits `ToolCall {
+///   approval_required: true }`; the `tool_approval_respond` command
+///   delivers the user's answer. Entries are removed on delivery and must
+///   be [`forget`](Self::forget)ed on every other exit path (cancel,
+///   timeout) so a stale sender can't linger.
+/// * `grants` — standing "Always allow" answers for built-in tools, keyed
+///   by `(session_id, scope, server_id, tool_name)`, `scope` being the
+///   workspace folder the answer was about. MCP tools record that answer
+///   on the server's `allowed_tools` row instead; a built-in has no server
+///   row to write to, so the grant lives here. The server id is part of the
+///   key so an MCP tool that shares a bare name with a built-in — the
+///   filesystem MCP server has its own `write_file` — never rides on the
+///   built-in's grant; the folder, so an answer a turn gives while still
+///   working in the chat's previous folder can't carry over to the next.
+///   Being in memory means it lasts for the rest of this chat but not past
+///   a restart, which is the right lifetime for blanket permission to write
+///   to someone's files; changing the chat's folder or deleting the chat
+///   ends it sooner ([`revoke_session`](Self::revoke_session)).
+#[derive(Clone, Default)]
+pub struct ApprovalRegistry {
+    inner: Arc<DashMap<String, oneshot::Sender<ApprovalDecision>>>,
+    grants: Arc<DashMap<String, ()>>,
+}
+
+impl ApprovalRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record "Always allow this tool" for one chat, in one `scope` — the
+    /// workspace folder the answer was given about.
+    pub fn grant(&self, session_id: &str, scope: &str, server_id: &str, tool_name: &str) {
+        self.grants
+            .insert(Self::grant_key(session_id, scope, server_id, tool_name), ());
+    }
+
+    /// Whether this chat already answered "Always allow" for this server's
+    /// `tool_name` in this `scope`.
+    pub fn granted(&self, session_id: &str, scope: &str, server_id: &str, tool_name: &str) -> bool {
+        self.grants
+            .contains_key(&Self::grant_key(session_id, scope, server_id, tool_name))
+    }
+
+    /// Drop every standing grant — the workspace tools were switched off.
+    pub fn revoke_all(&self) {
+        self.grants.clear();
+    }
+
+    /// Drop every standing grant one chat holds. Called when the chat's
+    /// workspace folder is changed or removed: "allow `write_file` for this
+    /// chat" was an answer about the folder on screen at the time, not
+    /// about whichever one is picked next.
+    pub fn revoke_session(&self, session_id: &str) {
+        let prefix = format!("{session_id}\u{1f}");
+        self.grants.retain(|k, _| !k.starts_with(&prefix));
+    }
+
+    fn grant_key(session_id: &str, scope: &str, server_id: &str, tool_name: &str) -> String {
+        format!("{session_id}\u{1f}{scope}\u{1f}{server_id}\u{1f}{tool_name}")
+    }
+
+    fn key(stream_id: &str, call_id: &str) -> String {
+        // Unit separator — never appears in a UUID or a provider call id.
+        format!("{stream_id}\u{1f}{call_id}")
+    }
+
+    /// Park a pending approval and hand back the receiving end.
+    pub fn register(&self, stream_id: &str, call_id: &str) -> oneshot::Receiver<ApprovalDecision> {
+        let (tx, rx) = oneshot::channel();
+        self.inner.insert(Self::key(stream_id, call_id), tx);
+        rx
+    }
+
+    /// Deliver an answer. `false` when nothing was waiting — the call was
+    /// already cancelled, timed out, or answered.
+    pub fn resolve(&self, stream_id: &str, call_id: &str, decision: ApprovalDecision) -> bool {
+        match self.inner.remove(&Self::key(stream_id, call_id)) {
+            Some((_, tx)) => tx.send(decision).is_ok(),
+            None => false,
+        }
+    }
+
+    pub fn forget(&self, stream_id: &str, call_id: &str) {
+        self.inner.remove(&Self::key(stream_id, call_id));
+    }
 }
 
 pub fn event_channel(stream_id: &str) -> String {
@@ -213,5 +360,90 @@ mod tests {
         reg.cancel("s2");
         let woke = timeout(Duration::from_millis(50), n.notified()).await;
         assert!(woke.is_err(), "no permit should exist after finish()");
+    }
+
+    /// After a reload the chat streams are stopped; a model pull running
+    /// through the same registry is not a chat and carries on.
+    #[tokio::test]
+    async fn cancel_chats_stops_chat_streams_only() {
+        use std::time::Duration;
+        use tokio::time::timeout;
+        let reg = StreamRegistry::new();
+        let chat = reg.register_chat("chat-stream".into());
+        let pull = reg.register("model-pull".into());
+        assert_eq!(reg.cancel_chats(), 1);
+        assert!(timeout(Duration::from_millis(50), chat.notified()).await.is_ok());
+        assert!(timeout(Duration::from_millis(50), pull.notified()).await.is_err());
+        assert_eq!(reg.cancel_chats(), 0, "a cancelled stream is forgotten");
+    }
+
+    /// A registered approval receives exactly the decision delivered to
+    /// its (stream, call) pair, and a second delivery finds nothing.
+    #[tokio::test]
+    async fn approval_resolves_once_by_stream_and_call() {
+        let reg = ApprovalRegistry::new();
+        let rx = reg.register("s1", "call_0");
+        assert!(!reg.resolve("s1", "call_9", ApprovalDecision::Deny), "wrong call id");
+        assert!(!reg.resolve("s2", "call_0", ApprovalDecision::Deny), "wrong stream id");
+        assert!(reg.resolve("s1", "call_0", ApprovalDecision::AllowAlways));
+        assert_eq!(rx.await.unwrap(), ApprovalDecision::AllowAlways);
+        assert!(!reg.resolve("s1", "call_0", ApprovalDecision::AllowOnce), "already delivered");
+    }
+
+    /// `forget` (the cancel / timeout path) drops the sender so a late
+    /// answer from the UI is a no-op rather than a leak.
+    #[tokio::test]
+    async fn forgotten_approval_rejects_late_answers() {
+        let reg = ApprovalRegistry::new();
+        let rx = reg.register("s1", "c");
+        reg.forget("s1", "c");
+        assert!(!reg.resolve("s1", "c", ApprovalDecision::AllowOnce));
+        assert!(rx.await.is_err(), "receiver sees the sender gone");
+    }
+
+    /// Grants are per chat, per folder, per server and per tool — one chat
+    /// saying "always" must not speak for another, an answer about one
+    /// folder must not cover the next, allowing `edit_file` must not allow
+    /// `write_file`, and allowing the built-in `write_file` must not allow
+    /// an MCP server's tool of the same name.
+    #[test]
+    fn grants_are_scoped_to_one_session_folder_server_and_tool() {
+        let reg = ApprovalRegistry::new();
+        let (builtin, ws) = ("__builtin__", r"C:\code\app");
+        assert!(!reg.granted("chat-1", ws, builtin, "write_file"));
+        reg.grant("chat-1", ws, builtin, "write_file");
+        assert!(reg.granted("chat-1", ws, builtin, "write_file"));
+        assert!(!reg.granted("chat-2", ws, builtin, "write_file"), "leaked across chats");
+        assert!(
+            !reg.granted("chat-1", r"C:\code\other", builtin, "write_file"),
+            "leaked across folders"
+        );
+        assert!(!reg.granted("chat-1", ws, builtin, "edit_file"), "leaked across tools");
+        assert!(
+            !reg.granted("chat-1", ws, "filesystem-mcp", "write_file"),
+            "leaked to an MCP tool with the same name"
+        );
+    }
+
+    #[test]
+    fn revoking_a_session_drops_only_its_grants() {
+        let reg = ApprovalRegistry::new();
+        reg.grant("chat-1", "ws", "__builtin__", "write_file");
+        reg.grant("chat-1", "ws", "__builtin__", "delete_file");
+        reg.grant("chat-10", "ws", "__builtin__", "write_file");
+        reg.revoke_session("chat-1");
+        assert!(!reg.granted("chat-1", "ws", "__builtin__", "write_file"));
+        assert!(!reg.granted("chat-1", "ws", "__builtin__", "delete_file"));
+        // A chat whose id merely starts with the revoked one keeps its own.
+        assert!(reg.granted("chat-10", "ws", "__builtin__", "write_file"));
+        reg.revoke_all();
+        assert!(!reg.granted("chat-10", "ws", "__builtin__", "write_file"));
+    }
+
+    #[test]
+    fn approval_decision_wire_form_is_snake_case() {
+        let d: ApprovalDecision = serde_json::from_str("\"allow_always\"").unwrap();
+        assert_eq!(d, ApprovalDecision::AllowAlways);
+        assert!(serde_json::from_str::<ApprovalDecision>("\"maybe\"").is_err());
     }
 }

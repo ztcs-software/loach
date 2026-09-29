@@ -43,16 +43,6 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 /// forever calling the same tool.
 const MAX_TOOL_TURNS: u32 = 10;
 
-/// Per-tool-result ceiling fed back into the next chat turn. MCP responses
-/// can legitimately be tens of kilobytes (a `list_issues` page, a file
-/// read, …) but the client-side cap on the raw HTTP body is 4 MiB. Push
-/// a 4 MiB blob into `messages` and the next round-trip blows the model's
-/// context window — across 10 turns the conversation could carry 40 MiB
-/// of in-flight strings before anyone sees the bill. Truncate per call,
-/// tell the model it was truncated so it can decide whether to ask for
-/// a different slice.
-const MAX_TOOL_RESULT_BYTES: usize = 32 * 1024;
-
 /// Hard ceiling on tool calls accumulated in a single turn. Mirrors the
 /// OpenAI path's cap, for the same reason: the model server is untrusted.
 const MAX_TOOL_CALLS: usize = 256;
@@ -598,6 +588,7 @@ pub async fn chat_stream(
     registry: StreamRegistry,
     db: Arc<Database>,
     cancel: Arc<tokio::sync::Notify>,
+    approvals: crate::stream::ApprovalRegistry,
     req: ChatRequest,
 ) -> Result<()> {
     // The cancel Notify is already registered upstream in
@@ -605,6 +596,17 @@ pub async fn chat_stream(
     // than re-registering, so cancels arriving during the pre-stream
     // MCP aggregation phase aren't lost.
     let channel = event_channel(&req.stream_id);
+    let tool_ctx = super::ToolCallCtx {
+        app: &app,
+        channel: &channel,
+        db: db.as_ref(),
+        cancel: cancel.as_ref(),
+        approvals: &approvals,
+        stream_id: &req.stream_id,
+        session_id: req.session_id.as_deref(),
+        workspace_root: req.workspace_root.as_deref(),
+        approval_wait_ms: Default::default(),
+    };
 
     // Defense-in-depth SSRF guard. Identical rationale to the OpenAI
     // path — reject link-local addresses (cloud-metadata services live
@@ -684,7 +686,10 @@ pub async fn chat_stream(
                 body["think"] = json!(t);
             }
         }
-        if let Some(tools) = tools_json.as_ref() {
+        // The last round goes out without tools, so a model still reaching
+        // for them answers with what it has — rather than asking for calls
+        // that would run (and be approved) with nothing left to read them.
+        if let Some(tools) = tools_json.as_ref().filter(|_| turn + 1 < MAX_TOOL_TURNS) {
             body["tools"] = tools.clone();
         }
 
@@ -712,11 +717,21 @@ pub async fn chat_stream(
         match outcome {
             TurnOutcome::Done => {
                 let tokens_for_metrics = reported_tokens.unwrap_or(total_tokens);
-                emit_metrics(&app, &channel, tokens_for_metrics, reported_eval_ns, start);
+                emit_metrics(
+                    &app,
+                    &channel,
+                    tokens_for_metrics,
+                    reported_eval_ns,
+                    start,
+                    tool_ctx.approval_wait(),
+                );
                 let _ = app.emit(&channel, StreamEvent::Done);
                 registry.finish(&req.stream_id);
                 return Ok(());
             }
+            // Asked for tools on the last round anyway: nothing would read
+            // their results, so don't run them.
+            TurnOutcome::Tools(_) if turn + 1 == MAX_TOOL_TURNS => break,
             TurnOutcome::Tools(calls) => {
                 // Append the assistant turn including the tool_calls block,
                 // so subsequent /api/chat calls see the full conversation.
@@ -751,6 +766,8 @@ pub async fn chat_stream(
                                     content: msg.clone(),
                                     is_error: true,
                                     attachments: Vec::new(),
+                                    denied: false,
+                                    timed_out: false,
                                 },
                             );
                             messages.push(json!({
@@ -771,62 +788,33 @@ pub async fn chat_stream(
 
                     let args = normalise_args(&func.arguments);
 
-                    let _ = app.emit(
-                        &channel,
-                        StreamEvent::ToolCall {
-                            id: call_id.clone(),
-                            server_id: tool_def.server_id.clone(),
-                            server_name: tool_def.server_name.clone(),
-                            tool: tool_def.qualified_name.clone(),
-                            arguments: args.clone(),
-                        },
-                    );
-
-                    // Honour cancellation while the tool runs — a slow
-                    // MCP server (e.g. GitHub at peak hours, or a tool
-                    // that does its own long fetch) shouldn't lock the
-                    // user into waiting once they hit Stop.
-                    let dispatch = crate::mcp::dispatch_tool_call(
-                        &db,
-                        &tool_def.server_id,
+                    // Emits ToolCall, asks the user first when the server
+                    // requires it, dispatches (honouring Stop throughout),
+                    // emits ToolResult. `None` = cancelled mid-way.
+                    let Some(outcome) = super::execute_tool_call(
+                        &tool_ctx,
+                        &call_id,
+                        tool_def,
                         &tool_name,
                         &args,
-                    );
-                    let (content, is_error, attachments) = select! {
-                        biased;
-                        _ = cancel.notified() => {
-                            let _ = app.emit(&channel, StreamEvent::Cancelled);
-                            registry.finish(&req.stream_id);
-                            return Ok(());
-                        }
-                        r = dispatch => match r {
-                            Ok(r) => (r.content_text, r.is_error, r.attachments),
-                            Err(e) => (format!("tool call failed: {e:#}"), true, Vec::new()),
-                        },
+                    )
+                    .await
+                    else {
+                        let _ = app.emit(&channel, StreamEvent::Cancelled);
+                        registry.finish(&req.stream_id);
+                        return Ok(());
                     };
-
-                    // Cap what we feed back to the model. The UI gets the
-                    // original (cap-free) string so users can still
-                    // inspect the full result; only the message turn that
-                    // re-enters the model is truncated.
-                    let for_ui = content.clone();
-                    let for_model = super::cap_tool_text(&content, MAX_TOOL_RESULT_BYTES);
-
-                    let _ = app.emit(
-                        &channel,
-                        StreamEvent::ToolResult {
-                            id: call_id.clone(),
-                            content: for_ui,
-                            is_error,
-                            attachments,
-                        },
-                    );
 
                     messages.push(json!({
                         "role": "tool",
+                        // Ollama's documented field is `name`; `tool_name`
+                        // is accepted by recent builds but older deploys
+                        // ignore it (and then mis-thread the tool reply).
+                        // Send `name` and include `tool_name` as a belt-
+                        // and-braces alias.
                         "name": func.name,
                         "tool_name": func.name,
-                        "content": for_model,
+                        "content": outcome.for_model,
                     }));
                 }
                 // Fall through — loop again to give the model the tool
@@ -1138,8 +1126,11 @@ fn emit_metrics(
     tokens: u32,
     eval_ns: Option<u64>,
     start: Instant,
+    waited: Duration,
 ) {
     let elapsed = start.elapsed().as_millis() as u64;
+    // The wall-clock fallback leaves out time parked on approval prompts.
+    let generating = elapsed.saturating_sub(waited.as_millis() as u64);
     // Prefer Ollama's own `eval_duration` (pure decode time) so the rate
     // reflects generation speed, not the wall clock — which also folds in model
     // load, prompt evaluation, and any tool round-trips, understating tok/s
@@ -1150,7 +1141,7 @@ fn emit_metrics(
         Some(ns) if ns > 0 && tokens > 0 => {
             (tokens as f64) * 1_000_000_000.0 / (ns as f64)
         }
-        _ if elapsed > 0 => (tokens as f64) * 1000.0 / (elapsed as f64),
+        _ if generating > 0 => (tokens as f64) * 1000.0 / (generating as f64),
         _ => 0.0,
     };
     let _ = app.emit(

@@ -12,6 +12,13 @@ export function estimateTokens(text: string | null | undefined): number {
 
 export interface ContextUsageBreakdown {
   systemPromptTokens: number;
+  /** The workspace's `LOACHFILE.md`, which the backend appends to the
+   *  system prompt on every turn. Counted on its own because it is the one
+   *  backend-added layer that can be large, and the user can shrink it. */
+  projectInstructionsTokens: number;
+  /** The global and Space memory lists the send prepends to the system
+   *  prompt — up to a few thousand characters each. */
+  memoriesTokens: number;
   messagesTokens: number;
   /** Sum of attachment text bodies inlined into user messages. Already
    *  counted inside `messagesTokens`; surfaced separately so the popup
@@ -19,7 +26,8 @@ export interface ContextUsageBreakdown {
   attachmentsTokens: number;
   messageCount: number;
   /** Total estimated tokens that will be sent to the model on the next
-   *  request: `systemPromptTokens + messagesTokens`. */
+   *  request: `systemPromptTokens + projectInstructionsTokens +
+   *  memoriesTokens + messagesTokens`. */
   used: number;
   /** The effective context window for the next request — `params.num_ctx`
    *  with a sensible fallback when the field is missing. */
@@ -60,8 +68,12 @@ export function computeContextUsage(
   messages: Message[],
   systemPrompt: string | null,
   params: GenerationParams,
+  projectInstructions: string | null = null,
+  memories: string | null = null,
 ): ContextUsageBreakdown {
   const systemPromptTokens = estimateTokens(systemPrompt);
+  const projectInstructionsTokens = estimateTokens(projectInstructions);
+  const memoriesTokens = estimateTokens(memories);
 
   let messageChars = 0;
   let attachmentChars = 0;
@@ -84,7 +96,7 @@ export function computeContextUsage(
 
   const messagesTokens = Math.ceil(messageChars / 4);
   const attachmentsTokens = Math.ceil(attachmentChars / 4);
-  const used = systemPromptTokens + messagesTokens;
+  const used = systemPromptTokens + projectInstructionsTokens + memoriesTokens + messagesTokens;
   const total =
     typeof params.num_ctx === "number" && params.num_ctx > 0
       ? params.num_ctx
@@ -93,6 +105,8 @@ export function computeContextUsage(
 
   return {
     systemPromptTokens,
+    projectInstructionsTokens,
+    memoriesTokens,
     messagesTokens,
     attachmentsTokens,
     messageCount: nonSystemCount,
@@ -136,6 +150,26 @@ export function extractSummary(prompt: string | null): string | null {
   if (!prompt) return null;
   const m = SUMMARY_BLOCK_RE.exec(prompt);
   return m ? m[1].trim() : null;
+}
+
+/** The base system prompt a chat sends, before the memory, persona and tone
+ *  layers: the Space's instructions when set, else the per-chat instructions,
+ *  else the global Custom instructions. The per-chat check looks only at the
+ *  user's own text — a compaction summary parked in `sessionPrompt` isn't an
+ *  instruction, and counting it as one shut the global Custom instructions
+ *  out of every compacted chat. The summary then goes back in front of
+ *  whichever prompt wins: it stands in for the turns no longer sent. */
+export function baseSystemPrompt(
+  sessionPrompt: string | null,
+  globalPrompt: string,
+  spaceInstructions = "",
+): string {
+  const prompt =
+    spaceInstructions || stripSummaryBlock(sessionPrompt).trim() || globalPrompt;
+  const summary = extractSummary(sessionPrompt);
+  if (!summary) return prompt;
+  const block = `${SUMMARY_START_TAG}\n${summary}\n${SUMMARY_END_TAG}`;
+  return prompt ? `${block}\n\n${prompt}` : block;
 }
 
 /** Format an integer token count compactly: 1234 → "1.2k", 12345 → "12k". */

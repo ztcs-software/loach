@@ -50,9 +50,11 @@ export function composerChipIconClass(variant: ComposerChipVariant) {
 export function ChipRemove({
   label,
   onClick,
+  disabled = false,
 }: {
   label: string;
   onClick: () => void;
+  disabled?: boolean;
 }) {
   return (
     <button
@@ -64,7 +66,8 @@ export function ChipRemove({
         onClick();
       }}
       aria-label={label}
-      className="-mr-1 grid h-5 w-5 shrink-0 place-items-center rounded-full text-foreground/50 transition-colors hover:bg-foreground/10 hover:text-foreground"
+      disabled={disabled}
+      className="-mr-1 grid h-5 w-5 shrink-0 place-items-center rounded-full text-foreground/50 transition-colors hover:bg-foreground/10 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-foreground/50"
     >
       <X className="h-3 w-3" />
     </button>

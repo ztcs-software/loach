@@ -54,6 +54,14 @@ pub struct AppState {
     /// Cached MCP tool catalogue so each chat send doesn't re-handshake
     /// every enabled server. Invalidated on MCP config changes and restores.
     pub mcp_tools_cache: crate::mcp::ToolsCache,
+    /// Per-call tool approvals parked by the provider loop and answered by
+    /// `tool_approval_respond`.
+    pub approvals: crate::stream::ApprovalRegistry,
+    /// stdio MCP command lines the user confirmed in the native consent
+    /// dialog this session (keyed by `McpServer::stdio_fingerprint`), so a
+    /// test-then-save asks once. Deliberately not persisted: a fresh
+    /// process re-asks before anything runs.
+    pub stdio_approved: parking_lot::Mutex<std::collections::HashSet<String>>,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -181,6 +189,8 @@ pub fn run() {
                 http,
                 streams: StreamRegistry::new(),
                 mcp_tools_cache: crate::mcp::new_tools_cache(),
+                approvals: crate::stream::ApprovalRegistry::new(),
+                stdio_approved: Default::default(),
             };
             app.manage(state);
 
@@ -273,6 +283,10 @@ pub fn run() {
             commands::update_session_params,
             commands::update_session_label,
             commands::set_session_folder,
+            commands::pick_session_workspace,
+            commands::clear_session_workspace,
+            commands::open_session_workspace,
+            commands::read_workspace_instructions,
             commands::list_folders,
             commands::create_folder,
             commands::rename_folder,
@@ -306,6 +320,7 @@ pub fn run() {
             commands::openai_list_models,
             commands::chat_stream,
             commands::chat_cancel,
+            commands::chat_cancel_all,
             commands::ollama_unload_model,
             commands::ollama_preload_model,
             commands::ollama_show_model,
@@ -326,6 +341,10 @@ pub fn run() {
             commands::add_space_memory,
             commands::update_space_memory,
             commands::remove_space_memory,
+            commands::list_global_memories,
+            commands::add_global_memory,
+            commands::update_global_memory,
+            commands::remove_global_memory,
             commands::list_snippets,
             commands::create_snippet,
             commands::update_snippet,
@@ -341,6 +360,8 @@ pub fn run() {
             commands::mcp_save,
             commands::mcp_delete,
             commands::mcp_test,
+            commands::mcp_tools,
+            commands::tool_approval_respond,
             commands::storage_stats,
             commands::export_data_json,
             commands::import_data_with_dialog,
@@ -353,6 +374,15 @@ pub fn run() {
             commands::updater_supported,
             commands::open_in_vscode,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Loach");
+        .build(tauri::generate_context!())
+        .expect("error while building Loach")
+        .run(|_app, event| {
+            if let tauri::RunEvent::Exit = event {
+                // Pooled stdio MCP servers are our child processes. Kill
+                // them now rather than rely on each one noticing its stdin
+                // closing once we're gone.
+                crate::mcp::drop_all_sessions();
+                crate::mcp::stdio::kill_all_now();
+            }
+        });
 }

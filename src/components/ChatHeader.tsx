@@ -61,6 +61,9 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
   const { confirm } = useConfirm();
   const setSessionModel = useChatStore((s) => s.setSessionModel);
   const importMessages = useChatStore((s) => s.importMessages);
+  const streamingHere = useChatStore(
+    (s) => !!s.activeSessionId && s.streamingSessionId === s.activeSessionId,
+  );
   const exportCompactedContext = useChatStore((s) => s.exportCompactedContext);
   // Single-chat actions piped through chatStore. We deliberately don't keep
   // local mirrors of these — the store re-renders ChatHeader's `session`
@@ -592,7 +595,11 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
               <FileText className="mr-2 h-4 w-4" />
               Export context
             </DropdownMenuItem>
-            <DropdownMenuItem onSelect={() => openImport()}>
+            <DropdownMenuItem
+              onSelect={() => openImport()}
+              disabled={streamingHere}
+              title={streamingHere ? "Wait for the reply to finish" : undefined}
+            >
               <ClipboardPaste className="mr-2 h-4 w-4" />
               Import context
             </DropdownMenuItem>

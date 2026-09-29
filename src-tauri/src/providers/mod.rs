@@ -1,10 +1,17 @@
 pub mod ollama;
 pub mod openai;
 
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use tauri::{AppHandle, Emitter};
+use tokio::select;
+use tokio::sync::Notify;
 
+use crate::db::Database;
 use crate::mcp::McpToolDef;
+use crate::stream::{ApprovalDecision, ApprovalRegistry, StreamEvent};
 
 /// Map a model-supplied qualified tool name (`slug__tool`) back to its
 /// definition and the bare name the server expects.
@@ -17,6 +24,258 @@ pub(super) fn resolve_qualified<'a>(
 ) -> Option<(&'a McpToolDef, String)> {
     let def = tools.iter().find(|t| t.qualified_name == qualified)?;
     Some((def, def.name.clone()))
+}
+
+/// Per-tool-result ceiling fed back into the next chat turn. MCP responses
+/// can legitimately be tens of kilobytes (a `list_issues` page, a file
+/// read, …) but the client-side cap on the raw HTTP body is 4 MiB. Push
+/// a 4 MiB blob into `messages` and the next round-trip blows the model's
+/// context window — across 10 turns the conversation could carry 40 MiB
+/// of in-flight strings before anyone sees the bill. Truncate per call,
+/// tell the model it was truncated so it can decide whether to ask for
+/// a different slice. The UI still receives the full text.
+pub(crate) const MAX_TOOL_RESULT_BYTES: usize = 32 * 1024;
+
+/// How long a per-call approval prompt stays open before it counts as a
+/// refusal. The stream is parked between provider turns while it waits, so
+/// nothing upstream times out — this only stops a walked-away-from prompt
+/// from pinning the chat (and the queue behind it) forever.
+const APPROVAL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
+/// What the model is told when the user refuses a call. Phrased as an
+/// instruction so it doesn't immediately retry the same tool.
+const DENIED_NOTE: &str =
+    "The user declined to run this tool. Do not call it again; continue without \
+     its result, or ask the user how they would like to proceed.";
+
+/// What the model is told when nobody answered the prompt in time. Not a
+/// refusal — the user may just have been away — so it isn't told to give
+/// the tool up for good, only not to retry it unasked.
+const UNANSWERED_NOTE: &str =
+    "The user didn't answer the approval prompt in time, so this tool was not run. \
+     Don't retry it on your own; continue without its result, or ask the user \
+     whether to try again.";
+
+/// Everything the per-call helper needs from the provider loop, bundled so
+/// both providers pass one struct instead of six references.
+pub(super) struct ToolCallCtx<'a> {
+    pub app: &'a AppHandle,
+    pub channel: &'a str,
+    pub db: &'a Database,
+    pub cancel: &'a Notify,
+    pub approvals: &'a ApprovalRegistry,
+    pub stream_id: &'a str,
+    /// The chat this stream belongs to, when there is one. Private Chat,
+    /// compaction and memory extraction run without one — none of them is
+    /// offered workspace tools — so `None` simply means "no standing grants
+    /// and no workspace" rather than a missing case.
+    pub session_id: Option<&'a str>,
+    /// Directory the workspace filesystem tools are scoped to. Resolved in
+    /// `commands::chat_stream` from the session row — never from anything
+    /// the renderer or the model sent — so neither can point the tools at
+    /// a tree the user didn't pick.
+    pub workspace_root: Option<&'a std::path::Path>,
+    /// Milliseconds this stream has spent parked on approval prompts. The
+    /// tokens-per-second figure leaves them out: minutes of the user reading
+    /// a card aren't generation time.
+    pub approval_wait_ms: std::sync::atomic::AtomicU64,
+}
+
+impl ToolCallCtx<'_> {
+    /// Total time spent waiting for approval answers so far.
+    pub fn approval_wait(&self) -> Duration {
+        Duration::from_millis(self.approval_wait_ms.load(std::sync::atomic::Ordering::Relaxed))
+    }
+}
+
+/// Result of one tool call, ready to append as the `tool` turn.
+pub(super) struct ToolOutcome {
+    /// The (possibly capped) text the model gets back.
+    pub for_model: String,
+}
+
+/// Run one model-requested tool call end to end: emit `ToolCall`, ask the
+/// user first when the server requires it, dispatch, emit `ToolResult`.
+/// Shared by both providers so the consent gate, the Stop handling and
+/// the result capping can't drift apart between them.
+///
+/// Returns `None` when the stream was cancelled while waiting — for an
+/// answer or for the tool — in which case nothing has been emitted for
+/// this call beyond `ToolCall`, and the caller emits `Cancelled` and
+/// returns exactly as it did before.
+pub(super) async fn execute_tool_call(
+    ctx: &ToolCallCtx<'_>,
+    call_id: &str,
+    tool_def: &McpToolDef,
+    tool_name: &str,
+    args: &Value,
+) -> Option<ToolOutcome> {
+    // What a workspace tool that changes files is about to touch, read off
+    // the disk once: for a write, whether it replaces a file and how big
+    // that is (so the card can't pass an overwrite off as a new file), and
+    // for any of them whether it reaches into a `.git` directory.
+    let builtin = tool_def.server_id == crate::tools::builtin::BUILTIN_SERVER_ID;
+    let (existing_bytes, in_git_dir) = match ctx.workspace_root {
+        Some(root) if builtin && crate::tools::fs::requires_approval(tool_name) => {
+            let (root, args) = (root.to_path_buf(), args.clone());
+            let is_write = tool_name == crate::tools::fs::WRITE_FILE;
+            tokio::task::spawn_blocking(move || {
+                let size = is_write
+                    .then(|| crate::tools::fs::write_target_size(&root, &args))
+                    .flatten();
+                (size, crate::tools::fs::touches_git_dir(&root, &args))
+            })
+            .await
+            .unwrap_or((None, false))
+        }
+        _ => (None, false),
+    };
+    // A standing "Always allow" from earlier in this chat satisfies the
+    // gate without re-prompting. Only built-ins are ever recorded in the
+    // registry — an MCP tool's equivalent answer is already folded into
+    // `needs_approval` via the server's allow-list — and the lookup carries
+    // the server id, so an MCP tool named like a built-in (`write_file`)
+    // can't match a built-in's grant. It carries the folder too, so an
+    // answer given to a turn still working in the chat's previous folder
+    // can't cover the next one; and it never covers `.git`.
+    let scope = ctx.workspace_root.map(|p| p.to_string_lossy()).unwrap_or_default();
+    let already_granted = !in_git_dir
+        && ctx.session_id.is_some_and(|sid| {
+            ctx.approvals
+                .granted(sid, &scope, &tool_def.server_id, tool_name)
+        });
+    let approval_required = !already_granted
+        && crate::mcp::needs_approval(ctx.db, &tool_def.server_id, tool_name);
+    // Parked before the card is announced, so an answer can never arrive
+    // ahead of the entry it resolves.
+    let rx = approval_required.then(|| ctx.approvals.register(ctx.stream_id, call_id));
+    let _ = ctx.app.emit(
+        ctx.channel,
+        StreamEvent::ToolCall {
+            id: call_id.to_string(),
+            server_id: tool_def.server_id.clone(),
+            server_name: tool_def.server_name.clone(),
+            tool: tool_def.qualified_name.clone(),
+            arguments: args.clone(),
+            approval_required,
+            existing_bytes,
+        },
+    );
+
+    if let Some(rx) = rx {
+        let waiting_since = std::time::Instant::now();
+        let (decision, timed_out) = select! {
+            biased;
+            _ = ctx.cancel.notified() => {
+                ctx.approvals.forget(ctx.stream_id, call_id);
+                return None;
+            }
+            // A dropped sender can only mean the registry was cleared out
+            // from under us — treat it as a refusal.
+            d = rx => (d.unwrap_or(ApprovalDecision::Deny), false),
+            _ = tokio::time::sleep(APPROVAL_TIMEOUT) => {
+                ctx.approvals.forget(ctx.stream_id, call_id);
+                (ApprovalDecision::Deny, true)
+            }
+        };
+        ctx.approval_wait_ms.fetch_add(
+            waiting_since.elapsed().as_millis() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        match decision {
+            ApprovalDecision::Deny => {
+                let note = if timed_out { UNANSWERED_NOTE } else { DENIED_NOTE };
+                let _ = ctx.app.emit(
+                    ctx.channel,
+                    StreamEvent::ToolResult {
+                        id: call_id.to_string(),
+                        content: note.to_string(),
+                        is_error: true,
+                        attachments: Vec::new(),
+                        denied: true,
+                        timed_out,
+                    },
+                );
+                return Some(ToolOutcome {
+                    for_model: note.to_string(),
+                });
+            }
+            ApprovalDecision::AllowAlways if builtin => {
+                // Built-ins have no server row to hang an allow-list on, so
+                // the grant is remembered in memory against this chat and
+                // folder. It covers the rest of the conversation and dies
+                // with the app.
+                if let Some(sid) = ctx.session_id {
+                    ctx.approvals.grant(sid, &scope, &tool_def.server_id, tool_name);
+                }
+            }
+            ApprovalDecision::AllowAlways => {
+                // Best effort: a failed write just means the prompt comes
+                // back next time, which is the safe direction.
+                match ctx.db.add_mcp_allowed_tool(&tool_def.server_id, tool_name) {
+                    Ok(true) => {}
+                    Ok(false) => tracing::debug!(
+                        "MCP: `{}` vanished before its allow-list could record `{tool_name}`",
+                        tool_def.server_name
+                    ),
+                    Err(e) => tracing::warn!(
+                        "MCP: couldn't remember allow-always for `{tool_name}` on `{}`: {e:#}",
+                        tool_def.server_name
+                    ),
+                }
+            }
+            ApprovalDecision::AllowOnce => {}
+        }
+    }
+
+    // Honour cancellation while the tool runs — a slow MCP server (GitHub
+    // at peak hours, a tool that does its own long fetch) shouldn't lock
+    // the user into waiting once they hit Stop.
+    let dispatch = crate::mcp::dispatch_tool_call(
+        ctx.db,
+        &tool_def.server_id,
+        tool_name,
+        args,
+        ctx.workspace_root,
+    );
+    let (content, is_error, attachments) = select! {
+        biased;
+        _ = ctx.cancel.notified() => return None,
+        r = dispatch => match r {
+            Ok(r) => (r.content_text, r.is_error, r.attachments),
+            Err(e) => {
+                // The whole error, a stdio server's stderr tail included,
+                // goes to the log. The model — and the transcript, and so
+                // exports — get it cut before the stderr, which can quote
+                // anything the server printed, a key in a URL included.
+                // Settings → MCP → Test connection shows it in full.
+                let full = format!("{e:#}");
+                tracing::warn!("tool `{}` failed: {full}", tool_def.qualified_name);
+                (
+                    format!("tool call failed: {}", crate::mcp::stdio::without_stderr(&full)),
+                    true,
+                    Vec::new(),
+                )
+            }
+        },
+    };
+
+    // Cap what we feed back to the model. The UI gets the original
+    // (cap-free) string so users can still inspect the full result; only
+    // the message turn that re-enters the model is truncated.
+    let for_model = cap_tool_text(&content, MAX_TOOL_RESULT_BYTES);
+    let _ = ctx.app.emit(
+        ctx.channel,
+        StreamEvent::ToolResult {
+            id: call_id.to_string(),
+            content,
+            is_error,
+            attachments,
+            denied: false,
+            timed_out: false,
+        },
+    );
+    Some(ToolOutcome { for_model })
 }
 
 /// Truncate a tool result to `max_bytes` on a UTF-8 boundary and append a
@@ -459,4 +718,26 @@ pub struct ChatRequest {
     /// can't smuggle in a tool definition the backend would honour.
     #[serde(default)]
     pub private: bool,
+    /// Background-task marker (compaction, memory extraction). When `true`,
+    /// `chat_stream` offers no tools at all — no MCP, no built-ins. Nobody
+    /// is watching these streams, so a call that needs approval would wait
+    /// on a card no one can see, and an MCP error notice would land in the
+    /// summary text.
+    #[serde(default)]
+    pub no_tools: bool,
+    /// Chat this turn belongs to. The frontend sends it so the backend can
+    /// look the session up; it is an id, not a capability, and every use of
+    /// it re-reads the row from the database. `None` for the compaction
+    /// stream, which isn't tied to a visible turn.
+    #[serde(default)]
+    pub session_id: Option<String>,
+    /// Directory the workspace filesystem tools may touch, read out of
+    /// `sessions.workspace_root` by `chat_stream`.
+    ///
+    /// `skip_deserializing` for the same reason `tools` is: this is a
+    /// filesystem capability, and the renderer must not be able to name the
+    /// directory. The only way a path lands here is the user picking it in
+    /// the native folder dialog.
+    #[serde(default, skip_deserializing)]
+    pub workspace_root: Option<std::path::PathBuf>,
 }

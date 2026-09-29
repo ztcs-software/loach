@@ -1,6 +1,6 @@
 [package]
 name = "loach"
-version = "1.4.1"
+version = "1.5.0"
 description = "Native local LLM chat client (Ollama + OpenAI-compatible)."
 authors = ["Loach"]
 license = "MIT"
@@ -59,6 +59,16 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 once_cell = "1"
 dashmap = "6"
 parking_lot = "0.12"
+# Opens a chat's workspace folder in the OS file manager. Already in the
+# tree through tauri-plugin-shell, with the same feature, so it adds no
+# crate: on Windows a folder goes to the shell API rather than a spawned
+# `cmd` / PowerShell line.
+open = { version = "5", features = ["shellexecute-on-windows"] }
+# The stdio MCP consent dialog, built on rfd directly rather than through
+# tauri-plugin-dialog, whose builder can't make Cancel the default button
+# (see `commands::confirm_stdio_spawn`). Already in the tree through that
+# plugin, which also switches on the per-platform backend features.
+rfd = { version = "0.16", default-features = false }
 
 
 # Backing crates for the rest of the built-in tools. Each is small,
@@ -93,6 +103,32 @@ printpdf = { version = "0.12", default-features = false }
 # `tools/calculate.rs` for the two operators we add on top of its defaults.
 exmex = "0.21"
 
+# Backing crates for the workspace filesystem tools (`tools/fs.rs`). Both are
+# already in the tree as transitive dependencies, so declaring them directly
+# costs a feature set, not a new download.
+#
+# `regex` powers `search_files`. Its engine has no backtracking, so a
+# model-supplied pattern can't be made to blow up exponentially the way a
+# PCRE-style engine can — the only unbounded axis is compiled program size,
+# which the call site caps with `size_limit`.
+regex = "1"
+# `walkdir` for the recursive halves of `list_directory` / `search_files`:
+# it never follows symlinks by default, which is what stops a link loop
+# inside the workspace from hanging the walk.
+walkdir = "2"
+# `glob` for the name matching in `find_files`; `dunce` to strip the verbatim
+# prefix (`\\?\C:\…`) from canonical Windows paths before a person or the
+# model reads them — the sandbox keeps comparing the verbatim forms.
+glob = "0.3"
+dunce = "1"
+# `chardetng` + `encoding_rs` let the same tools read and edit files that
+# aren't UTF-8 (Windows-1250, UTF-16, …) and write them back in their own
+# encoding — see `tools/fs/encoding.rs`. encoding_rs is already in the tree
+# (lopdf, allsorts); chardetng is the detector Firefox uses for unlabelled
+# pages, and adds nothing else (its rayon feature is opt-in and left off).
+encoding_rs = "0.8"
+chardetng = "1"
+
 # Total RAM + free disk for the onboarding model recommendation, which sizes
 # the Ollama catalog against the machine instead of quoting raw GB. Only the
 # `system` and `disk` collectors are compiled in — the default feature set also
@@ -105,8 +141,20 @@ sysinfo = { version = "0.38", default-features = false, features = ["system", "d
 # crate is already in the tree (sysinfo pulls it in), so declaring it directly
 # costs a feature set, not a new download. Linux reads nvidia-smi / sysfs and
 # macOS needs nothing — see src/gpu.rs.
+#
+# `Win32_System_JobObjects` + `Win32_Security` (for `CreateJobObjectW`'s
+# signature) put each stdio MCP server in a job, so stopping the server stops
+# every process it started — see `mcp/stdio.rs`. `Win32_Storage_FileSystem`
+# is for `MoveFileExW`, the rename behind `move_file` that refuses to
+# overwrite (`tools/fs.rs`).
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D12"] }
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D12", "Win32_System_JobObjects", "Win32_Security", "Win32_Storage_FileSystem"] }
+
+# `killpg` for the same purpose on macOS / Linux: a stdio MCP server runs in
+# its own process group and the whole group is stopped with it. Already in
+# the tree through tokio.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 # Only used by the db.rs test suite, which opens a fresh database in a
@@ -120,7 +168,7 @@ tempfile = "3"
 custom-protocol = ["tauri/custom-protocol"]
 
 [profile.release]
-# Smaller binary → smaller NSIS installer + updater `.nsis.zip` download for
+# Smaller binary → smaller NSIS installer + updater `-setup.exe` download for
 # every user on every release, and a faster cold start (Windows cold-start cost
 # is roughly proportional to bytes read + Defender-scanned). `lto = "thin"`
 # captures most of full LTO's size win for a fraction of the link time;

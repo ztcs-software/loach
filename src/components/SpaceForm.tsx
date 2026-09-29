@@ -58,7 +58,7 @@ export function SpaceForm() {
         <DialogHeader>
           <DialogTitle>Create a new Space</DialogTitle>
           <DialogDescription>
-            Spaces let you group chats with shared instructions and files.
+            Spaces let you group chats with shared instructions and sources.
           </DialogDescription>
         </DialogHeader>
 

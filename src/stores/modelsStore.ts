@@ -205,7 +205,7 @@ export const useModelsStore = create<ModelsState>((set, get) => ({
       out.push(...ollamaRes.value);
     } else {
       // Ollama unreachable is a common "not running" state — surface it as a
-      // soft error (the panel shows a "start ollama serve" hint) without
+      // soft error (the Models tab shows the error inline) without
       // hiding the OpenAI list.
       err =
         ollamaRes.reason instanceof Error

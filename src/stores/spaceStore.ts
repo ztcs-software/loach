@@ -84,10 +84,20 @@ interface SpaceState {
     content: string;
     source_session_id?: string | null;
     source_message_id?: string | null;
+    restore_id?: string;
+    restore_created_at?: number;
   }) => Promise<SpaceMemory>;
-  updateMemory: (id: string, spaceId: string, content: string) => Promise<void>;
-  removeMemory: (id: string, spaceId: string) => Promise<void>;
+  /** `false` when the memory was already gone. */
+  updateMemory: (id: string, spaceId: string, content: string) => Promise<boolean>;
+  /** `false` when the memory was already gone. */
+  removeMemory: (id: string, spaceId: string) => Promise<boolean>;
 }
+
+/** Memory writes completed so far. A load compares it before and after
+ *  reading: a write that finished in between may be missing from what it
+ *  read, while the write itself skipped the not-yet-loaded cache — so it
+ *  reads again. */
+let memoryWrites = 0;
 
 export const useSpaceStore = create<SpaceState>((set, get) => ({
   spaces: [],
@@ -255,7 +265,7 @@ export const useSpaceStore = create<SpaceState>((set, get) => ({
     } catch (e) {
       useToastStore.getState().push({
         kind: "error",
-        title: "Couldn't remove file",
+        title: "Couldn't remove source",
         body: e instanceof Error ? e.message : String(e),
       });
       return;
@@ -269,36 +279,52 @@ export const useSpaceStore = create<SpaceState>((set, get) => ({
   },
 
   loadSpaceMemories: async (spaceId) => {
-    const memories = await listSpaceMemories(spaceId);
-    set((s) => ({ spaceMemories: { ...s.spaceMemories, [spaceId]: memories } }));
-    return memories;
+    for (;;) {
+      const before = memoryWrites;
+      const memories = await listSpaceMemories(spaceId);
+      if (memoryWrites === before) {
+        set((s) => ({ spaceMemories: { ...s.spaceMemories, [spaceId]: memories } }));
+        return memories;
+      }
+    }
   },
 
+  // The memory writes patch a Space's cached list only once it has been
+  // loaded: seeding an unloaded one with a single row would make the
+  // extractor (which reads the cache first) see that row as the whole list.
   addMemory: async (args) => {
     const memory = await addSpaceMemory(args);
+    memoryWrites++;
     invalidateSpaceContext(args.space_id);
-    set((s) => ({
-      spaceMemories: {
-        ...s.spaceMemories,
-        [args.space_id]: [...(s.spaceMemories[args.space_id] ?? []), memory],
-      },
-    }));
+    set((s) => {
+      const list = s.spaceMemories[args.space_id];
+      if (!list) return s;
+      // Sorted in, so a restored row returns to its old place.
+      const next = [...list, memory].sort((a, b) => a.created_at - b.created_at);
+      return { spaceMemories: { ...s.spaceMemories, [args.space_id]: next } };
+    });
     return memory;
   },
 
   updateMemory: async (id, spaceId, content) => {
     const trimmed = content.trim();
-    await updateSpaceMemory({ id, space_id: spaceId, content: trimmed });
+    const changed = await updateSpaceMemory({ id, space_id: spaceId, content: trimmed });
+    memoryWrites++;
     invalidateSpaceContext(spaceId);
     const now = Date.now();
-    set((s) => ({
-      spaceMemories: {
-        ...s.spaceMemories,
-        [spaceId]: (s.spaceMemories[spaceId] ?? []).map((m) =>
-          m.id === id ? { ...m, content: trimmed, updated_at: now } : m,
-        ),
-      },
-    }));
+    set((s) => {
+      const list = s.spaceMemories[spaceId];
+      if (!list) return s;
+      return {
+        spaceMemories: {
+          ...s.spaceMemories,
+          [spaceId]: changed
+            ? list.map((m) => (m.id === id ? { ...m, content: trimmed, updated_at: now } : m))
+            : list.filter((m) => m.id !== id),
+        },
+      };
+    });
+    return changed;
   },
 
   // Unlike the other delete/remove actions this one does NOT toast on failure
@@ -306,13 +332,16 @@ export const useSpaceStore = create<SpaceState>((set, get) => ({
   // chat command) awaits it and reports failures through the command-result
   // panel. The SpaceView UI caller attaches its own toast on the rejection.
   removeMemory: async (id, spaceId) => {
-    await removeSpaceMemory({ id, space_id: spaceId });
+    const changed = await removeSpaceMemory({ id, space_id: spaceId });
+    memoryWrites++;
     invalidateSpaceContext(spaceId);
-    set((s) => ({
-      spaceMemories: {
-        ...s.spaceMemories,
-        [spaceId]: (s.spaceMemories[spaceId] ?? []).filter((m) => m.id !== id),
-      },
-    }));
+    set((s) => {
+      const list = s.spaceMemories[spaceId];
+      if (!list) return s;
+      return {
+        spaceMemories: { ...s.spaceMemories, [spaceId]: list.filter((m) => m.id !== id) },
+      };
+    });
+    return changed;
   },
 }));

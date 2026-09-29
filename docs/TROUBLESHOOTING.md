@@ -12,16 +12,19 @@ that reproduce it are usually enough to file a useful bug report.
 
 ### Ollama is installed but Loach can't see it
 
-**Problem.** The Providers panel says Ollama isn't reachable, or the model
-dropdown is empty even though `ollama list` works in a terminal.
+**Problem.** **Test connection** in **Settings → Providers** says
+**Connection failed**, the model picker lists Ollama as **Not running**, or
+the model dropdown is empty even though `ollama list` works in a terminal.
 
 **Solution.**
 
-1. Make sure `ollama serve` is running. On Windows, the Ollama tray icon
-   needs to be active; on Linux, the `ollama` service must be started; on
-   macOS, launch the Ollama menu-bar app or run `ollama serve` from a
-   terminal.
-2. Open **Settings → Providers → Ollama** and check the **Base URL**.
+1. Make sure Ollama is running. If it's installed on this computer, click
+   **Start Ollama** in the model picker, or turn on **Auto-launch Ollama** in
+   **Settings → Providers** so Loach starts it each time it opens.
+   Otherwise: on Windows, the Ollama tray icon needs to be active; on Linux,
+   the `ollama` service must be started; on macOS, launch the Ollama
+   menu-bar app or run `ollama serve` from a terminal.
+2. Open **Settings → Providers** and check the **Ollama base URL**.
    The default is `http://localhost:11434`. If you run Ollama on another
    machine or a custom port, change it here.
 3. Click **Refresh** in the Models tab. The list re-queries Ollama's
@@ -36,20 +39,32 @@ dropdown is empty even though `ollama list` works in a terminal.
 
 **Solution.**
 
-1. Re-enter the key in **Settings → Providers → OpenAI**. Keys are stored
-   in the operating system's credential store, not on disk, so a copy-paste
-   that picked up a trailing space will silently fail.
+1. Re-enter the key under **OpenAI API key** in **Settings → Providers**.
+   Keys are stored in the operating system's credential store, not on
+   disk. Leading and trailing spaces are trimmed before saving, so a
+   sloppy copy-paste isn't the problem — a truncated one can be.
 2. Confirm the key is active on your OpenAI dashboard and has not been
    rotated.
 3. If you're using a custom OpenAI-compatible endpoint (vLLM, LM Studio,
-   LiteLLM, OpenRouter, Groq), make sure the **Base URL** ends with `/v1`
-   and that the endpoint accepts the same `Authorization: Bearer …` header
-   the real OpenAI API uses.
+   LiteLLM, OpenRouter, Groq), make sure the **API base URL** is the one
+   its docs give — usually ending in `/v1` (LiteLLM's is
+   `http://localhost:4000`; the presets dropdown next to the field fills
+   in the common ones) — and that the endpoint accepts the same
+   `Authorization: Bearer …` header the real OpenAI API uses.
+4. A server on another machine reached over plain `http://` never gets the
+   key: Loach only sends it over `https://`, or over `http://` to this
+   computer, so it can't be read off the network. Put the server behind
+   HTTPS, or turn off its key requirement if it's on a network you trust.
+   When the server rejects the request for that reason, the error says so
+   ("API key withheld because the base URL is http:// to another
+   machine") rather than "API key invalid or expired".
 
 ### Key won't save on Linux
 
-**Problem.** The OpenAI key field clears every time you reopen Settings, or
-saving the key throws an error.
+**Problem.** Saving the OpenAI key throws an error, or when you reopen
+Settings the key field shows the `sk-…` placeholder instead of
+`•••••••• (stored)`. (The field itself is always blank — a saved key is
+never shown back.)
 
 **Solution.** Loach uses the system Secret Service to store secrets. On
 minimal Linux installs (server-style, some tiling window managers) there is
@@ -66,7 +81,7 @@ no Secret Service running.
 **Problem.** Ollama is reachable but the list is empty.
 
 **Solution.** You haven't pulled any models yet. In the **Models** tab, click
-**Pull a model**, type a tag (for example `llama3.1:8b`), and wait for the
+**Pull model**, type a tag (for example `llama3.1:8b`), and wait for the
 download to finish. The list refreshes automatically.
 
 ---
@@ -82,19 +97,24 @@ streaming anything.
 If another chat is busy, your message is parked in a FIFO queue.
 
 - Wait for the current generation to finish, or
-- Open the busy chat and click **Respond now** in the header of the chat
-  you want answered first. This cancels the current runner and starts
-  yours.
+- Open the chat that's waiting: its transcript shows a **Waiting for other
+  chats to finish…** banner with **Respond now**. That cancels the current
+  runner and starts yours.
+- If nothing seems to be generating, the running chat may be waiting on a
+  tool approval card. The banner then reads **Waiting for your approval of
+  a tool call in "…"** and offers **Go to it** — answer the card there (see
+  "The reply is stuck on 'Waiting for your approval…'").
 
 ### The reply stopped halfway and shows an error
 
-**Problem.** A streaming reply was cancelled or errored, and the bubble
-ends with a red error line.
+**Problem.** A streaming reply errored, and the bubble ends with an italic
+error line starting with ⚠.
 
 **Solution.** Whatever streamed before the failure is kept — open the
-message menu and use **Copy raw** if you want to preserve it. To get a
+message's `…` menu and use **Copy message** if you want to preserve it. To get a
 full answer, send the same prompt again, or click **Regenerate** if it's
-visible. If errors repeat, see the connection or VRAM sections below.
+visible. If errors repeat, see the connection section above or the VRAM
+section below.
 
 ### I see no "thinking" trace even though the model supports reasoning
 
@@ -105,11 +125,15 @@ above the answer.
 
 1. Open the **Parameters** sidebar and confirm the **Thinking** toggle is
    on for this chat.
-2. Make sure the model actually advertises the `thinking` capability — the
-   tile in the Models tab shows a "thinking" badge if it does. Many tags
-   of the same base model differ on this.
-3. Thinking is **Ollama-only**. OpenAI providers ignore the toggle even
-   when it's on.
+2. Make sure the model actually advertises the `thinking` capability — when
+   it doesn't, the Thinking row in the Parameters sidebar is disabled with
+   "This model doesn't support a thinking step". Many tags of the same base
+   model differ on this.
+3. The Thinking toggle is **Ollama-only**. In a chat on an
+   OpenAI-compatible provider it's disabled and reads off; a thinking block
+   still appears there only if the server streams its reasoning as a
+   separate `reasoning_content` field (some DeepSeek, vLLM and llama.cpp
+   setups do).
 
 ### A formula shows as raw TeX instead of rendering
 
@@ -122,35 +146,47 @@ source, not typeset math.
   error on hover — that keeps a half-typed formula quiet while it streams
   rather than flashing an error. Hover it to see what KaTeX objected to.
 - **`$…$` didn't typeset.** Single dollars are treated as currency unless
-  the span reads as math: it has to hug both delimiters, stay on one line,
-  not follow a word character, and not be chased by a digit. "$5 and $10"
+  the span reads as math: it has to hug both delimiters, stay on one line
+  and under 200 characters, not follow a word character, and not be chased
+  by a digit. "$5 and $10"
   and "US$5" stay prose by design. Ask the model for `$$…$$`, `\(…\)` or
   a ```` ```math ```` fence if you need the ambiguous case.
 - **Nothing renders at all.** Math is on with no setting to find, so this
   is more likely a delimiter the model didn't emit — check the raw text
-  via **Copy message**.
+  via **Copy message**. Math inside backticks or a code fence (such as
+  ```` ```latex ````) stays code on purpose; only ```` ```math ```` fences
+  typeset.
 
-### Tokens-per-second or token count chip is missing
+### The metrics chip's numbers don't match my provider
 
-**Problem.** Some replies show a metrics chip; others don't.
+**Problem.** The token count or tokens/sec under a reply doesn't line up
+with what the backend or your provider's dashboard reports.
 
-**Solution.** Metrics are shown when the provider reports them. Most
-OpenAI-compatible proxies omit the timing fields, so chats against those
-backends will only show the token counts (or nothing).
+**Solution.** The chip appears once a reply finishes and counts
+**completion tokens only**. Ollama reports the count itself; OpenAI-compatible
+endpoints only do so when they honour Loach's request for a `usage` block —
+older proxies ignore it, in which case Loach counts streamed chunks as an
+approximation. The rate
+falls back to wall-clock timing when the backend reports none, so it
+includes any queueing or model-load time.
 
 ### Replies are off-topic, repetitive, or too short
 
 **Problem.** The model is technically responding but the quality is poor.
 
-**Solution.** Open the **Parameters** sidebar:
+**Solution.** Open the **Parameters** sidebar. **Temperature**, **Max
+Tokens** and **Repeat Penalty** only appear in its **Advanced** view:
 
-- Lower **temperature** for more focused answers, raise it for more variety.
-- Raise **max tokens** if the answer keeps cutting off.
-- Raise **num_ctx** if the model is forgetting earlier turns. Higher
-  num_ctx uses more VRAM.
-- Increase **repeat_penalty** (try 1.1–1.3) if the model loops.
-- Click **Reset to defaults** in the panel header to discard per-chat
-  overrides and fall back to the model's defaults.
+- Lower **Temperature** for more focused answers, raise it for more variety.
+- Raise **Max Tokens** if the answer keeps cutting off.
+- Raise **Context Length** if the model is forgetting earlier turns. A
+  longer context uses more VRAM.
+- Increase **Repeat Penalty** (default 1.1; try up to 1.3) if the model
+  loops. On an OpenAI-compatible chat, Context Length and Repeat Penalty
+  are ignored — use **Frequency Penalty** for loops instead.
+- Click **Reset to defaults** (or **Reset to model defaults**) below the
+  sliders to discard per-chat overrides and fall back to the Space's and
+  model's defaults.
 
 ---
 
@@ -158,18 +194,19 @@ backends will only show the token counts (or nothing).
 
 ### Ollama crashes with "out of memory" or the model fails to load
 
-**Problem.** A pull works but loading or chatting fails with a CUDA / VRAM
-error.
+**Problem.** A pull works, but the model fails to load or the reply fails
+with "ran out of memory loading or running the model".
 
 **Solution.**
 
-1. Turn on **Low VRAM mode** in the Parameters sidebar (or globally in
-   **Settings → General**). This forces smaller batches and a leaner KV
-   cache.
-2. Lower **num_ctx** in the same panel — a smaller context window uses
-   dramatically less VRAM.
-3. Lower the **GPU layer count** to push more of the model onto CPU/RAM
-   at the cost of speed.
+1. Turn on **Low VRAM** in the Parameters sidebar (or globally with
+   **Settings → Features → Low VRAM mode**). This forces smaller batches
+   and a leaner KV cache.
+2. Lower **Context Length** in the same panel — a smaller context window
+   uses dramatically less VRAM.
+3. Set **GPU Layers** (Advanced view; blank means auto, 0 means CPU only)
+   below the model's layer count to push more of it onto CPU/RAM at the
+   cost of speed.
 4. Pick a smaller quantization (for example `q4_K_M` instead of `q8_0`)
    or a smaller parameter size.
 
@@ -179,18 +216,20 @@ error.
 for what your hardware actually manages, or names a constraint you don't
 recognise.
 
-**Solution.** The card names the number it used — "Based on 8 GB VRAM ·
-NVIDIA GeForce RTX 4060", or a RAM figure when there's no usable GPU
-reading. Which one you get:
+**Solution.** The card names the number it used — "Based on 8.0 GB VRAM ·
+NVIDIA GeForce RTX 4060 · 120 GB free on disk", or a RAM figure when
+there's no usable GPU reading. Which one you get:
 
 - **Windows** reads dedicated video memory directly, for any vendor.
 - **Linux** reads `nvidia-smi`, then the amdgpu sysfs node. **Intel Arc
-  isn't covered** and falls back to system RAM, which under-reports what
-  the card can do — pick a larger variant by hand if you have one.
+  isn't covered** and falls back to system RAM, which is usually more than
+  the card holds — so the pick can overflow it. If Ollama runs on your Arc,
+  choose a variant that fits its VRAM by hand.
 - **macOS** deliberately uses system RAM: Apple Silicon shares it with the
   GPU, so a separate figure would double-count.
-- Adapters under 1 GB are treated as integrated graphics and ignored,
-  since they carve out system RAM the RAM path already counts.
+- Adapters under 1 GB — and, on Windows, any adapter that reports unified
+  memory — are treated as integrated graphics and ignored, since they
+  carve out system RAM the RAM path already counts.
 
 Any probe that fails falls back to RAM. Nothing here restricts you — every
 catalog entry stays pullable, and the custom-tag field takes any tag at
@@ -208,9 +247,11 @@ runtime memory figures to size against.
 **Solution.**
 
 - In **Settings → Appearance**, switch the theme from **Aurora** to
-  **Solid**. Aurora's animated gradient is heavy on weak GPUs.
-- Close very long chats while testing — extremely long transcripts cost
-  more to re-render on every token.
+  **Solid**. Aurora's heavily blurred gradient and translucent panels are
+  heavy on weak GPUs.
+- Long chats mount only their latest 50 messages; **Show earlier
+  messages**, **Search in chat** or jumping to an old pinned response
+  mounts more. Switch to another chat and back to collapse them again.
 
 ### The first reply takes forever, even on a fast model
 
@@ -218,8 +259,11 @@ runtime memory figures to size against.
 streaming starts; subsequent replies are instant.
 
 **Solution.** Ollama loads the model into VRAM on first use. To preload at
-launch, turn on **Settings → General → Default model preload**. The first
-chat will start fast, at the cost of pinning VRAM as soon as Loach opens.
+launch, turn on **Preload on startup** under **Settings → General → Default
+model** (available when the default model is an Ollama model). Only that
+model is warmed, at the cost of pinning VRAM as soon as Loach opens, and it
+stays loaded only as long as **Keep model loaded** allows (5 minutes by
+default).
 
 ### Making Ollama generate faster
 
@@ -240,9 +284,12 @@ Ollama 0.5+:
   smaller but lossier; `f16` (the default) is highest quality.
 - **`OLLAMA_KEEP_ALIVE=30m`** (or `-1` for "until unloaded") — how long Ollama
   keeps a model resident after a request, so a reply after a pause skips the
-  cold reload. Loach also exposes this under **Settings → Providers → Keep
-  model loaded**, which is sent with every request and overrides the env
-  default.
+  cold reload. Loach also exposes this under **Settings → Features → Keep
+  model loaded** (5 min, 30 min, 1 hour, Always). Until you pick an option
+  there, Loach sends nothing and this env default applies — even though the
+  control already shows **5 min** highlighted. Once you click any option,
+  it's sent with every request and overrides the env default, and there's
+  no way back to "unset", so pick the one that matches your env var.
 - **`OLLAMA_NUM_PARALLEL=1`** — caps concurrent requests per model. The default
   splits VRAM across parallel slots; pinning it to 1 gives a single chat the
   whole budget (and the largest usable context).
@@ -261,9 +308,10 @@ and relaunch the Ollama app.
 
 ## 4. Attachments
 
-### "File too large" when dropping a file
+### "… is larger than 20 MB" when dropping a file
 
-**Problem.** The composer refuses the file.
+**Problem.** The composer refuses the file with that message under the
+input.
 
 **Solution.** There's a **20 MB** cap per file. Split large logs, or paste
 the relevant section as text instead.
@@ -277,20 +325,24 @@ attached a PDF.
 pages with no text layer) have no text to extract. Run the PDF through an
 OCR tool first, or paste the relevant pages as plain text.
 
-### The DOCX won't attach
+### The model can't read my Word document
 
-**Problem.** The file picker rejects the document.
+**Problem.** A `.doc` file attached, but the model says it only knows the
+file's name.
 
-**Solution.** Only `.docx` is supported, not legacy `.doc`. Open the file
-in Word or LibreOffice and **Save As → Word Document (.docx)**.
+**Solution.** Only `.docx` is extracted, not legacy `.doc`. A `.doc` still
+attaches, but as an opaque file the model is told about by name. Open the
+file in Word or LibreOffice and **Save As → Word Document (.docx)**.
 
-### A long document shows a "content truncated" footer
+### A long document's chip says "truncated"
 
-**Problem.** A long PDF or text file was attached but only part of it
-reached the model.
+**Problem.** A long PDF or text file was attached, its chip carries a
+**truncated** pill, and only part of it reached the model.
 
 **Solution.** Per-file cap is **200,000 characters**; total inlined content
-per message is **500,000 characters**. Either:
+per message is **500,000 characters**, counting your prompt and fetched pages
+too. Files past that per-message budget are clipped or left out without a
+**truncated** pill — only the model is told. Either:
 
 - Trim the document to the parts you actually need, or
 - Send several focused messages, each with a different excerpt.
@@ -299,9 +351,10 @@ per message is **500,000 characters**. Either:
 
 **Problem.** You attached a PNG/JPEG but the model can't describe it.
 
-**Solution.** The model needs **vision capability**. In the Models tab,
-the tile shows a "vision" badge when supported. Switch to a vision-capable
-model (Llava, Llama 3.2 Vision, GPT-4o, etc.) and re-send.
+**Solution.** The model needs **vision capability** — check the model's
+page on the Ollama library or the capabilities line of `ollama show`.
+Switch to a vision-capable model (Llava, Llama 3.2 Vision, GPT-4o, etc.)
+and re-send.
 
 ---
 
@@ -318,45 +371,159 @@ not the page content.
    Web fetch**.
 2. Only `http://` and `https://` URLs are fetched.
 3. Up to **5 URLs per message** are followed. Extras are ignored.
+4. **Private Chat** never fetches URLs, whatever the setting says.
 
-### "URL blocked" for `localhost`, `192.168.x`, or my office VPN
+### "Refusing to fetch …" for `localhost`, `192.168.x`, or my office VPN
 
 **Problem.** Loach refuses to fetch an internal URL.
 
 **Solution.** This is intentional. The SSRF guard rejects any URL whose
-resolved IP lands on loopback, link-local, or private RFC1918 ranges, even
-if the hostname looks public but resolves there via DNS. To share internal
-content with a model, copy the page text and paste it into the chat
-instead.
+resolved IP lands on loopback, link-local, private RFC1918 ranges,
+carrier-grade NAT (`100.64.0.0/10`, which Tailscale uses) or IPv6
+unique-local addresses (`fc00::/7`), even if the hostname looks public but
+resolves there via DNS. To share internal content with a model, copy the
+page text and paste it into the chat instead.
 
-### A URL fetch silently produces a "fetch failed" stub
+### A URL fetch failed or came back cut short
 
 **Problem.** The model is told a URL was attempted but no content came
-back.
+back — the reply's tool-call block shows a red warning — or only part of
+the page arrived.
 
-**Solution.** The fetch hit a limit:
+**Solution.** Expand the tool-call block on the reply and open its
+`web_fetch` entry to read the reason. A fetch fails on:
 
 - **30 s total timeout** or **10 s connect timeout**,
-- **5 MB body cap**,
-- A non-2xx HTTP response.
+- A non-2xx HTTP response,
+- More than **10 redirects**,
+- A DNS lookup failure or a TLS / certificate error,
+- The rate limit of **60 URLs per 60 seconds**, shared across all chats.
+
+A body over the **5 MB cap** isn't a failure: the page is cut off at the
+cap and the entry says "truncated by Loach" (so does a page whose
+extracted text runs past ~12,000 characters).
 
 Try the URL in a browser. If it works there but not in Loach, the page is
 likely slow, large, or blocks non-browser user agents.
 
-### MCP "Test connection" fails
+### MCP "Test connection" fails (HTTP)
 
-**Problem.** An MCP server is configured but the test button reports an
-error.
+**Problem.** An HTTP MCP server is configured but the test button reports
+an error.
 
 **Solution.**
 
 1. Confirm the URL is the **Streamable-HTTP** endpoint. Loach does not
-   support stdio or SSE MCP transports.
-2. If the server requires auth, add an `Authorization` header in the
-   server's row.
+   support the legacy two-endpoint SSE transport. If the server is
+   distributed as a command to run (`npx …`, `uvx …`), add it as a
+   **Local process (stdio)** server instead.
+2. If the server requires auth, open it in **Settings → MCP** and add an
+   `Authorization: Bearer …` line under **Headers**.
 3. Check that the response body fits under **4 MiB** — misconfigured
    servers that dump full schemas can exceed this.
 4. Per-request timeout is **30 s**.
+
+### A local (stdio) MCP server won't start
+
+**Problem.** **Test connection** on a stdio server fails, or a chat shows
+an error for it, with "couldn't start", "exited before replying", or a
+timeout. (Saving doesn't start the server — it first runs when you test
+it, with **Test connection** or `/tools`, or send a message with it
+enabled.)
+
+**Solution.**
+
+1. Use **Test connection** in **Settings → MCP**: when the server
+   process exits, it quotes the last lines the server wrote to stderr
+   (`npm ERR! 404`, a Python traceback, "command not found"). That is
+   usually the whole answer. An error in a chat stops short of the stderr,
+   which can print anything — keys included — and would otherwise be sent
+   to the model and saved with the chat. A timeout doesn't include stderr
+   either; run the command in a terminal to see what it's waiting on.
+2. Make sure the runtime the command needs is installed and on `PATH`
+   for your user: Node.js for `npx`, `uv` for `uvx`. Loach hands the
+   program its own environment, read when Loach started — if you installed
+   the runtime since, restart Loach.
+   - On macOS and Linux, Loach asks your login shell for its `PATH` once
+     per launch, so tools installed through Homebrew, nvm, pyenv and the
+     like are found even when Loach was started from the Dock or an app
+     menu. If one still isn't — your shell took over 10 s to start, or
+     sets `PATH` somewhere a login shell doesn't read — run `echo $PATH`
+     in a terminal and add the result to the server's environment
+     variables as `PATH=…`; Loach then uses that `PATH` instead.
+3. On Windows, `npx` is a `.cmd` shim (`uvx` an `.exe`). Loach finds
+   either on `PATH` for you, but a full path also works.
+4. First runs of `npx -y …` download the package. Startup is allowed
+   **60 s**; a slow network can exceed that — run the command once in a
+   terminal to warm the cache, then test again.
+5. Put one argument per line. Don't quote arguments the way you would in
+   a shell — Loach passes each line as one argument, spaces included
+   (only leading and trailing whitespace is trimmed).
+6. If you clicked **Cancel** on the "Run MCP server …?" system dialog —
+   or pressed Enter, which picks Cancel — nothing was saved or started.
+   Save again and click **Start server**.
+7. A tool call that times out doesn't stop the server; it may still be
+   working. If every call times out, disable and re-enable the server to
+   restart it.
+
+### A server imported from a backup is disabled and won't turn on
+
+**Problem.** After **Settings → Data → Import**, a stdio MCP server shows
+up switched off, and flipping the toggle opens a system dialog.
+
+**Solution.** That is deliberate: a backup can't prove *you* configured
+that command on this machine, so imported stdio servers arrive disabled
+and the first enable asks you to confirm the command line. Review it and
+choose **Start server** to enable the row. HTTP servers import enabled —
+unless their host couldn't be looked up during the import (offline, off
+the VPN), in which case they arrive switched off too; turn them on once
+the host is reachable again.
+
+Backups never contain MCP headers or environment variables, and a password
+in a connection URL or the value after a `--token`-style argument comes back
+as `REDACTED` — so after an import, re-enter any `Authorization` header,
+API-key variable or redacted argument a server needs.
+
+### The reply is stuck on "Waiting for your approval…"
+
+**Problem.** The assistant bubble shows an approval card and nothing else
+happens.
+
+**Solution.** The model asked to run an MCP tool, or to change a file in
+the chat's workspace folder, and Loach is waiting for you — answer
+**Allow once**, **Always allow** (**Allow … for this chat** for a file
+change), or **Deny** on the card. A prompt left unanswered for 10 minutes
+isn't run — the call is marked *No answer* — and the Stop button cancels
+the reply. Until you answer, other chats queue behind this one; if the
+card is in a chat you aren't looking at, Loach shows a notice with an
+**Open** button. To stop being asked for a
+server you trust, open it in **Settings → MCP** and turn off **Ask before
+each tool call**; to re-enable prompts for tools you answered "Always
+allow" for, use **Ask again for all** in the same editor and save.
+
+### "Stopped after 10 tool-use turns"
+
+**Problem.** A reply ends with this error while the model is still calling
+tools.
+
+**Solution.** Each reply gets at most 10 rounds with the model, so a
+model stuck in a loop can't run forever: tools can run in the first nine,
+and the tenth is sent without tools so the model can wrap up; this error
+means it asked for them anyway, and those calls weren't run. Either it was stuck, or the task
+needs more steps than that. Send a follow-up ("continue") to give it
+another 10 rounds, or break the task into smaller requests. With the
+workspace tools, pointing it at the right files up front (or putting that
+in `LOACHFILE.md`) saves rounds spent searching.
+
+### The model can't use a file or folder name on Windows
+
+**Problem.** A workspace tool refuses a path with "contains `:`", "ends
+with a dot or a space", or "is a device name Windows reserves".
+
+**Solution.** Those names are refused on purpose: a `:` names a hidden
+data stream, and `CON`, `nul.txt` or a trailing dot would be created as
+files that Explorer and most tools can't open or delete. Ask the model to
+pick another name.
 
 ---
 
@@ -371,8 +538,10 @@ tab.
 
 - Memory extraction only runs **after a complete assistant reply**.
   Cancelled or errored turns are skipped.
-- The toggle on the Space's Memory tab must be on.
-- Each candidate fact must be **under 280 characters**. Longer "facts"
+- The toggle on the Space's Memory tab must be on. Outside a Space,
+  memory stays off until you turn on **Settings → Features → Global
+  memories**.
+- Each candidate fact must be **at most 280 characters**. Longer "facts"
   are dropped.
 - Memory uses the same provider/model the chat is using. Tiny models
   often return empty extractions; try a larger one.
@@ -381,15 +550,20 @@ tab.
 
 **Problem.** A bad fact landed in long-term memory.
 
-**Solution.** Open the Space's **Memory** tab and click the row to edit or
-delete it. Turning the toggle off only stops *new* writes; existing
-memories still ride along until you remove them.
+**Solution.** Right after it lands, click **Undo** on the "Saved to
+memory" toast. Later, open the Space's **Memory** tab — or, for global
+memory, **Settings → Features → Manage global memories** — and click a
+memory's text to edit it, or hover the row and click the trash icon to
+delete it. Turning a Space's memory toggle off only stops *new* writes; its
+existing memories still ride along until you remove them. Turning off
+**Global memories** stops both.
 
-### Reference files won't add to a Space
+### Reference sources won't add to a Space
 
-**Problem.** Adding a file to a Space fails or silently does nothing.
+**Problem.** Adding a source to a Space fails or silently does nothing.
 
-**Solution.** Per-Space cap is **200 MB** total across all files. Remove
+**Solution.** Each file can be at most **20 MB**, and a Space's sources at
+most **200 MB** in total. Remove
 older references, or move the content into a smaller text file.
 
 ### Space instructions seem to override my custom instructions
@@ -409,22 +583,36 @@ Space's instructions, or repeat the relevant parts in them.
 
 **Problem.** You can't unlock the app.
 
-**Solution.** There is **no recovery path**. The lock blob is hashed with
-Argon2id and stored in the OS credential store; Loach cannot read or
-decrypt it back. Your options are:
+**Solution.** There is **no recovery path inside the app**. The lock is an
+Argon2id hash in your OS credential store; Loach cannot read or reverse it,
+and the in-app **Factory reset** itself asks for the credentials. Your
+options are:
 
 - Try the optional hint shown on the lock screen (if you set one).
-- **Factory reset** the install — this wipes every chat, Space, snippet,
-  and setting. On Windows that means removing the app's data directory and
-  reinstalling; on Linux, deleting the app-data folder under your home
-  directory; on macOS, deleting `~/Library/Application Support/dev.loach.app/`.
+- Remove the lock entry from the credential store by hand. Loach stores it
+  under the service `dev.loach.app` with the account `app_lock`:
+  - **Windows** — open **Credential Manager → Windows Credentials →
+    Generic Credentials** and remove the entry whose name contains
+    `dev.loach.app` and `app_lock`.
+  - **Linux** — delete it in your keyring app (Passwords and Keys /
+    KWalletManager), or run
+    `secret-tool clear service dev.loach.app username app_lock`.
+  - **macOS** — in **Keychain Access**, delete the `dev.loach.app` item
+    whose account is `app_lock`.
+
+  Your chats and settings are untouched — only the lock is gone, and Loach
+  starts unlocked on the next launch.
+
+Deleting the app-data folder does **not** help: it wipes your chats but
+leaves the credential-store entry, so the lock screen comes straight back.
 
 Set a hint when you create a lock — it's stored alongside in plain text
 for exactly this case.
 
-### "Too many attempts" — the unlock button is greyed out
+### "Too many failed attempts" on the lock screen
 
-**Problem.** After several wrong PINs, the unlock command refuses to run.
+**Problem.** After several wrong PINs, every unlock attempt is refused with
+a red *Too many failed attempts. Try again in N seconds* message.
 
 **Solution.** After 5 consecutive failed attempts, Loach starts an
 escalating cool-down (30 s → 60 s → 2 min … up to 2 h). Wait for the
@@ -451,8 +639,8 @@ lock is configured:
 
 - **Lock after inactivity** — set it to **Off**, or to a longer interval,
   if a 1- or 5-minute timeout is catching you while you read a long reply.
-  Only typing, clicking, scrolling and touch count as activity; watching a
-  reply stream does not.
+  Typing, clicking, scrolling, touch and moving the mouse over Loach count
+  as activity; watching a reply stream does not.
 - **Lock when minimized** — turn it off if you routinely minimize Loach
   while it works. Note that native save / open dialogs don't trigger it,
   so exporting or attaching a file is safe either way.
@@ -477,7 +665,7 @@ past the interval locks the moment it wakes.
 
 ## 8. Models editor
 
-### "Save as…" rejects my Modelfile
+### "Save as new model" rejects my Modelfile
 
 **Problem.** Saving a derived model fails with a validation error.
 
@@ -485,11 +673,14 @@ past the interval locks the moment it wakes.
 directives.
 
 - The **base tag** must only contain letters, digits, `.`, `_`, `/`, or
-  `-`. No spaces, no quotes.
+  `-`, plus one `:` before the tag (so `llama3.1:8b` and a Hugging Face
+  pull such as `hf.co/user/repo:Q4_K_M` are fine). No spaces, no quotes,
+  and no empty path segments (`a//b`, or a leading or trailing `/`).
 - The **SYSTEM** and **TEMPLATE** bodies cannot contain `"""`. If you need
   a triple-quote in your system prompt, rephrase.
-- "Save as…" always writes a **new** model. To replace one, save under a
-  new name and then delete the old one.
+- **Save as new model** writes under the tag you type. If a model with that
+  tag already exists, it's replaced without asking — pick a tag that
+  isn't taken if you want to keep the old one.
 
 ### A model pull is stuck
 
@@ -497,18 +688,21 @@ directives.
 
 **Solution.**
 
-1. Click **Cancel** on the progress chip and start the pull again.
-2. Confirm Ollama is still reachable (the Providers panel will go red if
-   it isn't).
+1. Click the ✕ on the progress chip and start the pull again.
+2. Confirm Ollama is still reachable — when it isn't, the model picker in
+   the chat header shows an amber warning next to **Ollama**, "Not
+   running" and a **Start Ollama** button, and **Settings → Providers →
+   Test connection** checks the base URL.
 3. Check disk space on the drive Ollama uses for its model cache.
 
 ### Can't delete a model
 
-**Problem.** Delete fails or the button is greyed out.
+**Problem.** Delete fails with a *Couldn't delete model* toast.
 
-**Solution.** Switch every chat off this model first (open them and pick
-a different one from the model dropdown), then retry. Ollama refuses to
-delete a model that's currently loaded.
+**Solution.** The toast quotes Ollama's own error — Loach never blocks a
+delete itself. Check that Ollama is still reachable (the chat-header model
+picker shows an amber warning and "Not running" when it isn't) and that
+the tag matches what `ollama list` shows, then retry from the Models tab.
 
 ---
 
@@ -527,8 +721,9 @@ support in-app updates, so the panel should offer one. Two things hide it:
    reported "unsupported" on packages. Download a newer `.deb` / `.rpm`
    once from the releases page; in-app updates work from then on.
 2. **You're running a development build** (`npm run tauri dev` or
-   `cargo run`). Format detection reads a marker the bundler writes at
-   build time, which dev builds don't have. Install a packaged build.
+   `cargo run`). Package detection reads a marker the bundler writes at
+   build time (an AppImage is recognised by its runtime's environment
+   variable), which dev builds don't have. Install a packaged build.
 
 Note that updates are in-app only — there's no apt or yum repository, so
 `apt upgrade` won't pick up new versions either way.
@@ -545,13 +740,14 @@ manager instead would leave its database describing a version that's no
 longer on disk. AppImage installs replace themselves in place and never
 prompt.
 
-### "Up to date" but I see a newer version on GitHub
+### "You're on the latest version" but I see a newer version on GitHub
 
 **Problem.** The updater says there's nothing new even though a newer
 release exists.
 
-**Solution.** The updater only reads **published** releases, not drafts.
-Wait until the release is published, or download manually from GitHub.
+**Solution.** The updater only sees the newest **published stable**
+release. Drafts aren't offered, and neither are pre-releases (versions with
+a suffix such as `-beta-1` or `-rc-1`) — download those from GitHub.
 
 ### Update download or signature fails
 
@@ -560,9 +756,10 @@ Wait until the release is published, or download manually from GitHub.
 **Solution.**
 
 1. Re-run the check — transient network failures are common.
-2. If the error mentions signature verification, the release is most
-   likely mid-publish (assets uploaded but not yet signed). Wait a few
-   minutes and retry.
+2. If the error mentions signature verification, the downloaded file
+   didn't match what the release signed — usually a corrupted or
+   intercepted download (a proxy or antivirus rewriting it). Retry, and if
+   it keeps failing, install from the releases page.
 3. As a fallback, download the installer for your platform directly from
    the releases page.
 
@@ -575,18 +772,19 @@ Wait until the release is published, or download manually from GitHub.
 **Problem.** "Import" rejects the file you picked.
 
 **Solution.** Import expects a **full Loach export** — the JSON produced
-by **Settings → Data → Export everything**. Single-chat exports (the
-per-chat **Export** menu) are not import sources; they're for sharing or
-archiving outside the app.
+by **Settings → Data → Export data**. The per-chat **Export context**
+Markdown is not an import source; paste it into another chat with
+**Import context** instead.
 
-### "Wipe user data" didn't remove my OpenAI key
+### "Remove my data" didn't remove my OpenAI key
 
-**Problem.** After wiping, your OpenAI key is still configured.
+**Problem.** After erasing, your OpenAI key is still configured.
 
-**Solution.** By design. **Wipe user data** removes chats, Spaces,
-snippets, MCP servers, and memories but keeps app settings and your
-stored API key. To clear everything, including the key, use **Factory
-reset** instead.
+**Solution.** By design. **Remove my data** (under **Settings → Data →
+Erase & Reset**) removes chats, folders, Spaces, snippets, snippet
+variables, MCP servers and memories but keeps app settings and your stored
+API key. To clear everything, including the key and the app lock, use
+**Factory reset** instead.
 
 ---
 
@@ -594,19 +792,25 @@ reset** instead.
 
 ### Aurora theme tears or stutters
 
-**Problem.** The animated background pulses or drops frames.
+**Problem.** The background or the translucent panels flicker or drop
+frames while you scroll or resize.
 
 **Solution.** Switch to the **Solid** theme in **Settings → Appearance**.
-Aurora relies on GPU compositing; integrated GPUs and remote desktop
-sessions don't always cope.
+Aurora's background is a static gradient under a large blur, with
+translucent panels that blur what's behind them — all GPU compositing that
+integrated GPUs and remote desktop sessions don't always cope with.
 
 ### Font size change didn't fully apply
 
 **Problem.** Some text scaled, some didn't.
 
-**Solution.** A few elements (the title bar, native dialogs) follow the
-OS font scale, not Loach's. Adjust your system display scaling alongside
-the in-app setting if you need everything uniform.
+**Solution.** Native dialogs (file pickers, the MCP consent prompt) follow
+the OS font scale, not Loach's; everything Loach draws itself, including
+the title bar, follows the in-app setting, apart from a few fixed sizes —
+the onboarding step titles, the percentage in the context-usage popover,
+and the "Aa" previews in the font-size picker itself. Adjust your system
+display scaling alongside the in-app setting if you need everything
+uniform.
 
 ---
 
@@ -616,9 +820,9 @@ the in-app setting if you need everything uniform.
 
 **Problem.** The shortcut doesn't open the global search.
 
-**Solution.** The palette is suppressed while the **onboarding wizard**
-or the **lock screen** owns the window. Finish onboarding or unlock the
-app first.
+**Solution.** The palette is suppressed while the **onboarding wizard**,
+the **lock screen** or **Private Chat** owns the window. Finish
+onboarding, unlock the app or close Private Chat first.
 
 ### Search doesn't find a phrase I know I wrote
 
@@ -642,9 +846,9 @@ skips several things:
 - **System notices**, which aren't conversation.
 
 Two more things to check: the query needs at least **two characters**, and
-case-insensitivity is ASCII-only — a query with accented or non-Latin
-characters matches at its own case but not across cases. Try the exact
-casing you used.
+message-search case-insensitivity is ASCII-only — a query with accented or
+non-Latin characters matches transcript text at its own case but not across
+cases. Try the exact casing you used.
 
 If titles crowd out what you want, narrow with the scope dropdown or type
 `in:messages` in the query — scoped to messages, transcript hits get the
@@ -664,8 +868,11 @@ free of malware"*.
 subscribe to the Apple Developer Program), so Gatekeeper blocks it on
 first launch. Bypass it once and the app runs normally afterwards:
 
-- **Right-click** `Loach.app` in **Applications** → **Open** → click
-  **Open** in the prompt, or
+- For *"Apple cannot verify…"*: on macOS 14 and earlier, **right-click**
+  `Loach.app` in **Applications** → **Open** → click **Open** in the
+  prompt; on macOS 15 and later, try to open it once, then click **Open
+  Anyway** in **System Settings → Privacy & Security**. Or, for either
+  message:
 - Run `xattr -cr /Applications/Loach.app` in **Terminal** and launch
   normally.
 
@@ -681,10 +888,10 @@ blocked the same way, the same workaround applies.
 Intel Macs aren't supported. Build from source if you need to run on
 Intel — see the README "Build from source" section.
 
-### Windows: "Credential Manager access denied"
+### Windows: saving a key or the app lock fails on a managed machine
 
 **Problem.** Saving keys or app-lock credentials fails on a managed
-Windows machine.
+Windows machine with a platform or storage error.
 
 **Solution.** Some corporate group policies block apps from writing to
 Credential Manager. Loach cannot store secrets without it. Ask your IT

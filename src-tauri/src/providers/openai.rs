@@ -32,10 +32,6 @@ const ADMIN_TIMEOUT: Duration = Duration::from_secs(30);
 /// tool use so a confused model can't pin the chat in an infinite loop.
 const MAX_TOOL_TURNS: u32 = 10;
 
-/// Per-tool-result ceiling fed back into the model. See the matching
-/// constant in `providers::ollama` for the full rationale.
-const MAX_TOOL_RESULT_BYTES: usize = 32 * 1024;
-
 /// Ceiling on the number of parallel tool-call slots a single streamed turn
 /// may allocate. The OpenAI wire protocol indexes parallel calls from 0; a
 /// real turn issues a handful. The `index` is taken verbatim from the
@@ -221,11 +217,23 @@ pub async fn chat_stream(
     registry: StreamRegistry,
     db: Arc<Database>,
     cancel: Arc<tokio::sync::Notify>,
+    approvals: crate::stream::ApprovalRegistry,
     req: ChatRequest,
 ) -> Result<()> {
     // Cancel Notify is registered upstream in `commands::chat_stream`.
     // See the matching note in providers/ollama.rs::chat_stream.
     let channel = event_channel(&req.stream_id);
+    let tool_ctx = super::ToolCallCtx {
+        app: &app,
+        channel: &channel,
+        db: db.as_ref(),
+        cancel: cancel.as_ref(),
+        approvals: &approvals,
+        stream_id: &req.stream_id,
+        session_id: req.session_id.as_deref(),
+        workspace_root: req.workspace_root.as_deref(),
+        approval_wait_ms: Default::default(),
+    };
 
     // Defense-in-depth SSRF guard. The shared HTTP client is intentionally
     // *not* DNS-pinned the way MCP's per-server clients are — hosted
@@ -310,6 +318,14 @@ pub async fn chat_stream(
         }
         if let Some(tools) = tools_json.as_ref() {
             body["tools"] = tools.clone();
+            // The last round may not call them, so a model still reaching
+            // for tools answers with what it has — rather than asking for
+            // calls that would run (and be approved) with nothing left to
+            // read them. The tools stay declared: strict servers reject
+            // tool-call history without them.
+            if turn + 1 == MAX_TOOL_TURNS {
+                body["tool_choice"] = json!("none");
+            }
         }
 
         let outcome = match run_one_turn(
@@ -337,11 +353,15 @@ pub async fn chat_stream(
                 // sent one; fall back to our chunk-counter approximation
                 // for compat shims that don't honour `include_usage`.
                 let tokens_for_metrics = reported_tokens.unwrap_or(total_tokens);
-                emit_metrics(&app, &channel, tokens_for_metrics, start);
+                emit_metrics(&app, &channel, tokens_for_metrics, start, tool_ctx.approval_wait());
                 let _ = app.emit(&channel, StreamEvent::Done);
                 registry.finish(&req.stream_id);
                 return Ok(());
             }
+            // Asked for tools on the last round anyway (a server that
+            // ignores `tool_choice`): nothing would read their results, so
+            // don't run them.
+            TurnOutcome::Tools(_) if turn + 1 == MAX_TOOL_TURNS => break,
             TurnOutcome::Tools(calls) => {
                 // Assistant turn carrying the tool calls. OpenAI requires
                 // the tool_calls array (with `id` and the `function` object)
@@ -351,9 +371,8 @@ pub async fn chat_stream(
                     .iter()
                     .enumerate()
                     .map(|(idx, c)| {
-                        let id = c.id.clone().unwrap_or_else(|| format!("call_{turn}_{idx}"));
                         json!({
-                            "id": id,
+                            "id": wire_call_id(c.id.as_deref(), turn, idx),
                             "type": "function",
                             "function": {
                                 "name": c.name,
@@ -373,10 +392,13 @@ pub async fn chat_stream(
                 }));
 
                 for (idx, call) in calls.iter().enumerate() {
-                    let call_id = call
-                        .id
-                        .clone()
-                        .unwrap_or_else(|| format!("call_{turn}_{idx}"));
+                    // Two ids. The provider's goes back to the provider as
+                    // `tool_call_id`; the UI and the approval prompt get
+                    // Loach's own, unique within the stream — some servers
+                    // send an empty id or reuse one across turns, and a
+                    // repeat made an approval card impossible to answer.
+                    let call_id = wire_call_id(call.id.as_deref(), turn, idx);
+                    let event_id = format!("call_{turn}_{idx}");
                     let (tool_def, tool_name) = match resolve_qualified(&req.tools, &call.name) {
                         Some(pair) => pair,
                         None => {
@@ -387,10 +409,12 @@ pub async fn chat_stream(
                             let _ = app.emit(
                                 &channel,
                                 StreamEvent::ToolResult {
-                                    id: call_id.clone(),
+                                    id: event_id,
                                     content: msg.clone(),
                                     is_error: true,
                                     attachments: Vec::new(),
+                                    denied: false,
+                                    timed_out: false,
                                 },
                             );
                             messages.push(json!({
@@ -404,54 +428,27 @@ pub async fn chat_stream(
 
                     let args = parse_args(&call.arguments);
 
-                    let _ = app.emit(
-                        &channel,
-                        StreamEvent::ToolCall {
-                            id: call_id.clone(),
-                            server_id: tool_def.server_id.clone(),
-                            server_name: tool_def.server_name.clone(),
-                            tool: tool_def.qualified_name.clone(),
-                            arguments: args.clone(),
-                        },
-                    );
-
-                    let dispatch = crate::mcp::dispatch_tool_call(
-                        &db,
-                        &tool_def.server_id,
+                    // Emits ToolCall, asks the user first when the server
+                    // requires it, dispatches (honouring Stop throughout),
+                    // emits ToolResult. `None` = cancelled mid-way.
+                    let Some(outcome) = super::execute_tool_call(
+                        &tool_ctx,
+                        &event_id,
+                        tool_def,
                         &tool_name,
                         &args,
-                    );
-                    let (content, is_error, attachments) = select! {
-                        biased;
-                        _ = cancel.notified() => {
-                            let _ = app.emit(&channel, StreamEvent::Cancelled);
-                            registry.finish(&req.stream_id);
-                            return Ok(());
-                        }
-                        r = dispatch => match r {
-                            Ok(r) => (r.content_text, r.is_error, r.attachments),
-                            Err(e) => (format!("tool call failed: {e:#}"), true, Vec::new()),
-                        },
+                    )
+                    .await
+                    else {
+                        let _ = app.emit(&channel, StreamEvent::Cancelled);
+                        registry.finish(&req.stream_id);
+                        return Ok(());
                     };
-
-                    // UI sees the full result; model only sees the cap.
-                    let for_ui = content.clone();
-                    let for_model = super::cap_tool_text(&content, MAX_TOOL_RESULT_BYTES);
-
-                    let _ = app.emit(
-                        &channel,
-                        StreamEvent::ToolResult {
-                            id: call_id.clone(),
-                            content: for_ui,
-                            is_error,
-                            attachments,
-                        },
-                    );
 
                     messages.push(json!({
                         "role": "tool",
                         "tool_call_id": call_id,
-                        "content": for_model,
+                        "content": outcome.for_model,
                     }));
                 }
                 // Loop — give the model the tool results and let it
@@ -778,7 +775,9 @@ async fn run_one_turn(
                                                     });
                                                 }
                                                 let slot = &mut accum[idx];
-                                                if let Some(id) = tc.id {
+                                                // An empty id in a later frame
+                                                // mustn't wipe the real one.
+                                                if let Some(id) = tc.id.filter(|id| !id.is_empty()) {
                                                     slot.id = Some(id);
                                                 }
                                                 if let Some(f) = tc.function {
@@ -895,10 +894,14 @@ fn decide_outcome(accum: Vec<AccumTool>) -> TurnOutcome {
     }
 }
 
-fn emit_metrics(app: &AppHandle, channel: &str, tokens: u32, start: Instant) {
+/// `waited` — time parked on approval prompts — is left out of the rate
+/// (a user reading a card isn't the model generating) but kept in
+/// `elapsed_ms`, which stays the reply's full wall-clock.
+fn emit_metrics(app: &AppHandle, channel: &str, tokens: u32, start: Instant, waited: Duration) {
     let elapsed = start.elapsed().as_millis() as u64;
-    let tps = if elapsed > 0 {
-        (tokens as f64) * 1000.0 / (elapsed as f64)
+    let generating = elapsed.saturating_sub(waited.as_millis() as u64);
+    let tps = if generating > 0 {
+        (tokens as f64) * 1000.0 / (generating as f64)
     } else {
         0.0
     };
@@ -925,6 +928,15 @@ fn openai_tool_def(def: &McpToolDef) -> Value {
     }
     function.insert("parameters".into(), def.input_schema.clone());
     json!({ "type": "function", "function": function })
+}
+
+/// The id a tool call goes back to the provider under, in the assistant
+/// turn's `tool_calls` and the `tool` message's `tool_call_id`: the
+/// provider's own, or `call_<turn>_<index>` when it sent none (or `""`).
+fn wire_call_id(id: Option<&str>, turn: u32, idx: usize) -> String {
+    id.filter(|id| !id.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("call_{turn}_{idx}"))
 }
 
 /// Parse a model-emitted tool-call argument string. The protocol promises
@@ -1136,6 +1148,15 @@ mod tests {
         // mid-char.
         let evil = format!("UklGR{}", "é".repeat(12));
         assert_eq!(sniff_image_mime(&evil), "image/png");
+    }
+
+    // --- wire_call_id ---------------------------------------------------------
+
+    #[test]
+    fn wire_call_id_keeps_the_providers_id_and_fills_in_a_missing_one() {
+        assert_eq!(wire_call_id(Some("call_abc"), 2, 1), "call_abc");
+        assert_eq!(wire_call_id(None, 2, 1), "call_2_1");
+        assert_eq!(wire_call_id(Some(""), 0, 3), "call_0_3", "an empty id counts as none");
     }
 
     // --- parse_args -----------------------------------------------------------

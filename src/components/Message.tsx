@@ -1,10 +1,12 @@
 import { memo, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
+  Ban,
   Brain,
   Check,
   ChevronDown,
   ChevronRight,
+  CircleStop,
   Copy,
   File,
   FileText,
@@ -15,10 +17,13 @@ import {
   PinOff,
   RefreshCw,
   Share2,
+  ShieldAlert,
   TextSelect,
   Wrench,
 } from "lucide-react";
+import { Button } from "@/components/ui/button";
 import { AttachmentActions } from "./AttachmentActions";
+import { BUILTIN_SERVER_ID, workspaceApproval } from "./WorkspaceApproval";
 import { Markdown, StreamingMarkdown } from "./Markdown";
 import { MarkdownSourceProvider } from "./markdownSource";
 import { lastCodeBlock } from "@/lib/codeBlocks";
@@ -32,6 +37,7 @@ import type {
   Attachment,
   Message as ChatMessage,
   MessageMetrics,
+  ToolApprovalDecision,
   ToolCallRecord,
 } from "@/types";
 import { cn } from "@/lib/utils";
@@ -97,31 +103,133 @@ function parseToolCalls(json: string | null): ToolCallRecord[] {
   }
 }
 
+/** Pretty-print a call's arguments. The model sometimes ships a string
+ *  instead of an object — try to parse it for nicer display, fall back to
+ *  raw. */
+function formatArgs(args: unknown): string {
+  if (typeof args === "string") {
+    try {
+      return JSON.stringify(JSON.parse(args), null, 2);
+    } catch {
+      return args;
+    }
+  }
+  try {
+    return JSON.stringify(args, null, 2);
+  } catch {
+    return String(args);
+  }
+}
+
+/** The qualified tool name comes through as `<serverSlug>__<toolName>` —
+ *  the raw piece is what the user recognises. */
+function rawToolName(tool: string): string {
+  return tool.includes("__") ? tool.slice(tool.indexOf("__") + 2) : tool;
+}
+
+/**
+ * Per-call consent prompt. Rendered above the collapsed tool block (not
+ * inside it) while the backend is parked waiting for an answer, so the
+ * decision is never hidden behind a disclosure toggle. The three answers
+ * mirror what LM Studio / Jan / Claude Desktop offer: run it this once,
+ * run it and stop asking for this tool, or refuse — the model is told
+ * about a refusal and continues without the result.
+ */
+function ApprovalCard({ call }: { call: ToolCallRecord }) {
+  const respond = useChatStore((s) => s.respondToolApproval);
+  const [sent, setSent] = useState(false);
+  const decide = (decision: ToolApprovalDecision) => {
+    setSent(true);
+    void respond(call.id, decision);
+  };
+  const tool = rawToolName(call.tool);
+  // Workspace file tools get a readable preview — the file, the diff, the
+  // move, the deletion — instead of the arguments as JSON. Deletions are
+  // painted red so they never blend in with the amber of an edit.
+  const builtin = call.server_id === BUILTIN_SERVER_ID;
+  const preview = builtin ? workspaceApproval(tool, call.arguments, call.existing_bytes) : null;
+  const destructive = preview?.destructive === true;
+  return (
+    <div
+      role="group"
+      aria-label={`Approve tool call ${tool}`}
+      className={cn(
+        "mb-2 rounded-xl border p-3 text-xs",
+        destructive
+          ? "border-red-500/40 bg-red-500/[0.07]"
+          : "border-amber-500/35 bg-amber-500/[0.07]",
+      )}
+    >
+      <div className="flex items-start gap-1.5 font-medium text-foreground/85">
+        <ShieldAlert
+          className={cn("mt-px h-3.5 w-3.5 shrink-0", destructive ? "text-red-500" : "text-amber-500")}
+        />
+        {/* Wraps rather than truncates: for a write or an edit the path is
+            here, and a cut-off path hides exactly the file name. An alert,
+            so a screen reader announces the question when the card
+            appears — the reply is stalled until it is answered. */}
+        <span role="alert" className="min-w-0 [overflow-wrap:anywhere]">
+          {preview ? (
+            <>Allow the model to {preview.title}?</>
+          ) : (
+            <>
+              Allow <span className="font-semibold">{call.server_name}</span> to run{" "}
+              <span className="font-mono">{tool}</span>?
+            </>
+          )}
+        </span>
+      </div>
+      {preview ? (
+        preview.body
+      ) : (
+        <pre className="mt-2 max-h-40 overflow-auto rounded border border-foreground/10 bg-foreground/[0.04] px-2 py-1.5 font-mono text-[11px] leading-snug text-foreground/80 whitespace-pre-wrap break-words">
+          {formatArgs(call.arguments) || "{}"}
+        </pre>
+      )}
+      <div className="mt-2.5 flex flex-wrap items-center gap-2">
+        <Button size="sm" className="h-7 px-3 text-xs" disabled={sent} onClick={() => decide("allow_once")}>
+          Allow once
+        </Button>
+        {/* A built-in's standing grant lives in memory for this chat only
+            (see `ApprovalRegistry::grant`); an MCP tool's is written to the
+            server's allow-list and outlives the app. Say which. */}
+        <Button
+          size="sm"
+          variant="outline"
+          className="h-7 px-3 text-xs"
+          disabled={sent}
+          onClick={() => decide("allow_always")}
+        >
+          {builtin ? `Allow ${tool} for this chat` : `Always allow ${tool}`}
+        </Button>
+        <Button
+          size="sm"
+          variant="ghost"
+          className="h-7 px-3 text-xs text-foreground/70 hover:text-destructive"
+          disabled={sent}
+          onClick={() => decide("deny")}
+        >
+          Deny
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 function ToolCallItem({ call }: { call: ToolCallRecord }) {
   const [open, setOpen] = useState(false);
   const pending = call.result === null;
-  const failed = !pending && call.is_error;
-  // Pretty-print arguments. The model sometimes ships a string instead of
-  // an object — try to parse it for nicer display, fall back to raw.
-  let argsText: string;
-  if (typeof call.arguments === "string") {
-    try {
-      argsText = JSON.stringify(JSON.parse(call.arguments), null, 2);
-    } catch {
-      argsText = call.arguments;
-    }
-  } else {
-    try {
-      argsText = JSON.stringify(call.arguments, null, 2);
-    } catch {
-      argsText = String(call.arguments);
-    }
-  }
-  // The qualified tool name comes through as `<serverSlug>__<toolName>` —
-  // show the raw piece in the chip and the server in the header.
-  const rawTool = call.tool.includes("__")
-    ? call.tool.slice(call.tool.indexOf("__") + 2)
-    : call.tool;
+  const denied = !pending && call.denied === true;
+  const interrupted = !pending && call.interrupted === true;
+  const failed = !pending && call.is_error && !denied;
+  const argsText = formatArgs(call.arguments);
+  const rawTool = rawToolName(call.tool);
+  // Same readable preview the approval card used, so the diff that was
+  // approved can still be seen after the fact.
+  const preview =
+    call.server_id === BUILTIN_SERVER_ID
+      ? workspaceApproval(rawTool, call.arguments, call.existing_bytes)
+      : null;
   return (
     <div
       className={cn(
@@ -134,6 +242,7 @@ function ToolCallItem({ call }: { call: ToolCallRecord }) {
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
         className="flex w-full items-center gap-1.5 text-left text-foreground/70 transition-colors hover:text-foreground"
       >
         {open ? (
@@ -141,8 +250,14 @@ function ToolCallItem({ call }: { call: ToolCallRecord }) {
         ) : (
           <ChevronRight className="h-3.5 w-3.5 shrink-0" />
         )}
-        {pending ? (
+        {pending && call.awaiting_approval ? (
+          <ShieldAlert className="h-3.5 w-3.5 shrink-0 text-amber-500" />
+        ) : pending ? (
           <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-foreground/55" />
+        ) : denied ? (
+          <Ban className="h-3.5 w-3.5 shrink-0 text-foreground/45" />
+        ) : interrupted ? (
+          <CircleStop className="h-3.5 w-3.5 shrink-0 text-foreground/45" />
         ) : failed ? (
           <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-red-400" />
         ) : (
@@ -151,21 +266,38 @@ function ToolCallItem({ call }: { call: ToolCallRecord }) {
         <span className="min-w-0 truncate font-mono text-foreground/80">
           {rawTool}
         </span>
+        {(denied || interrupted) && (
+          <span className="ml-auto shrink-0 text-[10.5px] uppercase tracking-wider text-foreground/45">
+            {denied ? (call.timed_out ? "No answer" : "Denied") : "Interrupted"}
+          </span>
+        )}
       </button>
       {open && (
         <div className="mt-2 space-y-2 pl-5">
-          <div>
-            <div className="mb-0.5 text-[10.5px] uppercase tracking-wider text-foreground/40">
-              Arguments
+          {preview ? (
+            <div>
+              {/* Not uppercased: the title carries a path, and `README.md`
+                  and `readme.md` are different files on a case-sensitive
+                  filesystem. */}
+              <div className="text-[10.5px] text-foreground/45 [overflow-wrap:anywhere]">
+                {preview.title}
+              </div>
+              {preview.body}
             </div>
-            <pre className="max-h-40 overflow-auto rounded border border-foreground/10 bg-foreground/[0.04] px-2 py-1.5 font-mono text-[11px] leading-snug text-foreground/80 whitespace-pre-wrap break-words">
-              {argsText || "{}"}
-            </pre>
-          </div>
+          ) : (
+            <div>
+              <div className="mb-0.5 text-[10.5px] uppercase tracking-wider text-foreground/40">
+                Arguments
+              </div>
+              <pre className="max-h-40 overflow-auto rounded border border-foreground/10 bg-foreground/[0.04] px-2 py-1.5 font-mono text-[11px] leading-snug text-foreground/80 whitespace-pre-wrap break-words">
+                {argsText || "{}"}
+              </pre>
+            </div>
+          )}
           {!pending && (
             <div>
               <div className="mb-0.5 text-[10.5px] uppercase tracking-wider text-foreground/40">
-                {failed ? "Error" : "Result"}
+                {denied ? "Not run" : interrupted ? "Interrupted" : failed ? "Error" : "Result"}
               </div>
               <pre
                 className={cn(
@@ -181,7 +313,7 @@ function ToolCallItem({ call }: { call: ToolCallRecord }) {
           )}
           {pending && (
             <div className="text-[11px] italic text-foreground/50">
-              Running…
+              {call.awaiting_approval ? "Waiting for your approval…" : "Running…"}
             </div>
           )}
         </div>
@@ -190,33 +322,50 @@ function ToolCallItem({ call }: { call: ToolCallRecord }) {
   );
 }
 
-function ToolCallsBlock({ calls }: { calls: ToolCallRecord[] }) {
+/**
+ * `interactive` is true only for the message currently streaming: that is
+ * the only time an `awaiting_approval` record has a backend parked behind
+ * it, so it is the only time the consent card can render. A persisted
+ * record that somehow still carries the flag renders as an ordinary
+ * pending row instead of a dead prompt.
+ */
+function ToolCallsBlock({
+  calls,
+  interactive,
+}: {
+  calls: ToolCallRecord[];
+  interactive?: boolean;
+}) {
   const [open, setOpen] = useState(false);
   if (calls.length === 0) return null;
 
+  const awaiting = interactive ? calls.filter((c) => c.result === null && c.awaiting_approval) : [];
   const anyPending = calls.some((c) => c.result === null);
-  const anyFailed = calls.some((c) => c.result !== null && c.is_error);
-
-  const displayName = (tool: string) =>
-    tool.includes("__") ? tool.slice(tool.indexOf("__") + 2) : tool;
+  const anyFailed = calls.some((c) => c.result !== null && c.is_error && !c.denied);
 
   let label: string;
-  if (anyPending) {
+  if (awaiting.length > 0) {
+    label = "Waiting for your approval…";
+  } else if (anyPending) {
     label =
       calls.length === 1
-        ? `Calling ${displayName(calls[0].tool)} tool…`
+        ? `Calling ${rawToolName(calls[0].tool)} tool…`
         : "Calling tools…";
   } else if (calls.length === 1) {
-    label = `Called ${displayName(calls[0].tool)} tool`;
+    label = `Called ${rawToolName(calls[0].tool)} tool`;
   } else {
     label = `Called ${calls.length} tools`;
   }
 
   return (
     <div className="mb-2">
+      {awaiting.map((c) => (
+        <ApprovalCard key={c.id} call={c} />
+      ))}
       <button
         type="button"
         onClick={() => setOpen(!open)}
+        aria-expanded={open}
         className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground/70 transition-colors"
       >
         {open ? (
@@ -224,7 +373,9 @@ function ToolCallsBlock({ calls }: { calls: ToolCallRecord[] }) {
         ) : (
           <ChevronRight className="h-3.5 w-3.5" />
         )}
-        {anyPending ? (
+        {awaiting.length > 0 ? (
+          <ShieldAlert className="h-3.5 w-3.5 text-amber-500" />
+        ) : anyPending ? (
           <Loader2 className="h-3.5 w-3.5 animate-spin" />
         ) : anyFailed ? (
           <AlertTriangle className="h-3.5 w-3.5 text-red-400" />
@@ -315,6 +466,7 @@ function ThinkingBlock({ text, isStreaming }: { text: string; isStreaming?: bool
       <button
         type="button"
         onClick={() => setOpen(!open)}
+        aria-expanded={open}
         className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground/70 transition-colors"
       >
         {open ? (
@@ -692,7 +844,7 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
           />
         )}
         {!isUser && toolCalls.length > 0 && (
-          <ToolCallsBlock calls={toolCalls} />
+          <ToolCallsBlock calls={toolCalls} interactive={!!isStreaming} />
         )}
         {message.content.length === 0 && isStreaming && !message.thinking && toolCalls.length === 0 ? (
           <div className="flex items-center gap-1.5 py-1 text-muted-foreground">

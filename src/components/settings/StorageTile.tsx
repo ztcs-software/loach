@@ -101,7 +101,7 @@ export function StorageTile() {
                   />
                   <StorageLine
                     label="Spaces"
-                    detail={`${count(stats.spaces)} space${stats.spaces === 1 ? "" : "s"} · ${count(stats.space_files)} file${stats.space_files === 1 ? "" : "s"}`}
+                    detail={`${count(stats.spaces)} space${stats.spaces === 1 ? "" : "s"} · ${count(stats.space_files)} source${stats.space_files === 1 ? "" : "s"}`}
                     bytes={stats.space_bytes}
                   />
                   <StorageLine

@@ -1,5 +1,5 @@
-//! Two Settings -> General switches that carry enough of their own state and
-//! copy to be worth their own file: Ollama keep-alive and UI font size.
+//! Two Settings switches (Features → keep-alive, Appearance → font size) that
+//! carry enough of their own state and copy to be worth their own file.
 
 import type { FontSize, OllamaKeepAlive } from "@/types";
 import { cn } from "@/lib/utils";

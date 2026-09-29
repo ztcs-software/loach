@@ -4,8 +4,11 @@ import { useChatStore } from "@/stores/chatStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useModelsStore } from "@/stores/modelsStore";
 import { useSpaceStore } from "@/stores/spaceStore";
+import { useGlobalMemoryStore } from "@/stores/globalMemoryStore";
+import { selectMemoriesForPrompt } from "@/lib/memoryRules";
 import { DEFAULT_PARAMS, type GenerationParams, type Message } from "@/types";
 import {
+  baseSystemPrompt,
   computeContextUsage,
   formatTokens,
 } from "@/lib/contextUsage";
@@ -70,6 +73,29 @@ export function ContextUsageBar() {
   const space = useSpaceStore((s) =>
     session?.space_id ? s.spaces.find((x) => x.id === session.space_id) : null,
   );
+  // Counted only while Workspace files is on — the backend drops the
+  // folder, and with it LOACHFILE.md, when the switch is off.
+  const workspaceToolsEnabled = useSettingsStore((s) => s.workspace_tool_enabled);
+  const projectInstructions = useChatStore((s) =>
+    workspaceToolsEnabled && s.activeSessionId
+      ? (s.workspaceInstructions[s.activeSessionId] ?? null)
+      : null,
+  );
+  // The memory lists the send prepends: global memory when it's on, and the
+  // Space's own — each cut the way the send cuts it. Counted from what the
+  // stores have loaded; a list not loaded yet counts as empty.
+  const globalMemoryOn = useSettingsStore((s) => s.global_memory_enabled);
+  const globalMemories = useGlobalMemoryStore((s) => s.memories);
+  const spaceMemories = useSpaceStore((s) =>
+    session?.space_id ? s.spaceMemories[session.space_id] : undefined,
+  );
+  const memoryText = useMemo(() => {
+    const rows = [
+      ...(globalMemoryOn && globalMemories ? selectMemoriesForPrompt(globalMemories) : []),
+      ...(spaceMemories ? selectMemoriesForPrompt(spaceMemories) : []),
+    ];
+    return rows.length > 0 ? rows.map((m) => `- ${m.content}`).join("\n") : null;
+  }, [globalMemoryOn, globalMemories, spaceMemories]);
   const compactingSessionId = useChatStore((s) => s.compactingSessionId);
   const compactContext = useChatStore((s) => s.compactContext);
   const setSessionParams = useChatStore((s) => s.setSessionParams);
@@ -111,15 +137,18 @@ export function ContextUsageBar() {
   );
 
   // The system prompt the request will actually send is the per-session
-  // value when set, otherwise the global default. Space-level prompt
+  // value when set, otherwise the global default, with any compaction
+  // summary in front — the same pick the send makes. Space-level prompt
   // augmentation happens server-side via getSpaceContext; we don't
   // include it in the estimate because the user can't see it from here
   // and double-counting it would mislead. The bar is a hint, not a
-  // billing tool — close enough for sizing decisions.
-  const effectiveSystemPrompt =
-    session?.system_prompt && session.system_prompt.length > 0
-      ? session.system_prompt
-      : globalSystemPrompt || "";
+  // billing tool — close enough for sizing decisions. The one backend-
+  // appended layer that can be big is the workspace's LOACHFILE.md, so
+  // that is counted from the store's last read of it.
+  const effectiveSystemPrompt = baseSystemPrompt(
+    session?.system_prompt ?? null,
+    globalSystemPrompt,
+  );
 
   // Defer the recompute: `messages` changes identity on every streaming flush
   // and computeContextUsage rescans the whole transcript. useDeferredValue lets
@@ -128,8 +157,15 @@ export function ContextUsageBar() {
   // bar can't end stale (the failure mode a leading-edge timer throttle has).
   const deferredMessages = useDeferredValue(messages);
   const usage = useMemo(
-    () => computeContextUsage(deferredMessages, effectiveSystemPrompt, params),
-    [deferredMessages, effectiveSystemPrompt, params],
+    () =>
+      computeContextUsage(
+        deferredMessages,
+        effectiveSystemPrompt,
+        params,
+        projectInstructions,
+        memoryText,
+      ),
+    [deferredMessages, effectiveSystemPrompt, params, projectInstructions, memoryText],
   );
 
   // Don't show the bar before the user has any conversation to measure —
@@ -331,6 +367,15 @@ const ContextUsagePopover = ({
           label="System prompt"
           value={formatTokens(usage.systemPromptTokens)}
         />
+        {usage.projectInstructionsTokens > 0 && (
+          <Row
+            label="Project instructions (LOACHFILE.md)"
+            value={formatTokens(usage.projectInstructionsTokens)}
+          />
+        )}
+        {usage.memoriesTokens > 0 && (
+          <Row label="Memories" value={formatTokens(usage.memoriesTokens)} />
+        )}
         <Row
           label={`Messages (${usage.messageCount})`}
           value={formatTokens(usage.messagesTokens)}

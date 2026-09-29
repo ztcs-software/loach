@@ -45,6 +45,7 @@ import { DEFAULT_TONE_ID, getTone, TONES, type Tone } from "@/lib/tones";
 import { useChatStore } from "@/stores/chatStore";
 import { useModelsStore } from "@/stores/modelsStore";
 import {
+  effectivePrivateParams,
   usePrivateChatStore,
   type PrivateMessage,
 } from "@/stores/privateChatStore";
@@ -575,6 +576,7 @@ function PrivateParamsPanel() {
   // chatStore.readSessionParams. Private Chat is Ollama-only so we don't
   // bother with the OpenAI branches.
   const thinkingDefault = useSettingsStore((s) => s.thinking_default);
+  const lowVramGlobal = useSettingsStore((s) => s.low_vram_global);
   const defaultToneId = useSettingsStore((s) => s.default_tone_id);
   const effectiveToneId = toneId ?? defaultToneId ?? DEFAULT_TONE_ID;
 
@@ -591,16 +593,15 @@ function PrivateParamsPanel() {
           ? "Using app defaults — no model selected yet."
           : "Using app defaults — this model lists no overrides.";
 
-  // Effective values shown on each row mirror chatStore.readSessionParams'
-  // merge order: DEFAULT_PARAMS < thinking-default < modelDefaults <
-  // user overrides. We don't need the per-model think pref or space
-  // defaults — Private Chat doesn't touch those layers.
-  const effectiveContext =
-    params.num_ctx ?? modelDefaults?.num_ctx ?? DEFAULT_PARAMS.num_ctx ?? 8192;
-  const effectiveThinking =
-    params.think ?? modelDefaults?.think ?? thinkingDefault;
-  const effectiveLowVram =
-    params.low_vram ?? modelDefaults?.low_vram ?? false;
+  // Effective values shown on each row come from the same merge `send` uses,
+  // so the panel shows exactly what the request carries.
+  const effective = effectivePrivateParams(params, modelDefaults, {
+    thinking_default: thinkingDefault,
+    low_vram_global: lowVramGlobal,
+  });
+  const effectiveContext = effective.num_ctx ?? DEFAULT_PARAMS.num_ctx ?? 8192;
+  const effectiveThinking = effective.think;
+  const effectiveLowVram = effective.low_vram ?? false;
 
   const update = (patch: Partial<GenerationParams>) =>
     setParams({ ...params, ...patch });
@@ -664,6 +665,7 @@ function PrivateParamsPanel() {
               onChange={(next) =>
                 update({ low_vram: next ? true : undefined })
               }
+              pinnedByGlobal={lowVramGlobal}
             />
           </Section>
 
@@ -825,12 +827,16 @@ function ThinkingRow({
 function LowVramRow({
   checked,
   onChange,
+  pinnedByGlobal,
 }: {
   checked: boolean;
   onChange: (next: boolean) => void;
+  /** Settings → Features Low VRAM mode is on: every request is sent with
+   *  it, so the switch is shown on and disabled, as in ParameterPanel. */
+  pinnedByGlobal: boolean;
 }) {
   return (
-    <div>
+    <div className={pinnedByGlobal ? "opacity-55" : undefined}>
       <div className="flex items-center justify-between gap-3">
         <Label className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.1em] text-zinc-300">
           <MemoryStick className="h-3.5 w-3.5 shrink-0 text-zinc-300" />
@@ -838,12 +844,15 @@ function LowVramRow({
         </Label>
         <Switch
           checked={checked}
+          disabled={pinnedByGlobal}
           onCheckedChange={onChange}
           aria-label={checked ? "Disable low VRAM mode" : "Enable low VRAM mode"}
         />
       </div>
       <p className="mt-1.5 text-[10.5px] leading-snug text-zinc-500">
-        Trade speed for memory: smaller batches and KV cache. Helpful when you're up against VRAM limits.
+        {pinnedByGlobal
+          ? "Pinned on by the global Low VRAM setting (Settings → Features). Turn that off to control it here."
+          : "Trade speed for memory: smaller batches and KV cache. Helpful when you're up against VRAM limits."}
       </p>
     </div>
   );

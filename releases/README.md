@@ -43,7 +43,10 @@ The macOS install / Gatekeeper-bypass instructions live in the top-level
    handing them a package file breaks their in-place update. The `.dmg`
    uploads for manual install only — the updater can't patch it, so it never
    appears in `latest.json`. (v1.2.3 is the reference shape to diff against.)
-5. Click **Publish release**. The in-app updater picks it up on next check.
+5. Click **Publish release**. The in-app updater picks it up on next check —
+   unless the version has a pre-release suffix (`-beta-1`, `-rc-1`): those
+   publish as GitHub pre-releases, which the updater's `releases/latest`
+   endpoint skips.
 
 ## Style
 

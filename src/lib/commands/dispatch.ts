@@ -1,5 +1,6 @@
 import { useChatStore } from "@/stores/chatStore";
-import { useMcpStore } from "@/stores/mcpStore";
+import { useGlobalMemoryStore } from "@/stores/globalMemoryStore";
+import { connectionLabel, useMcpStore } from "@/stores/mcpStore";
 import { useModelsStore } from "@/stores/modelsStore";
 import { usePrivateChatStore } from "@/stores/privateChatStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -8,13 +9,25 @@ import { useSpaceStore } from "@/stores/spaceStore";
 import { useUIStore, type SettingsTab } from "@/stores/uiStore";
 import { DEFAULT_PERSONA_ID, PERSONAS } from "@/lib/personas";
 import { expandAndPrimeSnippet } from "@/lib/runSnippet";
-import { stripSummaryBlock } from "@/lib/contextUsage";
+import {
+  extractSummary,
+  stripSummaryBlock,
+  SUMMARY_END_TAG,
+  SUMMARY_START_TAG,
+} from "@/lib/contextUsage";
+import type { MemoryScope } from "@/lib/memory";
 import {
   clearSessionMessages,
   fetchUrl,
-  mcpTest,
+  mcpTools,
 } from "@/lib/tauri";
-import type { GenerationParams, Message, MessageMetrics, Session } from "@/types";
+import type {
+  GenerationParams,
+  MemoryRow,
+  Message,
+  MessageMetrics,
+  Session,
+} from "@/types";
 import { findCommand, parseInput } from "./parser";
 import type { CommandResult, CommandResultItem } from "./types";
 
@@ -78,16 +91,34 @@ function requireSession(): Session {
   return session;
 }
 
-function activeSpaceId(): string {
+/** Where `/remember`, `/forget` and `/list memories` operate: the active
+ *  chat's Space (or the Space being viewed) when there is one, otherwise the
+ *  global list. */
+function memoryScope(): MemoryScope {
   const session = useChatStore.getState().sessions.find(
     (s) => s.id === useChatStore.getState().activeSessionId,
   );
-  if (session?.space_id) return session.space_id;
+  if (session?.space_id) return { kind: "space", spaceId: session.space_id };
   const sid = useSpaceStore.getState().activeSpaceId;
-  if (sid) return sid;
-  throw new Error(
-    "No active space. Open a chat that belongs to a space, or run /space <name>.",
+  if (sid) return { kind: "space", spaceId: sid };
+  return { kind: "global" };
+}
+
+async function scopedMemories(scope: MemoryScope): Promise<MemoryRow[]> {
+  if (scope.kind === "global") {
+    return useGlobalMemoryStore.getState().ensureLoaded();
+  }
+  return (
+    useSpaceStore.getState().spaceMemories[scope.spaceId] ??
+    (await useSpaceStore.getState().loadSpaceMemories(scope.spaceId))
   );
+}
+
+function removeScopedMemory(scope: MemoryScope, id: string): Promise<boolean> {
+  if (scope.kind === "global") {
+    return useGlobalMemoryStore.getState().removeMemory(id);
+  }
+  return useSpaceStore.getState().removeMemory(id, scope.spaceId);
 }
 
 function readCurrentParams(session: Session): Partial<GenerationParams> {
@@ -266,7 +297,7 @@ async function runFork(): Promise<CommandResult> {
 
 async function runExport(): Promise<CommandResult> {
   // Reuses the ChatHeader's "Export context" dialog (full / compacted views,
-  // copy, save-to-file) rather than duplicating that surface here. The header
+  // copy to clipboard) rather than duplicating that surface here. The header
   // owns the dialog's data-loading, so we flip a one-shot flag it consumes —
   // same pattern as the onboarding model-picker auto-open.
   requireSession();
@@ -392,7 +423,7 @@ async function runList(rest: string): Promise<CommandResult> {
         servers.map((s) => ({
           label: s.name,
           detail: s.enabled ? "enabled" : "disabled",
-          hint: s.url,
+          hint: connectionLabel(s),
         })),
       );
     }
@@ -408,13 +439,13 @@ async function runList(rest: string): Promise<CommandResult> {
       ]);
     }
     case "memories": {
-      const spaceId = activeSpaceId();
-      const memories =
-        useSpaceStore.getState().spaceMemories[spaceId] ??
-        (await useSpaceStore.getState().loadSpaceMemories(spaceId));
-      if (memories.length === 0) return ok("No memories in this space");
+      const scope = memoryScope();
+      const memories = await scopedMemories(scope);
+      if (memories.length === 0) {
+        return ok(scope.kind === "global" ? "No global memories" : "No memories in this space");
+      }
       return listItems(
-        "Memories",
+        scope.kind === "global" ? "Global memories" : "Memories",
         memories.map((m) => ({
           label: m.content,
           detail: m.id.slice(0, 8),
@@ -440,13 +471,19 @@ async function runInstructions(rest: string): Promise<CommandResult> {
     }
     return listItems("Chat instructions", [{ label: current }]);
   }
+  // Setting and clearing replace only that own text. A compaction summary
+  // parked in the same field stands in for the turns `chatHistory` no longer
+  // sends, so dropping it would leave the model with neither.
+  const summary = extractSummary(session.system_prompt ?? null);
+  const withSummary = (own: string) =>
+    summary ? `${SUMMARY_START_TAG}\n${summary}\n${SUMMARY_END_TAG}\n\n${own}` : own;
   if (value.toLowerCase() === "clear") {
-    await useChatStore.getState().setSessionSystemPrompt(session.id, "");
+    await useChatStore.getState().setSessionSystemPrompt(session.id, withSummary(""));
     return ok("Cleared instructions");
   }
   // We deliberately keep the user's raw text (including newlines after the
   // first space) — that's why `rest` was preserved verbatim in the parser.
-  await useChatStore.getState().setSessionSystemPrompt(session.id, value);
+  await useChatStore.getState().setSessionSystemPrompt(session.id, withSummary(value));
   return ok("Saved instructions", value.length > 80 ? value.slice(0, 80) + "…" : value);
 }
 
@@ -480,25 +517,42 @@ async function runSnippet(rest: string): Promise<CommandResult> {
 async function runRemember(rest: string): Promise<CommandResult> {
   const fact = rest.trim();
   if (!fact) throw new Error("Usage: /remember <fact>");
-  const spaceId = activeSpaceId();
+  const scope = memoryScope();
   const session = useChatStore.getState().sessions.find(
     (s) => s.id === useChatStore.getState().activeSessionId,
   );
+  const preview = fact.length > 80 ? fact.slice(0, 80) + "…" : fact;
+  if (scope.kind === "global") {
+    if (!useSettingsStore.getState().global_memory_enabled) {
+      throw new Error(
+        "Global memory is off. Turn it on in Settings → Features, or open a chat in a space.",
+      );
+    }
+    await useGlobalMemoryStore.getState().addMemory({
+      content: fact,
+      source_session_id: session?.id ?? null,
+    });
+    return ok("Saved to global memory", preview);
+  }
+  const space = useSpaceStore.getState().spaces.find((s) => s.id === scope.spaceId);
+  if (space && !space.memory_enabled) {
+    throw new Error(
+      `Memory is off for “${space.name}”. Turn it on in the space's Memory tab.`,
+    );
+  }
   await useSpaceStore.getState().addMemory({
-    space_id: spaceId,
+    space_id: scope.spaceId,
     content: fact,
     source_session_id: session?.id ?? null,
   });
-  return ok("Saved to memory", fact.length > 80 ? fact.slice(0, 80) + "…" : fact);
+  return ok("Saved to memory", preview);
 }
 
 async function runForget(rest: string): Promise<CommandResult> {
   const query = rest.trim();
   if (!query) throw new Error("Usage: /forget <id|query>");
-  const spaceId = activeSpaceId();
-  const memories =
-    useSpaceStore.getState().spaceMemories[spaceId] ??
-    (await useSpaceStore.getState().loadSpaceMemories(spaceId));
+  const scope = memoryScope();
+  const memories = await scopedMemories(scope);
   // First try a full or prefix id match (memories surface their short id in
   // /list memories, so the user might paste either form). Only treat the
   // query as an id prefix when it's specific enough — /list memories shows
@@ -511,7 +565,7 @@ async function runForget(rest: string): Promise<CommandResult> {
   const byId =
     exactId ?? (prefixMatches.length === 1 ? prefixMatches[0] : undefined);
   if (byId) {
-    await useSpaceStore.getState().removeMemory(byId.id, spaceId);
+    await removeScopedMemory(scope, byId.id);
     return ok("Removed memory", byId.content.length > 60 ? byId.content.slice(0, 60) + "…" : byId.content);
   }
   const lower = query.toLowerCase();
@@ -526,7 +580,7 @@ async function runForget(rest: string): Promise<CommandResult> {
     );
   }
   const m = byContent[0]!;
-  await useSpaceStore.getState().removeMemory(m.id, spaceId);
+  await removeScopedMemory(scope, m.id);
   return ok("Removed memory", m.content.length > 60 ? m.content.slice(0, 60) + "…" : m.content);
 }
 
@@ -556,25 +610,23 @@ async function runSpace(rest: string): Promise<CommandResult> {
 async function runTools(): Promise<CommandResult> {
   const servers = useMcpStore.getState().servers.filter((s) => s.enabled);
   if (servers.length === 0) return ok("No enabled MCP servers", "Configure one in Settings → MCP.");
-  // Probe each server in parallel — mcpTest never throws (failures land in
-  // `error`) so Promise.all is safe.
-  const probes = await Promise.all(
-    servers.map(async (s) => ({
-      server: s,
-      result: await mcpTest({ id: s.id, name: s.name, url: s.url, headers: s.headers, enabled: true }),
-    })),
-  );
+  // The catalogue a chat turn would get, from the servers already running —
+  // probing each with `mcp_test` started a second copy of every stdio
+  // server and asked for consent all over again.
+  const { tools, errors } = await mcpTools();
   const items: CommandResultItem[] = [];
-  for (const { server, result } of probes) {
-    if (!result.ok) {
-      items.push({ label: server.name, detail: "error", hint: result.error ?? "Probe failed" });
+  for (const server of servers) {
+    const error = errors.find(([name]) => name === server.name)?.[1];
+    if (error) {
+      items.push({ label: server.name, detail: "error", hint: error });
       continue;
     }
-    if (result.tools.length === 0) {
+    const own = tools.filter((t) => t.server_id === server.id);
+    if (own.length === 0) {
       items.push({ label: server.name, detail: "0 tools" });
       continue;
     }
-    for (const t of result.tools) {
+    for (const t of own) {
       items.push({
         label: t.name,
         detail: server.name,

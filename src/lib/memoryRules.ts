@@ -1,0 +1,324 @@
+/**
+ * Pure, store-free helpers behind the memory extractor (`memory.ts`): the
+ * extractor prompt, the tolerant JSON parser for the model's reply, the
+ * local dedupe and request filters, and the prompt-injection cap. Kept apart from
+ * `memory.ts` so they can be unit-tested without mocking the Tauri bridge
+ * or the stores.
+ */
+
+/**
+ * Cap on how many memories go into a prompt — both the block the chat
+ * model sees on every turn and the EXISTING MEMORIES list the extractor
+ * dedupes against. The same selection in both places on purpose: the
+ * extractor can only update or retire a memory it was shown, so showing the
+ * chat model a wider window than the extractor would let stale facts ride
+ * along that the extractor can never correct.
+ */
+export const MAX_MEMORIES_IN_PROMPT = 60;
+
+/**
+ * …and on how much text they add up to, since a fact typed by hand has no
+ * length limit. About 1,500 tokens per list — global and Space memory each
+ * get one — so a long list can't crowd a small context window.
+ */
+export const MAX_MEMORY_PROMPT_CHARS = 6_000;
+
+/** Longest fact we accept from the extractor. The prompt asks for one-liners;
+ *  an entire paragraph is almost always the model leaking context. */
+export const MAX_MEMORY_CHARS = 280;
+
+/** What the extractor model returns. `n` values are 1-based positions in
+ *  the EXISTING MEMORIES list the prompt showed it. */
+export interface ExtractionPayload {
+  add: string[];
+  update: { n: number; content: string }[];
+  remove: number[];
+}
+
+/**
+ * Pick the memories that go into a prompt: the newest rows that fit both
+ * `cap` and `charBudget`, still in chronological order so the model reads
+ * them the same way the Memory tab lists them. Input that fits is returned
+ * as-is. The newest row always goes in, however long.
+ */
+export function selectMemoriesForPrompt<T extends { created_at: number; content: string }>(
+  rows: T[],
+  cap: number = MAX_MEMORIES_IN_PROMPT,
+  charBudget: number = MAX_MEMORY_PROMPT_CHARS,
+): T[] {
+  const total = rows.reduce((n, r) => n + r.content.length, 0);
+  if (rows.length <= cap && total <= charBudget) return rows;
+  const newestFirst = [...rows].sort((a, b) => b.created_at - a.created_at);
+  const kept: T[] = [];
+  let used = 0;
+  for (const r of newestFirst) {
+    if (kept.length >= cap) break;
+    if (kept.length > 0 && used + r.content.length > charBudget) break;
+    kept.push(r);
+    used += r.content.length;
+  }
+  return kept.reverse();
+}
+
+/**
+ * The extractor's system prompt. Spelled out in plain English with worked
+ * examples so even smaller local models stick to the JSON shape. We
+ * instruct it to:
+ *   - Skip one-shot/ephemeral facts ("the user is asking about X today")
+ *   - Skip the task itself — what the user asks for is not a fact about
+ *     them, and small models otherwise save "Requested a Python file…"
+ *   - Skip anything already in memory (we list the memories, numbered)
+ *   - Correct or retire a listed memory the turn shows has changed, rather
+ *     than adding a second, contradicting one
+ *   - Return empty lists when nothing durable came up
+ *   - Output ONLY a JSON object — never prose around it
+ *
+ * `alreadyKnown` is context the model must not repeat but also can't edit
+ * here — the memories the user added by hand, and the global memories when
+ * extracting for a Space.
+ */
+export function buildExtractorSystemPrompt(
+  existing: string[],
+  alreadyKnown: string[] = [],
+): string {
+  const memoryBlock =
+    existing.length === 0
+      ? "(none yet)"
+      : existing.map((m, i) => `${i + 1}. ${m}`).join("\n");
+
+  const knownBlock =
+    alreadyKnown.length === 0
+      ? []
+      : [
+          "",
+          "ALREADY KNOWN (never repeat these, and they cannot be updated or removed here):",
+          ...alreadyKnown.map((m) => `- ${m}`),
+        ];
+
+  return [
+    "You are a memory extractor for a chat application.",
+    "Your only job: read the conversation turn(s) and decide whether they contain DURABLE facts about the user (preferences, identity, projects they work on, constraints, goals, recurring context) that should be remembered for future chats — and whether any EXISTING MEMORY has changed.",
+    "Most turns contain no such facts. Returning empty lists is the normal, expected answer.",
+    "",
+    "Rules:",
+    "- Return ONLY a single JSON object, no prose, no markdown fences. Shape: {\"add\": [\"...\"], \"update\": [{\"n\": 2, \"content\": \"...\"}], \"remove\": [5]}.",
+    "- \"add\": new durable facts. Each MUST be a single concise sentence (under 200 chars).",
+    "- \"update\": when a turn shows an EXISTING MEMORY has changed (a preference reversed, a move to a new city, a project renamed), put the corrected sentence here with that memory's number. NEVER add a second memory that contradicts an existing one.",
+    "- \"remove\": numbers of EXISTING MEMORIES the turn shows are no longer true and have no replacement.",
+    "- Before adding a fact, ask: would it still be true, and worth knowing, in an unrelated chat a month from now? If not, leave it out.",
+    "- What the user asks for in this chat (code, a file, a script, an explanation, a fix) is a TASK, not a fact about them. Never record it, whether phrased as \"wants...\", \"requested...\" or \"asked...\", and don't infer a preference from it either: asking for Python code once doesn't mean they prefer Python.",
+    "- Do NOT add facts already covered by EXISTING MEMORIES or ALREADY KNOWN facts.",
+    "- Do NOT include ephemeral content: the specific question being asked, generated code, transient errors, or summaries of the assistant's reply.",
+    "- Do NOT speculate. Only record facts the user clearly stated or strongly implied about themselves or their work.",
+    "- If nothing qualifies, return {\"add\": [], \"update\": [], \"remove\": []}.",
+    "",
+    "EXISTING MEMORIES:",
+    memoryBlock,
+    ...knownBlock,
+    "",
+    "Examples of GOOD additions:",
+    "- \"Prefers TypeScript over JavaScript for new code.\"",
+    "- \"Works on a Tauri desktop app called Loach.\"",
+    "- \"Lives in Warsaw, Poland.\"",
+    "",
+    "Example of an UPDATE: existing memory 3 is \"Lives in Warsaw, Poland.\" and the user says they moved to Berlin → {\"add\": [], \"update\": [{\"n\": 3, \"content\": \"Lives in Berlin, Germany.\"}], \"remove\": []}",
+    "",
+    "Examples of BAD additions (do NOT extract these):",
+    "- \"Is asking how to center a div.\"",
+    "- \"Wants a Python script that prints \\\"Hello World\\\" to a file.\" (a task, not a fact)",
+    "- \"Requested the creation of a config file.\" (a task, not a fact)",
+    "- \"The function returned an error.\"",
+    "- \"Wants the answer in bullet points.\" (request-scoped, not durable)",
+  ].join("\n");
+}
+
+/**
+ * Best-effort JSON extractor. Models — especially smaller open ones — often
+ * wrap JSON in ```json fences or pad it with a sentence or two of prose.
+ * We grab the first `{...}` that parses to the shape we expect and drop
+ * everything else. The pre-update shape `{"memories": [...]}` is still
+ * accepted (as plain additions) for models that echo an older prompt.
+ */
+export function parseExtractionJson(raw: string): ExtractionPayload | null {
+  if (!raw) return null;
+  // A reasoning model may think out loud first — the providers pass
+  // `<think>` through — and what it weighed isn't its answer. Then strip
+  // common code-fence patterns.
+  let cleaned = raw.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
+  cleaned = cleaned.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "");
+
+  // Try a direct parse before scanning for embedded JSON — fast path for
+  // models that follow the prompt.
+  const direct = tryParse(cleaned);
+  if (direct) return direct;
+
+  // Scan for the first balanced `{...}` block that parses, trying every
+  // `{` as a start — a brace in prose ahead of the object (`Format: {x} ->
+  // {…}`) must not sink it. Braces inside string values are rare enough in
+  // one-line facts to ignore.
+  for (let start = cleaned.indexOf("{"); start !== -1; start = cleaned.indexOf("{", start + 1)) {
+    let depth = 0;
+    for (let i = start; i < cleaned.length; i++) {
+      const c = cleaned[i];
+      if (c === "{") depth++;
+      else if (c === "}" && --depth === 0) {
+        const parsed = tryParse(cleaned.slice(start, i + 1));
+        if (parsed) return parsed;
+        break;
+      }
+    }
+  }
+  return null;
+}
+
+function tryParse(s: string): ExtractionPayload | null {
+  let obj: unknown;
+  try {
+    obj = JSON.parse(s);
+  } catch {
+    return null;
+  }
+  if (!obj || typeof obj !== "object") return null;
+  const o = obj as Record<string, unknown>;
+  const hasShape = ["add", "memories", "update", "remove"].some((k) =>
+    Array.isArray(o[k]),
+  );
+  if (!hasShape) return null;
+
+  const strings = (v: unknown): string[] =>
+    Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
+
+  const update = Array.isArray(o.update)
+    ? o.update.flatMap((u) => {
+        if (!u || typeof u !== "object") return [];
+        const { n, content } = u as { n?: unknown; content?: unknown };
+        if (!Number.isInteger(n) || typeof content !== "string") return [];
+        return [{ n: n as number, content }];
+      })
+    : [];
+  const remove = Array.isArray(o.remove)
+    ? o.remove.filter((n): n is number => Number.isInteger(n))
+    : [];
+
+  return {
+    add: [...strings(o.add), ...strings(o.memories)],
+    update,
+    remove,
+  };
+}
+
+/** Lowercased, whitespace-collapsed, punctuation-stripped form used for
+ *  similarity comparisons. Keeps "User likes TypeScript." and "user
+ *  likes typescript" matching as duplicates. A `#` or `+` glued to a word
+ *  is spelled out first, so C#, C++ and C don't all collapse to "c". */
+export function normalize(s: string): string {
+  return s
+    // One form per character: a decomposed "café" (e + combining accent)
+    // must compare equal to the composed one.
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/([\p{L}\p{N}])([#+]+)/gu, (_, ch: string, marks: string) =>
+      ch + marks.replace(/#/g, "sharp").replace(/\+/g, "plus"),
+    )
+    .replace(/[\p{P}\p{S}]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * Local dedupe layer that runs after the model has done its own pass. Both
+ * inputs are `normalize`d. Two checks — exact match, and Jaccard token
+ * overlap above 0.75 or the candidate appearing whole, as a phrase, inside
+ * an existing memory (catches phrasing-only differences like "Lives in
+ * Warsaw" vs. "User lives in Warsaw, Poland."; as a phrase, because loose
+ * words would make "Has a dog" a copy of "Has a cat and wants a dog") —
+ * confirmed by a word-ORDER check: a bag of words
+ * can't tell "Prefers TypeScript over JavaScript" from its reversal, so a
+ * candidate only counts as a duplicate when at least half of its adjacent
+ * word pairs also appear in the existing memory. A negated fact is never a
+ * duplicate of its positive form ("Nie mieszka w Warszawie" vs. "Mieszka
+ * w Warszawie"): dropping it would keep exactly the fact it contradicts.
+ */
+export function isDuplicate(candidate: string, existing: string[]): boolean {
+  if (!candidate) return true;
+  if (existing.includes(candidate)) return true;
+
+  const candTokens = tokenSet(candidate);
+  if (candTokens.size === 0) return true;
+  const candBigrams = bigramSet(candidate);
+  const candNegated = isNegated(candidate);
+
+  for (const ex of existing) {
+    if (isNegated(ex) !== candNegated) continue;
+    const exTokens = tokenSet(ex);
+    if (exTokens.size === 0) continue;
+    let intersect = 0;
+    for (const t of candTokens) if (exTokens.has(t)) intersect++;
+    const union = candTokens.size + exTokens.size - intersect;
+    const jaccard = union === 0 ? 0 : intersect / union;
+    const bagMatch =
+      jaccard >= 0.75 ||
+      (candTokens.size >= 3 && ` ${ex} `.includes(` ${candidate} `));
+    if (!bagMatch) continue;
+
+    // Sentences too short to have word pairs fall back to the bag result.
+    const exBigrams = bigramSet(ex);
+    if (candBigrams.size === 0 || exBigrams.size === 0) return true;
+    let shared = 0;
+    for (const b of candBigrams) if (exBigrams.has(b)) shared++;
+    if (shared / Math.min(candBigrams.size, exBigrams.size) >= 0.5) return true;
+  }
+  return false;
+}
+
+/** Opening of a fact that reports a request, English and Polish, as it
+ *  looks after `normalize`: optional subject, optional auxiliary, verb. */
+const REQUEST_REPORT =
+  /^(?:(?:the )?user |użytkownik |użytkowniczka )?(?:(?:is|was|has|had) )?(?:asked|asks|asking|requested|requests|requesting|prosi|prosił|prosiła|poprosił|poprosiła|pyta|pytał|pytała|zapytał|zapytała)(?= |$)(?! to be | that )/u;
+
+/**
+ * Local backstop for the prompt's "a request is not a fact" rule, which
+ * small models ignore: an addition that opens by reporting what the user
+ * asked for in the chat ("User requested a Python file…", "Is asking how
+ * to…", "Użytkownik poprosił o…") is about the conversation, not the user.
+ * "Asked to be called Andy" and "Requested that answers be in Polish" are
+ * durable preferences, so a `to be` / `that` continuation is spared.
+ * "Wants…" isn't matched at all: "Wants answers in Polish" is durable too,
+ * so those are left to the prompt. Takes `normalize`d input.
+ */
+export function describesRequest(s: string): boolean {
+  return REQUEST_REPORT.test(s);
+}
+
+function tokenSet(s: string): Set<string> {
+  return new Set(s.split(" ").filter(Boolean));
+}
+
+/** Negation words, English and Polish, as they look after `normalize`. */
+const NEGATIONS = new Set([
+  "not", "no", "never", "nor", "cannot", "without",
+  "dont", "doesnt", "didnt", "isnt", "arent", "wasnt", "werent",
+  "cant", "wont", "hasnt", "havent", "hadnt",
+  "nie", "nigdy",
+]);
+
+/** Whether a normalized fact is negated. `normalize` turns "doesn't" into
+ *  "doesn t", so a lone `t` after a word ending in `n` counts too. */
+function isNegated(s: string): boolean {
+  const words = s.split(" ");
+  return words.some(
+    (w, i) => NEGATIONS.has(w) || (w === "t" && i > 0 && words[i - 1].endsWith("n")),
+  );
+}
+
+function bigramSet(s: string): Set<string> {
+  const words = s.split(" ").filter(Boolean);
+  const out = new Set<string>();
+  for (let i = 0; i + 1 < words.length; i++) out.add(`${words[i]} ${words[i + 1]}`);
+  return out;
+}
+
+export function clip(text: string, max: number): string {
+  if (text.length <= max) return text;
+  return text.slice(0, max) + "…";
+}

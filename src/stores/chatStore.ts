@@ -14,6 +14,9 @@ import {
   listFolders,
   renameFolder as persistFolderName,
   setSessionFolder,
+  pickSessionWorkspace,
+  readWorkspaceInstructions,
+  clearSessionWorkspace,
   importMessages as tauriImportMessages,
   getSpaceContext,
   listMessages,
@@ -26,6 +29,7 @@ import {
   pinSession,
   renameSession,
   startChatStream,
+  toolApprovalRespond,
   updateMessage,
   updateSessionLabel,
   updateSessionModel as persistSessionModel,
@@ -36,10 +40,20 @@ import { useToastStore } from "./toastStore";
 import {
   imagesFromAttachments,
   inlineTextAttachments,
+  stripInlinedAttachments,
 } from "@/lib/files";
-import { extractMemories, cancelMemoryExtraction } from "@/lib/memory";
+import {
+  cancelMemoryExtraction,
+  deferMemoryTurn,
+  dropMemoryTurns,
+  extractMemories,
+  type MemoryScope,
+} from "@/lib/memory";
+import { selectMemoriesForPrompt } from "@/lib/memoryRules";
+import { useGlobalMemoryStore } from "./globalMemoryStore";
 import { buildCompactedMarkdown } from "@/lib/export";
 import {
+  baseSystemPrompt,
   extractSummary,
   stripSummaryBlock,
   SUMMARY_END_TAG,
@@ -71,6 +85,7 @@ import {
   type MessageMetrics,
   type ProviderId,
   type Session,
+  type ToolApprovalDecision,
   type ToolCallRecord,
 } from "@/types";
 import { useSettingsStore } from "./settingsStore";
@@ -80,6 +95,8 @@ import { useModelsStore } from "./modelsStore";
 import { getLivePullFor, pullPercent } from "@/lib/usePullRuns";
 
 interface ActiveStream {
+  /** Backend stream id — the key `tool_approval_respond` needs. */
+  streamId: string;
   stop: () => Promise<void>;
   unlisten: () => void;
 }
@@ -136,6 +153,11 @@ interface ChatState {
   messages: Record<string, Message[]>;
   streamingByMessage: Record<string, MessageMetrics | null>;
   activeStream: ActiveStream | null;
+  /** Answer the consent prompt for a tool call on the running stream.
+   *  Optimistically clears the prompt in the bubble, then delivers the
+   *  decision to the backend; the eventual `tool_result` settles the
+   *  record either way. No-op when nothing is streaming. */
+  respondToolApproval: (callId: string, decision: ToolApprovalDecision) => Promise<void>;
   isStreaming: boolean;
   /** Which session the active stream belongs to (mirrors `runningTask`).
    *  Used by the composer to scope the "Stop generating" button to the chat
@@ -179,6 +201,19 @@ interface ChatState {
   setLabel: (id: string, label: ChatLabel | null) => Promise<void>;
   /** File a chat under a folder, or pull it out with `null`. */
   moveToFolder: (id: string, folderId: string | null) => Promise<void>;
+  /** Open the native folder picker and scope this chat's filesystem tools
+   *  to the result. Resolves to the chosen path, or null if cancelled. */
+  pickWorkspace: (sessionId: string) => Promise<string | null>;
+  /** Drop this chat's workspace directory. */
+  clearWorkspace: (sessionId: string) => Promise<void>;
+  /** Each chat's `LOACHFILE.md` as last read, by session id — null when the
+   *  workspace has none. Drives the workspace badge and the context usage row;
+   *  the model's copy is read by the backend on every turn regardless. */
+  workspaceInstructions: Record<string, string | null>;
+  /** Re-read this chat's `LOACHFILE.md`. Cheap, so the composer calls it on
+   *  every chance the file may have changed: opening the chat, picking a
+   *  folder, and the end of a turn (the model may have written it). */
+  refreshWorkspaceInstructions: (sessionId: string) => Promise<void>;
   /** Create a named folder and move `sessionIds` into it in one go. This is
    *  the drag-one-chat-onto-another gesture: both chats land in the new
    *  folder. Returns the folder. */
@@ -255,8 +290,9 @@ interface ChatState {
   compactingSessionId: string | null;
   /** Summarize the older messages in a session via the same model and
    *  store the summary in `session.system_prompt` with a unique marker
-   *  block, then delete the summarized messages so they no longer
-   *  consume context. Earlier auto-summary blocks in `system_prompt`
+   *  block, then mark the summarized messages `compacted_at` so they stay
+   *  in the transcript but no longer reach the model. Earlier auto-summary
+   *  blocks in `system_prompt`
    *  are replaced, not stacked. */
   compactContext: (sessionId: string) => Promise<void>;
   /** Build a compacted Markdown export without touching the session.
@@ -475,7 +511,7 @@ function parseOverrides(json: string | null): Partial<GenerationParams> {
  *      (`params_json`). When `params_json` is `null` the session inherits
  *      from layers 1 – 3 only.
  *   5. Global app overrides — settings that win above every other layer,
- *      currently just the global Low-VRAM toggle from Settings → General.
+ *      currently just the global Low-VRAM toggle from Settings → Features.
  *      When the user pins it on we want it to apply to every chat with
  *      every model, even ones whose Modelfile sets `low_vram` differently.
  *
@@ -491,7 +527,7 @@ function readSessionParams(session: Session | undefined): GenerationParams {
   const modelsState = isOllama ? useModelsStore.getState() : null;
   const modelDefaults = modelsState?.modelDefaults[session.model] ?? {};
   const settingsState = useSettingsStore.getState();
-  // Global Thinking default (Settings → General). Sits below model + per-model
+  // Global Thinking default (Settings → Features). Sits below model + per-model
   // prefs and the per-chat override so an explicit per-model or per-chat
   // setting still wins.
   const globalThinkLayer: Partial<GenerationParams> = isOllama
@@ -525,7 +561,7 @@ function readSessionParams(session: Session | undefined): GenerationParams {
     ...spaceLayer,
     ...overrides,
   };
-  // Global Low-VRAM pin (Settings → General). Ollama-only — OpenAI ignores
+  // Global Low-VRAM pin (Settings → Features). Ollama-only — OpenAI ignores
   // the field, so we don't bother stamping it on those requests. Stays out
   // of `params_json` deliberately: a per-chat record of "user picked this"
   // shouldn't include settings the user never touched in the panel.
@@ -654,6 +690,7 @@ ${transcript}
           system_prompt: null,
           messages: [{ role: "user", content: summaryPrompt, images: [] }],
           params,
+          no_tools: true,
         },
         (ev) => {
           if (ev.kind === "token") {
@@ -723,13 +760,34 @@ async function buildTaskRequest(
       : settings.openai_base_url;
   const params = readSessionParams(session);
 
-  const fallbackPrompt =
-    session.system_prompt && session.system_prompt.length > 0
-      ? session.system_prompt
-      : settings.global_system_prompt || "";
+  const fallbackPrompt = baseSystemPrompt(
+    session.system_prompt,
+    settings.global_system_prompt,
+  );
 
   let effectiveSystemPrompt: string | null = fallbackPrompt || null;
   const spaceImages: string[] = [];
+
+  // Global memory rides along in every chat that goes through this store
+  // (Private Chat has its own prompt path and never sees it). Gated on the
+  // setting for injection as well as writes — an app-wide "off" that kept
+  // whispering old facts into every prompt would be a surprise.
+  let globalBlock = "";
+  if (settings.global_memory_enabled) {
+    try {
+      const rows = selectMemoriesForPrompt(
+        await useGlobalMemoryStore.getState().ensureLoaded(),
+      );
+      if (rows.length > 0) {
+        globalBlock = "--- Global memory ---\n";
+        globalBlock += "Facts to remember about the user in every chat:\n";
+        for (const m of rows) globalBlock += `- ${m.content}\n`;
+      }
+    } catch (e) {
+      logger.warn("Failed to load global memory", e);
+    }
+  }
+
   if (session.space_id) {
     try {
       // Serve the space context from the per-space cache when warm, so repeat
@@ -754,26 +812,51 @@ async function buildTaskRequest(
         if (f.kind === "image") spaceImages.push(f.data);
       }
       let memoryBlock = "";
-      if (ctx.memories.length > 0) {
+      // Same cap as the extractor sees, so every fact in the prompt is one
+      // the extractor can still correct or retire.
+      const promptMemories = selectMemoriesForPrompt(ctx.memories);
+      if (promptMemories.length > 0) {
         memoryBlock = "--- Space memory ---\n";
         memoryBlock +=
-          "Facts to remember about the user across chats in this space:\n";
-        for (const m of ctx.memories) {
+          "Facts to remember about the user across chats in this space" +
+          (globalBlock ? " (these win over global memory when they conflict)" : "") +
+          ":\n";
+        for (const m of promptMemories) {
           memoryBlock += `- ${m.content}\n`;
         }
       }
       useSpaceStore.setState((s) => ({
         spaceMemories: { ...s.spaceMemories, [session.space_id!]: ctx.memories },
       }));
-      const base = spaceInstructions || fallbackPrompt;
+      // Space instructions replace the per-chat prompt, but a compaction
+      // summary parked there stands in for the turns `chatHistory` no longer
+      // sends — `baseSystemPrompt` keeps it, or the model sees neither the
+      // summary nor them.
+      const base = baseSystemPrompt(
+        session.system_prompt,
+        settings.global_system_prompt,
+        spaceInstructions,
+      );
       const parts: string[] = [];
       if (base) parts.push(base);
+      if (globalBlock) parts.push(globalBlock);
       if (memoryBlock) parts.push(memoryBlock);
       if (filesBlock) parts.push(filesBlock);
       effectiveSystemPrompt = parts.length ? parts.join("\n\n") : null;
     } catch (e) {
       logger.warn("Failed to load space context", e);
+      // This turn goes out without the Space's own instructions and memory,
+      // but the global facts don't depend on them and still apply.
+      if (globalBlock) {
+        effectiveSystemPrompt = fallbackPrompt
+          ? `${fallbackPrompt}\n\n${globalBlock}`
+          : globalBlock;
+      }
     }
+  } else if (globalBlock) {
+    effectiveSystemPrompt = fallbackPrompt
+      ? `${fallbackPrompt}\n\n${globalBlock}`
+      : globalBlock;
   }
 
   if (effectiveSystemPrompt) {
@@ -858,6 +941,21 @@ type Setter = (
  *  half-written turn. */
 type FinishReason = "done" | "cancelled" | "error";
 
+/** A tool call is waiting for an answer in a chat the user isn't looking
+ *  at. Every other chat's reply queues behind it until it's answered or the
+ *  prompt times out, ten minutes on — so say so, with a way there. */
+function announceApprovalElsewhere(sessionId: string, get: Getter) {
+  if (get().activeSessionId === sessionId) return;
+  const title = get().sessions.find((s) => s.id === sessionId)?.title || "Another chat";
+  useToastStore.getState().push({
+    kind: "info",
+    title: `“${title}” is waiting for your approval`,
+    body: "Replies in other chats wait until you answer it.",
+    action: { label: "Open", onClick: () => void get().selectSession(sessionId) },
+    durationMs: 15_000,
+  });
+}
+
 /** Called when a stream ends (done event, manual cancel, or error).
  *  Persists the partial assistant reply, tears down the active stream
  *  handle, clears running state, and kicks the next waiting task.
@@ -893,7 +991,28 @@ function finishRunning(
   if (get().runningTask?.id !== forTask) return;
   const running = get().runningTask;
   const buf = runningBuffers;
+  let settledToolsJson: string | null = null;
   if (running && buf) {
+    // A stream that ends (Stop, error) with a call still open leaves it
+    // without a result forever: a consent prompt nobody can answer any
+    // more, or a tool whose result will never be delivered (the listener
+    // is already gone). Settle each one, or the bubble — and the transcript
+    // after a reload — shows a dead prompt or a spinner that never stops.
+    // Say plainly whether it can have run: a workspace write that was under
+    // way when Stop landed finishes on disk regardless.
+    let settled = false;
+    for (const c of buf.toolCalls) {
+      if (c.result === null) {
+        c.result = c.awaiting_approval
+          ? "Not run — the reply ended before you answered."
+          : "The reply ended while this was running, so it may or may not have completed.";
+        c.is_error = false;
+        c.interrupted = true;
+        settled = true;
+      }
+      delete c.awaiting_approval;
+    }
+    if (settled) settledToolsJson = JSON.stringify(buf.toolCalls);
     // Persist the partial assistant reply. If the DB write fails (disk
     // full, lock contention, file permissions, …) the bubble we just
     // streamed exists in memory but won't survive a reload — so surface
@@ -973,9 +1092,19 @@ function finishRunning(
     if (!running || !buf || !producedContent) return null;
     if (!finishedId) return null;
     const session = get().sessions.find((s) => s.id === finishedId);
-    if (!session?.space_id) return null;
-    const space = useSpaceStore.getState().spaces.find((s) => s.id === session.space_id);
-    if (!space || !space.memory_enabled) return null;
+    if (!session) return null;
+    // Routing: a Space chat writes to that Space's memory (when the Space has
+    // it on); a chat outside any Space writes to global memory (when the
+    // setting is on). Private Chat never reaches this store.
+    let scope: MemoryScope;
+    if (session.space_id) {
+      const space = useSpaceStore.getState().spaces.find((s) => s.id === session.space_id);
+      if (!space || !space.memory_enabled) return null;
+      scope = { kind: "space", spaceId: session.space_id };
+    } else {
+      if (!useSettingsStore.getState().global_memory_enabled) return null;
+      scope = { kind: "global" };
+    }
     // Pull the user message that triggered this turn so the extractor sees
     // both halves of the exchange. `userMsgId` was captured when the task
     // was enqueued, so it's always one of the persisted messages.
@@ -983,14 +1112,20 @@ function finishRunning(
     const userMsg = messages.find((m) => m.id === running.userMsgId);
     if (!userMsg) return null;
     return {
-      spaceId: session.space_id,
+      scope,
       sessionId: finishedId,
-      assistantMessageId: buf.assistantMsgId,
-      userText: userMsg.content,
-      assistantText: buf.content,
       provider: running.request.provider,
       model: running.request.model,
       baseUrl: running.request.base_url,
+      turn: {
+        // What the user typed, not the attachments and fetched pages the
+        // send inlined after it: the extractor records what "the user
+        // stated", and text from a web page or a file isn't that — it's
+        // exactly where an injected "remember that I …" would come from.
+        userText: stripInlinedAttachments(userMsg.content),
+        assistantText: buf.content,
+        assistantMessageId: buf.assistantMsgId,
+      },
     };
   })();
 
@@ -1011,11 +1146,17 @@ function finishRunning(
       delete streamingByMessage[finishedMsgId];
     }
     let messages = s.messages;
-    if (finishedId && finishedMsgId && finishedMetricsJson) {
+    if (finishedId && finishedMsgId && (finishedMetricsJson || settledToolsJson)) {
       messages = {
         ...messages,
         [finishedId]: (messages[finishedId] ?? []).map((m) =>
-          m.id === finishedMsgId ? { ...m, metrics_json: finishedMetricsJson } : m,
+          m.id === finishedMsgId
+            ? {
+                ...m,
+                ...(finishedMetricsJson ? { metrics_json: finishedMetricsJson } : {}),
+                ...(settledToolsJson ? { tool_calls_json: settledToolsJson } : {}),
+              }
+            : m,
         ),
       };
     }
@@ -1040,11 +1181,12 @@ function finishRunning(
     // microtask) or something already running. The extractor is a second full
     // LLM generation against the same model, so firing it now would make it
     // compete with the user's visible turn for the generation slot and inflate
-    // that turn's time-to-first-token. Extraction is best-effort, so dropping
-    // this turn's is acceptable.
+    // that turn's time-to-first-token. Park the turn instead so the next idle
+    // run in this chat reads it alongside the newer one.
     const busy = get().queue.length > 0 || get().runningTask !== null;
     if (busy) {
-      logger.debug("memory extraction skipped — chat busy");
+      deferMemoryTurn(memorySnapshot);
+      logger.debug("memory extraction deferred — chat busy");
     } else {
       void extractMemories(memorySnapshot).catch((e) => {
         logger.warn("memory extraction failed", e);
@@ -1220,6 +1362,10 @@ async function startTask(task: QueueTask, get: Getter, set: Setter) {
         system_prompt: task.request.system_prompt,
         messages: task.request.messages,
         params: task.request.params,
+        // Lets the backend find this chat's workspace directory. Only the
+        // id travels — the path is read from the session row in Rust, so
+        // nothing here can widen what the filesystem tools may touch.
+        session_id: task.sessionId,
       },
       (ev) => {
         // Drop events from a stream whose task is no longer the running one.
@@ -1257,14 +1403,21 @@ async function startTask(task: QueueTask, get: Getter, set: Setter) {
             arguments: ev.arguments,
             result: null,
             is_error: false,
+            ...(ev.approval_required ? { awaiting_approval: true } : {}),
+            ...(ev.existing_bytes !== undefined ? { existing_bytes: ev.existing_bytes } : {}),
           });
           pendingDirty.toolCalls = true;
           scheduleFlush(get, set);
+          if (ev.approval_required) announceApprovalElsewhere(task.sessionId, get);
         } else if (ev.kind === "tool_result") {
           const existing = buf.toolCalls.find((c) => c.id === ev.id);
           if (existing) {
             existing.result = ev.content;
             existing.is_error = ev.is_error;
+            // A result — including a denial — ends the wait either way.
+            delete existing.awaiting_approval;
+            if (ev.denied) existing.denied = true;
+            if (ev.timed_out) existing.timed_out = true;
           } else {
             // Defensive: a tool_result without a matching tool_call should
             // never happen (Rust emits the pair), but if it does, surface
@@ -1316,7 +1469,13 @@ async function startTask(task: QueueTask, get: Getter, set: Setter) {
       },
     );
     if (get().runningTask?.id === task.id) {
-      set({ activeStream: { stop: handle.stop, unlisten: handle.unlisten } });
+      set({
+        activeStream: {
+          streamId: handle.streamId,
+          stop: handle.stop,
+          unlisten: handle.unlisten,
+        },
+      });
     } else {
       // Cancelled or superseded during the connect window: the backend stream
       // is live but orphaned. Tear it down rather than installing a handle
@@ -1419,7 +1578,7 @@ function resetForTests() {
   pendingDirty.toolCalls = false;
   pendingDirty.attachments = false;
 }
-export const __testing = { startTask, resetForTests };
+export const __testing = { startTask, resetForTests, buildTaskRequest };
 
 /**
  * Resolve the user's "Default model" preference into a concrete
@@ -1483,12 +1642,39 @@ export const useChatStore = create<ChatState>((set, get) => ({
   messages: {},
   streamingByMessage: {},
   activeStream: null,
+  respondToolApproval: async (callId, decision) => {
+    const stream = get().activeStream;
+    const buf = runningBuffers;
+    if (!stream || !buf) return;
+    const record = buf.toolCalls.find((c) => c.id === callId);
+    if (!record?.awaiting_approval) return;
+    delete record.awaiting_approval;
+    pendingDirty.toolCalls = true;
+    scheduleFlush(get, set);
+    try {
+      await toolApprovalRespond(stream.streamId, callId, decision);
+    } catch (e) {
+      // Put the card back so the answer can be given again — the call is
+      // still parked — unless the stream moved on meanwhile.
+      if (runningBuffers === buf && record.result === null) {
+        record.awaiting_approval = true;
+        pendingDirty.toolCalls = true;
+        scheduleFlush(get, set);
+      }
+      useToastStore.getState().push({
+        kind: "error",
+        title: "Couldn't send your answer",
+        body: `${e instanceof Error ? e.message : String(e)} — try again.`,
+      });
+    }
+  },
   isStreaming: false,
   streamingSessionId: null,
   runningTask: null,
   queue: [],
   unread: {},
   compactingSessionId: null,
+  workspaceInstructions: {},
 
   hydrate: async () => {
     try {
@@ -1726,6 +1912,64 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }));
   },
 
+  pickWorkspace: async (sessionId) => {
+    const root = await pickSessionWorkspace(sessionId);
+    // null = the user cancelled the dialog, which must not clear an
+    // existing workspace — "I changed my mind" is not "remove it".
+    if (root === null) return null;
+    set((s) => ({
+      sessions: s.sessions.map((x) =>
+        x.id === sessionId ? { ...x, workspace_root: root } : x,
+      ),
+    }));
+    // Picking a folder is the clearest possible request for the file tools,
+    // so a master switch that is still off is turned on here rather than
+    // left for the user to discover in Settings → Tools after the model
+    // shrugs at their first question. Said out loud, because it is a
+    // global setting changed from a per-chat gesture.
+    const settings = useSettingsStore.getState();
+    if (!settings.workspace_tool_enabled) {
+      try {
+        await settings.update("workspace_tool_enabled", true);
+        // `update` reports its own failure (a toast) and reverts rather
+        // than throwing, so read the switch back before claiming it's on.
+        if (useSettingsStore.getState().workspace_tool_enabled) {
+          useToastStore.getState().push({
+            kind: "info",
+            title: "Workspace file tools turned on",
+            body: "The model can now work in this folder. Switch them off any time in Settings → Tools.",
+          });
+        }
+      } catch (e) {
+        logger.error("couldn't enable workspace tools after picking a folder", e);
+      }
+    }
+    return root;
+  },
+
+  clearWorkspace: async (sessionId) => {
+    await clearSessionWorkspace(sessionId);
+    set((s) => ({
+      sessions: s.sessions.map((x) =>
+        x.id === sessionId ? { ...x, workspace_root: null } : x,
+      ),
+      workspaceInstructions: { ...s.workspaceInstructions, [sessionId]: null },
+    }));
+  },
+
+  refreshWorkspaceInstructions: async (sessionId) => {
+    let text: string | null = null;
+    try {
+      text = await readWorkspaceInstructions(sessionId);
+    } catch (e) {
+      // Display only — a failed read hides the badge, nothing more.
+      logger.warn("couldn't read LOACHFILE.md", e);
+    }
+    set((s) => ({
+      workspaceInstructions: { ...s.workspaceInstructions, [sessionId]: text },
+    }));
+  },
+
   createFolderWith: async (name, sessionIds) => {
     const folder = await createFolder(name);
     // Sequential rather than Promise.all: these are single-row UPDATEs
@@ -1815,6 +2059,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // session that still exists in the DB.
     await get().cancelForSession(id);
     await deleteSession(id);
+    dropMemoryTurns(id);
     const wasActive = get().activeSessionId === id;
     set((s) => {
       const sessions = s.sessions.filter((x) => x.id !== id);
@@ -1972,6 +2217,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   importMessages: async (id, parsed, hidden) => {
     if (parsed.length === 0) return;
+    // Rows appended below a reply that is still streaming would push it off
+    // the end of the transcript — and with it any approval card it shows,
+    // while the backend stays parked on that card.
+    if (get().streamingSessionId === id) {
+      throw new Error("Wait for the reply to finish before importing context.");
+    }
     // One round-trip inserts the whole batch under a shared `import_group`
     // (timestamps stepped monotonically in the backend). We append to the
     // local cache only after it resolves so a backend failure doesn't leave
@@ -2223,6 +2474,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // import group the import-card renderer treats as atomic; deleting it here
     // would desync the rendered card from its remaining DB rows.
     if (last.import_group != null) return;
+    // As on a send: stop an extraction still competing for the model, and
+    // don't let one read the reply this replaces later.
+    cancelMemoryExtraction();
+    dropMemoryTurns(sessionId, last.id);
 
     const session = state.sessions.find((s) => s.id === sessionId);
     if (!session || !session.model) return;
