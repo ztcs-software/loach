@@ -74,7 +74,7 @@ Behind a calm, beautifully crafted UI sits a rich feature set - ready when you n
 - **Temporal awareness** - inject current date, weekday and timezone into the system prompt so models can answer to "what day is it today?".
 
 #### Viewing content
-- **Code canvas** - open any code block in a wider view that's resizable and updates live as the model streams, with copy, export and Open in VS Code actions.
+- **Code canvas** - open any code block in a wider view that's resizable and updates live as the model streams, with copy, export and Open in VS Code actions. HTML renders as a live page in an offline sandbox.
 - **Attachment previews** - click an attachment to open the right viewer: image lightbox, multi-page PDF preview, code canvas, or a file-info card with Save.
 - **Share a message** - copy any message as text or as a rendered chat-bubble image, save the image as a PNG, or open a pre-filled post on Facebook, X, Reddit or LinkedIn.
 
