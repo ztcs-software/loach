@@ -126,7 +126,7 @@ export function UpdateAvailableDialog() {
         {info.notes && (
           <div className="rounded-xl border border-foreground/10 bg-foreground/[0.03] p-4">
             <div className="mb-2 text-[11px] font-medium uppercase tracking-wider text-foreground/55">
-              What's new
+              Release notes
             </div>
             <div className="max-h-56 overflow-y-auto pr-1 [scrollbar-gutter:stable]">
               <Markdown content={info.notes} className="text-sm" />

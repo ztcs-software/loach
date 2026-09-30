@@ -8,7 +8,7 @@ the merged version and uses its content as **both**:
 
 - the GitHub release body, and
 - the `notes` field inside `latest.json` (what users see in-app under
-  Settings → Updates → "What's new").
+  Settings → Updates → "Release notes").
 
 Keeping them in sync means there's no post-publish edit step.
 
