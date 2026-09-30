@@ -20,13 +20,9 @@ use parking_lot::Mutex;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Result};
-use argon2::{
-    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
-    Algorithm, Argon2, Params, Version,
-};
+use argon2::{Algorithm, Argon2, Params, PasswordHash, PasswordHasher, PasswordVerifier, Version};
 use keyring::Entry;
 use once_cell::sync::Lazy;
-use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
 
 const SERVICE: &str = "dev.loach.app";
@@ -136,12 +132,11 @@ fn argon2_instance() -> Argon2<'static> {
 }
 
 fn hash(secret: &str) -> Result<String> {
-    let salt = SaltString::generate(&mut OsRng);
-    let phc = argon2_instance()
-        .hash_password(secret.as_bytes(), &salt)
-        .map_err(|e| anyhow!("argon2 hash failed: {e}"))?
-        .to_string();
-    Ok(phc)
+    // `hash_password` draws the salt from the OS RNG itself.
+    let phc: PasswordHash = argon2_instance()
+        .hash_password(secret.as_bytes())
+        .map_err(|e| anyhow!("argon2 hash failed: {e}"))?;
+    Ok(phc.to_string())
 }
 
 fn verify(secret: &str, phc: &str) -> bool {
@@ -477,6 +472,21 @@ mod tests {
     fn verify_rejects_malformed_phc() {
         assert!(!verify("anything", "not a valid PHC string"));
         assert!(!verify("anything", ""));
+    }
+
+    #[test]
+    fn verify_accepts_hashes_stored_by_argon2_0_5() {
+        // Made by argon2 0.5.3, the version that shipped up to Loach 1.5.0,
+        // and sitting in users' credential stores. A crate bump that stops
+        // verifying them locks those users out of the app.
+        let current_params = "$argon2id$v=19$m=65536,t=3,p=1$Hr9IRw89uglbWlWcxOZrJw$rr0xcfZgwJYES0b7Kf1M8bnY2m1csUk30fTLYapBVzI";
+        assert!(verify("1234", current_params));
+        assert!(!verify("0000", current_params));
+
+        // `Argon2::default()` parameters, from before the cost was raised.
+        let default_params = "$argon2id$v=19$m=19456,t=2,p=1$FXKWcHr77AyDYYzmY+CrwA$Zto6EKKlbuktJuMGNwUMpdpmdpC/dM9Ir+XeawQvRx4";
+        assert!(verify("correct-horse", default_params));
+        assert!(!verify("wrong", default_params));
     }
 
     #[test]

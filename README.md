@@ -13,7 +13,7 @@ Run local LLMs with [Ollama](https://ollama.com) or connect any OpenAI-compatibl
 
 ![Tauri 2](https://img.shields.io/badge/Tauri-2-FFC131?logo=tauri&logoColor=white)
 ![React 19](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=white)
-![Rust 1.88+](https://img.shields.io/badge/Rust-1.88+-000000?logo=rust&logoColor=white)
+![Rust 1.90+](https://img.shields.io/badge/Rust-1.90+-000000?logo=rust&logoColor=white)
 ![Vite](https://img.shields.io/badge/Vite-8-646CFF?logo=vite&logoColor=white)
 ![Tailwind CSS](https://img.shields.io/badge/Tailwind-3-38BDF8?logo=tailwindcss&logoColor=white)
 ![Ollama](https://img.shields.io/badge/Ollama-compatible-000000?logo=ollama&logoColor=white)
@@ -137,7 +137,7 @@ Auto-updates are delivered through Loach's own signed updater (independent of Ap
 #### Prerequisites
 
 - **Node.js 20.19+** (or 22.12+) and **npm** — Vite 8 won't run on older 20.x point releases.
-- **Rust 1.88+** via [`rustup`](https://rustup.rs) — the dependency tree's minimum; CI builds on 1.88.0
+- **Rust 1.90+** via [`rustup`](https://rustup.rs) — the dependency tree's minimum; CI builds on 1.90.0
 - Platform build tooling — install once via the official Tauri prerequisites guide: <https://tauri.app/start/prerequisites/>
   - **Windows**: Microsoft Visual Studio Build Tools, WebView2 runtime (preinstalled on Windows 11)
   - **Linux**: `libwebkit2gtk-4.1-dev`, `libappindicator3-dev` (or `libayatana-appindicator3-dev`), `librsvg2-dev`, `build-essential`, `libssl-dev`, `pkg-config`; bundling `.AppImage` / `.rpm` installers also needs `patchelf`, `rpm`, `file`, `wget` and `desktop-file-utils`. No Secret Service headers are needed — the keyring backend is pure Rust.

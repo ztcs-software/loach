@@ -5,7 +5,7 @@ description = "Native local LLM chat client (Ollama + OpenAI-compatible)."
 authors = ["Loach"]
 license = "MIT"
 edition = "2021"
-rust-version = "1.88"
+rust-version = "1.90"
 
 [lib]
 name = "loach_lib"
@@ -43,8 +43,7 @@ r2d2_sqlite = "0.35"
 
 # Secrets
 keyring = { version = "4", default-features = false, features = ["v1"] }
-argon2 = "0.5"
-rand_core = { version = "0.6", features = ["getrandom"] }
+argon2 = "0.6"
 
 # Utilities
 uuid = { version = "1", features = ["v4", "v7", "serde"] }
@@ -133,7 +132,7 @@ chardetng = "1"
 # the Ollama catalog against the machine instead of quoting raw GB. Only the
 # `system` and `disk` collectors are compiled in — the default feature set also
 # pulls process enumeration, networks, components and users, none of which we
-# read. Held at 0.38: 0.39 raises its MSRV to 1.95, above our 1.88.
+# read. Held at 0.38: 0.39 raises its MSRV to 1.95, above our 1.90.
 sysinfo = { version = "0.38", default-features = false, features = ["system", "disk"] }
 
 # Windows VRAM + adapter name for the onboarding model recommendation, read via
