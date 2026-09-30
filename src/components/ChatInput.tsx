@@ -30,7 +30,10 @@ import {
   FileTooLargeError,
 } from "@/lib/files";
 import { useChatStore } from "@/stores/chatStore";
+import { useModelsStore } from "@/stores/modelsStore";
 import { usePrivateChatStore } from "@/stores/privateChatStore";
+import { useSnippetStore } from "@/stores/snippetStore";
+import { useSpaceStore } from "@/stores/spaceStore";
 import { useUIStore } from "@/stores/uiStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useToastStore } from "@/stores/toastStore";
@@ -49,6 +52,7 @@ import {
   isCommandInput,
   matchCommands,
   parseInput,
+  type ArgSources,
   type PaletteEntry,
 } from "@/lib/commands/parser";
 import { orderByRecency, parseRecentCommands } from "@/lib/commands/recency";
@@ -169,6 +173,19 @@ export function ChatInput({ centered = false }: ChatInputProps) {
   const [paletteIndex, setPaletteIndex] = useState(0);
   const [paletteDismissed, setPaletteDismissed] = useState(false);
   const [commandResult, setCommandResult] = useState<CommandResult | null>(null);
+  // Names the palette completes after `/model `, `/space ` and `/snippet `.
+  // They live in stores, which the commands layer doesn't import.
+  const models = useModelsStore((s) => s.models);
+  const spaces = useSpaceStore((s) => s.spaces);
+  const snippets = useSnippetStore((s) => s.snippets);
+  const argSources: ArgSources = useMemo(
+    () => ({
+      model: models.map((m) => m.id),
+      space: spaces.map((s) => s.name),
+      snippet: snippets.map((s) => s.title),
+    }),
+    [models, spaces, snippets],
+  );
   // Recency is applied HERE rather than inside the palette: `paletteIndex`
   // indexes into this array, and both the keyboard handler and the palette
   // must agree on the order or Enter would accept a different row than the
@@ -177,11 +194,11 @@ export function ChatInput({ centered = false }: ChatInputProps) {
     () =>
       isCommandInput(text)
         ? orderByRecency(
-            matchCommands(text.slice(1)),
+            matchCommands(text.slice(1), argSources),
             parseRecentCommands(recentCommands),
           )
         : [],
-    [text, recentCommands],
+    [text, recentCommands, argSources],
   );
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -208,6 +225,11 @@ export function ChatInput({ centered = false }: ChatInputProps) {
   const acceptPaletteEntry = (entry: PaletteEntry) => {
     setText(entry.insertText);
     setComposerDraft(entry.insertText);
+    // Back to the top row, where the exact match for the accepted text
+    // lands. A highlight left further down could point at a longer name
+    // that also contains it (`llama3` → `llama3:70b`), and Enter would
+    // swap that in instead of running the command.
+    setPaletteIndex(0);
     requestAnimationFrame(() => {
       const el = textareaRef.current;
       if (!el) return;

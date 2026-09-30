@@ -66,7 +66,8 @@ export function pushRecentCommand(encoded: string, name: string): string {
  *   - sub-command rows (`/list models`) never hoist. They only appear when
  *     the parent command was typed in full, so every row would share one
  *     `cmd.name` and a matching parent would hoist the entire list under a
- *     pointless "Recent" header.
+ *     pointless "Recent" header. The same goes for the bare `/model` row
+ *     heading its own argument list.
  */
 export function orderByRecency(
   entries: PaletteEntry[],
@@ -75,8 +76,13 @@ export function orderByRecency(
   if (entries.length < 2 || recent.length === 0) return entries;
 
   const rank = new Map(recent.map((name, i) => [name, i]));
+  const withArgRows = new Set(
+    entries.filter((e) => e.sub !== null).map((e) => e.cmd.name),
+  );
   const hoisted = entries
-    .filter((e) => e.sub === null && rank.has(e.cmd.name))
+    .filter(
+      (e) => e.sub === null && !withArgRows.has(e.cmd.name) && rank.has(e.cmd.name),
+    )
     .sort((a, b) => rank.get(a.cmd.name)! - rank.get(b.cmd.name)!)
     .slice(0, RECENT_COMMANDS_SHOWN);
   if (hoisted.length === 0) return entries;

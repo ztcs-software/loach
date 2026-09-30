@@ -1,4 +1,5 @@
 import { CHAT_LABELS } from "@/lib/labels";
+import { PERSONAS } from "@/lib/personas";
 import { TONES } from "@/lib/tones";
 import type { CommandSpec } from "./types";
 
@@ -111,19 +112,20 @@ export const COMMANDS: readonly CommandSpec[] = [
   {
     name: "model",
     description: "Switch model for this chat",
-    usage: "<name>",
+    usage: "[name]",
     group: "Model & persona",
   },
   {
     name: "persona",
     description: "Apply a persona to this chat",
-    usage: "<name>",
+    usage: "[name]",
+    subcommands: PERSONAS.map((p) => p.id),
     group: "Model & persona",
   },
   {
     name: "tone",
     description: "Set the response tone for this chat",
-    usage: "<name>",
+    usage: "[name]",
     subcommands: TONES.map((t) => t.id),
     group: "Model & persona",
   },
@@ -173,7 +175,7 @@ export const COMMANDS: readonly CommandSpec[] = [
   {
     name: "instructions",
     description: "Set or clear per-chat instructions",
-    usage: "<text|clear>",
+    usage: "[text|clear]",
     subcommands: ["clear"],
     group: "Prompts",
   },

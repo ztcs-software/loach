@@ -9,8 +9,8 @@ import { useSnippetStore } from "@/stores/snippetStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useUIStore, type SettingsTab } from "@/stores/uiStore";
 import { CHAT_LABELS } from "@/lib/labels";
-import { DEFAULT_PERSONA_ID, PERSONAS } from "@/lib/personas";
-import { DEFAULT_TONE_ID, TONES } from "@/lib/tones";
+import { DEFAULT_PERSONA_ID, PERSONAS, getPersona } from "@/lib/personas";
+import { DEFAULT_TONE_ID, TONES, getTone } from "@/lib/tones";
 import { expandAndPrimeSnippet } from "@/lib/runSnippet";
 import {
   extractSummary,
@@ -331,8 +331,13 @@ async function runExport(): Promise<CommandResult> {
 
 async function runModel(rest: string): Promise<CommandResult> {
   const query = rest.trim();
-  if (!query) throw new Error("Usage: /model <name>");
   const session = requireSession();
+  if (!query) {
+    // Bare `/model` opens the header's model picker — the same one-shot
+    // hand-off `/export` uses, since the picker's state lives there.
+    useUIStore.getState().setPendingOpenModelPicker(true);
+    return { kind: "noop" };
+  }
   const models = useModelsStore.getState().models;
   const lower = query.toLowerCase();
   const exact = models.find(
@@ -362,8 +367,15 @@ async function runModel(rest: string): Promise<CommandResult> {
 
 async function runPersona(rest: string): Promise<CommandResult> {
   const query = rest.trim();
-  if (!query) throw new Error("Usage: /persona <name>");
   const session = requireSession();
+  if (!query) {
+    // Bare `/persona` reports the current one, like bare `/instructions`.
+    const current = getPersona(useUIStore.getState().personaIdBySession[session.id]);
+    if (!current || current.id === DEFAULT_PERSONA_ID) {
+      return ok("No persona set", "Apply one with /persona <name>.");
+    }
+    return ok("Current persona", current.label);
+  }
   const lower = query.toLowerCase();
   const exact = PERSONAS.find(
     (p) => p.id.toLowerCase() === lower || p.label.toLowerCase() === lower,
@@ -995,8 +1007,17 @@ async function runFolder(rest: string): Promise<CommandResult> {
 
 async function runTone(rest: string): Promise<CommandResult> {
   const query = rest.trim();
-  if (!query) throw new Error("Usage: /tone <name>");
   const session = requireSession();
+  if (!query) {
+    // Bare `/tone` reports the effective tone: this chat's own, else the
+    // app-wide default — the order the composer's tone chip reads them in.
+    const own = useUIStore.getState().toneIdBySession[session.id];
+    const current = getTone(own ?? useSettingsStore.getState().default_tone_id);
+    if (!current || current.id === DEFAULT_TONE_ID) {
+      return ok("No tone set", "Apply one with /tone <name>.");
+    }
+    return ok("Current tone", own ? current.label : `${current.label} (app default)`);
+  }
   const lower = query.toLowerCase();
   const exact = TONES.find(
     (t) => t.id.toLowerCase() === lower || t.label.toLowerCase() === lower,
