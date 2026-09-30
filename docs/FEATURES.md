@@ -1112,6 +1112,20 @@ Inline code blocks in assistant messages get an **Open** button (tooltip
   canvas keeps mirroring the latest code block as more tokens arrive.
 - **Resizable** — drag the left edge to set the panel width; the choice
   is remembered.
+- **HTML preview** — for HTML (an `html` code block, or an `.html` /
+  `.htm` attachment) a **Code / Preview** switch renders the page, and
+  HTML code blocks get a **Preview** button that opens the canvas straight
+  on it. Scripts, styles and form handlers work; **Reload** starts the page
+  over. On a reply that's still streaming, the preview appears once the
+  code block is complete.
+
+  The page runs in a sandbox, on an origin of its own: it can't reach
+  Loach, your chats or your files, can't open windows or navigate away,
+  and runs **offline** — scripts, stylesheets, images and fonts linked from
+  the web don't load, so a page built on a CDN library (Tailwind,
+  Chart.js, …) shows without it. `localStorage` and `sessionStorage`
+  work but last only until the page reloads; cookies aren't available, and
+  `alert()` does nothing.
 
 The canvas and the parameters sidebar share the right slot — the canvas
 wins when both would be open.
@@ -1506,7 +1520,10 @@ verification happens before the binary is replaced.
   check against the GitHub releases endpoint.
 - **CSP is locked down** — no remote scripts, no inline scripts, no eval.
   The Tauri global is disabled; the renderer talks to the backend only
-  through registered commands.
+  through registered commands. The one place inline scripts run is the
+  canvas's HTML preview (§10), and only inside its sandboxed frame, which
+  has its own policy: nothing it loads comes from outside the page, and it
+  can't reach the network or Loach's commands.
 - **File I/O is backend-owned** — every save dialog, the Data import
   dialog, the workspace folder picker (§8.4), and the actual read / write
   happen in Rust. The renderer can't pick a path itself (it only learns

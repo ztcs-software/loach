@@ -1,11 +1,15 @@
 import { useMemo, useState } from "react";
-import { Check, Copy, Download, X } from "lucide-react";
+import { Check, Copy, Download, RotateCw, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { CodeView } from "./CodeView";
+import { HtmlPreview } from "./HtmlPreview";
 import {
   useCanvasStore,
   clampCanvasWidth,
+  isHtmlLanguage,
   CANVAS_MIN_WIDTH,
+  type CanvasView,
 } from "@/stores/canvasStore";
 import { useChatStore } from "@/stores/chatStore";
 import { useToastStore } from "@/stores/toastStore";
@@ -18,11 +22,13 @@ import { cn } from "@/lib/utils";
  * Right-side code canvas — opens via "Open in canvas" on any inline
  * `CodeBlock`, or from an attachment chip.
  *
- * Two behaviours layered on the original read-only viewer:
+ * Three behaviours layered on the original read-only viewer:
  *  - horizontally resizable via a left-edge drag handle (width persisted in
  *    `canvasStore`);
  *  - live: when opened on a still-streaming code block it mirrors that block
- *    as it generates, by re-deriving from the bound message in `chatStore`.
+ *    as it generates, by re-deriving from the bound message in `chatStore`;
+ *  - HTML gets a Code / Preview switch that renders the page in a sandbox
+ *    (`HtmlPreview`).
  *
  * Mutually exclusive with `ParameterPanel` (App.tsx swaps which one renders
  * in the right slot).
@@ -34,9 +40,11 @@ export function CodeCanvas() {
   const title = useCanvasStore((s) => s.title);
   const name = useCanvasStore((s) => s.name);
   const binding = useCanvasStore((s) => s.binding);
+  const view = useCanvasStore((s) => s.view);
   const width = useCanvasStore((s) => s.width);
   const close = useCanvasStore((s) => s.close);
   const setWidth = useCanvasStore((s) => s.setWidth);
+  const setView = useCanvasStore((s) => s.setView);
 
   // Live source: the bound message's current content (null when not bound or
   // the message is gone). A primitive selector so we only re-render when the
@@ -53,6 +61,8 @@ export function CodeCanvas() {
   // persisted) to the store on pointer-up so we don't write localStorage on
   // every move.
   const [dragWidth, setDragWidth] = useState<number | null>(null);
+  // Bumped by the preview's Reload button to remount the frame.
+  const [reloadNonce, setReloadNonce] = useState(0);
 
   // When bound to a live message, re-extract its last fenced block so the
   // canvas tracks the streaming code — verbatim, since code is never
@@ -92,6 +102,8 @@ export function CodeCanvas() {
 
   const heading = title?.trim() || (isText ? "Text canvas" : "Code Canvas");
   const badgeLabel = isText ? "Text" : displayLanguage;
+  const previewable = isHtmlLanguage(displayLanguage);
+  const showPreview = previewable && view === "preview";
 
   const onCopy = async () => {
     try {
@@ -238,11 +250,58 @@ export function CodeCanvas() {
         </div>
       </header>
 
-      <CodeView
-        code={displayCode}
-        language={displayLanguage}
-        isLive={bindingStreaming}
-      />
+      {previewable && (
+        <div className="flex h-10 shrink-0 items-center justify-between gap-2 border-b border-foreground/[0.06] px-3">
+          <Tabs value={view} onValueChange={(v) => setView(v as CanvasView)}>
+            <TabsList className="h-7 rounded-lg p-0.5">
+              <TabsTrigger value="code" className="rounded-md px-2.5 py-0.5 text-[11px]">
+                Code
+              </TabsTrigger>
+              <TabsTrigger value="preview" className="rounded-md px-2.5 py-0.5 text-[11px]">
+                Preview
+              </TabsTrigger>
+            </TabsList>
+          </Tabs>
+          {showPreview && (
+            <div className="flex min-w-0 items-center gap-1">
+              <span
+                className="truncate text-[11px] text-foreground/45"
+                title="Previews run sandboxed and offline: scripts, stylesheets, images and fonts from the web don't load, and the page can't reach Loach or your files."
+              >
+                Offline sandbox
+              </span>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setReloadNonce((n) => n + 1)}
+                disabled={bindingStreaming}
+                className="h-7 shrink-0 gap-1 rounded-md px-2 text-[11px] text-foreground/65 hover:bg-foreground/10 hover:text-foreground"
+                title="Reload preview"
+              >
+                <RotateCw className="h-3.5 w-3.5" /> Reload
+              </Button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {showPreview ? (
+        // Re-rendering the page on every token would restart its scripts
+        // each flush; show it once the block settles instead.
+        bindingStreaming ? (
+          <div className="flex flex-1 items-center justify-center p-6 text-center text-xs text-muted-foreground">
+            The preview appears when the code finishes generating.
+          </div>
+        ) : (
+          <HtmlPreview key={reloadNonce} html={displayCode} />
+        )
+      ) : (
+        <CodeView
+          code={displayCode}
+          language={displayLanguage}
+          isLive={bindingStreaming}
+        />
+      )}
     </aside>
   );
 }

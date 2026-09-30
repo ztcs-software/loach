@@ -43,6 +43,15 @@ export interface CanvasBinding {
   messageId: string;
 }
 
+/** What the canvas body shows: the source, or — for HTML — the rendered page. */
+export type CanvasView = "code" | "preview";
+
+/** Languages the canvas can render as a page (`html` code fences and
+ *  `.html` / `.htm` attachments, whose extension is their language). */
+export function isHtmlLanguage(language: string | null | undefined): boolean {
+  return language === "html" || language === "htm";
+}
+
 interface CanvasState {
   isOpen: boolean;
   /** Raw source pushed in by `CodeBlock` when the user hits "Open in canvas". */
@@ -65,6 +74,9 @@ interface CanvasState {
    *  open time so the canvas renders before the first live tick and after the
    *  source message goes away. */
   binding: CanvasBinding | null;
+  /** Code or rendered preview. Only honoured for HTML; other languages
+   *  always show the code. */
+  view: CanvasView;
   /** Current width of the canvas in px. Persisted across sessions. */
   width: number;
 
@@ -74,6 +86,7 @@ interface CanvasState {
     language: string | null;
     title?: string;
     name?: string;
+    view?: CanvasView;
   }) => void;
   /** Open bound to a streaming message's last code block. The snapshot seeds
    *  the initial render; the canvas re-derives from the live message after. */
@@ -83,7 +96,9 @@ interface CanvasState {
     code: string;
     language: string | null;
     title?: string;
+    view?: CanvasView;
   }) => void;
+  setView: (view: CanvasView) => void;
   close: () => void;
   setWidth: (width: number) => void;
 }
@@ -103,8 +118,9 @@ export const useCanvasStore = create<CanvasState>((set) => ({
   title: null,
   name: null,
   binding: null,
+  view: "code",
   width: initialWidth(),
-  open: ({ code, language, title, name }) =>
+  open: ({ code, language, title, name, view }) =>
     set({
       isOpen: true,
       code,
@@ -112,8 +128,9 @@ export const useCanvasStore = create<CanvasState>((set) => ({
       title: title ?? null,
       name: name ?? null,
       binding: null,
+      view: view ?? "code",
     }),
-  openLive: ({ sessionId, messageId, code, language, title }) =>
+  openLive: ({ sessionId, messageId, code, language, title, view }) =>
     set({
       isOpen: true,
       code,
@@ -121,7 +138,9 @@ export const useCanvasStore = create<CanvasState>((set) => ({
       title: title ?? null,
       name: null,
       binding: { sessionId, messageId },
+      view: view ?? "code",
     }),
+  setView: (view) => set({ view }),
   close: () => set({ isOpen: false, binding: null }),
   setWidth: (width) => {
     const clamped = clampCanvasWidth(width);

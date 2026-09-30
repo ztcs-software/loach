@@ -1,0 +1,43 @@
+<!doctype html>
+<meta charset="utf-8">
+<script>
+  // Host page for the Code canvas's HTML preview, served by the
+  // `loach-sandbox` protocol (src-tauri/src/sandbox.rs) with its own CSP.
+  // The canvas frames it with `sandbox="allow-scripts allow-forms"`, waits
+  // for "ready" and posts the HTML to show; this page then replaces itself
+  // with that HTML, so it renders exactly once per load.
+  (() => {
+    // A sandboxed frame has an opaque origin, where merely reading
+    // localStorage or sessionStorage throws — and generated demos (to-do
+    // lists, games) read them on load. Give each render an in-memory
+    // stand-in. document.open() keeps this window object, so the
+    // replacements carry over into the written page.
+    const memoryStorage = () => {
+      const items = new Map();
+      return {
+        get length() { return items.size; },
+        key: (i) => [...items.keys()][i] ?? null,
+        getItem: (k) => items.get(String(k)) ?? null,
+        setItem: (k, v) => void items.set(String(k), String(v)),
+        removeItem: (k) => void items.delete(String(k)),
+        clear: () => items.clear(),
+      };
+    };
+    for (const name of ["localStorage", "sessionStorage"]) {
+      try {
+        Object.defineProperty(window, name, { value: memoryStorage(), configurable: true });
+      } catch {
+        /* leave the page to cope with the throwing original */
+      }
+    }
+
+    addEventListener("message", (e) => {
+      const msg = e.data;
+      if (e.source !== parent || msg?.type !== "loach-preview:render") return;
+      document.open();
+      document.write(String(msg.html));
+      document.close();
+    });
+    parent.postMessage({ type: "loach-preview:ready" }, "*");
+  })();
+</script>

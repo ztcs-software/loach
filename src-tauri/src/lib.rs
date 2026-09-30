@@ -5,6 +5,7 @@ mod mcp;
 mod ollama_launch;
 mod preload;
 mod providers;
+mod sandbox;
 mod secrets;
 mod security;
 mod sse;
@@ -90,6 +91,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .register_uri_scheme_protocol(sandbox::SCHEME, |_ctx, request| sandbox::handle(&request))
         .setup(|app| {
             // Replace the prior `.expect(...)` chain with explicit user-
             // facing error dialogs. The old behaviour silent-crashed the

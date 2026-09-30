@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   AdminEvent,
@@ -1224,6 +1224,15 @@ export function saveBinaryToFile(args: {
 export function openInVscode(code: string, filename: string): Promise<void> {
   if (!isTauri) return notInTauri(undefined);
   return invoke<void>("open_in_vscode", { code, filename });
+}
+
+/** URL of the HTML preview host page on the `loach-sandbox` protocol
+ *  (`src-tauri/src/sandbox.rs`). `convertFileSrc` isn't file-specific — it
+ *  builds the per-platform custom-protocol URL (`http://loach-sandbox.localhost/…`
+ *  on Windows, `loach-sandbox://localhost/…` elsewhere). Null outside Tauri,
+ *  where there is no protocol to serve it. */
+export function sandboxPreviewUrl(): string | null {
+  return isTauri ? convertFileSrc("preview.html", "loach-sandbox") : null;
 }
 
 /** Optional app-lock credentials for destructive Tauri commands. */
