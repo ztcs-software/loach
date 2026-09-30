@@ -78,6 +78,9 @@ interface UIState {
    *  Set by the `/export` slash command, which can't reach the dialog's
    *  local state directly. Mirrors `pendingOpenModelPicker`. */
   pendingOpenExport: boolean;
+  /** One-shot flag for the ChatHeader's "Import context" dialog, set by the
+   *  `/import` slash command. Mirrors `pendingOpenExport`. */
+  pendingOpenImport: boolean;
   /** One-shot: a message the transcript should scroll to and flash as soon as
    *  it's mounted. Set by the Cmd/Ctrl-K palette when the user picks a message
    *  result, consumed by ChatCanvas. It can't be a plain call because the
@@ -109,6 +112,8 @@ interface UIState {
   consumePendingOpenModelPicker: () => boolean;
   setPendingOpenExport: (v: boolean) => void;
   consumePendingOpenExport: () => boolean;
+  setPendingOpenImport: (v: boolean) => void;
+  consumePendingOpenImport: () => boolean;
   setPendingJumpMessage: (messageId: string | null) => void;
   consumePendingJumpMessage: () => string | null;
 }
@@ -131,6 +136,7 @@ export const useUIStore = create<UIState>((set, get) => ({
   toneIdBySession: {},
   pendingOpenModelPicker: false,
   pendingOpenExport: false,
+  pendingOpenImport: false,
   toggleSidebar: () =>
     set((s) => ({ sidebarOpen: !s.sidebarOpen, sidebarAutoCollapsed: false })),
   toggleParams: () => set((s) => ({ paramsOpen: !s.paramsOpen })),
@@ -190,6 +196,12 @@ export const useUIStore = create<UIState>((set, get) => ({
   consumePendingOpenExport: (): boolean => {
     const v = get().pendingOpenExport;
     if (v) set({ pendingOpenExport: false });
+    return v;
+  },
+  setPendingOpenImport: (v) => set({ pendingOpenImport: v }),
+  consumePendingOpenImport: (): boolean => {
+    const v = get().pendingOpenImport;
+    if (v) set({ pendingOpenImport: false });
     return v;
   },
   setPendingJumpMessage: (pendingJumpMessageId) => set({ pendingJumpMessageId }),

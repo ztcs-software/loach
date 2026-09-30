@@ -3,11 +3,14 @@ import { useGlobalMemoryStore } from "@/stores/globalMemoryStore";
 import { connectionLabel, useMcpStore } from "@/stores/mcpStore";
 import { useModelsStore } from "@/stores/modelsStore";
 import { usePrivateChatStore } from "@/stores/privateChatStore";
+import { useSecurityStore } from "@/stores/securityStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useSnippetStore } from "@/stores/snippetStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useUIStore, type SettingsTab } from "@/stores/uiStore";
+import { CHAT_LABELS } from "@/lib/labels";
 import { DEFAULT_PERSONA_ID, PERSONAS } from "@/lib/personas";
+import { DEFAULT_TONE_ID, TONES } from "@/lib/tones";
 import { expandAndPrimeSnippet } from "@/lib/runSnippet";
 import {
   extractSummary,
@@ -20,6 +23,7 @@ import {
   clearSessionMessages,
   fetchUrl,
   mcpTools,
+  ollamaUnloadModel,
 } from "@/lib/tauri";
 import type {
   GenerationParams,
@@ -209,6 +213,26 @@ async function run(
       return runPrivate();
     case "compact":
       return runCompact();
+    case "stop":
+      return runStop();
+    case "find":
+      return runFind(rest);
+    case "import":
+      return runImport();
+    case "label":
+      return runLabel(rest);
+    case "folder":
+      return runFolder(rest);
+    case "tone":
+      return runTone(rest);
+    case "set":
+      return runSet(rest);
+    case "unload":
+      return runUnload();
+    case "theme":
+      return runTheme(rest);
+    case "lock":
+      return runLock();
     default:
       // Defensive — `dispatch` already filtered unknown commands. Treat as a
       // toast error so the bug surfaces if a new entry in `COMMANDS` is
@@ -897,6 +921,213 @@ async function runCompact(): Promise<CommandResult> {
   // and owns ALL outcome feedback, so we return noop rather than a premature
   // success toast that could contradict the store's result.
   void useChatStore.getState().compactContext(session.id);
+  return { kind: "noop" };
+}
+
+async function runStop(): Promise<CommandResult> {
+  const session = requireSession();
+  // Same scope as the composer's Stop button: this chat only. A prompt still
+  // waiting in the queue counts too — `cancelForSession` evicts it.
+  const state = useChatStore.getState();
+  const running = state.runningTask?.sessionId === session.id;
+  if (!running && !state.queue.some((t) => t.sessionId === session.id)) {
+    return ok("Nothing to stop");
+  }
+  await state.cancelForSession(session.id);
+  return ok(running ? "Stopped reply" : "Removed queued prompt");
+}
+
+async function runFind(rest: string): Promise<CommandResult> {
+  requireSession();
+  // ChatCanvas owns the finder overlay; this is the event the header's
+  // "Search in chat" item fires, plus the text to prefill.
+  window.dispatchEvent(
+    new CustomEvent("loach:open-chat-search", { detail: { query: rest.trim() } }),
+  );
+  return { kind: "noop" };
+}
+
+async function runImport(): Promise<CommandResult> {
+  // Same one-shot hand-off as `/export`: the dialog's state lives in the
+  // ChatHeader.
+  requireSession();
+  useUIStore.getState().setPendingOpenImport(true);
+  return { kind: "noop" };
+}
+
+async function runLabel(rest: string): Promise<CommandResult> {
+  const session = requireSession();
+  const arg = rest.trim().toLowerCase();
+  if (arg === "clear") {
+    await useChatStore.getState().setLabel(session.id, null);
+    return ok("Cleared label");
+  }
+  const label = CHAT_LABELS.find((l) => l.id === arg);
+  if (!label) {
+    throw new Error(`Usage: /label <${CHAT_LABELS.map((l) => l.id).join("|")}|clear>`);
+  }
+  await useChatStore.getState().setLabel(session.id, label.id);
+  return ok("Labelled chat", label.name);
+}
+
+async function runFolder(rest: string): Promise<CommandResult> {
+  const session = requireSession();
+  const name = rest.trim();
+  if (!name) throw new Error("Usage: /folder <name|none>");
+  const chat = useChatStore.getState();
+  if (name.toLowerCase() === "none") {
+    if (!session.folder_id) return ok("Chat isn't in a folder");
+    await chat.moveToFolder(session.id, null);
+    return ok("Removed from folder");
+  }
+  // Exact (case-insensitive) name only — anything else creates a folder with
+  // the typed name. Substring matching like `/space` would let a near-miss
+  // file the chat into the wrong existing folder without saying so.
+  const lower = name.toLowerCase();
+  const existing = chat.folders.find((f) => f.name.toLowerCase() === lower);
+  if (existing) {
+    await chat.moveToFolder(session.id, existing.id);
+    return ok("Moved to folder", existing.name);
+  }
+  const folder = await chat.createFolderWith(name, [session.id]);
+  return ok("Created folder", folder.name);
+}
+
+async function runTone(rest: string): Promise<CommandResult> {
+  const query = rest.trim();
+  if (!query) throw new Error("Usage: /tone <name>");
+  const session = requireSession();
+  const lower = query.toLowerCase();
+  const exact = TONES.find(
+    (t) => t.id.toLowerCase() === lower || t.label.toLowerCase() === lower,
+  );
+  const matches = exact
+    ? [exact]
+    : TONES.filter(
+        (t) =>
+          t.id.toLowerCase().includes(lower) ||
+          t.label.toLowerCase().includes(lower),
+      );
+  if (matches.length === 0) {
+    throw new Error(`No tone matches "${query}". Try one of: ${TONES.map((t) => t.id).join(", ")}.`);
+  }
+  if (matches.length > 1) {
+    return listItems(
+      `Multiple tones match "${query}"`,
+      matches.map((t) => ({ label: t.label, detail: t.id, hint: t.shortDescription })),
+    );
+  }
+  const tone = matches[0]!;
+  useUIStore.getState().setSessionTone(session.id, tone.id);
+  return ok(tone.id === DEFAULT_TONE_ID ? "Cleared tone" : "Applied tone", tone.label);
+}
+
+interface ParamRule {
+  integer: boolean;
+  min?: number;
+  max?: number;
+  /** The only values accepted, when the panel's control snaps to a list. */
+  stops?: readonly number[];
+}
+
+// What `/set` accepts, matching the Parameter panel's controls so a value set
+// here reads back the same there — its Temperature slider stops at 1, and its
+// Context Length slider can only show the `CTX_STOPS` it snaps to. No `max`
+// means the panel doesn't cap it either.
+const PARAM_RULES: Partial<Record<keyof GenerationParams, ParamRule>> = {
+  temperature: { integer: false, min: 0, max: 1 },
+  top_p: { integer: false, min: 0, max: 1 },
+  top_k: { integer: true, min: 0, max: 200 },
+  min_p: { integer: false, min: 0, max: 0.5 },
+  num_ctx: {
+    integer: true,
+    stops: [4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576],
+  },
+  max_tokens: { integer: true, min: 128, max: 32768 },
+  repeat_penalty: { integer: false, min: 0.8, max: 2 },
+  frequency_penalty: { integer: false, min: -2, max: 2 },
+  presence_penalty: { integer: false, min: -2, max: 2 },
+  num_gpu: { integer: true, min: 0 },
+  seed: { integer: true },
+};
+
+async function runSet(rest: string): Promise<CommandResult> {
+  const session = requireSession();
+  const [rawKey = "", rawValue = "", ...extra] = rest.split(/\s+/).filter(Boolean);
+  const key = rawKey.toLowerCase() as keyof GenerationParams;
+  if (rawKey.toLowerCase() === "reset" && !rawValue) {
+    // Same as the panel's Reset: drop the override so the chat follows the
+    // Space / model / app defaults again.
+    await useChatStore.getState().setSessionParams(session.id, null);
+    return ok("Reset parameters", "Back to the defaults");
+  }
+  // `hasOwn`, not a bare lookup: `/set constructor 1` would otherwise find
+  // Object.prototype's and write it into the chat's params.
+  const rule = Object.hasOwn(PARAM_RULES, key) ? PARAM_RULES[key] : undefined;
+  if (!rule) {
+    throw new Error(
+      `Usage: /set <param> <value> or /set reset. Params: ${Object.keys(PARAM_RULES).join(", ")}.`,
+    );
+  }
+  // Plain decimals only, like `/copy`: `Number` alone would also accept
+  // `0x10`, `1e2` and an empty string (as 0).
+  const shape = rule.integer ? /^-?\d+$/ : /^-?(\d+(\.\d*)?|\.\d+)$/;
+  const n = Number(rawValue);
+  const valid =
+    shape.test(rawValue) &&
+    extra.length === 0 &&
+    (!rule.integer || Number.isSafeInteger(n)) &&
+    (rule.stops
+      ? rule.stops.includes(n)
+      : (rule.min === undefined || n >= rule.min) &&
+        (rule.max === undefined || n <= rule.max));
+  if (!valid) {
+    const allowed = rule.stops
+      ? `one of ${rule.stops.join(", ")}`
+      : `${rule.integer ? "a whole number" : "a number"}${
+          rule.min !== undefined && rule.max !== undefined
+            ? ` from ${rule.min} to ${rule.max}`
+            : rule.min !== undefined
+              ? ` of at least ${rule.min}`
+              : ""
+        }`;
+    throw new Error(`Usage: /set ${key} <value> — ${allowed}.`);
+  }
+  await patchParams({ [key]: n });
+  return ok(`Set ${key}`, String(n));
+}
+
+async function runUnload(): Promise<CommandResult> {
+  const session = requireSession();
+  if (!session.model) throw new Error("This chat has no model yet.");
+  if (session.provider !== "ollama") {
+    throw new Error("Only Ollama models can be unloaded — the server manages OpenAI-compatible ones.");
+  }
+  // Ollama expires the runner without loading anything first; if a reply is
+  // still using the model, it goes once that reply ends.
+  await ollamaUnloadModel(useSettingsStore.getState().ollama_base_url, session.model);
+  return ok("Unloaded model", `${session.model} — it loads again on your next message`);
+}
+
+async function runTheme(rest: string): Promise<CommandResult> {
+  const arg = rest.trim().toLowerCase();
+  if (arg !== "light" && arg !== "dark" && arg !== "system") {
+    throw new Error("Usage: /theme light|dark|system");
+  }
+  // No success toast: the repaint is the confirmation, and `update` toasts
+  // (and reverts) on its own if the save fails.
+  await useSettingsStore.getState().update("theme", arg);
+  return { kind: "noop" };
+}
+
+async function runLock(): Promise<CommandResult> {
+  const security = useSecurityStore.getState();
+  // `lock()` silently no-ops without a configured lock, which would read as
+  // a dead command.
+  if (!security.status.configured) {
+    throw new Error("App lock isn't set up. Add a PIN or password in Settings → Security.");
+  }
+  security.lock();
   return { kind: "noop" };
 }
 

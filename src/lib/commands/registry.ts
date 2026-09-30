@@ -1,3 +1,5 @@
+import { CHAT_LABELS } from "@/lib/labels";
+import { TONES } from "@/lib/tones";
 import type { CommandSpec } from "./types";
 
 // Canonical list of slash commands. The dispatcher reads `name` to route to a
@@ -29,6 +31,20 @@ export const COMMANDS: readonly CommandSpec[] = [
     group: "Chat",
   },
   {
+    name: "label",
+    description: "Colour-label the current chat",
+    usage: "<color|clear>",
+    subcommands: [...CHAT_LABELS.map((l) => l.id), "clear"],
+    group: "Chat",
+  },
+  {
+    name: "folder",
+    description: "Move the current chat into a folder, creating it if needed",
+    usage: "<name|none>",
+    subcommands: ["none"],
+    group: "Chat",
+  },
+  {
     name: "archive",
     description: "Archive the current chat",
     group: "Chat",
@@ -49,14 +65,30 @@ export const COMMANDS: readonly CommandSpec[] = [
     group: "Chat",
   },
   {
+    name: "stop",
+    description: "Stop the reply running (or queued) in this chat",
+    group: "Chat",
+  },
+  {
     name: "copy",
     description: "Copy the last (or Nth-latest) assistant reply",
     usage: "[N]",
     group: "Chat",
   },
   {
+    name: "find",
+    description: "Find text in the current chat",
+    usage: "[text]",
+    group: "Chat",
+  },
+  {
     name: "export",
     description: "Export this chat's context",
+    group: "Chat",
+  },
+  {
+    name: "import",
+    description: "Import context into this chat",
     group: "Chat",
   },
   {
@@ -86,6 +118,38 @@ export const COMMANDS: readonly CommandSpec[] = [
     name: "persona",
     description: "Apply a persona to this chat",
     usage: "<name>",
+    group: "Model & persona",
+  },
+  {
+    name: "tone",
+    description: "Set the response tone for this chat",
+    usage: "<name>",
+    subcommands: TONES.map((t) => t.id),
+    group: "Model & persona",
+  },
+  {
+    name: "set",
+    description: "Set a generation parameter for this chat",
+    usage: "<param> <value>|reset",
+    subcommands: [
+      "temperature",
+      "top_p",
+      "top_k",
+      "min_p",
+      "num_ctx",
+      "max_tokens",
+      "repeat_penalty",
+      "frequency_penalty",
+      "presence_penalty",
+      "num_gpu",
+      "seed",
+      "reset",
+    ],
+    group: "Model & persona",
+  },
+  {
+    name: "unload",
+    description: "Unload this chat's Ollama model from memory",
     group: "Model & persona",
   },
 
@@ -170,6 +234,18 @@ export const COMMANDS: readonly CommandSpec[] = [
     name: "settings",
     description: "Open Settings",
     usage: "[tab]",
+    group: "App",
+  },
+  {
+    name: "theme",
+    description: "Switch the colour theme",
+    usage: "light|dark|system",
+    subcommands: ["light", "dark", "system"],
+    group: "App",
+  },
+  {
+    name: "lock",
+    description: "Lock Loach now",
     group: "App",
   },
   {

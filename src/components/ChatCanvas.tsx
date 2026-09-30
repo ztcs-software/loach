@@ -268,7 +268,12 @@ export function ChatCanvas() {
   }, [sessionId]);
 
   useEffect(() => {
-    const open = () => setSearchOpen(true);
+    // `/find <text>` passes its text as `detail.query` to prefill the finder.
+    const open = (e: Event) => {
+      const query = (e as CustomEvent<{ query?: string } | null>).detail?.query;
+      if (query) setSearchQuery(query);
+      setSearchOpen(true);
+    };
     window.addEventListener("loach:open-chat-search", open);
     return () => window.removeEventListener("loach:open-chat-search", open);
   }, []);

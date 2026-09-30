@@ -112,6 +112,10 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
   const consumePendingOpenExport = useUIStore(
     (s) => s.consumePendingOpenExport,
   );
+  const pendingOpenImport = useUIStore((s) => s.pendingOpenImport);
+  const consumePendingOpenImport = useUIStore(
+    (s) => s.consumePendingOpenImport,
+  );
   useEffect(() => {
     if (!pendingOpenModelPicker) return;
     if (!session) return;
@@ -285,6 +289,15 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
     setImportError(null);
     setImportHidden(false);
   };
+
+  // `/import` counterpart of the `/export` one-shot above.
+  useEffect(() => {
+    if (!pendingOpenImport || !session) return;
+    consumePendingOpenImport();
+    openImport();
+    // openImport is recreated each render; deps kept minimal for this one-shot.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingOpenImport, session]);
 
   const doImport = async () => {
     if (!session) return;
