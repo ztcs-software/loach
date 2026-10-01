@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import {
   Cpu,
+  ExternalLink,
   MoreHorizontal,
   Pencil,
   Play,
@@ -24,8 +25,11 @@ import { useSnippetStore } from "@/stores/snippetStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useUIStore } from "@/stores/uiStore";
 import { expandAndPrimeSnippet } from "@/lib/runSnippet";
+import { openExternal } from "@/lib/tauri";
 import { cn, relativeTime } from "@/lib/utils";
 import type { Snippet } from "@/types";
+
+const PROMPT_GALLERY_URL = "https://loach.dev/prompt-gallery/";
 
 /**
  * Full-canvas browse-and-act surface for saved prompts. Each snippet is a
@@ -98,13 +102,23 @@ export function SnippetsLibrary() {
                 and, if pinned, the right model already selected.
               </p>
             </div>
-            <Button
-              onClick={() => openDialog("new")}
-              className="gap-1.5 rounded-xl"
-            >
-              <Plus className="h-4 w-4" />
-              New snippet
-            </Button>
+            <div className="flex items-center gap-4">
+              <button
+                type="button"
+                onClick={() => void openExternal(PROMPT_GALLERY_URL)}
+                className="inline-flex items-center gap-1 text-sm text-foreground/60 underline underline-offset-2 transition-colors hover:text-foreground"
+              >
+                Prompt gallery
+                <ExternalLink className="h-3.5 w-3.5" />
+              </button>
+              <Button
+                onClick={() => openDialog("new")}
+                className="gap-1.5 rounded-xl"
+              >
+                <Plus className="h-4 w-4" />
+                New snippet
+              </Button>
+            </div>
           </header>
 
           <SnippetVariablesPanel />
