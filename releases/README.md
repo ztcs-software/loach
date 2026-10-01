@@ -28,9 +28,14 @@ The macOS install / Gatekeeper-bypass instructions live in the top-level
    don't trigger anything.
 4. When the build finishes, inspect the **draft** release on GitHub. Open
    `latest.json` from the assets and check every platform entry points at the
-   right artifact, each with a non-empty base64 `signature`:
+   right artifact, each with a non-empty base64 `signature`. The `url`s are
+   GitHub API asset links (`api.github.com/.../releases/assets/<id>`) that
+   don't name the file, so read the artifact from the signature instead:
+   base64-decode it (PowerShell:
+   `[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($sig))`) and
+   check the `file:` field on its `trusted comment:` line:
 
-   | key | artifact |
+   | key | `file:` |
    | --- | --- |
    | `windows-x86_64`, `windows-x86_64-nsis` | `*-setup.exe` |
    | `linux-x86_64`, `linux-x86_64-appimage` | `*.AppImage` |
@@ -42,7 +47,8 @@ The macOS install / Gatekeeper-bypass instructions live in the top-level
    `.rpm`: installs running updater plugin < 2.10 only look up that key, and
    handing them a package file breaks their in-place update. The `.dmg`
    uploads for manual install only — the updater can't patch it, so it never
-   appears in `latest.json`. (v1.2.3 is the reference shape to diff against.)
+   appears in `latest.json`. (v1.2.3 is the reference set of keys to diff
+   against.)
 5. Click **Publish release**. The in-app updater picks it up on next check —
    unless the version has a pre-release suffix (`-beta-1`, `-rc-1`): those
    publish as GitHub pre-releases, which the updater's `releases/latest`

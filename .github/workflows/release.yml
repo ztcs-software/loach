@@ -196,7 +196,7 @@ jobs:
 
       - run: npm ci
 
-      - uses: tauri-apps/tauri-action@v0
+      - uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -215,5 +215,10 @@ jobs:
           # Anything with a pre-release qualifier (e.g. `-alpha`, `-beta`,
           # `-rc.1`) is flagged prerelease; bare `1.2.3` ships as stable.
           prerelease: ${{ contains(needs.prepare.outputs.version, '-') }}
-          includeUpdaterJson: true
+          # Since v1 the `url`s in latest.json are API asset links
+          # (api.github.com/.../releases/assets/<id>), stable across the
+          # draft -> publish switch. Every shipped install (updater plugin
+          # 2.10.1+) downloads them fine: it sends Accept:
+          # application/octet-stream and follows the redirect to the file.
+          uploadUpdaterJson: true
           args: ${{ matrix.args }}
