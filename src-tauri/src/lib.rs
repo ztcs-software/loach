@@ -282,6 +282,36 @@ pub fn run() {
                 .build(app)?
             };
 
+            // macOS: closing the window (red button, ⌘W) hides it and Loach
+            // stays in the Dock, like other Mac apps; the Dock icon (the
+            // `Reopen` arm below) or the tray brings it back. ⌘Q and the
+            // tray's Quit still quit — they end the app without a close
+            // request. Windows and Linux keep close-means-quit.
+            #[cfg(target_os = "macos")]
+            {
+                use tauri::Emitter;
+                if let Some(window) = app.get_webview_window("main") {
+                    let w = window.clone();
+                    window.on_window_event(move |event| {
+                        if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                            api.prevent_close();
+                            // Closing used to quit, and every launch meets the
+                            // app lock; the renderer locks on this when one is
+                            // set (`useAutoLock`), so a close still locks.
+                            let _ = w.emit("window://close-hidden", ());
+                            if w.is_fullscreen().unwrap_or(false) {
+                                // Hiding a full-screen window leaves its Space
+                                // behind, empty and black. Hiding the app (⌘H)
+                                // steps out of the Space properly.
+                                let _ = w.app_handle().hide();
+                            } else {
+                                let _ = w.hide();
+                            }
+                        }
+                    });
+                }
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

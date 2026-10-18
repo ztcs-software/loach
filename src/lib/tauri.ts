@@ -565,6 +565,13 @@ export function securityClear(args?: {
   return invoke("security_clear", { args: args ?? {} });
 }
 
+/** Subscribe to the window being closed on macOS, where that only hides it
+ *  (`lib.rs`) — Loach stays in the Dock instead of quitting. */
+export async function onWindowCloseHidden(cb: () => void): Promise<UnlistenFn> {
+  if (!isTauri) return (() => undefined) as UnlistenFn;
+  return listen("window://close-hidden", () => cb());
+}
+
 // ------------ host hardware ------------
 
 /** Installed RAM + free disk, used by onboarding to size its model

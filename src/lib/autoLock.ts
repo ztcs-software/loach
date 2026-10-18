@@ -3,17 +3,21 @@
 //! The app lock itself (`securityStore` + `security.rs`) only gates *launch*:
 //! once you clear the lock screen you stay unlocked for the life of the
 //! process. That makes it a boot gate rather than a control over the threat
-//! people actually have — walking away from an unlocked machine. The two
-//! triggers here re-engage it mid-session, both opt-in:
+//! people actually have — walking away from an unlocked machine. The
+//! triggers here re-engage it mid-session. Two are opt-in:
 //!
 //!   - `lock_idle_timeout` — no pointer / key / wheel / touch activity for N
 //!     minutes.
 //!   - `lock_on_hide` — the window was minimized or otherwise hidden.
 //!
-//! Neither needs the backend: `lock()` flips a render gate, and the
-//! credentials were never in the renderer to begin with.
+//! The third is always on: closing the window on macOS, which hides Loach
+//! there instead of quitting it (`lib.rs`).
+//!
+//! None of them asks the backend for anything: `lock()` flips a render gate,
+//! and the credentials were never in the renderer to begin with.
 
 import { useEffect } from "react";
+import { onWindowCloseHidden } from "@/lib/tauri";
 import { useSecurityStore } from "@/stores/securityStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import type { LockIdleTimeout } from "@/types";
@@ -130,4 +134,20 @@ export function useAutoLock() {
       lock: () => useSecurityStore.getState().lock(),
     });
   }, [configured, unlocked, timeout, onHide]);
+
+  // Not opt-in: on macOS closing the window only hides it, where it used to
+  // quit — and a relaunch always meets the lock. Locking on close keeps that.
+  useEffect(() => {
+    if (!configured || !unlocked) return;
+    let off: (() => void) | undefined;
+    let cancelled = false;
+    void onWindowCloseHidden(() => useSecurityStore.getState().lock()).then((u) => {
+      if (cancelled) u();
+      else off = u;
+    });
+    return () => {
+      cancelled = true;
+      off?.();
+    };
+  }, [configured, unlocked]);
 }
