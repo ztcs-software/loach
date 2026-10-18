@@ -1,0 +1,27 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Loach",
+        "width": 1280,
+        "height": 820,
+        "minWidth": 900,
+        "minHeight": 600,
+        "decorations": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "trafficLightPosition": { "x": 14, "y": 20 },
+        "transparent": false,
+        "resizable": true,
+        "fullscreen": false,
+        "center": true,
+        "visible": true,
+        "shadow": true,
+        "dragDropEnabled": false,
+        "backgroundColor": "#06070f"
+      }
+    ]
+  }
+}
