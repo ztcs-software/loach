@@ -10,7 +10,7 @@ import { useSecurityStore } from "@/stores/securityStore";
 import topBarLogo from "@/assets/loach-icon.png";
 
 // Detect macOS so we can label the Ctrl/Cmd+K shortcut with the right
-// modifier. The keybinding itself accepts either (see SearchBar) — this
+// modifier. The keybinding itself is SearchBar's (`primaryMod`) — this
 // is purely visual.
 const isMac =
   typeof navigator !== "undefined" &&

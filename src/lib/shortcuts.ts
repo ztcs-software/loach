@@ -6,14 +6,14 @@
  * them co-located guarantees the labels users see match the keys we
  * actually listen for.
  *
- * Platform mapping: we treat Ctrl on Windows/Linux and Cmd on macOS as the
- * same logical "primary" modifier. JavaScript's `event.metaKey` covers Cmd,
- * `event.ctrlKey` covers Ctrl; the handler accepts either.
+ * Platform mapping: the "primary" modifier is Cmd on macOS and Ctrl on
+ * Windows/Linux (see `primaryMod`). JavaScript's `event.metaKey` covers Cmd,
+ * `event.ctrlKey` covers Ctrl.
  */
 
 /** True when running on macOS — detected from `navigator.userAgentData`
- *  (Chromium) or the legacy `navigator.platform`. Pure cosmetic + key-label
- *  use; the shortcut matcher itself is platform-agnostic (Ctrl ≡ Cmd). */
+ *  (Chromium) or the legacy `navigator.platform`. Picks the key labels and
+ *  which key `primaryMod` reads. */
 const IS_MAC =
   typeof navigator !== "undefined" &&
   /mac/i.test(
@@ -136,13 +136,20 @@ export const SHORTCUTS: ShortcutSpec[] = [
   },
 ];
 
-/** Does this keyboard event match the spec? Accepts either Ctrl or Cmd as
- *  the primary modifier — JS distinguishes them (`ctrlKey` vs `metaKey`)
- *  but the app treats them as one. Strict on Shift (must match exactly) so
- *  Ctrl+S and Ctrl+Shift+S don't collide. Strict on Alt/Option (must not
- *  be pressed) so Ctrl+Alt+K doesn't accidentally trigger Ctrl+K. */
+/** Is the primary modifier held? Cmd alone on macOS: Ctrl there belongs to
+ *  the text field, where WebKit honours Cocoa's bindings (Ctrl+K kills to
+ *  the end of the line, Ctrl+N / Ctrl+F move the caret). Elsewhere Ctrl, or
+ *  Cmd from a Mac keyboard. */
+export function primaryMod(e: KeyboardEvent): boolean {
+  return IS_MAC ? e.metaKey : e.ctrlKey || e.metaKey;
+}
+
+/** Does this keyboard event match the spec? `mod` is `primaryMod`. Strict on
+ *  Shift (must match exactly) so Ctrl+S and Ctrl+Shift+S don't collide.
+ *  Strict on Alt/Option (must not be pressed) so Ctrl+Alt+K doesn't
+ *  accidentally trigger Ctrl+K. */
 export function matches(spec: ShortcutSpec, e: KeyboardEvent): boolean {
-  const mod = e.ctrlKey || e.metaKey;
+  const mod = primaryMod(e);
   if (spec.mod !== mod) return false;
   if (!!spec.shift !== e.shiftKey) return false;
   if (e.altKey) return false;

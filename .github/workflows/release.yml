@@ -196,6 +196,84 @@ jobs:
 
       - run: npm ci
 
+      # Signs the macOS app with a stable self-signed identity instead of the
+      # ad-hoc one in tauri.conf.json, once the two MACOS_SIGNING_* secrets
+      # exist. Gatekeeper treats both alike (neither is notarized); the
+      # Keychain doesn't. It ties Loach's saved items (API key, app-lock hash)
+      # to the signature's designated requirement, and an ad-hoc requirement
+      # is the binary's own hash — so after every update macOS took Loach for
+      # a different app and asked for the login password before it could read
+      # its own secrets. A certificate's requirement stays the same across
+      # builds. (Installs updating from an ad-hoc build are asked once more.)
+      #
+      # Not tauri's own APPLE_CERTIFICATE import: that only looks for
+      # Apple-issued certificates ("Developer ID Application:" …) and fails on
+      # a self-signed one. Exporting APPLE_SIGNING_IDENTITY instead makes the
+      # bundler run plain `codesign -s <identity>` against the keychain search
+      # list, skipping notarization as it does now. Any problem here falls
+      # back to the ad-hoc signature with a warning rather than failing the
+      # leg — by then another leg may already have pushed the tag.
+      #
+      # One-time setup, with OpenSSL (in Git Bash, prefix each command with
+      # MSYS_NO_PATHCONV=1 so `-subj` isn't rewritten into a Windows path):
+      #   openssl req -x509 -newkey rsa:2048 -sha256 -days 3650 -nodes \
+      #     -keyout loach-signing.key -out loach-signing.crt \
+      #     -subj "/CN=Loach Code Signing" \
+      #     -addext "keyUsage=critical,digitalSignature" \
+      #     -addext "extendedKeyUsage=critical,codeSigning"
+      #   openssl pkcs12 -export -inkey loach-signing.key -in loach-signing.crt \
+      #     -keypbe PBE-SHA1-3DES -certpbe PBE-SHA1-3DES -macalg sha1 \
+      #     -out loach-signing.p12
+      # (SHA1/3DES because macOS `security import` rejects OpenSSL 3's default
+      # PKCS#12 encryption.) Store `openssl base64 -A -in loach-signing.p12` as
+      # MACOS_SIGNING_CERTIFICATE and the export password as
+      # MACOS_SIGNING_CERTIFICATE_PASSWORD. Keep the .p12 as private as the
+      # updater key — whoever holds it can sign an app the Keychain takes for
+      # Loach — and keep it: a replacement costs every install another prompt.
+      - name: Import macOS signing identity
+        if: matrix.platform == 'macos-14'
+        env:
+          MACOS_SIGNING_CERTIFICATE: ${{ secrets.MACOS_SIGNING_CERTIFICATE }}
+          MACOS_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_SIGNING_CERTIFICATE_PASSWORD }}
+        run: |
+          # The default shell runs with -e; every failure below is handled
+          # explicitly so it can fall back to ad-hoc instead.
+          set +e -uo pipefail
+          adhoc() {
+            echo "::warning::$1 — this build keeps the ad-hoc signature."
+            exit 0
+          }
+          if [ -z "$MACOS_SIGNING_CERTIFICATE" ]; then
+            echo "::notice::MACOS_SIGNING_CERTIFICATE not set — keeping the ad-hoc signature."
+            exit 0
+          fi
+          KC="$RUNNER_TEMP/loach-signing.keychain-db"
+          KC_PW=$(openssl rand -hex 16)
+          P12="$RUNNER_TEMP/loach-signing.p12"
+          trap 'rm -f "$P12"' EXIT
+          printf '%s' "$MACOS_SIGNING_CERTIFICATE" | base64 --decode > "$P12" \
+            || adhoc "MACOS_SIGNING_CERTIFICATE isn't valid base64"
+          security create-keychain -p "$KC_PW" "$KC" || adhoc "couldn't create a keychain"
+          # No auto-lock: the release build can outlast any timeout.
+          security set-keychain-settings "$KC"
+          security unlock-keychain -p "$KC_PW" "$KC"
+          security import "$P12" -k "$KC" -P "$MACOS_SIGNING_CERTIFICATE_PASSWORD" -T /usr/bin/codesign \
+            || adhoc "couldn't import the certificate (wrong password, or not a SHA1/3DES .p12?)"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KC_PW" "$KC" >/dev/null \
+            || adhoc "couldn't let codesign use the key"
+          security list-keychains -d user -s "$KC" $(security list-keychains -d user | tr -d '"')
+          # Self-signed, so it's listed as untrusted, which codesign doesn't
+          # mind. The SHA-1 names it unambiguously.
+          ID=$(security find-identity -p codesigning "$KC" | grep -m1 -oE '[0-9A-F]{40}') \
+            || adhoc "no code-signing identity in MACOS_SIGNING_CERTIFICATE"
+          # Sign a scratch binary the way the bundler will before relying on it.
+          cp /usr/bin/true "$RUNNER_TEMP/probe"
+          codesign --force -s "$ID" --options runtime "$RUNNER_TEMP/probe" \
+            && codesign --verify "$RUNNER_TEMP/probe" \
+            || adhoc "codesign refused the identity"
+          codesign -d -r- "$RUNNER_TEMP/probe"
+          echo "APPLE_SIGNING_IDENTITY=$ID" >> "$GITHUB_ENV"
+
       - uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

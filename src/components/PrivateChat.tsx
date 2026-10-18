@@ -1141,7 +1141,9 @@ function PrivateChatComposer() {
               if (
                 e.key === "Enter" &&
                 !e.shiftKey &&
-                !e.nativeEvent.isComposing
+                !e.nativeEvent.isComposing &&
+                // WebKit's IME-confirming Enter arrives after compositionend.
+                e.nativeEvent.keyCode !== 229
               ) {
                 e.preventDefault();
                 void submit();

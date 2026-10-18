@@ -23,6 +23,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
 import { logger } from "@/lib/logger";
+import { primaryMod } from "@/lib/shortcuts";
 import { searchMessages } from "@/lib/tauri";
 import { useChatStore } from "@/stores/chatStore";
 import { usePrivateChatStore } from "@/stores/privateChatStore";
@@ -221,7 +222,7 @@ export function SearchBar() {
       }, 0);
     };
     const onKey = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+      if (primaryMod(e) && e.key.toLowerCase() === "k") {
         e.preventDefault();
         focus();
       }

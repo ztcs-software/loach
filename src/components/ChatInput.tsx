@@ -1113,7 +1113,10 @@ export function ChatInput({ centered = false }: ChatInputProps) {
               }}
               onSelect={(e) => setCaret(e.currentTarget.selectionStart ?? 0)}
               onKeyDown={(e) => {
-                if (e.nativeEvent.isComposing) return;
+                // keyCode 229 too: WebKit (macOS, Linux) fires the Enter that
+                // confirms an IME candidate after `compositionend`, so
+                // `isComposing` is already false and the message would send.
+                if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
                 if (mentionOpen && mention) {
                   if (e.key === "ArrowDown") {
                     e.preventDefault();

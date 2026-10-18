@@ -407,13 +407,27 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building Loach")
-        .run(|_app, event| {
-            if let tauri::RunEvent::Exit = event {
+        .run(|_app, event| match event {
+            tauri::RunEvent::Exit => {
                 // Pooled stdio MCP servers are our child processes. Kill
                 // them now rather than rely on each one noticing its stdin
                 // closing once we're gone.
                 crate::mcp::drop_all_sessions();
                 crate::mcp::stdio::kill_all_now();
             }
+            // A Dock click while the window is hidden to the tray. macOS
+            // brings back minimized windows itself, but not hidden ones, so
+            // without this the click did nothing.
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Reopen {
+                has_visible_windows: false,
+                ..
+            } => {
+                if let Some(w) = _app.get_webview_window("main") {
+                    let _ = w.show();
+                    let _ = w.set_focus();
+                }
+            }
+            _ => {}
         });
 }
