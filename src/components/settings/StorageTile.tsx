@@ -105,6 +105,11 @@ export function StorageTile() {
                     bytes={stats.space_bytes}
                   />
                   <StorageLine
+                    label="Library"
+                    detail={`${count(stats.library_items)} item${stats.library_items === 1 ? "" : "s"} · search index`}
+                    bytes={stats.library_bytes}
+                  />
+                  <StorageLine
                     label="Other"
                     detail={`${count(stats.snippets)} snippet${stats.snippets === 1 ? "" : "s"} · ${count(stats.mcp_servers)} MCP server${stats.mcp_servers === 1 ? "" : "s"} · settings`}
                     bytes={stats.other_bytes}

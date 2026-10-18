@@ -20,8 +20,12 @@ const SpaceView = lazy(() =>
 const SpacesLibrary = lazy(() =>
   import("@/components/SpacesLibrary").then((m) => ({ default: m.SpacesLibrary })),
 );
+const LibraryView = lazy(() =>
+  import("@/components/library/LibraryView").then((m) => ({ default: m.LibraryView })),
+);
 import { ShareDialog } from "@/components/ShareDialog";
 import { SnippetDialog } from "@/components/SnippetDialog";
+import { ItemPreviewDialog, TextEditorDialog } from "@/components/library/LibraryDialogs";
 import { SnippetVariableDialog } from "@/components/SnippetVariableDialog";
 import { SnippetVariableFillDialog } from "@/components/SnippetVariableFillDialog";
 const SnippetsLibrary = lazy(() =>
@@ -52,6 +56,7 @@ const CodeCanvas = lazy(() =>
 function warmLazyChunks() {
   void import("@/components/SpaceView");
   void import("@/components/SpacesLibrary");
+  void import("@/components/library/LibraryView");
   void import("@/components/SnippetsLibrary");
   void import("@/components/ModelsView");
   void import("@/components/ModelsLibrary");
@@ -73,6 +78,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { chatCancelAll, ollamaPreloadModel, ollamaStart } from "@/lib/tauri";
 import { logger } from "@/lib/logger";
 import { useSnippetStore } from "@/stores/snippetStore";
+import { useLibraryStore } from "@/stores/libraryStore";
 import { useSnippetVarStore } from "@/stores/snippetVarStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useSecurityStore, lockUntilHydrated } from "@/stores/securityStore";
@@ -91,6 +97,7 @@ export default function App() {
   const hydrateChats = useChatStore((s) => s.hydrate);
   const hydrateSpaces = useSpaceStore((s) => s.hydrate);
   const hydrateSnippets = useSnippetStore((s) => s.hydrate);
+  const hydrateLibrary = useLibraryStore((s) => s.hydrate);
   const hydrateSnippetVars = useSnippetVarStore((s) => s.hydrate);
   const hydrateModels = useModelsStore((s) => s.hydrate);
   const hydrateSecurity = useSecurityStore((s) => s.hydrate);
@@ -201,6 +208,7 @@ export default function App() {
     void hydrateSpaces();
     void hydrateSnippets();
     void hydrateSnippetVars();
+    void hydrateLibrary();
     // `hydrateModels` is network-bound (Ollama /api/tags) — fire-and-forget
     // so its latency never blocks anything the user sees.
     void hydrateModels();
@@ -272,6 +280,7 @@ export default function App() {
     hydrateSpaces,
     hydrateSnippets,
     hydrateSnippetVars,
+    hydrateLibrary,
     hydrateChats,
     hydrateModels,
   ]);
@@ -379,6 +388,12 @@ export default function App() {
                 <SpacesLibrary />
               </Suspense>
             </ErrorBoundary>
+          ) : sidebarTab === "library" ? (
+            <ErrorBoundary name="Library">
+              <Suspense fallback={null}>
+                <LibraryView />
+              </Suspense>
+            </ErrorBoundary>
           ) : sidebarTab === "snippets" ? (
             <ErrorBoundary name="Snippets library">
               <Suspense fallback={null}>
@@ -454,6 +469,12 @@ export default function App() {
         </ErrorBoundary>
         <ErrorBoundary name="Share message">
           <ShareDialog />
+        </ErrorBoundary>
+        <ErrorBoundary name="Library text editor">
+          <TextEditorDialog />
+        </ErrorBoundary>
+        <ErrorBoundary name="Library preview">
+          <ItemPreviewDialog />
         </ErrorBoundary>
         <ErrorBoundary name="Snippet variable editor">
           <SnippetVariableDialog />

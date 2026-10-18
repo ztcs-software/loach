@@ -106,6 +106,12 @@ pub struct FetchedPage {
 /// to close the TOCTOU window between "we resolved a public IP" and
 /// "reqwest dials a now-private one".
 pub async fn fetch(_shared_http: &reqwest::Client, raw_url: &str) -> Result<FetchedPage, String> {
+    fetch_capped(raw_url, MAX_TEXT_CHARS).await
+}
+
+/// [`fetch`] with a caller-chosen text cap. The Library keeps whole pages
+/// (it chunks them for retrieval), where a prompt prefetch wants a short one.
+pub async fn fetch_capped(raw_url: &str, max_text_chars: usize) -> Result<FetchedPage, String> {
     // Rate-limit before URL parsing so even an invalid-URL flood is bounded.
     // The slot is consumed regardless of fetch success — a renderer that
     // keeps firing fetches against malformed URLs still gets throttled.
@@ -229,7 +235,7 @@ pub async fn fetch(_shared_http: &reqwest::Client, raw_url: &str) -> Result<Fetc
         (None, body)
     };
 
-    let (text, truncated_text) = truncate(&text_raw, MAX_TEXT_CHARS);
+    let (text, truncated_text) = truncate(&text_raw, max_text_chars);
 
     Ok(FetchedPage {
         url: raw_url.to_string(),

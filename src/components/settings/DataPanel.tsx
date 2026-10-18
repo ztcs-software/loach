@@ -364,6 +364,10 @@ function formatImportSummary(s: ImportStats): string {
   if (s.messages) parts.push(`${s.messages} message${s.messages === 1 ? "" : "s"}`);
   if (s.spaces) parts.push(`${s.spaces} space${s.spaces === 1 ? "" : "s"}`);
   if (s.snippets) parts.push(`${s.snippets} snippet${s.snippets === 1 ? "" : "s"}`);
+  if (s.library_items)
+    parts.push(`${s.library_items} Library item${s.library_items === 1 ? "" : "s"}`);
+  if (s.library_datasets)
+    parts.push(`${s.library_datasets} dataset${s.library_datasets === 1 ? "" : "s"}`);
   if (s.snippet_variables)
     parts.push(`${s.snippet_variables} variable${s.snippet_variables === 1 ? "" : "s"}`);
   if (s.mcp_servers)

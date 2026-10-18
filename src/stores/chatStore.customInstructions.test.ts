@@ -66,7 +66,7 @@ async function systemPromptFor(session: Session) {
     global_memory_enabled: false,
     temporal_awareness: false,
   });
-  const request = await __testing.buildTaskRequest(session, session.id, [], "hi", []);
+  const { request } = await __testing.buildTaskRequest(session, session.id, [], "hi", []);
   return request.system_prompt;
 }
 

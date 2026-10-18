@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   Archive,
   Brain,
@@ -6,18 +6,14 @@ import {
   ChevronRight,
   CircleAlert,
   CircleCheck,
-  FileText,
   Folder,
-  Image as ImageIcon,
   MessageSquare,
   MoreHorizontal,
   Pencil,
   Pin,
   PinOff,
-  Plus,
   RefreshCw,
   Trash2,
-  Upload,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -44,12 +40,14 @@ import { ChatInput } from "@/components/ChatInput";
 import { ChatLabelDot, ChatLabelSubmenu } from "@/components/ChatLabelMenu";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { MemoryList } from "@/components/MemoryList";
+import { SpaceSourcesTab } from "@/components/library/SpaceSources";
 import { useChatStore } from "@/stores/chatStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useSpaceStore } from "@/stores/spaceStore";
+import { useLibraryStore } from "@/stores/libraryStore";
 import { useToastStore } from "@/stores/toastStore";
 import { useUIStore } from "@/stores/uiStore";
-import { fileToAttachment, SPACE_BYTES_CAP } from "@/lib/files";
+import { fileToAttachment } from "@/lib/files";
 import { useProviderModels } from "@/lib/useProviderModels";
 import { cn, relativeDay } from "@/lib/utils";
 import {
@@ -123,6 +121,10 @@ export function SpaceView() {
   // Meta-strip counts on screen until the new load resolved, or forever if
   // it failed.
   const files = storedFiles ?? EMPTY_FILES;
+  // Library items / datasets linked to the Space count as sources too.
+  const libraryLinks = useLibraryStore((s) =>
+    viewingSpaceId ? (s.sources[`space:${viewingSpaceId}`]?.length ?? 0) : 0,
+  );
   const memories = storedMemories ?? EMPTY_MEMORIES;
 
   useEffect(() => {
@@ -281,9 +283,10 @@ export function SpaceView() {
                 {spaceSessions.length}{" "}
                 {spaceSessions.length === 1 ? "chat" : "chats"}
               </MetaChip>
-              {files.length > 0 && (
+              {files.length + libraryLinks > 0 && (
                 <MetaChip>
-                  {files.length} {files.length === 1 ? "source" : "sources"}
+                  {files.length + libraryLinks}{" "}
+                  {files.length + libraryLinks === 1 ? "source" : "sources"}
                 </MetaChip>
               )}
               {hasInstructions && <MetaChip>Instructions on</MetaChip>}
@@ -347,9 +350,10 @@ export function SpaceView() {
               </TabsContent>
 
               <TabsContent value="files" className="mt-6">
-                <FilesTab
+                <SpaceSourcesTab
+                  space={space}
                   files={files}
-                  onAdd={async (fileList) => {
+                  onUpload={async (fileList) => {
                     for (const f of Array.from(fileList)) {
                       const att = await fileToAttachment(f);
                       await doAddFile(
@@ -362,7 +366,7 @@ export function SpaceView() {
                       );
                     }
                   }}
-                  onRemove={(id) => void doRemoveFile(id, space.id)}
+                  onRemoveFile={(id) => void doRemoveFile(id, space.id)}
                 />
               </TabsContent>
 
@@ -860,114 +864,6 @@ function InstructionsTab({
 }
 
 // ---------------------------------------------------------------------------
-// Files tab
-// ---------------------------------------------------------------------------
-
-function FilesTab({
-  files,
-  onAdd,
-  onRemove,
-}: {
-  files: SpaceFile[];
-  onAdd: (files: FileList) => Promise<void>;
-  onRemove: (fileId: string) => void;
-}) {
-  const inputRef = useRef<HTMLInputElement>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-
-  const totalBytes = files.reduce((acc, f) => acc + f.size, 0);
-  const atCap = totalBytes >= SPACE_BYTES_CAP;
-
-  const handlePick = async (list: FileList) => {
-    setError(null);
-    setBusy(true);
-    try {
-      await onAdd(list);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <div className="space-y-3">
-      <p className="text-xs text-foreground/55">
-        Reference sources available to every chat in this space. Text files are
-        inlined into the system prompt; images attach to vision-capable
-        models. 20&nbsp;MB per file, 200&nbsp;MB total per space.
-      </p>
-
-      {/* Upload row */}
-      <div className="flex items-center justify-between gap-3 rounded-xl border border-dashed border-foreground/15 bg-foreground/[0.02] px-4 py-3">
-        <div className="flex items-center gap-2.5 text-sm text-foreground/55">
-          <Upload className="h-4 w-4" />
-          <span>
-            {atCap
-              ? `Reached the 200 MB space limit`
-              : `${formatSize(totalBytes)} of 200 MB · ${files.length} ${files.length === 1 ? "source" : "sources"}`}
-          </span>
-        </div>
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={() => inputRef.current?.click()}
-          disabled={atCap || busy}
-          className="rounded-lg"
-        >
-          <Plus className="h-3.5 w-3.5" />
-          Add source
-        </Button>
-      </div>
-
-      <input
-        ref={inputRef}
-        type="file"
-        multiple
-        className="hidden"
-        onChange={(e) => {
-          if (e.target.files) void handlePick(e.target.files);
-          e.target.value = "";
-        }}
-      />
-
-      {error && <p className="text-xs text-destructive">{error}</p>}
-
-      {files.length > 0 && (
-        <ul className="divide-y divide-foreground/[0.06] overflow-hidden rounded-xl border border-foreground/10 bg-foreground/[0.02]">
-          {files.map((f) => (
-            <li
-              key={f.id}
-              className="group flex items-center gap-3 px-4 py-3 text-sm transition-colors hover:bg-foreground/[0.04]"
-            >
-              {f.kind === "image" ? (
-                <ImageIcon className="h-4 w-4 shrink-0 text-foreground/45" />
-              ) : (
-                <FileText className="h-4 w-4 shrink-0 text-foreground/45" />
-              )}
-              <span className="min-w-0 flex-1 truncate text-foreground/80">
-                {f.name}
-              </span>
-              <span className="shrink-0 text-[11px] text-foreground/40">
-                {formatSize(f.size)}
-              </span>
-              <button
-                onClick={() => onRemove(f.id)}
-                aria-label={`Remove ${f.name}`}
-                className="shrink-0 rounded-md p-1 text-foreground/40 opacity-0 transition-all hover:bg-foreground/10 hover:text-destructive group-hover:opacity-100"
-              >
-                <Trash2 className="h-3.5 w-3.5" />
-              </button>
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
 // Models tab
 // ---------------------------------------------------------------------------
 
@@ -1187,12 +1083,6 @@ function MetaChip({ children }: { children: ReactNode }) {
       {children}
     </span>
   );
-}
-
-function formatSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 // Drop the `:tag` suffix on Ollama model ids (`llama3.1:8b` → `llama3.1`)

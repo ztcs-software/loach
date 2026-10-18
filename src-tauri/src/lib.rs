@@ -5,6 +5,7 @@ mod mcp;
 mod ollama_launch;
 mod preload;
 mod providers;
+mod rag;
 mod sandbox;
 mod secrets;
 mod security;
@@ -63,6 +64,9 @@ pub struct AppState {
     /// test-then-save asks once. Deliberately not persisted: a fresh
     /// process re-asks before anything runs.
     pub stdio_approved: parking_lot::Mutex<std::collections::HashSet<String>>,
+    /// Background worker keeping the Library / Space-source retrieval index
+    /// chunked and embedded. Woken by anything that can create work.
+    pub indexer: Arc<rag::indexer::Indexer>,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -185,6 +189,7 @@ pub fn run() {
             let db = Arc::new(db);
             let preload_db = db.clone();
             let preload_http = http.clone();
+            let indexer = rag::indexer::Indexer::spawn(handle.clone(), db.clone(), http.clone());
 
             let state = AppState {
                 db,
@@ -193,6 +198,7 @@ pub fn run() {
                 mcp_tools_cache: crate::mcp::new_tools_cache(),
                 approvals: crate::stream::ApprovalRegistry::new(),
                 stdio_approved: Default::default(),
+                indexer,
             };
             app.manage(state);
 
@@ -358,6 +364,29 @@ pub fn run() {
             commands::list_snippet_fill_values,
             commands::upsert_snippet_fill_values,
             commands::fetch_url,
+            commands::library_list,
+            commands::library_get_items,
+            commands::library_create_item,
+            commands::library_rename_item,
+            commands::library_update_text,
+            commands::library_add_link,
+            commands::library_refresh_link,
+            commands::library_delete_items,
+            commands::library_usage,
+            commands::library_create_dataset,
+            commands::library_update_dataset,
+            commands::library_set_dataset_items,
+            commands::library_delete_dataset,
+            commands::library_list_sources,
+            commands::library_add_sources,
+            commands::library_remove_source,
+            commands::library_set_source_enabled,
+            commands::set_space_file_enabled,
+            commands::set_space_retrieval_mode,
+            commands::set_session_retrieval_mode,
+            commands::rag_search,
+            commands::rag_status,
+            commands::rag_reindex,
             commands::mcp_list,
             commands::mcp_save,
             commands::mcp_delete,

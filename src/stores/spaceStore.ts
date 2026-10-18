@@ -11,6 +11,8 @@ import {
   listSpaces,
   removeSpaceFile,
   removeSpaceMemory,
+  setSpaceFileEnabled,
+  setSpaceRetrievalMode,
   updateSpace,
   updateSpaceMemory,
 } from "@/lib/tauri";
@@ -19,7 +21,7 @@ import {
   invalidateSpaceContext,
   invalidateAllSpaceContext,
 } from "@/lib/spaceContextCache";
-import type { Space, SpaceFile, SpaceMemory } from "@/types";
+import type { RetrievalMode, Space, SpaceFile, SpaceMemory } from "@/types";
 
 interface SpaceState {
   spaces: Space[];
@@ -74,6 +76,10 @@ interface SpaceState {
     size: number,
   ) => Promise<SpaceFile>;
   removeFile: (fileId: string, spaceId: string) => Promise<void>;
+  /** Keep a source in the Space but out of (or back into) its chats. */
+  setFileEnabled: (fileId: string, spaceId: string, enabled: boolean) => Promise<void>;
+  /** How the Space's sources reach the model. */
+  setRetrievalMode: (spaceId: string, mode: RetrievalMode) => Promise<void>;
 
   loadSpaceMemories: (spaceId: string) => Promise<SpaceMemory[]>;
   /** Insert a new memory and return the persisted row. Used by both the
@@ -275,6 +281,27 @@ export const useSpaceStore = create<SpaceState>((set, get) => ({
         ...s.spaceFiles,
         [spaceId]: (s.spaceFiles[spaceId] ?? []).filter((f) => f.id !== fileId),
       },
+    }));
+  },
+
+  setFileEnabled: async (fileId, spaceId, enabled) => {
+    await setSpaceFileEnabled(fileId, enabled);
+    invalidateSpaceContext(spaceId);
+    set((s) => ({
+      spaceFiles: {
+        ...s.spaceFiles,
+        [spaceId]: (s.spaceFiles[spaceId] ?? []).map((f) =>
+          f.id === fileId ? { ...f, enabled } : f,
+        ),
+      },
+    }));
+  },
+
+  setRetrievalMode: async (spaceId, mode) => {
+    await setSpaceRetrievalMode(spaceId, mode);
+    invalidateSpaceContext(spaceId);
+    set((s) => ({
+      spaces: s.spaces.map((sp) => (sp.id === spaceId ? { ...sp, retrieval_mode: mode } : sp)),
     }));
   },
 

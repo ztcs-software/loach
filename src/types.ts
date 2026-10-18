@@ -40,9 +40,19 @@ export interface Session {
    *  folder dialog, so the renderer never chooses a path itself. Excluded
    *  from snapshots: it's machine-local. */
   workspace_root: string | null;
+  /** How this chat's Library and Space sources reach the model. Null =
+   *  inherit (the Space's mode, else `"auto"`). See `src/lib/sources.ts`. */
+  retrieval_mode: RetrievalMode | null;
   created_at: number;
   updated_at: number;
 }
+
+/** How a chat's sources reach the model:
+ *  - `auto` — full text while it fits the context budget, retrieved
+ *    excerpts once it doesn't;
+ *  - `full` — always the full text (overflow is cut, with a warning);
+ *  - `retrieval` — always the excerpts most relevant to the message. */
+export type RetrievalMode = "auto" | "full" | "retrieval";
 
 /** A user-named bucket of chats, shown as its own collapsible section in the
  *  sidebar between "Pinned" and the date groups. Created by dragging one chat
@@ -75,6 +85,8 @@ export interface Space {
    *  in the DB and keep riding along in the prompt so flipping it off
    *  doesn't silently strip context the user might still want. */
   memory_enabled: boolean;
+  /** How this Space's sources reach the model. */
+  retrieval_mode: RetrievalMode;
   created_at: number;
   updated_at: number;
 }
@@ -111,6 +123,8 @@ export interface SpaceFile {
   data: string;
   size: number;
   position: number;
+  /** False = kept in the Space but left out of its chats' context. */
+  enabled: boolean;
   created_at: number;
 }
 
@@ -565,6 +579,12 @@ export interface Settings {
    *  focus but leaves the document visible, so a focus-based trigger would
    *  relock the app every time the user exported a chat or attached a file. */
   lock_on_hide: boolean;
+  /** Provider serving the embedding model the Library's retrieval index
+   *  uses: `"ollama"` or `"openai"` (the OpenAI-compatible endpoint). */
+  embedding_provider: ProviderId;
+  /** Embedding model name, or `""` for none — retrieval then ranks by
+   *  keyword only. */
+  embedding_model: string;
   /** Slash commands the user ran most recently, newest first, as a JSON
    *  string array (`["model","new"]`). Drives the "Recent" section at the
    *  top of the composer's `/` palette. Never shown in the Settings dialog
@@ -611,6 +631,8 @@ export const DEFAULT_SETTINGS: Settings = {
   auto_check_updates: false,
   lock_idle_timeout: "off",
   lock_on_hide: false,
+  embedding_provider: "ollama",
+  embedding_model: "",
   recent_commands: "",
 };
 
@@ -829,6 +851,8 @@ export interface ImportStats {
   snippet_fill_values: number;
   mcp_servers: number;
   settings: number;
+  library_items: number;
+  library_datasets: number;
 }
 
 /** Storage usage for the Settings → Data tile, from `storage_stats`.
@@ -850,9 +874,114 @@ export interface StorageStats {
   space_files: number;
   snippets: number;
   mcp_servers: number;
+  library_items: number;
 
   message_bytes: number;
   attachment_bytes: number;
   space_bytes: number;
+  /** Library bodies plus the retrieval index (chunks + embeddings). */
+  library_bytes: number;
   other_bytes: number;
+}
+
+// ---------------------------------------------------------------------------
+// Library
+// ---------------------------------------------------------------------------
+
+/** `text` — written in the Library; `file` — uploaded; `link` — a web page
+ *  fetched once and kept as a dated snapshot. */
+export type LibraryItemKind = "text" | "file" | "link";
+
+/** A Library item without its body, as listed. Mirrors
+ *  `db::library::LibraryItemMeta`. */
+export interface LibraryItemMeta {
+  id: string;
+  kind: LibraryItemKind;
+  title: string;
+  mime: string;
+  media: "text" | "image";
+  /** Size of the original (file / page bytes, or the text's length). */
+  size: number;
+  /** Characters of extracted text — 0 for images. */
+  chars: number;
+  /** The opening of the text, for cards. Empty for images. */
+  preview: string;
+  url: string | null;
+  fetched_at: number | null;
+  /** Lowercase hex SHA-256 of the body — duplicate detection. */
+  content_hash: string;
+  /** Extraction or fetching hit a cap; the body is incomplete. */
+  truncated: boolean;
+  /** Retrieval chunks, and how many carry an embedding from the current
+   *  model. */
+  chunks: number;
+  embedded: number;
+  created_at: number;
+  updated_at: number;
+}
+
+/** A Library item with its body: text, or base64 for images. */
+export interface LibraryItem extends Omit<LibraryItemMeta, "chars" | "preview" | "chunks" | "embedded"> {
+  content: string;
+}
+
+export interface LibraryDataset {
+  id: string;
+  name: string;
+  description: string;
+  /** Members, in order. */
+  item_ids: string[];
+  created_at: number;
+  updated_at: number;
+}
+
+/** A Library item or dataset linked into a Space or chat. Exactly one of
+ *  `item_id` / `dataset_id` is set. */
+export interface LibrarySource {
+  id: string;
+  owner_id: string;
+  item_id: string | null;
+  dataset_id: string | null;
+  enabled: boolean;
+  position: number;
+  created_at: number;
+}
+
+export type LibrarySourceOwner = "space" | "session";
+
+export interface LibraryUsage {
+  /** Names of Spaces linking the items / datasets directly. */
+  spaces: string[];
+  /** Chats linking them directly. */
+  chats: number;
+}
+
+/** Progress of the background retrieval indexer (`library://index`). */
+export interface IndexStatus {
+  /** `provider:model` the index embeds with; null = keyword-only. */
+  model: string | null;
+  total: number;
+  embedded: number;
+  busy: boolean;
+  error: string | null;
+}
+
+/** A document `rag_search` may draw from. */
+export interface RagDocRef {
+  kind: "library" | "space_file";
+  id: string;
+}
+
+export interface RagHit {
+  doc_kind: "library" | "space_file";
+  doc_id: string;
+  seq: number;
+  text: string;
+  score: number;
+}
+
+export interface RagSearchResult {
+  hits: RagHit[];
+  method: "hybrid" | "keyword" | "overview";
+  warning: string | null;
 }

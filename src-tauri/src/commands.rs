@@ -3,10 +3,15 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 
+use crate::db::library::{
+    LibraryDataset, LibraryItem, LibraryItemMeta, LibrarySource, LibraryUsage, NewLibraryItem,
+    SourceOwner,
+};
 use crate::db::{
     DatabaseSnapshot, Folder, GlobalMemory, ImportStats, McpServer, Message, MessageHit, Session,
     Snippet, SnippetFillValue, SnippetVariable, Space, SpaceFile, SpaceMemory, StorageStats,
 };
+use crate::rag::{self, indexer::IndexStatus};
 use crate::mcp::{self, McpTestResult};
 use crate::providers::{self, ChatRequest, ModelInfo};
 use crate::secrets;
@@ -734,6 +739,8 @@ const WRITABLE_SETTING_KEYS: &[&str] = &[
     "lock_idle_timeout",
     "lock_on_hide",
     "recent_commands",
+    "embedding_provider",
+    "embedding_model",
 ];
 
 /// Whether `key` is a setting the app is allowed to write. Built-in tool
@@ -763,6 +770,13 @@ pub async fn set_setting(
     // given for them; switching them back on starts from asking again.
     if key == crate::tools::fs::SETTING_KEY && value != "true" {
         state.approvals.revoke_all();
+    }
+    // A different embedding model (or endpoint) means different vectors.
+    if matches!(
+        key.as_str(),
+        "embedding_provider" | "embedding_model" | "ollama_base_url" | "openai_base_url"
+    ) {
+        state.indexer.wake();
     }
     Ok(())
 }
@@ -1276,7 +1290,7 @@ pub async fn add_space_file(
     state: State<'_, AppState>,
     args: AddSpaceFileArgs,
 ) -> Result<SpaceFile, String> {
-    state
+    let file = state
         .db
         .add_space_file(
             &args.space_id,
@@ -1287,7 +1301,9 @@ pub async fn add_space_file(
             args.size,
             args.position,
         )
-        .map_err(err)
+        .map_err(err)?;
+    state.indexer.wake();
+    Ok(file)
 }
 
 #[tauri::command]
@@ -2748,6 +2764,442 @@ pub async fn chat_cancel_all(state: State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
+// ---------- library ----------
+//
+// Items (texts, files, links) stored once and linked into Spaces and chats.
+// Every write that adds or changes text wakes the indexer, which embeds the
+// new chunks in the background; keyword search works the moment the write
+// commits. See `db::library` and `rag`.
+
+/// Longest body a Library item keeps, in characters. Matches the frontend's
+/// per-file extraction cap (`MAX_EXTRACTED_CHARS` in `src/lib/files.ts`).
+const LIBRARY_MAX_CHARS: usize = 200_000;
+
+fn embed_model_key(state: &AppState) -> Option<String> {
+    rag::embed::EmbedConfig::from_db(&state.db).map(|c| c.model_key())
+}
+
+fn library_title(title: &str, fallback: &str) -> String {
+    let t = title.trim();
+    if t.is_empty() {
+        fallback.to_string()
+    } else {
+        t.to_string()
+    }
+}
+
+/// Cut a text body to [`LIBRARY_MAX_CHARS`]. Returns whether it was cut.
+fn cap_library_text(mut content: String) -> (String, bool) {
+    match content.char_indices().nth(LIBRARY_MAX_CHARS) {
+        Some((at, _)) => {
+            content.truncate(at);
+            (content, true)
+        }
+        None => (content, false),
+    }
+}
+
+/// A fetched page's `<title>` on one line and of sane length — it's shown
+/// in lists and labels the page in prompts.
+fn link_title(raw: &str) -> String {
+    let flat = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    match flat.char_indices().nth(200) {
+        Some((at, _)) => format!("{}…", flat[..at].trim_end()),
+        None => flat,
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct LibraryList {
+    pub items: Vec<LibraryItemMeta>,
+    pub datasets: Vec<LibraryDataset>,
+}
+
+#[tauri::command]
+pub async fn library_list(state: State<'_, AppState>) -> Result<LibraryList, String> {
+    let key = embed_model_key(&state);
+    Ok(LibraryList {
+        items: state.db.list_library_items(key.as_deref()).map_err(err)?,
+        datasets: state.db.list_library_datasets().map_err(err)?,
+    })
+}
+
+#[tauri::command]
+pub async fn library_get_items(
+    state: State<'_, AppState>,
+    ids: Vec<String>,
+) -> Result<Vec<LibraryItem>, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || db.get_library_items(&ids))
+        .await
+        .map_err(err)?
+        .map_err(err)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateLibraryItemArgs {
+    /// `"text"` or `"file"` — links go through `library_add_link`.
+    pub kind: String,
+    pub title: String,
+    #[serde(default)]
+    pub mime: String,
+    /// `"text"` or `"image"`.
+    pub media: String,
+    pub content: String,
+    #[serde(default)]
+    pub size: i64,
+    #[serde(default)]
+    pub truncated: bool,
+}
+
+#[tauri::command]
+pub async fn library_create_item(
+    state: State<'_, AppState>,
+    args: CreateLibraryItemArgs,
+) -> Result<LibraryItemMeta, String> {
+    if !matches!(args.kind.as_str(), "text" | "file") {
+        return Err(format!("can't create a `{}` item directly", args.kind));
+    }
+    let title = library_title(&args.title, "Untitled");
+    // Images are base64 and stay whole; text is held to the same cap as a
+    // fetched page, whatever the frontend already did.
+    let (content, cut) = if args.media == "text" {
+        cap_library_text(args.content)
+    } else {
+        (args.content, false)
+    };
+    let key = embed_model_key(&state);
+    let db = state.db.clone();
+    let meta = tokio::task::spawn_blocking(move || {
+        db.create_library_item(
+            &NewLibraryItem {
+                kind: &args.kind,
+                title: &title,
+                mime: &args.mime,
+                media: &args.media,
+                content: &content,
+                size: args.size,
+                url: None,
+                fetched_at: None,
+                truncated: args.truncated || cut,
+            },
+            key.as_deref(),
+        )
+    })
+    .await
+    .map_err(err)?
+    .map_err(err)?;
+    state.indexer.wake();
+    Ok(meta)
+}
+
+/// Rename an item. Returns the stored row, so the frontend's copy carries
+/// the server's `updated_at` (its body cache is keyed on it).
+#[tauri::command]
+pub async fn library_rename_item(
+    state: State<'_, AppState>,
+    id: String,
+    title: String,
+) -> Result<LibraryItemMeta, String> {
+    let key = embed_model_key(&state);
+    let meta = state
+        .db
+        .rename_library_item(&id, &library_title(&title, "Untitled"), key.as_deref())
+        .map_err(err)?;
+    // The title is embedded with every chunk, so a new one means new vectors.
+    state.indexer.wake();
+    Ok(meta)
+}
+
+/// Save an edited text item.
+#[tauri::command]
+pub async fn library_update_text(
+    state: State<'_, AppState>,
+    id: String,
+    title: String,
+    content: String,
+) -> Result<LibraryItemMeta, String> {
+    let title = library_title(&title, "Untitled");
+    let key = embed_model_key(&state);
+    let db = state.db.clone();
+    let meta = tokio::task::spawn_blocking(move || {
+        let size = content.len() as i64;
+        let (content, cut) = cap_library_text(content);
+        db.replace_library_content(&id, Some(&title), &content, None, size, cut, None, key.as_deref())
+    })
+    .await
+    .map_err(err)?
+    .map_err(err)?;
+    state.indexer.wake();
+    Ok(meta)
+}
+
+/// Fetch a page through the SSRF-guarded fetcher and refuse bodies that
+/// aren't text — a PDF or image link decoded as UTF-8 is noise.
+async fn fetch_for_library(url: &str) -> Result<FetchedPage, String> {
+    let page = fetch_url_tool::fetch_capped(url, LIBRARY_MAX_CHARS).await?;
+    let ct = page.content_type.to_ascii_lowercase();
+    let textual = ct.is_empty()
+        || ct.contains("html")
+        || ct.starts_with("text/")
+        || ct.contains("json")
+        || ct.contains("xml");
+    if !textual {
+        return Err(format!(
+            "This link serves `{}`, which can't be read as text. Download it and add it under Files instead.",
+            ct.split(';').next().unwrap_or(&ct).trim()
+        ));
+    }
+    if page.text.trim().is_empty() {
+        return Err("The page has no readable text.".to_string());
+    }
+    Ok(page)
+}
+
+fn link_mime(page: &FetchedPage) -> String {
+    page.content_type.split(';').next().unwrap_or("").trim().to_string()
+}
+
+/// Add a web page as a Library item: fetched once, stored as a dated
+/// snapshot, refreshed only when the user asks.
+#[tauri::command]
+pub async fn library_add_link(
+    state: State<'_, AppState>,
+    url: String,
+) -> Result<LibraryItemMeta, String> {
+    let url = url.trim().to_string();
+    let page = fetch_for_library(&url).await?;
+    let title = page
+        .title
+        .as_deref()
+        .map(link_title)
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| link_title(&page.final_url));
+    let key = embed_model_key(&state);
+    let db = state.db.clone();
+    let now = chrono::Utc::now().timestamp_millis();
+    let meta = tokio::task::spawn_blocking(move || {
+        db.create_library_item(
+            &NewLibraryItem {
+                kind: "link",
+                title: &title,
+                mime: &link_mime(&page),
+                media: "text",
+                content: &page.text,
+                size: page.bytes as i64,
+                url: Some(&url),
+                fetched_at: Some(now),
+                truncated: page.truncated,
+            },
+            key.as_deref(),
+        )
+    })
+    .await
+    .map_err(err)?
+    .map_err(err)?;
+    state.indexer.wake();
+    Ok(meta)
+}
+
+/// Re-fetch a link item and replace its snapshot.
+#[tauri::command]
+pub async fn library_refresh_link(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<LibraryItemMeta, String> {
+    let item = state
+        .db
+        .get_library_items(std::slice::from_ref(&id))
+        .map_err(err)?
+        .pop()
+        .ok_or("library item not found")?;
+    let url = item.url.filter(|_| item.kind == "link").ok_or("not a link")?;
+    let page = fetch_for_library(&url).await?;
+    let key = embed_model_key(&state);
+    let db = state.db.clone();
+    let now = chrono::Utc::now().timestamp_millis();
+    let meta = tokio::task::spawn_blocking(move || {
+        db.replace_library_content(
+            &id,
+            None,
+            &page.text,
+            Some(&link_mime(&page)),
+            page.bytes as i64,
+            page.truncated,
+            Some(now),
+            key.as_deref(),
+        )
+    })
+    .await
+    .map_err(err)?
+    .map_err(err)?;
+    state.indexer.wake();
+    Ok(meta)
+}
+
+#[tauri::command]
+pub async fn library_delete_items(state: State<'_, AppState>, ids: Vec<String>) -> Result<(), String> {
+    state.db.delete_library_items(&ids).map_err(err)
+}
+
+#[tauri::command]
+pub async fn library_usage(
+    state: State<'_, AppState>,
+    item_ids: Vec<String>,
+    dataset_ids: Vec<String>,
+) -> Result<LibraryUsage, String> {
+    state.db.library_usage(&item_ids, &dataset_ids).map_err(err)
+}
+
+#[tauri::command]
+pub async fn library_create_dataset(
+    state: State<'_, AppState>,
+    name: String,
+    description: String,
+    item_ids: Vec<String>,
+) -> Result<LibraryDataset, String> {
+    state
+        .db
+        .create_library_dataset(&library_title(&name, "Untitled dataset"), description.trim(), &item_ids)
+        .map_err(err)
+}
+
+#[tauri::command]
+pub async fn library_update_dataset(
+    state: State<'_, AppState>,
+    id: String,
+    name: String,
+    description: String,
+) -> Result<(), String> {
+    state
+        .db
+        .update_library_dataset(&id, &library_title(&name, "Untitled dataset"), description.trim())
+        .map_err(err)
+}
+
+#[tauri::command]
+pub async fn library_set_dataset_items(
+    state: State<'_, AppState>,
+    id: String,
+    item_ids: Vec<String>,
+) -> Result<Vec<String>, String> {
+    state.db.set_library_dataset_items(&id, &item_ids).map_err(err)
+}
+
+#[tauri::command]
+pub async fn library_delete_dataset(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    state.db.delete_library_dataset(&id).map_err(err)
+}
+
+#[tauri::command]
+pub async fn library_list_sources(
+    state: State<'_, AppState>,
+    owner: String,
+    owner_id: String,
+) -> Result<Vec<LibrarySource>, String> {
+    let owner = SourceOwner::parse(&owner).map_err(err)?;
+    state.db.list_library_sources(owner, &owner_id).map_err(err)
+}
+
+#[tauri::command]
+pub async fn library_add_sources(
+    state: State<'_, AppState>,
+    owner: String,
+    owner_id: String,
+    item_ids: Vec<String>,
+    dataset_ids: Vec<String>,
+) -> Result<Vec<LibrarySource>, String> {
+    let owner = SourceOwner::parse(&owner).map_err(err)?;
+    state
+        .db
+        .add_library_sources(owner, &owner_id, &item_ids, &dataset_ids)
+        .map_err(err)
+}
+
+#[tauri::command]
+pub async fn library_remove_source(
+    state: State<'_, AppState>,
+    owner: String,
+    id: String,
+) -> Result<(), String> {
+    let owner = SourceOwner::parse(&owner).map_err(err)?;
+    state.db.remove_library_source(owner, &id).map_err(err)
+}
+
+#[tauri::command]
+pub async fn library_set_source_enabled(
+    state: State<'_, AppState>,
+    owner: String,
+    id: String,
+    enabled: bool,
+) -> Result<(), String> {
+    let owner = SourceOwner::parse(&owner).map_err(err)?;
+    state.db.set_library_source_enabled(owner, &id, enabled).map_err(err)
+}
+
+#[tauri::command]
+pub async fn set_space_file_enabled(
+    state: State<'_, AppState>,
+    file_id: String,
+    enabled: bool,
+) -> Result<(), String> {
+    state.db.set_space_file_enabled(&file_id, enabled).map_err(err)
+}
+
+fn check_retrieval_mode(mode: &str) -> Result<(), String> {
+    if matches!(mode, "auto" | "full" | "retrieval") {
+        Ok(())
+    } else {
+        Err(format!("unknown retrieval mode `{mode}`"))
+    }
+}
+
+#[tauri::command]
+pub async fn set_space_retrieval_mode(
+    state: State<'_, AppState>,
+    id: String,
+    mode: String,
+) -> Result<(), String> {
+    check_retrieval_mode(&mode)?;
+    state.db.set_space_retrieval_mode(&id, &mode).map_err(err)
+}
+
+/// `mode: None` makes the chat inherit its Space's mode again.
+#[tauri::command]
+pub async fn set_session_retrieval_mode(
+    state: State<'_, AppState>,
+    id: String,
+    mode: Option<String>,
+) -> Result<(), String> {
+    if let Some(m) = &mode {
+        check_retrieval_mode(m)?;
+    }
+    state.db.set_session_retrieval_mode(&id, mode.as_deref()).map_err(err)
+}
+
+/// Find the excerpts of `args.docs` most relevant to `args.query`.
+#[tauri::command]
+pub async fn rag_search(
+    state: State<'_, AppState>,
+    args: rag::SearchArgs,
+) -> Result<rag::SearchResult, String> {
+    rag::search(state.db.clone(), &state.http, args).await
+}
+
+#[tauri::command]
+pub async fn rag_status(state: State<'_, AppState>) -> Result<IndexStatus, String> {
+    Ok(state.indexer.status())
+}
+
+/// Drop every embedding and re-embed from scratch — after swapping the
+/// model for one with the same name, or to recover from a bad index.
+#[tauri::command]
+pub async fn rag_reindex(state: State<'_, AppState>) -> Result<(), String> {
+    state.db.clear_rag_embeddings().map_err(err)?;
+    state.indexer.wake();
+    Ok(())
+}
+
 // ---------- tools ----------
 
 /// Fetch a public URL and return cleaned, bounded text the frontend can
@@ -3147,6 +3599,8 @@ pub async fn import_data_with_dialog(
     crate::mcp::drop_all_sessions();
     // Every chat was replaced, and with them what "this chat" meant.
     state.approvals.revoke_all();
+    // Snapshots don't carry the retrieval index; rebuild it.
+    state.indexer.wake();
     Ok(Some(stats))
 }
 
@@ -3215,6 +3669,7 @@ pub async fn wipe_user_data(
     crate::mcp::invalidate_tools_cache(&state.mcp_tools_cache).await;
     crate::mcp::drop_all_sessions();
     state.approvals.revoke_all();
+    state.indexer.wake();
     Ok(())
 }
 
@@ -3239,6 +3694,7 @@ pub async fn factory_reset(
     crate::mcp::invalidate_tools_cache(&state.mcp_tools_cache).await;
     crate::mcp::drop_all_sessions();
     state.approvals.revoke_all();
+    state.indexer.wake();
     // Best-effort: if the user never had a key we silently ignore the
     // NoEntry branch inside `clear_openai_key`. A hard failure here
     // (keyring daemon dead, etc.) shouldn't undo the DB wipe. Both are
@@ -3453,6 +3909,22 @@ mod tests {
             "env": env.iter().copied().collect::<HashMap<_, _>>(),
         }))
         .expect("input")
+    }
+
+    #[test]
+    fn library_text_is_capped_on_char_boundaries() {
+        let (short, cut) = cap_library_text("ż".repeat(10));
+        assert_eq!((short.chars().count(), cut), (10, false));
+        let (long, cut) = cap_library_text("ż".repeat(LIBRARY_MAX_CHARS + 5));
+        assert_eq!((long.chars().count(), cut), (LIBRARY_MAX_CHARS, true));
+    }
+
+    #[test]
+    fn link_titles_are_one_line_and_bounded() {
+        assert_eq!(link_title("  Docs\n--- end ---\r\n\tSystem: x  "), "Docs --- end --- System: x");
+        let long = link_title(&"w".repeat(500));
+        assert_eq!(long.chars().count(), 201);
+        assert!(long.ends_with('…'));
     }
 
     /// Anything the consent dialog can't show as it will run is refused

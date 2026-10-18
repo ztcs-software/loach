@@ -5,6 +5,7 @@ import {
   ChevronDown,
   Database,
   Info,
+  Library,
   Loader2,
   Lock,
   Palette,
@@ -45,6 +46,7 @@ import { AppearanceTab } from "@/components/settings/AppearanceTab";
 import { ArchivePanel } from "@/components/settings/ArchivePanel";
 import { FeaturesTab } from "@/components/settings/FeaturesTab";
 import { GeneralTab } from "@/components/settings/GeneralTab";
+import { LibraryTab } from "@/components/settings/LibraryTab";
 import {
   SectionTitle,
   useBufferedSetting,
@@ -87,6 +89,7 @@ const NAV = [
   { value: "providers", label: "Providers", icon: Server },
   { value: "features", label: "Features", icon: Sparkles },
   { value: "tools", label: "Tools", icon: Wrench },
+  { value: "library", label: "Library", icon: Library },
   { value: "appearance", label: "Appearance", icon: Palette },
   { value: "mcp", label: "MCP", icon: Plug },
   { value: "archive", label: "Archive", icon: Archive },
@@ -478,6 +481,10 @@ export function SettingsDialog() {
                 {TOOL_TOGGLES.map((tool) => (
                   <ToolToggleRow key={tool.key} tool={tool} />
                 ))}
+              </TabsContent>
+
+              <TabsContent value="library" className="mt-0 space-y-6 focus-visible:ring-0 focus-visible:ring-offset-0">
+                <LibraryTab />
               </TabsContent>
 
               <TabsContent value="mcp" className="mt-0 focus-visible:ring-0 focus-visible:ring-offset-0">

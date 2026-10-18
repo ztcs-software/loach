@@ -63,6 +63,7 @@ import { formatProviderError } from "@/lib/providerErrors";
 import { getPersona } from "@/lib/personas";
 import { getTone } from "@/lib/tones";
 import { applyTemporalAwareness } from "@/lib/temporal";
+import { resolveSources } from "@/lib/sources";
 import {
   getCachedSpaceContext,
   setCachedSpaceContext,
@@ -85,12 +86,14 @@ import {
   type MessageMetrics,
   type ProviderId,
   type Session,
+  type SpaceContext,
   type ToolApprovalDecision,
   type ToolCallRecord,
 } from "@/types";
 import { useSettingsStore } from "./settingsStore";
 import { useSpaceStore } from "./spaceStore";
 import { useUIStore } from "./uiStore";
+import { useLibraryStore } from "./libraryStore";
 import { useModelsStore } from "./modelsStore";
 import { getLivePullFor, pullPercent } from "@/lib/usePullRuns";
 
@@ -752,7 +755,7 @@ async function buildTaskRequest(
   history: Message[],
   triggerContent: string,
   triggerImages: string[],
-): Promise<QueueTask["request"]> {
+): Promise<{ request: QueueTask["request"]; preToolCalls: ToolCallRecord[] }> {
   const settings = useSettingsStore.getState();
   const baseUrl =
     session.provider === "ollama"
@@ -766,7 +769,45 @@ async function buildTaskRequest(
   );
 
   let effectiveSystemPrompt: string | null = fallbackPrompt || null;
-  const spaceImages: string[] = [];
+
+  // Serve the space context from the per-space cache when warm, so repeat
+  // sends in a Space don't re-ship every reference file across IPC. The
+  // cache is invalidated by every spaceStore mutation that can change a
+  // space's instructions / files / memories (see spaceContextCache.ts).
+  let spaceCtx: SpaceContext | null = null;
+  let spaceCtxError: unknown = null;
+  if (session.space_id) {
+    try {
+      spaceCtx = getCachedSpaceContext(session.space_id) ?? null;
+      if (!spaceCtx) {
+        spaceCtx = await getSpaceContext(session.space_id);
+        setCachedSpaceContext(session.space_id, spaceCtx);
+      }
+    } catch (e) {
+      spaceCtxError = e;
+    }
+  }
+
+  // Space uploads and Library sources (the Space's and the chat's own), as
+  // full text for the system prompt or excerpts for this turn. A failure
+  // here must not block the send — the chat goes out without them.
+  let sources: Awaited<ReturnType<typeof resolveSources>> = {
+    systemBlock: "",
+    userBlock: "",
+    images: [],
+    record: null,
+  };
+  try {
+    sources = await resolveSources({
+      session,
+      spaceCtx,
+      history,
+      trigger: triggerContent,
+      numCtx: params.num_ctx ?? DEFAULT_PARAMS.num_ctx ?? 8192,
+    });
+  } catch (e) {
+    logger.warn("Failed to resolve sources", e);
+  }
 
   // Global memory rides along in every chat that goes through this store
   // (Private Chat has its own prompt path and never sees it). Gated on the
@@ -788,75 +829,53 @@ async function buildTaskRequest(
     }
   }
 
-  if (session.space_id) {
-    try {
-      // Serve the space context from the per-space cache when warm, so repeat
-      // sends in a Space don't re-ship every reference file across IPC. The
-      // cache is invalidated by every spaceStore mutation that can change a
-      // space's instructions / files / memories (see spaceContextCache.ts).
-      let ctx = getCachedSpaceContext(session.space_id);
-      if (!ctx) {
-        ctx = await getSpaceContext(session.space_id);
-        setCachedSpaceContext(session.space_id, ctx);
-      }
-      const spaceInstructions = ctx.space.instructions.trim();
-      let filesBlock = "";
-      const textFiles = ctx.files.filter((f) => f.kind === "text");
-      if (textFiles.length > 0) {
-        filesBlock = "--- Space reference files ---\n";
-        for (const f of textFiles) {
-          filesBlock += `\nFile: \`${f.name}\`\n\`\`\`\n${f.data}\n\`\`\`\n`;
-        }
-      }
-      for (const f of ctx.files) {
-        if (f.kind === "image") spaceImages.push(f.data);
-      }
-      let memoryBlock = "";
-      // Same cap as the extractor sees, so every fact in the prompt is one
-      // the extractor can still correct or retire.
-      const promptMemories = selectMemoriesForPrompt(ctx.memories);
-      if (promptMemories.length > 0) {
-        memoryBlock = "--- Space memory ---\n";
-        memoryBlock +=
-          "Facts to remember about the user across chats in this space" +
-          (globalBlock ? " (these win over global memory when they conflict)" : "") +
-          ":\n";
-        for (const m of promptMemories) {
-          memoryBlock += `- ${m.content}\n`;
-        }
-      }
-      useSpaceStore.setState((s) => ({
-        spaceMemories: { ...s.spaceMemories, [session.space_id!]: ctx.memories },
-      }));
-      // Space instructions replace the per-chat prompt, but a compaction
-      // summary parked there stands in for the turns `chatHistory` no longer
-      // sends — `baseSystemPrompt` keeps it, or the model sees neither the
-      // summary nor them.
-      const base = baseSystemPrompt(
-        session.system_prompt,
-        settings.global_system_prompt,
-        spaceInstructions,
-      );
-      const parts: string[] = [];
-      if (base) parts.push(base);
-      if (globalBlock) parts.push(globalBlock);
-      if (memoryBlock) parts.push(memoryBlock);
-      if (filesBlock) parts.push(filesBlock);
-      effectiveSystemPrompt = parts.length ? parts.join("\n\n") : null;
-    } catch (e) {
-      logger.warn("Failed to load space context", e);
-      // This turn goes out without the Space's own instructions and memory,
-      // but the global facts don't depend on them and still apply.
-      if (globalBlock) {
-        effectiveSystemPrompt = fallbackPrompt
-          ? `${fallbackPrompt}\n\n${globalBlock}`
-          : globalBlock;
+  if (session.space_id && spaceCtx) {
+    const ctx = spaceCtx;
+    const spaceInstructions = ctx.space.instructions.trim();
+    let memoryBlock = "";
+    // Same cap as the extractor sees, so every fact in the prompt is one
+    // the extractor can still correct or retire.
+    const promptMemories = selectMemoriesForPrompt(ctx.memories);
+    if (promptMemories.length > 0) {
+      memoryBlock = "--- Space memory ---\n";
+      memoryBlock +=
+        "Facts to remember about the user across chats in this space" +
+        (globalBlock ? " (these win over global memory when they conflict)" : "") +
+        ":\n";
+      for (const m of promptMemories) {
+        memoryBlock += `- ${m.content}\n`;
       }
     }
-  } else if (globalBlock) {
-    effectiveSystemPrompt = fallbackPrompt
-      ? `${fallbackPrompt}\n\n${globalBlock}`
-      : globalBlock;
+    useSpaceStore.setState((s) => ({
+      spaceMemories: { ...s.spaceMemories, [session.space_id!]: ctx.memories },
+    }));
+    // Space instructions replace the per-chat prompt, but a compaction
+    // summary parked there stands in for the turns `chatHistory` no longer
+    // sends — `baseSystemPrompt` keeps it, or the model sees neither the
+    // summary nor them.
+    const base = baseSystemPrompt(
+      session.system_prompt,
+      settings.global_system_prompt,
+      spaceInstructions,
+    );
+    const parts: string[] = [];
+    if (base) parts.push(base);
+    if (globalBlock) parts.push(globalBlock);
+    if (memoryBlock) parts.push(memoryBlock);
+    if (sources.systemBlock) parts.push(sources.systemBlock);
+    effectiveSystemPrompt = parts.length ? parts.join("\n\n") : null;
+  } else {
+    if (spaceCtxError) {
+      logger.warn("Failed to load space context", spaceCtxError);
+    }
+    // No Space — or its context failed to load, in which case this turn goes
+    // out without the Space's own instructions and memory, but the global
+    // facts and the chat's own sources don't depend on them and still apply.
+    const parts: string[] = [];
+    if (fallbackPrompt) parts.push(fallbackPrompt);
+    if (globalBlock) parts.push(globalBlock);
+    if (sources.systemBlock) parts.push(sources.systemBlock);
+    effectiveSystemPrompt = parts.length ? parts.join("\n\n") : null;
   }
 
   if (effectiveSystemPrompt) {
@@ -889,18 +908,24 @@ async function buildTaskRequest(
       : tone.systemPrompt;
   }
 
-  const chatMessages = chatHistory(history, triggerContent, [
+  // Retrieved excerpts ride on this turn only: they're picked for this
+  // message, and keeping them out of the system prompt leaves its cached
+  // prefix intact from one turn to the next.
+  const chatMessages = chatHistory(history, triggerContent + sources.userBlock, [
     ...triggerImages,
-    ...spaceImages,
+    ...sources.images,
   ]);
 
   return {
-    provider: session.provider,
-    model: session.model,
-    base_url: baseUrl,
-    system_prompt: effectiveSystemPrompt,
-    messages: chatMessages,
-    params,
+    request: {
+      provider: session.provider,
+      model: session.model,
+      base_url: baseUrl,
+      system_prompt: effectiveSystemPrompt,
+      messages: chatMessages,
+      params,
+    },
+    preToolCalls: sources.record ? [sources.record] : [],
   };
 }
 
@@ -1869,6 +1894,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (pendingPersonaId) {
       useUIStore.getState().setSessionPersona(session.id, pendingPersonaId);
     }
+    // Library sources picked on the welcome screen follow the same path.
+    const pendingSources = useLibraryStore.getState().consumePending();
+    if (pendingSources.itemIds.length > 0 || pendingSources.datasetIds.length > 0) {
+      try {
+        await useLibraryStore.getState().addSources("session", session.id, pendingSources);
+      } catch (e) {
+        logger.warn("couldn't attach the picked Library sources", e);
+      }
+    }
     // Warm the model-defaults cache for the session's model so the parameter
     // panel and the first send already see Modelfile values without having
     // to wait on the show_model round-trip. Fire-and-forget — failure here
@@ -2425,20 +2459,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // Drop the just-inserted user message from the ambient history; we'll
       // re-add it as the trailing chat message so `images` is attached.
       const trimmed = history.filter((m) => m.id !== userMsg.id);
-      const request = await buildTaskRequest(
+      const { request, preToolCalls: sourceRecords } = await buildTaskRequest(
         session,
         sessionId,
         trimmed,
         inlinedContent,
         images,
       );
+      const preToolCalls = [...fetchToolRecords, ...sourceRecords];
 
       const task: QueueTask = {
         id: `t_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
         sessionId,
         userMsgId: userMsg.id,
         request,
-        preToolCalls: fetchToolRecords.length > 0 ? fetchToolRecords : undefined,
+        preToolCalls: preToolCalls.length > 0 ? preToolCalls : undefined,
       };
 
       // 3. Dispatch. If nothing is running (or mid-start) globally, start
@@ -2526,7 +2561,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const history = (get().messages[sessionId] ?? []).filter(
       (m) => m.id !== userMsg.id,
     );
-    const request = await buildTaskRequest(
+    const { request, preToolCalls } = await buildTaskRequest(
       session,
       sessionId,
       history,
@@ -2539,6 +2574,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       sessionId,
       userMsgId: userMsg.id,
       request,
+      preToolCalls: preToolCalls.length > 0 ? preToolCalls : undefined,
       // The row we just deleted may have been pinned; `startTask` restores
       // the mark on its replacement rather than silently dropping it.
       carryPin: last.pinned_at != null,

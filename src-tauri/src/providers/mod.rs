@@ -418,7 +418,7 @@ fn stub_tool_message(m: &mut Value) {
 /// during connect. If DNS resolution itself fails we let the request
 /// proceed — `reqwest::send` will surface a more accurate error than we
 /// could synthesize here.
-pub(super) async fn refuse_link_local_host(base_url: &str) -> Result<(), String> {
+pub(crate) async fn refuse_link_local_host(base_url: &str) -> Result<(), String> {
     use std::net::IpAddr;
     let url = reqwest::Url::parse(base_url)
         .map_err(|e| format!("could not parse base URL: {e}"))?;

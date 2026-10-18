@@ -974,7 +974,7 @@ fn parse_args(s: &str) -> Value {
 /// Anything else — http:// to an external host — is treated as
 /// untrusted transport and we drop the auth header to avoid leaking the
 /// user's API key over cleartext.
-fn is_safe_for_bearer(base_url: &str) -> bool {
+pub(crate) fn is_safe_for_bearer(base_url: &str) -> bool {
     let Ok(url) = reqwest::Url::parse(base_url) else {
         return false;
     };

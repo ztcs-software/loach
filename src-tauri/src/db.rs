@@ -30,6 +30,8 @@ const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+pub mod library;
+
 /// Pragmas applied to BOTH the writer connection and every pooled reader.
 /// Skipped: `journal_mode = WAL` (persisted in the file header — only the
 /// writer needs to set it, readers inherit) and `foreign_keys` (only
@@ -89,6 +91,11 @@ pub struct Session {
     /// export shouldn't hand their path to your model.
     #[serde(default)]
     pub workspace_root: Option<String>,
+    /// How this chat's Library and Space sources reach the model: `"auto"`,
+    /// `"full"` or `"retrieval"`. Null means "inherit" — the Space's mode
+    /// for a chat in a Space, otherwise `"auto"`. See `src/lib/sources.ts`.
+    #[serde(default)]
+    pub retrieval_mode: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -132,12 +139,21 @@ pub struct Space {
     /// on (matching the behaviour an existing user would see post-migration).
     #[serde(default = "default_true")]
     pub memory_enabled: bool,
+    /// How the Space's sources reach the model: `"auto"` (full text while
+    /// they fit, retrieved excerpts once they don't), `"full"` or
+    /// `"retrieval"`. Defaults to `"auto"` on exports that predate it.
+    #[serde(default = "default_retrieval_mode")]
+    pub retrieval_mode: String,
     pub created_at: i64,
     pub updated_at: i64,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_retrieval_mode() -> String {
+    "auto".to_string()
 }
 
 /// One free-text fact persisted across chats in a Space. The extractor
@@ -182,6 +198,10 @@ pub struct SpaceFile {
     pub data: String,
     pub size: i64,
     pub position: i32,
+    /// `false` keeps the source in the Space but out of every chat's
+    /// context. Defaults to on for exports that predate the toggle.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
     pub created_at: i64,
 }
 
@@ -429,12 +449,18 @@ pub struct StorageStats {
     pub space_files: i64,
     pub snippets: i64,
     pub mcp_servers: i64,
+    #[serde(default)]
+    pub library_items: i64,
 
     /// Logical text bytes, by area. These ignore page overhead and indexes,
     /// so they sum to less than `db_bytes`.
     pub message_bytes: i64,
     pub attachment_bytes: i64,
     pub space_bytes: i64,
+    /// Library item bodies plus the retrieval index built over them and
+    /// over Space sources (chunk text + embeddings).
+    #[serde(default)]
+    pub library_bytes: i64,
     pub other_bytes: i64,
 }
 
@@ -910,6 +936,136 @@ impl Database {
             "#,
         )?;
 
+        // Library (v1.6): how sources reach the model, per Space and per chat
+        // (NULL on a chat = inherit), and the per-source on/off switch for a
+        // Space's own uploads. Existing rows land on "auto" / enabled, which
+        // is what every Space did before: inline everything that fits.
+        if !has_column(&conn, "spaces", "retrieval_mode")? {
+            conn.execute_batch(
+                "ALTER TABLE spaces ADD COLUMN retrieval_mode TEXT NOT NULL DEFAULT 'auto';",
+            )?;
+        }
+        if !has_column(&conn, "sessions", "retrieval_mode")? {
+            conn.execute_batch("ALTER TABLE sessions ADD COLUMN retrieval_mode TEXT;")?;
+        }
+        if !has_column(&conn, "space_files", "enabled")? {
+            conn.execute_batch(
+                "ALTER TABLE space_files ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1;",
+            )?;
+        }
+
+        // Library: items (texts, files, links) stored once, grouped into
+        // datasets (an item can sit in several), and linked — not copied —
+        // into Spaces and chats. A link row points at exactly one of an item
+        // or a dataset; the partial unique indexes stop the same thing being
+        // linked twice to one owner.
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS library_items (
+                id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                title TEXT NOT NULL,
+                mime TEXT NOT NULL DEFAULT '',
+                media TEXT NOT NULL DEFAULT 'text',
+                content TEXT NOT NULL,
+                size INTEGER NOT NULL DEFAULT 0,
+                url TEXT,
+                fetched_at INTEGER,
+                content_hash TEXT NOT NULL DEFAULT '',
+                truncated INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_library_items_hash
+                ON library_items(content_hash);
+            CREATE TABLE IF NOT EXISTS library_datasets (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS library_dataset_items (
+                dataset_id TEXT NOT NULL REFERENCES library_datasets(id) ON DELETE CASCADE,
+                item_id TEXT NOT NULL REFERENCES library_items(id) ON DELETE CASCADE,
+                position INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (dataset_id, item_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_library_dataset_items_item
+                ON library_dataset_items(item_id);
+            CREATE TABLE IF NOT EXISTS space_library_sources (
+                id TEXT PRIMARY KEY,
+                owner_id TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
+                item_id TEXT REFERENCES library_items(id) ON DELETE CASCADE,
+                dataset_id TEXT REFERENCES library_datasets(id) ON DELETE CASCADE,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                position INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_space_library_sources_item
+                ON space_library_sources(owner_id, item_id) WHERE item_id IS NOT NULL;
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_space_library_sources_dataset
+                ON space_library_sources(owner_id, dataset_id) WHERE dataset_id IS NOT NULL;
+            CREATE TABLE IF NOT EXISTS session_library_sources (
+                id TEXT PRIMARY KEY,
+                owner_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                item_id TEXT REFERENCES library_items(id) ON DELETE CASCADE,
+                dataset_id TEXT REFERENCES library_datasets(id) ON DELETE CASCADE,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                position INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_session_library_sources_item
+                ON session_library_sources(owner_id, item_id) WHERE item_id IS NOT NULL;
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_session_library_sources_dataset
+                ON session_library_sources(owner_id, dataset_id) WHERE dataset_id IS NOT NULL;
+            "#,
+        )?;
+
+        // Retrieval index over every text source — Library items
+        // (`doc_kind = 'library'`) and a Space's own uploads
+        // (`'space_file'`). Derived data: never exported, rebuilt by the
+        // indexer from the documents themselves. `rag_chunks_fts` is an
+        // external-content FTS5 index kept in step by triggers; `embedding`
+        // is a unit-length f32 vector (little-endian) from `embed_model`,
+        // NULL until the background indexer gets to it. The polymorphic
+        // `doc_id` can't carry a cascading FK, so the two delete triggers do
+        // that job — they also fire for rows removed by a Space's cascade.
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS rag_chunks (
+                id INTEGER PRIMARY KEY,
+                doc_kind TEXT NOT NULL,
+                doc_id TEXT NOT NULL,
+                seq INTEGER NOT NULL,
+                text TEXT NOT NULL,
+                embedding BLOB,
+                embed_model TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_rag_chunks_doc
+                ON rag_chunks(doc_kind, doc_id, seq);
+            CREATE VIRTUAL TABLE IF NOT EXISTS rag_chunks_fts USING fts5(
+                text,
+                content = 'rag_chunks',
+                content_rowid = 'id',
+                tokenize = 'unicode61 remove_diacritics 2'
+            );
+            CREATE TRIGGER IF NOT EXISTS rag_chunks_ai AFTER INSERT ON rag_chunks BEGIN
+                INSERT INTO rag_chunks_fts(rowid, text) VALUES (new.id, new.text);
+            END;
+            CREATE TRIGGER IF NOT EXISTS rag_chunks_ad AFTER DELETE ON rag_chunks BEGIN
+                INSERT INTO rag_chunks_fts(rag_chunks_fts, rowid, text)
+                    VALUES ('delete', old.id, old.text);
+            END;
+            CREATE TRIGGER IF NOT EXISTS library_items_rag_ad AFTER DELETE ON library_items BEGIN
+                DELETE FROM rag_chunks WHERE doc_kind = 'library' AND doc_id = old.id;
+            END;
+            CREATE TRIGGER IF NOT EXISTS space_files_rag_ad AFTER DELETE ON space_files BEGIN
+                DELETE FROM rag_chunks WHERE doc_kind = 'space_file' AND doc_id = old.id;
+            END;
+            "#,
+        )?;
+
         Ok(())
     }
 
@@ -918,7 +1074,7 @@ impl Database {
     pub fn list_sessions(&self) -> Result<Vec<Session>> {
         self.with_read(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, title, provider, model, system_prompt, params_json, space_id, pinned_at, archived_at, forked_from_session_id, label, folder_id, workspace_root, created_at, updated_at
+                "SELECT id, title, provider, model, system_prompt, params_json, space_id, pinned_at, archived_at, forked_from_session_id, label, folder_id, workspace_root, created_at, updated_at, retrieval_mode
                  FROM sessions ORDER BY updated_at DESC",
             )?;
             let rows = stmt
@@ -937,6 +1093,7 @@ impl Database {
                         label: r.get(10)?,
                         folder_id: r.get(11)?,
                         workspace_root: r.get(12)?,
+                        retrieval_mode: r.get(15)?,
                         created_at: r.get(13)?,
                         updated_at: r.get(14)?,
                     })
@@ -976,6 +1133,7 @@ impl Database {
             label: None,
             folder_id: None,
             workspace_root: None,
+            retrieval_mode: None,
             created_at: now,
             updated_at: now,
         })
@@ -1033,8 +1191,8 @@ impl Database {
         tx.execute(
             "INSERT INTO sessions (id, title, provider, model, system_prompt, params_json,
                                    space_id, pinned_at, archived_at, forked_from_session_id,
-                                   folder_id, workspace_root, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, ?8, ?9, ?10, ?11, ?11)",
+                                   folder_id, workspace_root, retrieval_mode, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, ?8, ?9, ?10, ?11, ?12, ?12)",
             params![
                 new_id,
                 source.title,
@@ -1046,8 +1204,17 @@ impl Database {
                 source.id,
                 source.folder_id,
                 source.workspace_root,
+                source.retrieval_mode,
                 now,
             ],
+        )?;
+        // The chat's Library sources come along too: a branch continues the
+        // same conversation, so it should be looking at the same material.
+        tx.execute(
+            "INSERT INTO session_library_sources (id, owner_id, item_id, dataset_id, enabled, position, created_at)
+             SELECT lower(hex(randomblob(16))), ?1, item_id, dataset_id, enabled, position, ?2
+             FROM session_library_sources WHERE owner_id = ?3",
+            params![new_id, now, source.id],
         )?;
 
         // One prepare for the whole copy — forking a long chat replays every
@@ -1104,6 +1271,7 @@ impl Database {
             // of work, and the whole point of branching a coding chat is to
             // try something else against the same project.
             workspace_root: source.workspace_root,
+            retrieval_mode: source.retrieval_mode,
             created_at: now,
             updated_at: now,
         })
@@ -1250,7 +1418,7 @@ impl Database {
     pub fn get_session(&self, id: &str) -> Result<Option<Session>> {
         self.with_read(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, title, provider, model, system_prompt, params_json, space_id, pinned_at, archived_at, forked_from_session_id, label, folder_id, workspace_root, created_at, updated_at
+                "SELECT id, title, provider, model, system_prompt, params_json, space_id, pinned_at, archived_at, forked_from_session_id, label, folder_id, workspace_root, created_at, updated_at, retrieval_mode
                  FROM sessions WHERE id = ?1",
             )?;
             let mut rows = stmt.query(params![id])?;
@@ -1269,6 +1437,7 @@ impl Database {
                     label: r.get(10)?,
                     folder_id: r.get(11)?,
                     workspace_root: r.get(12)?,
+                    retrieval_mode: r.get(15)?,
                     created_at: r.get(13)?,
                     updated_at: r.get(14)?,
                 }))
@@ -1514,6 +1683,7 @@ impl Database {
                 space_files: scalar("SELECT COUNT(*) FROM space_files")?,
                 snippets: scalar("SELECT COUNT(*) FROM snippets")?,
                 mcp_servers: scalar("SELECT COUNT(*) FROM mcp_servers")?,
+                library_items: scalar("SELECT COUNT(*) FROM library_items")?,
 
                 message_bytes: scalar(
                     "SELECT COALESCE(SUM(LENGTH(CAST(content AS BLOB))), 0) FROM messages",
@@ -1533,6 +1703,12 @@ impl Database {
                 )? + scalar(
                     "SELECT COALESCE(SUM(LENGTH(CAST(description AS BLOB))
                                        + LENGTH(CAST(instructions AS BLOB))), 0) FROM spaces",
+                )?,
+                library_bytes: scalar(
+                    "SELECT COALESCE(SUM(LENGTH(CAST(content AS BLOB))), 0) FROM library_items",
+                )? + scalar(
+                    "SELECT COALESCE(SUM(LENGTH(CAST(text AS BLOB))
+                                       + COALESCE(LENGTH(embedding), 0)), 0) FROM rag_chunks",
                 )?,
                 // Everything else worth counting: prompt text, settings, and
                 // the per-chat metadata. Deliberately not exhaustive over
@@ -1848,7 +2024,7 @@ impl Database {
             let mut stmt = conn.prepare(
                 "SELECT id, name, description, instructions,
                         default_provider, default_model, default_params_json,
-                        memory_enabled, created_at, updated_at
+                        memory_enabled, created_at, updated_at, retrieval_mode
                  FROM spaces ORDER BY updated_at DESC",
             )?;
             let rows = stmt
@@ -1862,6 +2038,7 @@ impl Database {
                         default_model: r.get(5)?,
                         default_params_json: r.get(6)?,
                         memory_enabled: r.get::<_, i64>(7)? != 0,
+                        retrieval_mode: r.get(10)?,
                         created_at: r.get(8)?,
                         updated_at: r.get(9)?,
                     })
@@ -1876,7 +2053,7 @@ impl Database {
             let mut stmt = conn.prepare(
                 "SELECT id, name, description, instructions,
                         default_provider, default_model, default_params_json,
-                        memory_enabled, created_at, updated_at
+                        memory_enabled, created_at, updated_at, retrieval_mode
                  FROM spaces WHERE id = ?1",
             )?;
             let mut rows = stmt.query(params![id])?;
@@ -1890,6 +2067,7 @@ impl Database {
                     default_model: r.get(5)?,
                     default_params_json: r.get(6)?,
                     memory_enabled: r.get::<_, i64>(7)? != 0,
+                    retrieval_mode: r.get(10)?,
                     created_at: r.get(8)?,
                     updated_at: r.get(9)?,
                 }))
@@ -1922,6 +2100,7 @@ impl Database {
             default_model: None,
             default_params_json: None,
             memory_enabled: true,
+            retrieval_mode: default_retrieval_mode(),
             created_at: now,
             updated_at: now,
         })
@@ -1981,7 +2160,7 @@ impl Database {
     pub fn list_space_files(&self, space_id: &str) -> Result<Vec<SpaceFile>> {
         self.with_read(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, space_id, name, mime, kind, data, size, position, created_at
+                "SELECT id, space_id, name, mime, kind, data, size, position, created_at, enabled
                  FROM space_files WHERE space_id = ?1 ORDER BY position ASC",
             )?;
             let rows = stmt
@@ -1995,6 +2174,7 @@ impl Database {
                         data: r.get(5)?,
                         size: r.get(6)?,
                         position: r.get(7)?,
+                        enabled: r.get::<_, i64>(9)? != 0,
                         created_at: r.get(8)?,
                     })
                 })?
@@ -2019,12 +2199,19 @@ impl Database {
     ) -> Result<SpaceFile> {
         let id = Uuid::new_v4().to_string();
         let now = Utc::now().timestamp_millis();
-        let conn = self.conn.lock();
-        conn.execute(
+        let mut conn = self.conn.lock();
+        // Row and retrieval chunks in one transaction, so a text source is
+        // keyword-searchable the moment it exists.
+        let tx = conn.transaction()?;
+        tx.execute(
             "INSERT INTO space_files (id, space_id, name, mime, kind, data, size, position, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![id, space_id, name, mime, kind, data, size, position, now],
         )?;
+        if kind == "text" {
+            library::replace_chunks(&tx, library::DOC_SPACE_FILE, &id, data)?;
+        }
+        tx.commit()?;
         Ok(SpaceFile {
             id,
             space_id: space_id.to_string(),
@@ -2034,8 +2221,43 @@ impl Database {
             data: data.to_string(),
             size,
             position,
+            enabled: true,
             created_at: now,
         })
+    }
+
+    /// Switch one of a Space's own uploads in or out of its chats' context
+    /// without removing it.
+    pub fn set_space_file_enabled(&self, file_id: &str, enabled: bool) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "UPDATE space_files SET enabled = ?1 WHERE id = ?2",
+            params![enabled as i64, file_id],
+        )?;
+        Ok(())
+    }
+
+    /// Set how a Space's sources reach the model (`auto` / `full` /
+    /// `retrieval`). Validated by the caller.
+    pub fn set_space_retrieval_mode(&self, id: &str, mode: &str) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "UPDATE spaces SET retrieval_mode = ?1 WHERE id = ?2",
+            params![mode, id],
+        )?;
+        Ok(())
+    }
+
+    /// Set a chat's own retrieval mode, or `None` to inherit its Space's.
+    /// Leaves `updated_at` alone, like the label: it's a setting, not
+    /// activity.
+    pub fn set_session_retrieval_mode(&self, id: &str, mode: Option<&str>) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "UPDATE sessions SET retrieval_mode = ?1 WHERE id = ?2",
+            params![mode, id],
+        )?;
+        Ok(())
     }
 
     pub fn remove_space_file(&self, file_id: &str) -> Result<()> {
@@ -2656,7 +2878,7 @@ impl Database {
     pub fn all_space_files(&self) -> Result<Vec<SpaceFile>> {
         let conn = self.read_pool.get().context("acquire read connection")?;
         let mut stmt = conn.prepare(
-            "SELECT id, space_id, name, mime, kind, data, size, position, created_at
+            "SELECT id, space_id, name, mime, kind, data, size, position, created_at, enabled
              FROM space_files ORDER BY space_id, position",
         )?;
         let rows = stmt
@@ -2670,6 +2892,7 @@ impl Database {
                     data: r.get(5)?,
                     size: r.get(6)?,
                     position: r.get(7)?,
+                    enabled: r.get::<_, i64>(9)? != 0,
                     created_at: r.get(8)?,
                 })
             })?
@@ -2752,6 +2975,10 @@ impl Database {
                 snippet_fill_values: self.all_snippet_fill_values()?,
                 mcp_servers,
                 settings: self.all_settings()?,
+                library_items: self.all_library_items()?,
+                library_datasets: self.list_library_datasets()?,
+                space_library_sources: self.all_library_sources(library::SourceOwner::Space)?,
+                session_library_sources: self.all_library_sources(library::SourceOwner::Session)?,
             },
         })
     }
@@ -2788,6 +3015,12 @@ impl Database {
         // toggled back on mid-transaction. `snippet_variables` is independent.
         tx.execute_batch(
             r#"
+            DELETE FROM rag_chunks;
+            DELETE FROM session_library_sources;
+            DELETE FROM space_library_sources;
+            DELETE FROM library_dataset_items;
+            DELETE FROM library_datasets;
+            DELETE FROM library_items;
             DELETE FROM messages;
             DELETE FROM space_files;
             DELETE FROM space_memories;
@@ -2827,8 +3060,8 @@ impl Database {
             tx.execute(
                 "INSERT INTO sessions (id, title, provider, model, system_prompt, params_json,
                                        space_id, pinned_at, archived_at, forked_from_session_id,
-                                       label, folder_id, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                                       label, folder_id, created_at, updated_at, retrieval_mode)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                 params![
                     s.id,
                     s.title,
@@ -2844,6 +3077,7 @@ impl Database {
                     s.folder_id,
                     s.created_at,
                     s.updated_at,
+                    s.retrieval_mode,
                 ],
             )?;
         }
@@ -2882,8 +3116,8 @@ impl Database {
                 "INSERT INTO spaces (id, name, description, instructions,
                                      default_provider, default_model,
                                      default_params_json, memory_enabled,
-                                     created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                                     created_at, updated_at, retrieval_mode)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
                     sp.id,
                     sp.name,
@@ -2895,6 +3129,7 @@ impl Database {
                     if sp.memory_enabled { 1_i64 } else { 0_i64 },
                     sp.created_at,
                     sp.updated_at,
+                    sp.retrieval_mode,
                 ],
             )?;
         }
@@ -2934,8 +3169,8 @@ impl Database {
 
         for f in &d.space_files {
             tx.execute(
-                "INSERT INTO space_files (id, space_id, name, mime, kind, data, size, position, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                "INSERT INTO space_files (id, space_id, name, mime, kind, data, size, position, created_at, enabled)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 params![
                     f.id,
                     f.space_id,
@@ -2946,6 +3181,7 @@ impl Database {
                     f.size,
                     f.position,
                     f.created_at,
+                    f.enabled as i64,
                 ],
             )?;
         }
@@ -3021,6 +3257,12 @@ impl Database {
             )?;
         }
 
+        // Library rows. The retrieval index (`rag_chunks`) isn't part of a
+        // snapshot — the indexer rebuilds it from these bodies after the
+        // restore, so an export never carries embeddings from a model the
+        // importing machine may not even have.
+        library::restore_library(&tx, d)?;
+
         let stats = ImportStats {
             sessions: d.sessions.len(),
             folders: d.folders.len(),
@@ -3034,6 +3276,8 @@ impl Database {
             snippet_fill_values: d.snippet_fill_values.len(),
             mcp_servers: d.mcp_servers.len(),
             settings: d.settings.len(),
+            library_items: d.library_items.len(),
+            library_datasets: d.library_datasets.len(),
         };
 
         tx.commit()?;
@@ -3092,6 +3336,12 @@ impl Database {
         // resurfaced on the next snippet run.
         tx.execute_batch(
             r#"
+            DELETE FROM rag_chunks;
+            DELETE FROM session_library_sources;
+            DELETE FROM space_library_sources;
+            DELETE FROM library_dataset_items;
+            DELETE FROM library_datasets;
+            DELETE FROM library_items;
             DELETE FROM messages;
             DELETE FROM space_files;
             DELETE FROM space_memories;
@@ -3133,6 +3383,12 @@ impl Database {
         // does land back at zero rows.
         tx.execute_batch(
             r#"
+            DELETE FROM rag_chunks;
+            DELETE FROM session_library_sources;
+            DELETE FROM space_library_sources;
+            DELETE FROM library_dataset_items;
+            DELETE FROM library_datasets;
+            DELETE FROM library_items;
             DELETE FROM messages;
             DELETE FROM space_files;
             DELETE FROM space_memories;
@@ -3191,6 +3447,19 @@ pub struct SnapshotData {
     /// Key/value settings as stored in the `settings` table. A plain list
     /// (not a map) so round-trip order is stable.
     pub settings: Vec<(String, String)>,
+    /// Library items with their full bodies. Empty on exports that predate
+    /// the Library.
+    #[serde(default)]
+    pub library_items: Vec<library::LibraryItem>,
+    /// Datasets, each carrying its ordered member ids.
+    #[serde(default)]
+    pub library_datasets: Vec<library::LibraryDataset>,
+    /// Library items / datasets linked into Spaces.
+    #[serde(default)]
+    pub space_library_sources: Vec<library::LibrarySource>,
+    /// Library items / datasets linked into chats.
+    #[serde(default)]
+    pub session_library_sources: Vec<library::LibrarySource>,
 }
 
 /// Row-count breakdown returned after a successful import.
@@ -3208,6 +3477,8 @@ pub struct ImportStats {
     pub snippet_fill_values: usize,
     pub mcp_servers: usize,
     pub settings: usize,
+    pub library_items: usize,
+    pub library_datasets: usize,
 }
 
 /// How much text `search_messages` keeps around a hit, in characters: the

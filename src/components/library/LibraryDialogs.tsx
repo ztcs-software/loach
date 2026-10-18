@@ -1,0 +1,651 @@
+import { useEffect, useMemo, useState } from "react";
+import {
+  ExternalLink,
+  Loader2,
+  Pencil,
+  Plus,
+  RefreshCw,
+  Trash2,
+} from "lucide-react";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import { Markdown } from "@/components/Markdown";
+import { useConfirm } from "@/components/ConfirmDialog";
+import { libraryUsage, openExternal } from "@/lib/tauri";
+import { cn, formatBytes, relativeTime } from "@/lib/utils";
+import { safeImageMime } from "@/lib/files";
+import { useLibraryStore } from "@/stores/libraryStore";
+import { useToastStore } from "@/stores/toastStore";
+import type { LibraryItem } from "@/types";
+import {
+  DatasetIcon,
+  IndexBadge,
+  ItemIcon,
+  itemTokens,
+  tokensLabel,
+  typeLabel,
+} from "./libraryUi";
+
+// ---------------------------------------------------------------------------
+// Delete — one flow for every surface, naming what links to the items.
+// ---------------------------------------------------------------------------
+
+/** Delete Library items after a confirmation that says where they're used. */
+export function useDeleteLibraryItems() {
+  const { confirm } = useConfirm();
+  const deleteItems = useLibraryStore((s) => s.deleteItems);
+  return async (ids: string[]) => {
+    if (ids.length === 0) return false;
+    const { items, datasets } = useLibraryStore.getState();
+    const names = items.filter((i) => ids.includes(i.id)).map((i) => i.title);
+    const inDatasets = datasets.filter((d) => d.item_ids.some((id) => ids.includes(id)));
+    let usage = { spaces: [] as string[], chats: 0 };
+    try {
+      usage = await libraryUsage({ itemIds: ids, datasetIds: [] });
+    } catch {
+      /* the confirmation still works without the usage line */
+    }
+    const where: string[] = [];
+    if (inDatasets.length) where.push(`${inDatasets.length} dataset${inDatasets.length === 1 ? "" : "s"}`);
+    if (usage.spaces.length) where.push(`Space${usage.spaces.length === 1 ? "" : "s"} ${usage.spaces.map((s) => `“${s}”`).join(", ")}`);
+    if (usage.chats) where.push(`${usage.chats} chat${usage.chats === 1 ? "" : "s"}`);
+    const ok = await confirm({
+      title: ids.length === 1 ? `Delete “${names[0] ?? "item"}”?` : `Delete ${ids.length} items?`,
+      body:
+        (where.length ? `Used in ${where.join(", ")} — it will be removed from them too. ` : "") +
+        "This can't be undone.",
+      confirmLabel: "Delete",
+      destructive: true,
+    });
+    return ok && (await deleteItems(ids));
+  };
+}
+
+/** Delete a dataset (its items stay in the Library). */
+export function useDeleteDataset() {
+  const { confirm } = useConfirm();
+  const deleteDataset = useLibraryStore((s) => s.deleteDataset);
+  return async (id: string) => {
+    const ds = useLibraryStore.getState().datasets.find((d) => d.id === id);
+    if (!ds) return false;
+    let usage = { spaces: [] as string[], chats: 0 };
+    try {
+      usage = await libraryUsage({ itemIds: [], datasetIds: [id] });
+    } catch {
+      /* ignore */
+    }
+    const where: string[] = [];
+    if (usage.spaces.length) where.push(`Space${usage.spaces.length === 1 ? "" : "s"} ${usage.spaces.map((s) => `“${s}”`).join(", ")}`);
+    if (usage.chats) where.push(`${usage.chats} chat${usage.chats === 1 ? "" : "s"}`);
+    const ok = await confirm({
+      title: `Delete dataset “${ds.name}”?`,
+      body:
+        "Its items stay in your Library. " +
+        (where.length ? `It's linked to ${where.join(" and ")}, which will lose it.` : ""),
+      confirmLabel: "Delete dataset",
+      destructive: true,
+    });
+    if (ok) await deleteDataset(id);
+    return ok;
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Text editor (global — opened from the Library or an item preview)
+// ---------------------------------------------------------------------------
+
+export function TextEditorDialog() {
+  const target = useLibraryStore((s) => s.editTextTarget);
+  const close = () => useLibraryStore.getState().openTextEditor(null);
+  const createText = useLibraryStore((s) => s.createText);
+  const updateText = useLibraryStore((s) => s.updateText);
+  const getContents = useLibraryStore((s) => s.getContents);
+  const item = useLibraryStore((s) =>
+    target && target !== "new" ? s.items.find((i) => i.id === target) : undefined,
+  );
+  const [title, setTitle] = useState("");
+  const [body, setBody] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setError(null);
+    if (!target) return;
+    if (target === "new") {
+      setTitle("");
+      setBody("");
+      return;
+    }
+    setTitle(item?.title ?? "");
+    setLoading(true);
+    getContents([target])
+      .then(([full]) => setBody(full?.content ?? ""))
+      .catch((e) => setError(e instanceof Error ? e.message : String(e)))
+      .finally(() => setLoading(false));
+    // Re-seed only when a different item opens.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [target]);
+
+  const save = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      if (target === "new") await createText(title.trim(), body);
+      else if (target) await updateText(target, title.trim(), body);
+      close();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const tokens = Math.ceil(body.length / 4);
+  return (
+    <Dialog open={!!target} onOpenChange={(o) => !o && close()}>
+      <DialogContent className="max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>{target === "new" ? "New text" : "Edit text"}</DialogTitle>
+          <DialogDescription>
+            Notes, specs, guidelines — anything you want models to know. Markdown works.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="mt-1 space-y-3">
+          <Input
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            placeholder="Title — e.g. Brand voice guide"
+            maxLength={120}
+            autoFocus
+          />
+          <div className="relative">
+            <Textarea
+              value={body}
+              onChange={(e) => setBody(e.target.value)}
+              disabled={loading}
+              placeholder="Write or paste the text…"
+              className="min-h-[340px] rounded-2xl border-foreground/10 bg-foreground/[0.05] text-[13.5px] leading-relaxed"
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && title.trim() && body.trim()) {
+                  e.preventDefault();
+                  void save();
+                }
+              }}
+            />
+            {loading && (
+              <Loader2 className="absolute right-3 top-3 h-4 w-4 animate-spin text-foreground/45" />
+            )}
+          </div>
+          {error && <p className="text-xs text-destructive">{error}</p>}
+        </div>
+        <div className="mt-1 flex items-center justify-between gap-2">
+          <span className="text-xs tabular-nums text-foreground/45">
+            {body.length.toLocaleString()} characters · {tokensLabel(tokens)}
+          </span>
+          <div className="flex items-center gap-2">
+            <Button variant="outline" onClick={close} className="rounded-lg">
+              Cancel
+            </Button>
+            <Button
+              onClick={() => void save()}
+              disabled={saving || loading || !title.trim() || !body.trim()}
+              className="rounded-lg"
+            >
+              {saving ? "Saving…" : "Save"}
+            </Button>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Add link
+// ---------------------------------------------------------------------------
+
+export function AddLinkDialog({
+  open,
+  onOpenChange,
+  onAdded,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onAdded?: (id: string) => void;
+}) {
+  const addLink = useLibraryStore((s) => s.addLink);
+  const refreshLink = useLibraryStore((s) => s.refreshLink);
+  const items = useLibraryStore((s) => s.items);
+  const [url, setUrl] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (open) {
+      setUrl("");
+      setError(null);
+    }
+  }, [open]);
+
+  const normalized = useMemo(() => {
+    const raw = url.trim();
+    if (!raw) return null;
+    const withScheme = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+    try {
+      const u = new URL(withScheme);
+      return u.hostname.includes(".") ? u.toString() : null;
+    } catch {
+      return null;
+    }
+  }, [url]);
+  const existing = normalized ? items.find((i) => i.kind === "link" && i.url === normalized) : undefined;
+
+  const submit = async () => {
+    if (!normalized) return;
+    setBusy(true);
+    setError(null);
+    try {
+      if (existing) {
+        await refreshLink(existing.id);
+        onAdded?.(existing.id);
+      } else {
+        const item = await addLink(normalized);
+        onAdded?.(item.id);
+        useToastStore.getState().push({ kind: "info", title: "Link added", body: item.title });
+      }
+      onOpenChange(false);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={(o) => !busy && onOpenChange(o)}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle>Add a link</DialogTitle>
+          <DialogDescription>
+            Loach fetches the page once and keeps its text. Refresh it whenever the page changes.
+          </DialogDescription>
+        </DialogHeader>
+        <form
+          className="mt-1 space-y-3"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void submit();
+          }}
+        >
+          <Input
+            value={url}
+            onChange={(e) => setUrl(e.target.value)}
+            placeholder="https://example.com/article"
+            autoFocus
+            inputMode="url"
+            spellCheck={false}
+          />
+          {existing && (
+            <p className="text-xs text-foreground/55">
+              Already in your Library as “{existing.title}” — adding it again refreshes that copy.
+            </p>
+          )}
+          {error && <p className="text-xs text-destructive">{error}</p>}
+          <div className="flex items-center justify-end gap-2">
+            <Button type="button" variant="outline" onClick={() => onOpenChange(false)} className="rounded-lg">
+              Cancel
+            </Button>
+            <Button type="submit" disabled={!normalized || busy} className="gap-1.5 rounded-lg">
+              {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+              {busy ? "Fetching…" : existing ? "Refresh" : "Add link"}
+            </Button>
+          </div>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Dataset name / description
+// ---------------------------------------------------------------------------
+
+export function DatasetDialog({
+  open,
+  onOpenChange,
+  datasetId,
+  seedItemIds,
+  onSaved,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  /** Edit this dataset; omit to create one. */
+  datasetId?: string | null;
+  /** Items the new dataset starts with. */
+  seedItemIds?: string[];
+  onSaved?: (id: string) => void;
+}) {
+  const dataset = useLibraryStore((s) =>
+    datasetId ? s.datasets.find((d) => d.id === datasetId) : undefined,
+  );
+  const createDataset = useLibraryStore((s) => s.createDataset);
+  const updateDataset = useLibraryStore((s) => s.updateDataset);
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    setName(dataset?.name ?? "");
+    setDescription(dataset?.description ?? "");
+    setError(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  const save = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      if (dataset) {
+        await updateDataset(dataset.id, name.trim(), description.trim());
+        onSaved?.(dataset.id);
+      } else {
+        const ds = await createDataset(name.trim(), description.trim(), seedItemIds ?? []);
+        onSaved?.(ds.id);
+      }
+      onOpenChange(false);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const seeded = seedItemIds?.length ?? 0;
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle>{dataset ? "Edit dataset" : "New dataset"}</DialogTitle>
+          <DialogDescription>
+            {dataset
+              ? "Rename it or describe what it's for."
+              : seeded > 0
+                ? `A named collection starting with the ${seeded} selected item${seeded === 1 ? "" : "s"}. Attach it to a chat or Space in one go.`
+                : "A named collection of texts, files and links you can attach to a chat or Space in one go."}
+          </DialogDescription>
+        </DialogHeader>
+        <form
+          className="mt-1 space-y-3"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (name.trim()) void save();
+          }}
+        >
+          <Input
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="Name — e.g. Thesis research"
+            maxLength={80}
+            autoFocus
+          />
+          <Textarea
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            placeholder="What's in it (optional)"
+            className="min-h-[80px] rounded-2xl border-foreground/10 bg-foreground/[0.05]"
+          />
+          {error && <p className="text-xs text-destructive">{error}</p>}
+          <div className="flex items-center justify-end gap-2">
+            <Button type="button" variant="outline" onClick={() => onOpenChange(false)} className="rounded-lg">
+              Cancel
+            </Button>
+            <Button type="submit" disabled={saving || !name.trim()} className="rounded-lg">
+              {saving ? "Saving…" : dataset ? "Save" : "Create dataset"}
+            </Button>
+          </div>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Item preview (global) — shows exactly what a model would be given.
+// ---------------------------------------------------------------------------
+
+export function ItemPreviewDialog() {
+  const id = useLibraryStore((s) => s.previewItemId);
+  const item = useLibraryStore((s) => (id ? s.items.find((i) => i.id === id) : undefined));
+  const datasets = useLibraryStore((s) => s.datasets);
+  const openPreview = useLibraryStore((s) => s.openPreview);
+  const openTextEditor = useLibraryStore((s) => s.openTextEditor);
+  const getContents = useLibraryStore((s) => s.getContents);
+  const refreshLink = useLibraryStore((s) => s.refreshLink);
+  const rename = useLibraryStore((s) => s.rename);
+  const addToDataset = useLibraryStore((s) => s.addToDataset);
+  const deleteItems = useDeleteLibraryItems();
+  const [full, setFull] = useState<LibraryItem | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [renaming, setRenaming] = useState(false);
+  const [draftTitle, setDraftTitle] = useState("");
+
+  useEffect(() => {
+    setFull(null);
+    setRenaming(false);
+    if (!id) return;
+    setLoading(true);
+    getContents([id])
+      .then(([it]) => setFull(it ?? null))
+      .finally(() => setLoading(false));
+    // `updated_at` re-reads the body after a refresh or an edit.
+  }, [id, item?.updated_at, getContents]);
+
+  const close = () => openPreview(null);
+  if (!item) {
+    return (
+      <Dialog open={false}>
+        <DialogContent />
+      </Dialog>
+    );
+  }
+
+  const memberOf = datasets.filter((d) => d.item_ids.includes(item.id));
+  const others = datasets.filter((d) => !d.item_ids.includes(item.id));
+  const when =
+    item.kind === "link" && item.fetched_at
+      ? `Fetched ${relativeTime(item.fetched_at)}`
+      : `Added ${relativeTime(item.created_at)}`;
+
+  const commitRename = async () => {
+    const t = draftTitle.trim();
+    setRenaming(false);
+    if (t && t !== item.title) await rename(item.id, t);
+  };
+
+  return (
+    <Dialog open={!!id} onOpenChange={(o) => !o && close()}>
+      <DialogContent className="flex max-h-[86vh] max-w-3xl flex-col gap-0 p-0">
+        <DialogHeader className="border-b border-foreground/[0.07] px-6 pb-4 pt-6 pr-14">
+          <div className="flex items-start gap-3">
+            <ItemIcon item={item} />
+            <div className="min-w-0 flex-1">
+              {renaming ? (
+                <Input
+                  value={draftTitle}
+                  onChange={(e) => setDraftTitle(e.target.value)}
+                  onBlur={() => void commitRename()}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") void commitRename();
+                    if (e.key === "Escape") {
+                      e.stopPropagation();
+                      setRenaming(false);
+                    }
+                  }}
+                  autoFocus
+                  className="h-8"
+                />
+              ) : (
+                <DialogTitle className="group flex items-center gap-2 text-base leading-snug">
+                  <span className="min-w-0 [overflow-wrap:anywhere]">{item.title}</span>
+                  <button
+                    type="button"
+                    aria-label="Rename"
+                    onClick={() => {
+                      setDraftTitle(item.title);
+                      setRenaming(true);
+                    }}
+                    className="rounded-md p-1 text-foreground/40 opacity-0 transition-opacity hover:bg-foreground/10 hover:text-foreground group-hover:opacity-100 focus-visible:opacity-100"
+                  >
+                    <Pencil className="h-3.5 w-3.5" />
+                  </button>
+                </DialogTitle>
+              )}
+              <DialogDescription className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
+                <span>{typeLabel(item)}</span>
+                <span aria-hidden>·</span>
+                <span>{formatBytes(item.size)}</span>
+                {item.media === "text" && (
+                  <>
+                    <span aria-hidden>·</span>
+                    <span>{tokensLabel(itemTokens(item))}</span>
+                  </>
+                )}
+                <span aria-hidden>·</span>
+                <span title={new Date(item.fetched_at ?? item.created_at).toLocaleString()}>{when}</span>
+                <IndexBadge item={item} />
+              </DialogDescription>
+              {item.url && (
+                <button
+                  type="button"
+                  onClick={() => void openExternal(item.url!)}
+                  className="mt-1 inline-flex max-w-full items-center gap-1 truncate text-xs text-foreground/55 underline-offset-2 hover:text-foreground hover:underline"
+                >
+                  <span className="truncate">{item.url}</span>
+                  <ExternalLink className="h-3 w-3 shrink-0" />
+                </button>
+              )}
+            </div>
+          </div>
+        </DialogHeader>
+
+        <div className="min-h-[200px] flex-1 overflow-y-auto px-6 py-5">
+          {loading && !full ? (
+            <div className="flex h-40 items-center justify-center text-foreground/45">
+              <Loader2 className="h-5 w-5 animate-spin" />
+            </div>
+          ) : !full ? (
+            <p className="text-sm text-foreground/55">Couldn't load this item.</p>
+          ) : item.media === "image" ? (
+            <img
+              src={`data:${safeImageMime(item.mime)};base64,${full.content}`}
+              alt={item.title}
+              className="mx-auto max-h-[60vh] rounded-xl object-contain"
+            />
+          ) : item.kind === "text" ? (
+            <Markdown content={full.content} className="text-[14px]" />
+          ) : (
+            <pre className="whitespace-pre-wrap break-words font-sans text-[13px] leading-relaxed text-foreground/80">
+              {full.content}
+            </pre>
+          )}
+        </div>
+
+        <footer className="flex flex-wrap items-center justify-between gap-3 border-t border-foreground/[0.07] px-6 py-3.5">
+          <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+            {memberOf.map((d) => (
+              <span
+                key={d.id}
+                className="inline-flex items-center gap-1 rounded-full bg-violet-500/10 px-2 py-0.5 text-[11px] text-violet-700 dark:text-violet-300"
+              >
+                {d.name}
+              </span>
+            ))}
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <button
+                  type="button"
+                  className="inline-flex items-center gap-1 rounded-full border border-dashed border-foreground/15 px-2 py-0.5 text-[11px] text-foreground/55 transition-colors hover:border-foreground/30 hover:text-foreground"
+                >
+                  <Plus className="h-3 w-3" />
+                  Add to dataset
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="max-h-72 min-w-[200px] overflow-y-auto">
+                <DropdownMenuLabel className="text-xs text-foreground/50">Datasets</DropdownMenuLabel>
+                {others.length === 0 && (
+                  <DropdownMenuItem disabled>
+                    {datasets.length === 0 ? "No datasets yet" : "Already in all of them"}
+                  </DropdownMenuItem>
+                )}
+                {others.map((d) => (
+                  <DropdownMenuItem key={d.id} onSelect={() => void addToDataset(d.id, [item.id])}>
+                    <DatasetIcon size="sm" />
+                    <span className="truncate">{d.name}</span>
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="gap-1.5 text-foreground/65 hover:text-destructive"
+              onClick={() => void deleteItems([item.id]).then((ok) => ok && close())}
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+              Delete
+            </Button>
+            {item.kind === "link" && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="gap-1.5 rounded-lg"
+                disabled={refreshing}
+                onClick={() => {
+                  setRefreshing(true);
+                  void refreshLink(item.id).finally(() => setRefreshing(false));
+                }}
+              >
+                <RefreshCw className={cn("h-3.5 w-3.5", refreshing && "animate-spin")} />
+                Refresh
+              </Button>
+            )}
+            {item.kind === "text" && (
+              <Button
+                size="sm"
+                className="gap-1.5 rounded-lg"
+                onClick={() => {
+                  close();
+                  openTextEditor(item.id);
+                }}
+              >
+                <Pencil className="h-3.5 w-3.5" />
+                Edit
+              </Button>
+            )}
+          </div>
+        </footer>
+      </DialogContent>
+    </Dialog>
+  );
+}

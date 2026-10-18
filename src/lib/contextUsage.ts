@@ -19,6 +19,9 @@ export interface ContextUsageBreakdown {
   /** The global and Space memory lists the send prepends to the system
    *  prompt — up to a few thousand characters each. */
   memoriesTokens: number;
+  /** Space uploads and Library sources: their full text, or the retrieval
+   *  budget when they're searched instead (see `src/lib/sources.ts`). */
+  sourcesTokens: number;
   messagesTokens: number;
   /** Sum of attachment text bodies inlined into user messages. Already
    *  counted inside `messagesTokens`; surfaced separately so the popup
@@ -27,7 +30,7 @@ export interface ContextUsageBreakdown {
   messageCount: number;
   /** Total estimated tokens that will be sent to the model on the next
    *  request: `systemPromptTokens + projectInstructionsTokens +
-   *  memoriesTokens + messagesTokens`. */
+   *  memoriesTokens + sourcesTokens + messagesTokens`. */
   used: number;
   /** The effective context window for the next request — `params.num_ctx`
    *  with a sensible fallback when the field is missing. */
@@ -70,6 +73,7 @@ export function computeContextUsage(
   params: GenerationParams,
   projectInstructions: string | null = null,
   memories: string | null = null,
+  sourcesTokens = 0,
 ): ContextUsageBreakdown {
   const systemPromptTokens = estimateTokens(systemPrompt);
   const projectInstructionsTokens = estimateTokens(projectInstructions);
@@ -96,7 +100,8 @@ export function computeContextUsage(
 
   const messagesTokens = Math.ceil(messageChars / 4);
   const attachmentsTokens = Math.ceil(attachmentChars / 4);
-  const used = systemPromptTokens + projectInstructionsTokens + memoriesTokens + messagesTokens;
+  const used =
+    systemPromptTokens + projectInstructionsTokens + memoriesTokens + sourcesTokens + messagesTokens;
   const total =
     typeof params.num_ctx === "number" && params.num_ctx > 0
       ? params.num_ctx
@@ -107,6 +112,7 @@ export function computeContextUsage(
     systemPromptTokens,
     projectInstructionsTokens,
     memoriesTokens,
+    sourcesTokens,
     messagesTokens,
     attachmentsTokens,
     messageCount: nonSystemCount,

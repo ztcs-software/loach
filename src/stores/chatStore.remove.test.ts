@@ -50,6 +50,7 @@ function session(id: string, updatedAt: number, archived = false): Session {
     label: null,
     folder_id: null,
     workspace_root: null,
+    retrieval_mode: null,
     created_at: 0,
     updated_at: updatedAt,
   };

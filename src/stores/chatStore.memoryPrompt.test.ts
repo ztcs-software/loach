@@ -51,7 +51,7 @@ const session = {
 describe("memory in the system prompt", () => {
   it("keeps global memory in a Space chat whose Space context didn't load", async () => {
     useSettingsStore.setState({ global_memory_enabled: true, temporal_awareness: false });
-    const request = await __testing.buildTaskRequest(session, session.id, [], "hi", []);
+    const { request } = await __testing.buildTaskRequest(session, session.id, [], "hi", []);
     expect(request.system_prompt).toContain("Be brief.");
     expect(request.system_prompt).toContain("- Prefers metric units");
   });

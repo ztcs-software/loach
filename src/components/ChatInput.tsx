@@ -5,6 +5,7 @@ import {
   ClipboardPaste,
   FileUp,
   FolderOpen,
+  Library,
   Mic,
   Plus,
   Scissors,
@@ -42,6 +43,17 @@ import { logger } from "@/lib/logger";
 import { openSessionWorkspace } from "@/lib/tauri";
 import { ChipDivider, PersonaChip, ToneChip } from "./ComposerChip";
 import { WorkspaceNotice } from "./WorkspaceNotice";
+import { LibraryPicker, type LibrarySelection } from "./library/LibraryPicker";
+import {
+  ChatSourceChips,
+  chatNumCtx,
+  matchMentions,
+  MentionPalette,
+  mentionAt,
+  useChatSources,
+  type MentionEntry,
+} from "./library/ChatSources";
+import { useLibraryStore } from "@/stores/libraryStore";
 import {
   DEFAULT_PERSONA_ID,
   getPersona,
@@ -173,6 +185,37 @@ export function ChatInput({ centered = false }: ChatInputProps) {
   const [paletteIndex, setPaletteIndex] = useState(0);
   const [paletteDismissed, setPaletteDismissed] = useState(false);
   const [commandResult, setCommandResult] = useState<CommandResult | null>(null);
+  // Library: the "+ → From Library" picker, and the `#` mention list. The
+  // caret is tracked so the mention follows the token being typed, not the
+  // end of the text.
+  const [libraryPickerOpen, setLibraryPickerOpen] = useState(false);
+  const [caret, setCaret] = useState(0);
+  const [mentionIndex, setMentionIndex] = useState(0);
+  // Enter only picks a mention once the user has moved through the list
+  // with the arrows; until then it sends, so a message ending in `#tag`
+  // isn't swallowed by a Library match. Tab always picks.
+  const [mentionNavigated, setMentionNavigated] = useState(false);
+  const [mentionDismissedAt, setMentionDismissedAt] = useState<number | null>(null);
+  const activeSession = useChatStore((s) =>
+    s.activeSessionId ? s.sessions.find((x) => x.id === s.activeSessionId) : undefined,
+  );
+  const viewingSpaceId = useSpaceStore((s) => s.viewingSpaceId);
+  // From a Space's page the composer starts a new chat in that Space unless
+  // the open chat already belongs to it (see `sendUserMessage`) — so Library
+  // sources picked there wait for the new chat instead of landing on
+  // whichever chat happened to be open before.
+  const composerSessionId =
+    viewingSpaceId && activeSession?.space_id !== viewingSpaceId ? null : activeSessionId;
+  const sourcesSpaceId = viewingSpaceId ?? activeSession?.space_id ?? null;
+  const sourcesSpace = useSpaceStore((s) =>
+    sourcesSpaceId ? s.spaces.find((x) => x.id === sourcesSpaceId) : undefined,
+  );
+  const chatSources = useChatSources(composerSessionId, sourcesSpaceId);
+  const hasChatSources = chatSources.chips.length > 0 || chatSources.spaceCount > 0;
+  const libraryItems = useLibraryStore((s) => s.items);
+  const libraryDatasets = useLibraryStore((s) => s.datasets);
+  const addLibrarySources = useLibraryStore((s) => s.addSources);
+  const addPendingSources = useLibraryStore((s) => s.addPending);
   // Names the palette completes after `/model `, `/space ` and `/snippet `.
   // They live in stores, which the commands layer doesn't import.
   const models = useModelsStore((s) => s.models);
@@ -206,6 +249,51 @@ export function ChatInput({ centered = false }: ChatInputProps) {
 
   const paletteOpen =
     !paletteDismissed && isCommandInput(text) && paletteEntries.length > 0;
+
+  const mention = paletteOpen ? null : mentionAt(text, caret);
+  const mentionEntries: MentionEntry[] = useMemo(() => {
+    if (!mention) return [];
+    const linked = new Set(chatSources.chips.map((c) => `${c.kind}:${c.id}`));
+    return matchMentions(mention.query, libraryItems, libraryDatasets, 12)
+      .filter((e) => !linked.has(`${e.kind}:${e.id}`))
+      .slice(0, 8);
+  }, [mention?.query, mention?.start, libraryItems, libraryDatasets, chatSources.chips]);
+  const mentionOpen =
+    !!mention && mentionEntries.length > 0 && mentionDismissedAt !== mention.start;
+
+  useEffect(() => {
+    setMentionIndex(0);
+    setMentionNavigated(false);
+  }, [mention?.query, mention?.start]);
+
+  /** Link Library items / datasets to this chat — or park them until the
+   *  chat exists, when sending from the welcome screen. */
+  const attachFromLibrary = async (sel: LibrarySelection) => {
+    if (composerSessionId) await addLibrarySources("session", composerSessionId, sel);
+    else addPendingSources(sel);
+  };
+
+  const acceptMention = (entry: MentionEntry) => {
+    if (!mention) return;
+    // Drop the `#query` token itself; the chip above says what was added.
+    const before = text.slice(0, mention.start);
+    const after = text.slice(caret).replace(/^ /, "");
+    const next = before + after;
+    setText(next);
+    setComposerDraft(next);
+    void attachFromLibrary(
+      entry.kind === "dataset"
+        ? { itemIds: [], datasetIds: [entry.id] }
+        : { itemIds: [entry.id], datasetIds: [] },
+    ).catch((e) => setError(e instanceof Error ? e.message : String(e)));
+    requestAnimationFrame(() => {
+      const el = textareaRef.current;
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(before.length, before.length);
+      setCaret(before.length);
+    });
+  };
 
   // Reset the Esc-dismissed flag when the user clears the textarea or
   // removes the leading slash — otherwise the palette would stay hidden
@@ -855,7 +943,7 @@ export function ChatInput({ centered = false }: ChatInputProps) {
             onDismiss={() => setCommandResult(null)}
           />
         )}
-        {(attachments.length > 0 || activePersona || activeTone) && (
+        {(attachments.length > 0 || activePersona || activeTone || hasChatSources) && (
           // Config chips first, then payload. The divider marks the lifetime
           // boundary — everything left of it survives the send, everything
           // right of it goes with the message.
@@ -870,7 +958,8 @@ export function ChatInput({ centered = false }: ChatInputProps) {
                 onRemove={clearTone}
               />
             )}
-            {(activePersona || activeTone) &&
+            <ChatSourceChips sessionId={composerSessionId} spaceId={sourcesSpaceId} />
+            {(activePersona || activeTone || hasChatSources) &&
               attachments.length > 0 && <ChipDivider />}
             {attachments.map((a, i) => (
               <FileChip
@@ -880,6 +969,14 @@ export function ChatInput({ centered = false }: ChatInputProps) {
               />
             ))}
           </div>
+        )}
+        {mentionOpen && (
+          <MentionPalette
+            entries={mentionEntries}
+            highlightIndex={mentionIndex}
+            onHighlightChange={setMentionIndex}
+            onSelect={acceptMention}
+          />
         )}
         {paletteOpen && (
           <CommandPalette
@@ -936,8 +1033,8 @@ export function ChatInput({ centered = false }: ChatInputProps) {
                   type="button"
                   variant="ghost"
                   size="icon"
-                  aria-label="Add files or a directory"
-                  title="Add files or a directory"
+                  aria-label="Add files, Library sources or a directory"
+                  title="Add files, Library sources or a directory"
                   className="rounded-full text-foreground/65 hover:bg-foreground/10 hover:text-foreground"
                 >
                   <Plus className="h-4 w-4" />
@@ -950,6 +1047,15 @@ export function ChatInput({ centered = false }: ChatInputProps) {
                     <div>Add files</div>
                     <p className="text-[11px] text-foreground/50">
                       Attach their contents to this message
+                    </p>
+                  </div>
+                </DropdownMenuItem>
+                <DropdownMenuItem onSelect={() => setLibraryPickerOpen(true)}>
+                  <Library className="mr-2 h-4 w-4" />
+                  <div className="min-w-0">
+                    <div>From Library</div>
+                    <p className="text-[11px] text-foreground/50">
+                      Use saved sources in this chat · or type #
                     </p>
                   </div>
                 </DropdownMenuItem>
@@ -1003,9 +1109,36 @@ export function ChatInput({ centered = false }: ChatInputProps) {
                 // composerDraft on remount and is silently lost.
                 setText(e.target.value);
                 setComposerDraft(e.target.value);
+                setCaret(e.target.selectionStart ?? e.target.value.length);
               }}
+              onSelect={(e) => setCaret(e.currentTarget.selectionStart ?? 0)}
               onKeyDown={(e) => {
                 if (e.nativeEvent.isComposing) return;
+                if (mentionOpen && mention) {
+                  if (e.key === "ArrowDown") {
+                    e.preventDefault();
+                    setMentionIndex((i) => (i + 1) % mentionEntries.length);
+                    setMentionNavigated(true);
+                    return;
+                  }
+                  if (e.key === "ArrowUp") {
+                    e.preventDefault();
+                    setMentionIndex((i) => (i - 1 + mentionEntries.length) % mentionEntries.length);
+                    setMentionNavigated(true);
+                    return;
+                  }
+                  if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey && mentionNavigated)) {
+                    e.preventDefault();
+                    const entry = mentionEntries[mentionIndex];
+                    if (entry) acceptMention(entry);
+                    return;
+                  }
+                  if (e.key === "Escape") {
+                    e.preventDefault();
+                    setMentionDismissedAt(mention.start);
+                    return;
+                  }
+                }
                 // Palette navigation. Order matters: Tab/Enter accept the
                 // highlighted entry into the textarea (no message send);
                 // Enter without an open palette still sends, so unknown
@@ -1128,6 +1261,20 @@ export function ChatInput({ centered = false }: ChatInputProps) {
         )}
         {!centered && <ContextUsageBar />}
       </div>
+      <LibraryPicker
+        open={libraryPickerOpen}
+        onOpenChange={setLibraryPickerOpen}
+        title="Add from Library"
+        description="Attach datasets, texts, files and links to this chat. They're used on every message until you remove them."
+        confirmLabel="Add to chat"
+        linkedItemIds={chatSources.chips.filter((c) => c.kind === "item").map((c) => c.id)}
+        linkedDatasetIds={chatSources.chips.filter((c) => c.kind === "dataset").map((c) => c.id)}
+        numCtx={chatNumCtx(
+          composerSessionId ? activeSession?.params_json : null,
+          sourcesSpace?.default_params_json,
+        )}
+        onConfirm={attachFromLibrary}
+      />
       {ctxMenu && (
         <TextareaContextMenu
           ref={ctxMenuRef}

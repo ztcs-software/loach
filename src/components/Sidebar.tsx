@@ -9,6 +9,7 @@ import {
   FolderOpen,
   GitFork,
   Layers,
+  Library,
   Loader2,
   MoreHorizontal,
   Pencil,
@@ -126,6 +127,12 @@ function CollapsedRail() {
           active={sidebarTab === "spaces"}
         />
         <RailIcon
+          icon={<Library className="h-4 w-4" />}
+          label="Library"
+          onClick={() => goToTab("library")}
+          active={sidebarTab === "library"}
+        />
+        <RailIcon
           icon={<SquareTerminal className="h-4 w-4" />}
           label="Snippets"
           onClick={() => goToTab("snippets")}
@@ -233,6 +240,12 @@ function Quicklinks() {
         label="Spaces"
         onClick={() => goToTab("spaces")}
         active={tabActive("spaces")}
+      />
+      <Quicklink
+        icon={<Library className="h-4 w-4" />}
+        label="Library"
+        onClick={() => goToTab("library")}
+        active={tabActive("library")}
       />
       <Quicklink
         icon={<SquareTerminal className="h-4 w-4" />}

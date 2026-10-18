@@ -64,7 +64,7 @@ const compacted = {
 describe("compaction summary in a Space chat", () => {
   it("survives the Space instructions overriding the per-chat prompt", async () => {
     useSettingsStore.setState({ global_memory_enabled: false, temporal_awareness: false });
-    const request = await __testing.buildTaskRequest(session, session.id, [compacted], "hi", []);
+    const { request } = await __testing.buildTaskRequest(session, session.id, [compacted], "hi", []);
     expect(request.system_prompt).toContain(
       `${SUMMARY_START_TAG}\n- User is filing jointly\n${SUMMARY_END_TAG}`,
     );
