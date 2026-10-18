@@ -219,8 +219,11 @@ pub fn run() {
 
             // macOS menu-bar icons render as template images — single-channel
             // masks taken from the alpha channel — so they auto-invert in
-            // light vs. dark menu bars. The flag is a no-op on Windows /
-            // Linux, but we still gate it so the intent reads clearly.
+            // light vs. dark menu bars. That rules out the app icon there: it
+            // is an opaque rounded square, so its mask is a solid blob. macOS
+            // gets `icons/tray-template.png` instead, the fish line art in
+            // black on transparent. It is 36 px tall because tray-icon draws
+            // the image 18 pt tall, so it maps 2:1 onto a Retina menu bar.
             let _tray = {
                 let builder = TrayIconBuilder::with_id("loach-tray")
                     .menu(&menu)
@@ -231,12 +234,15 @@ pub fn run() {
                 // ships without the icon degrades to an icon-less tray instead
                 // of panicking the whole `setup` (which would bypass the
                 // friendly `fatal_setup_error` dialog the rest of setup uses).
+                #[cfg(not(target_os = "macos"))]
                 let builder = match app.default_window_icon() {
                     Some(icon) => builder.icon(icon.clone()),
                     None => builder,
                 };
                 #[cfg(target_os = "macos")]
-                let builder = builder.icon_as_template(true);
+                let builder = builder
+                    .icon(tauri::include_image!("icons/tray-template.png"))
+                    .icon_as_template(true);
                 builder
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => {
@@ -430,4 +436,19 @@ pub fn run() {
             }
             _ => {}
         });
+}
+
+#[cfg(test)]
+mod tests {
+    /// macOS draws the tray icon as a template, from the alpha channel alone
+    /// and 18 pt tall, so the file must stay black on transparent and 36 px
+    /// (2x) tall. Off macOS this is also the only place the `include_image!`
+    /// path is compiled.
+    #[test]
+    fn tray_template_is_a_retina_menu_bar_template() {
+        let icon = tauri::include_image!("icons/tray-template.png");
+        assert_eq!(icon.height(), 36);
+        assert!(icon.rgba().chunks(4).all(|px| px[..3] == [0, 0, 0]));
+        assert!(icon.rgba().chunks(4).any(|px| px[3] == 255));
+    }
 }
