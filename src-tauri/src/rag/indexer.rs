@@ -8,6 +8,7 @@
 //! otherwise asleep. Progress is broadcast on [`STATUS_EVENT`] so the Library
 //! and Settings can show it.
 
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -16,7 +17,8 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::Notify;
 
-use super::embed::{self, EmbedConfig};
+use super::embed::{self, EmbedConfig, EmbedError};
+use crate::db::library::ChunkVector;
 use crate::db::Database;
 
 /// Tauri event carrying an [`IndexStatus`] after every state change.
@@ -130,43 +132,38 @@ impl Indexer {
                 .iter()
                 .map(|c| embed::document_input(&cfg, &c.title, &c.text))
                 .collect();
-            let (rows, skipped) = match embed::embed_batch(http, &cfg, &inputs).await {
-                Ok(vectors) => (pending.iter().map(|c| c.id).zip(vectors).collect(), Vec::new()),
-                // One input the model refuses fails the whole request, and the
-                // same batch would come back every time. Go one by one so the
-                // rest still get embedded.
-                Err(e) if pending.len() > 1 => {
-                    let mut rows = Vec::new();
-                    let mut skipped = Vec::new();
-                    let mut last = e;
-                    for (c, input) in pending.iter().zip(&inputs) {
-                        match embed::embed_batch(http, &cfg, std::slice::from_ref(input)).await {
-                            Ok(mut v) => rows.extend(v.pop().map(|v| (c.id, v))),
-                            Err(e) => {
-                                skipped.push(c.id);
-                                last = e;
-                            }
-                        }
-                    }
-                    if rows.is_empty() {
-                        // Nothing went through on its own either, so it's
-                        // the model or the server, not these inputs.
-                        return self.fail(app, key, total, embedded, last);
-                    }
-                    if !skipped.is_empty() {
-                        tracing::warn!(
-                            "{key} refused {} chunk(s), left keyword-only: {last}",
-                            skipped.len()
-                        );
-                    }
-                    (rows, skipped)
-                }
-                Err(e) => return self.fail(app, key, total, embedded, e),
+            let Some(result) = self.embed_unless_reconfigured(db, http, &cfg, &inputs).await else {
+                // The settings changed mid-request: start over on the new ones.
+                continue;
             };
+            let ids: Vec<i64> = pending.iter().map(|c| c.id).collect();
+            let done = match result {
+                Ok(vectors) => Isolated { rows: ids.into_iter().zip(vectors).collect(), ..Isolated::default() },
+                // Unreachable, rate-limited, overloaded, model missing: nothing
+                // to do with these inputs, so nothing is set aside and the
+                // whole batch waits for the retry.
+                Err(e) if !e.refused => return self.fail(app, key, total, embedded, e.message),
+                // One input the model refuses fails the whole request, and the
+                // same batch would come back every time.
+                Err(_) => {
+                    let cfg = &cfg;
+                    isolate_refusals(
+                        &ids,
+                        &inputs,
+                        move |input| async move { embed::embed_batch(http, cfg, std::slice::from_ref(&input)).await },
+                        move || embed::probe(http, cfg),
+                    )
+                    .await
+                }
+            };
+            if !done.refused.is_empty() {
+                tracing::warn!("{key} refused {} chunk(s), left keyword-only", done.refused.len());
+            }
+            let Isolated { rows, refused, failure } = done;
             let (d, k) = (db.clone(), key.clone());
             let stored = blocking(move || {
                 d.store_rag_embeddings(&k, &rows)?;
-                d.skip_rag_chunks(&k, &skipped)
+                d.skip_rag_chunks(&k, &refused)
             })
             .await;
             if let Err(e) = stored {
@@ -174,7 +171,44 @@ impl Indexer {
                 // over and over.
                 return self.fail(app, key, total, embedded, format!("couldn't save embeddings: {e}"));
             }
+            if let Some(e) = failure {
+                return self.fail(app, key, total, embedded, e);
+            }
         }
+    }
+
+    /// Embed `inputs`, unless the embedding settings change meanwhile — then
+    /// `None`, so the pass restarts on the new settings instead of waiting out
+    /// a request to a server the user just replaced (up to the 120 s embed
+    /// timeout). A wake for anything else is handed on to the run loop.
+    async fn embed_unless_reconfigured(
+        &self,
+        db: &Arc<Database>,
+        http: &reqwest::Client,
+        cfg: &EmbedConfig,
+        inputs: &[String],
+    ) -> Option<Result<Vec<Vec<f32>>, EmbedError>> {
+        let request = embed::embed_batch(http, cfg, inputs);
+        tokio::pin!(request);
+        let mut woken = false;
+        let out = loop {
+            tokio::select! {
+                r = &mut request => break Some(r),
+                _ = self.notify.notified() => {
+                    woken = true;
+                    let d = db.clone();
+                    let now = blocking(move || Ok(EmbedConfig::from_db(&d))).await.ok().flatten();
+                    if now.as_ref() != Some(cfg) {
+                        break None;
+                    }
+                }
+            }
+        };
+        if woken {
+            // The run loop backfills once per wake (a restore relies on it).
+            self.notify.notify_one();
+        }
+        out
     }
 
     fn fail(&self, app: &AppHandle, key: String, total: i64, embedded: i64, error: String) -> Outcome {
@@ -182,6 +216,55 @@ impl Indexer {
         self.publish(app, IndexStatus { model: Some(key), total, embedded, busy: false, error: Some(error) });
         Outcome::Retry
     }
+}
+
+/// What came of a batch: vectors to store, chunks to set aside as refused,
+/// and whether the pass has to stop and retry later.
+#[derive(Debug, Default)]
+struct Isolated {
+    rows: Vec<ChunkVector>,
+    refused: Vec<i64>,
+    failure: Option<String>,
+}
+
+/// The server turned a batch down. Ask for each input on its own
+/// (`embed_one`), so only the inputs it refuses are set aside and the rest
+/// still get vectors. Stops at the first failure that isn't a refusal — the
+/// server went away or started rate-limiting — keeping the vectors that went
+/// through and setting nothing aside, so an outage never marks a chunk done.
+/// When every input is refused, `probe` tells a model that can't embed at
+/// all (fail and retry) from inputs it can't take (set aside).
+async fn isolate_refusals<E, EF, P, PF>(ids: &[i64], inputs: &[String], mut embed_one: E, probe: P) -> Isolated
+where
+    E: FnMut(String) -> EF,
+    EF: Future<Output = Result<Vec<Vec<f32>>, EmbedError>>,
+    P: FnOnce() -> PF,
+    PF: Future<Output = Result<(), EmbedError>>,
+{
+    let mut out = Isolated::default();
+    if ids.len() == 1 {
+        // The batch was this one input: its refusal is already known.
+        out.refused.push(ids[0]);
+    } else {
+        for (&id, input) in ids.iter().zip(inputs) {
+            match embed_one(input.clone()).await {
+                Ok(mut v) => out.rows.extend(v.pop().map(|v| (id, v))),
+                Err(e) if e.refused => out.refused.push(id),
+                Err(e) => {
+                    out.refused.clear();
+                    out.failure = Some(e.message);
+                    return out;
+                }
+            }
+        }
+    }
+    if out.rows.is_empty() {
+        if let Err(e) = probe().await {
+            out.refused.clear();
+            out.failure = Some(e.message);
+        }
+    }
+    out
 }
 
 /// How a pass of [`Indexer::embed_pending`] ended.
@@ -199,4 +282,89 @@ where
     T: Send + 'static,
 {
     tokio::task::spawn_blocking(f).await?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::VecDeque;
+
+    fn ok() -> Result<Vec<Vec<f32>>, EmbedError> {
+        Ok(vec![vec![1.0]])
+    }
+    fn refused() -> Result<Vec<Vec<f32>>, EmbedError> {
+        Err(EmbedError { message: "HTTP 400: too long".into(), refused: true })
+    }
+    fn outage() -> Result<Vec<Vec<f32>>, EmbedError> {
+        Err(EmbedError { message: "HTTP 429: rate limit".into(), refused: false })
+    }
+
+    /// Run [`isolate_refusals`] over `ids` with scripted per-input answers
+    /// and probe result; also returns how many single requests were made.
+    async fn run(
+        ids: &[i64],
+        answers: Vec<Result<Vec<Vec<f32>>, EmbedError>>,
+        probe_ok: bool,
+    ) -> (Isolated, usize) {
+        let inputs: Vec<String> = ids.iter().map(|i| format!("chunk {i}")).collect();
+        let mut script = VecDeque::from(answers);
+        let mut calls = 0;
+        let out = isolate_refusals(
+            ids,
+            &inputs,
+            |_input| {
+                calls += 1;
+                let r = script.pop_front().expect("more requests than scripted answers");
+                async move { r }
+            },
+            || async move {
+                if probe_ok {
+                    Ok(())
+                } else {
+                    Err(EmbedError { message: "HTTP 400: model does not support embeddings".into(), refused: true })
+                }
+            },
+        )
+        .await;
+        (out, calls)
+    }
+
+    #[tokio::test]
+    async fn only_the_refused_inputs_are_set_aside() {
+        let (out, _) = run(&[1, 2, 3], vec![ok(), refused(), ok()], true).await;
+        assert_eq!(out.rows.iter().map(|r| r.0).collect::<Vec<_>>(), vec![1, 3]);
+        assert_eq!(out.refused, vec![2]);
+        assert!(out.failure.is_none());
+    }
+
+    #[tokio::test]
+    async fn an_outage_mid_way_sets_nothing_aside_and_stops_asking() {
+        // Regression: any error on a single request used to mark that chunk
+        // done for good, so a burst of 429s emptied the vector index while
+        // the status read 100%.
+        let (out, calls) = run(&[1, 2, 3, 4], vec![ok(), refused(), outage()], true).await;
+        assert_eq!(calls, 3, "no requests after the outage");
+        assert_eq!(out.rows.iter().map(|r| r.0).collect::<Vec<_>>(), vec![1], "what went through is kept");
+        assert!(out.refused.is_empty());
+        assert_eq!(out.failure.as_deref(), Some("HTTP 429: rate limit"));
+    }
+
+    #[tokio::test]
+    async fn inputs_all_refused_by_a_working_model_are_set_aside() {
+        // Regression: a batch whose every input was too long for the server
+        // was retried every minute forever, holding up everything after it.
+        let (out, _) = run(&[1, 2], vec![refused(), refused()], true).await;
+        assert_eq!(out.refused, vec![1, 2]);
+        assert!(out.failure.is_none());
+        // A batch of one is the same case, without asking twice.
+        let (out, calls) = run(&[7], vec![], true).await;
+        assert_eq!((out.refused, calls), (vec![7], 0));
+    }
+
+    #[tokio::test]
+    async fn a_model_that_embeds_nothing_fails_instead() {
+        let (out, _) = run(&[1, 2], vec![refused(), refused()], false).await;
+        assert!(out.refused.is_empty(), "a chat model picked as embedder must not mark the index done");
+        assert_eq!(out.failure.as_deref(), Some("HTTP 400: model does not support embeddings"));
+    }
 }

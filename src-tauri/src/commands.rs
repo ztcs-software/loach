@@ -2788,15 +2788,21 @@ fn library_title(title: &str, fallback: &str) -> String {
     }
 }
 
-/// Cut a text body to [`LIBRARY_MAX_CHARS`]. Returns whether it was cut.
+/// Room past [`LIBRARY_MAX_CHARS`] for the note the frontend appends to a
+/// body it already cut (`[…file truncated…]`), so the model still reads it.
+const LIBRARY_NOTE_ROOM: usize = 1_000;
+
+/// Cut a text body to [`LIBRARY_MAX_CHARS`], saying so at the cut. Returns
+/// whether it was cut.
 fn cap_library_text(mut content: String) -> (String, bool) {
-    match content.char_indices().nth(LIBRARY_MAX_CHARS) {
-        Some((at, _)) => {
-            content.truncate(at);
-            (content, true)
-        }
-        None => (content, false),
+    if content.char_indices().nth(LIBRARY_MAX_CHARS + LIBRARY_NOTE_ROOM).is_none() {
+        return (content, false);
     }
+    if let Some((at, _)) = content.char_indices().nth(LIBRARY_MAX_CHARS) {
+        content.truncate(at);
+    }
+    content.push_str("\n\n[…truncated at 200,000 characters]");
+    (content, true)
 }
 
 /// A fetched page's `<title>` on one line and of sane length — it's shown
@@ -2925,7 +2931,12 @@ pub async fn library_update_text(
     let meta = tokio::task::spawn_blocking(move || {
         let size = content.len() as i64;
         let (content, cut) = cap_library_text(content);
-        db.replace_library_content(&id, Some(&title), &content, None, size, cut, None, key.as_deref())
+        // Editing a cut document doesn't bring back what was cut.
+        let was_cut = db
+            .get_library_items(std::slice::from_ref(&id))?
+            .pop()
+            .is_some_and(|i| i.truncated);
+        db.replace_library_content(&id, Some(&title), &content, None, size, cut || was_cut, None, key.as_deref())
     })
     .await
     .map_err(err)?
@@ -3183,7 +3194,7 @@ pub async fn rag_search(
     state: State<'_, AppState>,
     args: rag::SearchArgs,
 ) -> Result<rag::SearchResult, String> {
-    rag::search(state.db.clone(), &state.http, args).await
+    rag::search(state.db.clone(), &state.http, &state.indexer, args).await
 }
 
 #[tauri::command]
@@ -3195,7 +3206,11 @@ pub async fn rag_status(state: State<'_, AppState>) -> Result<IndexStatus, Strin
 /// model for one with the same name, or to recover from a bad index.
 #[tauri::command]
 pub async fn rag_reindex(state: State<'_, AppState>) -> Result<(), String> {
-    state.db.clear_rag_embeddings().map_err(err)?;
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || db.clear_rag_embeddings())
+        .await
+        .map_err(err)?
+        .map_err(err)?;
     state.indexer.wake();
     Ok(())
 }
@@ -3915,8 +3930,21 @@ mod tests {
     fn library_text_is_capped_on_char_boundaries() {
         let (short, cut) = cap_library_text("ż".repeat(10));
         assert_eq!((short.chars().count(), cut), (10, false));
-        let (long, cut) = cap_library_text("ż".repeat(LIBRARY_MAX_CHARS + 5));
-        assert_eq!((long.chars().count(), cut), (LIBRARY_MAX_CHARS, true));
+        // Regression: the frontend cuts at the same 200k and appends a note;
+        // cutting again at exactly 200k deleted the note, so the model was
+        // never told the document was incomplete.
+        let from_frontend = format!(
+            "{}\n\n[…file truncated at 200,000 chars. Ask the user for specific sections if you need more.]",
+            "ż".repeat(LIBRARY_MAX_CHARS)
+        );
+        let (kept, cut) = cap_library_text(from_frontend.clone());
+        assert_eq!((kept, cut), (from_frontend, false));
+        // Anything longer is cut on a char boundary, and says so.
+        let (long, cut) = cap_library_text("ż".repeat(LIBRARY_MAX_CHARS + LIBRARY_NOTE_ROOM + 5));
+        assert!(cut);
+        let (body, note) = long.split_once("\n\n[…").expect("note appended");
+        assert_eq!(body.chars().count(), LIBRARY_MAX_CHARS);
+        assert!(note.starts_with("truncated at 200,000 characters"), "{note}");
     }
 
     #[test]

@@ -1031,10 +1031,26 @@ impl Database {
         // NULL until the background indexer gets to it. The polymorphic
         // `doc_id` can't carry a cascading FK, so the two delete triggers do
         // that job — they also fire for rows removed by a Space's cascade.
+        //
+        // Ids are AUTOINCREMENT so a deleted chunk's id is never handed to a
+        // new one: the indexer stores vectors by id after a slow request, and
+        // a reused id would put an old text's vector on a new text. Pre-1.6
+        // development builds created the table without it; being derived
+        // data, that table is dropped and rebuilt (the indexer re-chunks
+        // every document on its first pass).
+        let legacy_rag: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master
+              WHERE type = 'table' AND name = 'rag_chunks' AND sql NOT LIKE '%AUTOINCREMENT%'",
+            [],
+            |r| r.get(0),
+        )?;
+        if legacy_rag > 0 {
+            conn.execute_batch("DROP TABLE IF EXISTS rag_chunks_fts; DROP TABLE rag_chunks;")?;
+        }
         conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS rag_chunks (
-                id INTEGER PRIMARY KEY,
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
                 doc_kind TEXT NOT NULL,
                 doc_id TEXT NOT NULL,
                 seq INTEGER NOT NULL,

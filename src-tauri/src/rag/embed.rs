@@ -20,7 +20,40 @@ const EMBED_TIMEOUT: Duration = Duration::from_secs(120);
 /// A query embedding sits on the send path, so it gets less patience.
 const QUERY_TIMEOUT: Duration = Duration::from_secs(20);
 
-#[derive(Debug, Clone)]
+/// Why an embedding request failed.
+#[derive(Debug)]
+pub struct EmbedError {
+    pub message: String,
+    /// The server answered and turned the input down (too long, malformed),
+    /// as opposed to being unreachable, rate-limiting, overloaded or missing
+    /// the model — failures that say nothing about the input itself.
+    pub refused: bool,
+}
+
+impl std::fmt::Display for EmbedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+/// Transport, decoding and setup failures: never about the input.
+impl From<String> for EmbedError {
+    fn from(message: String) -> Self {
+        Self { message, refused: false }
+    }
+}
+
+/// Whether an error response means "this input can't be embedded" rather
+/// than "the server can't embed right now". 400 / 413 / 422 are the
+/// input-is-wrong statuses; llama.cpp-based servers answer an input over
+/// their batch size with a 500 that says so, hence the wording check.
+pub fn is_refusal(status: u16, message: &str) -> bool {
+    let m = message.to_ascii_lowercase();
+    matches!(status, 400 | 413 | 422)
+        || (status >= 500 && (m.contains("too large") || m.contains("too long")))
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct EmbedConfig {
     /// `"ollama"` or `"openai"`.
     pub provider: String,
@@ -95,15 +128,21 @@ pub fn document_input(cfg: &EmbedConfig, title: &str, text: &str) -> String {
 }
 
 /// Embed one search query, unit-length.
-pub async fn embed_query(http: &reqwest::Client, cfg: &EmbedConfig, query: &str) -> Result<Vec<f32>, String> {
+pub async fn embed_query(http: &reqwest::Client, cfg: &EmbedConfig, query: &str) -> Result<Vec<f32>, EmbedError> {
     let input = (prefixes(&cfg.model).1)(query);
     let mut out = embed(http, cfg, &[input], QUERY_TIMEOUT).await?;
-    out.pop().ok_or_else(|| "the embedding model returned nothing".to_string())
+    out.pop().ok_or_else(|| "the embedding model returned nothing".to_string().into())
 }
 
 /// Embed a batch of inputs, unit-length, in input order.
-pub async fn embed_batch(http: &reqwest::Client, cfg: &EmbedConfig, inputs: &[String]) -> Result<Vec<Vec<f32>>, String> {
+pub async fn embed_batch(http: &reqwest::Client, cfg: &EmbedConfig, inputs: &[String]) -> Result<Vec<Vec<f32>>, EmbedError> {
     embed(http, cfg, inputs, EMBED_TIMEOUT).await
+}
+
+/// Embed one trivial input: whether the model embeds anything at all, when
+/// every real input was refused.
+pub async fn probe(http: &reqwest::Client, cfg: &EmbedConfig) -> Result<(), EmbedError> {
+    embed(http, cfg, &["hello".to_string()], QUERY_TIMEOUT).await.map(|_| ())
 }
 
 #[derive(Deserialize)]
@@ -127,7 +166,7 @@ async fn embed(
     cfg: &EmbedConfig,
     inputs: &[String],
     timeout: Duration,
-) -> Result<Vec<Vec<f32>>, String> {
+) -> Result<Vec<Vec<f32>>, EmbedError> {
     crate::providers::refuse_link_local_host(&cfg.base_url).await?;
     let base = cfg.base_url.trim_end_matches('/');
     let vectors = if cfg.provider == "openai" {
@@ -173,14 +212,15 @@ async fn embed(
             "the embedding model returned {} vectors for {} inputs",
             vectors.len(),
             inputs.len()
-        ));
+        )
+        .into());
     }
     Ok(vectors.into_iter().map(super::normalize).collect())
 }
 
 /// A short, readable reason from an error response (`{"error": "..."}` from
 /// Ollama, `{"error": {"message": ...}}` from OpenAI-style servers).
-async fn error_body(status: reqwest::StatusCode, resp: reqwest::Response) -> String {
+async fn error_body(status: reqwest::StatusCode, resp: reqwest::Response) -> EmbedError {
     let text = resp.text().await.unwrap_or_default();
     let reason = serde_json::from_str::<serde_json::Value>(&text)
         .ok()
@@ -191,7 +231,11 @@ async fn error_body(status: reqwest::StatusCode, resp: reqwest::Response) -> Str
                 .or_else(|| e.get("message").and_then(|m| m.as_str()).map(str::to_string))
         })
         .unwrap_or_else(|| text.chars().take(200).collect());
-    format!("HTTP {}: {}", status.as_u16(), reason.trim())
+    let reason = reason.trim();
+    EmbedError {
+        message: format!("HTTP {}: {}", status.as_u16(), reason),
+        refused: is_refusal(status.as_u16(), reason),
+    }
 }
 
 #[cfg(test)]
@@ -208,5 +252,20 @@ mod tests {
         assert_eq!(document_input(&cfg("embeddinggemma"), "", "x"), "title: none | text: x");
         assert_eq!(document_input(&cfg("bge-m3"), "T", "x"), "T\n\nx");
         assert_eq!(cfg("bge-m3").model_key(), "ollama:bge-m3");
+    }
+
+    #[test]
+    fn only_input_errors_count_as_refusals() {
+        // The input itself is the problem: worth isolating and setting aside.
+        assert!(is_refusal(400, "input length exceeds the context length"));
+        assert!(is_refusal(413, "Input validation error: inputs must have less than 512 tokens"));
+        assert!(is_refusal(422, "invalid input"));
+        assert!(is_refusal(500, "input is too large to process. increase the physical batch size"));
+        // The server or model is: retry later, set nothing aside.
+        assert!(!is_refusal(404, "model 'nomic-embed-text' not found"));
+        assert!(!is_refusal(401, "invalid api key"));
+        assert!(!is_refusal(429, "rate limit reached"));
+        assert!(!is_refusal(500, "llama runner process has terminated"));
+        assert!(!is_refusal(503, "server overloaded"));
     }
 }

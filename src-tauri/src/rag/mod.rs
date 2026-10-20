@@ -239,6 +239,7 @@ const DEFAULT_MAX_CHUNKS: usize = 12;
 pub async fn search(
     db: Arc<Database>,
     http: &reqwest::Client,
+    indexer: &indexer::Indexer,
     args: SearchArgs,
 ) -> Result<SearchResult, String> {
     let keys: Vec<String> = args.docs.iter().map(|d| format!("{}:{}", d.kind, d.id)).collect();
@@ -259,34 +260,46 @@ pub async fn search(
     let mut semantic = Vec::new();
     let mut used_vectors = false;
     if let Some(cfg) = embed::EmbedConfig::from_db(&db) {
-        match embed::embed_query(http, &cfg, &args.query).await {
-            Ok(q) => {
-                let (db2, scope2, key) = (db.clone(), scope.clone(), cfg.model_key());
-                let (vectors, total, pending) =
-                    tokio::task::spawn_blocking(move || db2.rag_vectors(&scope2, &key))
-                        .await
-                        .map_err(|e| e.to_string())?
-                        .map_err(|e| e.to_string())?;
-                // Chunks the model refused stay unembedded for good, so the
-                // warning follows what the indexer still has to do.
-                if pending > 0 {
-                    warning = Some(format!(
-                        "Still indexing — {} of {} excerpts searchable by meaning, the rest by keyword.",
-                        vectors.len(),
-                        total
-                    ));
+        let key = cfg.model_key();
+        let (db2, scope2, k) = (db.clone(), scope.clone(), key.clone());
+        let (vectors, total, pending) = tokio::task::spawn_blocking(move || db2.rag_vectors(&scope2, &k))
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())?;
+        // Chunks the model refused stay unembedded for good, so the warning
+        // follows what the indexer still has to do.
+        if pending > 0 {
+            warning = Some(format!(
+                "Still indexing — {} of {} excerpts searchable by meaning, the rest by keyword.",
+                vectors.len(),
+                total
+            ));
+        }
+        // The query embedding sits on the send path, so skip it when it can't
+        // pay off: the indexer's last request to this model failed (the
+        // server is down or the model missing — don't hold the send on
+        // another try, but nudge the indexer to retry in the background), or
+        // nothing in scope has a vector to compare against yet.
+        let status = indexer.status();
+        let failing = status.error.filter(|_| status.model.as_deref() == Some(key.as_str()));
+        if let Some(e) = failing {
+            indexer.wake();
+            warning = Some(format!("Embedding model unavailable ({e}); searched by keyword only."));
+        } else if !vectors.is_empty() {
+            match embed::embed_query(http, &cfg, &args.query).await {
+                Ok(q) => {
+                    let mut scored: Vec<(i64, f32)> = vectors
+                        .iter()
+                        .filter(|(_, v)| v.len() == q.len())
+                        .map(|(id, v)| (*id, dot(&q, v)))
+                        .collect();
+                    scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+                    semantic = scored.into_iter().take(CANDIDATES).map(|(id, _)| id).collect();
+                    used_vectors = !semantic.is_empty();
                 }
-                let mut scored: Vec<(i64, f32)> = vectors
-                    .iter()
-                    .filter(|(_, v)| v.len() == q.len())
-                    .map(|(id, v)| (*id, dot(&q, v)))
-                    .collect();
-                scored.sort_by(|a, b| b.1.total_cmp(&a.1));
-                semantic = scored.into_iter().take(CANDIDATES).map(|(id, _)| id).collect();
-                used_vectors = !semantic.is_empty();
-            }
-            Err(e) => {
-                warning = Some(format!("Embedding model unavailable ({e}); searched by keyword only."));
+                Err(e) => {
+                    warning = Some(format!("Embedding model unavailable ({e}); searched by keyword only."));
+                }
             }
         }
     }
@@ -306,7 +319,7 @@ pub async fn search(
     let max_chunks = args.max_chunks.unwrap_or(DEFAULT_MAX_CHUNKS);
     let candidates: Vec<(i64, f32)> = ranked.into_iter().take(max_chunks * 3).collect();
     let ids: Vec<i64> = candidates.iter().map(|(id, _)| *id).collect();
-    let rows: Vec<ChunkRow> = tokio::task::spawn_blocking(move || db.rag_chunks_by_ids(&ids))
+    let rows: Vec<ChunkRow> = tokio::task::spawn_blocking(move || db.rag_chunks_by_ids(&ids, &scope))
         .await
         .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())?;

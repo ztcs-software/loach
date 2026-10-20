@@ -210,6 +210,26 @@ pub(super) fn replace_chunks(conn: &Connection, doc_kind: &str, doc_id: &str, te
     Ok(())
 }
 
+/// Move chunks — one document's, or with `None` every one — to fresh ids
+/// with no embedding, as if just written. Resetting in place isn't enough:
+/// an indexer batch already in flight for the old ids would store its stale
+/// vectors (the old title, the old model) right over the reset. Ids are
+/// `AUTOINCREMENT`, never reused, so those writes now land nowhere.
+pub(super) fn reissue_chunks(conn: &Connection, doc: Option<(&str, &str)>) -> Result<()> {
+    let (kind, id) = doc.unzip();
+    let last: i64 = conn.query_row("SELECT COALESCE(MAX(id), 0) FROM rag_chunks", [], |r| r.get(0))?;
+    let filter = "id <= ?3 AND (?1 IS NULL OR (doc_kind = ?1 AND doc_id = ?2))";
+    conn.execute(
+        &format!(
+            "INSERT INTO rag_chunks (doc_kind, doc_id, seq, text)
+             SELECT doc_kind, doc_id, seq, text FROM rag_chunks WHERE {filter} ORDER BY id"
+        ),
+        params![kind, id, last],
+    )?;
+    conn.execute(&format!("DELETE FROM rag_chunks WHERE {filter}"), params![kind, id, last])?;
+    Ok(())
+}
+
 const ITEM_META_SELECT: &str = "
     SELECT i.id, i.kind, i.title, i.mime, i.media, i.size,
            CASE WHEN i.media = 'text' THEN LENGTH(i.content) ELSE 0 END,
@@ -465,11 +485,7 @@ impl Database {
                 params![title, now, id],
             )?;
             if changed > 0 {
-                tx.execute(
-                    "UPDATE rag_chunks SET embedding = NULL, embed_model = NULL
-                      WHERE doc_kind = ?1 AND doc_id = ?2",
-                    params![DOC_LIBRARY, id],
-                )?;
+                reissue_chunks(&tx, Some((DOC_LIBRARY, id)))?;
             }
             tx.commit()?;
         }
@@ -831,8 +847,9 @@ impl Database {
         })
     }
 
-    /// Store unit-length embeddings. A chunk deleted meanwhile (its document
-    /// was edited) simply updates nothing.
+    /// Store unit-length embeddings. A chunk deleted or reissued meanwhile
+    /// (its document edited, renamed or deleted, or the index rebuilt) simply
+    /// updates nothing: chunk ids are never reused.
     pub fn store_rag_embeddings(&self, model: &str, rows: &[ChunkVector]) -> Result<()> {
         let mut conn = self.conn.lock();
         let tx = conn.transaction()?;
@@ -881,11 +898,10 @@ impl Database {
 
     /// Forget every embedding so the indexer re-embeds from scratch.
     pub fn clear_rag_embeddings(&self) -> Result<()> {
-        let conn = self.conn.lock();
-        conn.execute(
-            "UPDATE rag_chunks SET embedding = NULL, embed_model = NULL",
-            [],
-        )?;
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction()?;
+        reissue_chunks(&tx, None)?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -934,16 +950,19 @@ impl Database {
         })
     }
 
-    /// Chunk rows for `ids`, in the order asked for.
-    pub fn rag_chunks_by_ids(&self, ids: &[i64]) -> Result<Vec<ChunkRow>> {
+    /// Chunk rows for `ids` still inside `scope`, in the order asked for.
+    /// The ids were ranked a moment ago, so the scope is checked again in
+    /// case a document left it meanwhile.
+    pub fn rag_chunks_by_ids(&self, ids: &[i64], scope: &str) -> Result<Vec<ChunkRow>> {
         self.with_read(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, doc_kind, doc_id, seq, text FROM rag_chunks WHERE id = ?1",
+                "SELECT id, doc_kind, doc_id, seq, text FROM rag_chunks
+                  WHERE id = ?1 AND (doc_kind || ':' || doc_id) IN (SELECT value FROM json_each(?2))",
             )?;
             let mut out = Vec::with_capacity(ids.len());
             for id in ids {
                 if let Some(row) = stmt
-                    .query_row(params![id], |r| {
+                    .query_row(params![id, scope], |r| {
                         Ok(ChunkRow {
                             id: r.get(0)?,
                             doc_kind: r.get(1)?,
@@ -1212,6 +1231,120 @@ mod tests {
         assert_eq!(meta.embedded, 0);
         let pending = db.rag_pending_embeddings("ollama:m1", 10).unwrap();
         assert_eq!(pending[0].title, "New");
+    }
+
+    /// Ids of chunks still waiting for `model`, as an indexer batch reads them.
+    fn in_flight(db: &Database, model: &str) -> Vec<ChunkVector> {
+        db.rag_pending_embeddings(model, 100)
+            .unwrap()
+            .iter()
+            .map(|c| (c.id, vec![1.0]))
+            .collect()
+    }
+
+    // Regression: `rag_chunks.id` had no AUTOINCREMENT, so re-chunking the
+    // newest document handed its deleted ids straight to the new chunks, and
+    // an embedding in flight for the old text was stored on the new text.
+    #[test]
+    fn an_embedding_in_flight_never_lands_on_newer_text() {
+        let (db, _dir) = fresh_db();
+        let m = "ollama:m1";
+        let a = text_item(&db, "Note", "old text about otters");
+        let stale = in_flight(&db, m);
+
+        // Edited while the batch is out: the vectors for the old text must
+        // not be stored on the new chunks.
+        db.replace_library_content(&a.id, None, "new text about badgers", None, 22, false, None, Some(m))
+            .unwrap();
+        db.store_rag_embeddings(m, &stale).unwrap();
+        assert_eq!(db.rag_counts(Some(m)).unwrap(), (1, 0), "edited chunk still pending");
+
+        // Deleted, then another document added: same story.
+        let stale = in_flight(&db, m);
+        db.delete_library_items(std::slice::from_ref(&a.id)).unwrap();
+        let b = text_item(&db, "Other", "unrelated text");
+        db.skip_rag_chunks(m, &stale.iter().map(|r| r.0).collect::<Vec<_>>()).unwrap();
+        db.store_rag_embeddings(m, &stale).unwrap();
+        assert_eq!(db.rag_counts(Some(m)).unwrap(), (1, 0), "new document's chunk still pending");
+        assert_eq!(db.library_item_meta(&b.id, Some(m)).unwrap().embedded, 0);
+    }
+
+    // Regression: rename and Rebuild reset embeddings in place, so a batch in
+    // flight from before (old title, old model) was stored right over the
+    // reset and the chunk counted as done.
+    #[test]
+    fn rename_and_rebuild_outrun_a_batch_in_flight() {
+        let (db, _dir) = fresh_db();
+        let m = "ollama:m1";
+        let a = text_item(&db, "Old title", "body about otters");
+        let s = scope(&[(DOC_LIBRARY, &a.id)]);
+
+        let stale = in_flight(&db, m);
+        db.rename_library_item(&a.id, "New title", Some(m)).unwrap();
+        db.store_rag_embeddings(m, &stale).unwrap();
+        assert_eq!(db.rag_counts(Some(m)).unwrap(), (1, 0), "renamed chunk still pending");
+
+        // Embed it for real, then Rebuild while a stale batch is out.
+        db.store_rag_embeddings(m, &in_flight(&db, m)).unwrap();
+        let stale: Vec<ChunkVector> =
+            db.rag_vectors(&s, m).unwrap().0.into_iter().map(|(id, _)| (id, vec![0.5])).collect();
+        db.clear_rag_embeddings().unwrap();
+        db.store_rag_embeddings(m, &stale).unwrap();
+        assert_eq!(db.rag_counts(Some(m)).unwrap(), (1, 0), "rebuilt chunk still pending");
+
+        // The keyword index followed the chunks to their new ids.
+        let q = crate::rag::build_fts_query("otters").unwrap();
+        let hits = db.rag_keyword_search(&s, &q, 5).unwrap();
+        assert_eq!(db.rag_chunks_by_ids(&hits, &s).unwrap()[0].text, "body about otters");
+    }
+
+    #[test]
+    fn chunk_rows_are_read_back_only_within_scope() {
+        let (db, _dir) = fresh_db();
+        let a = text_item(&db, "A", "alpha");
+        let b = text_item(&db, "B", "beta");
+        let both = scope(&[(DOC_LIBRARY, &a.id), (DOC_LIBRARY, &b.id)]);
+        let ids: Vec<i64> = db.rag_leading_chunks(&both, 1).unwrap();
+        assert_eq!(ids.len(), 2);
+        let only_a = scope(&[(DOC_LIBRARY, &a.id)]);
+        let rows = db.rag_chunks_by_ids(&ids, &only_a).unwrap();
+        assert_eq!(rows.iter().map(|r| r.text.as_str()).collect::<Vec<_>>(), vec!["alpha"]);
+    }
+
+    #[test]
+    fn a_pre_release_index_without_autoincrement_is_rebuilt() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("loach.db");
+        {
+            let db = Database::open(&path).expect("open");
+            db.migrate().expect("migrate");
+            text_item(&db, "Kept", "a document from a development build");
+            // The table as development builds of 1.6 created it.
+            db.conn
+                .lock()
+                .execute_batch(
+                    "DROP TABLE rag_chunks_fts; DROP TABLE rag_chunks;
+                     CREATE TABLE rag_chunks (
+                         id INTEGER PRIMARY KEY, doc_kind TEXT NOT NULL, doc_id TEXT NOT NULL,
+                         seq INTEGER NOT NULL, text TEXT NOT NULL, embedding BLOB, embed_model TEXT
+                     );",
+                )
+                .expect("simulate the old table");
+        }
+        let db = Database::open(&path).expect("reopen");
+        db.migrate().expect("migrate rebuilds the index");
+        let sql: String = db
+            .conn
+            .lock()
+            .query_row("SELECT sql FROM sqlite_master WHERE name = 'rag_chunks'", [], |r| r.get(0))
+            .unwrap();
+        assert!(sql.contains("AUTOINCREMENT"), "{sql}");
+        // The indexer's backfill re-chunks the documents into the new table.
+        assert_eq!(db.backfill_rag_chunks().unwrap(), 1);
+        let q = crate::rag::build_fts_query("development").unwrap();
+        let all = scope(&[(DOC_LIBRARY, &db.list_library_items(None).unwrap()[0].id)]);
+        assert_eq!(db.rag_keyword_search(&all, &q, 5).unwrap().len(), 1);
+        db.migrate().expect("and stays idempotent");
     }
 
     #[test]
