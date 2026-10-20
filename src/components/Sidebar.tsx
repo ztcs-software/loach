@@ -34,6 +34,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { findChatLabel } from "@/lib/labels";
 import { useChatStore } from "@/stores/chatStore";
+import { useLibraryStore } from "@/stores/libraryStore";
 import { useModelsStore } from "@/stores/modelsStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useUIStore } from "@/stores/uiStore";
@@ -98,10 +99,12 @@ function CollapsedRail() {
   const newSession = useChatStore((s) => s.newSession);
   const setViewingSpace = useSpaceStore((s) => s.setViewingSpace);
   const setViewingModel = useModelsStore((s) => s.setViewingModel);
+  const setViewingDataset = useLibraryStore((s) => s.setViewingDataset);
 
   const goToTab = (tab: SidebarTab) => {
     setViewingSpace(null);
     setViewingModel(null);
+    setViewingDataset(null);
     setSidebarTab(tab);
   };
 
@@ -202,12 +205,16 @@ function Quicklinks() {
   const activeSessionId = useChatStore((s) => s.activeSessionId);
   const setViewingSpace = useSpaceStore((s) => s.setViewingSpace);
   const setViewingModel = useModelsStore((s) => s.setViewingModel);
+  const setViewingDataset = useLibraryStore((s) => s.setViewingDataset);
 
   const goToTab = (tab: SidebarTab) => {
     // Clearing override views ensures the new tab's canvas actually renders;
     // App.tsx prioritizes viewingSpaceId and viewingModel over sidebarTab.
+    // An open dataset is cleared too, so the Library entry lands on the
+    // Library list the way the Spaces entry lands on the Spaces grid.
     setViewingSpace(null);
     setViewingModel(null);
+    setViewingDataset(null);
     setSidebarTab(tab);
   };
 

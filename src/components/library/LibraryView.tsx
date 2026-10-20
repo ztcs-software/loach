@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import {
-  ArrowLeft,
+  ChevronRight,
+  Database,
   ExternalLink,
   FileUp,
   Library,
@@ -96,8 +97,8 @@ export function LibraryView() {
   const hydrated = useLibraryStore((s) => s.hydrated);
   const loadError = useLibraryStore((s) => s.error);
   const hydrate = useLibraryStore((s) => s.hydrate);
-  const focusDatasetId = useLibraryStore((s) => s.focusDatasetId);
-  const setFocusDataset = useLibraryStore((s) => s.setFocusDataset);
+  const viewingDatasetId = useLibraryStore((s) => s.viewingDatasetId);
+  const setViewingDataset = useLibraryStore((s) => s.setViewingDataset);
   const openTextEditor = useLibraryStore((s) => s.openTextEditor);
   const addPrepared = useLibraryStore((s) => s.addPrepared);
   const addToDataset = useLibraryStore((s) => s.addToDataset);
@@ -106,7 +107,6 @@ export function LibraryView() {
 
   const [tab, setTabState] = useState<LibraryTab>(readTab);
   const [query, setQuery] = useState("");
-  const [openDatasetId, setOpenDatasetId] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [linkOpen, setLinkOpen] = useState(false);
   const [datasetDialog, setDatasetDialog] = useState<{ id?: string; seed?: string[] } | null>(null);
@@ -119,21 +119,12 @@ export function LibraryView() {
   const setTab = (t: LibraryTab) => {
     setTabState(t);
     setSelected(new Set());
-    setOpenDatasetId(null);
     try {
       localStorage.setItem(TAB_KEY, t);
     } catch {
       /* remembered tab is a convenience */
     }
   };
-
-  // Another surface asked to show a dataset (a chat's source chip, a Space).
-  useEffect(() => {
-    if (!focusDatasetId) return;
-    setTabState("datasets");
-    setOpenDatasetId(focusDatasetId);
-    setFocusDataset(null);
-  }, [focusDatasetId, setFocusDataset]);
 
   const counts: Record<LibraryTab, number> = useMemo(
     () => ({
@@ -163,7 +154,9 @@ export function LibraryView() {
       ),
     [datasets, q],
   );
-  const openDataset = openDatasetId ? datasets.find((d) => d.id === openDatasetId) : undefined;
+  // A dataset gets its own page, like a Space; an id that no longer
+  // resolves (deleted elsewhere) falls back to the list.
+  const openDataset = viewingDatasetId ? datasets.find((d) => d.id === viewingDatasetId) : undefined;
 
   // ------- Upload (picker + drag-and-drop) --------------------------------
 
@@ -231,9 +224,7 @@ export function LibraryView() {
   // ------- Header action --------------------------------------------------
 
   let primary: { label: string; icon: React.ReactNode; onClick: () => void };
-  if (tab === "datasets" && openDataset) {
-    primary = { label: "Add items", icon: <Plus className="h-4 w-4" />, onClick: () => setPickerFor(openDataset.id) };
-  } else if (tab === "datasets") {
+  if (tab === "datasets") {
     primary = { label: "New dataset", icon: <Plus className="h-4 w-4" />, onClick: () => setDatasetDialog({}) };
   } else if (tab === "texts") {
     primary = { label: "New text", icon: <NotebookPen className="h-4 w-4" />, onClick: () => openTextEditor("new") };
@@ -242,6 +233,13 @@ export function LibraryView() {
   } else {
     primary = { label: "Add link", icon: <Link2 className="h-4 w-4" />, onClick: () => setLinkOpen(true) };
   }
+
+  const uploadingNote = uploading > 0 && (
+    <p className="mt-4 flex items-center gap-2 text-xs text-foreground/55">
+      <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+      Reading {uploading} file{uploading === 1 ? "" : "s"}…
+    </p>
+  );
 
   return (
     <main
@@ -253,152 +251,157 @@ export function LibraryView() {
       onDragLeave={onDragLeave}
       onDrop={onDrop}
     >
-      <ScrollArea className="flex-1">
-        <div className="mx-auto w-full max-w-6xl px-8 py-8 pb-28">
-          <header className="mb-6 flex flex-wrap items-end justify-between gap-4">
-            <div className="min-w-0">
-              <h1 className="flex items-center gap-2.5 text-3xl font-semibold tracking-tight text-foreground">
-                <Library className="h-6 w-6 text-foreground/60" />
-                Library
-              </h1>
-              <p className="mt-2 max-w-xl text-sm text-foreground/55">
-                Texts, files and links you give your models — saved once, used anywhere. Attach them
-                to a chat with <span className="font-medium text-foreground/80">+ → From Library</span>{" "}
-                or <span className="font-medium text-foreground/80">#</span>, or add them to a Space's
-                sources.
-              </p>
-            </div>
-            <div className="flex items-center gap-3">
-              <IndexStatusPill />
-              <Button onClick={primary.onClick} className="gap-1.5 rounded-xl">
-                {primary.icon}
-                {primary.label}
-              </Button>
-            </div>
-          </header>
-
-          <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
-            <div
-              role="tablist"
-              aria-label="Library sections"
-              className="inline-flex h-10 items-center rounded-2xl border border-foreground/10 bg-foreground/[0.04] p-1 text-foreground/55"
-            >
-              {TABS.map((t) => (
-                <button
-                  key={t}
-                  type="button"
-                  role="tab"
-                  aria-selected={tab === t}
-                  onClick={() => setTab(t)}
-                  className={cn(
-                    "inline-flex items-center gap-1.5 rounded-xl px-3.5 py-1.5 text-sm font-medium transition-all",
-                    tab === t
-                      ? "bg-foreground/[0.10] text-foreground shadow-[0_1px_0_0_rgba(255,255,255,0.12)_inset]"
-                      : "hover:text-foreground/80",
-                  )}
-                >
-                  {TAB_LABELS[t]}
-                  <span className="text-xs tabular-nums text-foreground/40">{counts[t]}</span>
-                </button>
-              ))}
-            </div>
-            <div className="relative w-full sm:w-64">
-              <Search className="pointer-events-none absolute left-3.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-foreground/40" />
-              <Input
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder={`Search ${TAB_LABELS[tab].toLowerCase()}`}
-                aria-label="Search the Library"
-                className="h-10 rounded-2xl pl-9"
-              />
-            </div>
+      {/* Keyed so moving between the list and a dataset page starts at the
+          top, as moving between the Spaces grid and a Space does. */}
+      <ScrollArea key={openDataset?.id ?? "list"} className="flex-1">
+        {openDataset ? (
+          <div className="mx-auto w-full max-w-3xl px-4 pb-12 pt-8">
+            <DatasetDetail
+              dataset={openDataset}
+              items={items}
+              onBack={() => {
+                setTab("datasets");
+                setViewingDataset(null);
+              }}
+              onEdit={() => setDatasetDialog({ id: openDataset.id })}
+              onAddItems={() => setPickerFor(openDataset.id)}
+              onUpload={() => fileInputRef.current?.click()}
+            />
+            {uploadingNote}
           </div>
+        ) : (
+          <div className="mx-auto w-full max-w-6xl px-8 py-8 pb-28">
+            <header className="mb-6 flex flex-wrap items-end justify-between gap-4">
+              <div className="min-w-0">
+                <h1 className="flex items-center gap-2.5 text-3xl font-semibold tracking-tight text-foreground">
+                  <Library className="h-6 w-6 text-foreground/60" />
+                  Library
+                </h1>
+                <p className="mt-2 max-w-xl text-sm text-foreground/55">
+                  Texts, files and links you give your models — saved once, used anywhere. Attach them
+                  to a chat with <span className="font-medium text-foreground/80">+ → From Library</span>{" "}
+                  or <span className="font-medium text-foreground/80">#</span>, or add them to a Space's
+                  sources.
+                </p>
+              </div>
+              <div className="flex items-center gap-3">
+                <IndexStatusPill />
+                <Button onClick={primary.onClick} className="gap-1.5 rounded-xl">
+                  {primary.icon}
+                  {primary.label}
+                </Button>
+              </div>
+            </header>
 
-          {!hydrated ? (
-            <LoadingGrid />
-          ) : loadError ? (
-            <div className="mx-auto mt-10 flex max-w-md flex-col items-center rounded-3xl border border-dashed border-destructive/25 bg-destructive/[0.04] px-8 py-14 text-center">
-              <h2 className="text-base font-semibold text-foreground/85">Couldn't load the Library</h2>
-              <p className="mt-2 text-sm text-foreground/55">{loadError}</p>
-              <Button onClick={() => void hydrate()} variant="outline" size="sm" className="mt-5 gap-1.5">
-                <RefreshCw className="h-3.5 w-3.5" />
-                Retry
-              </Button>
-            </div>
-          ) : tab === "datasets" ? (
-            openDataset ? (
-              <DatasetDetail
-                dataset={openDataset}
-                items={items}
-                onBack={() => setOpenDatasetId(null)}
-                onEdit={() => setDatasetDialog({ id: openDataset.id })}
-                onAddItems={() => setPickerFor(openDataset.id)}
-                onUpload={() => fileInputRef.current?.click()}
-              />
-            ) : visibleDatasets.length === 0 ? (
-              q ? (
-                <NoMatches />
-              ) : (
-                <EmptyState
-                  icon={<DatasetIcon size="lg" />}
-                  title="No datasets yet"
-                  description="Group texts, files and links into a dataset, then attach the whole set to a chat or Space in one click."
-                  cta={
-                    <Button onClick={() => setDatasetDialog({})} className="gap-1.5 rounded-xl">
-                      <Plus className="h-4 w-4" />
-                      New dataset
-                    </Button>
-                  }
+            <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
+              <div
+                role="tablist"
+                aria-label="Library sections"
+                className="inline-flex h-10 items-center rounded-2xl border border-foreground/10 bg-foreground/[0.04] p-1 text-foreground/55"
+              >
+                {TABS.map((t) => (
+                  <button
+                    key={t}
+                    type="button"
+                    role="tab"
+                    aria-selected={tab === t}
+                    onClick={() => setTab(t)}
+                    className={cn(
+                      "inline-flex items-center gap-1.5 rounded-xl px-3.5 py-1.5 text-sm font-medium transition-all",
+                      tab === t
+                        ? "bg-foreground/[0.10] text-foreground shadow-[0_1px_0_0_rgba(255,255,255,0.12)_inset]"
+                        : "hover:text-foreground/80",
+                    )}
+                  >
+                    {TAB_LABELS[t]}
+                    <span className="text-xs tabular-nums text-foreground/40">{counts[t]}</span>
+                  </button>
+                ))}
+              </div>
+              <div className="relative w-full sm:w-64">
+                <Search className="pointer-events-none absolute left-3.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-foreground/40" />
+                <Input
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  placeholder={`Search ${TAB_LABELS[tab].toLowerCase()}`}
+                  aria-label="Search the Library"
+                  className="h-10 rounded-2xl pl-9"
                 />
+              </div>
+            </div>
+
+            {!hydrated ? (
+              <LoadingGrid />
+            ) : loadError ? (
+              <div className="mx-auto mt-10 flex max-w-md flex-col items-center rounded-3xl border border-dashed border-destructive/25 bg-destructive/[0.04] px-8 py-14 text-center">
+                <h2 className="text-base font-semibold text-foreground/85">Couldn't load the Library</h2>
+                <p className="mt-2 text-sm text-foreground/55">{loadError}</p>
+                <Button onClick={() => void hydrate()} variant="outline" size="sm" className="mt-5 gap-1.5">
+                  <RefreshCw className="h-3.5 w-3.5" />
+                  Retry
+                </Button>
+              </div>
+            ) : tab === "datasets" ? (
+              visibleDatasets.length === 0 ? (
+                q ? (
+                  <NoMatches />
+                ) : (
+                  <EmptyState
+                    icon={<DatasetIcon size="lg" />}
+                    title="No datasets yet"
+                    description="Group texts, files and links into a dataset, then attach the whole set to a chat or Space in one click."
+                    cta={
+                      <Button onClick={() => setDatasetDialog({})} className="gap-1.5 rounded-xl">
+                        <Plus className="h-4 w-4" />
+                        New dataset
+                      </Button>
+                    }
+                  />
+                )
+              ) : (
+                <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+                  {visibleDatasets.map((d) => (
+                    <DatasetCard
+                      key={d.id}
+                      dataset={d}
+                      items={items}
+                      onOpen={() => setViewingDataset(d.id)}
+                      onEdit={() => setDatasetDialog({ id: d.id })}
+                    />
+                  ))}
+                </div>
               )
-            ) : (
+            ) : visibleItems.length === 0 ? (
+              q ? <NoMatches /> : <EmptyTab tab={tab} onAction={primary.onClick} />
+            ) : tab === "texts" ? (
               <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-                {visibleDatasets.map((d) => (
-                  <DatasetCard
-                    key={d.id}
-                    dataset={d}
-                    items={items}
-                    onOpen={() => setOpenDatasetId(d.id)}
-                    onEdit={() => setDatasetDialog({ id: d.id })}
+                {visibleItems.map((i) => (
+                  <TextCard
+                    key={i.id}
+                    item={i}
+                    selected={selected.has(i.id)}
+                    selecting={selecting}
+                    onToggle={() => toggleSelected(i.id)}
                   />
                 ))}
               </div>
-            )
-          ) : visibleItems.length === 0 ? (
-            q ? <NoMatches /> : <EmptyTab tab={tab} onAction={primary.onClick} />
-          ) : tab === "texts" ? (
-            <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-              {visibleItems.map((i) => (
-                <TextCard
-                  key={i.id}
-                  item={i}
-                  selected={selected.has(i.id)}
-                  selecting={selecting}
-                  onToggle={() => toggleSelected(i.id)}
-                />
-              ))}
-            </div>
-          ) : (
-            <ul className="divide-y divide-foreground/[0.06] overflow-hidden rounded-2xl border border-foreground/10 bg-foreground/[0.02]">
-              {visibleItems.map((i) => (
-                <ItemRow
-                  key={i.id}
-                  item={i}
-                  selected={selected.has(i.id)}
-                  selecting={selecting}
-                  onToggle={() => toggleSelected(i.id)}
-                />
-              ))}
-            </ul>
-          )}
+            ) : (
+              <ul className="divide-y divide-foreground/[0.06] overflow-hidden rounded-2xl border border-foreground/10 bg-foreground/[0.02]">
+                {visibleItems.map((i) => (
+                  <ItemRow
+                    key={i.id}
+                    item={i}
+                    selected={selected.has(i.id)}
+                    selecting={selecting}
+                    onToggle={() => toggleSelected(i.id)}
+                  />
+                ))}
+              </ul>
+            )}
 
-          {uploading > 0 && (
-            <p className="mt-4 flex items-center gap-2 text-xs text-foreground/55">
-              <RefreshCw className="h-3.5 w-3.5 animate-spin" />
-              Reading {uploading} file{uploading === 1 ? "" : "s"}…
-            </p>
-          )}
-        </div>
+            {uploadingNote}
+          </div>
+        )}
       </ScrollArea>
 
       {selecting && (
@@ -455,9 +458,9 @@ export function LibraryView() {
           if (datasetDialog?.seed) {
             setSelected(new Set());
             setTab("datasets");
-            setOpenDatasetId(id);
+            setViewingDataset(id);
           } else if (!datasetDialog?.id) {
-            setOpenDatasetId(id);
+            setViewingDataset(id);
           }
         }}
       />
@@ -640,84 +643,117 @@ function DatasetDetail({
       dataset.id,
       dataset.item_ids.filter((x) => x !== id),
     );
+  // Laid out like SpaceView — breadcrumb, title row with its actions menu,
+  // description and meta chips — so opening a dataset feels like opening a
+  // Space.
   return (
     <section>
       <button
         type="button"
         onClick={onBack}
-        className="mb-4 inline-flex items-center gap-1.5 text-sm text-foreground/55 transition-colors hover:text-foreground"
+        className="mb-6 inline-flex items-center gap-1.5 text-xs text-foreground/45 transition-colors hover:text-foreground/75"
       >
-        <ArrowLeft className="h-4 w-4" />
-        All datasets
+        <span>Library</span>
+        <ChevronRight className="h-3 w-3" />
+        <span className="text-foreground/55">{dataset.name}</span>
       </button>
-      <div className="mb-5 flex flex-wrap items-start justify-between gap-4 rounded-2xl border border-foreground/10 bg-foreground/[0.025] p-5">
-        <div className="flex min-w-0 items-start gap-4">
-          <DatasetIcon size="lg" />
-          <div className="min-w-0">
-            <h2 className="text-xl font-semibold tracking-tight text-foreground">{dataset.name}</h2>
-            {dataset.description && (
-              <p className="mt-1 max-w-2xl text-sm text-foreground/60">{dataset.description}</p>
-            )}
-            <p className="mt-2 text-xs text-foreground/45">
-              {mixLabel(members)} · ~{formatTokens(tokens)} tokens · updated {relativeTime(dataset.updated_at)}
-            </p>
-          </div>
-        </div>
-        <div className="flex items-center gap-2">
-          <Button
-            variant="outline"
-            className="gap-1.5 rounded-lg"
-            disabled={members.length === 0}
-            onClick={() => void startChatWith({ itemIds: [], datasetIds: [dataset.id] })}
-          >
-            <MessageSquarePlus className="h-4 w-4" />
-            Chat with it
-          </Button>
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button variant="ghost" size="icon" aria-label="Dataset actions" className="rounded-lg">
-                <MoreHorizontal className="h-4 w-4" />
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
-              <DropdownMenuItem onSelect={onEdit}>
-                <Pencil className="h-4 w-4" /> Rename / describe
-              </DropdownMenuItem>
-              <DropdownMenuItem onSelect={onUpload}>
-                <Upload className="h-4 w-4" /> Upload files into it
-              </DropdownMenuItem>
-              <DropdownMenuSeparator />
-              <DropdownMenuItem
-                onSelect={() => void deleteDataset(dataset.id).then((ok) => ok && onBack())}
-                className="text-destructive focus:text-destructive"
-              >
-                <Trash2 className="h-4 w-4" /> Delete dataset
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
+
+      <div className="flex items-center gap-3">
+        <Database className="h-7 w-7 shrink-0 text-foreground/65" strokeWidth={1.75} />
+        <h1 className="flex-1 truncate text-3xl font-semibold tracking-tight text-foreground">
+          {dataset.name}
+        </h1>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              variant="ghost"
+              size="icon"
+              aria-label="Dataset actions"
+              className="rounded-xl text-foreground/55 hover:bg-foreground/10 hover:text-foreground"
+            >
+              <MoreHorizontal className="h-4 w-4" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="min-w-[180px]">
+            <DropdownMenuItem onSelect={onEdit}>
+              <Pencil className="h-4 w-4" /> Rename / describe
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={onUpload}>
+              <Upload className="h-4 w-4" /> Upload files into it
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              onSelect={() => void deleteDataset(dataset.id).then((ok) => ok && onBack())}
+              className="text-destructive focus:text-destructive"
+            >
+              <Trash2 className="h-4 w-4" /> Delete dataset
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
+
+      <div className="ml-10 mt-1.5">
+        <p className={cn("text-sm", dataset.description ? "text-foreground/55" : "italic text-foreground/30")}>
+          {dataset.description || "No description"}
+        </p>
+        <div className="mt-3 flex flex-wrap items-center gap-1.5">
+          <MetaChip>{mixLabel(members)}</MetaChip>
+          {members.length > 0 && <MetaChip>~{formatTokens(tokens)} tokens</MetaChip>}
+          <MetaChip>Updated {relativeTime(dataset.updated_at)}</MetaChip>
         </div>
       </div>
 
       {members.length === 0 ? (
-        <EmptyState
-          icon={<DatasetIcon size="lg" />}
-          title="This dataset is empty"
-          description="Add texts, files and links from your Library, or drop files here to upload them straight into it."
-          cta={
-            <Button onClick={onAddItems} className="gap-1.5 rounded-xl">
-              <Plus className="h-4 w-4" />
-              Add items
-            </Button>
-          }
-        />
+        <div className="mt-10">
+          <EmptyState
+            icon={<DatasetIcon size="lg" />}
+            title="This dataset is empty"
+            description="Add texts, files and links from your Library, or drop files here to upload them straight into it."
+            cta={
+              <Button onClick={onAddItems} className="gap-1.5 rounded-xl">
+                <Plus className="h-4 w-4" />
+                Add items
+              </Button>
+            }
+          />
+        </div>
       ) : (
-        <ul className="divide-y divide-foreground/[0.06] overflow-hidden rounded-2xl border border-foreground/10 bg-foreground/[0.02]">
-          {members.map((m) => (
-            <ItemRow key={m.id} item={m} onRemoveFromDataset={() => remove(m.id)} />
-          ))}
-        </ul>
+        <>
+          <div className="mb-3 mt-10 flex items-center justify-between gap-3">
+            <h2 className="text-[11px] font-semibold uppercase tracking-wider text-foreground/40">Items</h2>
+            <div className="flex items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                className="gap-1.5 rounded-lg"
+                onClick={() => void startChatWith({ itemIds: [], datasetIds: [dataset.id] })}
+              >
+                <MessageSquarePlus className="h-3.5 w-3.5" />
+                Chat with it
+              </Button>
+              <Button size="sm" className="gap-1.5 rounded-lg" onClick={onAddItems}>
+                <Plus className="h-3.5 w-3.5" />
+                Add items
+              </Button>
+            </div>
+          </div>
+          <ul className="divide-y divide-foreground/[0.06] overflow-hidden rounded-2xl border border-foreground/10 bg-foreground/[0.02]">
+            {members.map((m) => (
+              <ItemRow key={m.id} item={m} onRemoveFromDataset={() => remove(m.id)} />
+            ))}
+          </ul>
+        </>
       )}
     </section>
+  );
+}
+
+/** Pill in the meta strip under the dataset title — SpaceView's `MetaChip`. */
+function MetaChip({ children }: { children: React.ReactNode }) {
+  return (
+    <span className="inline-flex items-center rounded-full bg-foreground/[0.06] px-2.5 py-0.5 text-[11px] font-medium text-foreground/70">
+      {children}
+    </span>
   );
 }
 

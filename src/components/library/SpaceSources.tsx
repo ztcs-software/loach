@@ -61,7 +61,7 @@ export function SpaceSourcesTab({
   const removeSource = useLibraryStore((s) => s.removeSource);
   const setSourceEnabled = useLibraryStore((s) => s.setSourceEnabled);
   const openPreview = useLibraryStore((s) => s.openPreview);
-  const setFocusDataset = useLibraryStore((s) => s.setFocusDataset);
+  const setViewingDataset = useLibraryStore((s) => s.setViewingDataset);
   const saveToLibrary = useLibraryStore((s) => s.saveToLibrary);
   const setFileEnabled = useSpaceStore((s) => s.setFileEnabled);
   const setRetrievalMode = useSpaceStore((s) => s.setRetrievalMode);
@@ -120,7 +120,7 @@ export function SpaceSourcesTab({
   };
 
   const openDataset = (id: string) => {
-    setFocusDataset(id);
+    setViewingDataset(id);
     useSpaceStore.getState().setViewingSpace(null);
     useModelsStore.getState().setViewingModel(null);
     useUIStore.getState().setSidebarTab("library");

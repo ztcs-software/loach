@@ -105,9 +105,9 @@ interface LibraryState {
   previewItemId: string | null;
   /** Text item open in the editor dialog, or "new". */
   editTextTarget: string | null;
-  /** Dataset the Library page should open — set when navigating from a
-   *  chat or a Space. */
-  focusDatasetId: string | null;
+  /** Dataset the Library page is showing as its own page — the Library's
+   *  `spaceStore.viewingSpaceId`. Null shows the Library list. */
+  viewingDatasetId: string | null;
   /** Sources picked on the welcome screen, before the chat exists.
    *  `chatStore.newSession` links them to the chat it creates. */
   pending: { itemIds: string[]; datasetIds: string[] };
@@ -162,7 +162,7 @@ interface LibraryState {
   removePending: (id: string) => void;
   /** Take (and clear) the pending sources. */
   consumePending: () => { itemIds: string[]; datasetIds: string[] };
-  setFocusDataset: (id: string | null) => void;
+  setViewingDataset: (id: string | null) => void;
 }
 
 let unlistenIndex: (() => void) | null = null;
@@ -176,7 +176,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
   sources: {},
   previewItemId: null,
   editTextTarget: null,
-  focusDatasetId: null,
+  viewingDatasetId: null,
   pending: { itemIds: [], datasetIds: [] },
 
   hydrate: async () => {
@@ -482,7 +482,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     set({ pending: { itemIds: [], datasetIds: [] } });
     return p;
   },
-  setFocusDataset: (id) => set({ focusDatasetId: id }),
+  setViewingDataset: (id) => set({ viewingDatasetId: id }),
 }));
 
 /** Resolve an owner's links into the distinct, enabled items they reach —

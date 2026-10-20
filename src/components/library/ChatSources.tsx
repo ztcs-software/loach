@@ -124,11 +124,11 @@ export function ChatSourceChips({
   const removeSource = useLibraryStore((s) => s.removeSource);
   const removePending = useLibraryStore((s) => s.removePending);
   const openPreview = useLibraryStore((s) => s.openPreview);
-  const setFocusDataset = useLibraryStore((s) => s.setFocusDataset);
+  const setViewingDataset = useLibraryStore((s) => s.setViewingDataset);
   if (chips.length === 0 && spaceCount === 0) return null;
 
   const openDataset = (id: string) => {
-    setFocusDataset(id);
+    setViewingDataset(id);
     useSpaceStore.getState().setViewingSpace(null);
     useModelsStore.getState().setViewingModel(null);
     useUIStore.getState().setSidebarTab("library");
