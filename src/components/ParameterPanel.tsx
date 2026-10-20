@@ -422,10 +422,9 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
                 format={formatK}
                 hint={
                   isOpenAI
-                    ? "How much conversation history the model can see at once. Ignored by OpenAI providers — the server decides."
+                    ? "How much conversation history the model can see at once. Not sent to OpenAI providers — the server decides — but Loach sizes Library sources and the context bar by it, so set it to your model's window."
                     : "How much conversation history the model can see at once. Larger windows remember more but use more VRAM."
                 }
-                dimmed={isOpenAI}
               />
               {isAdvanced && (
                 <SliderRow

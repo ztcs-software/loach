@@ -869,7 +869,6 @@ async function buildTaskRequest(
     if (base) parts.push(base);
     if (globalBlock) parts.push(globalBlock);
     if (memoryBlock) parts.push(memoryBlock);
-    if (sources.systemBlock) parts.push(sources.systemBlock);
     effectiveSystemPrompt = parts.length ? parts.join("\n\n") : null;
   } else {
     if (spaceCtxError) {
@@ -881,7 +880,6 @@ async function buildTaskRequest(
     const parts: string[] = [];
     if (fallbackPrompt) parts.push(fallbackPrompt);
     if (globalBlock) parts.push(globalBlock);
-    if (sources.systemBlock) parts.push(sources.systemBlock);
     effectiveSystemPrompt = parts.length ? parts.join("\n\n") : null;
   }
 
@@ -896,6 +894,16 @@ async function buildTaskRequest(
     effectiveSystemPrompt,
     settings.temporal_awareness,
   );
+
+  // Full-text sources join after the template pass: they're the user's
+  // material, so a `{{USER_NAME}}` or `{{CURRENT_DATE}}` inside one is text,
+  // not a placeholder. (Joined before, a source got rewritten — and one
+  // with `{{CURRENT_…}}` in it also dropped the chat's date line.)
+  if (sources.systemBlock) {
+    effectiveSystemPrompt = effectiveSystemPrompt
+      ? `${effectiveSystemPrompt}\n\n${sources.systemBlock}`
+      : sources.systemBlock;
+  }
 
   const personaId = useUIStore.getState().personaIdBySession[sessionId];
   const persona = getPersona(personaId);
@@ -1901,15 +1909,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (pendingPersonaId) {
       useUIStore.getState().setSessionPersona(session.id, pendingPersonaId);
     }
-    // Library sources picked on the welcome screen follow the same path.
-    const pendingSources = useLibraryStore.getState().consumePending();
-    if (pendingSources.itemIds.length > 0 || pendingSources.datasetIds.length > 0) {
-      try {
-        await useLibraryStore.getState().addSources("session", session.id, pendingSources);
-      } catch (e) {
-        logger.warn("couldn't attach the picked Library sources", e);
-      }
-    }
     // Warm the model-defaults cache for the session's model so the parameter
     // panel and the first send already see Modelfile values without having
     // to wait on the show_model round-trip. Fire-and-forget — failure here
@@ -2328,6 +2327,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (!sessionId || (viewingSpaceId && state.sessions.find(s => s.id === sessionId)?.space_id !== viewingSpaceId)) {
       const created = await get().newSession();
       sessionId = created.id;
+      // Library sources picked in this composer before the chat existed.
+      // Taken here, not in `newSession`: a chat started from the sidebar, a
+      // shortcut or "Chat with it" mustn't inherit picks meant for this one.
+      // Keyed like the composer that showed them (`ChatInput`'s
+      // `sourcesSpaceId` with no chat yet): the Space page it's on, if any.
+      const picked = useLibraryStore.getState().consumePending(viewingSpaceId ?? null);
+      if (picked.itemIds.length > 0 || picked.datasetIds.length > 0) {
+        try {
+          await useLibraryStore.getState().addSources("session", created.id, picked);
+        } catch (e) {
+          logger.warn("couldn't attach the picked Library sources", e);
+        }
+      }
     }
     const session = get().sessions.find((s) => s.id === sessionId)!;
     if (!session.model) {

@@ -657,7 +657,11 @@ Full text goes into the system prompt and stays the same from turn to turn,
 so a local model's prompt cache keeps it. Image items are attached to the
 message as images, for vision models. The window is the chat's context
 length (§8); the context usage bar (§2.10) counts what the sources will
-actually cost.
+actually cost. An OpenAI-compatible server picks its own window, so for
+those chats set the context length to the model's: it isn't sent, but it's
+what sources are sized by. When full text has to leave something out, the
+chat's own sources go in first and the Space's after them; any source that
+didn't fit is named in the reply's sources chip.
 
 Every reply that drew on sources carries a chip above it — "Read 3 sources
 in full" or "Used 6 excerpts from 3 sources". Expand it to see which

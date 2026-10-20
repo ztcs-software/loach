@@ -20,7 +20,7 @@ import {
   onIndexStatus,
   ragStatus,
 } from "@/lib/tauri";
-import { fileToAttachment } from "@/lib/files";
+import { fileToAttachment, NO_DOCX_TEXT, NO_PDF_TEXT } from "@/lib/files";
 import { useToastStore } from "./toastStore";
 import type {
   IndexStatus,
@@ -62,6 +62,19 @@ export async function prepareFiles(
         failed.push({
           name: file.name,
           reason: "not a format Loach can read (text, code, PDF, Word or image)",
+        });
+        continue;
+      }
+      // A scanned PDF or an empty document comes back as a fixed note, which
+      // every such file shares — stored, it'd be a "source" with nothing in
+      // it, and the next one would look like a duplicate.
+      if (att.kind === "text" && (att.data === NO_PDF_TEXT || att.data === NO_DOCX_TEXT || !att.data.trim())) {
+        failed.push({
+          name: file.name,
+          reason:
+            att.data === NO_PDF_TEXT
+              ? "no readable text — it may be a scanned PDF. Add its pages as images, or a text version, instead."
+              : "no readable text",
         });
         continue;
       }
@@ -108,9 +121,11 @@ interface LibraryState {
   /** Dataset the Library page is showing as its own page — the Library's
    *  `spaceStore.viewingSpaceId`. Null shows the Library list. */
   viewingDatasetId: string | null;
-  /** Sources picked on the welcome screen, before the chat exists.
-   *  `chatStore.newSession` links them to the chat it creates. */
-  pending: { itemIds: string[]; datasetIds: string[] };
+  /** Sources picked in the composer before its chat exists (the welcome
+   *  screen, a Space's page), and the Space — or none — that chat will be in.
+   *  Only the composer's own send links them, to the chat it creates in that
+   *  Space; a chat started any other way never picks them up. */
+  pending: { itemIds: string[]; datasetIds: string[]; spaceId: string | null };
 
   hydrate: () => Promise<void>;
   refreshItems: () => Promise<void>;
@@ -158,10 +173,13 @@ interface LibraryState {
   getContents: (ids: string[]) => Promise<LibraryItem[]>;
   openPreview: (id: string | null) => void;
   openTextEditor: (target: string | null) => void;
-  addPending: (sel: { itemIds: string[]; datasetIds: string[] }) => void;
+  /** Park sources for the chat the composer will create in `spaceId`.
+   *  Picks parked for a different Space are dropped. */
+  addPending: (sel: { itemIds: string[]; datasetIds: string[] }, spaceId: string | null) => void;
   removePending: (id: string) => void;
-  /** Take (and clear) the pending sources. */
-  consumePending: () => { itemIds: string[]; datasetIds: string[] };
+  /** Take (and clear) the pending sources — none unless they were picked
+   *  for a chat in `spaceId`. */
+  consumePending: (spaceId: string | null) => { itemIds: string[]; datasetIds: string[] };
   setViewingDataset: (id: string | null) => void;
 }
 
@@ -177,7 +195,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
   previewItemId: null,
   editTextTarget: null,
   viewingDatasetId: null,
-  pending: { itemIds: [], datasetIds: [] },
+  pending: { itemIds: [], datasetIds: [], spaceId: null },
 
   hydrate: async () => {
     try {
@@ -477,24 +495,29 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
 
   openPreview: (id) => set({ previewItemId: id }),
   openTextEditor: (target) => set({ editTextTarget: target }),
-  addPending: (sel) =>
-    set((s) => ({
-      pending: {
-        itemIds: [...new Set([...s.pending.itemIds, ...sel.itemIds])],
-        datasetIds: [...new Set([...s.pending.datasetIds, ...sel.datasetIds])],
-      },
-    })),
+  addPending: (sel, spaceId) =>
+    set((s) => {
+      const kept = s.pending.spaceId === spaceId ? s.pending : { itemIds: [], datasetIds: [] };
+      return {
+        pending: {
+          itemIds: [...new Set([...kept.itemIds, ...sel.itemIds])],
+          datasetIds: [...new Set([...kept.datasetIds, ...sel.datasetIds])],
+          spaceId,
+        },
+      };
+    }),
   removePending: (id) =>
     set((s) => ({
       pending: {
+        ...s.pending,
         itemIds: s.pending.itemIds.filter((x) => x !== id),
         datasetIds: s.pending.datasetIds.filter((x) => x !== id),
       },
     })),
-  consumePending: () => {
-    const p = get().pending;
-    set({ pending: { itemIds: [], datasetIds: [] } });
-    return p;
+  consumePending: (spaceId) => {
+    const { itemIds, datasetIds, spaceId: pickedFor } = get().pending;
+    set({ pending: { itemIds: [], datasetIds: [], spaceId: null } });
+    return pickedFor === spaceId ? { itemIds, datasetIds } : { itemIds: [], datasetIds: [] };
   },
   setViewingDataset: (id) => set({ viewingDatasetId: id }),
 }));

@@ -97,7 +97,8 @@ export function useChatSources(sessionId: string | null, spaceId: string | null)
         if (src.item_id) push("item", src.item_id, src.id);
         else if (src.dataset_id) push("dataset", src.dataset_id, src.id);
       }
-    } else {
+    } else if (pending.spaceId === spaceId) {
+      // Picks parked for a chat in another Space aren't this composer's.
       pending.datasetIds.forEach((id) => push("dataset", id, null));
       pending.itemIds.forEach((id) => push("item", id, null));
     }
@@ -195,11 +196,15 @@ function ChipIcon({ chip }: { chip: ChipRef }) {
   return <FileText className={cls} />;
 }
 
-/** The context window a chat's sends are sized against: its own `num_ctx`
- *  override, else its Space's, else the app default. Model defaults from a
- *  Modelfile aren't consulted — close enough for a hint. */
-export function chatNumCtx(sessionParams: string | null | undefined, spaceParams: string | null | undefined): number {
-  let n = DEFAULT_PARAMS.num_ctx ?? 8192;
+/** The context window a chat's sends are sized against, layered the way
+ *  the send layers it: its own `num_ctx` override, else its Space's, else
+ *  the model's default (a Modelfile's `num_ctx`), else the app default. */
+export function chatNumCtx(
+  sessionParams: string | null | undefined,
+  spaceParams: string | null | undefined,
+  modelNumCtx?: number | null,
+): number {
+  let n = modelNumCtx && modelNumCtx > 0 ? modelNumCtx : (DEFAULT_PARAMS.num_ctx ?? 8192);
   for (const json of [spaceParams, sessionParams]) {
     if (!json) continue;
     try {
@@ -220,7 +225,10 @@ function ModeChip({ sessionId, spaceId }: { sessionId: string; spaceId: string |
   // Re-estimate when the Library or the links change.
   useLibraryStore((s) => s.items);
   useLibraryStore((s) => s.sources);
-  const numCtx = chatNumCtx(session?.params_json, space?.default_params_json);
+  const modelNumCtx = useModelsStore((s) =>
+    session?.provider === "ollama" && session.model ? s.modelDefaults[session.model]?.num_ctx : undefined,
+  );
+  const numCtx = chatNumCtx(session?.params_json, space?.default_params_json, modelNumCtx);
   if (!session) return null;
 
   const pref = chatRetrievalMode(session, space?.retrieval_mode);

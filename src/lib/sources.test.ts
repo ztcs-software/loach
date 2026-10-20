@@ -223,9 +223,10 @@ describe("resolveSources", () => {
     });
     const args = tauri.ragSearch.mock.calls[0][0] as { docs: unknown[]; max_chars: number };
     // The disabled file is left out; the 40k-char item tips auto into search.
+    // The chat's own pick comes before the Space's material.
     expect(args.docs).toEqual([
-      { kind: "space_file", id: "f1" },
       { kind: "library", id: "b" },
+      { kind: "space_file", id: "f1" },
     ]);
     expect(args.max_chars).toBe(2048 * 4);
     expect(r.systemBlock).toBe("");
@@ -261,6 +262,74 @@ describe("resolveSources", () => {
     expect(r.systemBlock).not.toContain("budget.xlsx");
     expect(r.systemBlock).not.toContain("UEsDBBQ");
     expect(r.record?.result).toBe("Read 1 source in full.");
+  });
+
+  it("reports only the sources that fit, the chat's own first", async () => {
+    // Regression: when full text ran out of room, later sources were left
+    // out whole while the chip still listed them as read — and the chat's
+    // own picks, coming last, were the first to go.
+    useLibraryStore.setState({
+      items: [meta("a", 1_000), meta("s", 500)],
+      sources: {
+        "session:s1": [
+          { id: "l1", owner_id: "s1", item_id: "a", dataset_id: null, enabled: true, position: 0, created_at: 0 },
+        ],
+        "space:sp": [
+          { id: "l2", owner_id: "sp", item_id: "s", dataset_id: null, enabled: true, position: 0, created_at: 0 },
+        ],
+      },
+    });
+    const spaceCtx = {
+      space: { id: "sp", retrieval_mode: "full" },
+      files: [{ id: "f1", name: "big.md", kind: "text", data: "f".repeat(30_000), enabled: true }],
+      memories: [],
+    } as unknown as SpaceContext;
+    const r = await resolveSources({
+      session: { ...session, space_id: "sp", retrieval_mode: "full" } as Session,
+      spaceCtx,
+      history: [],
+      trigger: "hi",
+      numCtx: 8192,
+    });
+    const report = r.record?.arguments as SourcesReport;
+    // The chat's item went first and whole; the Space's big file was cut to
+    // fill the room; its linked item after that didn't fit at all, and is
+    // named rather than listed as read.
+    expect(report.sources.map((s) => s.id)).toEqual(["a", "f1"]);
+    expect(r.systemBlock.indexOf("body of a")).toBeLessThan(r.systemBlock.indexOf("fff"));
+    expect(r.systemBlock).not.toContain("body of s");
+    expect(report.warning).toContain("didn't get “Item s”");
+    expect(r.record?.result).toBe("Read 2 sources in full (cut to fit).");
+  });
+
+  it("says so when the Library can't be read, and still sends the Space's uploads", async () => {
+    // Regression: a failed link or body read dropped every source with no
+    // chip and no warning.
+    useLibraryStore.setState({ sources: {} });
+    tauri.libraryListSources.mockRejectedValueOnce(new Error("database is locked"));
+    const spaceCtx = {
+      space: { id: "sp", retrieval_mode: "auto" },
+      files: [{ id: "f1", name: "notes.md", kind: "text", data: "space notes", enabled: true }],
+      memories: [],
+    } as unknown as SpaceContext;
+    const r = await resolveSources({
+      session: { ...session, space_id: "sp" } as Session,
+      spaceCtx,
+      history: [],
+      trigger: "hi",
+      numCtx: 8192,
+    });
+    expect(r.systemBlock).toContain("space notes");
+    expect((r.record?.arguments as SourcesReport).warning).toBe(
+      "Couldn't read your Library sources: database is locked",
+    );
+
+    // With nothing else to send, the record is an error rather than nothing.
+    useLibraryStore.setState({ sources: {} });
+    tauri.libraryListSources.mockRejectedValueOnce(new Error("database is locked"));
+    const alone = await resolveSources({ session, spaceCtx: null, history: [], trigger: "hi", numCtx: 8192 });
+    expect(alone.record?.is_error).toBe(true);
+    expect(alone.record?.result).toBe("Couldn't read your Library sources.");
   });
 
   it("records a failed search instead of blocking the send", async () => {

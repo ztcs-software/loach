@@ -17,6 +17,12 @@ export const SPACE_BYTES_CAP = 200 * 1024 * 1024; // 200 MB total per space
  */
 const MAX_EXTRACTED_CHARS = 200_000;
 
+/** Stand-ins for a document with no text layer — a note to the model on an
+ *  attachment, but nothing worth storing as a Library item. */
+export const NO_PDF_TEXT =
+  "[PDF contained no extractable text — it may be a scanned image. Try attaching it as an image instead for a vision-capable model.]";
+export const NO_DOCX_TEXT = "[DOCX contained no extractable text.]";
+
 /**
  * Combined inline-content ceiling for a single outgoing user message.
  *
@@ -252,9 +258,7 @@ export async function fileToAttachment(file: File): Promise<Attachment> {
       kind: "text",
       name: file.name,
       mime: PDF_MIME,
-      data:
-        text ||
-        "[PDF contained no extractable text — it may be a scanned image. Try attaching it as an image instead for a vision-capable model.]",
+      data: text || NO_PDF_TEXT,
       bytes,
       truncated: truncated || undefined,
     };
@@ -273,7 +277,7 @@ export async function fileToAttachment(file: File): Promise<Attachment> {
       kind: "text",
       name: file.name,
       mime: DOCX_MIME,
-      data: text || "[DOCX contained no extractable text.]",
+      data: text || NO_DOCX_TEXT,
       bytes,
       truncated: truncated || undefined,
     };

@@ -2815,6 +2815,20 @@ fn link_title(raw: &str) -> String {
     }
 }
 
+/// A link's URL without any `user:password@`: the Library keeps the URL as
+/// plain text and exports it, so credentials in it would sit in the database
+/// and every backup. Any other URL is returned exactly as given.
+fn strip_url_credentials(raw: &str) -> String {
+    match reqwest::Url::parse(raw) {
+        Ok(mut url) if !url.username().is_empty() || url.password().is_some() => {
+            let _ = url.set_username("");
+            let _ = url.set_password(None);
+            url.to_string()
+        }
+        _ => raw.to_string(),
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct LibraryList {
     pub items: Vec<LibraryItemMeta>,
@@ -2978,7 +2992,7 @@ pub async fn library_add_link(
     state: State<'_, AppState>,
     url: String,
 ) -> Result<LibraryItemMeta, String> {
-    let url = url.trim().to_string();
+    let url = strip_url_credentials(url.trim());
     let page = fetch_for_library(&url).await?;
     let title = page
         .title
@@ -3945,6 +3959,20 @@ mod tests {
         let (body, note) = long.split_once("\n\n[…").expect("note appended");
         assert_eq!(body.chars().count(), LIBRARY_MAX_CHARS);
         assert!(note.starts_with("truncated at 200,000 characters"), "{note}");
+    }
+
+    #[test]
+    fn link_credentials_are_never_kept() {
+        // Regression: `https://user:pass@host/…` was stored and exported
+        // verbatim, unlike MCP arguments, which backups already scrub.
+        assert_eq!(
+            strip_url_credentials("https://user:p%40ss@example.com/a?b=1#c"),
+            "https://example.com/a?b=1#c"
+        );
+        assert_eq!(strip_url_credentials("https://token@example.com/x"), "https://example.com/x");
+        // Anything else is kept exactly as typed (no normalising slash).
+        assert_eq!(strip_url_credentials("https://example.com"), "https://example.com");
+        assert_eq!(strip_url_credentials("not a url"), "not a url");
     }
 
     #[test]

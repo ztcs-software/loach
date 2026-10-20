@@ -212,6 +212,12 @@ export function ChatInput({ centered = false }: ChatInputProps) {
   );
   const chatSources = useChatSources(composerSessionId, sourcesSpaceId);
   const hasChatSources = chatSources.chips.length > 0 || chatSources.spaceCount > 0;
+  // A Modelfile's own window, which the send layers under the chat's.
+  const composerModelCtx = useModelsStore((s) =>
+    composerSessionId && activeSession?.provider === "ollama" && activeSession.model
+      ? s.modelDefaults[activeSession.model]?.num_ctx
+      : undefined,
+  );
   const libraryItems = useLibraryStore((s) => s.items);
   const libraryDatasets = useLibraryStore((s) => s.datasets);
   const addLibrarySources = useLibraryStore((s) => s.addSources);
@@ -270,7 +276,7 @@ export function ChatInput({ centered = false }: ChatInputProps) {
    *  chat exists, when sending from the welcome screen. */
   const attachFromLibrary = async (sel: LibrarySelection) => {
     if (composerSessionId) await addLibrarySources("session", composerSessionId, sel);
-    else addPendingSources(sel);
+    else addPendingSources(sel, sourcesSpaceId);
   };
 
   const acceptMention = (entry: MentionEntry) => {
@@ -1278,6 +1284,7 @@ export function ChatInput({ centered = false }: ChatInputProps) {
         numCtx={chatNumCtx(
           composerSessionId ? activeSession?.params_json : null,
           sourcesSpace?.default_params_json,
+          composerModelCtx,
         )}
         onConfirm={attachFromLibrary}
       />

@@ -168,9 +168,11 @@ export function LibraryView() {
       for (const f of failed) {
         useToastStore.getState().push({ kind: "error", title: `Couldn't add ${f.name}`, body: f.reason });
       }
-      const known = new Set(useLibraryStore.getState().items.map((i) => i.content_hash));
+      const known = new Map(useLibraryStore.getState().items.map((i) => [i.content_hash, i.id]));
       const dupes = ready.filter((f) => known.has(f.hash));
       let toAdd = ready;
+      // Skipped duplicates: the copies already in the Library.
+      let existingIds: string[] = [];
       if (dupes.length > 0) {
         const again = await confirm({
           title: dupes.length === 1 ? "Already in your Library" : `${dupes.length} files are already in your Library`,
@@ -178,12 +180,19 @@ export function LibraryView() {
           confirmLabel: "Add anyway",
           cancelLabel: "Skip",
         });
-        if (!again) toAdd = ready.filter((f) => !known.has(f.hash));
+        if (!again) {
+          toAdd = ready.filter((f) => !known.has(f.hash));
+          existingIds = dupes.map((f) => known.get(f.hash)!);
+        }
       }
       const added = await addPrepared(toAdd);
-      if (added.length > 0) {
-        if (openDataset) await addToDataset(openDataset.id, added.map((a) => a.id));
-        else if (tab !== "files") setTab("files");
+      if (openDataset) {
+        // Uploading into a dataset means "put this in it": a skipped
+        // duplicate joins as the copy the Library already has.
+        const ids = [...added.map((a) => a.id), ...existingIds];
+        if (ids.length > 0) await addToDataset(openDataset.id, ids);
+      } else if (added.length > 0 && tab !== "files") {
+        setTab("files");
       }
     } finally {
       setUploading((n) => Math.max(0, n - files.length));
