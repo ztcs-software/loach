@@ -47,6 +47,7 @@ Behind a calm, beautifully crafted UI sits a rich feature set - ready when you n
 
 #### Organizing chats & content
 - **Spaces** - group chats around a project, with shared instructions, reference sources and memory. 
+- **Library** - keep texts, files (PDF, Word, code, images) and web links in one place, group them into datasets, and attach them to any chat (`+` → From Library, or `#`) or Space. Small sources go to the model in full; big ones are searched, and only the most relevant passages are sent - by keyword out of the box, and by meaning with an optional embedding model. Each reply shows which sources it used.
 - **Global memories** - opt-in (**Settings → Features**): after each reply outside a Space, Loach notes lasting facts about you and updates or retires ones that changed, with an Undo on every change; the facts go with you into every chat, Spaces included. Space memory works the same way, and both have a searchable editor that links each fact back to the chat it came from.
 - **Chat folders** - drag one chat onto another in the sidebar to group them into a named folder.
 - **Chat labels** - tag a chat with a colour from any chat menu; it shows as a dot next to the chat in the sidebar and Space view.
@@ -79,14 +80,14 @@ Behind a calm, beautifully crafted UI sits a rich feature set - ready when you n
 - **Share a message** - copy any message as text or as a rendered chat-bubble image, save the image as a PNG, or open a pre-filled post on Facebook, X, Reddit or LinkedIn.
 
 #### App, data & updates 
-- **Data management** - make backups of your content to JSON file (MCP headers, environment variables and chats' workspace folders are left out), restore data or permanently delete it with a few clicks, with a storage breakdown showing what your chats, attachments and Spaces actually weigh on disk. 
+- **Data management** - make backups of your content to JSON file (MCP headers, environment variables and chats' workspace folders are left out), restore data or permanently delete it with a few clicks, with a storage breakdown showing what your chats, attachments, Spaces and Library actually weigh on disk. 
 - **App lock** - optional PIN, password or PIN + password gate at launch, with opt-in auto-lock after inactivity or on minimize and a lock-now shortcut; credentials are hashed and stored in OS credential manager.
 - **Themes** - glassy, gradient Aurora or flat Solid, both available in Dark and Light variants.
 - **OTA updates** - get new features, bug fixes, performance improvements and security patches directly from the app, with an opt-in check at launch that tells you when a new version is out.
 
 ...and more! 
 
-We are working on extending the list above, including new RAG and agentic features. 
+We are working on extending the list above, including new agentic features. 
 
 ---
 
@@ -215,6 +216,7 @@ Only one OpenAI-compatible endpoint is active at a time — switch the base URL 
 | Icons | `lucide-react` |
 | State | Zustand (in-memory; backed by SQLite for persistence where appropriate) |
 | Storage | SQLite via `rusqlite` (bundled feature — no system dependency) |
+| Library search | SQLite FTS5 keyword index + optional embeddings (Ollama or OpenAI-compatible), merged by reciprocal-rank fusion |
 | Secrets | `keyring` crate → Windows Credential Manager / Linux Secret Service / macOS Keychain |
 | Argon2id | `argon2` + `rand_core` (for app-lock hashing) |
 | HTTP | `reqwest` with streaming + `rustls-tls` |
@@ -232,7 +234,7 @@ Only one OpenAI-compatible endpoint is active at a time — switch the base URL 
 
 | What | Where |
 |---|---|
-| Chats, messages, folders, spaces (instructions, reference sources, memories), global memories, snippets, snippet variables and saved fill-ins, MCP servers (including their headers and environment variables, in plain text), app settings | SQLite at `<app-data-dir>/loach.db` |
+| Chats, messages, folders, spaces (instructions, reference sources, memories), the Library (texts, files, links, datasets and their search index), global memories, snippets, snippet variables and saved fill-ins, MCP servers (including their headers and environment variables, in plain text), app settings | SQLite at `<app-data-dir>/loach.db` |
 | OpenAI API key | OS credential manager (Windows Credential Manager / Linux Secret Service / macOS Keychain) |
 | App-lock hash + hint | OS credential manager — same store, separate entry |
 | Attached files (images, text, PDF, DOCX) and PDFs the pdf tool generates | Stored with their message in `loach.db`; no separate file store |
@@ -240,7 +242,7 @@ Only one OpenAI-compatible endpoint is active at a time — switch the base URL 
 | App data dir on Linux | `~/.local/share/dev.loach.app/` |
 | App data dir on macOS | `~/Library/Application Support/dev.loach.app/` |
 
-Loach launches and works completely offline as long as you stick to local providers. The **Models** library, **Spaces**, **Snippets**, search, parameter sidebar, app lock, and chat history are all available without network access. Only chat generations against remote endpoints (OpenAI, Groq, OpenRouter, …), model pulls, web fetch, remote MCP servers (and the first launch of an `npx`/`uvx` one, which downloads its package) and update checks require internet connection.
+Loach launches and works completely offline as long as you stick to local providers. The **Models** library, **Spaces**, the **Library**, **Snippets**, search, parameter sidebar, app lock, and chat history are all available without network access. Only chat generations against remote endpoints (OpenAI, Groq, OpenRouter, …), model pulls, web fetch and Library links, embeddings from a remote endpoint, remote MCP servers (and the first launch of an `npx`/`uvx` one, which downloads its package) and update checks require internet connection.
 
 ---
 

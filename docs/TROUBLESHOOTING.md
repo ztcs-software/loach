@@ -564,7 +564,8 @@ existing memories still ride along until you remove them. Turning off
 
 **Solution.** Each file can be at most **20 MB**, and a Space's sources at
 most **200 MB** in total. Remove
-older references, or move the content into a smaller text file.
+older references, or move the content into a smaller text file. Library
+items linked with **From Library** don't count toward that limit.
 
 ### Space instructions seem to override my custom instructions
 
@@ -577,7 +578,110 @@ Space's instructions, or repeat the relevant parts in them.
 
 ---
 
-## 7. App lock
+## 7. Library
+
+### Search by meaning says "Embedding paused"
+
+**Problem.** The Library header or **Settings → Library** shows **Embedding
+paused**, and replies' sources chips say the embedding model was
+unavailable.
+
+**Solution.** Loach can't reach the embedding model, so it searches your
+sources by keyword until it can — nothing is lost. **Settings → Library**
+shows the reason:
+
+- *model … not found* — the model isn't installed in Ollama. Click
+  **Download it**, or pick a suggested model with **Download & use**.
+- *error sending request* — Ollama, or the OpenAI-compatible endpoint, isn't
+  running or can't be reached. Start it, check the base URL under
+  **Settings → Providers**, then click **Retry**.
+- The endpoint answers but rejects the model — pick one it serves for
+  embeddings; a chat model won't do.
+
+Loach tries again by itself every minute, and straight away when you change
+the model or the base URL.
+
+### Indexing never seems to finish
+
+**Problem.** **Indexing n / m** stays in the Library header.
+
+**Solution.** Embedding runs in the background, a batch at a time, and a
+large Library on a CPU-only machine takes a while; keyword search works
+throughout. If the count stops moving, check **Settings → Library**: when
+something fails the status turns into **Embedding paused** with the reason
+(see above). Passages a model refuses — too long for some servers — are left
+to keyword search and don't hold up the rest. **Rebuild** in **Settings →
+Library** starts over from scratch.
+
+### A link won't add
+
+**Problem.** **Add link** fails with an error.
+
+**Solution.**
+
+- *Refusing to fetch …* — links to `localhost`, private networks and VPN
+  addresses are refused, the same as for web fetch (see "Refusing to fetch
+  …" above). Copy the page's text into a **New text** instead.
+- *This link serves `application/pdf`…* (or another file type) — the link
+  points at a file, not a page. Download it and add it under **Files**.
+- *The page has no readable text* — the page builds its content with
+  scripts, which Loach doesn't run. Copy its text into a **New text**.
+- A slow page gets 30 seconds, and anything past 5 MB is cut.
+
+A link is a snapshot: when the page changes, **Refresh** it.
+
+### The model ignored my source, or used the wrong part of it
+
+**Problem.** A reply doesn't reflect a source you attached.
+
+**Solution.** Expand the sources chip above the reply. It lists the sources
+and says whether the model read them **in full** or got **excerpts**.
+
+- **Excerpts** — only the passages most relevant to your message were sent.
+  Name the topic in the message, set an embedding model so sources are also
+  searched by meaning, or switch the chat's **Sources** chip to **Full
+  text** if they fit.
+- **Cut to fit** — the sources didn't fit the context window. Raise the
+  chat's context length, attach fewer sources, or switch to **Excerpts**.
+- **No chip** — the source isn't reaching the chat at all: check it's
+  switched on (a Space's **Sources** tab) and attached to this chat or its
+  Space. Private Chat never uses sources.
+
+Small local models sometimes overlook long context; a larger model helps.
+
+### Keyword search finds nothing in Chinese, Japanese or Thai text
+
+**Problem.** Excerpts from these sources don't match the question — the
+chip shows the opening part of each source instead.
+
+**Solution.** These languages don't put spaces between words, so keyword
+search can only match long runs of text. Set a multilingual embedding model
+in **Settings → Library** (`embeddinggemma`, `qwen3-embedding:0.6b` or
+`bge-m3`) — search by meaning doesn't depend on spaces — or switch the chat
+to **Full text** when the sources fit.
+
+### An item is marked "Truncated"
+
+**Problem.** A Library item shows a **Truncated** badge.
+
+**Solution.** An item keeps up to 200,000 characters (roughly a 100-page
+document); the rest was cut, and the model is told the text is incomplete.
+Split the document and add the parts as separate items — put them in one
+dataset to attach them together.
+
+### A Space upload says "unreadable"
+
+**Problem.** On a Space's **Sources** tab, an upload shows **unreadable**
+instead of a token count.
+
+**Solution.** Loach can't read that format (spreadsheets, archives, legacy
+`.doc`), so it keeps the file in the Space but never sends it to a model.
+Save it as PDF, DOCX or plain text and upload that instead. The Library
+turns such files away outright.
+
+---
+
+## 8. App lock
 
 ### I forgot my PIN or password
 
@@ -663,7 +767,7 @@ past the interval locks the moment it wakes.
 
 ---
 
-## 8. Models editor
+## 9. Models editor
 
 ### "Save as new model" rejects my Modelfile
 
@@ -706,7 +810,7 @@ the tag matches what `ollama list` shows, then retry from the Models tab.
 
 ---
 
-## 9. Updates
+## 10. Updates
 
 ### No "Install update" button on Linux
 
@@ -765,7 +869,7 @@ a suffix such as `-beta-1` or `-rc-1`) — download those from GitHub.
 
 ---
 
-## 10. Data, import, and export
+## 11. Data, import, and export
 
 ### Import won't accept my JSON file
 
@@ -788,7 +892,7 @@ API key. To clear everything, including the key and the app lock, use
 
 ---
 
-## 11. Appearance and window
+## 12. Appearance and window
 
 ### Aurora theme tears or stutters
 
@@ -814,7 +918,7 @@ uniform.
 
 ---
 
-## 12. Search palette
+## 13. Search palette
 
 ### Cmd/Ctrl+K does nothing
 
@@ -856,7 +960,7 @@ whole list instead of a reserved block at the bottom.
 
 ---
 
-## 13. Platform
+## 14. Platform
 
 ### macOS: "Loach is damaged and can't be opened" on first launch
 
