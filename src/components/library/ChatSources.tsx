@@ -21,6 +21,7 @@ import { useChatStore } from "@/stores/chatStore";
 import { expandSources, useLibraryStore } from "@/stores/libraryStore";
 import { useModelsStore } from "@/stores/modelsStore";
 import { useSpaceStore } from "@/stores/spaceStore";
+import { useToastStore } from "@/stores/toastStore";
 import { useUIStore } from "@/stores/uiStore";
 import {
   DEFAULT_PARAMS,
@@ -234,7 +235,16 @@ function ModeChip({ sessionId, spaceId }: { sessionId: string; spaceId: string |
   // that never picked a mode shows the Auto it actually runs in.
   const selected = session.retrieval_mode ?? (space ? null : "auto");
   const setMode = async (mode: RetrievalMode | null) => {
-    await setSessionRetrievalMode(sessionId, mode);
+    try {
+      await setSessionRetrievalMode(sessionId, mode);
+    } catch (e) {
+      useToastStore.getState().push({
+        kind: "error",
+        title: "Couldn't change how sources are used",
+        body: e instanceof Error ? e.message : String(e),
+      });
+      return;
+    }
     useChatStore.setState((s) => ({
       sessions: s.sessions.map((x) => (x.id === sessionId ? { ...x, retrieval_mode: mode } : x)),
     }));

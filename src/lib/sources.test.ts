@@ -129,6 +129,13 @@ describe("prompt blocks", () => {
     const trigger = "and the fillings?\n\n---\nAttached file: `x.txt`\n```\nnoise\n```";
     expect(retrievalQuery(trigger, history)).toBe("and the fillings?\nTell me about pierogi");
   });
+
+  it("never cuts the query inside an emoji", () => {
+    // Regression: the 2000-unit cut could keep only the first half of a
+    // surrogate pair, and the backend then rejected the whole search.
+    const q = retrievalQuery(`${"a".repeat(1999)}🐟 loach`, []);
+    expect(q).toBe("a".repeat(1999));
+  });
 });
 
 describe("expandSources", () => {
@@ -229,6 +236,31 @@ describe("resolveSources", () => {
       { kind: "space_file", id: "f1", title: "contract.pdf", excerpts: [{ seq: 0, text: "the clause" }] },
     ]);
     expect(r.record?.result).toBe("Used 1 excerpt from 1 source.");
+  });
+
+  it("leaves unreadable Space uploads out of the prompt", async () => {
+    // Regression: an .xlsx stored as base64 (`kind: "file"`) was inlined as a
+    // "source", and its size could tip auto into excerpts.
+    const spaceCtx = {
+      space: { id: "sp", retrieval_mode: "auto" },
+      files: [
+        { id: "f1", name: "notes.md", kind: "text", data: "readable notes", enabled: true },
+        { id: "f2", name: "budget.xlsx", kind: "file", data: "UEsDBBQ".repeat(20_000), enabled: true },
+      ],
+      memories: [],
+    } as unknown as SpaceContext;
+    useLibraryStore.setState({ sources: { "session:s1": [] } });
+    const r = await resolveSources({
+      session: { ...session, space_id: "sp" } as Session,
+      spaceCtx,
+      history: [],
+      trigger: "hi",
+      numCtx: 8192,
+    });
+    expect(r.systemBlock).toContain("readable notes");
+    expect(r.systemBlock).not.toContain("budget.xlsx");
+    expect(r.systemBlock).not.toContain("UEsDBBQ");
+    expect(r.record?.result).toBe("Read 1 source in full.");
   });
 
   it("records a failed search instead of blocking the send", async () => {

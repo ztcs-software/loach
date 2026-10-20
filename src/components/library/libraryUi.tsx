@@ -153,6 +153,9 @@ export function mixLabel(items: LibraryItemMeta[]): string {
  *  there's nothing to say. */
 export function IndexBadge({ item }: { item: LibraryItemMeta }) {
   const model = useLibraryStore((s) => s.indexStatus?.model ?? null);
+  // While the embedding model is failing nothing is being indexed: the
+  // status pill says why, and a spinner here would spin forever.
+  const failing = useLibraryStore((s) => !!s.indexStatus?.error);
   if (item.truncated) {
     return (
       <span
@@ -163,7 +166,7 @@ export function IndexBadge({ item }: { item: LibraryItemMeta }) {
       </span>
     );
   }
-  if (model && item.media === "text" && item.chunks > item.embedded) {
+  if (model && !failing && item.media === "text" && item.chunks > item.embedded) {
     return (
       <span
         className="inline-flex items-center gap-1 text-[10.5px] text-foreground/45"

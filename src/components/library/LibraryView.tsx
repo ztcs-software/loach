@@ -513,6 +513,9 @@ function DatasetCard({
       aria-label={`Open dataset: ${dataset.name}`}
       onClick={onOpen}
       onKeyDown={(e) => {
+        // Only the card's own keys: Enter on its Chat or ⋯ button (or a menu
+        // item, which bubbles here through the portal) belongs to that control.
+        if (e.target !== e.currentTarget) return;
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
           onOpen();
@@ -861,7 +864,9 @@ function TextCard({
       aria-label={`Open text: ${item.title}`}
       onClick={() => (selecting ? onToggle() : openPreview(item.id))}
       onKeyDown={(e) => {
-        if (e.key === "Enter") openPreview(item.id);
+        if (e.key !== "Enter" || e.target !== e.currentTarget) return;
+        if (selecting) onToggle();
+        else openPreview(item.id);
       }}
       className={cn(
         "group relative flex h-full min-h-[168px] cursor-pointer flex-col rounded-2xl border bg-foreground/[0.025] p-5 transition-colors",

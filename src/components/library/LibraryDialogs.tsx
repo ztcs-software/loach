@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ExternalLink,
   Loader2,
@@ -26,6 +26,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Markdown } from "@/components/Markdown";
 import { useConfirm } from "@/components/ConfirmDialog";
+import { primaryMod } from "@/lib/shortcuts";
 import { libraryUsage, openExternal } from "@/lib/tauri";
 import { cn, formatBytes, relativeTime } from "@/lib/utils";
 import { safeImageMime } from "@/lib/files";
@@ -56,7 +57,9 @@ export function useDeleteLibraryItems() {
     const inDatasets = datasets.filter((d) => d.item_ids.some((id) => ids.includes(id)));
     let usage = { spaces: [] as string[], chats: 0 };
     try {
-      usage = await libraryUsage({ itemIds: ids, datasetIds: [] });
+      // Through its datasets too: a Space or chat that links a dataset loses
+      // the item just the same.
+      usage = await libraryUsage({ itemIds: ids, datasetIds: inDatasets.map((d) => d.id) });
     } catch {
       /* the confirmation still works without the usage line */
     }
@@ -122,6 +125,9 @@ export function TextEditorDialog() {
   const [body, setBody] = useState("");
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  // State lags a render behind, so two quick Ctrl+Enters both saw `saving`
+  // false and created the text twice. A ref holds the save synchronously.
+  const savingRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -143,6 +149,8 @@ export function TextEditorDialog() {
   }, [target]);
 
   const save = async () => {
+    if (savingRef.current) return;
+    savingRef.current = true;
     setSaving(true);
     setError(null);
     try {
@@ -152,6 +160,7 @@ export function TextEditorDialog() {
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
+      savingRef.current = false;
       setSaving(false);
     }
   };
@@ -182,7 +191,7 @@ export function TextEditorDialog() {
               placeholder="Write or paste the text…"
               className="min-h-[340px] rounded-2xl border-foreground/10 bg-foreground/[0.05] text-[13.5px] leading-relaxed"
               onKeyDown={(e) => {
-                if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && title.trim() && body.trim()) {
+                if (e.key === "Enter" && primaryMod(e.nativeEvent) && title.trim() && body.trim()) {
                   e.preventDefault();
                   void save();
                 }
@@ -447,6 +456,9 @@ export function ItemPreviewDialog() {
   const [refreshing, setRefreshing] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const [draftTitle, setDraftTitle] = useState("");
+  // Set by Escape, so the blur that follows the field's unmount can't commit
+  // the draft it was meant to throw away.
+  const renameCancelled = useRef(false);
 
   useEffect(() => {
     setFull(null);
@@ -476,6 +488,7 @@ export function ItemPreviewDialog() {
       : `Added ${relativeTime(item.created_at)}`;
 
   const commitRename = async () => {
+    if (renameCancelled.current) return;
     const t = draftTitle.trim();
     setRenaming(false);
     if (t && t !== item.title) await rename(item.id, t);
@@ -483,7 +496,17 @@ export function ItemPreviewDialog() {
 
   return (
     <Dialog open={!!id} onOpenChange={(o) => !o && close()}>
-      <DialogContent className="flex max-h-[86vh] max-w-3xl flex-col gap-0 p-0">
+      <DialogContent
+        className="flex max-h-[86vh] max-w-3xl flex-col gap-0 p-0"
+        // Radix hears Escape on the document before the field does, so a
+        // rename is cancelled here — otherwise Escape closes the preview.
+        onEscapeKeyDown={(e) => {
+          if (!renaming) return;
+          e.preventDefault();
+          renameCancelled.current = true;
+          setRenaming(false);
+        }}
+      >
         <DialogHeader className="border-b border-foreground/[0.07] px-6 pb-4 pt-6 pr-14">
           <div className="flex items-start gap-3">
             <ItemIcon item={item} />
@@ -494,11 +517,9 @@ export function ItemPreviewDialog() {
                   onChange={(e) => setDraftTitle(e.target.value)}
                   onBlur={() => void commitRename()}
                   onKeyDown={(e) => {
+                    // The Enter that confirms an IME candidate isn't the rename's.
+                    if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
                     if (e.key === "Enter") void commitRename();
-                    if (e.key === "Escape") {
-                      e.stopPropagation();
-                      setRenaming(false);
-                    }
                   }}
                   autoFocus
                   className="h-8"
@@ -511,6 +532,7 @@ export function ItemPreviewDialog() {
                     aria-label="Rename"
                     onClick={() => {
                       setDraftTitle(item.title);
+                      renameCancelled.current = false;
                       setRenaming(true);
                     }}
                     className="rounded-md p-1 text-foreground/40 opacity-0 transition-opacity hover:bg-foreground/10 hover:text-foreground group-hover:opacity-100 focus-visible:opacity-100"

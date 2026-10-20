@@ -616,6 +616,13 @@ const COMPACT_MIN_TOTAL = 6;
  *  through both guards and dispatched a duplicate task. */
 const sendingSessions = new Set<string>();
 
+/** Is a send or regenerate for this chat still building its request (before
+ *  it shows as running or queued)? A submit then would be dropped, so the
+ *  composer keeps its draft instead of clearing it. */
+export function isPreparingSend(sessionId: string): boolean {
+  return sendingSessions.has(sessionId);
+}
+
 /** Folder ordering, matched to the backend's `ORDER BY name COLLATE NOCASE`.
  *
  *  `localeCompare` with `sensitivity: "base"` is accent-INsensitive, so it
@@ -2495,93 +2502,101 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const state = get();
     // Hard cap mirrors `sendUserMessage` — one in-flight task per chat.
     // The UI hides the menu item in this state too; belt-and-suspenders.
+    // Claimed like a send, too: the reply is deleted before the request is
+    // built (source retrieval can take seconds), and a send in that gap
+    // would otherwise run a second task for this chat.
     if (state.runningTask?.sessionId === sessionId) return;
     if (state.queue.some((t) => t.sessionId === sessionId)) return;
-
-    const messages = state.messages[sessionId] ?? [];
-    if (messages.length < 2) return;
-    const lastIdx = messages.length - 1;
-    const last = messages[lastIdx];
-    if (last.role !== "assistant") return;
-    const userMsg = messages[lastIdx - 1];
-    if (userMsg.role !== "user") return;
-    // Don't regenerate an imported turn. The assistant row belongs to an
-    // import group the import-card renderer treats as atomic; deleting it here
-    // would desync the rendered card from its remaining DB rows.
-    if (last.import_group != null) return;
-    // As on a send: stop an extraction still competing for the model, and
-    // don't let one read the reply this replaces later.
-    cancelMemoryExtraction();
-    dropMemoryTurns(sessionId, last.id);
-
-    const session = state.sessions.find((s) => s.id === sessionId);
-    if (!session || !session.model) return;
-
-    // Drop the assistant turn from DB + store first. Same model as
-    // `sendUserMessage`'s placeholder: a fresh assistant row is created
-    // when the task actually starts streaming (inside `startTask`), so
-    // a cancel-while-waiting doesn't leave an empty bubble behind.
+    if (sendingSessions.has(sessionId)) return;
+    sendingSessions.add(sessionId);
     try {
-      await deleteMessage(last.id, sessionId);
-    } catch (e) {
-      useToastStore.getState().push({
-        kind: "error",
-        title: "Couldn't regenerate",
-        body: e instanceof Error ? e.message : String(e),
-      });
-      return;
-    }
-    set((s) => {
-      const sbm = { ...s.streamingByMessage };
-      delete sbm[last.id];
-      return {
-        messages: {
-          ...s.messages,
-          [sessionId]: (s.messages[sessionId] ?? []).filter(
-            (m) => m.id !== last.id,
-          ),
-        },
-        streamingByMessage: sbm,
-      };
-    });
+      const messages = state.messages[sessionId] ?? [];
+      if (messages.length < 2) return;
+      const lastIdx = messages.length - 1;
+      const last = messages[lastIdx];
+      if (last.role !== "assistant") return;
+      const userMsg = messages[lastIdx - 1];
+      if (userMsg.role !== "user") return;
+      // Don't regenerate an imported turn. The assistant row belongs to an
+      // import group the import-card renderer treats as atomic; deleting it here
+      // would desync the rendered card from its remaining DB rows.
+      if (last.import_group != null) return;
+      // As on a send: stop an extraction still competing for the model, and
+      // don't let one read the reply this replaces later.
+      cancelMemoryExtraction();
+      dropMemoryTurns(sessionId, last.id);
 
-    // Re-extract images from the original user turn's attachments_json
-    // so the new request reaches the model with the same multimodal
-    // context as the original send.
-    let triggerImages: string[] = [];
-    if (userMsg.attachments_json) {
+      const session = state.sessions.find((s) => s.id === sessionId);
+      if (!session || !session.model) return;
+
+      // Drop the assistant turn from DB + store first. Same model as
+      // `sendUserMessage`'s placeholder: a fresh assistant row is created
+      // when the task actually starts streaming (inside `startTask`), so
+      // a cancel-while-waiting doesn't leave an empty bubble behind.
       try {
-        const atts = JSON.parse(userMsg.attachments_json) as Attachment[];
-        triggerImages = imagesFromAttachments(atts);
-      } catch {
-        /* malformed JSON — proceed without images */
+        await deleteMessage(last.id, sessionId);
+      } catch (e) {
+        useToastStore.getState().push({
+          kind: "error",
+          title: "Couldn't regenerate",
+          body: e instanceof Error ? e.message : String(e),
+        });
+        return;
       }
-    }
+      set((s) => {
+        const sbm = { ...s.streamingByMessage };
+        delete sbm[last.id];
+        return {
+          messages: {
+            ...s.messages,
+            [sessionId]: (s.messages[sessionId] ?? []).filter(
+              (m) => m.id !== last.id,
+            ),
+          },
+          streamingByMessage: sbm,
+        };
+      });
 
-    const history = (get().messages[sessionId] ?? []).filter(
-      (m) => m.id !== userMsg.id,
-    );
-    const { request, preToolCalls } = await buildTaskRequest(
-      session,
-      sessionId,
-      history,
-      userMsg.content,
-      triggerImages,
-    );
+      // Re-extract images from the original user turn's attachments_json
+      // so the new request reaches the model with the same multimodal
+      // context as the original send.
+      let triggerImages: string[] = [];
+      if (userMsg.attachments_json) {
+        try {
+          const atts = JSON.parse(userMsg.attachments_json) as Attachment[];
+          triggerImages = imagesFromAttachments(atts);
+        } catch {
+          /* malformed JSON — proceed without images */
+        }
+      }
 
-    const task: QueueTask = {
-      id: `t_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-      sessionId,
-      userMsgId: userMsg.id,
-      request,
-      preToolCalls: preToolCalls.length > 0 ? preToolCalls : undefined,
-      // The row we just deleted may have been pinned; `startTask` restores
-      // the mark on its replacement rather than silently dropping it.
-      carryPin: last.pinned_at != null,
-    };
+      const history = (get().messages[sessionId] ?? []).filter(
+        (m) => m.id !== userMsg.id,
+      );
+      const { request, preToolCalls } = await buildTaskRequest(
+        session,
+        sessionId,
+        history,
+        userMsg.content,
+        triggerImages,
+      );
 
-    if (!(await tryDirectStart(task, get, set))) {
-      set((s) => ({ queue: [...s.queue, task] }));
+      const task: QueueTask = {
+        id: `t_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        sessionId,
+        userMsgId: userMsg.id,
+        request,
+        preToolCalls: preToolCalls.length > 0 ? preToolCalls : undefined,
+        // The row we just deleted may have been pinned; `startTask` restores
+        // the mark on its replacement rather than silently dropping it.
+        carryPin: last.pinned_at != null,
+      };
+
+      if (!(await tryDirectStart(task, get, set))) {
+        set((s) => ({ queue: [...s.queue, task] }));
+      }
+    } finally {
+      sendingSessions.delete(sessionId);
     }
   },
 

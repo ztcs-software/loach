@@ -285,7 +285,16 @@ export const useSpaceStore = create<SpaceState>((set, get) => ({
   },
 
   setFileEnabled: async (fileId, spaceId, enabled) => {
-    await setSpaceFileEnabled(fileId, enabled);
+    try {
+      await setSpaceFileEnabled(fileId, enabled);
+    } catch (e) {
+      useToastStore.getState().push({
+        kind: "error",
+        title: enabled ? "Couldn't switch the source on" : "Couldn't switch the source off",
+        body: e instanceof Error ? e.message : String(e),
+      });
+      return;
+    }
     invalidateSpaceContext(spaceId);
     set((s) => ({
       spaceFiles: {
@@ -298,7 +307,16 @@ export const useSpaceStore = create<SpaceState>((set, get) => ({
   },
 
   setRetrievalMode: async (spaceId, mode) => {
-    await setSpaceRetrievalMode(spaceId, mode);
+    try {
+      await setSpaceRetrievalMode(spaceId, mode);
+    } catch (e) {
+      useToastStore.getState().push({
+        kind: "error",
+        title: "Couldn't change how sources are used",
+        body: e instanceof Error ? e.message : String(e),
+      });
+      return;
+    }
     invalidateSpaceContext(spaceId);
     set((s) => ({
       spaces: s.spaces.map((sp) => (sp.id === spaceId ? { ...sp, retrieval_mode: mode } : sp)),

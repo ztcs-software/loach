@@ -484,7 +484,8 @@ function EraseDialog({
             title="Remove my data"
             body={
               <>
-                Delete all <strong>chats</strong>, <strong>spaces</strong>,{" "}
+                Delete all <strong>chats</strong>, <strong>spaces</strong>, your{" "}
+                <strong>Library</strong> (texts, files, links and datasets),{" "}
                 <strong>global memories</strong>, <strong>snippets</strong>, and{" "}
                 <strong>MCP servers</strong>.
                 Keeps your settings (theme, provider URLs, system prompt) and

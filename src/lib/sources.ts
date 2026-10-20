@@ -132,11 +132,13 @@ export function retrievalQuery(trigger: string, history: Message[]): string {
   const prev = [...history].reverse().find((m) => m.role === "user" && m.compacted_at == null);
   const parts = [stripInlinedAttachments(trigger)];
   if (prev) parts.push(stripInlinedAttachments(prev.content));
-  return parts
+  const query = parts
     .map((p) => p.trim())
     .filter(Boolean)
     .join("\n")
     .slice(0, 2000);
+  // Never end on half an emoji: a lone surrogate fails the IPC's JSON decode.
+  return /[\uD800-\uDBFF]$/.test(query) ? query.slice(0, -1) : query;
 }
 
 /** Structured payload of a `library_sources` record. */
@@ -198,7 +200,10 @@ export async function resolveSources(args: {
   for (const f of spaceCtx?.files ?? []) {
     if (f.enabled === false) continue;
     if (f.kind === "image") images.push(f.data);
-    else docs.push({ kind: "space_file", id: f.id, title: f.name, url: null, chars: f.data.length, text: f.data });
+    // `kind: "file"` uploads are formats Loach can't read, kept as base64:
+    // nothing a model could use.
+    else if (f.kind === "text")
+      docs.push({ kind: "space_file", id: f.id, title: f.name, url: null, chars: f.data.length, text: f.data });
   }
 
   const sourceLists = await Promise.all([

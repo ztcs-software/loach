@@ -30,7 +30,7 @@ import {
   fileToAttachment,
   FileTooLargeError,
 } from "@/lib/files";
-import { useChatStore } from "@/stores/chatStore";
+import { isPreparingSend, useChatStore } from "@/stores/chatStore";
 import { useModelsStore } from "@/stores/modelsStore";
 import { usePrivateChatStore } from "@/stores/privateChatStore";
 import { useSnippetStore } from "@/stores/snippetStore";
@@ -844,11 +844,14 @@ export function ChatInput({ centered = false }: ChatInputProps) {
     const busyHere =
       !!activeId &&
       (state.streamingSessionId === activeId ||
-        state.queue.some((t) => t.sessionId === activeId));
+        state.queue.some((t) => t.sessionId === activeId) ||
+        isPreparingSend(activeId));
 
-    // One-in-flight-per-chat cap: if this chat is already running or
-    // already has a waiter, swallow the submit. The send button is disabled
-    // in this state too — this is belt-and-suspenders.
+    // One-in-flight-per-chat cap: if this chat is already running, already
+    // has a waiter, or is still preparing a send (resolving its sources can
+    // take seconds), swallow the submit with the draft kept — the store
+    // would drop it anyway. The send button is disabled while running or
+    // queued too — this is belt-and-suspenders.
     if (busyHere) return;
 
     // Stop dictation before sending so the recogniser doesn't keep writing

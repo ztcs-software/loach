@@ -426,7 +426,12 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
   },
 
   removeSource: async (owner, ownerId, sourceId) => {
-    await libraryRemoveSource(owner, sourceId);
+    try {
+      await libraryRemoveSource(owner, sourceId);
+    } catch (e) {
+      useToastStore.getState().push({ kind: "error", title: "Couldn't remove the source", body: errorText(e) });
+      return;
+    }
     const key = ownerKey(owner, ownerId);
     set((s) => ({
       sources: {
@@ -437,7 +442,16 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
   },
 
   setSourceEnabled: async (owner, ownerId, sourceId, enabled) => {
-    await librarySetSourceEnabled(owner, sourceId, enabled);
+    try {
+      await librarySetSourceEnabled(owner, sourceId, enabled);
+    } catch (e) {
+      useToastStore.getState().push({
+        kind: "error",
+        title: enabled ? "Couldn't switch the source on" : "Couldn't switch the source off",
+        body: errorText(e),
+      });
+      return;
+    }
     const key = ownerKey(owner, ownerId);
     set((s) => ({
       sources: {

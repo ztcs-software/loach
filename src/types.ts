@@ -119,7 +119,9 @@ export interface SpaceFile {
   space_id: string;
   name: string;
   mime: string;
-  kind: "text" | "image";
+  /** `"file"`: a format Loach can't read, kept as base64 and never sent to
+   *  a model (see `fileToAttachment`). */
+  kind: "text" | "image" | "file";
   data: string;
   size: number;
   position: number;

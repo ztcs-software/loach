@@ -291,7 +291,9 @@ export function SpaceSourcesTab({
               }
               title={f.name}
               sub={`Uploaded · ${formatBytes(f.size)}`}
-              tokens={f.kind === "text" ? Math.ceil(f.data.length / 4) : null}
+              tokens={
+                f.kind === "text" ? Math.ceil(f.data.length / 4) : f.kind === "image" ? "image" : "unreadable"
+              }
               actions={
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>
@@ -304,21 +306,27 @@ export function SpaceSourcesTab({
                     </button>
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="end">
-                    <DropdownMenuItem
-                      onSelect={() =>
-                        void saveToLibrary({
-                          kind: "file",
-                          title: f.name,
-                          mime: f.mime,
-                          media: f.kind === "image" ? "image" : "text",
-                          content: f.data,
-                          size: f.size,
-                        })
-                      }
-                    >
-                      <BookmarkPlus className="h-4 w-4" /> Save to Library
-                    </DropdownMenuItem>
-                    <DropdownMenuSeparator />
+                    {/* An unreadable upload is base64 — as a Library text it
+                        would be indexed and sent to models as noise. */}
+                    {f.kind !== "file" && (
+                      <>
+                        <DropdownMenuItem
+                          onSelect={() =>
+                            void saveToLibrary({
+                              kind: "file",
+                              title: f.name,
+                              mime: f.mime,
+                              media: f.kind === "image" ? "image" : "text",
+                              content: f.data,
+                              size: f.size,
+                            })
+                          }
+                        >
+                          <BookmarkPlus className="h-4 w-4" /> Save to Library
+                        </DropdownMenuItem>
+                        <DropdownMenuSeparator />
+                      </>
+                    )}
                     <DropdownMenuItem
                       onSelect={() => onRemoveFile(f.id)}
                       className="text-destructive focus:text-destructive"
@@ -373,7 +381,8 @@ function SourceRow({
   icon: React.ReactNode;
   title: string;
   sub: string;
-  tokens: number | null;
+  /** Estimated tokens, or a word for a source that isn't text. */
+  tokens: number | string;
   onOpen?: () => void;
   actions: React.ReactNode;
 }) {
@@ -401,7 +410,7 @@ function SourceRow({
         <span className="block truncate text-[11px] text-foreground/45">{sub}</span>
       </button>
       <span className="shrink-0 text-[11px] tabular-nums text-foreground/40">
-        {tokens === null ? "image" : `~${formatTokens(tokens)}`}
+        {typeof tokens === "string" ? tokens : `~${formatTokens(tokens)}`}
       </span>
       {actions}
     </li>
