@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Check, Library, Search } from "lucide-react";
+import { Check, Library, Loader2, Search } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -133,28 +133,38 @@ export function LibraryPicker({
   }, [tab, datasets, items, q, byId, linkedDatasets, linkedItems]);
 
   // What the selection would add, each item counted once even when it's
-  // also inside a picked dataset.
+  // also inside a picked dataset — or already attached. `total` adds what's
+  // attached already: together they decide full text or excerpts.
   const selection = useMemo(() => {
+    const tokensOf = (ids: Set<string>) => {
+      let n = 0;
+      for (const id of ids) {
+        const it = byId.get(id);
+        if (it) n += itemTokens(it);
+      }
+      return n;
+    };
+    const attached = new Set<string>(linkedItems);
+    for (const id of linkedDatasets) datasets.find((d) => d.id === id)?.item_ids.forEach((i) => attached.add(i));
     const itemIds: string[] = [];
     const datasetIds: string[] = [];
     const reached = new Set<string>();
+    const add = (id: string) => {
+      if (!attached.has(id)) reached.add(id);
+    };
     for (const key of picked) {
       const id = key.slice(2);
       if (key.startsWith("d:")) {
         datasetIds.push(id);
-        datasets.find((d) => d.id === id)?.item_ids.forEach((i) => reached.add(i));
+        datasets.find((d) => d.id === id)?.item_ids.forEach(add);
       } else {
         itemIds.push(id);
-        reached.add(id);
+        add(id);
       }
     }
-    let tokens = 0;
-    for (const id of reached) {
-      const it = byId.get(id);
-      if (it) tokens += itemTokens(it);
-    }
-    return { itemIds, datasetIds, tokens };
-  }, [picked, datasets, byId]);
+    const tokens = tokensOf(reached);
+    return { itemIds, datasetIds, tokens, total: tokens + tokensOf(attached), hasAttached: attached.size > 0 };
+  }, [picked, datasets, byId, linkedItems, linkedDatasets]);
 
   const toggle = (key: string) =>
     setPicked((prev) => {
@@ -174,8 +184,11 @@ export function LibraryPicker({
     }
   };
 
-  const empty = items.length === 0 && datasets.length === 0;
-  const fits = numCtx ? selection.tokens <= numCtx * FULL_TEXT_SHARE : null;
+  const libraryError = useLibraryStore((s) => s.error);
+  // Empty only once it has loaded — not while it loads, nor when it failed.
+  const empty = hydrated && !libraryError && items.length === 0 && datasets.length === 0;
+  const unavailable = !hydrated || (!!libraryError && items.length === 0 && datasets.length === 0);
+  const fits = numCtx ? selection.total <= numCtx * FULL_TEXT_SHARE : null;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -205,6 +218,25 @@ export function LibraryPicker({
             >
               Open Library
             </Button>
+          </div>
+        ) : unavailable ? (
+          <div className="mx-6 mb-6 flex flex-col items-center rounded-2xl border border-dashed border-foreground/10 bg-foreground/[0.015] px-6 py-12 text-center">
+            {libraryError ? (
+              <>
+                <p className="text-sm font-medium text-foreground/80">Couldn't load your Library</p>
+                <p className="mt-1.5 max-w-sm text-[13px] text-foreground/55 [overflow-wrap:anywhere]">
+                  {libraryError}
+                </p>
+                <Button variant="outline" className="mt-4 rounded-lg" onClick={() => void hydrate()}>
+                  Try again
+                </Button>
+              </>
+            ) : (
+              <p className="flex items-center gap-2 text-sm text-foreground/55">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                Loading your Library…
+              </p>
+            )}
           </div>
         ) : (
           <>
@@ -298,6 +330,9 @@ export function LibraryPicker({
                   <>
                     <span className="font-medium text-foreground/75">{picked.size} selected</span>
                     <span> · ~{formatTokens(selection.tokens)} tokens</span>
+                    {selection.hasAttached && (
+                      <span> (~{formatTokens(selection.total)} with what's attached)</span>
+                    )}
                     {fits !== null && (
                       <span
                         className={cn(

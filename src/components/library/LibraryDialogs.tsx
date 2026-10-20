@@ -121,8 +121,14 @@ export function TextEditorDialog() {
   const item = useLibraryStore((s) =>
     target && target !== "new" ? s.items.find((i) => i.id === target) : undefined,
   );
-  const [title, setTitle] = useState("");
-  const [body, setBody] = useState("");
+  // A draft kept for this target — the dialog was unmounted by the app lock
+  // while it was open (see `editDraft`).
+  const keptDraft = () => {
+    const d = useLibraryStore.getState().editDraft;
+    return d && d.target === target ? d : null;
+  };
+  const [title, setTitle] = useState(() => keptDraft()?.title ?? "");
+  const [body, setBody] = useState(() => keptDraft()?.body ?? "");
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   // State lags a render behind, so two quick Ctrl+Enters both saw `saving`
@@ -133,6 +139,12 @@ export function TextEditorDialog() {
   useEffect(() => {
     setError(null);
     if (!target) return;
+    const kept = keptDraft();
+    if (kept) {
+      setTitle(kept.title);
+      setBody(kept.body);
+      return;
+    }
     if (target === "new") {
       setTitle("");
       setBody("");
@@ -147,6 +159,12 @@ export function TextEditorDialog() {
     // Re-seed only when a different item opens.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [target]);
+
+  // Keep the store's copy of the draft current, so it outlives an unmount.
+  useEffect(() => {
+    if (!target || loading) return;
+    useLibraryStore.setState({ editDraft: { target, title, body } });
+  }, [target, title, body, loading]);
 
   const save = async () => {
     if (savingRef.current) return;

@@ -775,7 +775,9 @@ async function buildTaskRequest(
     settings.global_system_prompt,
   );
 
-  let effectiveSystemPrompt: string | null = fallbackPrompt || null;
+  // The system prompt is built from these in three layers — see below.
+  let instructions: string | null = fallbackPrompt || null;
+  let memoryBlocks: string[] = [];
 
   // Serve the space context from the per-space cache when warm, so repeat
   // sends in a Space don't re-ship every reference file across IPC. The
@@ -865,11 +867,8 @@ async function buildTaskRequest(
       settings.global_system_prompt,
       spaceInstructions,
     );
-    const parts: string[] = [];
-    if (base) parts.push(base);
-    if (globalBlock) parts.push(globalBlock);
-    if (memoryBlock) parts.push(memoryBlock);
-    effectiveSystemPrompt = parts.length ? parts.join("\n\n") : null;
+    instructions = base || null;
+    memoryBlocks = [globalBlock, memoryBlock].filter(Boolean);
   } else {
     if (spaceCtxError) {
       logger.warn("Failed to load space context", spaceCtxError);
@@ -877,33 +876,29 @@ async function buildTaskRequest(
     // No Space — or its context failed to load, in which case this turn goes
     // out without the Space's own instructions and memory, but the global
     // facts and the chat's own sources don't depend on them and still apply.
-    const parts: string[] = [];
-    if (fallbackPrompt) parts.push(fallbackPrompt);
-    if (globalBlock) parts.push(globalBlock);
-    effectiveSystemPrompt = parts.length ? parts.join("\n\n") : null;
+    instructions = fallbackPrompt || null;
+    memoryBlocks = [globalBlock].filter(Boolean);
   }
 
-  if (effectiveSystemPrompt) {
-    effectiveSystemPrompt = effectiveSystemPrompt.replace(
-      /\{\{\s*USER_NAME\s*\}\}/g,
-      settings.user_name ?? "",
-    );
-  }
-
-  effectiveSystemPrompt = applyTemporalAwareness(
-    effectiveSystemPrompt,
-    settings.temporal_awareness,
-  );
-
-  // Full-text sources join after the template pass: they're the user's
-  // material, so a `{{USER_NAME}}` or `{{CURRENT_DATE}}` inside one is text,
-  // not a placeholder. (Joined before, a source got rewritten — and one
-  // with `{{CURRENT_…}}` in it also dropped the chat's date line.)
-  if (sources.systemBlock) {
-    effectiveSystemPrompt = effectiveSystemPrompt
-      ? `${effectiveSystemPrompt}\n\n${sources.systemBlock}`
-      : sources.systemBlock;
-  }
+  const withUserName = (text: string) =>
+    text.replace(/\{\{\s*USER_NAME\s*\}\}/g, settings.user_name ?? "");
+  // 1. The instructions, templated: `{{USER_NAME}}`, the temporal
+  //    placeholders, and the date line when they don't place it themselves.
+  // 2. Full-text sources, untouched: they're the user's material, so a
+  //    `{{USER_NAME}}` or `{{CURRENT_DATE}}` inside one is text, not a
+  //    placeholder (templated, a source got rewritten — and one with
+  //    `{{CURRENT_…}}` in it also dropped the chat's date line).
+  // 3. The memory blocks last: the extractor rewrites them after replies,
+  //    and a local model re-reads everything after a change, so the
+  //    sources sit before them and stay in its prompt cache.
+  let effectiveSystemPrompt: string | null =
+    [
+      applyTemporalAwareness(instructions ? withUserName(instructions) : null, settings.temporal_awareness),
+      sources.systemBlock,
+      ...memoryBlocks.map(withUserName),
+    ]
+      .filter(Boolean)
+      .join("\n\n") || null;
 
   const personaId = useUIStore.getState().personaIdBySession[sessionId];
   const persona = getPersona(personaId);

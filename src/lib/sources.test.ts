@@ -19,6 +19,7 @@ vi.mock("@/lib/tauri", async (importOriginal) => {
 import {
   buildExcerptBlock,
   buildFullTextBlock,
+  excerptLimit,
   resolveMode,
   resolveSources,
   retrievalBudgetTokens,
@@ -68,6 +69,14 @@ describe("mode selection", () => {
     expect(retrievalBudgetTokens(8192)).toBe(2048);
     expect(retrievalBudgetTokens(1024)).toBe(600);
     expect(retrievalBudgetTokens(1_000_000)).toBe(12_000);
+  });
+
+  it("lets a large window's budget hold more than a dozen excerpts", () => {
+    // Regression: the search stopped at 12 excerpts (~3.6k tokens) even
+    // when a 32k window budgeted 8k tokens for them.
+    expect(excerptLimit(retrievalBudgetTokens(8192) * 4)).toBe(12);
+    expect(excerptLimit(retrievalBudgetTokens(32_768) * 4)).toBe(41);
+    expect(excerptLimit(retrievalBudgetTokens(1_000_000) * 4)).toBe(60);
   });
 
   it("costs what the send will actually spend", () => {

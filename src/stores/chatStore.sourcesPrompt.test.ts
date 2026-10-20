@@ -25,6 +25,7 @@ vi.mock("@/lib/tauri", async (importOriginal) => {
 });
 
 import { __testing } from "./chatStore";
+import { useGlobalMemoryStore } from "./globalMemoryStore";
 import { useLibraryStore } from "./libraryStore";
 import { useSettingsStore } from "./settingsStore";
 
@@ -94,5 +95,18 @@ describe("full-text sources and the template pass", () => {
     // …the source is not, and comes after them.
     expect(prompt).toContain(BODY);
     expect(prompt.indexOf("Call me Ada.")).toBeLessThan(prompt.indexOf(BODY));
+  });
+
+  it("sit before the memory blocks, which change between turns", async () => {
+    // Regression: memories came first, so every fact the extractor added or
+    // retired made a local model re-read the sources after it.
+    useSettingsStore.setState({ global_system_prompt: "Be brief.", global_memory_enabled: true, temporal_awareness: false });
+    useGlobalMemoryStore.setState({
+      memories: [{ id: "g1", content: "Prefers metric units", created_at: 1, updated_at: 1 }] as never,
+    });
+    const { request } = await __testing.buildTaskRequest(chat, chat.id, [], "Draft it", []);
+    const prompt = request.system_prompt ?? "";
+    expect(prompt.indexOf("Be brief.")).toBeLessThan(prompt.indexOf(BODY));
+    expect(prompt.indexOf(BODY)).toBeLessThan(prompt.indexOf("Prefers metric units"));
   });
 });

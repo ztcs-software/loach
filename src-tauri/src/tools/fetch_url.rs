@@ -227,7 +227,7 @@ pub async fn fetch_capped(raw_url: &str, max_text_chars: usize) -> Result<Fetche
     }
 
     let bytes = buf.len();
-    let body = String::from_utf8_lossy(&buf).to_string();
+    let body = decode_body(&buf, &content_type);
 
     let (title, text_raw) = if content_type.contains("html") || looks_like_html(&body) {
         html_to_text(&body)
@@ -598,6 +598,43 @@ pub(crate) fn is_link_local(ip: &IpAddr) -> bool {
             false
         }
     }
+}
+
+/// The body as text, in the charset the page declares — the `Content-Type`
+/// header's, else an HTML `<meta charset>` near the top — and UTF-8 when it
+/// declares none. Read as UTF-8 regardless, a page served as ISO-8859-2 or
+/// windows-1250 came out full of replacement characters, and a Library link
+/// keeps that text for good. A byte-order mark wins over both.
+fn decode_body(buf: &[u8], content_type: &str) -> String {
+    let label = charset_param(content_type).or_else(|| meta_charset(buf));
+    let encoding = label
+        .and_then(|l| encoding_rs::Encoding::for_label(l.as_bytes()))
+        .unwrap_or(encoding_rs::UTF_8);
+    encoding.decode(buf).0.into_owned()
+}
+
+/// `charset=` from a `Content-Type` value like `text/html; charset="utf-8"`.
+fn charset_param(content_type: &str) -> Option<String> {
+    content_type.split(';').skip(1).find_map(|p| {
+        let (k, v) = p.split_once('=')?;
+        k.trim()
+            .eq_ignore_ascii_case("charset")
+            .then(|| v.trim().trim_matches(['"', '\'']).to_string())
+    })
+}
+
+/// The charset an HTML page names in its first 1 KiB — `<meta charset=…>` or
+/// a `http-equiv` Content-Type — where the HTML spec's prescan looks.
+fn meta_charset(buf: &[u8]) -> Option<String> {
+    let head = String::from_utf8_lossy(&buf[..buf.len().min(1024)]).to_ascii_lowercase();
+    if !head.contains("<meta") {
+        return None;
+    }
+    let rest = head[head.find("charset=")? + "charset=".len()..].trim_start_matches(['"', '\'']);
+    let end = rest
+        .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':' | '.')))
+        .unwrap_or(rest.len());
+    Some(rest[..end].to_string()).filter(|l| !l.is_empty())
 }
 
 fn looks_like_html(body: &str) -> bool {
@@ -1180,6 +1217,26 @@ mod tests {
             matches!(err, HostScreenError::Unresolvable(_)),
             "expected Unresolvable, got {err:?}"
         );
+    }
+
+    #[test]
+    fn bodies_decode_in_the_charset_they_declare() {
+        // Regression: every body was read as UTF-8, so a Polish page served
+        // as ISO-8859-2 or windows-1250 was stored garbled.
+        let iso = encoding_rs::ISO_8859_2.encode("Żółw błotny").0;
+        assert_eq!(decode_body(&iso, "text/html; charset=\"ISO-8859-2\""), "Żółw błotny");
+        let page = [
+            b"<html><head><meta http-equiv=\"Content-Type\" content=\"text/html; charset=windows-1250\"></head><body>"
+                .as_slice(),
+            &encoding_rs::WINDOWS_1250.encode("Zażółć gęślą jaźń").0,
+            b"</body></html>",
+        ]
+        .concat();
+        assert!(decode_body(&page, "text/html").contains("Zażółć gęślą jaźń"));
+        // Nothing declared: UTF-8, as before.
+        assert_eq!(decode_body("zwykły tekst".as_bytes(), "text/plain"), "zwykły tekst");
+        assert_eq!(charset_param("text/html;charset=utf-8").as_deref(), Some("utf-8"));
+        assert_eq!(meta_charset(b"<p>no meta here, charset=nothing</p>"), None);
     }
 
     #[test]

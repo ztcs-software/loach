@@ -96,10 +96,32 @@ export async function prepareFiles(
 
 const ownerKey = (owner: LibrarySourceOwner, ownerId: string) => `${owner}:${ownerId}`;
 
+/** `added` in front of `list`, without a second copy of any of them — a
+ *  refresh landing first may already have brought them in. */
+function withNew<T extends { id: string }>(list: T[], added: T[]): T[] {
+  const ids = new Set(added.map((x) => x.id));
+  return [...added, ...list.filter((x) => !ids.has(x.id))];
+}
+
+/** Rows in `local` that a list fetched at `since` couldn't have known about. */
+function createdSince<T extends { id: string; created_at: number }>(local: T[], fetched: T[], since: number): T[] {
+  const ids = new Set(fetched.map((x) => x.id));
+  return local.filter((x) => !ids.has(x.id) && x.created_at >= since);
+}
+
 /** Bodies already fetched, keyed by id and valid while `updated_at` matches.
  *  The send path asks for the same sources every turn; this keeps them from
  *  crossing IPC again until one is edited. */
 const contentCache = new Map<string, LibraryItem>();
+
+/** Per-owner version of the cached link lists. Every change bumps it, so a
+ *  list read before the change can't land after it and undo it. */
+const sourceVersions = new Map<string, number>();
+const bumpSources = (key: string) => {
+  const v = (sourceVersions.get(key) ?? 0) + 1;
+  sourceVersions.set(key, v);
+  return v;
+};
 
 function errorText(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
@@ -118,6 +140,10 @@ interface LibraryState {
   previewItemId: string | null;
   /** Text item open in the editor dialog, or "new". */
   editTextTarget: string | null;
+  /** The editor's unsaved title and body. Kept here, not in the dialog: the
+   *  app lock unmounts the dialog, and a long draft must still be there when
+   *  it comes back. Dropped on save or close. */
+  editDraft: { target: string; title: string; body: string } | null;
   /** Dataset the Library page is showing as its own page — the Library's
    *  `spaceStore.viewingSpaceId`. Null shows the Library list. */
   viewingDatasetId: string | null;
@@ -194,6 +220,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
   sources: {},
   previewItemId: null,
   editTextTarget: null,
+  editDraft: null,
   viewingDatasetId: null,
   pending: { itemIds: [], datasetIds: [], spaceId: null },
 
@@ -204,6 +231,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
       // A fresh hydrate (startup, or after an import rewrote the tables)
       // invalidates every cached link list and body.
       contentCache.clear();
+      sourceVersions.clear();
       set({ sources: {} });
     } catch (e) {
       logger.error("library hydrate failed", e);
@@ -226,9 +254,16 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
   },
 
   refreshItems: async () => {
+    // Writes can land while the list is in flight — an upload finishing,
+    // say. Rows created since it was asked for are kept rather than wiped,
+    // and the server's copy wins for everything else.
+    const since = Date.now();
     try {
       const { items, datasets } = await libraryList();
-      set({ items, datasets });
+      set((s) => ({
+        items: [...createdSince(s.items, items, since), ...items],
+        datasets: [...createdSince(s.datasets, datasets, since), ...datasets],
+      }));
     } catch (e) {
       logger.warn("library refresh failed", e);
     }
@@ -243,7 +278,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
       content,
       size: new TextEncoder().encode(content).length,
     });
-    set((s) => ({ items: [item, ...s.items] }));
+    set((s) => ({ items: withNew(s.items, [item]) }));
     return item;
   },
 
@@ -276,13 +311,13 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
         });
       }
     }
-    if (added.length > 0) set((s) => ({ items: [...added.reverse(), ...s.items] }));
+    if (added.length > 0) set((s) => ({ items: withNew(s.items, [...added].reverse()) }));
     return added;
   },
 
   addLink: async (url) => {
     const item = await libraryAddLink(url);
-    set((s) => ({ items: [item, ...s.items] }));
+    set((s) => ({ items: withNew(s.items, [item]) }));
     return item;
   },
 
@@ -344,7 +379,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
 
   createDataset: async (name, description, itemIds = []) => {
     const ds = await libraryCreateDataset({ name, description, itemIds });
-    set((s) => ({ datasets: [ds, ...s.datasets] }));
+    set((s) => ({ datasets: withNew(s.datasets, [ds]) }));
     return ds;
   },
 
@@ -410,7 +445,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     }
     try {
       const item = await libraryCreateItem(args);
-      set((s) => ({ items: [item, ...s.items] }));
+      set((s) => ({ items: withNew(s.items, [item]) }));
       useToastStore.getState().push({
         kind: "info",
         title: "Saved to Library",
@@ -428,8 +463,13 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
   },
 
   loadSources: async (owner, ownerId) => {
+    const key = ownerKey(owner, ownerId);
+    const version = bumpSources(key);
     const list = await libraryListSources(owner, ownerId);
-    set((s) => ({ sources: { ...s.sources, [ownerKey(owner, ownerId)]: list } }));
+    // Superseded while in flight (a source added, removed or toggled, or a
+    // later load): the store already holds something newer.
+    if (sourceVersions.get(key) !== version) return get().sources[key] ?? list;
+    set((s) => ({ sources: { ...s.sources, [key]: list } }));
     return list;
   },
 
@@ -440,7 +480,9 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
 
   addSources: async (owner, ownerId, refs) => {
     const list = await libraryAddSources({ owner, ownerId, ...refs });
-    set((s) => ({ sources: { ...s.sources, [ownerKey(owner, ownerId)]: list } }));
+    const key = ownerKey(owner, ownerId);
+    bumpSources(key);
+    set((s) => ({ sources: { ...s.sources, [key]: list } }));
   },
 
   removeSource: async (owner, ownerId, sourceId) => {
@@ -451,6 +493,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
       return;
     }
     const key = ownerKey(owner, ownerId);
+    bumpSources(key);
     set((s) => ({
       sources: {
         ...s.sources,
@@ -471,6 +514,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
       return;
     }
     const key = ownerKey(owner, ownerId);
+    bumpSources(key);
     set((s) => ({
       sources: {
         ...s.sources,
@@ -494,7 +538,11 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
   },
 
   openPreview: (id) => set({ previewItemId: id }),
-  openTextEditor: (target) => set({ editTextTarget: target }),
+  openTextEditor: (target) =>
+    set((s) => ({
+      editTextTarget: target,
+      editDraft: target !== null && s.editDraft?.target === target ? s.editDraft : null,
+    })),
   addPending: (sel, spaceId) =>
     set((s) => {
       const kept = s.pending.spaceId === spaceId ? s.pending : { itemIds: [], datasetIds: [] };

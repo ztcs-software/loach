@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ChevronRight,
   Database,
@@ -198,6 +198,23 @@ export function LibraryView() {
       setUploading((n) => Math.max(0, n - files.length));
     }
   };
+
+  // The page's own handlers cover only <main>. A file dropped on the
+  // sidebar or the title bar would reach the webview's default handling,
+  // which opens the file in place of the app (Tauri's drag-drop is off, so
+  // nothing else catches it). The composer guards the window the same way,
+  // but it isn't mounted on this page.
+  useEffect(() => {
+    const guard = (e: DragEvent) => {
+      if (e.dataTransfer?.types.includes("Files")) e.preventDefault();
+    };
+    window.addEventListener("dragover", guard);
+    window.addEventListener("drop", guard);
+    return () => {
+      window.removeEventListener("dragover", guard);
+      window.removeEventListener("drop", guard);
+    };
+  }, []);
 
   const onDragEnter = (e: React.DragEvent) => {
     if (!e.dataTransfer.types.includes("Files") || usePrivateChatStore.getState().open) return;
@@ -926,11 +943,22 @@ function ItemRow({
     item.kind === "link"
       ? [domainOf(item.url), item.fetched_at ? `fetched ${relativeTime(item.fetched_at)}` : null]
       : [typeLabel(item), formatBytes(item.size)];
+  const activate = () => (selecting && onToggle ? onToggle() : openPreview(item.id));
   return (
     <li
-      onClick={() => (selecting && onToggle ? onToggle() : openPreview(item.id))}
+      role="button"
+      tabIndex={0}
+      aria-label={`Open ${item.title}`}
+      onClick={activate}
+      onKeyDown={(e) => {
+        // The row's own keys only — its buttons and menu handle theirs.
+        if (e.target !== e.currentTarget || (e.key !== "Enter" && e.key !== " ")) return;
+        e.preventDefault();
+        activate();
+      }}
       className={cn(
         "group flex cursor-pointer items-center gap-3 px-4 py-3 transition-colors hover:bg-foreground/[0.04]",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/40",
         selected && "bg-primary/[0.06]",
       )}
     >
@@ -974,7 +1002,7 @@ function ItemRow({
             <RefreshCw className={cn("h-3.5 w-3.5", refreshing && "animate-spin")} />
           </button>
         )}
-        {onRemoveFromDataset ? (
+        {onRemoveFromDataset && (
           <button
             type="button"
             aria-label={`Remove ${item.title} from the dataset`}
@@ -984,9 +1012,8 @@ function ItemRow({
           >
             <X className="h-4 w-4" />
           </button>
-        ) : (
-          <ItemMenu item={item} />
         )}
+        <ItemMenu item={item} />
       </div>
     </li>
   );

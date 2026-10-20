@@ -56,6 +56,13 @@ export function retrievalBudgetTokens(numCtx: number): number {
   );
 }
 
+/** How many excerpts a search may return for a budget of `maxChars`.
+ *  Excerpts run up to 1,200 characters; without this the search stopped at
+ *  its default of 12 (~3.6k tokens) however large the window's budget was. */
+export function excerptLimit(maxChars: number): number {
+  return Math.max(12, Math.ceil(maxChars / 800));
+}
+
 /** Tokens the sources will cost on the next request, for the context bar. */
 export function sourcesTokenCost(pref: RetrievalMode, sourceTokens: number, numCtx: number): number {
   if (sourceTokens === 0) return 0;
@@ -336,10 +343,12 @@ export async function resolveSources(args: {
 
   const titles = new Map(docs.map((d) => [`${d.kind}:${d.id}`, d.title]));
   try {
+    const maxChars = retrievalBudgetTokens(numCtx) * 4;
     const result = await ragSearch({
       docs: docs.map((d) => ({ kind: d.kind, id: d.id })),
       query: retrievalQuery(trigger, history),
-      max_chars: retrievalBudgetTokens(numCtx) * 4,
+      max_chars: maxChars,
+      max_chunks: excerptLimit(maxChars),
     });
     const hits = result.hits;
     const grouped = new Map<string, SourcesReport["sources"][number]>();

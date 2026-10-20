@@ -2779,12 +2779,14 @@ fn embed_model_key(state: &AppState) -> Option<String> {
     rag::embed::EmbedConfig::from_db(&state.db).map(|c| c.model_key())
 }
 
+/// A Library or dataset title on one line: whitespace runs, newlines
+/// included, collapse to a space — titles label lists, chips and prompt lines.
 fn library_title(title: &str, fallback: &str) -> String {
-    let t = title.trim();
+    let t = title.split_whitespace().collect::<Vec<_>>().join(" ");
     if t.is_empty() {
         fallback.to_string()
     } else {
-        t.to_string()
+        t
     }
 }
 
@@ -3959,6 +3961,12 @@ mod tests {
         let (body, note) = long.split_once("\n\n[…").expect("note appended");
         assert_eq!(body.chars().count(), LIBRARY_MAX_CHARS);
         assert!(note.starts_with("truncated at 200,000 characters"), "{note}");
+    }
+
+    #[test]
+    fn library_titles_are_one_line() {
+        assert_eq!(library_title("\n\tTitle\nwith  newlines\n", "Untitled"), "Title with newlines");
+        assert_eq!(library_title(" \n ", "Untitled"), "Untitled");
     }
 
     #[test]

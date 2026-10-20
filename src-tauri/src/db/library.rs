@@ -718,9 +718,14 @@ impl Database {
                 params![owner_id],
                 |r| r.get(0),
             )?;
+            // Ids that no longer resolve (deleted in another view meanwhile)
+            // are skipped, as `insert_members` does, rather than failing the
+            // whole batch on the foreign key.
             let sql = format!(
                 "INSERT OR IGNORE INTO {} (id, owner_id, item_id, dataset_id, enabled, position, created_at)
-                 VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6)",
+                 SELECT ?1, ?2, ?3, ?4, 1, ?5, ?6
+                  WHERE EXISTS (SELECT 1 FROM library_items WHERE id = ?3)
+                     OR EXISTS (SELECT 1 FROM library_datasets WHERE id = ?4)",
                 owner.table()
             );
             let refs = item_ids
@@ -789,38 +794,64 @@ impl Database {
     /// Chunk every text document that has no chunks yet: rows from before
     /// the index existed, and everything after a restore (snapshots don't
     /// carry the index). Returns how many documents were chunked.
+    ///
+    /// This runs on every indexer wake, so finding the work reads only ids,
+    /// through the read pool — never the document bodies. Those are read and
+    /// chunked a few documents per transaction, so rebuilding a restored
+    /// Library doesn't hold the write lock (and every send) for its whole
+    /// length.
     pub fn backfill_rag_chunks(&self) -> Result<usize> {
-        let mut conn = self.conn.lock();
-        let tx = conn.transaction()?;
-        let docs: Vec<(&str, String, String)> = {
+        const BATCH: usize = 16;
+        let todo: Vec<(&'static str, String)> = self.with_read(|conn| {
             let mut out = Vec::new();
-            let mut stmt = tx.prepare(
-                "SELECT i.id, i.content FROM library_items i
-                  WHERE i.media = 'text' AND i.content <> ''
-                    AND NOT EXISTS (SELECT 1 FROM rag_chunks c
-                                     WHERE c.doc_kind = 'library' AND c.doc_id = i.id)",
-            )?;
-            for row in stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))? {
-                let (id, text) = row?;
-                out.push((DOC_LIBRARY, id, text));
+            for (kind, sql) in [
+                (
+                    DOC_LIBRARY,
+                    "SELECT i.id FROM library_items i
+                      WHERE i.media = 'text'
+                        AND NOT EXISTS (SELECT 1 FROM rag_chunks c
+                                         WHERE c.doc_kind = 'library' AND c.doc_id = i.id)",
+                ),
+                (
+                    DOC_SPACE_FILE,
+                    "SELECT f.id FROM space_files f
+                      WHERE f.kind = 'text'
+                        AND NOT EXISTS (SELECT 1 FROM rag_chunks c
+                                         WHERE c.doc_kind = 'space_file' AND c.doc_id = f.id)",
+                ),
+            ] {
+                let mut stmt = conn.prepare(sql)?;
+                for id in stmt.query_map([], |r| r.get::<_, String>(0))? {
+                    out.push((kind, id?));
+                }
             }
-            let mut stmt = tx.prepare(
-                "SELECT f.id, f.data FROM space_files f
-                  WHERE f.kind = 'text' AND f.data <> ''
-                    AND NOT EXISTS (SELECT 1 FROM rag_chunks c
-                                     WHERE c.doc_kind = 'space_file' AND c.doc_id = f.id)",
-            )?;
-            for row in stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))? {
-                let (id, text) = row?;
-                out.push((DOC_SPACE_FILE, id, text));
+            Ok(out)
+        })?;
+        let mut chunked = 0;
+        for batch in todo.chunks(BATCH) {
+            let mut conn = self.conn.lock();
+            let tx = conn.transaction()?;
+            for (kind, id) in batch {
+                // Checked again inside the write: a document chunked since the
+                // ids were read (edited, say) is left as it is.
+                let sql = if *kind == DOC_LIBRARY {
+                    "SELECT content FROM library_items WHERE id = ?1
+                        AND NOT EXISTS (SELECT 1 FROM rag_chunks c
+                                         WHERE c.doc_kind = 'library' AND c.doc_id = ?1)"
+                } else {
+                    "SELECT data FROM space_files WHERE id = ?1
+                        AND NOT EXISTS (SELECT 1 FROM rag_chunks c
+                                         WHERE c.doc_kind = 'space_file' AND c.doc_id = ?1)"
+                };
+                let text: Option<String> = tx.query_row(sql, params![id], |r| r.get(0)).optional()?;
+                if let Some(text) = text.filter(|t| !t.trim().is_empty()) {
+                    replace_chunks(&tx, kind, id, &text)?;
+                    chunked += 1;
+                }
             }
-            out
-        };
-        for (kind, id, text) in &docs {
-            replace_chunks(&tx, kind, id, text)?;
+            tx.commit()?;
         }
-        tx.commit()?;
-        Ok(docs.len())
+        Ok(chunked)
     }
 
     /// Up to `limit` chunks not yet embedded with `model`, oldest first.
@@ -1151,6 +1182,41 @@ mod tests {
         assert!(db.list_library_sources(SourceOwner::Session, &chat.id).unwrap().is_empty());
         db.delete_space(&space.id).unwrap();
         assert!(db.all_library_sources(SourceOwner::Space).unwrap().is_empty());
+    }
+
+    #[test]
+    fn backfill_chunks_a_whole_restored_library_in_batches() {
+        let (db, _dir) = fresh_db();
+        let ids: Vec<String> = (0..40)
+            .map(|i| text_item(&db, &format!("T{i}"), &format!("body number {i}")).id)
+            .collect();
+        db.conn.lock().execute_batch("DELETE FROM rag_chunks").unwrap();
+        // More documents than one batch, all chunked; then nothing left to do.
+        assert_eq!(db.backfill_rag_chunks().unwrap(), 40);
+        assert_eq!(db.backfill_rag_chunks().unwrap(), 0);
+        let q = crate::rag::build_fts_query("number").unwrap();
+        let keys: Vec<(&str, &str)> = ids.iter().map(|id| (DOC_LIBRARY, id.as_str())).collect();
+        assert_eq!(db.rag_keyword_search(&scope(&keys), &q, 100).unwrap().len(), 40);
+    }
+
+    // Regression: one id deleted elsewhere failed the whole batch with a raw
+    // "FOREIGN KEY constraint failed", so none of the others were linked.
+    #[test]
+    fn linking_skips_ids_that_no_longer_exist() {
+        let (db, _dir) = fresh_db();
+        let chat = db.create_session("c", "ollama", "m", None, None).unwrap();
+        let a = text_item(&db, "A", "a body");
+        let linked = db
+            .add_library_sources(
+                SourceOwner::Session,
+                &chat.id,
+                &[a.id.clone(), "gone-item".into()],
+                &["gone-dataset".into()],
+            )
+            .unwrap();
+        assert_eq!(linked.iter().map(|l| l.item_id.as_deref()).collect::<Vec<_>>(), vec![Some(a.id.as_str())]);
+        // A missing owner is still an error, not a silent no-op.
+        assert!(db.add_library_sources(SourceOwner::Session, "gone-chat", &[a.id.clone()], &[]).is_err());
     }
 
     #[test]

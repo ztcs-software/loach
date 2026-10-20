@@ -98,23 +98,32 @@ fn split_to_fit(s: &str, seps: &[&str], out: &mut Vec<Piece>) {
 fn pack(pieces: Vec<Piece>) -> Vec<String> {
     let mut chunks = Vec::new();
     let mut cur = String::new();
+    // Whether `cur` holds anything beyond the overlap carried over from the
+    // previous chunk. One that doesn't would only repeat the end of the chunk
+    // before it (a whitespace-only line followed by a long one used to emit
+    // exactly that), so it's never emitted.
+    let mut fresh = false;
     for piece in pieces {
         let joiner = if !cur.is_empty() && piece.para_start { "\n\n" } else { "" };
         if !cur.is_empty() && char_len(&cur) + joiner.len() + char_len(&piece.text) > CHUNK_TARGET {
             let tail = overlap_tail(&cur);
-            chunks.push(cur.trim().to_string());
+            if fresh {
+                chunks.push(cur.trim().to_string());
+            }
             cur = if char_len(&tail) + 2 + char_len(&piece.text) <= CHUNK_TARGET {
                 tail
             } else {
                 String::new()
             };
+            fresh = false;
         }
         if !cur.is_empty() && piece.para_start {
             cur.push_str("\n\n");
         }
         cur.push_str(&piece.text);
+        fresh |= !piece.text.trim().is_empty();
     }
-    if !cur.trim().is_empty() {
+    if fresh {
         chunks.push(cur.trim().to_string());
     }
     chunks
@@ -293,6 +302,17 @@ pub async fn search(
                         .filter(|(_, v)| v.len() == q.len())
                         .map(|(id, v)| (*id, dot(&q, v)))
                         .collect();
+                    // Vectors of another length came from a different model
+                    // under the same name (a re-pulled tag, a swapped
+                    // server): they can't be compared, so say how to fix it
+                    // rather than quietly searching by keyword.
+                    let stale = vectors.len() - scored.len();
+                    if stale > 0 {
+                        warning = Some(format!(
+                            "{stale} of {total} excerpts were embedded by a different version of the model — \
+                             rebuild the index in Settings → Library to search them by meaning."
+                        ));
+                    }
                     scored.sort_by(|a, b| b.1.total_cmp(&a.1));
                     semantic = scored.into_iter().take(CANDIDATES).map(|(id, _)| id).collect();
                     used_vectors = !semantic.is_empty();
@@ -381,6 +401,20 @@ mod tests {
         // The overlap carries the end of one chunk into the next.
         let tail: String = chunks[0].chars().rev().take(30).collect::<Vec<_>>().into_iter().rev().collect();
         assert!(chunks[1].contains(tail.trim()), "no overlap between chunks");
+    }
+
+    #[test]
+    fn no_chunk_is_only_the_previous_ones_tail() {
+        // Regression: a near-full line, a whitespace-only line, then a long
+        // unbroken one emitted a chunk made of nothing but the first chunk's
+        // overlap — the same text twice, spending excerpt budget.
+        let text = format!("{}wo\n   \n{}", "word ".repeat(239), "y".repeat(1100));
+        let chunks = chunk_text(&text);
+        assert_eq!(chunks.len(), 2, "{chunks:?}");
+        for pair in chunks.windows(2) {
+            assert!(!pair[0].contains(pair[1].as_str()), "chunk repeats its predecessor: {:?}", pair[1]);
+        }
+        assert!(chunks[1].starts_with('y'));
     }
 
     #[test]
