@@ -24,7 +24,7 @@ import {
 import type { RetrievalMode, Space, SpaceFile, SpaceMemory } from "@/types";
 
 /** The tabs of a Space's page. `files` is the Sources tab. */
-export type SpaceTab = "chats" | "instructions" | "files" | "memory" | "models";
+export type SpaceTab = "chats" | "instructions" | "files" | "memory" | "settings";
 
 interface SpaceState {
   spaces: Space[];

@@ -483,8 +483,9 @@ context.
   Space (text files, PDFs and DOCX documents; **20 MB** per file, **200 MB**
   total per Space) and Library items or datasets linked to it (§4). Every
   chat in the Space gets them, as full text or as the most relevant
-  excerpts — the tab sets the Space's mode and shows how much of the context
-  window they take (§4.4); images ride along with the user turn. A switch on
+  excerpts — the tab shows how much of the context window they take, and the
+  Space's mode is set on its **Settings** tab (§4.4); images ride along with
+  the user turn. A switch on
   each source keeps it in the Space without using it. Uploads in formats
   Loach can't read (spreadsheets, archives, legacy `.doc`) are kept but
   marked **unreadable** and never sent.
@@ -494,14 +495,15 @@ context.
 
 ### 3.2 Lifecycle
 
-- Create from the **Spaces** library (**New space**).
+- Create from the **Spaces** library (**New Space**).
 - Edit name and description from the Space's `⋯` menu → **Edit details**;
-  instructions and the default model live on their own tabs.
+  instructions live on their own tab, and the default model, memory
+  auto-save and source mode together on the **Settings** tab.
 - Open a Space to see its detail view — **Chats**, **Instructions**,
-  **Sources**, **Memory** and **Models**, each on its own tab. Each chat row
+  **Sources**, **Memory** and **Settings**, each on its own tab. Each chat row
   in the Chats tab exposes the same `…` action menu as the main sidebar
   (Pin this chat / Unpin, Label, Rename, Move to archive, Delete).
-- **Delete space** (same `⋯` menu) removes its instructions, uploaded
+- **Delete Space** (same `⋯` menu) removes its instructions, uploaded
   sources and memories; Library items linked to it stay in the Library. Its
   chats stay, but leave the Space.
 
@@ -532,7 +534,8 @@ rewrite or remove them, only avoid repeating them.
   clear the whole list — while a search is typed, **Clear** removes only
   the facts it shows. Facts too old to fit the prompt (below) are marked
   *not sent*.
-- **Per-Space toggle** — turn extraction off without wiping existing rows.
+- **Per-Space toggle** — on the Space's **Settings** tab (the Memory tab
+  shows whether it's on); turn extraction off without wiping existing rows.
   Existing memories continue to ride along in every chat; automatic
   extraction, the Memory tab's **Add** and `/remember` stop.
 - **Coverage** — a reply that finishes while more messages are queued, or
@@ -611,10 +614,11 @@ before storing it twice.
   added or fetched, and the datasets it's in. The title is renamed in place
   (Enter saves, Esc cancels).
 - Each item's `⋯` menu has **Preview**, **Edit** (texts), **Refresh** and
-  **Open in browser** (links), **Chat with it**, **Add to dataset** and
-  **Delete**.
-- Tick several items to act on them together — **Add to dataset** (a new or
-  an existing one), **Chat**, **Delete**.
+  **Open in browser** (links), **New chat**, **Add to dataset**, **Add to
+  Space** and **Delete**.
+- Tick several items — across tabs, or a whole tab with **Select all** — to
+  act on them together: **Add to dataset** (a new or an existing one), **Add
+  to Space**, **New chat**, **Delete**.
 - **Delete** asks first and names the datasets, Spaces and chats that use the
   item, directly or through a dataset; it's removed from all of them.
   Deleting a dataset keeps its items.
@@ -629,8 +633,8 @@ before storing it twice.
   items, or type `#` and a few letters to pick one inline (`Tab`, or the
   arrow keys and `Enter`, attaches it; `Esc` dismisses the list). Picked on
   the welcome screen, sources attach to the chat once it's created.
-- **Chat with it** — on a card, a dataset page or a selection — starts a new
-  chat with them already attached.
+- **New chat** — on a text or dataset card, a dataset page or a selection —
+  starts a new chat with them already attached.
 - Attached sources show as chips above the message box, with ✕ to remove
   one. A chat in a Space also gets the Space's sources (§3.1), shown
   alongside but managed on the Space's **Sources** tab.
@@ -639,7 +643,7 @@ before storing it twice.
 ### 4.4 How sources reach the model
 
 The **Sources** chip next to the message box sets how this chat uses them
-(the same choice sits on a Space's **Sources** tab, and a chat in a Space
+(the same choice sits on a Space's **Settings** tab, and a chat in a Space
 follows it until you pick something else):
 
 - **Auto** (default) — the full text while all the sources fit in half the
@@ -684,8 +688,8 @@ share its words. It runs on Ollama — with suggested models
 **Download & use** in one click — or on the OpenAI-compatible endpoint from
 **Settings → Providers** (`text-embedding-3-small` / `-large`). Indexing runs
 in the background, and keyword search keeps working meanwhile. The Library
-header and Settings show where it stands: **Indexing n / m**, **Smart
-search** once done, or **Embedding paused** with the reason (and **Retry**)
+header and Settings show where it stands: **Keyword search only** without a
+model, **Indexing n / m**, **Search by meaning** once done, or **Embedding paused** with the reason (and **Retry**)
 when the model can't be reached — searches then fall back to keywords and
 the reply's sources chip says so. **Rebuild** re-embeds everything, for
 example after replacing a model with a new version under the same name.

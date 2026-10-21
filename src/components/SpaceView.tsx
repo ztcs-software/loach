@@ -3,7 +3,9 @@ import {
   Archive,
   Brain,
   ChevronRight,
+  Cpu,
   Layers,
+  Library,
   MessageSquare,
   MoreHorizontal,
   Pencil,
@@ -38,7 +40,8 @@ import { ChatSpaceSubmenu } from "@/components/ChatSpaceMenu";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { DefaultModelPicker, DEFAULT_MODEL_LABEL } from "@/components/DefaultModelPicker";
 import { MemoryList } from "@/components/MemoryList";
-import { SpaceSourcesTab } from "@/components/library/SpaceSources";
+import { MODE_LABELS } from "@/components/library/ChatSources";
+import { SourceModeSwitch, SpaceSourcesTab } from "@/components/library/SpaceSources";
 import { useChatStore } from "@/stores/chatStore";
 import { useSpaceStore, type SpaceTab } from "@/stores/spaceStore";
 import { useLibraryStore } from "@/stores/libraryStore";
@@ -52,6 +55,7 @@ import { cn, relativeDay } from "@/lib/utils";
 import {
   type ChatLabel,
   type ProviderId,
+  type RetrievalMode,
   type Session,
   type SpaceFile,
   type SpaceMemory,
@@ -87,6 +91,7 @@ export function SpaceView() {
   const loadFiles = useSpaceStore((s) => s.loadSpaceFiles);
   const doAddFile = useSpaceStore((s) => s.addFile);
   const doRemoveFile = useSpaceStore((s) => s.removeFile);
+  const setRetrievalMode = useSpaceStore((s) => s.setRetrievalMode);
   const storedFiles = useSpaceStore((s) =>
     viewingSpaceId ? s.spaceFiles[viewingSpaceId] : undefined,
   );
@@ -339,7 +344,7 @@ export function SpaceView() {
                   <TabsTrigger value="instructions">Instructions</TabsTrigger>
                   <TabsTrigger value="files">Sources</TabsTrigger>
                   <TabsTrigger value="memory">Memory</TabsTrigger>
-                  <TabsTrigger value="models">Models</TabsTrigger>
+                  <TabsTrigger value="settings">Settings</TabsTrigger>
                 </TabsList>
               </div>
 
@@ -406,14 +411,7 @@ export function SpaceView() {
                 <MemoryTab
                   space={space}
                   memories={memories}
-                  onToggle={(enabled) =>
-                    doUpdateNotify({
-                      name: space.name,
-                      description: space.description,
-                      instructions: space.instructions,
-                      memory_enabled: enabled,
-                    })
-                  }
+                  onOpenSettings={() => setTab("settings")}
                   onAdd={(content) =>
                     doAddMemory({ space_id: space.id, content }).catch((e) => {
                       useToastStore.getState().push({
@@ -451,8 +449,8 @@ export function SpaceView() {
                 />
               </TabsContent>
 
-              <TabsContent value="models" className="mt-6">
-                <ModelsTab
+              <TabsContent value="settings" className="mt-6">
+                <SettingsTab
                   space={space}
                   onSave={(patch) =>
                     doUpdateNotify({
@@ -462,6 +460,7 @@ export function SpaceView() {
                       ...patch,
                     })
                   }
+                  onSetMode={(mode) => void setRetrievalMode(space.id, mode)}
                 />
               </TabsContent>
             </Tabs>
@@ -913,42 +912,100 @@ function InstructionsTab({
 }
 
 // ---------------------------------------------------------------------------
-// Models tab
+// Settings tab
 // ---------------------------------------------------------------------------
+//
+// Everything that sets how the Space's chats behave, in one place: the default
+// model, memory auto-save and how sources reach the model. They used to be
+// spread over a Models tab holding a single dropdown, a switch above the
+// Memory list and a selector on the Sources tab; those two tabs now show the
+// setting as a status line linking back here.
 
-interface ModelsPatch {
+interface SettingsPatch {
   default_provider?: string | null;
   default_model?: string | null;
-  default_params_json?: string | null;
+  memory_enabled?: boolean | null;
 }
 
-function ModelsTab({
+function SettingsTab({
   space,
   onSave,
+  onSetMode,
 }: {
   space: {
     default_provider: ProviderId | null;
     default_model: string | null;
-    default_params_json: string | null;
+    memory_enabled: boolean;
+    retrieval_mode: RetrievalMode;
   };
-  onSave: (patch: ModelsPatch) => Promise<void>;
+  onSave: (patch: SettingsPatch) => Promise<void>;
+  onSetMode: (mode: RetrievalMode) => void;
 }) {
-  const pickModel = (provider: ProviderId | null, model: string | null) => {
-    void onSave({ default_provider: provider, default_model: model });
-  };
-
   return (
-    <div className="space-y-3">
-      <p className="text-xs text-foreground/55">
-        Pick a default model for every chat created in this Space. Leave it on
-        Default model to use your General Settings default; per-chat picks
-        still win once a chat is open.
-      </p>
-      <DefaultModelPicker
-        provider={space.default_provider}
-        model={space.default_model}
-        onChange={pickModel}
+    <div className="space-y-4">
+      <SettingCard
+        icon={<Cpu className="h-4 w-4 text-foreground/55" />}
+        title="Default model"
+        description="Used by every chat created in this Space. Leave it on Default model to use your General Settings default; a model picked in a chat still wins for that chat."
+      >
+        <DefaultModelPicker
+          provider={space.default_provider}
+          model={space.default_model}
+          onChange={(provider, model) => void onSave({ default_provider: provider, default_model: model })}
+        />
+      </SettingCard>
+
+      <SettingCard
+        icon={<Brain className="h-4 w-4 text-foreground/55" />}
+        title="Memory"
+        description={'Auto-saves durable facts from your chats so the assistant remembers them next time. New memories trigger a "Saved to memory" toast. Existing memories stay in the prompt even when this is off.'}
+        control={
+          <Switch
+            checked={space.memory_enabled}
+            onCheckedChange={(v) => void onSave({ memory_enabled: !!v })}
+            aria-label="Save memories automatically"
+          />
+        }
       />
+
+      <SettingCard
+        icon={<Library className="h-4 w-4 text-foreground/55" />}
+        title="How sources reach the model"
+        description={MODE_LABELS[space.retrieval_mode].hint}
+        control={<SourceModeSwitch value={space.retrieval_mode} onChange={onSetMode} />}
+      />
+    </div>
+  );
+}
+
+/** One setting on the Settings tab: a title and what it does, with its
+ *  control beside them (a switch) or below them (the model picker). */
+function SettingCard({
+  icon,
+  title,
+  description,
+  control,
+  children,
+}: {
+  icon: ReactNode;
+  title: string;
+  description: string;
+  control?: ReactNode;
+  children?: ReactNode;
+}) {
+  return (
+    <div className="rounded-2xl border border-foreground/10 bg-foreground/[0.02] px-4 py-3.5">
+      <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-3">
+        <div className="min-w-0 flex-1 basis-64">
+          <div className="flex items-center gap-2 text-sm font-medium text-foreground/85">
+            {icon}
+            {title}
+          </div>
+          <p className="mt-1 text-xs text-foreground/55">{description}</p>
+        </div>
+        {control}
+      </div>
+      {children && <div className="mt-3">{children}</div>}
     </div>
   );
 }
@@ -957,14 +1014,15 @@ function ModelsTab({
 // Memory tab
 // ---------------------------------------------------------------------------
 //
-// Surfaces the per-space memory the extractor accumulates plus the on/off
-// toggle. The list itself (add / inline edit / delete / search / source
-// link) is the shared `MemoryList`, also used for global memories.
+// Surfaces the per-space memory the extractor accumulates, with whether
+// auto-save is on — switched on the Settings tab. The list itself (add /
+// inline edit / delete / search / source link) is the shared `MemoryList`,
+// also used for global memories.
 
 function MemoryTab({
   space,
   memories,
-  onToggle,
+  onOpenSettings,
   onAdd,
   onUpdate,
   onRemove,
@@ -972,7 +1030,7 @@ function MemoryTab({
 }: {
   space: { id: string; memory_enabled: boolean };
   memories: SpaceMemory[];
-  onToggle: (enabled: boolean) => Promise<void>;
+  onOpenSettings: () => void;
   onAdd: (content: string) => Promise<unknown>;
   onUpdate: (id: string, content: string) => Promise<unknown>;
   onRemove: (id: string) => Promise<unknown>;
@@ -980,24 +1038,20 @@ function MemoryTab({
 }) {
   return (
     <div className="space-y-4">
-      {/* Toggle row — mirrors the on/off chip from the meta strip with a
-          short rationale so users know exactly what flipping it does. */}
-      <div className="flex items-start justify-between gap-4 rounded-2xl border border-foreground/10 bg-foreground/[0.02] px-4 py-3.5">
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2 text-sm font-medium text-foreground/85">
-            <Brain className="h-4 w-4 text-foreground/55" />
-            Memory
-          </div>
-          <p className="mt-1 text-xs text-foreground/55">
-            Auto-saves durable facts from your chats so the assistant remembers
-            them next time. New memories trigger a "Saved to memory" toast.
-            Existing memories stay in the prompt even when this is off.
-          </p>
-        </div>
-        <Switch
-          checked={space.memory_enabled}
-          onCheckedChange={(v) => void onToggle(!!v)}
-        />
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-foreground/10 bg-foreground/[0.02] px-4 py-3 text-xs">
+        <span className="flex min-w-0 items-center gap-2 text-foreground/65">
+          <Brain className="h-4 w-4 shrink-0 text-foreground/55" />
+          {space.memory_enabled
+            ? "Auto-save is on: new facts from this Space's chats are saved here."
+            : "Auto-save is off: these memories still reach the model, but nothing new is saved."}
+        </span>
+        <button
+          type="button"
+          onClick={onOpenSettings}
+          className="shrink-0 text-foreground/55 underline underline-offset-2 transition-colors hover:text-foreground"
+        >
+          Change in Settings
+        </button>
       </div>
 
       <MemoryList
@@ -1006,7 +1060,7 @@ function MemoryTab({
         emptyText={
           space.memory_enabled
             ? "No memories yet — chat in this Space and the extractor will start saving durable facts here."
-            : "Memory is off for this Space. Turn it back on to start collecting facts."
+            : "Memory is off for this Space. Turn it on in Settings to start collecting facts."
         }
         onAdd={onAdd}
         onUpdate={onUpdate}

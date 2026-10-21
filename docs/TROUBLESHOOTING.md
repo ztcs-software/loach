@@ -538,7 +538,7 @@ tab.
 
 - Memory extraction only runs **after a complete assistant reply**.
   Cancelled or errored turns are skipped.
-- The toggle on the Space's Memory tab must be on. Outside a Space,
+- Memory must be on in the Space's **Settings** tab. Outside a Space,
   memory stays off until you turn on **Settings → Features → Global
   memories**.
 - Each candidate fact must be **at most 280 characters**. Longer "facts"

@@ -75,7 +75,7 @@ export function SpaceSourcesTab({
   const setViewingDataset = useLibraryStore((s) => s.setViewingDataset);
   const saveToLibrary = useLibraryStore((s) => s.saveToLibrary);
   const setFileEnabled = useSpaceStore((s) => s.setFileEnabled);
-  const setRetrievalMode = useSpaceStore((s) => s.setRetrievalMode);
+  const setSpaceTab = useSpaceStore((s) => s.setSpaceTab);
 
   useEffect(() => {
     void ensureSources("space", space.id).catch(() => undefined);
@@ -135,35 +135,26 @@ export function SpaceSourcesTab({
         keep it here without using it.
       </p>
 
-      {/* How sources reach the model */}
+      {/* How sources reach the model — the mode is set on the Settings tab
+          with the Space's other settings; here it's shown beside what it
+          does to these sources, with a way back to change it. */}
       <div className="rounded-xl border border-foreground/10 bg-foreground/[0.02] p-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="min-w-0">
             <div className="text-sm font-medium text-foreground/85">How sources reach the model</div>
             <p className="mt-0.5 text-xs text-foreground/50">{MODE_LABELS[space.retrieval_mode].hint}</p>
           </div>
-          <div
-            role="radiogroup"
-            aria-label="Source mode"
-            className="inline-flex rounded-xl border border-foreground/10 bg-foreground/[0.04] p-0.5"
-          >
-            {(["auto", "full", "retrieval"] as RetrievalMode[]).map((m) => (
-              <button
-                key={m}
-                type="button"
-                role="radio"
-                aria-checked={space.retrieval_mode === m}
-                onClick={() => void setRetrievalMode(space.id, m)}
-                className={cn(
-                  "rounded-[10px] px-3 py-1 text-xs font-medium transition-colors",
-                  space.retrieval_mode === m
-                    ? "bg-foreground/[0.10] text-foreground"
-                    : "text-foreground/55 hover:text-foreground",
-                )}
-              >
-                {MODE_LABELS[m].label}
-              </button>
-            ))}
+          <div className="flex items-center gap-2 text-xs">
+            <span className="rounded-full bg-foreground/[0.06] px-2.5 py-0.5 font-medium text-foreground/75">
+              {MODE_LABELS[space.retrieval_mode].label}
+            </span>
+            <button
+              type="button"
+              onClick={() => setSpaceTab(space.id, "settings")}
+              className="text-foreground/55 underline underline-offset-2 transition-colors hover:text-foreground"
+            >
+              Change in Settings
+            </button>
           </div>
         </div>
         {count > 0 && (
@@ -355,6 +346,40 @@ export function SpaceSourcesTab({
         onConfirm={(sel) => addSources("space", space.id, sel)}
       />
       {previewing && <UploadPreview file={previewing} onClose={() => setPreviewing(null)} />}
+    </div>
+  );
+}
+
+/** Auto / Full text / Excerpts, as a segmented switch — the Space's source
+ *  mode on its Settings tab. */
+export function SourceModeSwitch({
+  value,
+  onChange,
+}: {
+  value: RetrievalMode;
+  onChange: (mode: RetrievalMode) => void;
+}) {
+  return (
+    <div
+      role="radiogroup"
+      aria-label="How sources reach the model"
+      className="inline-flex rounded-xl border border-foreground/10 bg-foreground/[0.04] p-0.5"
+    >
+      {(["auto", "full", "retrieval"] as RetrievalMode[]).map((m) => (
+        <button
+          key={m}
+          type="button"
+          role="radio"
+          aria-checked={value === m}
+          onClick={() => onChange(m)}
+          className={cn(
+            "rounded-[10px] px-3 py-1 text-xs font-medium transition-colors",
+            value === m ? "bg-foreground/[0.10] text-foreground" : "text-foreground/55 hover:text-foreground",
+          )}
+        >
+          {MODE_LABELS[m].label}
+        </button>
+      ))}
     </div>
   );
 }
