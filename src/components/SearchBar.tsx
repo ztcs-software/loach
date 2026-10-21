@@ -9,6 +9,7 @@ import {
   Search,
   MessageSquare,
   Layers,
+  Library,
   SquareTerminal,
   Quote,
   Check,
@@ -26,12 +27,22 @@ import { logger } from "@/lib/logger";
 import { primaryMod } from "@/lib/shortcuts";
 import { searchMessages } from "@/lib/tauri";
 import { useChatStore } from "@/stores/chatStore";
+import { useLibraryStore } from "@/stores/libraryStore";
+import { useModelsStore } from "@/stores/modelsStore";
 import { usePrivateChatStore } from "@/stores/privateChatStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useSnippetStore } from "@/stores/snippetStore";
 import { useUIStore } from "@/stores/uiStore";
+import { domainOf, mixLabel, typeLabel } from "@/components/library/libraryUi";
 import { expandAndPrimeSnippet } from "@/lib/runSnippet";
-import type { MessageHit, Session, Snippet, Space } from "@/types";
+import type {
+  LibraryDataset,
+  LibraryItemMeta,
+  MessageHit,
+  Session,
+  Snippet,
+  Space,
+} from "@/types";
 
 /**
  * Floating command-palette-style search.
@@ -47,8 +58,9 @@ import type { MessageHit, Session, Snippet, Space } from "@/types";
  *     pill so non-keyboard surfaces share the same path
  *
  * Behaviour while open:
- *   - Empty query → "suggestions" mix of recent chats / spaces / snippets
- *   - Typing filters across all three stores with case-insensitive substring
+ *   - Empty query → "suggestions" mix of recent chats / spaces / snippets /
+ *     Library items and datasets
+ *   - Typing filters across those stores with case-insensitive substring
  *     match on the most-relevant fields, and searches inside chat transcripts
  *     (both prompts and responses) via the backend — see `messageHits`
  *   - An `in:<scope>` token narrows the search to one kind. The token is the
@@ -68,9 +80,11 @@ import type { MessageHit, Session, Snippet, Space } from "@/types";
  *             SnippetsLibrary.runSnippet)
  *   message → select the chat it lives in, then hand ChatCanvas the message
  *             id so it scrolls there and flashes the row
+ *   library → an item opens its preview where the user is; a dataset opens
+ *             its page in the Library
  */
 
-type ResultKind = "chat" | "space" | "snippet" | "message";
+type ResultKind = "chat" | "space" | "snippet" | "message" | "library";
 
 type Result =
   | { kind: "chat"; id: string; label: string; sub?: string; session: Session }
@@ -82,11 +96,19 @@ type Result =
       sub?: string;
       snippet: Snippet;
     }
-  | { kind: "message"; id: string; label: string; sub?: string; hit: MessageHit };
+  | { kind: "message"; id: string; label: string; sub?: string; hit: MessageHit }
+  | {
+      kind: "library";
+      id: string;
+      label: string;
+      sub?: string;
+      /** Set for a dataset; an item result leaves it undefined. */
+      dataset?: LibraryDataset;
+    };
 
 /** What the search is currently pointed at. "everywhere" is the default and
  *  means "no filter"; every other value narrows the list to a single kind. */
-const SCOPES = ["everywhere", "chats", "messages", "spaces", "snippets"] as const;
+const SCOPES = ["everywhere", "chats", "messages", "spaces", "snippets", "library"] as const;
 type Scope = (typeof SCOPES)[number];
 
 /** The one result kind each narrowing scope admits. "everywhere" is absent
@@ -96,13 +118,44 @@ const SCOPE_KIND: Record<Exclude<Scope, "everywhere">, ResultKind> = {
   messages: "message",
   spaces: "space",
   snippets: "snippet",
+  library: "library",
 };
 
 /** The `in:<scope>` filter, matched as a standalone word anywhere in the query
  *  rather than only at the front — `notes in:messages` is as natural to type as
  *  the other order. `in:everywhere` is deliberately not accepted: "everywhere"
  *  is the *absence* of a filter, spelled by deleting the token. */
-const SCOPE_TOKEN = /(^|\s)(in:(?:chats|messages|spaces|snippets))(?=\s|$)/i;
+const SCOPE_TOKEN = /(^|\s)(in:(?:chats|messages|spaces|snippets|library))(?=\s|$)/i;
+
+/** A Library dataset as a result row, sub-lined like its card ("2 texts ·
+ *  1 link"). */
+function datasetResult(
+  d: LibraryDataset,
+  byId: Map<string, LibraryItemMeta>,
+): Result {
+  const members = d.item_ids
+    .map((id) => byId.get(id))
+    .filter((i): i is LibraryItemMeta => !!i);
+  return {
+    kind: "library",
+    id: d.id,
+    label: d.name,
+    sub: `Dataset · ${mixLabel(members)}`,
+    dataset: d,
+  };
+}
+
+/** A Library item as a result row: its type, then the link's site or the
+ *  start of its text. */
+function itemResult(i: LibraryItemMeta): Result {
+  const detail = i.kind === "link" ? domainOf(i.url) : i.preview;
+  return {
+    kind: "library",
+    id: i.id,
+    label: i.title,
+    sub: [typeLabel(i), detail].filter(Boolean).join(" · "),
+  };
+}
 
 interface ParsedQuery {
   scope: Scope;
@@ -155,6 +208,10 @@ export function SearchBar() {
   const sessions = useChatStore((s) => s.sessions);
   const spaces = useSpaceStore((s) => s.spaces);
   const snippets = useSnippetStore((s) => s.snippets);
+  const libraryItems = useLibraryStore((s) => s.items);
+  const datasets = useLibraryStore((s) => s.datasets);
+  const openPreview = useLibraryStore((s) => s.openPreview);
+  const setViewingDataset = useLibraryStore((s) => s.setViewingDataset);
   const select = useChatStore((s) => s.selectSession);
   const newSession = useChatStore((s) => s.newSession);
   const setViewingSpace = useSpaceStore((s) => s.setViewingSpace);
@@ -277,6 +334,7 @@ export function SearchBar() {
     // to the keys `SCOPE_KIND` actually has.
     const allows = (kind: ResultKind) =>
       scope === "everywhere" ? true : SCOPE_KIND[scope] === kind;
+    const itemsById = new Map(libraryItems.map((i) => [i.id, i]));
 
     // Empty query → "suggestions": a small mixed slice of recent items. Under
     // a narrowed scope one kind has the list to itself, so it gets to show
@@ -330,6 +388,14 @@ export function SearchBar() {
           });
         }
       }
+      if (allows("library")) {
+        // Both lists arrive most recently updated first.
+        const recent = [
+          ...datasets.map((d) => datasetResult(d, itemsById)),
+          ...libraryItems.map(itemResult),
+        ];
+        out.push(...recent.slice(0, room.other));
+      }
       return out;
     }
 
@@ -382,6 +448,24 @@ export function SearchBar() {
       }
     }
 
+    // Same fields the Library page's own search looks at.
+    if (allows("library")) {
+      for (const d of datasets) {
+        if (d.name.toLowerCase().includes(q) || d.description.toLowerCase().includes(q)) {
+          matches.push(datasetResult(d, itemsById));
+        }
+      }
+      for (const i of libraryItems) {
+        if (
+          i.title.toLowerCase().includes(q) ||
+          i.preview.toLowerCase().includes(q) ||
+          (i.url ?? "").toLowerCase().includes(q)
+        ) {
+          matches.push(itemResult(i));
+        }
+      }
+    }
+
     // Transcript hits go last: a chat whose *title* matches is a stronger
     // signal than a phrase buried in one of its turns. They still get a
     // guaranteed block of slots at the bottom, so a query that also matches
@@ -402,7 +486,7 @@ export function SearchBar() {
       ...matches.slice(0, MAX_RESULTS - Math.min(messages.length, messageRoom)),
       ...messages.slice(0, messageRoom),
     ];
-  }, [terms, scope, sessions, spaces, snippets, recentSessionIds, messageHits]);
+  }, [terms, scope, sessions, spaces, snippets, libraryItems, datasets, recentSessionIds, messageHits]);
 
   // Keep the active row valid whenever the result set changes.
   useEffect(() => {
@@ -528,15 +612,30 @@ export function SearchBar() {
       return;
     }
 
-    // snippet — same handler as the sidebar's "Run" action.
-    setViewingSpace(null);
-    setSidebarTab("chats");
-    await newSession({
-      spaceId: null,
-      provider: r.snippet.provider ?? undefined,
-      model: r.snippet.model ?? undefined,
+    if (r.kind === "library") {
+      if (r.dataset) {
+        // Same route as a dataset chip in the composer.
+        setViewingDataset(r.id);
+        setViewingSpace(null);
+        useModelsStore.getState().setViewingModel(null);
+        setSidebarTab("library");
+      } else {
+        openPreview(r.id);
+      }
+      return;
+    }
+
+    // snippet — same handler as the Snippets page's "Run" action: the chat
+    // is created once the variables are filled, not before.
+    await expandAndPrimeSnippet(r.snippet, async () => {
+      setViewingSpace(null);
+      setSidebarTab("chats");
+      await newSession({
+        spaceId: null,
+        provider: r.snippet.provider ?? undefined,
+        model: r.snippet.model ?? undefined,
+      });
     });
-    await expandAndPrimeSnippet(r.snippet);
   };
 
   const onKeyDown = (e: ReactKeyboardEvent<HTMLInputElement>) => {
@@ -659,13 +758,13 @@ export function SearchBar() {
                   if (mirrorRef.current)
                     mirrorRef.current.scrollLeft = e.currentTarget.scrollLeft;
                 }}
-                placeholder="Search chats, messages, spaces, snippets…"
+                placeholder="Search chats, messages, spaces, snippets, Library…"
                 spellCheck={false}
                 // Combobox-over-listbox: ↑/↓ already moved a visual highlight
                 // that existed only as a background colour. `aria-activedescendant`
                 // is what turns that into something announceable, and keeps
                 // real focus in the input so typing never breaks.
-                aria-label="Search chats, messages, spaces, snippets"
+                aria-label="Search chats, messages, spaces, snippets and the Library"
                 role="combobox"
                 aria-expanded={results.length > 0}
                 aria-controls="search-results"
@@ -821,6 +920,7 @@ function ResultIcon({ kind }: { kind: ResultKind }) {
   if (kind === "chat") return <MessageSquare className={cls} />;
   if (kind === "space") return <Layers className={cls} />;
   if (kind === "message") return <Quote className={cls} />;
+  if (kind === "library") return <Library className={cls} />;
   return <SquareTerminal className={cls} />;
 }
 

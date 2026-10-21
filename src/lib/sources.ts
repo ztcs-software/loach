@@ -4,7 +4,9 @@ import { logger } from "@/lib/logger";
 import { expandSources, useLibraryStore } from "@/stores/libraryStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import type {
+  LibraryDataset,
   LibraryItemMeta,
+  LibrarySource,
   Message,
   RagHit,
   RetrievalMode,
@@ -69,6 +71,15 @@ export function sourcesTokenCost(pref: RetrievalMode, sourceTokens: number, numC
   return resolveMode(pref, sourceTokens, numCtx) === "full"
     ? Math.min(sourceTokens, pref === "full" ? Math.round(numCtx * FORCED_FULL_SHARE) : sourceTokens)
     : Math.min(sourceTokens, retrievalBudgetTokens(numCtx));
+}
+
+/** What `tokens` of sources will meet under `pref`, for the Library picker's
+ *  badge: given whole, given whole but cut to fit (forced full text past its
+ *  share of the window), or searched for excerpts. Follows the same rules as
+ *  the send, so a chat or Space set to Excerpts never reads "Fits in full". */
+export function sourcesVerdict(pref: RetrievalMode, tokens: number, numCtx: number): "full" | "cut" | "excerpts" {
+  if (resolveMode(pref, tokens, numCtx) === "retrieval") return "excerpts";
+  return pref === "full" && tokens > Math.round(numCtx * FORCED_FULL_SHARE) ? "cut" : "full";
 }
 
 /** A title or URL made safe for one prompt line: whitespace runs (newlines
@@ -395,6 +406,21 @@ export async function resolveSources(args: {
       ),
     };
   }
+}
+
+/** How many sources a Space gives each of its chats: its switched-on uploads
+ *  a model can use (not the unreadable `kind: "file"` ones) plus its
+ *  switched-on Library items, a dataset counting as its items and an item
+ *  once. The one count the Space's page, its Sources tab and the composer's
+ *  "Space sources" chip all show, so they can't disagree. */
+export function spaceSourceCount(
+  files: SpaceFile[],
+  links: LibrarySource[],
+  datasets: LibraryDataset[],
+  items: LibraryItemMeta[],
+): number {
+  const uploads = files.filter((f) => f.enabled !== false && f.kind !== "file").length;
+  return uploads + expandSources(links, datasets, items).length;
 }
 
 /** Token estimate of a chat's sources for the context bar, from what's

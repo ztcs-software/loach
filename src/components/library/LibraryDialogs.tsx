@@ -113,6 +113,7 @@ export function useDeleteDataset() {
 // ---------------------------------------------------------------------------
 
 export function TextEditorDialog() {
+  const { confirm } = useConfirm();
   const target = useLibraryStore((s) => s.editTextTarget);
   const close = () => useLibraryStore.getState().openTextEditor(null);
   const createText = useLibraryStore((s) => s.createText);
@@ -135,6 +136,15 @@ export function TextEditorDialog() {
   // false and created the text twice. A ref holds the save synchronously.
   const savingRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
+  // What the fields held once the editor opened (and its text loaded):
+  // closing with anything else asks first. Null for a draft kept across an
+  // app lock, whose saved state isn't known here — any text in it counts.
+  const [baseline, setBaseline] = useState<{ title: string; body: string } | null>(null);
+  const dirty =
+    !loading &&
+    (baseline
+      ? title !== baseline.title || body !== baseline.body
+      : title.trim() !== "" || body.trim() !== "");
 
   useEffect(() => {
     setError(null);
@@ -143,18 +153,28 @@ export function TextEditorDialog() {
     if (kept) {
       setTitle(kept.title);
       setBody(kept.body);
+      setBaseline(null);
       return;
     }
     if (target === "new") {
       setTitle("");
       setBody("");
+      setBaseline({ title: "", body: "" });
       return;
     }
-    setTitle(item?.title ?? "");
+    const savedTitle = item?.title ?? "";
+    setTitle(savedTitle);
     setLoading(true);
     getContents([target])
-      .then(([full]) => setBody(full?.content ?? ""))
-      .catch((e) => setError(e instanceof Error ? e.message : String(e)))
+      .then(([full]) => {
+        const content = full?.content ?? "";
+        setBody(content);
+        setBaseline({ title: savedTitle, body: content });
+      })
+      .catch((e) => {
+        setError(e instanceof Error ? e.message : String(e));
+        setBaseline({ title: savedTitle, body: "" });
+      })
       .finally(() => setLoading(false));
     // Re-seed only when a different item opens.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -183,9 +203,27 @@ export function TextEditorDialog() {
     }
   };
 
+  // Escape, the backdrop, ✕ and Cancel all come through here, so none of them
+  // can throw typed text away without asking.
+  const requestClose = async () => {
+    if (
+      dirty &&
+      !(await confirm({
+        title: "Discard unsaved changes?",
+        body: target === "new" ? "This text hasn't been saved yet." : "Your edits to this text haven't been saved.",
+        confirmLabel: "Discard",
+        cancelLabel: "Keep editing",
+        destructive: true,
+      }))
+    ) {
+      return;
+    }
+    close();
+  };
+
   const tokens = Math.ceil(body.length / 4);
   return (
-    <Dialog open={!!target} onOpenChange={(o) => !o && close()}>
+    <Dialog open={!!target} onOpenChange={(o) => !o && void requestClose()}>
       <DialogContent className="max-w-2xl">
         <DialogHeader>
           <DialogTitle>{target === "new" ? "New text" : "Edit text"}</DialogTitle>
@@ -226,7 +264,7 @@ export function TextEditorDialog() {
             {body.length.toLocaleString()} characters · {tokensLabel(tokens)}
           </span>
           <div className="flex items-center gap-2">
-            <Button variant="outline" onClick={close} className="rounded-lg">
+            <Button variant="outline" onClick={() => void requestClose()} className="rounded-lg">
               Cancel
             </Button>
             <Button

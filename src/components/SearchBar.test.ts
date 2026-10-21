@@ -77,6 +77,12 @@ describe("parseQuery", () => {
     }
   });
 
+  it("narrows to the Library", () => {
+    const p = parseQuery("brand in:library");
+    expect(p.scope).toBe("library");
+    expect(p.terms).toBe("brand");
+  });
+
   it("does not accept in:everywhere — that scope is the absence of a token", () => {
     expect(parseQuery("in:everywhere alpha").scope).toBe("everywhere");
     expect(parseQuery("in:everywhere alpha").token).toBeNull();

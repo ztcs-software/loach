@@ -20,9 +20,9 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { formatTokens } from "@/lib/contextUsage";
 import { SPACE_BYTES_CAP } from "@/lib/files";
-import { FULL_TEXT_SHARE, resolveMode, retrievalBudgetTokens } from "@/lib/sources";
+import { FULL_TEXT_SHARE, resolveMode, retrievalBudgetTokens, spaceSourceCount } from "@/lib/sources";
 import { cn, formatBytes } from "@/lib/utils";
-import { useLibraryStore } from "@/stores/libraryStore";
+import { expandSources, useLibraryStore } from "@/stores/libraryStore";
 import { useModelsStore } from "@/stores/modelsStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useUIStore } from "@/stores/uiStore";
@@ -75,31 +75,19 @@ export function SpaceSourcesTab({
   const links = sources ?? [];
 
   // What the model gets: enabled uploads + enabled links, each item once.
+  // The count includes images (they reach the model too) so it matches the
+  // page's and the composer's; only text adds tokens.
   const { tokens, count } = useMemo(() => {
     let chars = 0;
-    let n = 0;
     for (const f of files) {
       if (!f.enabled || f.kind !== "text") continue;
       chars += f.data.length;
-      n += 1;
     }
-    const seen = new Set<string>();
-    const add = (id: string) => {
-      const it = byId.get(id);
-      if (!it || seen.has(id)) return;
-      seen.add(id);
-      if (it.media === "text") {
-        chars += it.chars;
-        n += 1;
-      }
-    };
-    for (const l of links) {
-      if (!l.enabled) continue;
-      if (l.item_id) add(l.item_id);
-      else if (l.dataset_id) dsById.get(l.dataset_id)?.item_ids.forEach(add);
+    for (const it of expandSources(links, datasets, items)) {
+      if (it.media === "text") chars += it.chars;
     }
-    return { tokens: Math.ceil(chars / 4), count: n };
-  }, [files, links, byId, dsById]);
+    return { tokens: Math.ceil(chars / 4), count: spaceSourceCount(files, links, datasets, items) };
+  }, [files, links, datasets, items]);
 
   const numCtx = chatNumCtx(null, space.default_params_json);
   const effective = resolveMode(space.retrieval_mode, tokens, numCtx);
@@ -331,7 +319,7 @@ export function SpaceSourcesTab({
                       onSelect={() => onRemoveFile(f.id)}
                       className="text-destructive focus:text-destructive"
                     >
-                      <Trash2 className="h-4 w-4" /> Remove
+                      <Trash2 className="h-4 w-4" /> Delete
                     </DropdownMenuItem>
                   </DropdownMenuContent>
                 </DropdownMenu>
@@ -360,6 +348,7 @@ export function SpaceSourcesTab({
         linkedItemIds={links.filter((l) => l.item_id).map((l) => l.item_id!)}
         linkedDatasetIds={links.filter((l) => l.dataset_id).map((l) => l.dataset_id!)}
         numCtx={numCtx}
+        mode={space.retrieval_mode}
         onConfirm={(sel) => addSources("space", space.id, sel)}
       />
     </div>

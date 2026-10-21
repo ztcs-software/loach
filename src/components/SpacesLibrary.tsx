@@ -67,7 +67,7 @@ export function SpacesLibrary() {
   const handleDelete = async (space: Space) => {
     const ok = await confirm({
       title: `Delete space “${space.name}”?`,
-      body: "Sources and instructions in this space will be removed. Chats inside the space stay, but they lose their space association.",
+      body: "Its instructions, memories and uploaded files are deleted for good. Library sources stay in your Library, and its chats are kept outside any Space.",
       confirmLabel: "Delete space",
       destructive: true,
     });

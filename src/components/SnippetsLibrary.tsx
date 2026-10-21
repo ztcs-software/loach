@@ -59,20 +59,22 @@ export function SnippetsLibrary() {
   );
 
   const runSnippet = async (snippet: Snippet) => {
-    // Land the user on the chats canvas so primeComposer's draft has a place
-    // to render. Without this the new session would mount under the still-
-    // active "snippets" tab and the chat surface would never appear.
-    setViewingSpace(null);
-    setSidebarTab("chats");
-    await newSession({
-      spaceId: null,
-      provider: snippet.provider ?? undefined,
-      model: snippet.model ?? undefined,
-    });
     // `expandAndPrimeSnippet` substitutes built-ins + custom globals; if any
-    // `{{VAR}}` is still unresolved it opens the fill-blanks dialog before
-    // priming the composer.
-    await expandAndPrimeSnippet(snippet);
+    // `{{VAR}}` is still unresolved it opens the fill-blanks dialog first.
+    // The chat is only created once the prompt is final, so cancelling that
+    // dialog leaves the user here instead of in an empty chat.
+    await expandAndPrimeSnippet(snippet, async () => {
+      // Land the user on the chats canvas so primeComposer's draft has a
+      // place to render. Without this the new session would mount under the
+      // still-active "snippets" tab and the chat surface would never appear.
+      setViewingSpace(null);
+      setSidebarTab("chats");
+      await newSession({
+        spaceId: null,
+        provider: snippet.provider ?? undefined,
+        model: snippet.model ?? undefined,
+      });
+    });
   };
 
   const handleDelete = async (snippet: Snippet) => {

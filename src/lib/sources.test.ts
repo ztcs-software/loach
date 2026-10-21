@@ -3,7 +3,7 @@
 // mocked `@/lib/tauri`, so no backend is involved.
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { LibraryItem, LibraryItemMeta, Message, RagSearchResult, Session, SpaceContext } from "@/types";
+import type { LibraryItem, LibraryItemMeta, Message, RagSearchResult, Session, SpaceContext, SpaceFile } from "@/types";
 
 const tauri = vi.hoisted(() => ({
   libraryGetItems: vi.fn<(ids: string[]) => Promise<LibraryItem[]>>(),
@@ -25,6 +25,8 @@ import {
   retrievalBudgetTokens,
   retrievalQuery,
   sourcesTokenCost,
+  sourcesVerdict,
+  spaceSourceCount,
   type SourcesReport,
 } from "./sources";
 import { expandSources, useLibraryStore } from "@/stores/libraryStore";
@@ -77,6 +79,16 @@ describe("mode selection", () => {
     expect(excerptLimit(retrievalBudgetTokens(8192) * 4)).toBe(12);
     expect(excerptLimit(retrievalBudgetTokens(32_768) * 4)).toBe(41);
     expect(excerptLimit(retrievalBudgetTokens(1_000_000) * 4)).toBe(60);
+  });
+
+  it("tells the picker what the chat's own mode will do with a selection", () => {
+    // Regression: the badge only knew Auto, so a Space set to Excerpts read
+    // "Fits in full" and one set to Full text read "Will be searched".
+    expect(sourcesVerdict("auto", 3000, 8192)).toBe("full");
+    expect(sourcesVerdict("auto", 5000, 8192)).toBe("excerpts");
+    expect(sourcesVerdict("retrieval", 10, 8192)).toBe("excerpts");
+    expect(sourcesVerdict("full", 5000, 8192)).toBe("full");
+    expect(sourcesVerdict("full", 50_000, 8192)).toBe("cut");
   });
 
   it("costs what the send will actually spend", () => {
@@ -166,6 +178,35 @@ describe("expandSources", () => {
       items,
     );
     expect(out.map((i) => i.id)).toEqual(["a", "b"]);
+  });
+});
+
+describe("spaceSourceCount", () => {
+  it("counts what the Space's chats get: usable uploads plus each linked item once", () => {
+    // Regression: the Space page counted links (a dataset as one, switched-off
+    // ones included) and said "2 sources" right above a composer chip saying
+    // "5 Space sources".
+    const items = [meta("a", 10), meta("b", 10), meta("img", 0, { media: "image" })];
+    const datasets = [{ id: "d", name: "D", description: "", item_ids: ["a", "b", "img"], created_at: 0, updated_at: 0 }];
+    const link = (id: string, item: string | null, dataset: string | null, enabled = true) => ({
+      id,
+      owner_id: "sp",
+      item_id: item,
+      dataset_id: dataset,
+      enabled,
+      position: 0,
+      created_at: 0,
+    });
+    const file = (id: string, kind: "text" | "image" | "file", enabled = true) =>
+      ({ id, space_id: "sp", name: id, mime: "", kind, data: "x", size: 1, position: 0, enabled, created_at: 0 }) as SpaceFile;
+    const count = spaceSourceCount(
+      [file("t", "text"), file("i", "image"), file("bin", "file"), file("off", "text", false)],
+      [link("1", null, "d"), link("2", "a", null), link("3", "b", null, false)],
+      datasets,
+      items,
+    );
+    // 2 usable uploads + a, b, img from the dataset (a linked twice counts once).
+    expect(count).toBe(5);
   });
 });
 

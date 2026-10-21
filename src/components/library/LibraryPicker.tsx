@@ -10,13 +10,13 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { formatTokens } from "@/lib/contextUsage";
-import { FULL_TEXT_SHARE } from "@/lib/sources";
+import { sourcesVerdict } from "@/lib/sources";
 import { cn, formatBytes } from "@/lib/utils";
 import { useLibraryStore } from "@/stores/libraryStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useModelsStore } from "@/stores/modelsStore";
 import { useUIStore } from "@/stores/uiStore";
-import type { LibraryItemMeta } from "@/types";
+import type { LibraryItemMeta, RetrievalMode } from "@/types";
 import {
   DatasetIcon,
   domainOf,
@@ -49,6 +49,7 @@ export function LibraryPicker({
   linkedItemIds = [],
   linkedDatasetIds = [],
   numCtx,
+  mode = "auto",
   onConfirm,
 }: {
   open: boolean;
@@ -62,6 +63,9 @@ export function LibraryPicker({
   linkedDatasetIds?: string[];
   /** Context window the selection will be measured against. */
   numCtx?: number;
+  /** How the chat or Space it's added to uses its sources — the badge says
+   *  what that mode will do with the selection. */
+  mode?: RetrievalMode;
   onConfirm: (sel: LibrarySelection) => void | Promise<void>;
 }) {
   const items = useLibraryStore((s) => s.items);
@@ -188,7 +192,29 @@ export function LibraryPicker({
   // Empty only once it has loaded — not while it loads, nor when it failed.
   const empty = hydrated && !libraryError && items.length === 0 && datasets.length === 0;
   const unavailable = !hydrated || (!!libraryError && items.length === 0 && datasets.length === 0);
-  const fits = numCtx ? selection.total <= numCtx * FULL_TEXT_SHARE : null;
+  const verdict = numCtx ? sourcesVerdict(mode, selection.total, numCtx) : null;
+  const badge =
+    verdict === "full"
+      ? { label: "Fits in full", warn: false, title: "Small enough to give the model in full." }
+      : verdict === "cut"
+        ? {
+            label: "Will be cut short",
+            warn: true,
+            title: "Full text is on, but this is too big — it will be cut short to fit the context window.",
+          }
+        : verdict === "excerpts"
+          ? mode === "retrieval"
+            ? {
+                label: "Will be searched",
+                warn: false,
+                title: "Sources here are set to Excerpts — the most relevant parts are retrieved for each message.",
+              }
+            : {
+                label: "Will be searched",
+                warn: true,
+                title: "Too big to give in full — the most relevant excerpts will be retrieved for each message.",
+              }
+          : null;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -333,21 +359,17 @@ export function LibraryPicker({
                     {selection.hasAttached && (
                       <span> (~{formatTokens(selection.total)} with what's attached)</span>
                     )}
-                    {fits !== null && (
+                    {badge && (
                       <span
                         className={cn(
                           "ml-2 rounded-full px-2 py-0.5",
-                          fits
-                            ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
-                            : "bg-amber-500/10 text-amber-700 dark:text-amber-300",
+                          badge.warn
+                            ? "bg-amber-500/10 text-amber-700 dark:text-amber-300"
+                            : "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
                         )}
-                        title={
-                          fits
-                            ? "Small enough to give the model in full."
-                            : "Too big to give in full — the most relevant excerpts will be retrieved for each message."
-                        }
+                        title={badge.title}
                       >
-                        {fits ? "Fits in full" : "Will be searched"}
+                        {badge.label}
                       </span>
                     )}
                   </>

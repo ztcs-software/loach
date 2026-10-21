@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   Archive,
   Brain,
@@ -48,6 +48,7 @@ import { useLibraryStore } from "@/stores/libraryStore";
 import { useToastStore } from "@/stores/toastStore";
 import { useUIStore } from "@/stores/uiStore";
 import { fileToAttachment } from "@/lib/files";
+import { spaceSourceCount } from "@/lib/sources";
 import { useProviderModels } from "@/lib/useProviderModels";
 import { cn, relativeDay } from "@/lib/utils";
 import {
@@ -121,9 +122,16 @@ export function SpaceView() {
   // Meta-strip counts on screen until the new load resolved, or forever if
   // it failed.
   const files = storedFiles ?? EMPTY_FILES;
-  // Library items / datasets linked to the Space count as sources too.
+  // Library items / datasets linked to the Space count as sources too —
+  // counted the way the composer's "Space sources" chip counts them.
   const libraryLinks = useLibraryStore((s) =>
-    viewingSpaceId ? (s.sources[`space:${viewingSpaceId}`]?.length ?? 0) : 0,
+    viewingSpaceId ? s.sources[`space:${viewingSpaceId}`] : undefined,
+  );
+  const libraryItems = useLibraryStore((s) => s.items);
+  const datasets = useLibraryStore((s) => s.datasets);
+  const sourceCount = useMemo(
+    () => spaceSourceCount(files, libraryLinks ?? [], datasets, libraryItems),
+    [files, libraryLinks, datasets, libraryItems],
   );
   const memories = storedMemories ?? EMPTY_MEMORIES;
 
@@ -177,7 +185,7 @@ export function SpaceView() {
   const handleDeleteSpace = async () => {
     const ok = await confirm({
       title: `Delete space “${space.name}”?`,
-      body: "Sources and instructions in this space will be removed. Chats inside the space stay, but they lose their space association.",
+      body: "Its instructions, memories and uploaded files are deleted for good. Library sources stay in your Library, and its chats are kept outside any Space.",
       confirmLabel: "Delete space",
       destructive: true,
     });
@@ -283,10 +291,9 @@ export function SpaceView() {
                 {spaceSessions.length}{" "}
                 {spaceSessions.length === 1 ? "chat" : "chats"}
               </MetaChip>
-              {files.length + libraryLinks > 0 && (
+              {sourceCount > 0 && (
                 <MetaChip>
-                  {files.length + libraryLinks}{" "}
-                  {files.length + libraryLinks === 1 ? "source" : "sources"}
+                  {sourceCount} {sourceCount === 1 ? "source" : "sources"}
                 </MetaChip>
               )}
               {hasInstructions && <MetaChip>Instructions on</MetaChip>}
@@ -366,7 +373,20 @@ export function SpaceView() {
                       );
                     }
                   }}
-                  onRemoveFile={(id) => void doRemoveFile(id, space.id)}
+                  onRemoveFile={async (id) => {
+                    // An upload lives only in this Space, so removing it is a
+                    // delete — unlike unlinking a Library source.
+                    const f = files.find((x) => x.id === id);
+                    const ok = await confirm({
+                      title: `Delete “${f?.name ?? "this file"}”?`,
+                      body:
+                        "Uploads are stored only in this Space, so it will be gone for good." +
+                        (f && f.kind !== "file" ? " Save it to your Library first to keep a copy." : ""),
+                      confirmLabel: "Delete",
+                      destructive: true,
+                    });
+                    if (ok) void doRemoveFile(id, space.id);
+                  }}
                 />
               </TabsContent>
 
@@ -840,6 +860,27 @@ function InstructionsTab({
 
   const dirty = val !== space.instructions;
 
+  // Saved on blur, and again when the tab goes away with edits the blur never
+  // caught — a keyboard shortcut or the app lock leaves without blurring the
+  // field. `sent` keeps a blur followed straight by an unmount (clicking
+  // another tab) from saving the same text twice.
+  const sent = useRef<string | null>(null);
+  const save = (text: string) => {
+    sent.current = text;
+    void onSave(text.trim());
+  };
+  const latest = useRef({ val, dirty, save });
+  useEffect(() => {
+    latest.current = { val, dirty, save };
+  });
+  useEffect(
+    () => () => {
+      const l = latest.current;
+      if (l.dirty && l.val !== sent.current) l.save(l.val);
+    },
+    [space.id],
+  );
+
   return (
     <div className="space-y-3">
       <p className="text-xs text-foreground/55">
@@ -850,14 +891,14 @@ function InstructionsTab({
         value={val}
         onChange={(e) => setVal(e.target.value)}
         onBlur={() => {
-          if (dirty) void onSave(val.trim());
+          if (dirty) save(val);
         }}
         placeholder="e.g. Reply concisely and in the voice of a senior engineer reviewing a PR."
         className="min-h-[200px] rounded-xl border-foreground/10 bg-foreground/[0.03] text-sm leading-relaxed"
       />
       <div className="flex items-center justify-between text-[11px] text-foreground/40">
         <span>{val.length.toLocaleString()} characters</span>
-        {dirty && <span className="text-foreground/55">Unsaved — blur to save</span>}
+        {dirty && <span className="text-foreground/55">Saves when you click away</span>}
       </div>
     </div>
   );

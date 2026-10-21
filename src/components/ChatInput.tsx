@@ -41,6 +41,7 @@ import { useToastStore } from "@/stores/toastStore";
 import { cn } from "@/lib/utils";
 import { logger } from "@/lib/logger";
 import { openSessionWorkspace } from "@/lib/tauri";
+import { chatRetrievalMode } from "@/lib/sources";
 import { ChipDivider, PersonaChip, ToneChip } from "./ComposerChip";
 import { WorkspaceNotice } from "./WorkspaceNotice";
 import { LibraryPicker, type LibrarySelection } from "./library/LibraryPicker";
@@ -83,20 +84,25 @@ export function ChatInput({ centered = false }: ChatInputProps) {
   // chat, period. The streaming case additionally morphs the send button
   // into a stop button (see "Send/Stop morph" below).
   const activeSessionId = useChatStore((s) => s.activeSessionId);
+  const viewingSpaceId = useSpaceStore((s) => s.viewingSpaceId);
+  // From a Space's page the composer always starts a new chat in that Space
+  // (see `sendUserMessage`), so the chat left open is neither its target nor
+  // what its send button may stop or wait on.
+  const composerSessionId = viewingSpaceId ? null : activeSessionId;
   const streamingSessionId = useChatStore((s) => s.streamingSessionId);
   const waitingHere = useChatStore((s) =>
-    !!activeSessionId &&
-    s.queue.some((t) => t.sessionId === activeSessionId),
+    !!composerSessionId &&
+    s.queue.some((t) => t.sessionId === composerSessionId),
   );
   const streamingThisChat =
-    !!activeSessionId && streamingSessionId === activeSessionId;
+    !!composerSessionId && streamingSessionId === composerSessionId;
   const send = useChatStore((s) => s.sendUserMessage);
   const cancelForSession = useChatStore((s) => s.cancelForSession);
   // The chat's workspace directory, if it has one. Read off the session
   // rather than kept locally so it survives a remount and stays in step
   // with the row the backend reads when the next turn starts.
   const workspaceRoot = useChatStore(
-    (s) => s.sessions.find((x) => x.id === s.activeSessionId)?.workspace_root ?? null,
+    (s) => s.sessions.find((x) => x.id === composerSessionId)?.workspace_root ?? null,
   );
   const pickWorkspace = useChatStore((s) => s.pickWorkspace);
   const clearWorkspace = useChatStore((s) => s.clearWorkspace);
@@ -104,7 +110,7 @@ export function ChatInput({ centered = false }: ChatInputProps) {
   // master switch in Settings → Tools has been turned off since.
   const workspaceToolsEnabled = useSettingsStore((s) => s.workspace_tool_enabled);
   const workspaceInstructions = useChatStore((s) =>
-    s.activeSessionId ? (s.workspaceInstructions[s.activeSessionId] ?? null) : null,
+    composerSessionId ? (s.workspaceInstructions[composerSessionId] ?? null) : null,
   );
   const refreshWorkspaceInstructions = useChatStore(
     (s) => s.refreshWorkspaceInstructions,
@@ -115,9 +121,9 @@ export function ChatInput({ centered = false }: ChatInputProps) {
   // The backend reads its own copy every turn regardless; this only feeds
   // the workspace notice and the context usage row.
   useEffect(() => {
-    if (!activeSessionId || !workspaceRoot || streamingThisChat) return;
-    void refreshWorkspaceInstructions(activeSessionId);
-  }, [activeSessionId, workspaceRoot, streamingThisChat, refreshWorkspaceInstructions]);
+    if (!composerSessionId || !workspaceRoot || streamingThisChat) return;
+    void refreshWorkspaceInstructions(composerSessionId);
+  }, [composerSessionId, workspaceRoot, streamingThisChat, refreshWorkspaceInstructions]);
   const composerDraft = useUIStore((s) => s.composerDraft);
   const composerAttachments = useUIStore((s) => s.composerAttachments);
   const composerInsertSeq = useUIStore((s) => s.composerInsertSeq);
@@ -140,8 +146,8 @@ export function ChatInput({ centered = false }: ChatInputProps) {
   // an open chat reads from `personaIdBySession`; the welcome screen (no
   // session yet) falls back to `pendingPersonaId`, which chatStore.newSession
   // consumes when it materialises the session.
-  const activePersonaId = activeSessionId
-    ? personaIdBySession[activeSessionId]
+  const activePersonaId = composerSessionId
+    ? personaIdBySession[composerSessionId]
     : pendingPersonaId;
   // The chip only renders for a *real* persona — "default" (None) is the
   // absence of a persona, not a thing to advertise above the composer.
@@ -156,12 +162,12 @@ export function ChatInput({ centered = false }: ChatInputProps) {
   // says which scope it came from. Scoped to a real session: the welcome
   // composer has no chat to override yet (persona parks in `pendingPersonaId`;
   // tone has no such slot), so the chip appears from the first send onward.
-  const sessionToneId = activeSessionId
-    ? toneIdBySession[activeSessionId]
+  const sessionToneId = composerSessionId
+    ? toneIdBySession[composerSessionId]
     : undefined;
   const effectiveToneId = sessionToneId ?? defaultToneId ?? DEFAULT_TONE_ID;
   const activeTone =
-    activeSessionId && effectiveToneId !== DEFAULT_TONE_ID
+    composerSessionId && effectiveToneId !== DEFAULT_TONE_ID
       ? getTone(effectiveToneId)
       : null;
   const toneFromGlobal = !sessionToneId;
@@ -199,13 +205,9 @@ export function ChatInput({ centered = false }: ChatInputProps) {
   const activeSession = useChatStore((s) =>
     s.activeSessionId ? s.sessions.find((x) => x.id === s.activeSessionId) : undefined,
   );
-  const viewingSpaceId = useSpaceStore((s) => s.viewingSpaceId);
-  // From a Space's page the composer starts a new chat in that Space unless
-  // the open chat already belongs to it (see `sendUserMessage`) — so Library
-  // sources picked there wait for the new chat instead of landing on
-  // whichever chat happened to be open before.
-  const composerSessionId =
-    viewingSpaceId && activeSession?.space_id !== viewingSpaceId ? null : activeSessionId;
+  // Library sources picked on a Space's page wait for the new chat
+  // (`composerSessionId` is null there) instead of landing on whichever chat
+  // happened to be open before.
   const sourcesSpaceId = viewingSpaceId ?? activeSession?.space_id ?? null;
   const sourcesSpace = useSpaceStore((s) =>
     sourcesSpaceId ? s.spaces.find((x) => x.id === sourcesSpaceId) : undefined,
@@ -494,8 +496,8 @@ export function ChatInput({ centered = false }: ChatInputProps) {
   // `pendingPersonaId` until newSession adopts it.
   const applyPersona = (personaId: string) => {
     if (!getPersona(personaId)) return;
-    if (activeSessionId) {
-      setSessionPersona(activeSessionId, personaId);
+    if (composerSessionId) {
+      setSessionPersona(composerSessionId, personaId);
     } else {
       setPendingPersona(personaId === DEFAULT_PERSONA_ID ? null : personaId);
     }
@@ -508,15 +510,15 @@ export function ChatInput({ centered = false }: ChatInputProps) {
   // global `default_tone_id` and the chip would reappear. The user's global
   // setting is never touched from here.
   const clearTone = () => {
-    if (activeSessionId) setSessionTone(activeSessionId, DEFAULT_TONE_ID);
+    if (composerSessionId) setSessionTone(composerSessionId, DEFAULT_TONE_ID);
   };
 
   const chooseWorkspace = async () => {
-    if (!activeSessionId) return;
+    if (!composerSessionId) return;
     setError(null);
     setPickingWorkspace(true);
     try {
-      await pickWorkspace(activeSessionId);
+      await pickWorkspace(composerSessionId);
     } catch (e) {
       // Surfaced in the composer's own error line rather than a toast: the
       // user is looking here, having just used the menu right beside it.
@@ -530,10 +532,10 @@ export function ChatInput({ centered = false }: ChatInputProps) {
   };
 
   const openWorkspace = async () => {
-    if (!activeSessionId) return;
+    if (!composerSessionId) return;
     setError(null);
     try {
-      await openSessionWorkspace(activeSessionId);
+      await openSessionWorkspace(composerSessionId);
     } catch (e) {
       logger.error("workspace open failed", e);
       setError(
@@ -543,10 +545,10 @@ export function ChatInput({ centered = false }: ChatInputProps) {
   };
 
   const removeWorkspace = async () => {
-    if (!activeSessionId) return;
+    if (!composerSessionId) return;
     setError(null);
     try {
-      await clearWorkspace(activeSessionId);
+      await clearWorkspace(composerSessionId);
     } catch (e) {
       logger.error("workspace remove failed", e);
       setError(
@@ -846,7 +848,8 @@ export function ChatInput({ centered = false }: ChatInputProps) {
     // will actually observe (the hook-bound selectors above could be a
     // render behind).
     const state = useChatStore.getState();
-    const activeId = state.activeSessionId;
+    // A Space's page sends to a chat it's about to create — nothing is busy.
+    const activeId = useSpaceStore.getState().viewingSpaceId ? null : state.activeSessionId;
     const busyHere =
       !!activeId &&
       (state.streamingSessionId === activeId ||
@@ -907,8 +910,8 @@ export function ChatInput({ centered = false }: ChatInputProps) {
   // has a pending prompt, and the canvas's waiting banner exposes a
   // dedicated Cancel for the queued task.
   const onPrimaryClick = () => {
-    if (streamingThisChat && activeSessionId) {
-      void cancelForSession(activeSessionId);
+    if (streamingThisChat && composerSessionId) {
+      void cancelForSession(composerSessionId);
       return;
     }
     void submit();
@@ -1016,7 +1019,7 @@ export function ChatInput({ centered = false }: ChatInputProps) {
           {/* The chat's folder, named inside the bar right above the text
               it scopes. Clearing it waits for a running reply to end — see
               WorkspaceNotice's `locked`. */}
-          {workspaceRoot && activeSessionId && (
+          {workspaceRoot && composerSessionId && (
             <WorkspaceNotice
               root={workspaceRoot}
               toolsEnabled={workspaceToolsEnabled}
@@ -1075,14 +1078,14 @@ export function ChatInput({ centered = false }: ChatInputProps) {
                 <DropdownMenuItem
                   onSelect={() => void chooseWorkspace()}
                   disabled={
-                    !activeSessionId || pickingWorkspace || (streamingThisChat && !!workspaceRoot)
+                    !composerSessionId || pickingWorkspace || (streamingThisChat && !!workspaceRoot)
                   }
                 >
                   <FolderOpen className="mr-2 h-4 w-4" />
                   <div className="min-w-0">
                     <div>{workspaceRoot ? "Change directory" : "Add directory"}</div>
                     <p className="text-[11px] text-foreground/50">
-                      {!activeSessionId
+                      {!composerSessionId
                         ? "Send a message first to start this chat"
                         : streamingThisChat && workspaceRoot
                           ? "Wait for the reply to finish"
@@ -1286,6 +1289,11 @@ export function ChatInput({ centered = false }: ChatInputProps) {
           sourcesSpace?.default_params_json,
           composerModelCtx,
         )}
+        mode={
+          composerSessionId && activeSession
+            ? chatRetrievalMode(activeSession, sourcesSpace?.retrieval_mode)
+            : (sourcesSpace?.retrieval_mode ?? "auto")
+        }
         onConfirm={attachFromLibrary}
       />
       {ctxMenu && (

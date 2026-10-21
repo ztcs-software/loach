@@ -2318,8 +2318,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     const state = get();
     let sessionId = state.activeSessionId;
-    // If we came from a space view, or have no session, create one
-    if (!sessionId || (viewingSpaceId && state.sessions.find(s => s.id === sessionId)?.space_id !== viewingSpaceId)) {
+    // A send from a Space's page always starts a new chat there — even when
+    // the chat left open belongs to that Space, the page reads as "start a
+    // chat here", and appending to whichever chat was last opened surprised
+    // users. No session at all also means a new one.
+    if (!sessionId || viewingSpaceId) {
       const created = await get().newSession();
       sessionId = created.id;
       // Library sources picked in this composer before the chat existed.

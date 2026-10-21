@@ -6,6 +6,7 @@ import {
   RefreshCw,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { useConfirm } from "@/components/ConfirmDialog";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import {
@@ -37,6 +38,7 @@ import type { ProviderId } from "@/types";
  * compat but the UI surface is removed per product decision.
  */
 export function SnippetDialog() {
+  const { confirm } = useConfirm();
   const target = useSnippetStore((s) => s.dialogTarget);
   const close = useSnippetStore((s) => s.closeDialog);
   const create = useSnippetStore((s) => s.create);
@@ -59,6 +61,35 @@ export function SnippetDialog() {
   const [model, setModel] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // What the fields held when the dialog opened — closing with anything else
+  // asks first.
+  const baseline = editing
+    ? editing
+    : { title: "", prompt: isSeed ? (target as { seedPrompt: string }).seedPrompt : "", provider: null, model: null };
+  const dirty =
+    title !== baseline.title ||
+    prompt !== baseline.prompt ||
+    provider !== baseline.provider ||
+    model !== baseline.model;
+
+  // Escape, the backdrop, ✕ and Cancel all come through here, so none of them
+  // can throw a typed prompt away without asking.
+  const requestClose = async () => {
+    if (
+      dirty &&
+      !(await confirm({
+        title: "Discard unsaved changes?",
+        body: isEditMode ? "Your edits to this snippet haven't been saved." : "This snippet hasn't been saved yet.",
+        confirmLabel: "Discard",
+        cancelLabel: "Keep editing",
+        destructive: true,
+      }))
+    ) {
+      return;
+    }
+    close();
+  };
 
   useEffect(() => {
     if (!target) return;
@@ -109,7 +140,7 @@ export function SnippetDialog() {
   };
 
   return (
-    <Dialog open={!!target} onOpenChange={(o) => !o && close()}>
+    <Dialog open={!!target} onOpenChange={(o) => !o && void requestClose()}>
       <DialogContent className="max-w-lg">
         <DialogHeader>
           <DialogTitle>
@@ -153,7 +184,7 @@ export function SnippetDialog() {
         </div>
 
         <div className="mt-3 flex items-center justify-end gap-2">
-          <Button variant="outline" onClick={close} className="rounded-lg">
+          <Button variant="outline" onClick={() => void requestClose()} className="rounded-lg">
             Cancel
           </Button>
           <Button

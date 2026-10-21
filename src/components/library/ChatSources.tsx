@@ -15,10 +15,10 @@ import {
 } from "@/components/ComposerChip";
 import { formatTokens } from "@/lib/contextUsage";
 import { setSessionRetrievalMode } from "@/lib/tauri";
-import { chatRetrievalMode, estimateChatSources } from "@/lib/sources";
+import { chatRetrievalMode, estimateChatSources, spaceSourceCount } from "@/lib/sources";
 import { cn } from "@/lib/utils";
 import { useChatStore } from "@/stores/chatStore";
-import { expandSources, useLibraryStore } from "@/stores/libraryStore";
+import { useLibraryStore } from "@/stores/libraryStore";
 import { useModelsStore } from "@/stores/modelsStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useToastStore } from "@/stores/toastStore";
@@ -102,9 +102,7 @@ export function useChatSources(sessionId: string | null, spaceId: string | null)
       pending.datasetIds.forEach((id) => push("dataset", id, null));
       pending.itemIds.forEach((id) => push("item", id, null));
     }
-    const fromSpace =
-      (spaceFiles ?? EMPTY_FILES).filter((f) => f.enabled !== false).length +
-      expandSources(spaceSources ?? [], datasets, items).length;
+    const fromSpace = spaceSourceCount(spaceFiles ?? EMPTY_FILES, spaceSources ?? [], datasets, items);
     return { chips, spaceCount: fromSpace };
   }, [items, datasets, sessionSources, spaceSources, spaceFiles, pending, sessionId]);
 }
