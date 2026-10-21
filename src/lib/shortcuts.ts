@@ -65,7 +65,7 @@ export const SHORTCUTS: ShortcutSpec[] = [
   // Navigation
   {
     action: "global-search",
-    label: "Search chats, spaces, snippets",
+    label: "Search chats, Spaces, snippets",
     group: "Navigation",
     mod: true,
     keys: ["k"],
@@ -142,6 +142,34 @@ export const SHORTCUTS: ShortcutSpec[] = [
  *  Cmd from a Mac keyboard. */
 export function primaryMod(e: KeyboardEvent): boolean {
   return IS_MAC ? e.metaKey : e.ctrlKey || e.metaKey;
+}
+
+/**
+ * The one Enter rule for create/edit dialogs: Enter in a one-line field, or
+ * Ctrl/⌘+Enter in a multi-line one, submits once the form is `ready` — and
+ * before that moves on to `next`, the field still to fill. Each dialog used
+ * to pick its own (Enter saved a Space but did nothing in a snippet's title).
+ * Returns whether it handled the key.
+ */
+export function dialogEnter(
+  e: {
+    key: string;
+    shiftKey: boolean;
+    currentTarget: HTMLElement;
+    nativeEvent: KeyboardEvent;
+    preventDefault: () => void;
+  },
+  submit: () => void,
+  opts: { ready: boolean; next?: HTMLElement | null },
+): boolean {
+  if (e.key !== "Enter" || e.shiftKey) return false;
+  // The Enter that confirms an IME candidate isn't the form's.
+  if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return false;
+  if (e.currentTarget.tagName === "TEXTAREA" && !primaryMod(e.nativeEvent)) return false;
+  e.preventDefault();
+  if (opts.ready) submit();
+  else opts.next?.focus();
+  return true;
 }
 
 /** Does this keyboard event match the spec? `mod` is `primaryMod`. Strict on

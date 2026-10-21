@@ -3,7 +3,6 @@ import {
   Layers,
   MessageSquareText,
   MoreHorizontal,
-  Pencil,
   Plus,
   RefreshCw,
   Search,
@@ -17,6 +16,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useConfirm } from "@/components/ConfirmDialog";
@@ -73,9 +73,9 @@ export function SpacesLibrary() {
 
   const handleDelete = async (space: Space) => {
     const ok = await confirm({
-      title: `Delete space “${space.name}”?`,
+      title: `Delete Space “${space.name}”?`,
       body: "Its instructions, memories and uploaded files are deleted for good. Library sources stay in your Library, and its chats are kept outside any Space.",
-      confirmLabel: "Delete space",
+      confirmLabel: "Delete Space",
       destructive: true,
     });
     if (ok) void removeSpace(space.id);
@@ -112,7 +112,7 @@ export function SpacesLibrary() {
               className="gap-1.5 rounded-xl"
             >
               <Plus className="h-4 w-4" />
-              New space
+              New Space
             </Button>
           </header>
 
@@ -123,24 +123,24 @@ export function SpacesLibrary() {
           ) : spaces.length === 0 ? (
             <EmptyLibraryState
               icon={<Layers className="h-7 w-7 text-foreground/45" />}
-              title="No spaces yet"
-              description="Create a space for a project, a topic, or a long-running thread of work. Drop in reference sources and Loach will pull from them in every chat inside the space."
+              title="No Spaces yet"
+              description="Create a Space for a project, a topic, or a long-running thread of work. Drop in reference sources and Loach will pull from them in every chat inside the Space."
               cta={
                 <Button
                   onClick={() => setFormOpen(true)}
                   className="gap-1.5 rounded-xl"
                 >
                   <Plus className="h-4 w-4" />
-                  Create your first space
+                  Create your first Space
                 </Button>
               }
             />
           ) : (
             <>
-              <SearchField value={query} onChange={setQuery} label="Search spaces" />
+              <SearchField value={query} onChange={setQuery} label="Search Spaces" />
               {sorted.length === 0 ? (
                 <p className="mt-10 text-center text-sm text-foreground/45">
-                  No spaces match your search.
+                  No Spaces match your search.
                 </p>
               ) : (
                 <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
@@ -177,7 +177,7 @@ function SpaceCard({
 }: {
   space: Space;
   chatCount: number;
-  /** Tile body click + kebab "Open / edit" both use this — drops the user
+  /** Tile body click + kebab "Open" both use this — drops the user
    *  into SpaceView for the space's instructions / files / chat list. */
   onOpen: () => void;
   /** Footer button — creates a fresh chat scoped to this space and lands
@@ -200,7 +200,7 @@ function SpaceCard({
     <article
       role="button"
       tabIndex={0}
-      aria-label={`Open space: ${space.name}`}
+      aria-label={`Open Space: ${space.name}`}
       onClick={onOpen}
       onKeyDown={(e) => {
         if (e.key === "Enter" || e.key === " ") {
@@ -235,8 +235,12 @@ function SpaceCard({
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" onClick={(e) => e.stopPropagation()}>
             <DropdownMenuItem onSelect={onOpen}>
-              <Pencil className="h-4 w-4" /> Open / edit
+              <Layers className="h-4 w-4" /> Open
             </DropdownMenuItem>
+            <DropdownMenuItem onSelect={onNewChat}>
+              <SquarePen className="h-4 w-4" /> New chat
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
             <DropdownMenuItem
               onSelect={onDelete}
               className="text-destructive focus:text-destructive"
@@ -264,7 +268,7 @@ function SpaceCard({
         <div className="flex min-w-0 items-center gap-2 text-[10.5px] text-foreground/45">
           <span
             className="inline-flex items-center gap-1 truncate"
-            title={`${chatCount} live chat${chatCount === 1 ? "" : "s"} in this space`}
+            title={`${chatCount} live chat${chatCount === 1 ? "" : "s"} in this Space`}
           >
             <MessageSquareText className="h-3 w-3 shrink-0" />
             {chatCount}

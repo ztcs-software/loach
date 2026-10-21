@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { deleteChatConfirm } from "@/lib/confirmations";
 import { logger } from "@/lib/logger";
 import {
   Archive,
@@ -228,12 +229,7 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
 
   const handleDelete = async () => {
     if (!session) return;
-    const ok = await confirm({
-      title: "Delete this chat?",
-      body: `“${session.title || "Untitled"}” will be removed permanently — all messages and metrics will be gone.`,
-      confirmLabel: "Delete chat",
-      destructive: true,
-    });
+    const ok = await confirm(deleteChatConfirm(session.title));
     if (ok) void removeSession(session.id);
   };
 
@@ -421,7 +417,7 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
                 <button
                   type="button"
                   onClick={navigateToSpace}
-                  title={`Open space "${spaceName}"`}
+                  title={`Open Space "${spaceName}"`}
                   className="flex min-w-0 max-w-[180px] shrink items-center gap-1 rounded-md px-1.5 py-0.5 text-foreground/60 hover:bg-foreground/10 hover:text-foreground"
                 >
                   <Layers className="h-3.5 w-3.5 shrink-0" />

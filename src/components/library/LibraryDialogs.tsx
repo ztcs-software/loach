@@ -22,11 +22,12 @@ import {
   DropdownMenuLabel,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Field } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Markdown } from "@/components/Markdown";
 import { useConfirm } from "@/components/ConfirmDialog";
-import { primaryMod } from "@/lib/shortcuts";
+import { dialogEnter } from "@/lib/shortcuts";
 import { libraryUsage, openExternal } from "@/lib/tauri";
 import { cn, formatBytes, relativeTime } from "@/lib/utils";
 import { safeImageMime } from "@/lib/files";
@@ -135,6 +136,7 @@ export function TextEditorDialog() {
   // State lags a render behind, so two quick Ctrl+Enters both saw `saving`
   // false and created the text twice. A ref holds the save synchronously.
   const savingRef = useRef(false);
+  const bodyRef = useRef<HTMLTextAreaElement>(null);
   const [error, setError] = useState<string | null>(null);
   // What the fields held once the editor opened (and its text loaded):
   // closing with anything else asks first. Null for a draft kept across an
@@ -221,6 +223,7 @@ export function TextEditorDialog() {
     close();
   };
 
+  const canSave = !saving && !loading && !!title.trim() && !!body.trim();
   const tokens = Math.ceil(body.length / 4);
   return (
     <Dialog open={!!target} onOpenChange={(o) => !o && void requestClose()}>
@@ -232,31 +235,32 @@ export function TextEditorDialog() {
           </DialogDescription>
         </DialogHeader>
         <div className="mt-1 space-y-3">
-          <Input
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-            placeholder="Title — e.g. Brand voice guide"
-            maxLength={120}
-            autoFocus
-          />
-          <div className="relative">
-            <Textarea
-              value={body}
-              onChange={(e) => setBody(e.target.value)}
-              disabled={loading}
-              placeholder="Write or paste the text…"
-              className="min-h-[340px] rounded-2xl border-foreground/10 bg-foreground/[0.05] text-[13.5px] leading-relaxed"
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && primaryMod(e.nativeEvent) && title.trim() && body.trim()) {
-                  e.preventDefault();
-                  void save();
-                }
-              }}
+          <Field label="Title">
+            <Input
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              onKeyDown={(e) => dialogEnter(e, () => void save(), { ready: canSave, next: bodyRef.current })}
+              placeholder="e.g. Brand voice guide"
+              maxLength={120}
+              autoFocus
             />
-            {loading && (
-              <Loader2 className="absolute right-3 top-3 h-4 w-4 animate-spin text-foreground/45" />
-            )}
-          </div>
+          </Field>
+          <Field label="Text">
+            <span className="relative block">
+              <Textarea
+                ref={bodyRef}
+                value={body}
+                onChange={(e) => setBody(e.target.value)}
+                disabled={loading}
+                placeholder="Write or paste the text…"
+                className="min-h-[340px] rounded-2xl border-foreground/10 bg-foreground/[0.05] text-[13.5px] leading-relaxed"
+                onKeyDown={(e) => dialogEnter(e, () => void save(), { ready: canSave })}
+              />
+              {loading && (
+                <Loader2 className="absolute right-3 top-3 h-4 w-4 animate-spin text-foreground/45" />
+              )}
+            </span>
+          </Field>
           {error && <p className="text-xs text-destructive">{error}</p>}
         </div>
         <div className="mt-1 flex items-center justify-between gap-2">
@@ -267,12 +271,8 @@ export function TextEditorDialog() {
             <Button variant="outline" onClick={() => void requestClose()} className="rounded-lg">
               Cancel
             </Button>
-            <Button
-              onClick={() => void save()}
-              disabled={saving || loading || !title.trim() || !body.trim()}
-              className="rounded-lg"
-            >
-              {saving ? "Saving…" : "Save"}
+            <Button onClick={() => void save()} disabled={!canSave} className="rounded-lg">
+              {target === "new" ? (saving ? "Creating…" : "Create") : saving ? "Saving…" : "Save"}
             </Button>
           </div>
         </div>
@@ -358,14 +358,16 @@ export function AddLinkDialog({
             void submit();
           }}
         >
-          <Input
-            value={url}
-            onChange={(e) => setUrl(e.target.value)}
-            placeholder="https://example.com/article"
-            autoFocus
-            inputMode="url"
-            spellCheck={false}
-          />
+          <Field label="Web address">
+            <Input
+              value={url}
+              onChange={(e) => setUrl(e.target.value)}
+              placeholder="https://example.com/article"
+              autoFocus
+              inputMode="url"
+              spellCheck={false}
+            />
+          </Field>
           {existing && (
             <p className="text-xs text-foreground/55">
               Already in your Library as “{existing.title}” — adding it again refreshes that copy.
@@ -464,26 +466,32 @@ export function DatasetDialog({
             if (name.trim()) void save();
           }}
         >
-          <Input
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="Name — e.g. Thesis research"
-            maxLength={80}
-            autoFocus
-          />
-          <Textarea
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-            placeholder="What's in it (optional)"
-            className="min-h-[80px] rounded-2xl border-foreground/10 bg-foreground/[0.05]"
-          />
+          <Field label="Name">
+            <Input
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              onKeyDown={(e) => dialogEnter(e, () => void save(), { ready: !saving && !!name.trim() })}
+              placeholder="e.g. Thesis research"
+              maxLength={80}
+              autoFocus
+            />
+          </Field>
+          <Field label="Description" optional>
+            <Textarea
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              onKeyDown={(e) => dialogEnter(e, () => void save(), { ready: !saving && !!name.trim() })}
+              placeholder="What's in it"
+              className="min-h-[80px] rounded-2xl border-foreground/10 bg-foreground/[0.05]"
+            />
+          </Field>
           {error && <p className="text-xs text-destructive">{error}</p>}
           <div className="flex items-center justify-end gap-2">
             <Button type="button" variant="outline" onClick={() => onOpenChange(false)} className="rounded-lg">
               Cancel
             </Button>
             <Button type="submit" disabled={saving || !name.trim()} className="rounded-lg">
-              {saving ? "Saving…" : dataset ? "Save" : "Create dataset"}
+              {dataset ? (saving ? "Saving…" : "Save") : saving ? "Creating…" : "Create"}
             </Button>
           </div>
         </form>

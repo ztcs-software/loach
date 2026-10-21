@@ -1,5 +1,6 @@
 import {
   AlertTriangle,
+  Check,
   Database,
   File,
   FileCode2,
@@ -9,7 +10,7 @@ import {
   Globe,
   Loader2,
   NotebookPen,
-  Search,
+  SlidersHorizontal,
   Sparkles,
 } from "lucide-react";
 import { formatTokens } from "@/lib/contextUsage";
@@ -180,12 +181,16 @@ export function IndexBadge({ item }: { item: LibraryItemMeta }) {
   return null;
 }
 
-/** Where the retrieval index stands, as a pill that opens Settings → Library. */
+/** Where the retrieval index stands, as a pill that opens Settings → Library,
+ *  worded like that page's status. It used to read "Keyword search" beside a
+ *  magnifier, right next to the page's search box, so it looked like a second
+ *  search control: the keyword state now says "only" and wears a settings
+ *  icon. */
 export function IndexStatusPill() {
   const status = useLibraryStore((s) => s.indexStatus);
   const openSettingsTab = useUIStore((s) => s.openSettingsTab);
-  let icon = <Search className="h-3.5 w-3.5" />;
-  let label = "Keyword search";
+  let icon = <SlidersHorizontal className="h-3.5 w-3.5" />;
+  let label = "Keyword search only";
   let title =
     "Large sources are searched by keyword. Set an embedding model in Settings → Library to also search by meaning.";
   let tone = "text-foreground/55";
@@ -202,7 +207,7 @@ export function IndexStatusPill() {
       title = `Embedding with ${model}. Sources stay searchable by keyword meanwhile.`;
     } else {
       icon = <Sparkles className="h-3.5 w-3.5" />;
-      label = "Smart search";
+      label = "Search by meaning";
       title = `Search by meaning and keyword, embedded with ${model}.`;
       tone = "text-foreground/65";
     }
@@ -236,17 +241,33 @@ export function SelectBox({
   onToggle: () => void;
   label: string;
 }) {
+  // Drawn like the Library picker's check box rather than the platform's own,
+  // so picking items looks the same on the page and in the picker. The real
+  // checkbox stays underneath for keyboard and screen-reader use.
   return (
-    <input
-      type="checkbox"
-      checked={checked}
-      aria-label={label}
+    <label
       onClick={(e) => e.stopPropagation()}
-      onChange={onToggle}
       className={cn(
-        "h-4 w-4 shrink-0 cursor-pointer accent-[rgb(var(--primary-glow))] transition-opacity",
-        checked || visible ? "opacity-100" : "opacity-0 group-hover:opacity-100 focus-visible:opacity-100",
+        "relative inline-flex shrink-0 cursor-pointer transition-opacity",
+        checked || visible ? "opacity-100" : "opacity-0 focus-within:opacity-100 group-hover:opacity-100",
       )}
-    />
+    >
+      <input
+        type="checkbox"
+        checked={checked}
+        aria-label={label}
+        onChange={onToggle}
+        className="peer sr-only"
+      />
+      <span
+        aria-hidden
+        className={cn(
+          "flex h-[18px] w-[18px] items-center justify-center rounded-md border transition-colors peer-focus-visible:ring-2 peer-focus-visible:ring-ring/40",
+          checked ? "border-primary bg-primary text-primary-foreground" : "border-foreground/25",
+        )}
+      >
+        {checked && <Check className="h-3 w-3" strokeWidth={3} />}
+      </span>
+    </label>
   );
 }

@@ -63,7 +63,7 @@ export function GlobalMemoriesDialog({
             enabled={enabled}
             emptyText={
               enabled
-                ? "No global memories yet — chat outside a space and the extractor will start saving durable facts here."
+                ? "No global memories yet — chat outside a Space and the extractor will start saving durable facts here."
                 : "Global memory is off. Turn it on to start collecting facts."
             }
             onAdd={(content) =>

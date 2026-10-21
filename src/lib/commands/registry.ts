@@ -158,7 +158,7 @@ export const COMMANDS: readonly CommandSpec[] = [
   // ----- listings -----
   {
     name: "list",
-    description: "List models, personas, spaces, snippets, MCP servers…",
+    description: "List models, personas, Spaces, snippets, MCP servers…",
     subcommands: [
       "models",
       "personas",
@@ -189,21 +189,21 @@ export const COMMANDS: readonly CommandSpec[] = [
   // ----- memory & spaces -----
   {
     name: "remember",
-    description: "Save a fact to the active space's memory, or to global memory outside a space",
+    description: "Save a fact to the active Space's memory, or to global memory outside a Space",
     usage: "<fact>",
-    group: "Memory & spaces",
+    group: "Memory & Spaces",
   },
   {
     name: "forget",
     description: "Remove a memory by id or content match",
     usage: "<id|query>",
-    group: "Memory & spaces",
+    group: "Memory & Spaces",
   },
   {
     name: "space",
-    description: "Switch the active space",
+    description: "Switch the active Space",
     usage: "<name>",
-    group: "Memory & spaces",
+    group: "Memory & Spaces",
   },
 
   // ----- tools & web -----

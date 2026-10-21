@@ -35,3 +35,41 @@ describe("primary modifier", () => {
     }
   });
 });
+
+describe("dialogEnter", () => {
+  const key = (tagName: "INPUT" | "TEXTAREA", mods: Partial<KeyboardEvent> = {}) => {
+    const e = {
+      key: "Enter",
+      shiftKey: false,
+      currentTarget: { tagName } as HTMLElement,
+      nativeEvent: { isComposing: false, keyCode: 13, ctrlKey: false, metaKey: false, ...mods } as KeyboardEvent,
+      preventDefault: vi.fn(),
+    };
+    return e;
+  };
+
+  it("submits from a one-line field, and from a multi-line one only with Ctrl", async () => {
+    const { dialogEnter } = await loadOn("Win32");
+    const submit = vi.fn();
+    expect(dialogEnter(key("INPUT"), submit, { ready: true })).toBe(true);
+    expect(dialogEnter(key("TEXTAREA"), submit, { ready: true })).toBe(false);
+    expect(dialogEnter(key("TEXTAREA", { ctrlKey: true }), submit, { ready: true })).toBe(true);
+    expect(submit).toHaveBeenCalledTimes(2);
+  });
+
+  it("moves on to the field still to fill instead of submitting an incomplete form", async () => {
+    const { dialogEnter } = await loadOn("Win32");
+    const submit = vi.fn();
+    const next = { focus: vi.fn() } as unknown as HTMLElement;
+    expect(dialogEnter(key("INPUT"), submit, { ready: false, next })).toBe(true);
+    expect(submit).not.toHaveBeenCalled();
+    expect(next.focus).toHaveBeenCalled();
+  });
+
+  it("leaves the Enter that confirms an IME candidate alone", async () => {
+    const { dialogEnter } = await loadOn("Win32");
+    const submit = vi.fn();
+    expect(dialogEnter(key("INPUT", { isComposing: true }), submit, { ready: true })).toBe(false);
+    expect(submit).not.toHaveBeenCalled();
+  });
+});

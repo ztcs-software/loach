@@ -450,7 +450,7 @@ function EraseDialog({
     try {
       if (mode === "user-data") {
         await wipeUserData(auth);
-        onDone("All chats, spaces, snippets, and MCP servers deleted. Reloading…");
+        onDone("All chats, Spaces, snippets, and MCP servers deleted. Reloading…");
       } else {
         await factoryReset(auth);
         onDone("Loach has been reset to factory defaults. Reloading…");
@@ -750,7 +750,7 @@ function ImportConfirm({
             Import data
           </DialogTitle>
           <DialogDescription className="mt-1.5 text-[13px] text-foreground/60">
-            Importing will replace ALL chats, spaces, snippets, MCP servers,
+            Importing will replace ALL chats, Spaces, snippets, MCP servers,
             and settings with the contents of the file you select next. Your
             stored OpenAI API key is not touched.
           </DialogDescription>

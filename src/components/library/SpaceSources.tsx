@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   BookmarkPlus,
+  Eye,
   FileText,
   Image as ImageIcon,
   Library,
@@ -9,8 +10,17 @@ import {
   Upload,
   X,
 } from "lucide-react";
+import { FilePreview } from "@/components/FilePreview";
+import { ImagePreview } from "@/components/ImagePreview";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -52,6 +62,7 @@ export function SpaceSourcesTab({
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [previewing, setPreviewing] = useState<SpaceFile | null>(null);
 
   const items = useLibraryStore((s) => s.items);
   const datasets = useLibraryStore((s) => s.datasets);
@@ -254,15 +265,16 @@ export function SpaceSourcesTab({
                 tokens={t}
                 onOpen={() => (ds ? openDataset(ds.id) : openPreview(it!.id))}
                 actions={
-                  <button
-                    type="button"
-                    onClick={() => void removeSource("space", space.id, l.id)}
-                    aria-label={`Unlink ${ds ? ds.name : it!.title}`}
-                    title="Remove from this Space (stays in your Library)"
-                    className="rounded-md p-1 text-foreground/40 opacity-0 transition-all hover:bg-foreground/10 hover:text-foreground group-hover:opacity-100 focus-visible:opacity-100"
-                  >
-                    <X className="h-3.5 w-3.5" />
-                  </button>
+                  <RowMenu label={ds ? ds.name : it!.title}>
+                    <DropdownMenuItem onSelect={() => (ds ? openDataset(ds.id) : openPreview(it!.id))}>
+                      {ds ? <Library className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                      {ds ? "Open dataset" : "Preview"}
+                    </DropdownMenuItem>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem onSelect={() => void removeSource("space", space.id, l.id)}>
+                      <X className="h-4 w-4" /> Remove from Space
+                    </DropdownMenuItem>
+                  </RowMenu>
                 }
               />
             );
@@ -282,47 +294,38 @@ export function SpaceSourcesTab({
               tokens={
                 f.kind === "text" ? Math.ceil(f.data.length / 4) : f.kind === "image" ? "image" : "unreadable"
               }
+              onOpen={() => setPreviewing(f)}
               actions={
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <button
-                      type="button"
-                      aria-label={`Actions for ${f.name}`}
-                      className="rounded-md p-1 text-foreground/40 opacity-0 transition-all hover:bg-foreground/10 hover:text-foreground group-hover:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100"
-                    >
-                      <MoreHorizontal className="h-3.5 w-3.5" />
-                    </button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent align="end">
-                    {/* An unreadable upload is base64 — as a Library text it
-                        would be indexed and sent to models as noise. */}
-                    {f.kind !== "file" && (
-                      <>
-                        <DropdownMenuItem
-                          onSelect={() =>
-                            void saveToLibrary({
-                              kind: "file",
-                              title: f.name,
-                              mime: f.mime,
-                              media: f.kind === "image" ? "image" : "text",
-                              content: f.data,
-                              size: f.size,
-                            })
-                          }
-                        >
-                          <BookmarkPlus className="h-4 w-4" /> Save to Library
-                        </DropdownMenuItem>
-                        <DropdownMenuSeparator />
-                      </>
-                    )}
+                <RowMenu label={f.name}>
+                  <DropdownMenuItem onSelect={() => setPreviewing(f)}>
+                    <Eye className="h-4 w-4" /> Preview
+                  </DropdownMenuItem>
+                  {/* An unreadable upload is base64 — as a Library text it
+                      would be indexed and sent to models as noise. */}
+                  {f.kind !== "file" && (
                     <DropdownMenuItem
-                      onSelect={() => onRemoveFile(f.id)}
-                      className="text-destructive focus:text-destructive"
+                      onSelect={() =>
+                        void saveToLibrary({
+                          kind: "file",
+                          title: f.name,
+                          mime: f.mime,
+                          media: f.kind === "image" ? "image" : "text",
+                          content: f.data,
+                          size: f.size,
+                        })
+                      }
                     >
-                      <Trash2 className="h-4 w-4" /> Delete
+                      <BookmarkPlus className="h-4 w-4" /> Save to Library
                     </DropdownMenuItem>
-                  </DropdownMenuContent>
-                </DropdownMenu>
+                  )}
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem
+                    onSelect={() => onRemoveFile(f.id)}
+                    className="text-destructive focus:text-destructive"
+                  >
+                    <Trash2 className="h-4 w-4" /> Delete
+                  </DropdownMenuItem>
+                </RowMenu>
               }
             />
           ))}
@@ -351,7 +354,63 @@ export function SpaceSourcesTab({
         mode={space.retrieval_mode}
         onConfirm={(sel) => addSources("space", space.id, sel)}
       />
+      {previewing && <UploadPreview file={previewing} onClose={() => setPreviewing(null)} />}
     </div>
+  );
+}
+
+/** The ⋯ menu every source row carries — a Library link and an upload alike,
+ *  where links used to get a bare × and uploads a menu. */
+function RowMenu({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          aria-label={`Actions for ${label}`}
+          className="rounded-md p-1 text-foreground/40 opacity-0 transition-all hover:bg-foreground/10 hover:text-foreground group-hover:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100"
+        >
+          <MoreHorizontal className="h-3.5 w-3.5" />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end">{children}</DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+/** A Space upload, opened the way a Library item opens: images and
+ *  unreadable files in the chat's own previews, text in a dialog laid out
+ *  like the Library's item preview. Uploads used to have no preview at all. */
+function UploadPreview({ file, onClose }: { file: SpaceFile; onClose: () => void }) {
+  const onOpenChange = (open: boolean) => !open && onClose();
+  if (file.kind === "image") {
+    return <ImagePreview open onOpenChange={onOpenChange} data={file.data} mime={file.mime} name={file.name} />;
+  }
+  if (file.kind === "file") {
+    return (
+      <FilePreview
+        open
+        onOpenChange={onOpenChange}
+        attachment={{ kind: "file", name: file.name, mime: file.mime, data: file.data }}
+      />
+    );
+  }
+  return (
+    <Dialog open onOpenChange={onOpenChange}>
+      <DialogContent className="flex max-h-[86vh] max-w-3xl flex-col gap-0 p-0">
+        <DialogHeader className="border-b border-foreground/[0.07] px-6 pb-4 pt-6 pr-14">
+          <DialogTitle className="text-base leading-snug [overflow-wrap:anywhere]">{file.name}</DialogTitle>
+          <DialogDescription className="mt-1 text-xs">
+            Uploaded to this Space · {formatBytes(file.size)} · ~{formatTokens(Math.ceil(file.data.length / 4))} tokens
+          </DialogDescription>
+        </DialogHeader>
+        <div className="min-h-[200px] flex-1 overflow-y-auto px-6 py-5">
+          <pre className="whitespace-pre-wrap break-words font-sans text-[13px] leading-relaxed text-foreground/80">
+            {file.data}
+          </pre>
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 

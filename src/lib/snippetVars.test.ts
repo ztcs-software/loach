@@ -8,7 +8,7 @@
 // and self-reference still terminate.
 
 import { describe, it, expect } from "vitest";
-import { applyFillValues, expandKnownVars } from "./snippetVars";
+import { applyFillValues, describePlaceholders, expandKnownVars } from "./snippetVars";
 
 const NOW = new Date("2026-06-10T12:00:00Z");
 // Minimal SnippetVariable shape — only key/value are read here.
@@ -131,5 +131,23 @@ describe("applyFillValues", () => {
 
   it("substitutes empty-string fills rather than skipping them", () => {
     expect(applyFillValues("a{{GAP}}b", { GAP: "" })).toBe("ab");
+  });
+});
+
+describe("describePlaceholders", () => {
+  it("classifies each placeholder the way a run will treat it, once, in order", () => {
+    const globals = [{ id: "1", key: "COMPANY", value: "Acme", description: null, created_at: 0, updated_at: 0 }];
+    expect(
+      describePlaceholders(
+        "Hi {{USER_NAME}} at {{ COMPANY }} — {{LANGUAGE}}, {{topic}}, {{USER_NAME}} again",
+        globals,
+      ),
+    ).toEqual([
+      { name: "USER_NAME", kind: "builtin" },
+      { name: "COMPANY", kind: "saved" },
+      { name: "LANGUAGE", kind: "ask" },
+      // Regression: lower case was silently sent as typed.
+      { name: "topic", kind: "invalid" },
+    ]);
   });
 });

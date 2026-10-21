@@ -6,6 +6,7 @@ import type { Session } from "@/types";
 import { Archive, ArchiveRestore, Layers, Loader2, MoreHorizontal, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { deleteChatConfirm } from "@/lib/confirmations";
 import { cn } from "@/lib/utils";
 import { useChatStore } from "@/stores/chatStore";
 import { useConfirm } from "@/components/ConfirmDialog";
@@ -111,12 +112,7 @@ export function ArchivePanel({ onOpenChat }: { onOpenChat: () => void }) {
             onUnarchive={() => void archive(s.id, false)}
             onDelete={() =>
               void (async () => {
-                const ok = await confirm({
-                  title: "Delete this chat?",
-                  body: `“${s.title || "Untitled"}” and all its messages will be permanently deleted. This cannot be undone.`,
-                  confirmLabel: "Delete",
-                  destructive: true,
-                });
+                const ok = await confirm(deleteChatConfirm(s.title));
                 if (ok) await remove(s.id);
               })()
             }

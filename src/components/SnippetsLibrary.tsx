@@ -21,6 +21,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useConfirm } from "@/components/ConfirmDialog";
+import { DEFAULT_MODEL_LABEL } from "@/components/DefaultModelPicker";
 import { SnippetVariablesPanel } from "@/components/SnippetVariablesPanel";
 import { useChatStore } from "@/stores/chatStore";
 import { useSnippetStore } from "@/stores/snippetStore";
@@ -273,7 +274,7 @@ function SnippetCard({
               <span className="truncate">{snippet.model}</span>
             </span>
           ) : (
-            <span className="italic text-foreground/40">Default model</span>
+            <span className="italic text-foreground/40">{DEFAULT_MODEL_LABEL}</span>
           )}
           <span aria-hidden className="text-foreground/25">
             ·

@@ -33,6 +33,7 @@ import { ChatSpaceSubmenu } from "@/components/ChatSpaceMenu";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useConfirm } from "@/components/ConfirmDialog";
+import { deleteChatConfirm } from "@/lib/confirmations";
 import { findChatLabel } from "@/lib/labels";
 import { useChatStore } from "@/stores/chatStore";
 import { useLibraryStore } from "@/stores/libraryStore";
@@ -1116,12 +1117,7 @@ const SessionRow = memo(function SessionRowImpl({
             <DropdownMenuItem
               onSelect={() =>
                 void (async () => {
-                  const ok = await confirm({
-                    title: "Delete this chat?",
-                    body: `“${session.title || "Untitled"}” and all its messages will be permanently deleted. This cannot be undone.`,
-                    confirmLabel: "Delete",
-                    destructive: true,
-                  });
+                  const ok = await confirm(deleteChatConfirm(session.title));
                   if (ok) await remove(session.id);
                 })()
               }

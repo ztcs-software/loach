@@ -2,17 +2,13 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   Archive,
   Brain,
-  ChevronDown,
   ChevronRight,
-  CircleAlert,
-  CircleCheck,
-  Folder,
+  Layers,
   MessageSquare,
   MoreHorizontal,
   Pencil,
   Pin,
   PinOff,
-  RefreshCw,
   Trash2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -27,10 +23,10 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Field } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Switch } from "@/components/ui/switch";
@@ -40,17 +36,18 @@ import { ChatInput } from "@/components/ChatInput";
 import { ChatLabelDot, ChatLabelSubmenu } from "@/components/ChatLabelMenu";
 import { ChatSpaceSubmenu } from "@/components/ChatSpaceMenu";
 import { useConfirm } from "@/components/ConfirmDialog";
+import { DefaultModelPicker, DEFAULT_MODEL_LABEL } from "@/components/DefaultModelPicker";
 import { MemoryList } from "@/components/MemoryList";
 import { SpaceSourcesTab } from "@/components/library/SpaceSources";
 import { useChatStore } from "@/stores/chatStore";
-import { useSettingsStore } from "@/stores/settingsStore";
 import { useSpaceStore, type SpaceTab } from "@/stores/spaceStore";
 import { useLibraryStore } from "@/stores/libraryStore";
 import { useToastStore } from "@/stores/toastStore";
 import { useUIStore } from "@/stores/uiStore";
+import { deleteChatConfirm } from "@/lib/confirmations";
 import { fileToAttachment } from "@/lib/files";
+import { dialogEnter } from "@/lib/shortcuts";
 import { spaceSourceCount } from "@/lib/sources";
-import { useProviderModels } from "@/lib/useProviderModels";
 import { cn, relativeDay } from "@/lib/utils";
 import {
   type ChatLabel,
@@ -182,7 +179,7 @@ export function SpaceView() {
     } catch (e) {
       useToastStore.getState().push({
         kind: "error",
-        title: "Couldn't save space",
+        title: "Couldn't save Space",
         body: e instanceof Error ? e.message : String(e),
       });
     }
@@ -190,9 +187,9 @@ export function SpaceView() {
 
   const handleDeleteSpace = async () => {
     const ok = await confirm({
-      title: `Delete space “${space.name}”?`,
+      title: `Delete Space “${space.name}”?`,
       body: "Its instructions, memories and uploaded files are deleted for good. Library sources stay in your Library, and its chats are kept outside any Space.",
-      confirmLabel: "Delete space",
+      confirmLabel: "Delete Space",
       destructive: true,
     });
     if (ok) {
@@ -219,10 +216,8 @@ export function SpaceView() {
   // files, no instructions). Chat count and model are always shown so the
   // user can read the space's posture even when most knobs are at default.
   const hasInstructions = space.instructions.trim().length > 0;
-  const modelLabel =
-    space.default_model && space.default_provider
-      ? trimModelLabel(space.default_model)
-      : "Default model";
+  // The whole model id, as a snippet card shows a pinned model.
+  const pinnedModel = space.default_model && space.default_provider ? space.default_model : null;
 
   return (
     <main className="flex min-w-0 flex-1 flex-col">
@@ -246,7 +241,7 @@ export function SpaceView() {
 
           {/* Title row */}
           <div className="flex items-center gap-3">
-            <Folder className="h-7 w-7 shrink-0 text-foreground/65" strokeWidth={1.75} />
+            <Layers className="h-7 w-7 shrink-0 text-foreground/65" strokeWidth={1.75} />
             <h1 className="flex-1 truncate text-3xl font-semibold tracking-tight text-foreground">
               {space.name}
             </h1>
@@ -273,7 +268,7 @@ export function SpaceView() {
                   className="text-destructive focus:text-destructive"
                 >
                   <Trash2 className="mr-2 h-4 w-4" />
-                  Delete space
+                  Delete Space
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
@@ -309,7 +304,18 @@ export function SpaceView() {
                   {memories.length === 1 ? "memory" : "memories"}
                 </MetaChip>
               )}
-              <MetaChip>{modelLabel}</MetaChip>
+              <MetaChip>
+                {pinnedModel ? (
+                  <span
+                    className="block max-w-[24ch] truncate"
+                    title={`${space.default_provider} · ${pinnedModel}`}
+                  >
+                    {pinnedModel}
+                  </span>
+                ) : (
+                  DEFAULT_MODEL_LABEL
+                )}
+              </MetaChip>
             </div>
           </div>
           </div>
@@ -539,36 +545,36 @@ function EditSpaceDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-md">
+      <DialogContent className="max-w-lg">
         <DialogHeader>
-          <DialogTitle>Edit Space details</DialogTitle>
+          <DialogTitle>Edit Space</DialogTitle>
           <DialogDescription>
-            Update the name and description for this space.
+            Update the name and description for this Space.
           </DialogDescription>
         </DialogHeader>
 
         <div className="mt-2 space-y-3">
-          <Input
-            id="edit-space-name"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                void handleSave();
-              }
-            }}
-            placeholder="Name your space"
-            maxLength={60}
-            autoFocus
-          />
-          <Textarea
-            id="edit-space-desc"
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-            placeholder="Describe your project, goals, subject…"
-            className="min-h-[88px] rounded-2xl border-foreground/10 bg-foreground/[0.05]"
-          />
+          <Field label="Name">
+            <Input
+              id="edit-space-name"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              onKeyDown={(e) => dialogEnter(e, () => void handleSave(), { ready: !saving && !!name.trim() })}
+              placeholder="e.g. Website redesign"
+              maxLength={60}
+              autoFocus
+            />
+          </Field>
+          <Field label="Description" optional>
+            <Textarea
+              id="edit-space-desc"
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              onKeyDown={(e) => dialogEnter(e, () => void handleSave(), { ready: !saving && !!name.trim() })}
+              placeholder="Describe your project, goals, subject…"
+              className="min-h-[88px] rounded-2xl border-foreground/10 bg-foreground/[0.05]"
+            />
+          </Field>
           {error && <p className="text-xs text-destructive">{error}</p>}
         </div>
 
@@ -626,7 +632,7 @@ function ChatsTab({
       <div className="rounded-2xl border border-dashed border-foreground/10 px-6 py-10 text-center">
         <MessageSquare className="mx-auto mb-3 h-6 w-6 text-foreground/35" />
         <p className="text-sm text-foreground/55">
-          No chats yet — type above to start the first one in this space.
+          No chats yet — type above to start the first one in this Space.
         </p>
       </div>
     );
@@ -643,7 +649,7 @@ function ChatsTab({
   const groups: { label: string; rows: Session[] }[] = [
     { label: "Today", rows: buckets.today },
     { label: "Yesterday", rows: buckets.yesterday },
-    { label: "Earlier this week", rows: buckets.week },
+    { label: "This week", rows: buckets.week },
     { label: "Older", rows: buckets.older },
   ].filter((g) => g.rows.length > 0);
 
@@ -672,12 +678,7 @@ function ChatsTab({
                 onSetLabel={(label) => onSetLabel(s.id, label)}
                 onArchive={() => onArchive(s.id)}
                 onDelete={async () => {
-                  const ok = await confirm({
-                    title: "Delete this chat?",
-                    body: `“${s.title || "Untitled"}” will be removed permanently — all messages and metrics will be gone.`,
-                    confirmLabel: "Delete chat",
-                    destructive: true,
-                  });
+                  const ok = await confirm(deleteChatConfirm(s.title));
                   if (ok) onDelete(s.id);
                 }}
               />
@@ -891,7 +892,7 @@ function InstructionsTab({
   return (
     <div className="space-y-3">
       <p className="text-xs text-foreground/55">
-        Sent as the system prompt for every chat in this space. Replaces your
+        Sent as the system prompt for every chat in this Space. Replaces your
         global system prompt while a chat lives here.
       </p>
       <Textarea
@@ -932,15 +933,6 @@ function ModelsTab({
   };
   onSave: (patch: ModelsPatch) => Promise<void>;
 }) {
-  // Slice the store: only the four fields that drive the model probe.
-  // A full `useSettingsStore()` subscription would re-render this picker
-  // on every keystroke in the global SettingsDialog textareas.
-  const openaiKeySet = useSettingsStore((s) => s.openai_key_set);
-  const { ollamaModels, openaiModels, ollamaUp, loading, refresh } =
-    useProviderModels();
-
-  const hasPick = !!(space.default_model && space.default_provider);
-
   const pickModel = (provider: ProviderId | null, model: string | null) => {
     void onSave({ default_provider: provider, default_model: model });
   };
@@ -948,106 +940,15 @@ function ModelsTab({
   return (
     <div className="space-y-3">
       <p className="text-xs text-foreground/55">
-        Pick a default model for every chat created in this space. Leave
-        blank to inherit your General Settings default; per-chat picks
+        Pick a default model for every chat created in this Space. Leave it on
+        Default model to use your General Settings default; per-chat picks
         still win once a chat is open.
       </p>
-
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <Button
-            variant="outline"
-            className="h-11 w-full justify-between gap-2 rounded-xl border-foreground/10 bg-foreground/[0.02] px-4 text-left font-normal hover:bg-foreground/[0.05]"
-          >
-            {hasPick ? (
-              <span className="flex min-w-0 items-center gap-2">
-                <span className="truncate text-foreground/90">
-                  {space.default_model}
-                </span>
-                <span className="shrink-0 text-[11px] text-foreground/40">
-                  {space.default_provider}
-                </span>
-              </span>
-            ) : (
-              <span className="text-foreground/40">Select a model</span>
-            )}
-            <ChevronDown className="h-4 w-4 opacity-50" />
-          </Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent
-          align="start"
-          className="min-w-[--radix-dropdown-menu-trigger-width]"
-        >
-          <div className="flex items-center justify-between px-2 py-1.5">
-            <DropdownMenuLabel className="p-0">Default model</DropdownMenuLabel>
-            <button
-              onClick={(e) => {
-                e.preventDefault();
-                refresh();
-              }}
-              className="rounded p-1 hover:bg-accent"
-              aria-label="Refresh models"
-            >
-              <RefreshCw className={cn("h-3.5 w-3.5", loading && "animate-spin")} />
-            </button>
-          </div>
-          {hasPick && (
-            <>
-              <DropdownMenuSeparator />
-              <DropdownMenuItem onSelect={() => pickModel(null, null)}>
-                Clear selection
-              </DropdownMenuItem>
-            </>
-          )}
-          <DropdownMenuSeparator />
-          <DropdownMenuLabel className="flex items-center gap-1.5">
-            {ollamaUp ? (
-              <CircleCheck className="h-3 w-3 text-emerald-500" />
-            ) : (
-              <CircleAlert className="h-3 w-3 text-amber-500" />
-            )}
-            Ollama
-          </DropdownMenuLabel>
-          {ollamaModels.length === 0 && (
-            <DropdownMenuItem disabled>
-              {ollamaUp ? "No models installed" : "Not running"}
-            </DropdownMenuItem>
-          )}
-          {ollamaModels.map((m) => (
-            <DropdownMenuItem
-              key={`ollama:${m.id}`}
-              onSelect={() => pickModel("ollama", m.id)}
-              className={cn(
-                space.default_provider === "ollama" &&
-                  space.default_model === m.id &&
-                  "bg-foreground/[0.06]",
-              )}
-            >
-              {m.label}
-            </DropdownMenuItem>
-          ))}
-          <DropdownMenuSeparator />
-          <DropdownMenuLabel>API</DropdownMenuLabel>
-          {openaiModels.length === 0 && (
-            <DropdownMenuItem disabled>
-              {openaiKeySet ? "No models" : "Not connected"}
-            </DropdownMenuItem>
-          )}
-          {openaiModels.slice(0, 30).map((m) => (
-            <DropdownMenuItem
-              key={`openai:${m.id}`}
-              onSelect={() => pickModel("openai", m.id)}
-              className={cn(
-                space.default_provider === "openai" &&
-                  space.default_model === m.id &&
-                  "bg-foreground/[0.06]",
-              )}
-            >
-              {m.label}
-            </DropdownMenuItem>
-          ))}
-        </DropdownMenuContent>
-      </DropdownMenu>
+      <DefaultModelPicker
+        provider={space.default_provider}
+        model={space.default_model}
+        onChange={pickModel}
+      />
     </div>
   );
 }
@@ -1104,8 +1005,8 @@ function MemoryTab({
         enabled={space.memory_enabled}
         emptyText={
           space.memory_enabled
-            ? "No memories yet — chat in this space and the extractor will start saving durable facts here."
-            : "Memory is off for this space. Turn it back on to start collecting facts."
+            ? "No memories yet — chat in this Space and the extractor will start saving durable facts here."
+            : "Memory is off for this Space. Turn it back on to start collecting facts."
         }
         onAdd={onAdd}
         onUpdate={onUpdate}
@@ -1134,7 +1035,7 @@ function MetaChip({ children }: { children: ReactNode }) {
 }
 
 // Drop the `:tag` suffix on Ollama model ids (`llama3.1:8b` → `llama3.1`)
-// for compact display in tab badges and chat-row meta. Falls through for
+// for compact display in chat-row meta. Falls through for
 // OpenAI-style ids (no colon).
 function trimModelLabel(id: string): string {
   if (!id) return "";

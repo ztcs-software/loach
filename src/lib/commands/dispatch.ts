@@ -8,6 +8,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { useSnippetStore } from "@/stores/snippetStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useUIStore, type SettingsTab } from "@/stores/uiStore";
+import { deleteChatConfirm } from "@/lib/confirmations";
 import { CHAT_LABELS } from "@/lib/labels";
 import { DEFAULT_PERSONA_ID, PERSONAS, getPersona } from "@/lib/personas";
 import { DEFAULT_TONE_ID, TONES, getTone } from "@/lib/tones";
@@ -302,12 +303,7 @@ async function runArchive(): Promise<CommandResult> {
 
 async function runDelete(deps: CommandDeps): Promise<CommandResult> {
   const session = requireSession();
-  const approved = await deps.confirm({
-    title: "Delete this chat?",
-    body: `“${session.title || "Untitled"}” will be removed permanently — all messages and metrics will be gone.`,
-    confirmLabel: "Delete chat",
-    destructive: true,
-  });
+  const approved = await deps.confirm(deleteChatConfirm(session.title));
   if (!approved) return { kind: "noop" };
   await useChatStore.getState().remove(session.id);
   return ok("Deleted chat", session.title);
@@ -429,7 +425,7 @@ async function runList(rest: string): Promise<CommandResult> {
       );
     case "spaces": {
       const { spaces, activeSpaceId: activeId } = useSpaceStore.getState();
-      if (spaces.length === 0) return ok("No spaces yet");
+      if (spaces.length === 0) return ok("No Spaces yet");
       return listItems(
         "Spaces",
         spaces.map((s) => ({
@@ -478,7 +474,7 @@ async function runList(rest: string): Promise<CommandResult> {
       const scope = memoryScope();
       const memories = await scopedMemories(scope);
       if (memories.length === 0) {
-        return ok(scope.kind === "global" ? "No global memories" : "No memories in this space");
+        return ok(scope.kind === "global" ? "No global memories" : "No memories in this Space");
       }
       return listItems(
         scope.kind === "global" ? "Global memories" : "Memories",
@@ -561,7 +557,7 @@ async function runRemember(rest: string): Promise<CommandResult> {
   if (scope.kind === "global") {
     if (!useSettingsStore.getState().global_memory_enabled) {
       throw new Error(
-        "Global memory is off. Turn it on in Settings → Features, or open a chat in a space.",
+        "Global memory is off. Turn it on in Settings → Features, or open a chat in a Space.",
       );
     }
     await useGlobalMemoryStore.getState().addMemory({
@@ -634,13 +630,13 @@ async function runSpace(rest: string): Promise<CommandResult> {
   }
   if (matches.length > 1) {
     return listItems(
-      `Multiple spaces match "${query}"`,
+      `Multiple Spaces match "${query}"`,
       matches.map((s) => ({ label: s.name, hint: s.description || undefined })),
     );
   }
   const match = matches[0]!;
   useSpaceStore.getState().selectSpace(match.id);
-  return ok("Active space", match.name);
+  return ok("Active Space", match.name);
 }
 
 async function runTools(): Promise<CommandResult> {

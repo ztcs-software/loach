@@ -8,6 +8,7 @@ import { useModelsStore } from "@/stores/modelsStore";
 import { usePrivateChatStore } from "@/stores/privateChatStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useSecurityStore } from "@/stores/securityStore";
+import { deleteChatConfirm } from "@/lib/confirmations";
 import { matches, SHORTCUTS, type ShortcutAction } from "@/lib/shortcuts";
 
 /**
@@ -123,12 +124,7 @@ export function KeyboardShortcuts() {
           if (!id) return;
           const session = chat.sessions.find((s) => s.id === id);
           if (!session) return;
-          const ok = await confirm({
-            title: "Delete this chat?",
-            body: `“${session.title || "Untitled"}” will be removed permanently — all messages and metrics will be gone.`,
-            confirmLabel: "Delete chat",
-            destructive: true,
-          });
+          const ok = await confirm(deleteChatConfirm(session.title));
           if (ok) void chat.remove(id);
           return;
         }

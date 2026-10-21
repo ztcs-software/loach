@@ -3,17 +3,18 @@ import {
   ChevronRight,
   Database,
   ExternalLink,
+  Eye,
   FileUp,
   Layers,
   Library,
   Link2,
-  MessageSquarePlus,
   MoreHorizontal,
   NotebookPen,
   Pencil,
   Plus,
   RefreshCw,
   Search,
+  SquarePen,
   Trash2,
   Upload,
   X,
@@ -168,9 +169,10 @@ export function LibraryView() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const dragDepth = useRef(0);
 
+  // The selection survives a tab switch, as it does in the Library picker,
+  // so texts and files can be picked together for one dataset or chat.
   const setTab = (t: LibraryTab) => {
     setTabState(t);
-    setSelected(new Set());
     try {
       localStorage.setItem(TAB_KEY, t);
     } catch {
@@ -467,7 +469,7 @@ export function LibraryView() {
               q ? (
                 <NoMatches elsewhere={elsewhere} counts={counts} onPick={setTab} />
               ) : (
-                <EmptyTab tab={tab} onAction={primary.onClick} />
+                <EmptyTab tab={tab} action={primary} />
               )
             ) : tab === "texts" ? (
               <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
@@ -504,6 +506,14 @@ export function LibraryView() {
         <SelectionBar
           count={selected.size}
           onClear={() => setSelected(new Set())}
+          // What this tab lists that isn't picked yet; nothing to add on
+          // Datasets, which can't be selected.
+          selectAll={(() => {
+            const rest = visibleItems.filter((i) => !selected.has(i.id));
+            return rest.length > 0
+              ? () => setSelected((prev) => new Set([...prev, ...rest.map((i) => i.id)]))
+              : null;
+          })()}
           onAddTo={async (datasetId) => {
             await addToDataset(datasetId, [...selected]);
             const name = datasets.find((d) => d.id === datasetId)?.name ?? "dataset";
@@ -650,14 +660,14 @@ function DatasetCard({
             <DropdownMenuItem onSelect={onOpen}>
               <Library className="h-4 w-4" /> Open
             </DropdownMenuItem>
-            <DropdownMenuItem onSelect={onEdit}>
-              <Pencil className="h-4 w-4" /> Rename / describe
-            </DropdownMenuItem>
             <DropdownMenuItem
               disabled={members.length === 0}
               onSelect={() => void startChatWith({ itemIds: [], datasetIds: [dataset.id] })}
             >
-              <MessageSquarePlus className="h-4 w-4" /> Chat with it
+              <SquarePen className="h-4 w-4" /> New chat
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={onEdit}>
+              <Pencil className="h-4 w-4" /> Edit details
             </DropdownMenuItem>
             <AddToSpaceSubmenu sel={{ itemIds: [], datasetIds: [dataset.id] }} />
             <DropdownMenuSeparator />
@@ -714,8 +724,8 @@ function DatasetCard({
           }}
           className="h-8 gap-1 rounded-lg px-3 text-xs"
         >
-          <MessageSquarePlus className="h-3 w-3" />
-          Chat
+          <SquarePen className="h-3 w-3" />
+          New chat
         </Button>
       </footer>
     </article>
@@ -779,7 +789,7 @@ function DatasetDetail({
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="min-w-[180px]">
             <DropdownMenuItem onSelect={onEdit}>
-              <Pencil className="h-4 w-4" /> Rename / describe
+              <Pencil className="h-4 w-4" /> Edit details
             </DropdownMenuItem>
             <DropdownMenuItem onSelect={onUpload}>
               <Upload className="h-4 w-4" /> Upload files into it
@@ -832,8 +842,8 @@ function DatasetDetail({
                 className="gap-1.5 rounded-lg"
                 onClick={() => void startChatWith({ itemIds: [], datasetIds: [dataset.id] })}
               >
-                <MessageSquarePlus className="h-3.5 w-3.5" />
-                Chat with it
+                <SquarePen className="h-3.5 w-3.5" />
+                New chat
               </Button>
               <Button size="sm" className="gap-1.5 rounded-lg" onClick={onAddItems}>
                 <Plus className="h-3.5 w-3.5" />
@@ -896,7 +906,7 @@ function ItemMenu({ item, onOpenChange }: { item: LibraryItemMeta; onOpenChange?
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" onClick={(e) => e.stopPropagation()} className="min-w-[200px]">
         <DropdownMenuItem onSelect={() => openPreview(item.id)}>
-          <Search className="h-4 w-4" /> Preview
+          <Eye className="h-4 w-4" /> Preview
         </DropdownMenuItem>
         {item.kind === "text" && (
           <DropdownMenuItem onSelect={() => openTextEditor(item.id)}>
@@ -914,7 +924,7 @@ function ItemMenu({ item, onOpenChange }: { item: LibraryItemMeta; onOpenChange?
           </>
         )}
         <DropdownMenuItem onSelect={() => void startChatWith({ itemIds: [item.id], datasetIds: [] })}>
-          <MessageSquarePlus className="h-4 w-4" /> Chat about it
+          <SquarePen className="h-4 w-4" /> New chat
         </DropdownMenuItem>
         <DropdownMenuSub>
           <DropdownMenuSubTrigger>
@@ -986,13 +996,27 @@ function TextCard({
         {item.preview}
       </p>
       <div className="flex-1" />
-      <footer className="mt-4 flex items-center gap-2 border-t border-foreground/[0.06] pt-3 text-[10.5px] text-foreground/45">
-        <span className="tabular-nums">~{formatTokens(itemTokens(item))} tokens</span>
-        <span aria-hidden className="text-foreground/25">·</span>
-        <span title={new Date(item.updated_at).toLocaleString()}>{relativeTime(item.updated_at)}</span>
-        <span className="ml-auto">
+      {/* Footer laid out like every other card's: meta left, the card's
+          action right — here, as on a dataset card, a new chat with it. */}
+      <footer className="mt-4 flex items-center justify-between gap-2 border-t border-foreground/[0.06] pt-3">
+        <div className="flex min-w-0 items-center gap-2 text-[10.5px] text-foreground/45">
+          <span className="tabular-nums">~{formatTokens(itemTokens(item))} tokens</span>
+          <span aria-hidden className="text-foreground/25">·</span>
+          <span title={new Date(item.updated_at).toLocaleString()}>{relativeTime(item.updated_at)}</span>
           <IndexBadge item={item} />
-        </span>
+        </div>
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={(e) => {
+            e.stopPropagation();
+            void startChatWith({ itemIds: [item.id], datasetIds: [] });
+          }}
+          className="h-8 gap-1 rounded-lg px-3 text-xs"
+        >
+          <SquarePen className="h-3 w-3" />
+          New chat
+        </Button>
       </footer>
     </article>
   );
@@ -1061,7 +1085,7 @@ function ItemRow({
         {relativeTime(item.created_at)}
       </span>
       <div className="flex shrink-0 items-center gap-0.5" onClick={(e) => e.stopPropagation()}>
-        {item.kind === "link" && (
+        {item.kind === "link" ? (
           <button
             type="button"
             aria-label="Refresh link"
@@ -1077,6 +1101,12 @@ function ItemRow({
           >
             <RefreshCw className={cn("h-3.5 w-3.5", refreshing && "animate-spin")} />
           </button>
+        ) : (
+          // Same width as the refresh button, so in a list mixing links with
+          // other items (a dataset's page) the token and date columns line up.
+          <span aria-hidden className="p-1">
+            <span className="block h-3.5 w-3.5" />
+          </span>
         )}
         {onRemoveFromDataset && (
           <button
@@ -1102,6 +1132,7 @@ function ItemRow({
 function SelectionBar({
   count,
   onClear,
+  selectAll,
   onAddTo,
   onNewDataset,
   onAddToSpace,
@@ -1110,6 +1141,8 @@ function SelectionBar({
 }: {
   count: number;
   onClear: () => void;
+  /** Adds the rest of this tab's entries; null when there's nothing left. */
+  selectAll: (() => void) | null;
   onAddTo: (datasetId: string) => void;
   onNewDataset: () => void;
   onAddToSpace: (spaceId: string) => void;
@@ -1122,6 +1155,11 @@ function SelectionBar({
     <div className="pointer-events-none absolute inset-x-0 bottom-6 z-10 flex justify-center px-4">
       <div className="glass-panel pointer-events-auto flex items-center gap-1.5 rounded-full py-1.5 pl-4 pr-1.5 shadow-xl">
         <span className="mr-1 text-sm font-medium tabular-nums text-foreground/85">{count} selected</span>
+        {selectAll && (
+          <Button size="sm" variant="ghost" className="rounded-full text-foreground/70" onClick={selectAll}>
+            Select all
+          </Button>
+        )}
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button size="sm" variant="ghost" className="gap-1.5 rounded-full">
@@ -1163,8 +1201,8 @@ function SelectionBar({
           </DropdownMenuContent>
         </DropdownMenu>
         <Button size="sm" variant="ghost" className="gap-1.5 rounded-full" onClick={onChat}>
-          <MessageSquarePlus className="h-3.5 w-3.5" />
-          Chat
+          <SquarePen className="h-3.5 w-3.5" />
+          New chat
         </Button>
         <Button
           size="sm"
@@ -1192,28 +1230,33 @@ function SelectionBar({
 // Empty / loading states — visual mirror of Spaces and Snippets.
 // ---------------------------------------------------------------------------
 
-const EMPTY_COPY: Record<Exclude<LibraryTab, "datasets">, { title: string; body: string; cta: string; icon: React.ReactNode }> = {
+const EMPTY_COPY: Record<Exclude<LibraryTab, "datasets">, { title: string; body: string; icon: React.ReactNode }> = {
   texts: {
     title: "No texts yet",
     body: "Write notes, specs or guidelines once and reuse them in any chat — edit them here and every chat and Space using them picks up the change.",
-    cta: "New text",
     icon: <NotebookPen className="h-6 w-6 text-amber-600 dark:text-amber-300" />,
   },
   files: {
     title: "No files yet",
     body: "Upload PDFs, Word documents, code, notes or images — or drop them anywhere on this page. Loach extracts the text once and keeps it here.",
-    cta: "Upload files",
     icon: <FileUp className="h-6 w-6 text-sky-600 dark:text-sky-300" />,
   },
   links: {
     title: "No links yet",
     body: "Add a web page and Loach keeps a snapshot of its text, so models can read it offline. Refresh it whenever the page changes.",
-    cta: "Add link",
     icon: <Link2 className="h-6 w-6 text-emerald-600 dark:text-emerald-300" />,
   },
 };
 
-function EmptyTab({ tab, onAction }: { tab: Exclude<LibraryTab, "datasets">; onAction: () => void }) {
+/** An empty tab's call to action is the header's own button — same label,
+ *  same icon — so the two never read as different actions. */
+function EmptyTab({
+  tab,
+  action,
+}: {
+  tab: Exclude<LibraryTab, "datasets">;
+  action: { label: string; icon: React.ReactNode; onClick: () => void };
+}) {
   const c = EMPTY_COPY[tab];
   return (
     <EmptyState
@@ -1221,9 +1264,9 @@ function EmptyTab({ tab, onAction }: { tab: Exclude<LibraryTab, "datasets">; onA
       title={c.title}
       description={c.body}
       cta={
-        <Button onClick={onAction} className="gap-1.5 rounded-xl">
-          <Plus className="h-4 w-4" />
-          {c.cta}
+        <Button onClick={action.onClick} className="gap-1.5 rounded-xl">
+          {action.icon}
+          {action.label}
         </Button>
       }
     />

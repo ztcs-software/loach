@@ -758,13 +758,13 @@ export function SearchBar() {
                   if (mirrorRef.current)
                     mirrorRef.current.scrollLeft = e.currentTarget.scrollLeft;
                 }}
-                placeholder="Search chats, messages, spaces, snippets, Library…"
+                placeholder="Search chats, messages, Spaces, snippets, Library…"
                 spellCheck={false}
                 // Combobox-over-listbox: ↑/↓ already moved a visual highlight
                 // that existed only as a background colour. `aria-activedescendant`
                 // is what turns that into something announceable, and keeps
                 // real focus in the input so typing never breaks.
-                aria-label="Search chats, messages, spaces, snippets and the Library"
+                aria-label="Search chats, messages, Spaces, snippets and the Library"
                 role="combobox"
                 aria-expanded={results.length > 0}
                 aria-controls="search-results"
@@ -849,7 +849,7 @@ export function SearchBar() {
           {results.length === 0 ? (
             <div className="px-4 py-6 text-center text-xs text-foreground/45">
               {!query.trim()
-                ? "Nothing yet — start a chat, create a space, or save a snippet."
+                ? "Nothing yet — start a chat, create a Space, or save a snippet."
                 : searching
                   ? "Searching…"
                   : !terms
