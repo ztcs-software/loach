@@ -327,6 +327,7 @@ pub fn run() {
             commands::update_session_params,
             commands::update_session_label,
             commands::set_session_folder,
+            commands::set_session_space,
             commands::pick_session_workspace,
             commands::clear_session_workspace,
             commands::open_session_workspace,

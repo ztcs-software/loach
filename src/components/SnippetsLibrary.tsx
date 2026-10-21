@@ -7,10 +7,12 @@ import {
   Play,
   Plus,
   RefreshCw,
+  Search,
   SquareTerminal,
   Trash2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   DropdownMenu,
@@ -53,9 +55,14 @@ export function SnippetsLibrary() {
   const setViewingSpace = useSpaceStore((s) => s.setViewingSpace);
   const setSidebarTab = useUIStore((s) => s.setSidebarTab);
 
+  const [query, setQuery] = useState("");
+  const q = query.trim().toLowerCase();
   const sorted = useMemo(
-    () => [...snippets].sort((a, b) => b.updated_at - a.updated_at),
-    [snippets],
+    () =>
+      [...snippets]
+        .filter((s) => !q || s.title.toLowerCase().includes(q) || s.prompt.toLowerCase().includes(q))
+        .sort((a, b) => b.updated_at - a.updated_at),
+    [snippets, q],
   );
 
   const runSnippet = async (snippet: Snippet) => {
@@ -145,17 +152,26 @@ export function SnippetsLibrary() {
               }
             />
           ) : (
-            <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-              {sorted.map((snippet) => (
-                <SnippetCard
-                  key={snippet.id}
-                  snippet={snippet}
-                  onRun={() => void runSnippet(snippet)}
-                  onEdit={() => openDialog(snippet)}
-                  onDelete={() => handleDelete(snippet)}
-                />
-              ))}
-            </div>
+            <>
+              <SearchField value={query} onChange={setQuery} label="Search snippets" />
+              {sorted.length === 0 ? (
+                <p className="mt-10 text-center text-sm text-foreground/45">
+                  No snippets match your search.
+                </p>
+              ) : (
+                <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+                  {sorted.map((snippet) => (
+                    <SnippetCard
+                      key={snippet.id}
+                      snippet={snippet}
+                      onRun={() => void runSnippet(snippet)}
+                      onEdit={() => openDialog(snippet)}
+                      onDelete={() => handleDelete(snippet)}
+                    />
+                  ))}
+                </div>
+              )}
+            </>
           )}
         </div>
       </ScrollArea>
@@ -289,6 +305,30 @@ function SnippetCard({
 // Shared empty state — reused by SpacesLibrary too via plain shape parity, but
 // kept local for now to avoid a tiny shared file.
 // ---------------------------------------------------------------------------
+
+/** Search box above the grid, styled like the Library's. */
+function SearchField({
+  value,
+  onChange,
+  label,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  label: string;
+}) {
+  return (
+    <div className="relative mb-5 ml-auto w-full sm:w-64">
+      <Search className="pointer-events-none absolute left-3.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-foreground/40" />
+      <Input
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={label}
+        aria-label={label}
+        className="h-10 rounded-2xl pl-9"
+      />
+    </div>
+  );
+}
 
 function LibraryLoading() {
   return (

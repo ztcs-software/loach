@@ -220,6 +220,26 @@ pub async fn set_session_folder(
         .map_err(err)
 }
 
+#[derive(Debug, Deserialize)]
+pub struct SetSessionSpaceArgs {
+    pub id: String,
+    /// Space to move the chat into. `None` takes it out of any Space.
+    #[serde(default)]
+    pub space_id: Option<String>,
+}
+
+/// Move a chat into a Space, or out of the one it's in.
+#[tauri::command]
+pub async fn set_session_space(
+    state: State<'_, AppState>,
+    args: SetSessionSpaceArgs,
+) -> Result<(), String> {
+    state
+        .db
+        .set_session_space(&args.id, args.space_id.as_deref())
+        .map_err(err)
+}
+
 // ---------- workspace directory ----------
 
 /// Open the native folder picker and scope this chat's filesystem tools to

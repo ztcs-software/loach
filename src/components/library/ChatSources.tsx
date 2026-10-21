@@ -170,7 +170,13 @@ export function ChatSourceChips({
       {spaceCount > 0 && spaceId && (
         <button
           type="button"
-          onClick={() => useSpaceStore.getState().setViewingSpace(spaceId)}
+          // Straight to the Space's Sources tab — what the chip is about, and
+          // on the Space's own page the only thing a click could mean.
+          onClick={() => {
+            useModelsStore.getState().setViewingModel(null);
+            useUIStore.getState().setSidebarTab("spaces");
+            useSpaceStore.getState().setViewingSpace(spaceId, "files");
+          }}
           className={cn(composerChipClass("config"), "hover:bg-primary/15")}
           title="Sources this chat gets from its Space — manage them in the Space's Sources tab"
         >

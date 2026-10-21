@@ -3,6 +3,8 @@
 // It used to be appended to the chat left open whenever that chat belonged to
 // the same Space — so going from a chat to its Space's page (the header's
 // Space link) and asking something new quietly continued the old thread.
+//
+// Also here: moving an existing chat into or out of a Space.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { Message, Session } from "@/types";
@@ -110,5 +112,15 @@ describe("sending from a Space's page", () => {
     await get().sendUserMessage("a follow-up", []);
     expect(get().activeSessionId).toBe("old");
     expect(calls.appended).toEqual(["old"]);
+  });
+});
+
+describe("moving a chat between Spaces", () => {
+  it("moves it in and out, keeping its place in the list", async () => {
+    await get().moveToSpace("old", "space-B");
+    expect(get().sessions[0]).toMatchObject({ id: "old", space_id: "space-B", updated_at: 0 });
+
+    await get().moveToSpace("old", null);
+    expect(get().sessions[0].space_id).toBeNull();
   });
 });

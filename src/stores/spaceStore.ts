@@ -23,10 +23,18 @@ import {
 } from "@/lib/spaceContextCache";
 import type { RetrievalMode, Space, SpaceFile, SpaceMemory } from "@/types";
 
+/** The tabs of a Space's page. `files` is the Sources tab. */
+export type SpaceTab = "chats" | "instructions" | "files" | "memory" | "models";
+
 interface SpaceState {
   spaces: Space[];
   activeSpaceId: string | null;
   viewingSpaceId: string | null;
+  /** The tab each Space's page was last left on, by space id — so coming back
+   *  to a Space (from one of its chats, say) lands where the user was, the
+   *  way the Library keeps its tab. In memory only: a Space not opened yet
+   *  this run starts on Chats. */
+  spaceTabs: Record<string, SpaceTab>;
   spaceFiles: Record<string, SpaceFile[]>;
   /** Per-space memory cache, keyed by `space_id`. Hydrated lazily — the
    *  Memory tab and the chat send path each call `loadSpaceMemories` when
@@ -64,7 +72,10 @@ interface SpaceState {
    *  success — e.g. SpaceView returning to the library — should gate on it. */
   deleteSpace: (id: string) => Promise<boolean>;
   setSpaceFormOpen: (open: boolean) => void;
-  setViewingSpace: (id: string | null) => void;
+  /** Open a Space's page — on `tab` when given (a link straight to its
+   *  Sources, say), else on the tab it was last left on. */
+  setViewingSpace: (id: string | null, tab?: SpaceTab) => void;
+  setSpaceTab: (id: string, tab: SpaceTab) => void;
 
   loadSpaceFiles: (spaceId: string) => Promise<SpaceFile[]>;
   addFile: (
@@ -109,6 +120,7 @@ export const useSpaceStore = create<SpaceState>((set, get) => ({
   spaces: [],
   activeSpaceId: null,
   viewingSpaceId: null,
+  spaceTabs: {},
   spaceFiles: {},
   spaceMemories: {},
   spaceFormOpen: false,
@@ -229,7 +241,14 @@ export const useSpaceStore = create<SpaceState>((set, get) => ({
   },
 
   setSpaceFormOpen: (open) => set({ spaceFormOpen: open }),
-  setViewingSpace: (id) => set({ viewingSpaceId: id, activeSpaceId: id }),
+  setViewingSpace: (id, tab) =>
+    set((s) => ({
+      viewingSpaceId: id,
+      activeSpaceId: id,
+      spaceTabs: id && tab ? { ...s.spaceTabs, [id]: tab } : s.spaceTabs,
+    })),
+
+  setSpaceTab: (id, tab) => set((s) => ({ spaceTabs: { ...s.spaceTabs, [id]: tab } })),
 
   loadSpaceFiles: async (spaceId) => {
     const files = await listSpaceFiles(spaceId);

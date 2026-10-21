@@ -38,12 +38,13 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { ChatInput } from "@/components/ChatInput";
 import { ChatLabelDot, ChatLabelSubmenu } from "@/components/ChatLabelMenu";
+import { ChatSpaceSubmenu } from "@/components/ChatSpaceMenu";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { MemoryList } from "@/components/MemoryList";
 import { SpaceSourcesTab } from "@/components/library/SpaceSources";
 import { useChatStore } from "@/stores/chatStore";
 import { useSettingsStore } from "@/stores/settingsStore";
-import { useSpaceStore } from "@/stores/spaceStore";
+import { useSpaceStore, type SpaceTab } from "@/stores/spaceStore";
 import { useLibraryStore } from "@/stores/libraryStore";
 import { useToastStore } from "@/stores/toastStore";
 import { useUIStore } from "@/stores/uiStore";
@@ -58,8 +59,6 @@ import {
   type SpaceFile,
   type SpaceMemory,
 } from "@/types";
-
-type TabId = "chats" | "instructions" | "files" | "memory" | "models";
 
 /** Stable empties for the "not loaded yet" case — a fresh `[]` per render
  *  would churn every memo and effect keyed on these. */
@@ -114,7 +113,14 @@ export function SpaceView() {
   const space = spaces.find((s) => s.id === viewingSpaceId);
 
   const [editDialogOpen, setEditDialogOpen] = useState(false);
-  const [tab, setTab] = useState<TabId>("chats");
+  // Kept in the store per Space, so a link can open a tab directly (the
+  // composer's "Space sources" chip opens Sources) and coming back from one
+  // of the Space's chats lands on the tab it was left on.
+  const tab = useSpaceStore((s) => (viewingSpaceId ? s.spaceTabs[viewingSpaceId] : undefined)) ?? "chats";
+  const setSpaceTab = useSpaceStore((s) => s.setSpaceTab);
+  const setTab = (t: SpaceTab) => {
+    if (viewingSpaceId) setSpaceTab(viewingSpaceId, t);
+  };
   // Read straight from the store rather than mirroring into local state.
   // The mirror only ever copied `stored*` forward, and its effect was
   // guarded on truthiness — so switching to a space whose rows weren't
@@ -317,7 +323,7 @@ export function SpaceView() {
 
           {/* Tabs — re-inset to match the title column. */}
           <div className="mt-10 px-4">
-            <Tabs value={tab} onValueChange={(v) => setTab(v as TabId)}>
+            <Tabs value={tab} onValueChange={(v) => setTab(v as SpaceTab)}>
               {/* Centered, auto-width — TabsList default is `inline-flex`,
                   so wrapping in a flex container is enough to centre it
                   without stretching. */}
@@ -819,6 +825,7 @@ function ChatRow({
               onSelect={onSetLabel}
               iconClassName="mr-2 h-4 w-4"
             />
+            <ChatSpaceSubmenu session={session} iconClassName="mr-2 h-4 w-4" />
             <DropdownMenuItem onSelect={onStartRename}>
               <Pencil className="mr-2 h-4 w-4" />
               Rename

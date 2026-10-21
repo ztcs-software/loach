@@ -14,6 +14,7 @@ import {
   listFolders,
   renameFolder as persistFolderName,
   setSessionFolder,
+  setSessionSpace,
   pickSessionWorkspace,
   readWorkspaceInstructions,
   clearSessionWorkspace,
@@ -204,6 +205,9 @@ interface ChatState {
   setLabel: (id: string, label: ChatLabel | null) => Promise<void>;
   /** File a chat under a folder, or pull it out with `null`. */
   moveToFolder: (id: string, folderId: string | null) => Promise<void>;
+  /** Move a chat into a Space, or out of any Space with `null`. From its
+   *  next message on it uses that Space's instructions, sources and memory. */
+  moveToSpace: (id: string, spaceId: string | null) => Promise<void>;
   /** Open the native folder picker and scope this chat's filesystem tools
    *  to the result. Resolves to the chosen path, or null if cancelled. */
   pickWorkspace: (sessionId: string) => Promise<string | null>;
@@ -1943,6 +1947,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((s) => ({
       sessions: s.sessions.map((x) =>
         x.id === id ? { ...x, folder_id: folderId } : x,
+      ),
+    }));
+  },
+
+  moveToSpace: async (id, spaceId) => {
+    await setSessionSpace({ id, space_id: spaceId });
+    set((s) => ({
+      sessions: s.sessions.map((x) =>
+        x.id === id ? { ...x, space_id: spaceId } : x,
       ),
     }));
   },

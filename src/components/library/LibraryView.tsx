@@ -4,6 +4,7 @@ import {
   Database,
   ExternalLink,
   FileUp,
+  Layers,
   Library,
   Link2,
   MessageSquarePlus,
@@ -37,6 +38,7 @@ import { openExternal } from "@/lib/tauri";
 import { cn, formatBytes, relativeTime } from "@/lib/utils";
 import { useChatStore } from "@/stores/chatStore";
 import { prepareFiles, useLibraryStore } from "@/stores/libraryStore";
+import { useModelsStore } from "@/stores/modelsStore";
 import { usePrivateChatStore } from "@/stores/privateChatStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useToastStore } from "@/stores/toastStore";
@@ -67,12 +69,13 @@ import {
 const TAB_KEY = "loach.library.tab";
 const TABS: LibraryTab[] = ["datasets", "texts", "files", "links"];
 
-function readTab(): LibraryTab {
+/** The tab the user last picked, or null when they never have. */
+function readTab(): LibraryTab | null {
   try {
     const t = localStorage.getItem(TAB_KEY) as LibraryTab | null;
-    return t && TABS.includes(t) ? t : "datasets";
+    return t && TABS.includes(t) ? t : null;
   } catch {
-    return "datasets";
+    return null;
   }
 }
 
@@ -82,6 +85,55 @@ async function startChatWith(sel: { itemIds: string[]; datasetIds: string[] }) {
   useUIStore.getState().setSidebarTab("chats");
   const session = await useChatStore.getState().newSession({ spaceId: null });
   await useLibraryStore.getState().addSources("session", session.id, sel);
+}
+
+/** Link Library items or datasets into a Space's sources — the Library side
+ *  of the Space's own "From Library" picker. Already-linked ones are skipped
+ *  by the backend. Returns whether it worked. */
+async function addToSpace(spaceId: string, sel: { itemIds: string[]; datasetIds: string[] }) {
+  const toast = useToastStore.getState().push;
+  const name = useSpaceStore.getState().spaces.find((s) => s.id === spaceId)?.name ?? "the Space";
+  try {
+    await useLibraryStore.getState().addSources("space", spaceId, sel);
+  } catch (e) {
+    toast({ kind: "error", title: `Couldn't add to “${name}”`, body: e instanceof Error ? e.message : String(e) });
+    return false;
+  }
+  const n = sel.itemIds.length + sel.datasetIds.length;
+  toast({
+    kind: "info",
+    title: n === 1 ? `Added to “${name}”` : `Added ${n} to “${name}”`,
+    body: "Every chat in the Space can use it.",
+    action: {
+      label: "Open",
+      onClick: () => {
+        useModelsStore.getState().setViewingModel(null);
+        useUIStore.getState().setSidebarTab("spaces");
+        useSpaceStore.getState().setViewingSpace(spaceId, "files");
+      },
+    },
+  });
+  return true;
+}
+
+/** "Add to Space ▸" for an item's or a dataset's menu. */
+function AddToSpaceSubmenu({ sel }: { sel: { itemIds: string[]; datasetIds: string[] } }) {
+  const spaces = useSpaceStore((s) => s.spaces);
+  return (
+    <DropdownMenuSub>
+      <DropdownMenuSubTrigger>
+        <Layers className="h-4 w-4" /> Add to Space
+      </DropdownMenuSubTrigger>
+      <DropdownMenuSubContent className="max-h-72 min-w-[180px] overflow-y-auto">
+        {spaces.length === 0 && <DropdownMenuItem disabled>No Spaces yet</DropdownMenuItem>}
+        {spaces.map((sp) => (
+          <DropdownMenuItem key={sp.id} onSelect={() => void addToSpace(sp.id, sel)}>
+            <span className="truncate">{sp.name}</span>
+          </DropdownMenuItem>
+        ))}
+      </DropdownMenuSubContent>
+    </DropdownMenuSub>
+  );
 }
 
 /**
@@ -105,7 +157,7 @@ export function LibraryView() {
   const deleteItems = useDeleteLibraryItems();
   const { confirm } = useConfirm();
 
-  const [tab, setTabState] = useState<LibraryTab>(readTab);
+  const [pickedTab, setTabState] = useState<LibraryTab | null>(readTab);
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [linkOpen, setLinkOpen] = useState(false);
@@ -126,34 +178,48 @@ export function LibraryView() {
     }
   };
 
-  const counts: Record<LibraryTab, number> = useMemo(
-    () => ({
-      datasets: datasets.length,
-      texts: items.filter((i) => i.kind === "text").length,
-      files: items.filter((i) => i.kind === "file").length,
-      links: items.filter((i) => i.kind === "link").length,
-    }),
-    [items, datasets],
-  );
-
   const q = query.trim().toLowerCase();
   const matches = (i: LibraryItemMeta) =>
     !q ||
     i.title.toLowerCase().includes(q) ||
     i.preview.toLowerCase().includes(q) ||
     (i.url ?? "").toLowerCase().includes(q);
+  const datasetMatches = (d: LibraryDataset) =>
+    !q || d.name.toLowerCase().includes(q) || d.description.toLowerCase().includes(q);
+
+  // What each tab holds — or, while searching, how many of its entries match,
+  // so a search that comes up empty on this tab shows where the hits are.
+  const counts: Record<LibraryTab, number> = useMemo(
+    () => ({
+      datasets: datasets.filter(datasetMatches).length,
+      texts: items.filter((i) => i.kind === "text" && matches(i)).length,
+      files: items.filter((i) => i.kind === "file" && matches(i)).length,
+      links: items.filter((i) => i.kind === "link" && matches(i)).length,
+    }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [items, datasets, q],
+  );
+
+  // A Library never opened before lands on the first section with something
+  // in it, rather than on Datasets: a new user was greeted by "New dataset"
+  // before there was anything to put in one. With nothing anywhere, Files —
+  // dropping a document in is the usual first step.
+  const tab: LibraryTab =
+    pickedTab ??
+    TABS.find((t) => (t === "datasets" ? datasets.length > 0 : items.some((i) => tabOf(i) === t))) ??
+    "files";
   const visibleItems = useMemo(
     () => (tab === "datasets" ? [] : items.filter((i) => tabOf(i) === tab && matches(i))),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [items, tab, q],
   );
   const visibleDatasets = useMemo(
-    () =>
-      datasets.filter(
-        (d) => !q || d.name.toLowerCase().includes(q) || d.description.toLowerCase().includes(q),
-      ),
+    () => datasets.filter(datasetMatches),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [datasets, q],
   );
+  // Tabs other than this one that have hits, for the "no matches" line.
+  const elsewhere = TABS.filter((t) => t !== tab && counts[t] > 0);
   // A dataset gets its own page, like a Space; an id that no longer
   // resolves (deleted elsewhere) falls back to the list.
   const openDataset = viewingDatasetId ? datasets.find((d) => d.id === viewingDatasetId) : undefined;
@@ -349,7 +415,7 @@ export function LibraryView() {
                 <Input
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
-                  placeholder={`Search ${TAB_LABELS[tab].toLowerCase()}`}
+                  placeholder="Search the Library"
                   aria-label="Search the Library"
                   className="h-10 rounded-2xl pl-9"
                 />
@@ -370,7 +436,7 @@ export function LibraryView() {
             ) : tab === "datasets" ? (
               visibleDatasets.length === 0 ? (
                 q ? (
-                  <NoMatches />
+                  <NoMatches elsewhere={elsewhere} counts={counts} onPick={setTab} />
                 ) : (
                   <EmptyState
                     icon={<DatasetIcon size="lg" />}
@@ -398,7 +464,11 @@ export function LibraryView() {
                 </div>
               )
             ) : visibleItems.length === 0 ? (
-              q ? <NoMatches /> : <EmptyTab tab={tab} onAction={primary.onClick} />
+              q ? (
+                <NoMatches elsewhere={elsewhere} counts={counts} onPick={setTab} />
+              ) : (
+                <EmptyTab tab={tab} onAction={primary.onClick} />
+              )
             ) : tab === "texts" ? (
               <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
                 {visibleItems.map((i) => (
@@ -444,6 +514,9 @@ export function LibraryView() {
             setSelected(new Set());
           }}
           onNewDataset={() => setDatasetDialog({ seed: [...selected] })}
+          onAddToSpace={async (spaceId) => {
+            if (await addToSpace(spaceId, { itemIds: [...selected], datasetIds: [] })) setSelected(new Set());
+          }}
           onChat={() => void startChatWith({ itemIds: [...selected], datasetIds: [] })}
           onDelete={async () => {
             if (await deleteItems([...selected])) setSelected(new Set());
@@ -586,6 +659,7 @@ function DatasetCard({
             >
               <MessageSquarePlus className="h-4 w-4" /> Chat with it
             </DropdownMenuItem>
+            <AddToSpaceSubmenu sel={{ itemIds: [], datasetIds: [dataset.id] }} />
             <DropdownMenuSeparator />
             <DropdownMenuItem
               onSelect={() => void deleteDataset(dataset.id)}
@@ -710,6 +784,7 @@ function DatasetDetail({
             <DropdownMenuItem onSelect={onUpload}>
               <Upload className="h-4 w-4" /> Upload files into it
             </DropdownMenuItem>
+            <AddToSpaceSubmenu sel={{ itemIds: [], datasetIds: [dataset.id] }} />
             <DropdownMenuSeparator />
             <DropdownMenuItem
               onSelect={() => void deleteDataset(dataset.id).then((ok) => ok && onBack())}
@@ -859,6 +934,7 @@ function ItemMenu({ item, onOpenChange }: { item: LibraryItemMeta; onOpenChange?
             })}
           </DropdownMenuSubContent>
         </DropdownMenuSub>
+        <AddToSpaceSubmenu sel={{ itemIds: [item.id], datasetIds: [] }} />
         <DropdownMenuSeparator />
         <DropdownMenuItem
           onSelect={() => void deleteItems([item.id])}
@@ -1028,6 +1104,7 @@ function SelectionBar({
   onClear,
   onAddTo,
   onNewDataset,
+  onAddToSpace,
   onChat,
   onDelete,
 }: {
@@ -1035,10 +1112,12 @@ function SelectionBar({
   onClear: () => void;
   onAddTo: (datasetId: string) => void;
   onNewDataset: () => void;
+  onAddToSpace: (spaceId: string) => void;
   onChat: () => void;
   onDelete: () => void;
 }) {
   const datasets = useLibraryStore((s) => s.datasets);
+  const spaces = useSpaceStore((s) => s.spaces);
   return (
     <div className="pointer-events-none absolute inset-x-0 bottom-6 z-10 flex justify-center px-4">
       <div className="glass-panel pointer-events-auto flex items-center gap-1.5 rounded-full py-1.5 pl-4 pr-1.5 shadow-xl">
@@ -1062,6 +1141,23 @@ function SelectionBar({
               <DropdownMenuItem key={d.id} onSelect={() => onAddTo(d.id)}>
                 <DatasetIcon size="sm" />
                 <span className="truncate">{d.name}</span>
+              </DropdownMenuItem>
+            ))}
+          </DropdownMenuContent>
+        </DropdownMenu>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button size="sm" variant="ghost" className="gap-1.5 rounded-full">
+              <Layers className="h-3.5 w-3.5" />
+              Add to Space
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="center" side="top" className="max-h-72 min-w-[200px] overflow-y-auto">
+            {spaces.length === 0 && <DropdownMenuItem disabled>No Spaces yet</DropdownMenuItem>}
+            {spaces.map((sp) => (
+              <DropdownMenuItem key={sp.id} onSelect={() => onAddToSpace(sp.id)}>
+                <Layers className="h-4 w-4" />
+                <span className="truncate">{sp.name}</span>
               </DropdownMenuItem>
             ))}
           </DropdownMenuContent>
@@ -1157,8 +1253,39 @@ function EmptyState({
   );
 }
 
-function NoMatches() {
-  return <p className="mt-10 text-center text-sm text-foreground/45">Nothing matches your search.</p>;
+/** "No matches" for this tab — with a way to the tabs that do have some, since
+ *  the search only lists the open tab's entries. */
+function NoMatches({
+  elsewhere,
+  counts,
+  onPick,
+}: {
+  elsewhere: LibraryTab[];
+  counts: Record<LibraryTab, number>;
+  onPick: (tab: LibraryTab) => void;
+}) {
+  return (
+    <div className="mt-10 text-center text-sm text-foreground/45">
+      <p>Nothing here matches your search.</p>
+      {elsewhere.length > 0 && (
+        <p className="mt-2">
+          Found in{" "}
+          {elsewhere.map((t, i) => (
+            <span key={t}>
+              {i > 0 && ", "}
+              <button
+                type="button"
+                onClick={() => onPick(t)}
+                className="font-medium text-foreground/75 underline underline-offset-2 hover:text-foreground"
+              >
+                {TAB_LABELS[t]} ({counts[t]})
+              </button>
+            </span>
+          ))}
+        </p>
+      )}
+    </div>
+  );
 }
 
 function LoadingGrid() {

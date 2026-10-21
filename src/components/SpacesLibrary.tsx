@@ -6,10 +6,12 @@ import {
   Pencil,
   Plus,
   RefreshCw,
+  Search,
   SquarePen,
   Trash2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   DropdownMenu,
@@ -59,9 +61,14 @@ export function SpacesLibrary() {
     return counts;
   }, [sessions]);
 
+  const [query, setQuery] = useState("");
+  const q = query.trim().toLowerCase();
   const sorted = useMemo(
-    () => [...spaces].sort((a, b) => b.updated_at - a.updated_at),
-    [spaces],
+    () =>
+      [...spaces]
+        .filter((s) => !q || s.name.toLowerCase().includes(q) || s.description.toLowerCase().includes(q))
+        .sort((a, b) => b.updated_at - a.updated_at),
+    [spaces, q],
   );
 
   const handleDelete = async (space: Space) => {
@@ -129,18 +136,27 @@ export function SpacesLibrary() {
               }
             />
           ) : (
-            <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-              {sorted.map((space) => (
-                <SpaceCard
-                  key={space.id}
-                  space={space}
-                  chatCount={chatCounts[space.id] ?? 0}
-                  onOpen={() => setViewingSpace(space.id)}
-                  onNewChat={() => newChatInSpace(space)}
-                  onDelete={() => handleDelete(space)}
-                />
-              ))}
-            </div>
+            <>
+              <SearchField value={query} onChange={setQuery} label="Search spaces" />
+              {sorted.length === 0 ? (
+                <p className="mt-10 text-center text-sm text-foreground/45">
+                  No spaces match your search.
+                </p>
+              ) : (
+                <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+                  {sorted.map((space) => (
+                    <SpaceCard
+                      key={space.id}
+                      space={space}
+                      chatCount={chatCounts[space.id] ?? 0}
+                      onOpen={() => setViewingSpace(space.id)}
+                      onNewChat={() => newChatInSpace(space)}
+                      onDelete={() => handleDelete(space)}
+                    />
+                  ))}
+                </div>
+              )}
+            </>
           )}
         </div>
       </ScrollArea>
@@ -297,6 +313,30 @@ function SpaceCard({
 // Shared empty state — visual mirror of SnippetsLibrary's so the surfaces
 // feel like the same place in two outfits.
 // ---------------------------------------------------------------------------
+
+/** Search box above the grid — SnippetsLibrary's, styled like the Library's. */
+function SearchField({
+  value,
+  onChange,
+  label,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  label: string;
+}) {
+  return (
+    <div className="relative mb-5 ml-auto w-full sm:w-64">
+      <Search className="pointer-events-none absolute left-3.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-foreground/40" />
+      <Input
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={label}
+        aria-label={label}
+        className="h-10 rounded-2xl pl-9"
+      />
+    </div>
+  );
+}
 
 function LibraryLoading() {
   return (

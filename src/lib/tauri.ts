@@ -230,6 +230,15 @@ export function setSessionFolder(args: {
   return invoke("set_session_folder", { args });
 }
 
+/** Move a chat into a Space, or out of any Space with `null`. */
+export function setSessionSpace(args: {
+  id: string;
+  space_id: string | null;
+}): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("set_session_space", { args });
+}
+
 /** Open the native folder picker and scope this chat's filesystem tools to
  *  what the user chooses. Resolves to the stored (canonical) path, or null
  *  if they cancelled.

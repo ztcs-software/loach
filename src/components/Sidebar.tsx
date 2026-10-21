@@ -29,6 +29,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { ChatLabelDot, ChatLabelSubmenu } from "@/components/ChatLabelMenu";
+import { ChatSpaceSubmenu } from "@/components/ChatSpaceMenu";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useConfirm } from "@/components/ConfirmDialog";
@@ -417,7 +418,14 @@ function readOpenFolders(): Set<string> {
 function ChatList() {
   const sessions = useChatStore((s) => s.sessions);
   const folders = useChatStore((s) => s.folders);
-  const activeId = useChatStore((s) => s.activeSessionId);
+  // The open chat's row is highlighted only while that chat is what's on
+  // screen. On Spaces, the Library, Snippets, Models or a Space's page the
+  // section's own entry is the highlight — two at once read as two places.
+  const openId = useChatStore((s) => s.activeSessionId);
+  const onChatsTab = useUIStore((s) => s.sidebarTab === "chats");
+  const viewingSpace = useSpaceStore((s) => s.viewingSpaceId !== null);
+  const viewingModel = useModelsStore((s) => s.viewingModel !== null);
+  const activeId = onChatsTab && !viewingSpace && !viewingModel ? openId : null;
   const select = useChatStore((s) => s.selectSession);
   const moveToFolder = useChatStore((s) => s.moveToFolder);
   const createFolderWith = useChatStore((s) => s.createFolderWith);
@@ -1090,6 +1098,7 @@ const SessionRow = memo(function SessionRowImpl({
               value={session.label}
               onSelect={(label) => void setLabel(session.id, label)}
             />
+            <ChatSpaceSubmenu session={session} />
             <DropdownMenuItem onSelect={beginRename}>
               <Pencil className="h-4 w-4" /> Rename
             </DropdownMenuItem>

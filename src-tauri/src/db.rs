@@ -1407,6 +1407,19 @@ impl Database {
         Ok(())
     }
 
+    /// Move the chat into the Space `space_id`, or out of any Space with
+    /// `None`. Like `set_session_folder` this leaves `updated_at` alone —
+    /// moving a chat isn't new activity in it. An unknown Space id fails on
+    /// the foreign key instead of leaving the chat pointing at nothing.
+    pub fn set_session_space(&self, id: &str, space_id: Option<&str>) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "UPDATE sessions SET space_id = ?1 WHERE id = ?2",
+            params![space_id, id],
+        )?;
+        Ok(())
+    }
+
     pub fn archive_session(&self, id: &str, archived: bool) -> Result<()> {
         let conn = self.conn.lock();
         let now = Utc::now().timestamp_millis();
@@ -4210,6 +4223,33 @@ mod tests {
         let after = db.list_sessions().unwrap();
         assert_eq!(after.len(), 1, "the chat survives its folder");
         assert_eq!(after[0].folder_id, None);
+    }
+
+    #[test]
+    fn moving_a_chat_between_spaces_keeps_its_place_in_the_list() {
+        let (db, _dir) = fresh_db();
+        let s = db
+            .create_session("t", "ollama", "llama3", None, None)
+            .expect("create");
+        let sp = db.create_space("Work", "", "").expect("space");
+
+        db.set_session_space(&s.id, Some(&sp.id)).expect("move in");
+        let listed = db.list_sessions().unwrap();
+        assert_eq!(listed[0].space_id.as_deref(), Some(sp.id.as_str()));
+        assert_eq!(
+            listed[0].updated_at, s.updated_at,
+            "moving a chat must not re-sort the list the way pinning does",
+        );
+
+        // A Space that doesn't exist is refused, not stored as a dangling id.
+        assert!(db.set_session_space(&s.id, Some("no-such-space")).is_err());
+        assert_eq!(
+            db.get_session(&s.id).unwrap().unwrap().space_id.as_deref(),
+            Some(sp.id.as_str()),
+        );
+
+        db.set_session_space(&s.id, None).expect("move out");
+        assert_eq!(db.get_session(&s.id).unwrap().unwrap().space_id, None);
     }
 
     #[test]

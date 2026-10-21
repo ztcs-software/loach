@@ -5,6 +5,7 @@ import {
   ArchiveRestore,
   Check,
   ChevronDown,
+  ChevronRight,
   CircleAlert,
   CircleCheck,
   ClipboardPaste,
@@ -43,6 +44,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { ChatLabelSubmenu } from "@/components/ChatLabelMenu";
+import { ChatSpaceSubmenu } from "@/components/ChatSpaceMenu";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { useChatStore } from "@/stores/chatStore";
 import { useModelsStore } from "@/stores/modelsStore";
@@ -425,7 +427,8 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
                   <Layers className="h-3.5 w-3.5 shrink-0" />
                   <span className="truncate">{spaceName}</span>
                 </button>
-                <span className="shrink-0 text-foreground/30">/</span>
+                {/* Same chevron as the Space and dataset pages' breadcrumbs. */}
+                <ChevronRight aria-hidden className="h-3 w-3 shrink-0 text-foreground/35" />
               </>
             )}
             <span className="flex min-w-0 items-center gap-1.5 font-medium text-foreground/85">
@@ -595,6 +598,7 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
               }}
               iconClassName="mr-2 h-4 w-4"
             />
+            {session && <ChatSpaceSubmenu session={session} iconClassName="mr-2 h-4 w-4" />}
             <DropdownMenuItem onSelect={startRename}>
               <Pencil className="mr-2 h-4 w-4" />
               Rename
