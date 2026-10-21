@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  ChevronDown,
   ChevronRight,
   Database,
   ExternalLink,
@@ -34,6 +35,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useConfirm } from "@/components/ConfirmDialog";
+import { SpaceSubmenu } from "@/components/ChatSpaceMenu";
 import { formatTokens } from "@/lib/contextUsage";
 import { openExternal } from "@/lib/tauri";
 import { cn, formatBytes, relativeTime } from "@/lib/utils";
@@ -50,6 +52,7 @@ import {
   DatasetDialog,
   useDeleteDataset,
   useDeleteLibraryItems,
+  useDeleteSelection,
 } from "./LibraryDialogs";
 import { LibraryPicker } from "./LibraryPicker";
 import {
@@ -81,11 +84,30 @@ function readTab(): LibraryTab | null {
 }
 
 /** Start a fresh chat with Library items or datasets already attached. */
-async function startChatWith(sel: { itemIds: string[]; datasetIds: string[] }) {
+async function startChatWith(sel: { itemIds: string[]; datasetIds: string[] }, spaceId: string | null = null) {
   useSpaceStore.getState().setViewingSpace(null);
   useUIStore.getState().setSidebarTab("chats");
-  const session = await useChatStore.getState().newSession({ spaceId: null });
+  const session = await useChatStore.getState().newSession({ spaceId });
   await useLibraryStore.getState().addSources("session", session.id, sel);
+}
+
+/** "New chat in Space ▸": the same chat as **New chat**, started inside a
+ *  Space so it also gets the Space's instructions, sources and memory. */
+function NewChatInSpaceSubmenu({
+  sel,
+  disabled,
+}: {
+  sel: { itemIds: string[]; datasetIds: string[] };
+  disabled?: boolean;
+}) {
+  return (
+    <SpaceSubmenu
+      label="New chat in Space"
+      icon={<SquarePen className="h-4 w-4" />}
+      disabled={disabled}
+      onSelect={(spaceId) => void startChatWith(sel, spaceId)}
+    />
+  );
 }
 
 /** Link Library items or datasets into a Space's sources — the Library side
@@ -119,21 +141,12 @@ async function addToSpace(spaceId: string, sel: { itemIds: string[]; datasetIds:
 
 /** "Add to Space ▸" for an item's or a dataset's menu. */
 function AddToSpaceSubmenu({ sel }: { sel: { itemIds: string[]; datasetIds: string[] } }) {
-  const spaces = useSpaceStore((s) => s.spaces);
   return (
-    <DropdownMenuSub>
-      <DropdownMenuSubTrigger>
-        <Layers className="h-4 w-4" /> Add to Space
-      </DropdownMenuSubTrigger>
-      <DropdownMenuSubContent className="max-h-72 min-w-[180px] overflow-y-auto">
-        {spaces.length === 0 && <DropdownMenuItem disabled>No Spaces yet</DropdownMenuItem>}
-        {spaces.map((sp) => (
-          <DropdownMenuItem key={sp.id} onSelect={() => void addToSpace(sp.id, sel)}>
-            <span className="truncate">{sp.name}</span>
-          </DropdownMenuItem>
-        ))}
-      </DropdownMenuSubContent>
-    </DropdownMenuSub>
+    <SpaceSubmenu
+      label="Add to Space"
+      icon={<Layers className="h-4 w-4" />}
+      onSelect={(spaceId) => void addToSpace(spaceId, sel)}
+    />
   );
 }
 
@@ -155,7 +168,7 @@ export function LibraryView() {
   const openTextEditor = useLibraryStore((s) => s.openTextEditor);
   const addPrepared = useLibraryStore((s) => s.addPrepared);
   const addToDataset = useLibraryStore((s) => s.addToDataset);
-  const deleteItems = useDeleteLibraryItems();
+  const deleteSelection = useDeleteSelection();
   const { confirm } = useConfirm();
 
   const [pickedTab, setTabState] = useState<LibraryTab | null>(readTab);
@@ -314,6 +327,16 @@ export function LibraryView() {
       return next;
     });
   const selecting = selected.size > 0;
+  // The selection holds item and dataset ids alike; actions that only make
+  // sense for one kind take that part. Ids deleted meanwhile drop out.
+  const selectedItemIds = useMemo(() => {
+    const ids = new Set(items.map((i) => i.id));
+    return [...selected].filter((id) => ids.has(id));
+  }, [selected, items]);
+  const selectedDatasetIds = useMemo(() => {
+    const ids = new Set(datasets.map((d) => d.id));
+    return [...selected].filter((id) => ids.has(id));
+  }, [selected, datasets]);
 
   // ------- Header action --------------------------------------------------
 
@@ -459,6 +482,9 @@ export function LibraryView() {
                       key={d.id}
                       dataset={d}
                       items={items}
+                      selected={selected.has(d.id)}
+                      selecting={selecting}
+                      onToggle={() => toggleSelected(d.id)}
                       onOpen={() => setViewingDataset(d.id)}
                       onEdit={() => setDatasetDialog({ id: d.id })}
                     />
@@ -506,30 +532,36 @@ export function LibraryView() {
         <SelectionBar
           count={selected.size}
           onClear={() => setSelected(new Set())}
-          // What this tab lists that isn't picked yet; nothing to add on
-          // Datasets, which can't be selected.
+          // What this tab lists that isn't picked yet.
           selectAll={(() => {
-            const rest = visibleItems.filter((i) => !selected.has(i.id));
-            return rest.length > 0
-              ? () => setSelected((prev) => new Set([...prev, ...rest.map((i) => i.id)]))
-              : null;
+            const rest = (tab === "datasets" ? visibleDatasets : visibleItems)
+              .map((x) => x.id)
+              .filter((id) => !selected.has(id));
+            return rest.length > 0 ? () => setSelected((prev) => new Set([...prev, ...rest])) : null;
           })()}
+          // A dataset can't go inside another one.
+          datasetsSelected={selectedDatasetIds.length > 0}
           onAddTo={async (datasetId) => {
-            await addToDataset(datasetId, [...selected]);
+            await addToDataset(datasetId, selectedItemIds);
             const name = datasets.find((d) => d.id === datasetId)?.name ?? "dataset";
             useToastStore.getState().push({
               kind: "info",
-              title: `Added ${selected.size} to “${name}”`,
+              title: `Added ${selectedItemIds.length} to “${name}”`,
             });
             setSelected(new Set());
           }}
-          onNewDataset={() => setDatasetDialog({ seed: [...selected] })}
+          onNewDataset={() => setDatasetDialog({ seed: selectedItemIds })}
           onAddToSpace={async (spaceId) => {
-            if (await addToSpace(spaceId, { itemIds: [...selected], datasetIds: [] })) setSelected(new Set());
+            if (await addToSpace(spaceId, { itemIds: selectedItemIds, datasetIds: selectedDatasetIds })) {
+              setSelected(new Set());
+            }
           }}
-          onChat={() => void startChatWith({ itemIds: [...selected], datasetIds: [] })}
+          onChat={() => void startChatWith({ itemIds: selectedItemIds, datasetIds: selectedDatasetIds })}
+          onChatInSpace={(spaceId) =>
+            void startChatWith({ itemIds: selectedItemIds, datasetIds: selectedDatasetIds }, spaceId)
+          }
           onDelete={async () => {
-            if (await deleteItems([...selected])) setSelected(new Set());
+            if (await deleteSelection(selectedItemIds, selectedDatasetIds)) setSelected(new Set());
           }}
         />
       )}
@@ -603,11 +635,19 @@ function useMembers(dataset: LibraryDataset, items: LibraryItemMeta[]): LibraryI
 function DatasetCard({
   dataset,
   items,
+  selected,
+  selecting,
+  onToggle,
   onOpen,
   onEdit,
 }: {
   dataset: LibraryDataset;
   items: LibraryItemMeta[];
+  selected: boolean;
+  /** Something is selected, so a click on the card selects it too, as on a
+   *  text card, instead of opening it. */
+  selecting: boolean;
+  onToggle: () => void;
   onOpen: () => void;
   onEdit: () => void;
 }) {
@@ -620,20 +660,22 @@ function DatasetCard({
       role="button"
       tabIndex={0}
       aria-label={`Open dataset: ${dataset.name}`}
-      onClick={onOpen}
+      onClick={() => (selecting ? onToggle() : onOpen())}
       onKeyDown={(e) => {
         // Only the card's own keys: Enter on its Chat or ⋯ button (or a menu
         // item, which bubbles here through the portal) belongs to that control.
         if (e.target !== e.currentTarget) return;
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
-          onOpen();
+          if (selecting) onToggle();
+          else onOpen();
         }
       }}
       className={cn(
-        "group relative flex h-full cursor-pointer flex-col rounded-2xl border border-foreground/10 bg-foreground/[0.025]",
+        "group relative flex h-full cursor-pointer flex-col rounded-2xl border bg-foreground/[0.025]",
         "p-5 transition-colors hover:border-foreground/20 hover:bg-foreground/[0.04]",
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
+        selected ? "border-primary/50 bg-primary/[0.05]" : "border-foreground/10",
       )}
     >
       <header className="flex items-start gap-3">
@@ -642,6 +684,7 @@ function DatasetCard({
           <h3 className="line-clamp-1 text-[15px] font-semibold text-foreground/90">{dataset.name}</h3>
           <p className="mt-0.5 text-[11.5px] text-foreground/45">{mixLabel(members)}</p>
         </div>
+        <SelectBox checked={selected} visible={selecting} onToggle={onToggle} label={`Select ${dataset.name}`} />
         <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
           <DropdownMenuTrigger asChild>
             <button
@@ -666,6 +709,7 @@ function DatasetCard({
             >
               <SquarePen className="h-4 w-4" /> New chat
             </DropdownMenuItem>
+            <NewChatInSpaceSubmenu sel={{ itemIds: [], datasetIds: [dataset.id] }} disabled={members.length === 0} />
             <DropdownMenuItem onSelect={onEdit}>
               <Pencil className="h-4 w-4" /> Edit details
             </DropdownMenuItem>
@@ -794,6 +838,7 @@ function DatasetDetail({
             <DropdownMenuItem onSelect={onUpload}>
               <Upload className="h-4 w-4" /> Upload files into it
             </DropdownMenuItem>
+            <NewChatInSpaceSubmenu sel={{ itemIds: [], datasetIds: [dataset.id] }} disabled={members.length === 0} />
             <AddToSpaceSubmenu sel={{ itemIds: [], datasetIds: [dataset.id] }} />
             <DropdownMenuSeparator />
             <DropdownMenuItem
@@ -926,6 +971,7 @@ function ItemMenu({ item, onOpenChange }: { item: LibraryItemMeta; onOpenChange?
         <DropdownMenuItem onSelect={() => void startChatWith({ itemIds: [item.id], datasetIds: [] })}>
           <SquarePen className="h-4 w-4" /> New chat
         </DropdownMenuItem>
+        <NewChatInSpaceSubmenu sel={{ itemIds: [item.id], datasetIds: [] }} />
         <DropdownMenuSub>
           <DropdownMenuSubTrigger>
             <Plus className="h-4 w-4" /> Add to dataset
@@ -1133,20 +1179,25 @@ function SelectionBar({
   count,
   onClear,
   selectAll,
+  datasetsSelected,
   onAddTo,
   onNewDataset,
   onAddToSpace,
   onChat,
+  onChatInSpace,
   onDelete,
 }: {
   count: number;
   onClear: () => void;
   /** Adds the rest of this tab's entries; null when there's nothing left. */
   selectAll: (() => void) | null;
+  /** Datasets are among the selection, so "Add to dataset" is off. */
+  datasetsSelected: boolean;
   onAddTo: (datasetId: string) => void;
   onNewDataset: () => void;
   onAddToSpace: (spaceId: string) => void;
   onChat: () => void;
+  onChatInSpace: (spaceId: string) => void;
   onDelete: () => void;
 }) {
   const datasets = useLibraryStore((s) => s.datasets);
@@ -1161,8 +1212,13 @@ function SelectionBar({
           </Button>
         )}
         <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button size="sm" variant="ghost" className="gap-1.5 rounded-full">
+          <DropdownMenuTrigger asChild disabled={datasetsSelected}>
+            <Button
+              size="sm"
+              variant="ghost"
+              className="gap-1.5 rounded-full"
+              title={datasetsSelected ? "A dataset can't go inside another dataset — select only texts, files and links" : undefined}
+            >
               <Plus className="h-3.5 w-3.5" />
               Add to dataset
             </Button>
@@ -1200,10 +1256,37 @@ function SelectionBar({
             ))}
           </DropdownMenuContent>
         </DropdownMenu>
-        <Button size="sm" variant="ghost" className="gap-1.5 rounded-full" onClick={onChat}>
-          <SquarePen className="h-3.5 w-3.5" />
-          New chat
-        </Button>
+        {/* New chat, with a ▾ beside it to start it inside a Space instead —
+            the selection's version of the menus' "New chat in Space". */}
+        <div className="flex items-center">
+          <Button size="sm" variant="ghost" className="gap-1.5 rounded-l-full rounded-r-none pr-2" onClick={onChat}>
+            <SquarePen className="h-3.5 w-3.5" />
+            New chat
+          </Button>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                size="sm"
+                variant="ghost"
+                className="rounded-l-none rounded-r-full px-1.5"
+                aria-label="New chat in a Space"
+                title="New chat in a Space"
+              >
+                <ChevronDown className="h-3.5 w-3.5" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="center" side="top" className="max-h-72 min-w-[200px] overflow-y-auto">
+              <DropdownMenuLabel className="text-xs text-foreground/50">New chat in Space</DropdownMenuLabel>
+              {spaces.length === 0 && <DropdownMenuItem disabled>No Spaces yet</DropdownMenuItem>}
+              {spaces.map((sp) => (
+                <DropdownMenuItem key={sp.id} onSelect={() => onChatInSpace(sp.id)}>
+                  <Layers className="h-4 w-4" />
+                  <span className="truncate">{sp.name}</span>
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
         <Button
           size="sm"
           variant="ghost"

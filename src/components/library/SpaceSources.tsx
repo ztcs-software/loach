@@ -342,6 +342,7 @@ export function SpaceSourcesTab({
         linkedItemIds={links.filter((l) => l.item_id).map((l) => l.item_id!)}
         linkedDatasetIds={links.filter((l) => l.dataset_id).map((l) => l.dataset_id!)}
         numCtx={numCtx}
+        spaceId={space.id}
         mode={space.retrieval_mode}
         onConfirm={(sel) => addSources("space", space.id, sel)}
       />

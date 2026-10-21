@@ -21,6 +21,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useConfirm } from "@/components/ConfirmDialog";
+import { SpaceSubmenu } from "@/components/ChatSpaceMenu";
 import { DEFAULT_MODEL_LABEL } from "@/components/DefaultModelPicker";
 import { SnippetVariablesPanel } from "@/components/SnippetVariablesPanel";
 import { useChatStore } from "@/stores/chatStore";
@@ -66,7 +67,10 @@ export function SnippetsLibrary() {
     [snippets, q],
   );
 
-  const runSnippet = async (snippet: Snippet) => {
+  // `spaceId` runs it in a new chat inside that Space ("Run in Space ▸"),
+  // so the chat also gets the Space's instructions, sources and memory. A
+  // model pinned on the snippet still wins over the Space's default.
+  const runSnippet = async (snippet: Snippet, spaceId: string | null = null) => {
     // `expandAndPrimeSnippet` substitutes built-ins + custom globals; if any
     // `{{VAR}}` is still unresolved it opens the fill-blanks dialog first.
     // The chat is only created once the prompt is final, so cancelling that
@@ -78,7 +82,7 @@ export function SnippetsLibrary() {
       setViewingSpace(null);
       setSidebarTab("chats");
       await newSession({
-        spaceId: null,
+        spaceId,
         provider: snippet.provider ?? undefined,
         model: snippet.model ?? undefined,
       });
@@ -166,6 +170,7 @@ export function SnippetsLibrary() {
                       key={snippet.id}
                       snippet={snippet}
                       onRun={() => void runSnippet(snippet)}
+                      onRunInSpace={(spaceId) => void runSnippet(snippet, spaceId)}
                       onEdit={() => openDialog(snippet)}
                       onDelete={() => handleDelete(snippet)}
                     />
@@ -187,11 +192,13 @@ export function SnippetsLibrary() {
 function SnippetCard({
   snippet,
   onRun,
+  onRunInSpace,
   onEdit,
   onDelete,
 }: {
   snippet: Snippet;
   onRun: () => void;
+  onRunInSpace: (spaceId: string) => void;
   /** Tile body click + kebab "Edit" both use this — opens the snippet
    *  editor dialog. The "Run" footer button is the dominant verb so it
    *  stays separate. */
@@ -240,6 +247,11 @@ function SnippetCard({
             <DropdownMenuItem onSelect={onRun}>
               <Play className="h-4 w-4" /> Run
             </DropdownMenuItem>
+            <SpaceSubmenu
+              label="Run in Space"
+              icon={<Play className="h-4 w-4" />}
+              onSelect={onRunInSpace}
+            />
             <DropdownMenuItem onSelect={onEdit}>
               <Pencil className="h-4 w-4" /> Edit
             </DropdownMenuItem>

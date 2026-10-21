@@ -1289,6 +1289,7 @@ export function ChatInput({ centered = false }: ChatInputProps) {
           sourcesSpace?.default_params_json,
           composerModelCtx,
         )}
+        spaceId={sourcesSpaceId}
         mode={
           composerSessionId && activeSession
             ? chatRetrievalMode(activeSession, sourcesSpace?.retrieval_mode)

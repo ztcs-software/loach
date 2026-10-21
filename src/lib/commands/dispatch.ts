@@ -87,19 +87,34 @@ export async function dispatch(
 // Helpers
 // ---------------------------------------------------------------------------
 
+/** The chat a command acts on: the composer's. On a Space's page the composer
+ *  starts a new chat (see `sendUserMessage`), so the chat left open behind the
+ *  page isn't it — `/clear`, `/delete` or `/model` typed there used to change
+ *  a chat the user couldn't even see. */
+function composerSessionId(): string | null {
+  if (useSpaceStore.getState().viewingSpaceId) return null;
+  return useChatStore.getState().activeSessionId;
+}
+
 function requireSession(): Session {
-  const state = useChatStore.getState();
-  const id = state.activeSessionId;
-  if (!id) throw new Error("No active chat. Start one with /new first.");
-  const session = state.sessions.find((s) => s.id === id);
+  const id = composerSessionId();
+  if (!id) {
+    throw new Error(
+      useSpaceStore.getState().viewingSpaceId
+        ? "This works on a chat. Open one of this Space's chats, or send a message here to start one."
+        : "No active chat. Start one with /new first.",
+    );
+  }
+  const session = useChatStore.getState().sessions.find((s) => s.id === id);
   if (!session) throw new Error("Active chat is missing — try /new.");
   return session;
 }
 
-/** Where `/remember`, `/forget` and `/list memories` operate: the active
- *  chat's Space (or the Space being viewed) when there is one, otherwise the
- *  global list. */
+/** Where `/remember`, `/forget` and `/list memories` operate: the Space being
+ *  viewed, else the active chat's Space, else the global list. */
 function memoryScope(): MemoryScope {
+  const viewing = useSpaceStore.getState().viewingSpaceId;
+  if (viewing) return { kind: "space", spaceId: viewing };
   const session = useChatStore.getState().sessions.find(
     (s) => s.id === useChatStore.getState().activeSessionId,
   );
@@ -244,6 +259,12 @@ async function run(
 
 async function runNew(): Promise<CommandResult> {
   const session = await useChatStore.getState().newSession();
+  // From a Space's page the chat is created in that Space; go to it, or it
+  // would sit behind the page the user is still looking at.
+  if (useSpaceStore.getState().viewingSpaceId) {
+    useSpaceStore.setState({ viewingSpaceId: null });
+    useUIStore.getState().setSidebarTab("chats");
+  }
   return ok("New chat", session.title || "Untitled");
 }
 
@@ -551,7 +572,7 @@ async function runRemember(rest: string): Promise<CommandResult> {
   if (!fact) throw new Error("Usage: /remember <fact>");
   const scope = memoryScope();
   const session = useChatStore.getState().sessions.find(
-    (s) => s.id === useChatStore.getState().activeSessionId,
+    (s) => s.id === composerSessionId(),
   );
   const preview = fact.length > 80 ? fact.slice(0, 80) + "…" : fact;
   if (scope.kind === "global") {
@@ -569,7 +590,7 @@ async function runRemember(rest: string): Promise<CommandResult> {
   const space = useSpaceStore.getState().spaces.find((s) => s.id === scope.spaceId);
   if (space && !space.memory_enabled) {
     throw new Error(
-      `Memory is off for “${space.name}”. Turn it on in the space's Memory tab.`,
+      `Memory is off for “${space.name}”. Turn it on in the Space's Settings tab.`,
     );
   }
   await useSpaceStore.getState().addMemory({
@@ -626,7 +647,7 @@ async function runSpace(rest: string): Promise<CommandResult> {
     ? [exact]
     : spaces.filter((s) => s.name.toLowerCase().includes(lower));
   if (matches.length === 0) {
-    throw new Error(`No space matches "${query}". Try /list spaces.`);
+    throw new Error(`No Space matches "${query}". Try /list spaces.`);
   }
   if (matches.length > 1) {
     return listItems(

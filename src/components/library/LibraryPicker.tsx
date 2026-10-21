@@ -12,7 +12,7 @@ import { Input } from "@/components/ui/input";
 import { formatTokens } from "@/lib/contextUsage";
 import { sourcesVerdict } from "@/lib/sources";
 import { cn, formatBytes } from "@/lib/utils";
-import { useLibraryStore } from "@/stores/libraryStore";
+import { expandSources, useLibraryStore } from "@/stores/libraryStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useModelsStore } from "@/stores/modelsStore";
 import { useUIStore } from "@/stores/uiStore";
@@ -49,6 +49,7 @@ export function LibraryPicker({
   linkedItemIds = [],
   linkedDatasetIds = [],
   numCtx,
+  spaceId = null,
   mode = "auto",
   onConfirm,
 }: {
@@ -63,6 +64,11 @@ export function LibraryPicker({
   linkedDatasetIds?: string[];
   /** Context window the selection will be measured against. */
   numCtx?: number;
+  /** The Space whose sources the chat (or Space) already gets. They count
+   *  toward the estimate — the badge used to ignore them, so a chat in a
+   *  Space with big sources read "Fits in full" — and items arriving through
+   *  them show as "In Space" instead of being offered a second time. */
+  spaceId?: string | null;
   /** How the chat or Space it's added to uses its sources — the badge says
    *  what that mode will do with the selection. */
   mode?: RetrievalMode;
@@ -98,6 +104,20 @@ export function LibraryPicker({
   const linkedItems = useMemo(() => new Set(linkedItemIds), [linkedItemIds]);
   const linkedDatasets = useMemo(() => new Set(linkedDatasetIds), [linkedDatasetIds]);
   const byId = useMemo(() => new Map(items.map((i) => [i.id, i])), [items]);
+  const spaceLinks = useLibraryStore((s) => (spaceId ? s.sources[`space:${spaceId}`] : undefined));
+  const spaceFiles = useSpaceStore((s) => (spaceId ? s.spaceFiles[spaceId] : undefined));
+  const fromSpace = useMemo(() => {
+    const links = spaceLinks ?? [];
+    return {
+      items: new Set(expandSources(links, datasets, items).map((i) => i.id)),
+      datasets: new Set(links.filter((l) => l.enabled && l.dataset_id).map((l) => l.dataset_id!)),
+      uploadTokens: (spaceFiles ?? [])
+        .filter((f) => f.enabled !== false && f.kind === "text")
+        .reduce((n, f) => n + Math.ceil(f.data.length / 4), 0),
+    };
+  }, [spaceLinks, spaceFiles, datasets, items]);
+  /** Why a row can't be picked, or null when it can. */
+  const lockOf = (linked: boolean, inSpace: boolean) => (linked ? "Added" : inSpace ? "In Space" : null);
 
   const q = query.trim().toLowerCase();
   const rows = useMemo(() => {
@@ -111,7 +131,7 @@ export function LibraryPicker({
             icon: <DatasetIcon size="sm" />,
             title: d.name,
             sub: `${mixLabel(members)} · ~${formatTokens(members.reduce((n, i) => n + itemTokens(i), 0))} tokens`,
-            locked: linkedDatasets.has(d.id),
+            locked: lockOf(linkedDatasets.has(d.id), fromSpace.datasets.has(d.id)),
           };
         });
     }
@@ -132,9 +152,10 @@ export function LibraryPicker({
           i.kind === "link" ? domainOf(i.url) : formatBytes(i.size),
           i.media === "text" ? `~${formatTokens(itemTokens(i))} tokens` : "image",
         ].join(" · "),
-        locked: linkedItems.has(i.id),
+        locked: lockOf(linkedItems.has(i.id), fromSpace.items.has(i.id)),
       }));
-  }, [tab, datasets, items, q, byId, linkedDatasets, linkedItems]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, datasets, items, q, byId, linkedDatasets, linkedItems, fromSpace]);
 
   // What the selection would add, each item counted once even when it's
   // also inside a picked dataset — or already attached. `total` adds what's
@@ -148,7 +169,7 @@ export function LibraryPicker({
       }
       return n;
     };
-    const attached = new Set<string>(linkedItems);
+    const attached = new Set<string>([...linkedItems, ...fromSpace.items]);
     for (const id of linkedDatasets) datasets.find((d) => d.id === id)?.item_ids.forEach((i) => attached.add(i));
     const itemIds: string[] = [];
     const datasetIds: string[] = [];
@@ -167,8 +188,14 @@ export function LibraryPicker({
       }
     }
     const tokens = tokensOf(reached);
-    return { itemIds, datasetIds, tokens, total: tokens + tokensOf(attached), hasAttached: attached.size > 0 };
-  }, [picked, datasets, byId, linkedItems, linkedDatasets]);
+    return {
+      itemIds,
+      datasetIds,
+      tokens,
+      total: tokens + tokensOf(attached) + fromSpace.uploadTokens,
+      hasAttached: attached.size > 0 || fromSpace.uploadTokens > 0,
+    };
+  }, [picked, datasets, byId, linkedItems, linkedDatasets, fromSpace]);
 
   const toggle = (key: string) =>
     setPicked((prev) => {
@@ -307,12 +334,12 @@ export function LibraryPicker({
               ) : (
                 <ul className="divide-y divide-foreground/[0.06]">
                   {rows.map((r) => {
-                    const checked = r.locked || picked.has(r.key);
+                    const checked = !!r.locked || picked.has(r.key);
                     return (
                       <li key={r.key}>
                         <button
                           type="button"
-                          disabled={r.locked}
+                          disabled={!!r.locked}
                           onClick={() => toggle(r.key)}
                           aria-pressed={checked}
                           className={cn(
@@ -338,7 +365,7 @@ export function LibraryPicker({
                             <span className="block truncate text-[11.5px] text-foreground/45">{r.sub}</span>
                           </span>
                           {r.locked && (
-                            <span className="shrink-0 text-[11px] text-foreground/45">Added</span>
+                            <span className="shrink-0 text-[11px] text-foreground/45">{r.locked}</span>
                           )}
                         </button>
                       </li>

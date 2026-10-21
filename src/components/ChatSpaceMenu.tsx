@@ -11,6 +11,39 @@ import { useSpaceStore } from "@/stores/spaceStore";
 import { useToastStore } from "@/stores/toastStore";
 import type { Session } from "@/types";
 
+/** "<label> ▸" listing every Space, for the menu actions that need one:
+ *  adding Library sources to a Space, starting a chat in one, running a
+ *  snippet in one. */
+export function SpaceSubmenu({
+  label,
+  icon,
+  onSelect,
+  disabled = false,
+}: {
+  label: string;
+  icon: React.ReactNode;
+  onSelect: (spaceId: string) => void;
+  disabled?: boolean;
+}) {
+  const spaces = useSpaceStore((s) => s.spaces);
+  return (
+    <DropdownMenuSub>
+      <DropdownMenuSubTrigger disabled={disabled}>
+        {icon}
+        {label}
+      </DropdownMenuSubTrigger>
+      <DropdownMenuSubContent className="max-h-72 min-w-[180px] overflow-y-auto">
+        {spaces.length === 0 && <DropdownMenuItem disabled>No Spaces yet</DropdownMenuItem>}
+        {spaces.map((sp) => (
+          <DropdownMenuItem key={sp.id} onSelect={() => onSelect(sp.id)}>
+            <span className="min-w-0 truncate">{sp.name}</span>
+          </DropdownMenuItem>
+        ))}
+      </DropdownMenuSubContent>
+    </DropdownMenuSub>
+  );
+}
+
 /** "Move to Space ▸" submenu: every Space, plus taking the chat out of the
  *  one it's in. Drop it into any chat kebab's `DropdownMenuContent` — the
  *  sidebar row, a Space's chat list and the chat header all carry it, so a

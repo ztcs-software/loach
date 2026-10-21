@@ -109,6 +109,52 @@ export function useDeleteDataset() {
   };
 }
 
+/** Delete what's selected on the Library page — items, datasets or a mix —
+ *  after one confirmation. Items alone or a single dataset go through their
+ *  own flows above, so those keep their exact wording. */
+export function useDeleteSelection() {
+  const { confirm } = useConfirm();
+  const deleteItemsFlow = useDeleteLibraryItems();
+  const deleteDatasetFlow = useDeleteDataset();
+  const deleteItems = useLibraryStore((s) => s.deleteItems);
+  const deleteDataset = useLibraryStore((s) => s.deleteDataset);
+  return async (itemIds: string[], datasetIds: string[]) => {
+    if (datasetIds.length === 0) return deleteItemsFlow(itemIds);
+    if (itemIds.length === 0 && datasetIds.length === 1) return deleteDatasetFlow(datasetIds[0]);
+    const { datasets } = useLibraryStore.getState();
+    // Through the datasets the items are in too, as for items alone.
+    const reach = new Set(datasetIds);
+    for (const d of datasets) if (d.item_ids.some((id) => itemIds.includes(id))) reach.add(d.id);
+    let usage = { spaces: [] as string[], chats: 0 };
+    try {
+      usage = await libraryUsage({ itemIds, datasetIds: [...reach] });
+    } catch {
+      /* the confirmation still works without the usage line */
+    }
+    const where: string[] = [];
+    if (usage.spaces.length) where.push(`Space${usage.spaces.length === 1 ? "" : "s"} ${usage.spaces.map((s) => `“${s}”`).join(", ")}`);
+    if (usage.chats) where.push(`${usage.chats} chat${usage.chats === 1 ? "" : "s"}`);
+    const what = [
+      itemIds.length ? `${itemIds.length} item${itemIds.length === 1 ? "" : "s"}` : null,
+      `${datasetIds.length} dataset${datasetIds.length === 1 ? "" : "s"}`,
+    ]
+      .filter(Boolean)
+      .join(" and ");
+    const ok = await confirm({
+      title: `Delete ${what}?`,
+      body:
+        "Items inside the datasets that you didn't select stay in your Library. " +
+        (where.length ? `Used in ${where.join(", ")} — they'll lose them. ` : "") +
+        "This can't be undone.",
+      confirmLabel: "Delete",
+      destructive: true,
+    });
+    if (!ok) return false;
+    for (const id of datasetIds) await deleteDataset(id);
+    return itemIds.length > 0 ? deleteItems(itemIds) : true;
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Text editor (global — opened from the Library or an item preview)
 // ---------------------------------------------------------------------------
