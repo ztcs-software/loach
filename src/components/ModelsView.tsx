@@ -191,7 +191,8 @@ export function ModelsView() {
   return (
     <main className="flex min-w-0 flex-1 flex-col">
       <ScrollArea className="flex-1">
-        <div className="mx-auto w-full max-w-4xl px-8 pb-12 pt-8">
+        {/* Same column as a Space's and a dataset's page. */}
+        <div className="mx-auto w-full max-w-3xl px-4 pb-12 pt-8">
           {/* Breadcrumb — the same one a Space's and a dataset's page lead
               with, so every detail page goes back the same way. */}
           <button
