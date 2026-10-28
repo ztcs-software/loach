@@ -13,6 +13,7 @@ import {
   SlidersHorizontal,
   Sparkles,
 } from "lucide-react";
+import { Button } from "@/components/ui/button";
 import { formatTokens } from "@/lib/contextUsage";
 import { cn } from "@/lib/utils";
 import { useLibraryStore } from "@/stores/libraryStore";
@@ -181,50 +182,45 @@ export function IndexBadge({ item }: { item: LibraryItemMeta }) {
   return null;
 }
 
-/** Where the retrieval index stands, as a pill that opens Settings → Library,
- *  worded like that page's status. It used to read "Keyword search" beside a
- *  magnifier, right next to the page's search box, so it looked like a second
- *  search control: the keyword state now says "only" and wears a settings
- *  icon. */
-export function IndexStatusPill() {
+/** Where the retrieval index stands, as a button that opens Settings →
+ *  Library, worded like that page's status. Drawn as the header's secondary
+ *  button (the Models page's Refresh) beside its primary action: as a
+ *  rounded, tinted pill it read as a search field. */
+export function IndexStatusButton() {
   const status = useLibraryStore((s) => s.indexStatus);
   const openSettingsTab = useUIStore((s) => s.openSettingsTab);
-  let icon = <SlidersHorizontal className="h-3.5 w-3.5" />;
+  let icon = <SlidersHorizontal className="h-4 w-4" />;
   let label = "Keyword search only";
   let title =
     "Large sources are searched by keyword. Set an embedding model in Settings → Library to also search by meaning.";
-  let tone = "text-foreground/55";
+  let tone = "";
   if (status?.model) {
     const model = status.model.split(":").slice(1).join(":");
     if (status.error) {
-      icon = <AlertTriangle className="h-3.5 w-3.5" />;
+      icon = <AlertTriangle className="h-4 w-4" />;
       label = "Embedding paused";
       title = `${model}: ${status.error}`;
-      tone = "text-amber-700 dark:text-amber-300";
+      tone = "text-amber-700 hover:text-amber-700 dark:text-amber-300 dark:hover:text-amber-300";
     } else if (status.busy || status.embedded < status.total) {
-      icon = <Loader2 className="h-3.5 w-3.5 animate-spin" />;
+      icon = <Loader2 className="h-4 w-4 animate-spin" />;
       label = `Indexing ${status.embedded.toLocaleString()} / ${status.total.toLocaleString()}`;
       title = `Embedding with ${model}. Sources stay searchable by keyword meanwhile.`;
     } else {
-      icon = <Sparkles className="h-3.5 w-3.5" />;
+      icon = <Sparkles className="h-4 w-4" />;
       label = "Search by meaning";
       title = `Search by meaning and keyword, embedded with ${model}.`;
-      tone = "text-foreground/65";
     }
   }
   return (
-    <button
-      type="button"
+    <Button
+      variant="outline"
       onClick={() => openSettingsTab("library")}
       title={title}
-      className={cn(
-        "inline-flex items-center gap-1.5 rounded-full border border-foreground/10 bg-foreground/[0.03] px-3 py-1.5 text-xs transition-colors hover:bg-foreground/[0.07] hover:text-foreground",
-        tone,
-      )}
+      className={cn("gap-1.5 rounded-xl", tone)}
     >
       {icon}
       {label}
-    </button>
+    </Button>
   );
 }
 

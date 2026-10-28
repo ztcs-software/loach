@@ -1,5 +1,5 @@
 import { ragSearch } from "@/lib/tauri";
-import { stripInlinedAttachments } from "@/lib/files";
+import { fitImageForModel, stripInlinedAttachments } from "@/lib/files";
 import { logger } from "@/lib/logger";
 import { expandSources, useLibraryStore } from "@/stores/libraryStore";
 import { useSpaceStore } from "@/stores/spaceStore";
@@ -27,6 +27,9 @@ import type {
  *  - **retrieval** — the excerpts most relevant to this message are found
  *    by `rag_search` (keyword + embeddings) and appended to the trailing
  *    user turn only, never persisted into the transcript.
+ *
+ * Images go with the trailing user turn in either mode, scaled down by
+ * `fitImageForModel` and named in the system prompt.
  *
  * `auto` picks full text while the sources fit {@link FULL_TEXT_SHARE} of
  * the context window. Either way the assistant reply carries a
@@ -137,6 +140,19 @@ export function buildFullTextBlock(
   return { block: included > 0 ? block : "", cut, included };
 }
 
+/** The system-prompt block naming the image sources, which ride on the
+ *  user's latest message. Without it the prompt listed only the text
+ *  sources, and a model answered that no picture had been attached. */
+export function buildImageBlock(titles: string[]): string {
+  if (titles.length === 0) return "";
+  return (
+    "--- Reference images ---\n" +
+    `Images from the user's sources, attached to their latest message: ${titles
+      .map((t) => `\`${promptLabel(t)}\``)
+      .join(", ")}.\n`
+  );
+}
+
 /** The block appended to the trailing user turn in retrieval mode. */
 export function buildExcerptBlock(hits: RagHit[], titleOf: (h: RagHit) => string): string {
   if (hits.length === 0) return "";
@@ -184,7 +200,7 @@ export interface ResolvedSources {
   systemBlock: string;
   /** Appended to the trailing user turn (retrieval mode). */
   userBlock: string;
-  /** Image sources, attached to the trailing user turn. */
+  /** Image sources, scaled to fit and attached to the trailing user turn. */
   images: string[];
   /** Transcript record of what was used, or null when there were no
    *  sources. */
@@ -199,6 +215,32 @@ interface Doc {
   chars: number;
   /** Already in hand for Space files; fetched on demand for Library items. */
   text?: string;
+}
+
+interface ImageSource {
+  kind: "library" | "space_file";
+  id: string;
+  title: string;
+  mime: string;
+  /** Base64. Already in hand for Space files; fetched for Library items. */
+  data?: string;
+}
+
+/** Image sources already scaled for a model, so a chat doesn't decode the
+ *  same photo again on every turn. Keyed by source and size; small, since a
+ *  chat rarely carries more than a few. */
+const fittedImages = new Map<string, Promise<string>>();
+const FITTED_IMAGES_KEPT = 16;
+
+function fittedImage(src: ImageSource & { data: string }): Promise<string> {
+  const key = `${src.kind}:${src.id}:${src.data.length}`;
+  let fitted = fittedImages.get(key);
+  if (!fitted) {
+    fitted = fitImageForModel(src.data, src.mime);
+    fittedImages.set(key, fitted);
+    if (fittedImages.size > FITTED_IMAGES_KEPT) fittedImages.delete(fittedImages.keys().next().value!);
+  }
+  return fitted;
 }
 
 /** The effective preference for a chat: its own, else its Space's. */
@@ -234,7 +276,7 @@ export async function resolveSources(args: {
   if (!lib.hydrated) await lib.hydrate();
 
   const docs: Doc[] = [];
-  const images: string[] = [];
+  const imageSources: ImageSource[] = [];
   // Reading the Library can fail. Its sources then sit this turn out, but
   // the record says so — never silently — and the Space's own uploads,
   // already in hand, still go.
@@ -264,30 +306,41 @@ export async function resolveSources(args: {
   } catch (e) {
     libraryFailed(e);
   }
-  const imageItemIds: string[] = [];
   const addItems = (list: LibraryItemMeta[]) => {
     for (const item of list) {
-      if (item.media === "image") imageItemIds.push(item.id);
+      if (item.media === "image")
+        imageSources.push({ kind: "library", id: item.id, title: item.title, mime: item.mime });
       else docs.push({ kind: "library", id: item.id, title: item.title, url: item.url, chars: item.chars });
     }
   };
   addItems(chatItems);
   for (const f of spaceCtx?.files ?? []) {
     if (f.enabled === false) continue;
-    if (f.kind === "image") images.push(f.data);
+    if (f.kind === "image")
+      imageSources.push({ kind: "space_file", id: f.id, title: f.name, mime: f.mime, data: f.data });
     // `kind: "file"` uploads are formats Loach can't read, kept as base64:
     // nothing a model could use.
     else if (f.kind === "text")
       docs.push({ kind: "space_file", id: f.id, title: f.name, url: null, chars: f.data.length, text: f.data });
   }
   addItems(spaceItems);
-  if (imageItemIds.length > 0) {
+  const libraryImageIds = imageSources.filter((s) => s.data === undefined).map((s) => s.id);
+  if (libraryImageIds.length > 0) {
     try {
-      for (const item of await lib.getContents(imageItemIds)) images.push(item.content);
+      const bodies = new Map((await lib.getContents(libraryImageIds)).map((i) => [i.id, i.content]));
+      for (const s of imageSources) if (s.data === undefined) s.data = bodies.get(s.id);
     } catch (e) {
       libraryFailed(e);
     }
   }
+  // Images go scaled to fit, named in the system prompt and listed in the
+  // record, in every mode — one whose body didn't come back is none of these.
+  const sentImages = imageSources.filter((s): s is ImageSource & { data: string } => s.data !== undefined);
+  const images = await Promise.all(sentImages.map(fittedImage));
+  const imageBlock = buildImageBlock(sentImages.map((s) => s.title));
+  const imageEntries: SourcesReport["sources"] = sentImages.map((s) => ({ kind: s.kind, id: s.id, title: s.title }));
+  const withImageCount = (result: string) =>
+    [result, sentImages.length > 0 ? `Attached ${plural(sentImages.length, "image")}.` : ""].filter(Boolean).join(" ");
 
   const space = session.space_id
     ? useSpaceStore.getState().spaces.find((s) => s.id === session.space_id) ?? spaceCtx?.space
@@ -296,14 +349,24 @@ export async function resolveSources(args: {
   const totalTokens = docs.reduce((n, d) => n + Math.ceil(d.chars / 4), 0);
   const mode = resolveMode(pref, totalTokens, numCtx);
   const unreadable = (): ResolvedSources => ({
-    systemBlock: "",
+    systemBlock: imageBlock,
     userBlock: "",
     images,
-    record: sourcesRecord({ mode, sources: [], warning: warnings.join(" ") }, "Couldn't read your Library sources.", true),
+    record: sourcesRecord(
+      { mode, sources: imageEntries, warning: warnings.join(" ") },
+      withImageCount("Couldn't read your Library sources."),
+      true,
+    ),
   });
 
   if (docs.length === 0) {
-    return library.failed ? unreadable() : { systemBlock: "", userBlock: "", images, record: null };
+    if (library.failed) return unreadable();
+    return {
+      systemBlock: imageBlock,
+      userBlock: "",
+      images,
+      record: sentImages.length > 0 ? sourcesRecord({ mode, sources: imageEntries }, withImageCount("")) : null,
+    };
   }
 
   if (mode === "full") {
@@ -337,17 +400,19 @@ export async function resolveSources(args: {
     const report: SourcesReport = {
       mode,
       warning: warnings.join(" ") || null,
-      sources: read.map((d) => ({ kind: d.kind, id: d.id, title: d.title })),
+      sources: [...read.map((d) => ({ kind: d.kind, id: d.id, title: d.title })), ...imageEntries],
     };
     return {
-      systemBlock: block,
+      systemBlock: [block, imageBlock].filter(Boolean).join("\n"),
       userBlock: "",
       images,
       record: sourcesRecord(
         report,
-        read.length === 0
-          ? "None of the sources fit the context window."
-          : `Read ${plural(read.length, "source")} in full${cut ? " (cut to fit)" : ""}.`,
+        withImageCount(
+          read.length === 0
+            ? "None of the sources fit the context window."
+            : `Read ${plural(read.length, "source")} in full${cut ? " (cut to fit)" : ""}.`,
+        ),
       ),
     };
   }
@@ -379,28 +444,30 @@ export async function resolveSources(args: {
       mode,
       method: result.method,
       warning: warnings.join(" ") || null,
-      sources: [...grouped.values()],
+      sources: [...grouped.values(), ...imageEntries],
     };
     return {
-      systemBlock: "",
+      systemBlock: imageBlock,
       userBlock: buildExcerptBlock(hits, (h) => titles.get(`${h.doc_kind}:${h.doc_id}`) ?? "Source"),
       images,
       record: sourcesRecord(
         report,
-        hits.length === 0
-          ? `Searched ${plural(docs.length, "source")}; nothing matched.`
-          : `Used ${plural(hits.length, "excerpt")} from ${plural(grouped.size, "source")}.`,
+        withImageCount(
+          hits.length === 0
+            ? `Searched ${plural(docs.length, "source")}; nothing matched.`
+            : `Used ${plural(hits.length, "excerpt")} from ${plural(grouped.size, "source")}.`,
+        ),
       ),
     };
   } catch (e) {
     logger.warn("source retrieval failed", e);
     const message = e instanceof Error ? e.message : String(e);
     return {
-      systemBlock: "",
+      systemBlock: imageBlock,
       userBlock: "",
       images,
       record: sourcesRecord(
-        { mode, sources: [], warning: [...warnings, message].join(" ") },
+        { mode, sources: imageEntries, warning: [...warnings, message].join(" ") },
         `Couldn't search the sources: ${message}`,
         true,
       ),

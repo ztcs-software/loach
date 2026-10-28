@@ -116,6 +116,41 @@ function blobToBase64(blob: Blob): Promise<string> {
   });
 }
 
+/** Longest side, in pixels, an image source is sent to a model at. A camera
+ *  photo kept whole runs to thousands of image tokens, and models do worse
+ *  with it, not better: Gemma 4 on Ollama answered a 24-megapixel dataset
+ *  photo as if no picture were attached, and described it at 1024 px. */
+export const MODEL_IMAGE_MAX_SIDE = 1024;
+
+/**
+ * `base64` (an image of type `mime`) scaled down to fit
+ * {@link MODEL_IMAGE_MAX_SIDE}, as base64 — JPEG stays JPEG, anything else
+ * becomes PNG so transparency survives. An image that already fits, or that
+ * can't be decoded here, comes back unchanged: sending the original beats
+ * sending nothing.
+ */
+export async function fitImageForModel(base64: string, mime: string): Promise<string> {
+  try {
+    const img = new Image();
+    img.src = `data:${safeImageMime(mime)};base64,${base64}`;
+    await img.decode();
+    const scale = MODEL_IMAGE_MAX_SIDE / Math.max(img.naturalWidth, img.naturalHeight);
+    if (!(scale < 1)) return base64;
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(img.naturalWidth * scale));
+    canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return base64;
+    ctx.imageSmoothingQuality = "high";
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    const type = safeImageMime(mime) === "image/jpeg" ? "image/jpeg" : "image/png";
+    const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, type, 0.9));
+    return blob ? await blobToBase64(blob) : base64;
+  } catch {
+    return base64;
+  }
+}
+
 /** Lazy-loaded to keep the initial bundle small.
  *
  * The `legacy/` build rather than the default one. pdfjs calls

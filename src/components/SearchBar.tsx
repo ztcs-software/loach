@@ -448,7 +448,8 @@ export function SearchBar() {
       }
     }
 
-    // Same fields the Library page's own search looks at.
+    // The Library's only search — its page has no box of its own: datasets
+    // by name and description, items by title, opening text and link.
     if (allows("library")) {
       for (const d of datasets) {
         if (d.name.toLowerCase().includes(q) || d.description.toLowerCase().includes(q)) {

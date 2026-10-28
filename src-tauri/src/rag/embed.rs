@@ -250,6 +250,8 @@ mod tests {
     fn task_prefixes_follow_the_model() {
         assert_eq!(document_input(&cfg("nomic-embed-text:latest"), "T", "x"), "search_document: T\n\nx");
         assert_eq!(document_input(&cfg("embeddinggemma"), "", "x"), "title: none | text: x");
+        // EmbeddingGemma 2 kept the first one's prompts.
+        assert_eq!(document_input(&cfg("embeddinggemma-2:270m"), "", "x"), "title: none | text: x");
         assert_eq!(document_input(&cfg("bge-m3"), "T", "x"), "T\n\nx");
         assert_eq!(cfg("bge-m3").model_key(), "ollama:bge-m3");
     }

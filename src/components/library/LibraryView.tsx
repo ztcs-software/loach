@@ -14,14 +14,12 @@ import {
   Pencil,
   Plus,
   RefreshCw,
-  Search,
   SquarePen,
   Trash2,
   Upload,
   X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   DropdownMenu,
@@ -59,7 +57,7 @@ import {
   DatasetIcon,
   domainOf,
   IndexBadge,
-  IndexStatusPill,
+  IndexStatusButton,
   ItemIcon,
   itemTokens,
   mixLabel,
@@ -172,7 +170,6 @@ export function LibraryView() {
   const { confirm } = useConfirm();
 
   const [pickedTab, setTabState] = useState<LibraryTab | null>(readTab);
-  const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [linkOpen, setLinkOpen] = useState(false);
   const [datasetDialog, setDatasetDialog] = useState<{ id?: string; seed?: string[] } | null>(null);
@@ -193,26 +190,16 @@ export function LibraryView() {
     }
   };
 
-  const q = query.trim().toLowerCase();
-  const matches = (i: LibraryItemMeta) =>
-    !q ||
-    i.title.toLowerCase().includes(q) ||
-    i.preview.toLowerCase().includes(q) ||
-    (i.url ?? "").toLowerCase().includes(q);
-  const datasetMatches = (d: LibraryDataset) =>
-    !q || d.name.toLowerCase().includes(q) || d.description.toLowerCase().includes(q);
-
-  // What each tab holds — or, while searching, how many of its entries match,
-  // so a search that comes up empty on this tab shows where the hits are.
+  // What each tab holds. Searching the Library is the global search's job
+  // (Ctrl+K, or `in:library`), so the page lists everything.
   const counts: Record<LibraryTab, number> = useMemo(
     () => ({
-      datasets: datasets.filter(datasetMatches).length,
-      texts: items.filter((i) => i.kind === "text" && matches(i)).length,
-      files: items.filter((i) => i.kind === "file" && matches(i)).length,
-      links: items.filter((i) => i.kind === "link" && matches(i)).length,
+      datasets: datasets.length,
+      texts: items.filter((i) => i.kind === "text").length,
+      files: items.filter((i) => i.kind === "file").length,
+      links: items.filter((i) => i.kind === "link").length,
     }),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [items, datasets, q],
+    [items, datasets],
   );
 
   // A Library never opened before lands on the first section with something
@@ -224,17 +211,9 @@ export function LibraryView() {
     TABS.find((t) => (t === "datasets" ? datasets.length > 0 : items.some((i) => tabOf(i) === t))) ??
     "files";
   const visibleItems = useMemo(
-    () => (tab === "datasets" ? [] : items.filter((i) => tabOf(i) === tab && matches(i))),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [items, tab, q],
+    () => (tab === "datasets" ? [] : items.filter((i) => tabOf(i) === tab)),
+    [items, tab],
   );
-  const visibleDatasets = useMemo(
-    () => datasets.filter(datasetMatches),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [datasets, q],
-  );
-  // Tabs other than this one that have hits, for the "no matches" line.
-  const elsewhere = TABS.filter((t) => t !== tab && counts[t] > 0);
   // A dataset gets its own page, like a Space; an id that no longer
   // resolves (deleted elsewhere) falls back to the list.
   const openDataset = viewingDatasetId ? datasets.find((d) => d.id === viewingDatasetId) : undefined;
@@ -401,8 +380,8 @@ export function LibraryView() {
                   sources.
                 </p>
               </div>
-              <div className="flex items-center gap-3">
-                <IndexStatusPill />
+              <div className="flex items-center gap-2">
+                <IndexStatusButton />
                 <Button onClick={primary.onClick} className="gap-1.5 rounded-xl">
                   {primary.icon}
                   {primary.label}
@@ -410,7 +389,7 @@ export function LibraryView() {
               </div>
             </header>
 
-            <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
+            <div className="mb-5">
               <div
                 role="tablist"
                 aria-label="Library sections"
@@ -435,16 +414,6 @@ export function LibraryView() {
                   </button>
                 ))}
               </div>
-              <div className="relative w-full sm:w-64">
-                <Search className="pointer-events-none absolute left-3.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-foreground/40" />
-                <Input
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
-                  placeholder="Search the Library"
-                  aria-label="Search the Library"
-                  className="h-10 rounded-2xl pl-9"
-                />
-              </div>
             </div>
 
             {!hydrated ? (
@@ -459,25 +428,21 @@ export function LibraryView() {
                 </Button>
               </div>
             ) : tab === "datasets" ? (
-              visibleDatasets.length === 0 ? (
-                q ? (
-                  <NoMatches elsewhere={elsewhere} counts={counts} onPick={setTab} />
-                ) : (
-                  <EmptyState
-                    icon={<DatasetIcon size="lg" />}
-                    title="No datasets yet"
-                    description="Group texts, files and links into a dataset, then attach the whole set to a chat or Space in one click."
-                    cta={
-                      <Button onClick={() => setDatasetDialog({})} className="gap-1.5 rounded-xl">
-                        <Plus className="h-4 w-4" />
-                        New dataset
-                      </Button>
-                    }
-                  />
-                )
+              datasets.length === 0 ? (
+                <EmptyState
+                  icon={<DatasetIcon size="lg" />}
+                  title="No datasets yet"
+                  description="Group texts, files and links into a dataset, then attach the whole set to a chat or Space in one click."
+                  cta={
+                    <Button onClick={() => setDatasetDialog({})} className="gap-1.5 rounded-xl">
+                      <Plus className="h-4 w-4" />
+                      New dataset
+                    </Button>
+                  }
+                />
               ) : (
                 <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-                  {visibleDatasets.map((d) => (
+                  {datasets.map((d) => (
                     <DatasetCard
                       key={d.id}
                       dataset={d}
@@ -492,11 +457,7 @@ export function LibraryView() {
                 </div>
               )
             ) : visibleItems.length === 0 ? (
-              q ? (
-                <NoMatches elsewhere={elsewhere} counts={counts} onPick={setTab} />
-              ) : (
-                <EmptyTab tab={tab} action={primary} />
-              )
+              <EmptyTab tab={tab} action={primary} />
             ) : tab === "texts" ? (
               <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
                 {visibleItems.map((i) => (
@@ -534,7 +495,7 @@ export function LibraryView() {
           onClear={() => setSelected(new Set())}
           // What this tab lists that isn't picked yet.
           selectAll={(() => {
-            const rest = (tab === "datasets" ? visibleDatasets : visibleItems)
+            const rest = (tab === "datasets" ? datasets : visibleItems)
               .map((x) => x.id)
               .filter((id) => !selected.has(id));
             return rest.length > 0 ? () => setSelected((prev) => new Set([...prev, ...rest])) : null;
@@ -1375,41 +1336,6 @@ function EmptyState({
       <h2 className="text-base font-semibold text-foreground/85">{title}</h2>
       <p className="mt-2 text-sm leading-relaxed text-foreground/55">{description}</p>
       {cta && <div className="mt-5">{cta}</div>}
-    </div>
-  );
-}
-
-/** "No matches" for this tab — with a way to the tabs that do have some, since
- *  the search only lists the open tab's entries. */
-function NoMatches({
-  elsewhere,
-  counts,
-  onPick,
-}: {
-  elsewhere: LibraryTab[];
-  counts: Record<LibraryTab, number>;
-  onPick: (tab: LibraryTab) => void;
-}) {
-  return (
-    <div className="mt-10 text-center text-sm text-foreground/45">
-      <p>Nothing here matches your search.</p>
-      {elsewhere.length > 0 && (
-        <p className="mt-2">
-          Found in{" "}
-          {elsewhere.map((t, i) => (
-            <span key={t}>
-              {i > 0 && ", "}
-              <button
-                type="button"
-                onClick={() => onPick(t)}
-                className="font-medium text-foreground/75 underline underline-offset-2 hover:text-foreground"
-              >
-                {TAB_LABELS[t]} ({counts[t]})
-              </button>
-            </span>
-          ))}
-        </p>
-      )}
     </div>
   );
 }

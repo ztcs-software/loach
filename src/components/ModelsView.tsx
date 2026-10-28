@@ -1,7 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import {
-  ArrowLeft,
   Brain,
+  ChevronRight,
   Cpu,
   Eye,
   EyeOff,
@@ -191,13 +191,17 @@ export function ModelsView() {
   return (
     <main className="flex min-w-0 flex-1 flex-col">
       <ScrollArea className="flex-1">
-        <div className="mx-auto w-full max-w-4xl px-8 py-6">
+        <div className="mx-auto w-full max-w-4xl px-8 pb-12 pt-8">
+          {/* Breadcrumb — the same one a Space's and a dataset's page lead
+              with, so every detail page goes back the same way. */}
           <button
+            type="button"
             onClick={handleBack}
-            className="mb-6 flex items-center gap-1.5 text-sm text-foreground/50 transition-colors hover:text-foreground"
+            className="mb-6 inline-flex max-w-full items-center gap-1.5 text-xs text-foreground/45 transition-colors hover:text-foreground/75"
           >
-            <ArrowLeft className="h-4 w-4" />
-            All models
+            <span>Models</span>
+            <ChevronRight className="h-3 w-3 shrink-0" />
+            <span className="truncate text-foreground/55">{viewingModel}</span>
           </button>
 
           {/* Header */}

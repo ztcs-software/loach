@@ -13,9 +13,12 @@ import type { ProviderId } from "@/types";
 import { SectionTitle } from "./shared";
 
 /** Embedding models worth suggesting on Ollama. Tags only — sizes change
- *  between releases, and the Models page shows the real ones. */
+ *  between releases, and the Models page shows the real ones. EmbeddingGemma
+ *  2's `270m` is its text-only build (the Library embeds text), on the same
+ *  task prefixes as the first; it needs an Ollama new enough to run it. */
 const OLLAMA_SUGGESTIONS: { tag: string; note: string }[] = [
   { tag: "embeddinggemma", note: "Small, multilingual — a good default" },
+  { tag: "embeddinggemma-2:270m", note: "Newer, better with code — needs a recent Ollama" },
   { tag: "qwen3-embedding:0.6b", note: "Multilingual, strong on retrieval" },
   { tag: "bge-m3", note: "Multilingual, handles long passages" },
   { tag: "nomic-embed-text", note: "Compact, English-focused" },

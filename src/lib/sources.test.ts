@@ -243,6 +243,36 @@ describe("resolveSources", () => {
     expect(r.record?.result).toBe("Read 1 source in full.");
   });
 
+  it("sends a dataset's images with its text, named in the prompt and the record", async () => {
+    // Regression: a dataset of a note and a photo reached the model with the
+    // photo unnamed — the prompt listed only the note, the chip said "Read 1
+    // source in full", and the model answered that no picture was attached.
+    const photo = meta("img", 0, { kind: "file", media: "image", mime: "image/jpeg", title: "photo.jpg" });
+    useLibraryStore.setState({
+      items: [meta("a", 400), photo],
+      datasets: [{ id: "d", name: "D", description: "", item_ids: ["a", "img"], created_at: 0, updated_at: 0 }],
+      sources: {
+        "session:s1": [
+          { id: "l1", owner_id: "s1", item_id: null, dataset_id: "d", enabled: true, position: 0, created_at: 0 },
+        ],
+      },
+    });
+    const r = await resolveSources({ session, spaceCtx: null, history: [], trigger: "what's in it?", numCtx: 8192 });
+    expect(r.images).toEqual(["body of img"]);
+    expect(r.systemBlock).toContain("body of a");
+    expect(r.systemBlock).toContain("--- Reference images ---");
+    expect(r.systemBlock).toContain("`photo.jpg`");
+    expect((r.record?.arguments as SourcesReport).sources.map((s) => s.id)).toEqual(["a", "img"]);
+    expect(r.record?.result).toBe("Read 1 source in full. Attached 1 image.");
+
+    // Images alone still get named and a chip, rather than no record at all.
+    useLibraryStore.setState({ datasets: [{ id: "d", name: "D", description: "", item_ids: ["img"], created_at: 0, updated_at: 0 }] });
+    const alone = await resolveSources({ session, spaceCtx: null, history: [], trigger: "what's in it?", numCtx: 8192 });
+    expect(alone.images).toEqual(["body of img"]);
+    expect(alone.systemBlock).toContain("`photo.jpg`");
+    expect(alone.record?.result).toBe("Attached 1 image.");
+  });
+
   it("searches Space files and Library items once they're too big, on this turn only", async () => {
     useLibraryStore.setState({
       sources: {
