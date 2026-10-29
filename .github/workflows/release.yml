@@ -100,6 +100,19 @@ jobs:
             echo 'RELEASE_NOTES_EOF'
           } >> "$GITHUB_OUTPUT"
 
+      # Push the tag before anything builds. The gate above keys on it, and
+      # nothing else creates it in time: tauri-action only drafts the release,
+      # and GitHub creates a draft's tag when the draft is published. Without
+      # this, a push to main between the draft and Publish passed the gate
+      # again and rebuilt the draft's assets from the newer commit.
+      - name: Tag the release commit
+        if: steps.gate.outputs.should_release == 'true'
+        run: |
+          set -euo pipefail
+          TAG="v${{ steps.gate.outputs.version }}"
+          git tag "$TAG" "$GITHUB_SHA"
+          git push origin "refs/tags/$TAG"
+
   build:
     needs: prepare
     if: needs.prepare.outputs.should_release == 'true'
@@ -283,9 +296,9 @@ jobs:
           # provide; this makes it self-extract instead. Harmless elsewhere.
           APPIMAGE_EXTRACT_AND_RUN: 1
         with:
-          # tauri-action will create + push this tag at the commit being built
-          # if it doesn't already exist. First matrix job to finish creates
-          # the release; subsequent jobs upload their assets to the same one.
+          # The `prepare` job already pushed this tag at the commit being
+          # built. First matrix job to finish creates the release; subsequent
+          # jobs upload their assets to the same one.
           tagName: v${{ needs.prepare.outputs.version }}
           releaseName: 'Loach v${{ needs.prepare.outputs.version }}'
           releaseBody: ${{ needs.prepare.outputs.release_body }}

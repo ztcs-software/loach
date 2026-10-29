@@ -98,7 +98,9 @@ const MAPPINGS: Mapping[] = [
     build: () => "the upstream server returned an error. Try again later.",
   },
   {
-    match: ["context length", "context window", "max_tokens", "maximum context"],
+    // Not "max_tokens": a model refusing that parameter, or a cap set above
+    // its output limit, is not an over-long conversation.
+    match: ["context length", "context window", "maximum context"],
     build: () => "the conversation is too long for this model's context window. Start a new chat or pick a model with a bigger window.",
   },
 ];

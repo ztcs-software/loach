@@ -281,6 +281,10 @@ pub async fn chat_stream(
     // fallback when usage never arrives — e.g. older Ollama compat
     // shims that ignore `stream_options.include_usage`).
     let mut reported_tokens: Option<u32> = None;
+    // Request fields the server refused earlier in this stream (see
+    // `refused_field`), re-applied to every later tool turn's body so each
+    // turn doesn't pay the same rejected round-trip.
+    let mut refused: Vec<String> = Vec::new();
 
     for turn in 0..MAX_TOOL_TURNS {
         // Keep the running history under the soft cap. The first turn is
@@ -327,6 +331,9 @@ pub async fn chat_stream(
                 body["tool_choice"] = json!("none");
             }
         }
+        for field in &refused {
+            apply_refusal(&mut body, field);
+        }
 
         let outcome = match run_one_turn(
             &app,
@@ -336,6 +343,7 @@ pub async fn chat_stream(
             &cancel,
             api_key.as_deref(),
             body,
+            &mut refused,
             &mut total_tokens,
             &mut reported_tokens,
             &req.stream_id,
@@ -470,6 +478,63 @@ pub async fn chat_stream(
     Ok(())
 }
 
+/// Request fields a 400 may name that are safe to adjust and resend: ones
+/// Loach sets on its own, never the conversation or the tools.
+const ADJUSTABLE_FIELDS: &[&str] = &[
+    "stream_options",
+    "max_tokens",
+    "max_completion_tokens",
+    "temperature",
+    "top_p",
+    "frequency_penalty",
+    "presence_penalty",
+    "seed",
+];
+
+/// Which field a 400 body refuses, if it's one in `body` that
+/// `apply_refusal` can adjust. OpenAI names it in `error.param`; other
+/// servers only in the message, so that falls back to OpenAI's wording
+/// ("Unsupported parameter: 'max_tokens' …") — plus any mention of
+/// `stream_options`, the one strict gateways reject in their own words.
+fn refused_field(body: &Value, error_text: &str) -> Option<String> {
+    let param = serde_json::from_str::<Value>(error_text).ok().and_then(|v| {
+        v.pointer("/error/param")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    });
+    ADJUSTABLE_FIELDS
+        .iter()
+        .find(|&&field| {
+            body.get(field).is_some()
+                && match &param {
+                    Some(p) => p == field,
+                    None if field == "stream_options" => error_text.contains(field),
+                    None => [
+                        "Unsupported parameter: '",
+                        "Unsupported value: '",
+                        "Unrecognized request argument supplied: ",
+                    ]
+                    .iter()
+                    .any(|lead| error_text.contains(&format!("{lead}{field}"))),
+                }
+        })
+        .map(|field| field.to_string())
+}
+
+/// Drop `field` from the request, except `max_tokens`, whose cap moves to
+/// `max_completion_tokens` — the name OpenAI's reasoning models take.
+fn apply_refusal(body: &mut Value, field: &str) {
+    let Some(obj) = body.as_object_mut() else {
+        return;
+    };
+    let removed = obj.remove(field);
+    if field == "max_tokens" {
+        if let Some(cap) = removed {
+            obj.insert("max_completion_tokens".into(), cap);
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_one_turn(
     app: &AppHandle,
@@ -479,6 +544,7 @@ async fn run_one_turn(
     cancel: &Arc<tokio::sync::Notify>,
     api_key: Option<&str>,
     mut body: Value,
+    refused: &mut Vec<String>,
     total_tokens: &mut u32,
     reported_tokens: &mut Option<u32>,
     stream_id: &str,
@@ -489,8 +555,8 @@ async fn run_one_turn(
     // that re-reports cumulative usage per chunk can't inflate the total.
     let mut turn_tokens: Option<u32> = None;
     let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
-    // Built through a closure so the `stream_options` retry below can issue a
-    // second, identically-authenticated request without duplicating the
+    // Built through a closure so the refused-field retry below can issue
+    // another, identically-authenticated request without duplicating the
     // bearer logic.
     let build_req = |b: &Value| {
         let mut r = http.post(&url).json(b);
@@ -549,43 +615,17 @@ async fn run_one_turn(
         }
     };
 
-    // `stream_options` is opt-in usage telemetry, not something the chat
-    // needs. A strict gateway that rejects unknown arguments would otherwise
-    // fail the whole turn over a field the user never asked for — so on that
-    // specific rejection, drop it and retry once. Mirrors the Ollama path's
-    // `think` retry. Metrics fall back to the chunk counter afterwards.
-    if resp.status() == reqwest::StatusCode::BAD_REQUEST
-        && body.get("stream_options").is_some()
-    {
+    // A 400 that names a field Loach added on its own: `stream_options`
+    // (opt-in usage telemetry strict gateways reject), or a sampling knob a
+    // model refuses — OpenAI's o-series and GPT-5 reject `max_tokens` (they
+    // take `max_completion_tokens`) and any non-default `temperature`. The
+    // whole turn would otherwise fail over a field the user never set, so
+    // adjust that one field and retry; each field once, recorded in `refused`
+    // for the stream's later turns. Mirrors the Ollama path's `think` retry.
+    // Metrics fall back to the chunk counter without `stream_options`.
+    while resp.status() == reqwest::StatusCode::BAD_REQUEST {
         let text = resp.text().await.unwrap_or_default();
-        if text.contains("stream_options") {
-            tracing::warn!("server rejected `stream_options`; retrying without it");
-            if let Some(obj) = body.as_object_mut() {
-                obj.remove("stream_options");
-            }
-            let retried = select! {
-                biased;
-                _ = cancel.notified() => {
-                    let _ = app.emit(channel, StreamEvent::Cancelled);
-                    registry.finish(stream_id);
-                    return Ok(None);
-                }
-                r = build_req(&body).send() => r,
-            };
-            resp = match retried {
-                Ok(r) => r,
-                Err(e) => {
-                    let _ = app.emit(
-                        channel,
-                        StreamEvent::Error {
-                            message: format!("OpenAI request failed: {e}"),
-                        },
-                    );
-                    registry.finish(stream_id);
-                    return Err(e.into());
-                }
-            };
-        } else {
+        let Some(field) = refused_field(&body, &text).filter(|f| !refused.contains(f)) else {
             // A 400 about something else. The body is already consumed, so
             // report it here rather than falling through to the block below.
             let _ = app.emit(
@@ -596,7 +636,32 @@ async fn run_one_turn(
             );
             registry.finish(stream_id);
             return Err(anyhow!("openai http error"));
-        }
+        };
+        tracing::warn!("server refused `{field}`; retrying without it");
+        apply_refusal(&mut body, &field);
+        refused.push(field);
+        let retried = select! {
+            biased;
+            _ = cancel.notified() => {
+                let _ = app.emit(channel, StreamEvent::Cancelled);
+                registry.finish(stream_id);
+                return Ok(None);
+            }
+            r = build_req(&body).send() => r,
+        };
+        resp = match retried {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = app.emit(
+                    channel,
+                    StreamEvent::Error {
+                        message: format!("OpenAI request failed: {e}"),
+                    },
+                );
+                registry.finish(stream_id);
+                return Err(e.into());
+            }
+        };
     }
 
     if !resp.status().is_success() {
@@ -1044,6 +1109,68 @@ fn sniff_image_mime(b64: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- refused_field / apply_refusal ----------------------------------------
+    // OpenAI's reasoning models (o-series, GPT-5) refuse `max_tokens` and a
+    // non-default `temperature`, and every request carries both — so without
+    // the retry each send to them failed with a 400.
+
+    fn request() -> Value {
+        json!({
+            "model": "gpt-5",
+            "messages": [],
+            "stream": true,
+            "stream_options": { "include_usage": true },
+            "temperature": 0.7,
+            "max_tokens": 4096,
+        })
+    }
+
+    #[test]
+    fn moves_a_refused_max_tokens_to_max_completion_tokens() {
+        let mut body = request();
+        let err = r#"{"error":{"message":"Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.","type":"invalid_request_error","param":"max_tokens","code":"unsupported_parameter"}}"#;
+        let field = refused_field(&body, err).expect("named");
+        assert_eq!(field, "max_tokens");
+        apply_refusal(&mut body, &field);
+        assert!(body.get("max_tokens").is_none());
+        assert_eq!(body["max_completion_tokens"], 4096);
+    }
+
+    #[test]
+    fn drops_a_refused_temperature() {
+        let mut body = request();
+        let err = r#"{"error":{"message":"Unsupported value: 'temperature' does not support 0.7 with this model. Only the default (1) value is supported.","type":"invalid_request_error","param":"temperature","code":"unsupported_value"}}"#;
+        let field = refused_field(&body, err).expect("named");
+        apply_refusal(&mut body, &field);
+        assert!(body.get("temperature").is_none());
+        assert_eq!(body["max_tokens"], 4096);
+    }
+
+    #[test]
+    fn reads_the_field_from_plain_text_errors_too() {
+        let body = request();
+        assert_eq!(
+            refused_field(&body, "Unsupported parameter: 'max_tokens' is not supported").as_deref(),
+            Some("max_tokens")
+        );
+        assert_eq!(
+            refused_field(&body, "unknown field `stream_options`").as_deref(),
+            Some("stream_options")
+        );
+    }
+
+    #[test]
+    fn leaves_other_400s_alone() {
+        let body = request();
+        // The conversation itself, a field we never sent, and prose that
+        // merely mentions a knob are all reported, not retried.
+        let messages = r#"{"error":{"message":"This model's maximum context length is 8192 tokens.","param":"messages","code":"context_length_exceeded"}}"#;
+        assert_eq!(refused_field(&body, messages), None);
+        let unsent = r#"{"error":{"message":"Unsupported value","param":"top_p"}}"#;
+        assert_eq!(refused_field(&body, unsent), None);
+        assert_eq!(refused_field(&body, "temperature must be at most 2"), None);
+    }
 
     // --- is_safe_for_bearer -------------------------------------------------
     // A regression here silently leaks the user's API key over cleartext

@@ -17,16 +17,64 @@
 // `PoisonError` boilerplate that `std::sync::Mutex` requires on every
 // `.lock()` call and panics on first poison.
 use parking_lot::Mutex;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Result};
 use argon2::{Algorithm, Argon2, Params, PasswordHash, PasswordHasher, PasswordVerifier, Version};
 use keyring::Entry;
-use once_cell::sync::Lazy;
+use once_cell::sync::{Lazy, OnceCell};
 use serde::{Deserialize, Serialize};
 
 const SERVICE: &str = "dev.loach.app";
 const ACCOUNT: &str = "app_lock";
+
+// ---------------------------------------------------------------------------
+// Lock marker.
+//
+// A copy of the non-secret `LockStatus`, kept in the app data dir, so the
+// startup probe can tell whether a lock is configured without reading the
+// keyring. Reading the keyring there let the lock fail open: the probe ran
+// before anything was shown, and a keychain access prompt (macOS asks again
+// after every update of an ad-hoc-signed build) that was denied or answered
+// slowly made the renderer treat the app as unlocked. With the marker the
+// lock screen shows at once and the keyring is first read on unlock, where
+// a refused read keeps the app locked.
+//
+// The keyring stays the source of truth: the marker is rewritten whenever
+// the lock changes, removed when it can't be, and when it's missing (first
+// launch on this version, or a fresh install) `status` reads the keyring
+// and writes it.
+// ---------------------------------------------------------------------------
+
+static MARKER_PATH: OnceCell<PathBuf> = OnceCell::new();
+
+/// Point the marker at the app data dir. Called once from `lib.rs` setup;
+/// until then (and in tests) the marker is skipped and `status` reads the
+/// keyring every time, as before.
+pub fn init_marker(data_dir: &Path) {
+    let _ = MARKER_PATH.set(data_dir.join("app_lock.json"));
+}
+
+fn read_marker() -> Option<LockStatus> {
+    let raw = std::fs::read_to_string(MARKER_PATH.get()?).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+/// Best effort. A marker that can't be written is removed instead, so it
+/// never outlives the keyring entry it describes.
+fn write_marker(status: &LockStatus) {
+    let Some(path) = MARKER_PATH.get() else {
+        return;
+    };
+    let written = serde_json::to_string(status)
+        .map_err(anyhow::Error::from)
+        .and_then(|json| std::fs::write(path, json).map_err(anyhow::Error::from));
+    if let Err(e) = written {
+        tracing::warn!("couldn't write the app-lock marker: {e:#}");
+        let _ = std::fs::remove_file(path);
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Rate-limit state for `unlock`.
@@ -107,6 +155,7 @@ fn load() -> Result<Option<LockConfig>> {
 fn save(cfg: &LockConfig) -> Result<()> {
     let json = serde_json::to_string(cfg)?;
     entry()?.set_password(&json)?;
+    write_marker(&status_of(Some(cfg)));
     Ok(())
 }
 
@@ -158,8 +207,19 @@ fn verify(secret: &str, phc: &str) -> bool {
 // Public API — wired through `commands.rs` to the frontend.
 // ---------------------------------------------------------------------------
 
+/// Whether a lock is configured, for the startup probe. Answers from the
+/// marker when there is one; see the "Lock marker" note above.
 pub fn status() -> Result<LockStatus> {
-    Ok(match load()? {
+    if let Some(marker) = read_marker() {
+        return Ok(marker);
+    }
+    let status = status_of(load()?.as_ref());
+    write_marker(&status);
+    Ok(status)
+}
+
+fn status_of(cfg: Option<&LockConfig>) -> LockStatus {
+    match cfg {
         None => LockStatus {
             configured: false,
             method: None,
@@ -172,7 +232,7 @@ pub fn status() -> Result<LockStatus> {
             pin_length: c.pin_length,
             has_hint: c.hint.is_some(),
         },
-    })
+    }
 }
 
 /// Check whether we're currently inside the rate-limit cool-down. Returns
@@ -346,7 +406,13 @@ pub fn unlock(pin: Option<&str>, password: Option<&str>) -> Result<bool> {
 
     let cfg = match load()? {
         Some(c) => c,
-        None => return Ok(true),
+        None => {
+            // The keyring entry is gone (removed outside the app) while the
+            // marker still put up the lock screen. Correct the marker, or
+            // every launch would show a lock that any input opens.
+            write_marker(&status_of(None));
+            return Ok(true);
+        }
     };
 
     let ok = verify_against_config(&cfg, pin, password);
@@ -373,6 +439,9 @@ pub fn clear() -> Result<()> {
         Err(keyring::Error::NoEntry) => Ok(()),
         Err(e) => Err(e.into()),
     };
+    if result.is_ok() {
+        write_marker(&status_of(None));
+    }
     // Clearing the lock invalidates any in-flight lockout — the keyring
     // entry that the cool-down was guarding is now gone.
     reset_unlock_state();
@@ -446,6 +515,35 @@ mod tests {
     /// counter and intermittently fail. The hash/verify tests don't touch
     /// `UNLOCK_STATE` and run free.
     static LOCKOUT_TEST_LOCK: Lazy<PMutex<()>> = Lazy::new(|| PMutex::new(()));
+
+    #[test]
+    fn status_answers_from_the_marker_without_the_keyring() {
+        // The marker path is process-wide and set once; this is the only test
+        // that sets it, and the only one that calls `status`.
+        let dir = tempfile::tempdir().unwrap();
+        init_marker(dir.path());
+        let cfg = LockConfig {
+            method: LockMethod::Pin,
+            pin_length: Some(4),
+            pin_hash: Some("unused".into()),
+            password_hash: None,
+            hint: Some("the usual".into()),
+        };
+        write_marker(&status_of(Some(&cfg)));
+
+        // With a marker present the keyring is never read, so a keychain
+        // prompt can't stand between startup and the lock screen.
+        let s = status().expect("answered from the marker");
+        assert!(s.configured);
+        assert_eq!(s.method, Some(LockMethod::Pin));
+        assert_eq!(s.pin_length, Some(4));
+        assert!(s.has_hint);
+
+        // A torn write reads as no marker, which sends `status` back to the
+        // keyring instead of trusting a half-written answer.
+        std::fs::write(dir.path().join("app_lock.json"), "{\"configured\":tr").unwrap();
+        assert!(read_marker().is_none());
+    }
 
     #[test]
     fn hash_then_verify_roundtrips() {

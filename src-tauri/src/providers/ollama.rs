@@ -374,15 +374,129 @@ pub async fn create_model(
         return Ok(());
     }
     let url = format!("{}/api/create", base_url.trim_end_matches('/'));
-    // Ollama 0.3+ supports `modelfile` as a field on `/api/create` so we
-    // don't need to write a temp file. `stream: true` keeps the NDJSON
-    // progress frames flowing.
-    let body = serde_json::json!({
-        "name": name,
-        "modelfile": modelfile,
-        "stream": true,
-    });
+    // Ollama 0.5.5 replaced `/api/create`'s raw `modelfile` field with
+    // structured ones (`from`, `system`, `template`, `parameters`) and
+    // rejects a request without `from`. Send both: current servers read the
+    // structured fields, older ones ignore them and read `modelfile`.
+    // `stream: true` keeps the NDJSON progress frames flowing.
+    let mut body = match create_fields(modelfile) {
+        Ok(fields) => Value::Object(fields),
+        Err(e) => {
+            let _ = app.emit(
+                &admin_channel(&stream_id),
+                AdminEvent::Error {
+                    message: format!("Couldn't read the Modelfile: {e}"),
+                },
+            );
+            registry.finish(&stream_id);
+            return Ok(());
+        }
+    };
+    body["model"] = json!(name);
+    body["name"] = json!(name);
+    body["modelfile"] = json!(modelfile);
+    body["stream"] = json!(true);
     drive_progress_stream(app, registry, stream_id, url, body, http, cancel).await
+}
+
+/// Split the Models editor's Modelfile into `/api/create`'s structured
+/// fields. Covers the directives `buildModelfile` (src/lib/modelfile.ts)
+/// emits: FROM; SYSTEM and TEMPLATE, `"""`-quoted and possibly multi-line;
+/// and PARAMETER, numeric except `stop`, whose quoted values collect into a
+/// list.
+fn create_fields(modelfile: &str) -> std::result::Result<serde_json::Map<String, Value>, String> {
+    let mut out = serde_json::Map::new();
+    let mut params = serde_json::Map::new();
+    let mut stops: Vec<Value> = Vec::new();
+    let mut rest = modelfile;
+    loop {
+        rest = rest.trim_start();
+        if rest.is_empty() {
+            break;
+        }
+        let split = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let (directive, after) = rest.split_at(split);
+        match directive.to_ascii_uppercase().as_str() {
+            "FROM" => {
+                let (line, next) = take_line(after);
+                out.insert("from".into(), json!(line.trim()));
+                rest = next;
+            }
+            d @ ("SYSTEM" | "TEMPLATE") => {
+                let after = after.trim_start_matches([' ', '\t']);
+                let (value, next) = match after.strip_prefix("\"\"\"") {
+                    Some(block) => {
+                        let end = block
+                            .find("\"\"\"")
+                            .ok_or_else(|| format!("{d} block has no closing \"\"\""))?;
+                        (&block[..end], &block[end + 3..])
+                    }
+                    None => {
+                        let (line, next) = take_line(after);
+                        (line.trim(), next)
+                    }
+                };
+                out.insert(d.to_ascii_lowercase(), json!(value));
+                rest = next;
+            }
+            "PARAMETER" => {
+                let (line, next) = take_line(after);
+                rest = next;
+                let line = line.trim();
+                let (key, value) = line
+                    .split_once(char::is_whitespace)
+                    .ok_or_else(|| format!("PARAMETER `{line}` has no value"))?;
+                let value = value.trim();
+                if key == "stop" {
+                    stops.push(json!(unquote(value)));
+                } else if let Ok(n) = value.parse::<i64>() {
+                    params.insert(key.into(), json!(n));
+                } else if let Ok(f) = value.parse::<f64>() {
+                    params.insert(key.into(), json!(f));
+                } else {
+                    return Err(format!("PARAMETER {key} isn't a number: {value}"));
+                }
+            }
+            other => return Err(format!("unsupported directive `{other}`")),
+        }
+    }
+    if !out.contains_key("from") {
+        return Err("no FROM line".into());
+    }
+    if !stops.is_empty() {
+        params.insert("stop".into(), Value::Array(stops));
+    }
+    if !params.is_empty() {
+        out.insert("parameters".into(), Value::Object(params));
+    }
+    Ok(out)
+}
+
+fn take_line(s: &str) -> (&str, &str) {
+    match s.find('\n') {
+        Some(i) => (&s[..i], &s[i + 1..]),
+        None => (s, ""),
+    }
+}
+
+/// `"a\"b"` → `a"b`: reverses the quoting `buildModelfile` applies to `stop`.
+fn unquote(v: &str) -> String {
+    let inner = v
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .unwrap_or(v);
+    let mut out = String::with_capacity(inner.len());
+    let mut chars = inner.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            if let Some(escaped) = chars.next() {
+                out.push(escaped);
+                continue;
+            }
+        }
+        out.push(c);
+    }
+    out
 }
 
 #[derive(Debug, Deserialize)]
@@ -1314,6 +1428,47 @@ fn normalise_args(v: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- create_fields --------------------------------------------------------
+    // Ollama 0.5.5+ rejects `/api/create` without the structured fields, so
+    // the editor's Modelfile has to come apart cleanly.
+
+    #[test]
+    fn create_fields_splits_the_editors_modelfile() {
+        let modelfile = "FROM llama3.1:8b\n\n\
+            SYSTEM \"\"\"You are terse.\nAnswer in one line.\"\"\"\n\n\
+            TEMPLATE \"\"\"{{ .Prompt }}\"\"\"\n\n\
+            PARAMETER temperature 0.7\n\
+            PARAMETER num_ctx 32768\n\
+            PARAMETER stop \"<|end|>\"\n\
+            PARAMETER stop \"say \\\"hi\\\" \\\\ bye\"\n";
+        let fields = create_fields(modelfile).expect("parses");
+        assert_eq!(fields["from"], "llama3.1:8b");
+        assert_eq!(fields["system"], "You are terse.\nAnswer in one line.");
+        assert_eq!(fields["template"], "{{ .Prompt }}");
+        assert_eq!(
+            fields["parameters"],
+            json!({
+                "temperature": 0.7,
+                "num_ctx": 32768,
+                "stop": ["<|end|>", "say \"hi\" \\ bye"],
+            })
+        );
+    }
+
+    #[test]
+    fn create_fields_omits_what_the_form_left_empty() {
+        let fields = create_fields("FROM qwen3:8b\n").expect("parses");
+        assert_eq!(Value::Object(fields), json!({ "from": "qwen3:8b" }));
+    }
+
+    #[test]
+    fn create_fields_refuses_what_it_cant_send() {
+        assert!(create_fields("PARAMETER temperature 0.7\n").is_err());
+        assert!(create_fields("FROM m\nSYSTEM \"\"\"never closed\n").is_err());
+        assert!(create_fields("FROM m\nADAPTER ./lora.gguf\n").is_err());
+        assert!(create_fields("FROM m\nPARAMETER temperature warm\n").is_err());
+    }
 
     // --- normalise_args -------------------------------------------------------
     // Ollama mainline hands `arguments` as a parsed object, but some builds

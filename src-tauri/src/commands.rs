@@ -726,9 +726,10 @@ pub async fn get_settings(state: State<'_, AppState>) -> Result<HashMap<String, 
 /// adding a new user-facing setting.
 ///
 /// The allowlist is a defence against a compromised renderer planting
-/// arbitrary KV rows. The concrete attack it closes: silently repointing
-/// `openai_base_url` at an attacker host so the stored bearer token gets
-/// shipped on the next chat request. With this gate in place, the only
+/// arbitrary KV rows. It does not stop `openai_base_url` itself from being
+/// rewritten — that key is user-editable — so a snapshot import keeps the
+/// current value while a key is stored (`keep_current_openai_base_url`).
+/// With this gate in place, the only
 /// way to write a setting from the UI is to use a known key — a future
 /// settings consumer that forgets its own validation can't be exploited
 /// via a key the renderer was free to mint. Unknown keys fail loudly so
@@ -2285,32 +2286,65 @@ fn stdio_consent_text(draft: &McpServer) -> Result<String, String> {
 async fn confirm_stdio_spawn(app: &AppHandle, draft: &McpServer) -> Result<(), String> {
     let body = stdio_consent_text(draft)?;
     let title = format!("Run MCP server \"{}\"?", draft.name);
+    let answer = show_consent_dialog(app, title, body).await?;
+    if consent_given(&answer) {
+        Ok(())
+    } else {
+        Err("Cancelled — the server was not started.".into())
+    }
+}
 
-    // rfd shows dialogs from the main thread (macOS and GTK require it);
-    // the future it hands back can be awaited anywhere.
+fn consent_buttons() -> rfd::MessageButtons {
+    rfd::MessageButtons::OkCancelCustom(CONSENT_CANCEL.into(), CONSENT_START.into())
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn show_consent_dialog(
+    app: &AppHandle,
+    title: String,
+    body: String,
+) -> Result<rfd::MessageDialogResult, String> {
+    // rfd shows dialogs from the main thread (macOS requires it); the
+    // future it hands back can be awaited anywhere.
     let (tx, rx) = tokio::sync::oneshot::channel();
     app.run_on_main_thread(move || {
         let answer = rfd::AsyncMessageDialog::new()
             .set_level(rfd::MessageLevel::Warning)
             .set_title(title)
             .set_description(body)
-            .set_buttons(rfd::MessageButtons::OkCancelCustom(
-                CONSENT_CANCEL.into(),
-                CONSENT_START.into(),
-            ))
+            .set_buttons(consent_buttons())
             .show();
         let _ = tx.send(answer);
     })
     .map_err(|e| format!("couldn't show the consent dialog: {e}"))?;
-    let answer = rx
+    Ok(rx
         .await
         .map_err(|_| "the consent dialog couldn't be shown".to_string())?
-        .await;
-    if consent_given(&answer) {
-        Ok(())
-    } else {
-        Err("Cancelled — the server was not started.".into())
-    }
+        .await)
+}
+
+/// GTK's async dialog answers only `Ok` / `Cancel`, never `Custom`, and Esc
+/// comes back as `Cancel` too — so "Start server" (the second button) read
+/// as a dismissal and no stdio server could ever be started on Linux. The
+/// blocking dialog maps each button to its label and Esc / close to
+/// `Cancel`. rfd runs GTK dialogs on its own thread, so it's driven from the
+/// blocking pool rather than the main thread.
+#[cfg(target_os = "linux")]
+async fn show_consent_dialog(
+    _app: &AppHandle,
+    title: String,
+    body: String,
+) -> Result<rfd::MessageDialogResult, String> {
+    tokio::task::spawn_blocking(move || {
+        rfd::MessageDialog::new()
+            .set_level(rfd::MessageLevel::Warning)
+            .set_title(title)
+            .set_description(body)
+            .set_buttons(consent_buttons())
+            .show()
+    })
+    .await
+    .map_err(|_| "the consent dialog couldn't be shown".to_string())
 }
 
 /// The consent dialog's buttons. See [`confirm_stdio_spawn`] for the order.
@@ -3618,11 +3652,11 @@ pub async fn import_data_with_dialog(
     // Stage 2.5 — filter imported settings through the SAME allowlist
     // `set_setting` enforces. `restore_snapshot` writes settings rows
     // verbatim, which otherwise bypasses the gate entirely: a hand-edited
-    // export could plant arbitrary keys or repoint `openai_base_url` at an
-    // attacker host — the exact attack `set_setting`'s allowlist closes.
-    // (We deliberately do NOT value-screen base URLs: they're freely
-    // user-writable on the normal path — local proxies like LM Studio need
-    // `localhost:1234` — so the import path matches that.)
+    // export could plant arbitrary keys. (We deliberately do NOT
+    // value-screen base URLs: they're freely user-writable on the normal
+    // path — local proxies like LM Studio need `localhost:1234` — so the
+    // import path matches that. Stage 2.6 handles the one URL a stored
+    // secret is sent to.)
     let before = snap.data.settings.len();
     snap.data
         .settings
@@ -3632,6 +3666,23 @@ pub async fn import_data_with_dialog(
         tracing::warn!(
             "import: dropped {dropped} setting(s) not on the writable allowlist"
         );
+    }
+
+    // Stage 2.6 — the allowlist above admits `openai_base_url`, so a backup
+    // could still repoint it. Keep the current URL while a key is stored
+    // (a failed keyring read counts as stored).
+    let key_may_exist =
+        tokio::task::spawn_blocking(|| !matches!(secrets::get_openai_key(), Ok(None)))
+            .await
+            .unwrap_or(true);
+    if key_may_exist {
+        let current = state.db.get_setting(OPENAI_BASE_URL_KEY).map_err(err)?;
+        if keep_current_openai_base_url(&mut snap.data.settings, current) {
+            tracing::warn!(
+                "import: kept the current OpenAI base URL — an API key is stored for it \
+                 and the backup named a different server"
+            );
+        }
     }
 
     // Stage 3 — apply. `restore_snapshot` holds the single DB mutex for
@@ -3653,6 +3704,32 @@ pub async fn import_data_with_dialog(
     // Snapshots don't carry the retrieval index; rebuild it.
     state.indexer.wake();
     Ok(Some(stats))
+}
+
+const OPENAI_BASE_URL_KEY: &str = "openai_base_url";
+
+/// Replace an imported `openai_base_url` with `current` (the installed value,
+/// `None` when it's the default). The API key never travels in a snapshot, so
+/// the one in the keyring belongs to the server configured here; a backup
+/// naming another server would otherwise have that key sent there on the
+/// next model listing, chat or embedding request, with no click from the
+/// user. Returns whether the snapshot named a different URL.
+fn keep_current_openai_base_url(
+    settings: &mut Vec<(String, String)>,
+    current: Option<String>,
+) -> bool {
+    let imported = settings
+        .iter()
+        .find(|(k, _)| k == OPENAI_BASE_URL_KEY)
+        .map(|(_, v)| v.clone());
+    if imported == current {
+        return false;
+    }
+    settings.retain(|(k, _)| k != OPENAI_BASE_URL_KEY);
+    if let Some(url) = current {
+        settings.push((OPENAI_BASE_URL_KEY.to_string(), url));
+    }
+    true
 }
 
 /// Decode one JSON column of an imported MCP row, naming the row and the
@@ -3950,6 +4027,42 @@ pub fn updater_supported() -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn base_url_rows(settings: &[(String, String)]) -> Vec<&str> {
+        settings
+            .iter()
+            .filter(|(k, _)| k == OPENAI_BASE_URL_KEY)
+            .map(|(_, v)| v.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn import_keeps_the_base_url_a_stored_key_belongs_to() {
+        let row = |v: &str| (OPENAI_BASE_URL_KEY.to_string(), v.to_string());
+        let theme = ("theme".to_string(), "dark".to_string());
+
+        // A backup naming another server: the installed URL stays.
+        let mut s = vec![theme.clone(), row("https://attacker.example/v1")];
+        assert!(keep_current_openai_base_url(&mut s, Some("https://openrouter.ai/api/v1".into())));
+        assert_eq!(base_url_rows(&s), ["https://openrouter.ai/api/v1"]);
+        assert!(s.contains(&theme));
+
+        // Installed URL is the default (no row): the imported one is dropped.
+        let mut s = vec![row("https://attacker.example/v1")];
+        assert!(keep_current_openai_base_url(&mut s, None));
+        assert!(base_url_rows(&s).is_empty());
+
+        // Backup without the row, installed URL custom: restore would wipe it
+        // back to the default, so it's carried over.
+        let mut s = vec![theme.clone()];
+        assert!(keep_current_openai_base_url(&mut s, Some("http://localhost:1234/v1".into())));
+        assert_eq!(base_url_rows(&s), ["http://localhost:1234/v1"]);
+
+        // Same URL: nothing to report.
+        let mut s = vec![row("https://api.openai.com/v1")];
+        assert!(!keep_current_openai_base_url(&mut s, Some("https://api.openai.com/v1".into())));
+        assert_eq!(base_url_rows(&s), ["https://api.openai.com/v1"]);
+    }
 
     fn stdio_input(command: &str, args: &[&str], env: &[(&str, &str)]) -> McpServerInput {
         serde_json::from_value(json!({

@@ -123,6 +123,8 @@ pub fn run() {
                 );
             }
 
+            security::init_marker(&data_dir);
+
             let db_path = data_dir.join("loach.db");
             let db = match Database::open(&db_path) {
                 Ok(d) => d,

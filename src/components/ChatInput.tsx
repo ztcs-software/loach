@@ -810,6 +810,7 @@ export function ChatInput({ centered = false }: ChatInputProps) {
     // fall through to the normal send path so the user's literal text still
     // reaches the model (the "ignore unknown" rule).
     if (trimmed && isCommandInput(trimmed)) {
+      const insertSeq = useUIStore.getState().composerInsertSeq;
       const outcome = await dispatchCommand(trimmed, { confirm });
       if (outcome.kind === "handled") {
         // "Handled" covers the failed-command case too, and that's the
@@ -818,8 +819,13 @@ export function ChatInput({ centered = false }: ChatInputProps) {
         // retry. `passthrough` (unregistered text) is correctly excluded.
         const name = parseInput(trimmed)?.name;
         if (name) recordCommandUse(name);
-        setText("");
-        setComposerDraft("");
+        // A command that filled the composer itself (`/snippet` primes it
+        // with the snippet's text) leaves that text in place; clearing here
+        // too wiped it before it ever showed.
+        if (useUIStore.getState().composerInsertSeq === insertSeq) {
+          setText("");
+          setComposerDraft("");
+        }
         setError(null);
         setPaletteDismissed(false);
         const result = outcome.result;

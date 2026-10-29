@@ -414,7 +414,13 @@ pub(crate) fn build_pinned_client(url: &Url, addrs: &[SocketAddr]) -> Result<req
         // back to the system resolver, bypassing the SSRF guard. `fetch()`
         // walks the redirect chain manually and rebuilds a pinned client
         // per hop.
-        .redirect(reqwest::redirect::Policy::none());
+        .redirect(reqwest::redirect::Policy::none())
+        // Connect directly, never through a proxy. reqwest otherwise picks
+        // one up from HTTP(S)_PROXY / ALL_PROXY or the OS settings, and a
+        // proxy resolves the hostname itself — the `resolve()` pin below is
+        // never consulted, so a rebinding host could reach a private
+        // address through it after passing our screen.
+        .no_proxy();
 
     // `resolve()` plumbs a (host, addr) override into the internal resolver.
     // We feed in every screened address so a multi-A-record host can still

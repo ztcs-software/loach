@@ -524,9 +524,21 @@ function parseOverrides(json: string | null): Partial<GenerationParams> {
  *
  * Read synchronously so the chat send path doesn't pay an async hop on
  * every message. Cache warming happens up-front in `newSession` /
- * `setSessionModel` so by the time the user hits Enter the merge has the
- * right data.
+ * `selectSession` / `setSessionModel`, and the request builders await
+ * `warmModelDefaults` in case it hasn't landed yet.
  */
+/** Load the Modelfile defaults `readSessionParams` reads for an Ollama
+ *  chat. Only `newSession`, a model switch and the parameter panel warmed
+ *  that cache, so a chat reopened after a restart sent DEFAULT_PARAMS over
+ *  its model's Modelfile (num_ctx 8192 instead of the model's own) until the
+ *  panel was opened. Cached after the first call, so later sends don't
+ *  wait; a failed `/api/show` resolves to `{}` rather than throwing. */
+async function warmModelDefaults(session: Session): Promise<void> {
+  if (session.provider === "ollama" && session.model) {
+    await useModelsStore.getState().loadModelDefaults(session.model);
+  }
+}
+
 function readSessionParams(session: Session | undefined): GenerationParams {
   if (!session) return { ...DEFAULT_PARAMS };
   const overrides = parseOverrides(session.params_json);
@@ -674,6 +686,7 @@ ${transcript}
     session.provider === "ollama"
       ? settings.ollama_base_url
       : settings.openai_base_url;
+  await warmModelDefaults(session);
   const params = readSessionParams(session);
 
   let summary = "";
@@ -772,6 +785,7 @@ async function buildTaskRequest(
     session.provider === "ollama"
       ? settings.ollama_base_url
       : settings.openai_base_url;
+  await warmModelDefaults(session);
   const params = readSessionParams(session);
 
   const fallbackPrompt = baseSystemPrompt(
@@ -1799,6 +1813,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // After the early return, so clearing the selection (delete / archive)
     // doesn't register as a visit.
     useUIStore.getState().noteSessionVisit(id);
+    // Warm the model's Modelfile defaults so the context bar and parameter
+    // panel show this chat's real values — same as `newSession`.
+    const opened = get().sessions.find((s) => s.id === id);
+    if (opened) void warmModelDefaults(opened);
     if (!get().messages[id]) {
       // Every caller fires this without awaiting (`void select(id)`), so an
       // unguarded reject here surfaces only as an unhandled promise rejection

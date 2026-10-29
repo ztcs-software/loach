@@ -175,17 +175,24 @@ export default function App() {
     return () => window.clearTimeout(t);
   }, []);
 
+  const phase2Started = useRef(false);
   // Phase 2 — once we're past the lock screen, hydrate the rest of the app.
   // Doing this after unlock keeps the lock surface snappy and avoids
   // shipping any chat data into memory while the user is still proving
   // they're allowed to see it.
   //
-  // The five hydrates are independent — none of their `hydrate()` methods
-  // reads from another store — so we fan them out in parallel. The prior
+  // The hydrates are independent — except `hydrateModels`, whose listing
+  // reads the provider URLs and the key flag from the settings store, so it
+  // waits for settings — and we fan the rest out in parallel. The prior
   // sequential await chain was the dominant chunk of post-unlock latency,
   // since IPC round-trips stack additively. Parallelising collapses them
   // to the slowest single call (typically `hydrateModels`, which is
   // network-bound to Ollama).
+  //
+  // Runs once per launch. Every later unlock (idle lock, lock-now, a macOS
+  // window close) re-mounts the app over stores that are still loaded, and
+  // re-running this used to re-cull empty chats, jump the selection and
+  // repeat auto-launch and preload on each one.
   //
   // The Ollama preload only needs `settings` + `sessions` to resolve the
   // default model choice, so we kick it off as soon as those two land
@@ -202,6 +209,8 @@ export default function App() {
     // the same atomic update that sets the correct `unlocked`, so gating on it
     // closes that window.
     if (!securityHydrated || !unlocked) return;
+    if (phase2Started.current) return;
+    phase2Started.current = true;
 
     const settingsP = hydrateSettings();
     const chatsP = hydrateChats();
@@ -210,8 +219,11 @@ export default function App() {
     void hydrateSnippetVars();
     void hydrateLibrary();
     // `hydrateModels` is network-bound (Ollama /api/tags) — fire-and-forget
-    // so its latency never blocks anything the user sees.
-    void hydrateModels();
+    // so its latency never blocks anything the user sees. It lists from the
+    // configured URLs, so it starts once settings land: started alongside
+    // them, it listed the defaults (localhost Ollama, no OpenAI) and stayed
+    // that way for anyone with a remote server or an API key.
+    void settingsP.then(() => hydrateModels());
 
     // Optional Ollama auto-launch. Starts `ollama serve` if nothing is
     // answering, so a user who lives in Loach doesn't have to keep the

@@ -51,3 +51,18 @@ describe("argument completion", () => {
     expect(matchCommands("model").map((e) => e.insertText)).toEqual(["/model"]);
   });
 });
+
+describe("text that only starts with a slash", () => {
+  // `matchCommands` gets the composer text minus its first `/`. A pasted code
+  // comment or an aside used to open the palette with every command, and
+  // Enter then replaced the whole draft with the first one.
+  it("lists nothing for `//` or `/ ` prose", () => {
+    expect(matchCommands("/ why does this fail?\nconst x = 1;")).toEqual([]);
+    expect(matchCommands("/")).toEqual([]);
+    expect(matchCommands(" aside")).toEqual([]);
+  });
+
+  it("still lists every command for a bare slash", () => {
+    expect(matchCommands("").length).toBeGreaterThan(10);
+  });
+});

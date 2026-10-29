@@ -52,7 +52,11 @@ export type ArgSources = Readonly<Record<string, readonly string[]>>;
  *  starts with the typed prefix, plus any sub-command entries when the
  *  parent matches. Empty query (just `/`) returns every command. */
 export function matchCommands(query: string, argSources: ArgSources = {}): PaletteEntry[] {
-  const parsed = parseInput("/" + query.replace(/^\/+/, ""));
+  // Only a bare `/` lists everything. Text going on with a space or another
+  // slash — a pasted `// comment`, `/ aside` — is prose, and an open palette
+  // let Enter replace the whole draft with its first command.
+  if (query !== "" && /^[\s/]/.test(query)) return [];
+  const parsed = parseInput("/" + query);
   if (!parsed) return [];
   const name = parsed.name;
   const rest = parsed.rest;

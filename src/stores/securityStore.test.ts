@@ -80,6 +80,30 @@ describe("securityStore hydration", () => {
     }
   });
 
+  it("locks once a probe that outlived the timeout finds a lock", async () => {
+    // A keychain prompt the user answers after the 5 s cut-off: the app has
+    // already opened, and must not stay open for the session.
+    vi.useFakeTimers();
+    try {
+      lockUntilHydrated();
+      let answer!: (s: LockStatus) => void;
+      probe.mockReturnValueOnce(new Promise<LockStatus>((r) => (answer = r)));
+      const hydration = useSecurityStore.getState().hydrate();
+      await vi.advanceTimersByTimeAsync(5000);
+      await hydration;
+      expect(useSecurityStore.getState().unlocked).toBe(true);
+
+      answer(PIN_LOCK);
+      await vi.advanceTimersByTimeAsync(0);
+
+      const s = useSecurityStore.getState();
+      expect(s.unlocked).toBe(false);
+      expect(s.status).toEqual(PIN_LOCK);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("stays locked on cold start when a lock is configured", async () => {
     // Fail-open must not leak into the success path: a configured lock on
     // first boot keeps the pessimistic `unlocked: false`.
