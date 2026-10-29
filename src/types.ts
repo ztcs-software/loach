@@ -333,6 +333,13 @@ export interface GenerationParams {
   low_vram?: boolean;
 }
 
+/** Context window assumed for an OpenAI-compatible chat that doesn't set
+ *  `num_ctx` itself. Those servers don't report their window and ignore
+ *  `num_ctx`, so it only sizes Library sources and the context bar — where
+ *  DEFAULT_PARAMS' 8192 made a 128k model read as nearly full after a few
+ *  turns and pushed its sources down to excerpts. */
+export const OPENAI_COMPAT_NUM_CTX = 32768;
+
 export const DEFAULT_PARAMS: GenerationParams = {
   temperature: 0.7,
   top_p: 0.95,

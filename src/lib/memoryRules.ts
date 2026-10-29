@@ -1,7 +1,7 @@
 /**
  * Pure, store-free helpers behind the memory extractor (`memory.ts`): the
  * extractor prompt, the tolerant JSON parser for the model's reply, the
- * local dedupe and request filters, and the prompt-injection cap. Kept apart from
+ * local dedupe, request and secret filters, and the prompt-injection cap. Kept apart from
  * `memory.ts` so they can be unit-tested without mocking the Tauri bridge
  * or the stores.
  */
@@ -70,6 +70,7 @@ export function selectMemoriesForPrompt<T extends { created_at: number; content:
  *   - Skip anything already in memory (we list the memories, numbered)
  *   - Correct or retire a listed memory the turn shows has changed, rather
  *     than adding a second, contradicting one
+ *   - Never record a credential, even one the user shared
  *   - Return empty lists when nothing durable came up
  *   - Output ONLY a JSON object — never prose around it
  *
@@ -110,6 +111,7 @@ export function buildExtractorSystemPrompt(
     "- Do NOT add facts already covered by EXISTING MEMORIES or ALREADY KNOWN facts.",
     "- Do NOT include ephemeral content: the specific question being asked, generated code, transient errors, or summaries of the assistant's reply.",
     "- Do NOT speculate. Only record facts the user clearly stated or strongly implied about themselves or their work.",
+    "- NEVER record a secret: a password, passcode, PIN, API key, access token, private key or any other credential — not even one the user shared about themselves or that appears in a file they attached. Memory is stored in plain text and shown to other models.",
     "- If nothing qualifies, return {\"add\": [], \"update\": [], \"remove\": []}.",
     "",
     "EXISTING MEMORIES:",
@@ -288,6 +290,44 @@ const REQUEST_REPORT =
  */
 export function describesRequest(s: string): boolean {
   return REQUEST_REPORT.test(s);
+}
+
+/** Key shapes with a recognisable prefix: OpenAI-style `sk-…`, GitHub
+ *  `ghp_…` / `gho_…` (and siblings) and fine-grained `github_pat_…`, AWS
+ *  access key ids, Slack `xox…-` tokens. */
+const KEY_SHAPE =
+  /\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_\w{20,}|A[KS]IA[0-9A-Z]{16}|xox[abprs]-[A-Za-z0-9-]{10,})/;
+
+/** "Wi-Fi password is …", "PIN: …", "hasło do routera to …": a credential
+ *  named and then given, English and Polish. */
+const CREDENTIAL_GIVEN =
+  /\b(?:(?:password|passcode|passphrase|pin(?: code)?)(?: (?:for|to|of|on) [^.:=\n]{1,40}?)? *(?:(?:is|was)\b|[:=])|(?:hasło|haslo|kod pin)(?: (?:do|od|dla) [^.:=\n]{1,40}?)? *(?:(?:to|jest)\b|[:=])) *\S/i;
+
+/** A run of key characters (24 or more) that reads as a token of a shape we
+ *  don't know: a long hex string, or upper- and lower-case letters and digits
+ *  that rarely repeat. A slug, a long word or a number never qualifies. */
+function looksRandom(token: string): boolean {
+  if (/^[0-9a-f]{32,}$/i.test(token)) return true;
+  if (!/\d/.test(token) || !/[a-z]/.test(token) || !/[A-Z]/.test(token)) return false;
+  const counts = new Map<string, number>();
+  for (const c of token) counts.set(c, (counts.get(c) ?? 0) + 1);
+  let bits = 0;
+  for (const n of counts.values()) bits -= (n / token.length) * Math.log2(n / token.length);
+  return bits >= 3.5;
+}
+
+/**
+ * Local backstop for the prompt's "never record a secret" rule. Memory is
+ * kept in plain text and goes into every later prompt, remote providers
+ * included, so a fact that carries a credential ("Wi-Fi password is …", a
+ * key quoted from an attached `.env`) is dropped rather than saved. Errs on
+ * the side of dropping: a lost fact can be said again, a leaked key can't be
+ * taken back. Takes the raw text, not `normalize`d — keys are made of the
+ * `-` and `_` it strips.
+ */
+export function looksLikeSecret(s: string): boolean {
+  if (KEY_SHAPE.test(s) || CREDENTIAL_GIVEN.test(s)) return true;
+  return (s.match(/[A-Za-z0-9+/_=-]{24,}/g) ?? []).some(looksRandom);
 }
 
 function tokenSet(s: string): Set<string> {

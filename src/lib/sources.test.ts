@@ -9,6 +9,7 @@ const tauri = vi.hoisted(() => ({
   libraryGetItems: vi.fn<(ids: string[]) => Promise<LibraryItem[]>>(),
   ragSearch: vi.fn<(args: unknown) => Promise<RagSearchResult>>(),
   libraryListSources: vi.fn(async () => []),
+  libraryList: vi.fn<() => Promise<{ items: LibraryItemMeta[]; datasets: [] }>>(),
 }));
 
 vi.mock("@/lib/tauri", async (importOriginal) => {
@@ -19,7 +20,9 @@ vi.mock("@/lib/tauri", async (importOriginal) => {
 import {
   buildExcerptBlock,
   buildFullTextBlock,
+  cutText,
   excerptLimit,
+  promptLabel,
   resolveMode,
   resolveSources,
   retrievalBudgetTokens,
@@ -157,6 +160,21 @@ describe("prompt blocks", () => {
     const q = retrievalQuery(`${"a".repeat(1999)}🐟 loach`, []);
     expect(q).toBe("a".repeat(1999));
   });
+
+  it("never cuts a source or its label inside an emoji", () => {
+    // Regression: a lone surrogate in the system prompt made the backend
+    // reject the whole chat request — every send in that chat failed.
+    const lone = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])/;
+    expect(cutText("ab🐟", 3)).toBe("ab");
+    expect(cutText("ab🐟", 4)).toBe("ab🐟");
+    expect(promptLabel(`${"t".repeat(159)}🐟 title`)).toBe(`${"t".repeat(159)}…`);
+    const text = "x".repeat(5000) + "🐟".repeat(1000);
+    for (let max = 1000; max < 1010; max++) {
+      const { block, cut } = buildFullTextBlock([{ title: "Emoji", text }], max + 5000);
+      expect(cut).toBe(true);
+      expect(block).not.toMatch(lone);
+    }
+  });
 });
 
 describe("expandSources", () => {
@@ -215,6 +233,7 @@ describe("resolveSources", () => {
     vi.clearAllMocks();
     useLibraryStore.setState({
       hydrated: true,
+      error: null,
       items: [meta("a", 400), meta("b", 40_000)],
       datasets: [],
       sources: {
@@ -410,6 +429,48 @@ describe("resolveSources", () => {
     const alone = await resolveSources({ session, spaceCtx: null, history: [], trigger: "hi", numCtx: 8192 });
     expect(alone.record?.is_error).toBe(true);
     expect(alone.record?.result).toBe("Couldn't read your Library sources.");
+  });
+
+  it("retries a Library that failed to load, and says so when it still can't", async () => {
+    // Regression: a failed startup load left the Library empty but "hydrated",
+    // so every send dropped the chat's sources without a word, for good.
+    const link = { id: "l1", owner_id: "s1", item_id: "a", dataset_id: null, enabled: true, position: 0, created_at: 0 };
+    useLibraryStore.setState({ items: [], error: "database is locked" });
+    tauri.libraryList.mockRejectedValueOnce(new Error("database is locked"));
+    const failed = await resolveSources({ session, spaceCtx: null, history: [], trigger: "hi", numCtx: 8192 });
+    expect(tauri.libraryList).toHaveBeenCalledTimes(1);
+    expect(failed.record?.is_error).toBe(true);
+    expect(failed.record?.result).toBe("Couldn't read your Library sources.");
+
+    // The next send tries again, and the source goes once it loads (a load
+    // drops the cached links, so they're read again too).
+    tauri.libraryList.mockResolvedValueOnce({ items: [meta("a", 400)], datasets: [] });
+    tauri.libraryListSources.mockResolvedValueOnce([link] as never);
+    const ok = await resolveSources({ session, spaceCtx: null, history: [], trigger: "hi", numCtx: 8192 });
+    expect(ok.systemBlock).toContain("body of a");
+    expect(ok.record?.result).toBe("Read 1 source in full.");
+  });
+
+  it("sends at most sixteen source images, and says how many stayed home", async () => {
+    const photos = Array.from({ length: 20 }, (_, i) =>
+      meta(`img${i}`, 0, { kind: "file", media: "image", mime: "image/png", title: `p${i}.png` }),
+    );
+    useLibraryStore.setState({
+      items: photos,
+      datasets: [{ id: "d", name: "D", description: "", item_ids: photos.map((p) => p.id), created_at: 0, updated_at: 0 }],
+      sources: {
+        "session:s1": [
+          { id: "l1", owner_id: "s1", item_id: null, dataset_id: "d", enabled: true, position: 0, created_at: 0 },
+        ],
+      },
+    });
+    const r = await resolveSources({ session, spaceCtx: null, history: [], trigger: "hi", numCtx: 8192 });
+    expect(r.images).toHaveLength(16);
+    expect(r.images[0]).toBe("body of img0");
+    // Only the ones that go are fetched at all.
+    expect(tauri.libraryGetItems.mock.calls[0][0]).toHaveLength(16);
+    expect((r.record?.arguments as SourcesReport).warning).toContain("4 more images");
+    expect(r.record?.result).toBe("Attached 16 images.");
   });
 
   it("records a failed search instead of blocking the send", async () => {

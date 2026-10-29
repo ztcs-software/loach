@@ -22,6 +22,8 @@ import {
   invalidateAllSpaceContext,
 } from "@/lib/spaceContextCache";
 import type { RetrievalMode, Space, SpaceFile, SpaceMemory } from "@/types";
+import { useChatStore } from "./chatStore";
+import { useLibraryStore } from "./libraryStore";
 
 /** The tabs of a Space's page. `files` is the Sources tab. */
 export type SpaceTab = "chats" | "instructions" | "files" | "memory" | "settings";
@@ -115,6 +117,11 @@ interface SpaceState {
  *  read, while the write itself skipped the not-yet-loaded cache — so it
  *  reads again. */
 let memoryWrites = 0;
+
+/** The same for a Space's sources: SpaceView reloads them on every visit,
+ *  and a list read before an upload, removal or switch landed after it and
+ *  put the old state back. */
+let fileWrites = 0;
 
 export const useSpaceStore = create<SpaceState>((set, get) => ({
   spaces: [],
@@ -235,7 +242,20 @@ export const useSpaceStore = create<SpaceState>((set, get) => ({
         spaceFiles: files,
         spaceMemories: memories,
         activeSpaceId: s.activeSpaceId === id ? null : s.activeSpaceId,
+        viewingSpaceId: s.viewingSpaceId === id ? null : s.viewingSpaceId,
       };
+    });
+    // Mirror the backend locally, like `removeFolder`: the Space's chats are
+    // space-less now (ON DELETE SET NULL) and its Library links are gone
+    // (CASCADE). Left cached, its former chats kept sending its sources,
+    // stopped remembering anything, and failed `/remember` on the missing row.
+    useChatStore.setState((s) => ({
+      sessions: s.sessions.map((x) => (x.space_id === id ? { ...x, space_id: null } : x)),
+    }));
+    useLibraryStore.setState((s) => {
+      const sources = { ...s.sources };
+      delete sources[`space:${id}`];
+      return { sources };
     });
     return true;
   },
@@ -251,9 +271,14 @@ export const useSpaceStore = create<SpaceState>((set, get) => ({
   setSpaceTab: (id, tab) => set((s) => ({ spaceTabs: { ...s.spaceTabs, [id]: tab } })),
 
   loadSpaceFiles: async (spaceId) => {
-    const files = await listSpaceFiles(spaceId);
-    set((s) => ({ spaceFiles: { ...s.spaceFiles, [spaceId]: files } }));
-    return files;
+    for (;;) {
+      const before = fileWrites;
+      const files = await listSpaceFiles(spaceId);
+      if (fileWrites === before) {
+        set((s) => ({ spaceFiles: { ...s.spaceFiles, [spaceId]: files } }));
+        return files;
+      }
+    }
   },
 
   addFile: async (spaceId, name, mime, kind, data, size) => {
@@ -273,6 +298,7 @@ export const useSpaceStore = create<SpaceState>((set, get) => ({
       size,
       position: existing.length,
     });
+    fileWrites++;
     invalidateSpaceContext(spaceId);
     set((s) => ({
       spaceFiles: {
@@ -286,6 +312,7 @@ export const useSpaceStore = create<SpaceState>((set, get) => ({
   removeFile: async (fileId, spaceId) => {
     try {
       await removeSpaceFile(fileId);
+      fileWrites++;
       invalidateSpaceContext(spaceId);
     } catch (e) {
       useToastStore.getState().push({
@@ -314,6 +341,7 @@ export const useSpaceStore = create<SpaceState>((set, get) => ({
       });
       return;
     }
+    fileWrites++;
     invalidateSpaceContext(spaceId);
     set((s) => ({
       spaceFiles: {

@@ -50,6 +50,12 @@ const MAX_TOOL_CALLS: usize = 256;
 /// the accumulation bounded.
 const MAX_TOOL_CALL_BYTES: usize = 4 * 1024 * 1024;
 
+/// How long a reply may run on past its `finish_reason` for the `usage`
+/// frame, which `include_usage` servers send after the finish chunk and
+/// before `[DONE]`. Only a server that skips `[DONE]` *and* holds the
+/// connection open waits this out; the rest end on `[DONE]` or the close.
+const USAGE_GRACE: Duration = Duration::from_secs(2);
+
 #[derive(Debug, Deserialize)]
 struct ModelsResponse {
     data: Vec<OpenAIModel>,
@@ -104,8 +110,10 @@ struct Choice {
     delta: Option<DeltaMsg>,
     /// Present on the terminator frame for compat servers that omit the
     /// trailing `data: [DONE]` marker (Azure, some Ollama-OpenAI proxies).
-    /// We treat any non-null `finish_reason` as an EOS so the chat doesn't
-    /// hang waiting for a [DONE] that never arrives.
+    /// Any non-null `finish_reason` ends the reply — after at most
+    /// `USAGE_GRACE` more for the usage frame — so the chat doesn't hang
+    /// waiting for a [DONE] that never arrives. `"error"` (OpenRouter) ends
+    /// it as an error.
     #[serde(default)]
     finish_reason: Option<String>,
 }
@@ -116,7 +124,7 @@ struct DeltaMsg {
     content: Option<String>,
     #[serde(default)]
     reasoning_content: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_empty")]
     tool_calls: Vec<DeltaToolCall>,
 }
 
@@ -144,7 +152,7 @@ struct DeltaToolFn {
 
 #[derive(Debug, Deserialize)]
 struct SseChunk {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_empty")]
     choices: Vec<Choice>,
     /// Some servers emit a final, choices-empty chunk that carries
     /// `usage: { completion_tokens, prompt_tokens, total_tokens }`. When
@@ -154,12 +162,38 @@ struct SseChunk {
     /// multiple tokens per chunk.
     #[serde(default)]
     usage: Option<Usage>,
+    /// A failure mid-reply. vLLM, llama-server and Ollama's compat endpoint
+    /// send it as a `data: {"error":{…}}` frame of its own; OpenRouter next
+    /// to a `finish_reason: "error"`. Read as an empty chunk, the cut-off
+    /// reply ended as a normal completion.
+    #[serde(default)]
+    error: Option<Value>,
 }
 
 #[derive(Debug, Deserialize, Clone, Copy)]
 struct Usage {
     #[serde(default)]
     completion_tokens: Option<u32>,
+}
+
+/// `#[serde(default)]` for a list that also takes an explicit `null` as
+/// empty. Some compat servers send `"tool_calls": null` on every delta;
+/// failing those frames dropped every token of the reply.
+fn null_as_empty<'de, D, T>(d: D) -> std::result::Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Ok(Option::<Vec<T>>::deserialize(d)?.unwrap_or_default())
+}
+
+/// The text of a mid-stream `error`: its `message` when it's the usual
+/// object, the string itself when a server sends just that, else the JSON.
+fn stream_error_message(err: &Value) -> String {
+    err.get("message")
+        .unwrap_or(err)
+        .as_str()
+        .map_or_else(|| err.to_string(), str::to_owned)
 }
 
 /// Accumulated tool call across a single turn — `name` and `arguments` may
@@ -699,6 +733,11 @@ async fn run_one_turn(
     // arguments. Bounded by `MAX_TOOL_CALL_BYTES` in the loop so an untrusted
     // server can't grow `accum` without limit via a flood of small frames.
     let mut tool_call_bytes: usize = 0;
+    // Set once a choice carries a `finish_reason`. The reply's content is
+    // complete then, but the `usage` frame is still to come, so reading
+    // goes on until `[DONE]`, the end of the stream, or `usage_deadline`.
+    let mut finish_seen = false;
+    let mut usage_deadline: Option<tokio::time::Instant> = None;
 
     loop {
         select! {
@@ -708,6 +747,17 @@ async fn run_one_turn(
                 let _ = app.emit(channel, StreamEvent::Cancelled);
                 registry.finish(stream_id);
                 return Ok(None);
+            }
+            _ = tokio::time::sleep_until(
+                usage_deadline.unwrap_or_else(tokio::time::Instant::now)
+            ), if usage_deadline.is_some() => {
+                // Finished, but neither `[DONE]` nor the close followed —
+                // same fold as the `finished` path below.
+                if let Some(n) = turn_tokens {
+                    *reported_tokens =
+                        Some(reported_tokens.unwrap_or(0).saturating_add(n));
+                }
+                return Ok(Some(decide_outcome(accum)));
             }
             maybe = byte_stream.next() => {
                 match maybe {
@@ -730,6 +780,7 @@ async fn run_one_turn(
                         let mut pending_token = String::new();
                         let mut pending_think = String::new();
                         let mut finished = false;
+                        let mut stream_error: Option<String> = None;
                         while let Some((rel_pos, sep_len)) =
                             find_frame_end(&buf[scan_offset..])
                         {
@@ -761,6 +812,10 @@ async fn run_one_turn(
                                     );
                                 }
                                 if let Ok(parsed) = parsed {
+                                    if let Some(err) = parsed.error.as_ref() {
+                                        stream_error = Some(stream_error_message(err));
+                                        break;
+                                    }
                                     // OpenAI (and most compat servers)
                                     // emit a final choices-empty frame
                                     // carrying `usage`. When we see it,
@@ -788,6 +843,10 @@ async fn run_one_turn(
                                             turn_tokens = Some(n);
                                         }
                                     }
+                                    // Past the finish only `usage` still
+                                    // counts: the reply's text and tool
+                                    // calls are complete.
+                                    if finish_seen { continue; }
                                     for c in parsed.choices {
                                         if let Some(d) = c.delta {
                                             if let Some(think) = d.reasoning_content {
@@ -883,16 +942,23 @@ async fn run_one_turn(
                                         // We still let the current chunk's
                                         // deltas accumulate (they may carry
                                         // the last tokens or tool-call
-                                        // pieces) — the `finished` flag
-                                        // only takes effect once the
-                                        // outer frame loop finishes.
-                                        if c.finish_reason.is_some() {
-                                            finished = true;
+                                        // pieces). Reading goes on only for
+                                        // the `usage` frame, which comes
+                                        // after this one.
+                                        match c.finish_reason.as_deref() {
+                                            Some("error") => {
+                                                stream_error = Some(
+                                                    "the server ended the reply with an error".into(),
+                                                );
+                                            }
+                                            Some(_) => finish_seen = true,
+                                            None => {}
                                         }
                                     }
+                                    if stream_error.is_some() { break; }
                                 }
                             }
-                            if finished { break; }
+                            if finished || stream_error.is_some() { break; }
                         }
                         // The longest SSE frame separator is `\r\n\r\n`
                         // (4 bytes), so keep that many bytes of overlap
@@ -911,6 +977,18 @@ async fn run_one_turn(
                                 StreamEvent::Token { delta: pending_token },
                             );
                         }
+                        // The text so far went out above; the reply ends
+                        // here as an error, not Done.
+                        if let Some(message) = stream_error {
+                            let _ = app.emit(
+                                channel,
+                                StreamEvent::Error {
+                                    message: format!("OpenAI stream stopped mid-reply: {message}"),
+                                },
+                            );
+                            registry.finish(stream_id);
+                            return Err(anyhow!("openai stream error: {message}"));
+                        }
                         if finished {
                             // Fold this turn's reported usage into the
                             // running total exactly once.
@@ -919,6 +997,9 @@ async fn run_one_turn(
                                     Some(reported_tokens.unwrap_or(0).saturating_add(n));
                             }
                             return Ok(Some(decide_outcome(accum)));
+                        }
+                        if finish_seen && usage_deadline.is_none() {
+                            usage_deadline = Some(tokio::time::Instant::now() + USAGE_GRACE);
                         }
                     }
                     Some(Err(e)) => {
@@ -1329,5 +1410,55 @@ mod tests {
         let debris = vec![AccumTool { id: None, name: String::new(), arguments: "{}".into() }];
         assert!(matches!(decide_outcome(debris), TurnOutcome::Done));
         assert!(matches!(decide_outcome(vec![]), TurnOutcome::Done));
+    }
+
+    // --- SseChunk ---------------------------------------------------------------
+
+    #[test]
+    fn explicit_null_lists_read_as_empty() {
+        // Some compat servers send this on every delta; it used to fail the
+        // frame, so the whole reply came back empty.
+        let chunk: SseChunk = serde_json::from_str(
+            r#"{"choices":[{"delta":{"content":"Hi","tool_calls":null},"finish_reason":null}]}"#,
+        )
+        .expect("parses");
+        let delta = chunk.choices[0].delta.as_ref().expect("delta");
+        assert_eq!(delta.content.as_deref(), Some("Hi"));
+        assert!(delta.tool_calls.is_empty());
+
+        let usage_only: SseChunk =
+            serde_json::from_str(r#"{"choices":null,"usage":{"completion_tokens":7}}"#)
+                .expect("parses");
+        assert!(usage_only.choices.is_empty());
+        assert_eq!(usage_only.usage.and_then(|u| u.completion_tokens), Some(7));
+    }
+
+    #[test]
+    fn mid_stream_error_frames_carry_their_message() {
+        // vLLM / llama-server: an error frame of its own.
+        let chunk: SseChunk = serde_json::from_str(
+            r#"{"error":{"message":"CUDA out of memory","type":"server_error","code":500}}"#,
+        )
+        .expect("parses");
+        assert_eq!(
+            chunk.error.as_ref().map(stream_error_message).as_deref(),
+            Some("CUDA out of memory")
+        );
+        // OpenRouter: the error beside a `finish_reason: "error"` choice.
+        let chunk: SseChunk = serde_json::from_str(
+            r#"{"error":{"code":502,"message":"Provider disconnected"},"choices":[{"delta":{"content":""},"finish_reason":"error"}]}"#,
+        )
+        .expect("parses");
+        assert_eq!(
+            chunk.error.as_ref().map(stream_error_message).as_deref(),
+            Some("Provider disconnected")
+        );
+        assert_eq!(chunk.choices[0].finish_reason.as_deref(), Some("error"));
+
+        assert_eq!(stream_error_message(&json!("overloaded")), "overloaded");
+        assert_eq!(stream_error_message(&json!({ "code": 1 })), r#"{"code":1}"#);
+        // An explicit `"error": null` is no error.
+        let ok: SseChunk = serde_json::from_str(r#"{"choices":[],"error":null}"#).expect("parses");
+        assert!(ok.error.is_none());
     }
 }

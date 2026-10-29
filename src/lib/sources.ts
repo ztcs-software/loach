@@ -1,4 +1,5 @@
 import { ragSearch } from "@/lib/tauri";
+import { charsPerToken } from "@/lib/contextUsage";
 import { fitImageForModel, stripInlinedAttachments } from "@/lib/files";
 import { logger } from "@/lib/logger";
 import { expandSources, useLibraryStore } from "@/stores/libraryStore";
@@ -85,12 +86,20 @@ export function sourcesVerdict(pref: RetrievalMode, tokens: number, numCtx: numb
   return pref === "full" && tokens > Math.round(numCtx * FORCED_FULL_SHARE) ? "cut" : "full";
 }
 
+/** `s` cut to at most `max` UTF-16 units, never between the two halves of an
+ *  emoji (a surrogate pair): a lone surrogate fails the IPC's JSON decode,
+ *  and with it the whole request — every send, for a source cut that way. */
+export function cutText(s: string, max: number): string {
+  const cut = s.slice(0, max);
+  return /[\uD800-\uDBFF]$/.test(cut) ? cut.slice(0, -1) : cut;
+}
+
 /** A title or URL made safe for one prompt line: whitespace runs (newlines
  *  included) collapse to a space and backticks go, so a page title can't
  *  close its label or start lines of its own outside the fence. */
 export function promptLabel(s: string, max = 160): string {
   const flat = s.replace(/\s+/g, " ").replace(/`/g, "'").trim();
-  return flat.length > max ? `${flat.slice(0, max).trimEnd()}…` : flat;
+  return flat.length > max ? `${cutText(flat, max).trimEnd()}…` : flat;
 }
 
 /** A code fence long enough not to be closed by anything inside `text`. */
@@ -130,7 +139,7 @@ export function buildFullTextBlock(
     }
     let text = d.text;
     if (text.length > room) {
-      text = `${text.slice(0, room)}\n[…cut to fit the context window]`;
+      text = `${cutText(text, room)}\n[…cut to fit the context window]`;
       cut = true;
     }
     const fence = fenceFor(text);
@@ -176,10 +185,8 @@ export function retrievalQuery(trigger: string, history: Message[]): string {
   const query = parts
     .map((p) => p.trim())
     .filter(Boolean)
-    .join("\n")
-    .slice(0, 2000);
-  // Never end on half an emoji: a lone surrogate fails the IPC's JSON decode.
-  return /[\uD800-\uDBFF]$/.test(query) ? query.slice(0, -1) : query;
+    .join("\n");
+  return cutText(query, 2000);
 }
 
 /** Structured payload of a `library_sources` record. */
@@ -215,6 +222,13 @@ interface Doc {
   chars: number;
   /** Already in hand for Space files; fetched on demand for Library items. */
   text?: string;
+  /** The item's stored preview, to tell its script by (see `charsPerToken`). */
+  preview?: string;
+}
+
+/** Characters per token across `docs`, judged from a slice of each. */
+function docsCharsPerToken(docs: { text?: string; preview?: string }[]): number {
+  return charsPerToken(docs.map((d) => (d.text ?? d.preview ?? "").slice(0, 500)).join(""));
 }
 
 interface ImageSource {
@@ -226,11 +240,16 @@ interface ImageSource {
   data?: string;
 }
 
+/** Most source images one message carries. Each is decoded and scaled before
+ *  it goes, and a Space or dataset full of photos otherwise sent every one of
+ *  them with every message. */
+const MAX_IMAGES_PER_TURN = 16;
+
 /** Image sources already scaled for a model, so a chat doesn't decode the
- *  same photo again on every turn. Keyed by source and size; small, since a
- *  chat rarely carries more than a few. */
+ *  same photo again on every turn. Keyed by source and size; holds one
+ *  message's worth, so a chat at the cap still finds them all here. */
 const fittedImages = new Map<string, Promise<string>>();
-const FITTED_IMAGES_KEPT = 16;
+const FITTED_IMAGES_KEPT = MAX_IMAGES_PER_TURN;
 
 function fittedImage(src: ImageSource & { data: string }): Promise<string> {
   const key = `${src.kind}:${src.id}:${src.data.length}`;
@@ -273,7 +292,10 @@ export async function resolveSources(args: {
 }): Promise<ResolvedSources> {
   const { session, spaceCtx, history, trigger, numCtx } = args;
   const lib = useLibraryStore.getState();
-  if (!lib.hydrated) await lib.hydrate();
+  // A failed hydrate leaves the Library looking empty, so every link would
+  // expand to nothing — try it again rather than live with that.
+  if (!lib.hydrated || lib.error !== null) await lib.hydrate();
+  const hydrateError = useLibraryStore.getState().error;
 
   const docs: Doc[] = [];
   const imageSources: ImageSource[] = [];
@@ -299,6 +321,11 @@ export async function resolveSources(args: {
       session.space_id ? lib.ensureSources("space", session.space_id) : Promise.resolve([]),
       lib.ensureSources("session", session.id),
     ]);
+    // The links read but the Library still didn't: what they point at is
+    // unknown, so they count as unreadable rather than as nothing.
+    if (hydrateError !== null && [...spaceLinks, ...chatLinks].some((l) => l.enabled)) {
+      throw new Error(hydrateError);
+    }
     const { datasets, items } = useLibraryStore.getState();
     chatItems = expandSources(chatLinks, datasets, items);
     const inChat = new Set(chatItems.map((i) => i.id));
@@ -310,7 +337,15 @@ export async function resolveSources(args: {
     for (const item of list) {
       if (item.media === "image")
         imageSources.push({ kind: "library", id: item.id, title: item.title, mime: item.mime });
-      else docs.push({ kind: "library", id: item.id, title: item.title, url: item.url, chars: item.chars });
+      else
+        docs.push({
+          kind: "library",
+          id: item.id,
+          title: item.title,
+          url: item.url,
+          chars: item.chars,
+          preview: item.preview,
+        });
     }
   };
   addItems(chatItems);
@@ -324,6 +359,14 @@ export async function resolveSources(args: {
       docs.push({ kind: "space_file", id: f.id, title: f.name, url: null, chars: f.data.length, text: f.data });
   }
   addItems(spaceItems);
+  // Past the cap the rest stay home — the chat's own picks are first in line
+  // — and the record says how many.
+  const imagesLeftOut = imageSources.splice(MAX_IMAGES_PER_TURN).length;
+  if (imagesLeftOut > 0) {
+    warnings.push(
+      `A message carries at most ${MAX_IMAGES_PER_TURN} images, so ${plural(imagesLeftOut, "more image")} from your sources didn't go with this one.`,
+    );
+  }
   const libraryImageIds = imageSources.filter((s) => s.data === undefined).map((s) => s.id);
   if (libraryImageIds.length > 0) {
     try {
@@ -346,7 +389,8 @@ export async function resolveSources(args: {
     ? useSpaceStore.getState().spaces.find((s) => s.id === session.space_id) ?? spaceCtx?.space
     : null;
   const pref = chatRetrievalMode(session, space?.retrieval_mode);
-  const totalTokens = docs.reduce((n, d) => n + Math.ceil(d.chars / 4), 0);
+  const cpt = docsCharsPerToken(docs);
+  const totalTokens = docs.reduce((n, d) => n + Math.ceil(d.chars / cpt), 0);
   const mode = resolveMode(pref, totalTokens, numCtx);
   const unreadable = (): ResolvedSources => ({
     systemBlock: imageBlock,
@@ -365,7 +409,10 @@ export async function resolveSources(args: {
       systemBlock: imageBlock,
       userBlock: "",
       images,
-      record: sentImages.length > 0 ? sourcesRecord({ mode, sources: imageEntries }, withImageCount("")) : null,
+      record:
+        sentImages.length > 0
+          ? sourcesRecord({ mode, sources: imageEntries, warning: warnings.join(" ") || null }, withImageCount(""))
+          : null,
     };
   }
 
@@ -384,7 +431,7 @@ export async function resolveSources(args: {
     const readable = docs.filter((d) => d.text !== undefined || bodies.has(d.id));
     if (readable.length === 0) return unreadable();
     const full = readable.map((d) => ({ title: d.title, url: d.url, text: d.text ?? bodies.get(d.id) ?? "" }));
-    const maxChars = Math.round(numCtx * (pref === "full" ? FORCED_FULL_SHARE : FULL_TEXT_SHARE) * 4) + 2000;
+    const maxChars = Math.round(numCtx * (pref === "full" ? FORCED_FULL_SHARE : FULL_TEXT_SHARE) * cpt) + 2000;
     const { block, cut, included } = buildFullTextBlock(full, maxChars);
     // Report what the model actually got: a source that didn't fit at all
     // is named as left out, not listed as read.
@@ -419,7 +466,7 @@ export async function resolveSources(args: {
 
   const titles = new Map(docs.map((d) => [`${d.kind}:${d.id}`, d.title]));
   try {
-    const maxChars = retrievalBudgetTokens(numCtx) * 4;
+    const maxChars = Math.round(retrievalBudgetTokens(numCtx) * cpt);
     const result = await ragSearch({
       docs: docs.map((d) => ({ kind: d.kind, id: d.id })),
       query: retrievalQuery(trigger, history),
@@ -502,10 +549,12 @@ export function estimateChatSources(args: {
   const lib = useLibraryStore.getState();
   let chars = 0;
   let count = 0;
+  const samples: { text?: string; preview?: string }[] = [];
   for (const f of spaceFiles) {
     if (f.enabled === false || f.kind !== "text") continue;
     chars += f.data.length;
     count += 1;
+    samples.push({ text: f.data });
   }
   const lists = [
     session.space_id ? lib.sources[`space:${session.space_id}`] ?? [] : [],
@@ -515,10 +564,11 @@ export function estimateChatSources(args: {
     if (item.media !== "text") continue;
     chars += item.chars;
     count += 1;
+    samples.push({ preview: item.preview });
   }
   if (count === 0) return { tokens: 0, mode: null, count: 0 };
   const pref = chatRetrievalMode(session, spaceMode);
-  const sourceTokens = Math.ceil(chars / 4);
+  const sourceTokens = Math.ceil(chars / docsCharsPerToken(samples));
   return {
     tokens: sourcesTokenCost(pref, sourceTokens, numCtx),
     mode: resolveMode(pref, sourceTokens, numCtx),

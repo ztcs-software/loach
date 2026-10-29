@@ -15,7 +15,9 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon", "image-png"] }
+# No `image-png`: the tray icon is decoded at compile time by
+# `include_image!`, and nothing loads an image from a path or bytes at runtime.
+tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-shell = "2"
 tauri-plugin-updater = "2"
@@ -29,7 +31,9 @@ async-stream = "0.3"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `preserve_order` keeps object keys in document order, so the built-in `json`
+# tool's `format` / `extract` give the model its own JSON back, not re-sorted.
+serde_json = { version = "1", features = ["preserve_order"] }
 
 # Storage
 rusqlite = { version = "0.40", features = ["bundled"] }

@@ -640,6 +640,13 @@ export function openaiListModels(baseUrl: string): Promise<ModelInfo[]> {
   return invoke("openai_list_models", { baseUrl });
 }
 
+/** {@link openaiListModels} with `apiKey` in place of the stored key — checks
+ *  a key the user just typed before anything is stored. */
+export function openaiListModelsWithKey(baseUrl: string, apiKey: string): Promise<ModelInfo[]> {
+  if (!isTauri) return notInTauri([]);
+  return invoke("openai_list_models_with_key", { baseUrl, apiKey });
+}
+
 // ------------ ollama model admin ------------
 
 /** `POST /api/show` — returns the Modelfile, template, system prompt,
@@ -1446,12 +1453,13 @@ export function mcpTools(): Promise<McpToolsOverview> {
 
 // ------------ data (export / import / wipe) ------------
 
-/** Returns a JSON string representing every table in the DB. Use
- *  `saveTextToFile` to put the result on disk through a backend-owned
- *  save dialog. */
-export function exportDataJson(): Promise<string> {
+/** Open a native save dialog and write every table in the DB to the chosen
+ *  file as JSON. The dialog and the write both happen in Rust, so the export
+ *  never passes through the renderer. Resolves to the chosen path, or `null`
+ *  if the user cancelled the dialog. */
+export function exportDataToFile(): Promise<string | null> {
   if (!isTauri) return Promise.reject(new Error("export requires the Tauri runtime"));
-  return invoke<string>("export_data_json");
+  return invoke<string | null>("export_data_to_file");
 }
 
 /** Row counts and byte totals for the storage tile. Resolves `null` outside

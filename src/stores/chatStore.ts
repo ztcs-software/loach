@@ -45,9 +45,9 @@ import {
 } from "@/lib/files";
 import {
   cancelMemoryExtraction,
-  deferMemoryTurn,
   dropMemoryTurns,
   extractMemories,
+  queueMemoryTurn,
   type MemoryScope,
 } from "@/lib/memory";
 import { selectMemoriesForPrompt } from "@/lib/memoryRules";
@@ -64,7 +64,7 @@ import { formatProviderError } from "@/lib/providerErrors";
 import { getPersona } from "@/lib/personas";
 import { getTone } from "@/lib/tones";
 import { applyTemporalAwareness } from "@/lib/temporal";
-import { resolveSources } from "@/lib/sources";
+import { cutText, resolveSources } from "@/lib/sources";
 import {
   getCachedSpaceContext,
   setCachedSpaceContext,
@@ -78,6 +78,7 @@ import {
 } from "@/lib/webFetch";
 import {
   DEFAULT_PARAMS,
+  OPENAI_COMPAT_NUM_CTX,
   type Attachment,
   type ChatLabel,
   type ChatMessageIn,
@@ -141,6 +142,16 @@ interface QueueTask {
    *  the pin silently discarded a curated mark they'd have to notice was
    *  gone before they could restore it. */
   carryPin?: boolean;
+  /** Where facts from this turn are remembered — the chat's Space, or
+   *  global memory — as of the send. A chat can move to another Space while
+   *  its reply waits or streams; the turn belongs with the Space whose
+   *  instructions and memory its request was built from. */
+  memoryScope: MemoryScope;
+}
+
+/** The memory scope of a turn sent from `session` (see `QueueTask`). */
+function memoryScopeOf(session: Session): MemoryScope {
+  return session.space_id ? { kind: "space", spaceId: session.space_id } : { kind: "global" };
 }
 
 interface ChatState {
@@ -284,7 +295,9 @@ interface ChatState {
    *   - If that session is the currently running one → stops the stream,
    *     persists the partial reply, promotes the next waiter.
    *   - If that session is waiting in the queue → removes it. The persisted
-   *     user message stays visible; no assistant placeholder existed yet. */
+   *     user message stays visible; no assistant placeholder existed yet.
+   *   - If a send or regenerate for it is still building its request, or its
+   *     task is between the queue and the stream → that work never starts. */
   cancelForSession: (sessionId: string) => Promise<void>;
   /** "Respond now" affordance on a waiting chat. Moves that chat's task to
    *  the head of the waiting queue, then cancels the current runner —
@@ -544,7 +557,11 @@ function readSessionParams(session: Session | undefined): GenerationParams {
   const overrides = parseOverrides(session.params_json);
   const isOllama = session.provider === "ollama";
   const modelsState = isOllama ? useModelsStore.getState() : null;
-  const modelDefaults = modelsState?.modelDefaults[session.model] ?? {};
+  // An OpenAI-compatible model has no Modelfile; its stand-in default is
+  // the assumed window, which only sizes sources (the provider ignores it).
+  const modelDefaults: Partial<GenerationParams> = isOllama
+    ? (modelsState?.modelDefaults[session.model] ?? {})
+    : { num_ctx: OPENAI_COMPAT_NUM_CTX };
   const settingsState = useSettingsStore.getState();
   // Global Thinking default (Settings → Features). Sits below model + per-model
   // prefs and the per-chat override so an explicit per-model or per-chat
@@ -638,6 +655,15 @@ const sendingSessions = new Set<string>();
 export function isPreparingSend(sessionId: string): boolean {
   return sendingSessions.has(sessionId);
 }
+
+/** Per-chat count of `cancelForSession` calls. Work for a chat that is in
+ *  neither `runningTask` nor `queue` — a send or regenerate still building
+ *  its request, or a task between leaving the queue and `startTask` setting
+ *  `runningTask` — reads it before its awaits and doesn't start if it moved:
+ *  archive, delete and /clear all cancel through it, and that work otherwise
+ *  went on to stream into the chat they had just put away. */
+const cancelCounts = new Map<string, number>();
+const cancelCount = (sessionId: string) => cancelCounts.get(sessionId) ?? 0;
 
 /** Folder ordering, matched to the backend's `ORDER BY name COLLATE NOCASE`.
  *
@@ -967,7 +993,9 @@ async function maybeAutoTitle(
   if (!session) return;
   if (session.title && session.title !== "New chat") return;
   const raw = firstUserContent.trim();
-  const draft = raw.length > 28 ? raw.slice(0, 28).trimEnd() + "…" : raw;
+  // `cutText`, not `slice`: half an emoji fails the rename's IPC decode, and
+  // that failure aborted the chat's first send.
+  const draft = raw.length > 28 ? cutText(raw, 28).trimEnd() + "…" : raw;
   if (!draft) return;
   await renameSession(sessionId, draft);
   setStore({
@@ -1144,26 +1172,23 @@ function finishRunning(
     if (reason !== "done") return null;
     if (!running || !buf || !producedContent) return null;
     if (!finishedId) return null;
-    const session = get().sessions.find((s) => s.id === finishedId);
-    if (!session) return null;
-    // Routing: a Space chat writes to that Space's memory (when the Space has
-    // it on); a chat outside any Space writes to global memory (when the
-    // setting is on). Private Chat never reaches this store.
-    let scope: MemoryScope;
-    if (session.space_id) {
-      const space = useSpaceStore.getState().spaces.find((s) => s.id === session.space_id);
-      if (!space || !space.memory_enabled) return null;
-      scope = { kind: "space", spaceId: session.space_id };
-    } else {
-      if (!useSettingsStore.getState().global_memory_enabled) return null;
-      scope = { kind: "global" };
-    }
     // Pull the user message that triggered this turn so the extractor sees
     // both halves of the exchange. `userMsgId` was captured when the task
     // was enqueued, so it's always one of the persisted messages.
     const messages = get().messages[finishedId] ?? [];
     const userMsg = messages.find((m) => m.id === running.userMsgId);
     if (!userMsg) return null;
+    // Routing, decided at send time: a Space chat writes to that Space's
+    // memory (when the Space has it on); a chat outside any Space writes to
+    // global memory (when the setting is on). Private Chat never reaches this
+    // store.
+    const scope = running.memoryScope;
+    if (scope.kind === "space") {
+      const space = useSpaceStore.getState().spaces.find((s) => s.id === scope.spaceId);
+      if (!space || !space.memory_enabled) return null;
+    } else if (!useSettingsStore.getState().global_memory_enabled) {
+      return null;
+    }
     return {
       scope,
       sessionId: finishedId,
@@ -1228,24 +1253,25 @@ function finishRunning(
   // Fire-and-forget memory extraction. Runs after the queue head has been
   // promoted so the user's next message starts streaming without waiting on
   // us; failures are logged inside the extractor and never bubble up.
-  if (memorySnapshot) {
-    // Skip extraction when the chat has more work pending — a queued message
-    // (still in `queue` here; `promoteQueueHead` only shifts it on the next
-    // microtask) or something already running. The extractor is a second full
-    // LLM generation against the same model, so firing it now would make it
-    // compete with the user's visible turn for the generation slot and inflate
-    // that turn's time-to-first-token. Park the turn instead so the next idle
-    // run in this chat reads it alongside the newer one.
-    const busy = get().queue.length > 0 || get().runningTask !== null;
-    if (busy) {
-      deferMemoryTurn(memorySnapshot);
-      logger.debug("memory extraction deferred — chat busy");
-    } else {
-      void extractMemories(memorySnapshot).catch((e) => {
-        logger.warn("memory extraction failed", e);
-      });
-    }
+  if (memorySnapshot) queueMemoryTurn(memorySnapshot);
+  // Extract once a reply ends normally — in whichever chat — with nothing
+  // else wanting the model: no queued message (still in `queue` here;
+  // `promoteQueueHead` only shifts it on the next microtask), no send still
+  // building its request, no queue held for Private Chat. The extractor is a
+  // second full LLM generation against the same model, so firing it now would
+  // make it compete with the user's visible turn for the generation slot and
+  // inflate that turn's time-to-first-token. Turns stay parked meanwhile, this
+  // chat's and any other's. A stop or an error starts nothing: archive,
+  // delete, /clear and Private Chat end replies that way too, just as they
+  // put the chat away or want the model themselves.
+  if (reason !== "done") return;
+  if (queueHeld || get().queue.length > 0 || sendingSessions.size > 0) {
+    logger.debug("memory extraction deferred — model busy");
+    return;
   }
+  void extractMemories().catch((e) => {
+    logger.warn("memory extraction failed", e);
+  });
 }
 
 /** Promotes the head of the waiting queue to be the running task. Deferred
@@ -1317,6 +1343,7 @@ async function tryDirectStart(
  *  next waiter so one broken task can't stall the whole queue. */
 async function startTask(task: QueueTask, get: Getter, set: Setter) {
   const { sessionId } = task;
+  const cancels = cancelCount(sessionId);
 
   // Create the assistant placeholder NOW (not at enqueue time). Keeping
   // the placeholder deferred means a waiting task that gets cancelled
@@ -1333,6 +1360,15 @@ async function startTask(task: QueueTask, get: Getter, set: Setter) {
     // and move on to the next — the .finally hook in `promoteQueueHead`'s
     // caller will pick the next waiter once the dispatch lock is released.
     logger.error("failed to create assistant placeholder", e);
+    return;
+  }
+  // Cancelled while the placeholder was written: out of the queue but not
+  // yet running, this task was invisible to `cancelForSession`. Drop the
+  // empty row like a cancelled waiter, which never had one.
+  if (cancelCount(sessionId) !== cancels) {
+    void deleteMessage(assistantMsg.id, sessionId).catch((e) =>
+      logger.warn("couldn't remove a cancelled reply's placeholder", e),
+    );
     return;
   }
 
@@ -1620,6 +1656,7 @@ function resetForTests() {
   dispatching = false;
   queueHeld = false;
   sendingSessions.clear();
+  cancelCounts.clear();
   runningBuffers = null;
   if (pendingFrame !== null) {
     cancelAnimationFrame(pendingFrame);
@@ -1868,10 +1905,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
 
     // Wipe any leftover composer primer (e.g. a suggestion chip the user
-    // clicked but never sent). Bump the seq so a currently-mounted ChatInput
-    // also resets its local text state. Callers that want to seed the new
-    // chat's composer (Snippets "Run") call primeComposer AFTER newSession,
-    // so their primer still wins.
+    // clicked but never sent) so it can't land in the new chat. The composer
+    // itself shows the new chat's own (empty) draft — it keeps drafts per
+    // chat and passes over this empty primer. Callers that want to seed the
+    // new chat's composer (Snippets "Run") call primeComposer AFTER
+    // newSession, so their primer still wins.
     useUIStore.setState((s) => ({
       composerDraft: "",
       composerAttachments: [],
@@ -2438,6 +2476,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       sendingSessions.has(sessionId);
     if (alreadyBusy) return;
     sendingSessions.add(sessionId);
+    const cancels = cancelCount(sessionId);
     try {
 
       let inlinedContent = inlineTextAttachments(rawContent, attachments);
@@ -2522,12 +2561,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
         userMsgId: userMsg.id,
         request,
         preToolCalls: preToolCalls.length > 0 ? preToolCalls : undefined,
+        memoryScope: memoryScopeOf(session),
       };
 
       // 3. Dispatch. If nothing is running (or mid-start) globally, start
       //    immediately. Otherwise park in the waiting queue and let the
       //    runner pick us up when the current task ends — `tryDirectStart`
       //    owns the dispatch-lock claim and the trailing re-promote nudge.
+      //    Not at all when the chat was cancelled meanwhile (archived,
+      //    deleted, cleared, stopped): the user message stays, as it does
+      //    for a cancelled waiter.
+        if (cancelCount(sessionId) !== cancels) return;
         if (!(await tryDirectStart(task, get, set))) {
           set((s) => ({ queue: [...s.queue, task] }));
         }
@@ -2550,6 +2594,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (state.queue.some((t) => t.sessionId === sessionId)) return;
     if (sendingSessions.has(sessionId)) return;
     sendingSessions.add(sessionId);
+    const cancels = cancelCount(sessionId);
     try {
       const messages = state.messages[sessionId] ?? [];
       if (messages.length < 2) return;
@@ -2631,8 +2676,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
         // The row we just deleted may have been pinned; `startTask` restores
         // the mark on its replacement rather than silently dropping it.
         carryPin: last.pinned_at != null,
+        memoryScope: memoryScopeOf(session),
       };
 
+      // Cancelled while the request was built — as on a send.
+      if (cancelCount(sessionId) !== cancels) return;
       if (!(await tryDirectStart(task, get, set))) {
         set((s) => ({ queue: [...s.queue, task] }));
       }
@@ -2642,6 +2690,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   cancelForSession: async (sessionId) => {
+    // Case C, ahead of the rest: work for this chat not yet running or
+    // queued — a send or regenerate building its request, or a task leaving
+    // the queue — sees the count move and never starts (see `cancelCounts`).
+    cancelCounts.set(sessionId, cancelCount(sessionId) + 1);
     const state = get();
     const running = state.runningTask;
 

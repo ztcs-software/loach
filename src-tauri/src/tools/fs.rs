@@ -129,9 +129,6 @@ fn cut_by_depth(entry: &walkdir::DirEntry) -> bool {
 /// entry's size *before* the file is read, so a multi-gigabyte log in the
 /// tree costs a stat, not an allocation.
 const MAX_SEARCH_FILE_BYTES: u64 = 512 * 1024;
-/// How much of an existing file `write_file` samples to learn its line
-/// endings and text encoding before overwriting it.
-const FORMAT_SNIFF_BYTES: u64 = 64 * 1024;
 
 /// Project instructions file, read from the workspace root on every turn
 /// and appended to the system prompt — the same idea as a `CLAUDE.md` or
@@ -262,6 +259,55 @@ fn unusable_name(part: &std::ffi::OsStr) -> Option<&'static str> {
     None
 }
 
+/// Whether `name` has the shape of a Windows 8.3 short name: a `~` then a
+/// digit, as in `PROGRA~1` or `IMPORT~1.MD`.
+fn looks_like_short_name(name: &str) -> bool {
+    name.as_bytes()
+        .windows(2)
+        .any(|w| w[0] == b'~' && w[1].is_ascii_digit())
+}
+
+/// Whether `requested` is a short name the disk knows by a different long
+/// name, `on_disk`. A difference in case alone is the same name on the
+/// case-insensitive filesystems that have short names.
+fn is_short_name_alias(requested: &str, on_disk: &str) -> bool {
+    looks_like_short_name(requested) && requested.to_lowercase() != on_disk.to_lowercase()
+}
+
+/// Refuse a path that reaches an entry through its 8.3 short name. Windows
+/// opens `IMPORT~1.MD` as `important-notes.md`, so the approval card, which
+/// shows the path as the model wrote it, would name a different file from
+/// the one changed. Run once a resolver's own prefix checks have passed.
+/// Only components shaped like a short name are looked up, so an ordinary
+/// path costs nothing extra; a link is left alone, since its canonical name
+/// is its target's.
+fn refuse_short_names(root: &Path, vetted: &Path, rel: &str) -> Result<(), String> {
+    let mut walked = root.to_path_buf();
+    for part in vetted.iter() {
+        walked.push(part);
+        let requested = part.to_string_lossy();
+        if !looks_like_short_name(&requested)
+            || fs::symlink_metadata(&walked).map_or(true, |m| m.file_type().is_symlink())
+        {
+            continue;
+        }
+        let on_disk = walked.canonicalize().ok();
+        if let Some(name) = on_disk.as_deref().and_then(Path::file_name) {
+            if is_short_name_alias(&requested, &name.to_string_lossy()) {
+                // Deliberately not naming the long name: only the resolved
+                // path was prefix-checked, not every step of this walk.
+                return Err(format!(
+                    "`{}` reaches `{requested}` by its Windows short (8.3) name, which \
+                     stands for a longer one. Use the full name (list_directory shows \
+                     it), so the approval names the file that will actually change.",
+                    display_rel(rel)
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Confirm `candidate` — already canonical — sits inside `root`.
 fn ensure_inside(root: &Path, candidate: &Path, rel: &str) -> Result<(), String> {
     if candidate.starts_with(root) {
@@ -283,6 +329,7 @@ fn resolve_read(root: &Path, rel: &str) -> Result<PathBuf, String> {
         .canonicalize()
         .map_err(|e| format!("`{}` is not readable: {e}", display_rel(rel)))?;
     ensure_inside(root, &canon, rel)?;
+    refuse_short_names(root, &vetted, rel)?;
     Ok(canon)
 }
 
@@ -342,6 +389,7 @@ fn resolve_target(root: &Path, rel: &str) -> Result<PathBuf, String> {
         }
         remaining.push(part);
     }
+    refuse_short_names(root, &vetted, rel)?;
 
     // `base` is canonical and inside the root; anything left over is a
     // plain name that doesn't exist yet. If everything existed, `base` is
@@ -370,6 +418,7 @@ fn resolve_entry(root: &Path, rel: &str) -> Result<PathBuf, String> {
     let unreadable = |e: std::io::Error| format!("`{}` is not readable: {e}", display_rel(rel));
     let dir = root.join(parent).canonicalize().map_err(unreadable)?;
     ensure_inside(root, &dir, rel)?;
+    refuse_short_names(root, &vetted, rel)?;
     let entry = dir.join(name);
     let meta = fs::symlink_metadata(&entry).map_err(unreadable)?;
     if meta.file_type().is_symlink() {
@@ -492,19 +541,23 @@ fn match_line_endings(existing_ending: &str, content: &str) -> String {
     }
 }
 
-/// Text encoding and line ending of the file at `path`, from its first
-/// 64 KiB. Anything that can't be read, or reads as binary, counts as plain
-/// UTF-8 with LF: the new content then goes to disk exactly as given, and
-/// the write that follows reports any real error.
+/// Text encoding and line ending of the file at `path`, judged from as much
+/// of it as `read_file` and `edit_file` decode — all of it, up to
+/// [`MAX_READ_FILE_BYTES`]. Sampling only the first 64 KiB took a
+/// Windows-1250 file whose first accented letter came later for UTF-8 —
+/// which read_file, decoding all of it, didn't — and the overwrite
+/// converted it. Anything that can't be read, or reads as
+/// binary, counts as plain UTF-8 with LF: the new content then goes to disk
+/// exactly as given, and the write that follows reports any real error.
 fn sniff_format(path: &Path) -> (TextEncoding, &'static str) {
     const PLAIN: (TextEncoding, &str) = (TextEncoding::Utf8 { bom: false }, "\n");
     let mut head = Vec::new();
     let read = fs::File::open(path)
-        .and_then(|f| f.take(FORMAT_SNIFF_BYTES).read_to_end(&mut head));
+        .and_then(|f| f.take(MAX_READ_FILE_BYTES).read_to_end(&mut head));
     if read.is_err() {
         return PLAIN;
     }
-    let complete = (head.len() as u64) < FORMAT_SNIFF_BYTES;
+    let complete = (head.len() as u64) < MAX_READ_FILE_BYTES;
     match encoding::decode(&head, complete) {
         Some(d) => (d.encoding, line_ending_of(&d.text)),
         None => PLAIN,
@@ -587,28 +640,65 @@ fn replace_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     written
 }
 
-/// Whether a call's `path` — or either end of a move — lies inside a `.git`
-/// directory, as written or once links are resolved. A standing "Allow …
-/// for this chat" never covers those: a change there shows in no `git
-/// status` or diff, and a hook or config setting there runs commands the
-/// next time the user runs git — a way out of the folder that a grant given
-/// for ordinary edits was never meant to open.
+/// Whether a call's `path` — or either end of a move — lies where git runs
+/// what it finds the next time the user runs git, as written or once links
+/// are resolved. A standing "Allow … for this chat" never covers those: a
+/// hook or config setting there runs commands — a way out of the folder
+/// that a grant given for ordinary edits was never meant to open.
+///
+/// That's a `.git` directory (whose changes also show in no `git status`
+/// or diff), the hook folders `core.hooksPath` is pointed at by husky
+/// (`.husky`) and by convention (`.githooks`), a `.pre-commit-config.yaml`
+/// (a `repo: local` hook runs any command), and any folder laid out as a
+/// bare repository — see [`in_git_dir_layout`].
 pub fn touches_git_dir(root: &Path, args: &Value) -> bool {
-    let has_git = |p: &Path| {
-        p.components().any(|c| {
-            matches!(c, Component::Normal(n) if n.to_string_lossy().eq_ignore_ascii_case(".git"))
-        })
-    };
     ["path", "from", "to"]
         .iter()
         .filter_map(|key| args.get(*key)?.as_str())
         .any(|rel| {
-            has_git(Path::new(rel.trim()))
-                || resolve_target(root, rel)
-                    .ok()
-                    .and_then(|p| p.strip_prefix(root).ok().map(has_git))
-                    .unwrap_or(false)
+            runs_with_git(Path::new(rel.trim()))
+                || resolve_target(root, rel).ok().is_some_and(|p| {
+                    p.strip_prefix(root).is_ok_and(runs_with_git) || in_git_dir_layout(root, &p)
+                })
         })
+}
+
+/// Names git, or the hook manager it calls, takes commands from — see
+/// [`touches_git_dir`].
+const GIT_RUN_NAMES: &[&str] = &[".git", ".husky", ".githooks", ".pre-commit-config.yaml"];
+
+/// Whether any component of `p` is one of [`GIT_RUN_NAMES`].
+fn runs_with_git(p: &Path) -> bool {
+    p.components().any(|c| {
+        matches!(c, Component::Normal(n) if {
+            let n = n.to_string_lossy();
+            GIT_RUN_NAMES.iter().any(|name| n.eq_ignore_ascii_case(name))
+        })
+    })
+}
+
+/// Whether `target`, once written, lies in a folder — the root itself or
+/// any on the way down to it — laid out as a git directory. A `HEAD` beside
+/// `objects/` and `refs/` is all git needs to open one as a bare
+/// repository, and opening it runs whatever its `config` names as
+/// `core.fsmonitor`; editors that scan a project for nested repositories
+/// open them unasked. `target` counts as present, so the call that would
+/// complete such a layout asks too, not only those into a finished one.
+fn in_git_dir_layout(root: &Path, target: &Path) -> bool {
+    let Ok(rel) = target.strip_prefix(root) else {
+        return false;
+    };
+    let mut dir = root.to_path_buf();
+    for part in rel.iter() {
+        let present = |marker: &str| {
+            part.to_string_lossy().eq_ignore_ascii_case(marker) || dir.join(marker).exists()
+        };
+        if present("HEAD") && present("objects") && present("refs") {
+            return true;
+        }
+        dir.push(part);
+    }
+    false
 }
 
 /// For the approval card: the size of the file a `write_file` call would
@@ -2141,6 +2231,114 @@ mod tests {
         assert!(!touches_git_dir(&root, &json!({ "path": ".gitignore" })));
     }
 
+    /// Hook folders and the pre-commit config run commands on the user's
+    /// next commit just as `.git/hooks` does, so no grant covers them either.
+    #[test]
+    fn hook_folders_and_the_pre_commit_config_are_recognised() {
+        for p in [
+            ".husky/pre-commit",
+            ".githooks/post-checkout",
+            ".pre-commit-config.yaml",
+            "sub/.Pre-Commit-Config.yaml",
+            ".HUSKY/_/h",
+        ] {
+            assert!(runs_with_git(Path::new(p)), "{p}");
+        }
+        for p in [".husky-notes.md", "pre-commit-config.yaml", ".github/workflows/ci.yml", "docs/githooks.md"] {
+            assert!(!runs_with_git(Path::new(p)), "{p}");
+        }
+        let (_d, root) = workspace();
+        assert!(touches_git_dir(&root, &json!({ "from": "a.yaml", "to": ".pre-commit-config.yaml" })));
+    }
+
+    /// A folder with `HEAD`, `objects/` and `refs/` is a bare repository to
+    /// git, whose `config` can name a `core.fsmonitor` command. A write into
+    /// one, or the write that completes one, always asks.
+    #[test]
+    fn writes_into_a_bare_repository_layout_are_recognised() {
+        let (_d, root) = workspace();
+        fs::create_dir_all(root.join("x/objects")).unwrap();
+        fs::write(root.join("x/HEAD"), "ref: refs/heads/main\n").unwrap();
+        // Not a repository yet: `refs/` is missing.
+        assert!(!touches_git_dir(&root, &json!({ "path": "x/config" })));
+        // …but the write that adds it would make one.
+        assert!(touches_git_dir(&root, &json!({ "path": "x/refs/heads/main" })));
+        fs::create_dir_all(root.join("x/refs")).unwrap();
+        assert!(touches_git_dir(&root, &json!({ "path": "x/config" })));
+        assert!(touches_git_dir(&root, &json!({ "path": "x/hooks/deep/file" })));
+        assert!(touches_git_dir(&root, &json!({ "from": "README.md", "to": "x/description" })));
+        assert!(!touches_git_dir(&root, &json!({ "path": "src/main.rs" })));
+        assert!(!touches_git_dir(&root, &json!({ "path": "xy/config" })));
+
+        // A workspace that is itself a git directory: everything in it asks.
+        let (_d2, bare) = workspace();
+        fs::create_dir_all(bare.join("objects")).unwrap();
+        fs::create_dir_all(bare.join("refs")).unwrap();
+        fs::write(bare.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        assert!(touches_git_dir(&bare, &json!({ "path": "config" })));
+    }
+
+    /// The approval card shows the path as the model wrote it, so a Windows
+    /// short name that opens a differently named file must be refused. The
+    /// comparison is tested on its own: whether a volume generates short
+    /// names is a per-machine setting.
+    #[test]
+    fn short_name_aliases_are_told_apart_from_real_names() {
+        assert!(looks_like_short_name("IMPORT~1.MD"));
+        assert!(looks_like_short_name("PROGRA~12"));
+        assert!(!looks_like_short_name("notes~.md"));
+        assert!(!looks_like_short_name("file.txt"));
+        // A short name standing for a longer one.
+        assert!(is_short_name_alias("IMPORT~1.MD", "important-notes.md"));
+        assert!(is_short_name_alias("GIT~1", ".git"));
+        // The file really has that name, in any case.
+        assert!(!is_short_name_alias("import~1.md", "IMPORT~1.MD"));
+        assert!(!is_short_name_alias("backup~1.txt", "backup~1.txt"));
+        // Names not shaped like a short name — a case change, a link to a
+        // differently named target — are the sandbox's business, not this.
+        assert!(!is_short_name_alias("notes.md", "Notes.md"));
+        assert!(!is_short_name_alias("docs", "documentation"));
+
+        // A real file literally named like a short name still works.
+        let (_d, root) = workspace();
+        fs::write(root.join("backup~1.txt"), "x").unwrap();
+        let w = dispatch_write_file(&root, &json!({ "path": "backup~1.txt", "content": "y" }));
+        assert!(!w.is_error, "{}", w.content_text);
+    }
+
+    /// Where the volume does generate short names, every path through one is
+    /// refused and the long-named file is left alone.
+    #[cfg(windows)]
+    #[test]
+    fn a_short_name_alias_is_refused_on_disk() {
+        use windows::core::HSTRING;
+        use windows::Win32::Storage::FileSystem::GetShortPathNameW;
+        let (_d, root) = workspace();
+        let long = root.join("important-notes-for-taxes.md");
+        fs::write(&long, "original\n").unwrap();
+        let mut buf = [0u16; 1024];
+        // SAFETY: the path outlives the call, and the buffer length is passed.
+        let n = unsafe { GetShortPathNameW(&HSTRING::from(long.as_path()), Some(&mut buf)) } as usize;
+        let short = PathBuf::from(String::from_utf16_lossy(&buf[..n.min(buf.len())]));
+        let short_name = short.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        if !looks_like_short_name(&short_name) {
+            eprintln!("8.3 names are off on this volume; skipping");
+            return;
+        }
+        let w = dispatch_write_file(&root, &json!({ "path": short_name, "content": "changed\n" }));
+        assert!(w.is_error && w.content_text.contains("short (8.3) name"), "{}", w.content_text);
+        let e = dispatch_edit_file(
+            &root,
+            &json!({ "path": short_name, "old_text": "original", "new_text": "changed" }),
+        );
+        assert!(e.is_error, "{}", e.content_text);
+        let d = dispatch_delete_file(&root, &json!({ "path": short_name }));
+        assert!(d.is_error, "{}", d.content_text);
+        let m = dispatch_move_file(&root, &json!({ "from": short_name, "to": "moved.md" }));
+        assert!(m.is_error, "{}", m.content_text);
+        assert_eq!(fs::read_to_string(&long).unwrap(), "original\n");
+    }
+
     #[test]
     fn write_target_size_tells_a_new_file_from_an_overwrite() {
         let (_d, root) = workspace();
@@ -3037,6 +3235,26 @@ mod tests {
         let w = dispatch_write_file(&root, &json!({ "path": "pl.txt", "content": "Źdźbło\n" }));
         assert!(!w.is_error, "{}", w.content_text);
         assert_eq!(fs::read(root.join("pl.txt")).unwrap(), cp1250("Źdźbło\r\n"));
+    }
+
+    /// An overwrite judged the encoding from the first 64 KiB, so a
+    /// Windows-1250 file whose first accented letter came later was taken
+    /// for UTF-8 and converted — while read_file, decoding all of it, called
+    /// it Windows-1250.
+    #[test]
+    fn write_judges_the_encoding_from_as_much_as_read_file_decodes() {
+        let (_d, root) = workspace();
+        let mut original = "plain ascii line\r\n".repeat(200 * 1024 / 18).into_bytes();
+        original.extend(cp1250("Zażółć gęślą jaźń\r\n"));
+        assert!(original.len() > 64 * 1024 * 3);
+        fs::write(root.join("big.txt"), &original).unwrap();
+
+        let r = dispatch_read_file(&root, &json!({ "path": "big.txt", "max_lines": 1 }));
+        assert!(r.content_text.contains("windows-1250"), "{}", r.content_text);
+        let w = dispatch_write_file(&root, &json!({ "path": "big.txt", "content": "łódź\n" }));
+        assert!(!w.is_error, "{}", w.content_text);
+        assert!(w.content_text.contains("Kept its windows-1250 encoding"), "{}", w.content_text);
+        assert_eq!(fs::read(root.join("big.txt")).unwrap(), cp1250("łódź\r\n"));
     }
 
     /// A character the file's encoding can't store is refused — never

@@ -47,7 +47,7 @@ jobs:
       should_release: ${{ steps.gate.outputs.should_release }}
       release_body: ${{ steps.notes.outputs.body }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0  # need full history to inspect existing tags
 
@@ -158,11 +158,15 @@ jobs:
             git curl ca-certificates xz-utils sudo
           git config --global --add safe.directory '*'
 
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Tauri-action needs full history to compute the right tag base
           # for the auto-created tag. Matches `prepare`'s checkout.
           fetch-depth: 0
+          # Nothing in this job pushes (tauri-action talks to the API with
+          # GITHUB_TOKEN), so don't leave the token in .git/config for
+          # `npm ci` install scripts and build scripts to find.
+          persist-credentials: false
 
       # Runs as root inside the container, so no sudo. build-essential,
       # pkg-config and libssl-dev come preinstalled on the runner image but
@@ -186,7 +190,7 @@ jobs:
             wget \
             desktop-file-utils
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
           cache: npm
@@ -201,11 +205,24 @@ jobs:
       # 1.90.0 is the floor imposed by current deps: `tauri` 2.12 and its
       # plugins, `muda` and `tray-icon` need 1.90+; before them `darling`,
       # `image`, `serde_with`, `time` set it at 1.88.
-      - uses: dtolnay/rust-toolchain@1.90.0
+      #
+      # Every action is pinned to a commit, not a tag: a moved tag would run
+      # new code in a job that holds the updater signing key.
+      - uses: dtolnay/rust-toolchain@7dcc700092a1a8b9c17ba0e140b4e34e93000946 # 1.90.0
+        with:
+          toolchain: 1.90.0
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: src-tauri
+
+      # `tauri build` runs cargo without --locked, so a Cargo.toml change
+      # merged without its Cargo.lock refresh would ship whatever versions
+      # resolve today. Fail first instead, as CI's `cargo test --locked` does.
+      - name: Check Cargo.lock is current
+        working-directory: src-tauri
+        shell: bash
+        run: cargo metadata --locked --format-version 1 > /dev/null
 
       - run: npm ci
 
@@ -287,7 +304,7 @@ jobs:
           codesign -d -r- "$RUNNER_TEMP/probe"
           echo "APPLE_SIGNING_IDENTITY=$ID" >> "$GITHUB_ENV"
 
-      - uses: tauri-apps/tauri-action@v1
+      - uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}

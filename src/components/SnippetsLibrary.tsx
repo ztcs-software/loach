@@ -213,6 +213,10 @@ function SnippetCard({
       aria-label={`Edit snippet: ${snippet.title}`}
       onClick={onEdit}
       onKeyDown={(e) => {
+        // Only the card's own keys: Enter on its Run or ⋯ button (or a menu
+        // item, which bubbles here through the portal) belongs to that
+        // control — the preventDefault below swallowed a keyboard Run.
+        if (e.target !== e.currentTarget) return;
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
           onEdit();

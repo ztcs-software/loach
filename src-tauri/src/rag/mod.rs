@@ -20,6 +20,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -37,8 +38,12 @@ pub const CHUNK_TARGET: usize = 1200;
 const CHUNK_OVERLAP: usize = 200;
 
 /// Boundaries tried, in order, when a paragraph is longer than a chunk.
-/// Each keeps its separator attached to the piece before it.
-const SEPARATORS: [&str; 7] = ["\n", ". ", "? ", "! ", "; ", ", ", " "];
+/// Each keeps its separator attached to the piece before it. Chinese and
+/// Japanese end sentences and clauses with full-width marks and no space;
+/// without them a long CJK paragraph was hard-cut mid-sentence.
+const SEPARATORS: [&str; 12] = [
+    "\n", ". ", "? ", "! ", "。", "？", "！", "; ", "；", ", ", "，", " ",
+];
 
 struct Piece {
     text: String,
@@ -243,6 +248,32 @@ pub struct SearchResult {
 
 const CANDIDATES: usize = 60;
 const DEFAULT_MAX_CHUNKS: usize = 12;
+/// How long sends go straight to keyword search after a query embedding
+/// failed, rather than each waiting out the same timeout first.
+const QUERY_COOLDOWN: Duration = Duration::from_secs(60);
+
+/// The last query embedding that failed for the server's sake (unreachable,
+/// hung, rate-limiting, the model missing), with the settings it was sent
+/// with.
+#[derive(Debug, Default)]
+pub struct QueryCooldown(Option<(embed::EmbedConfig, Instant, String)>);
+
+impl QueryCooldown {
+    /// The failure to report instead of embedding a query with `cfg` at
+    /// `now`: one with the same settings less than [`QUERY_COOLDOWN`] ago.
+    /// New settings are tried straight away.
+    pub fn active(&self, cfg: &embed::EmbedConfig, now: Instant) -> Option<&str> {
+        let (sent, at, error) = self.0.as_ref()?;
+        (sent == cfg && now.duration_since(*at) < QUERY_COOLDOWN).then_some(error.as_str())
+    }
+
+    /// Note how a query embedding with `cfg` ended at `at`. A success clears
+    /// the record, and so does a refusal: that's about the query, not the
+    /// server.
+    pub fn record(&mut self, cfg: &embed::EmbedConfig, at: Instant, error: Option<&embed::EmbedError>) {
+        self.0 = error.filter(|e| !e.refused).map(|e| (cfg.clone(), at, e.message.clone()));
+    }
+}
 
 /// Search `args.docs` for excerpts relevant to `args.query`.
 pub async fn search(
@@ -285,17 +316,22 @@ pub async fn search(
             ));
         }
         // The query embedding sits on the send path, so skip it when it can't
-        // pay off: the indexer's last request to this model failed (the
-        // server is down or the model missing — don't hold the send on
-        // another try, but nudge the indexer to retry in the background), or
-        // nothing in scope has a vector to compare against yet.
+        // pay off: the indexer's last request to this model failed, or the
+        // last query embedding with these settings did a moment ago (the
+        // server is down or the model missing — don't hold every send on
+        // another try; the indexer retries on its own schedule), or nothing
+        // in scope has a vector to compare against yet.
         let status = indexer.status();
-        let failing = status.error.filter(|_| status.model.as_deref() == Some(key.as_str()));
+        let failing = status
+            .error
+            .filter(|_| status.model.as_deref() == Some(key.as_str()))
+            .or_else(|| indexer.query_cooldown.lock().active(&cfg, Instant::now()).map(str::to_string));
         if let Some(e) = failing {
-            indexer.wake();
             warning = Some(format!("Embedding model unavailable ({e}); searched by keyword only."));
         } else if !vectors.is_empty() {
-            match embed::embed_query(http, &cfg, &args.query).await {
+            let result = embed::embed_query(http, &cfg, &args.query).await;
+            indexer.query_cooldown.lock().record(&cfg, Instant::now(), result.as_ref().err());
+            match result {
                 Ok(q) => {
                     let mut scored: Vec<(i64, f32)> = vectors
                         .iter()
@@ -373,6 +409,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cjk_paragraphs_split_at_sentence_ends() {
+        let sentence = "机器学习是人工智能的一个分支，它让计算机从数据中学习。";
+        let text = sentence.repeat(80); // one paragraph, no spaces
+        let chunks = chunk_text(&text);
+        assert!(chunks.len() >= 2);
+        for c in &chunks {
+            assert!(char_len(c) <= CHUNK_TARGET, "chunk of {} chars", char_len(c));
+            assert!(c.ends_with('。'), "cut mid-sentence: …{}", c.chars().rev().take(8).collect::<String>());
+        }
+    }
+
+    #[test]
     fn short_text_is_one_chunk() {
         assert_eq!(chunk_text("hello world"), vec!["hello world"]);
         assert!(chunk_text("  \n\n \r\n ").is_empty());
@@ -443,6 +491,32 @@ mod tests {
         let fused = rrf(&[vec![1, 2, 3], vec![3, 4]]);
         assert_eq!(fused[0].0, 3, "id ranked by both lists wins");
         assert_eq!(fused.len(), 4);
+    }
+
+    // Regression: a fully embedded index publishes no error, so with the
+    // embedding server unreachable every send waited out the connect or
+    // query timeout before falling back to keyword search.
+    #[test]
+    fn a_failed_query_embedding_holds_off_the_next_for_a_while() {
+        let cfg = |url: &str| embed::EmbedConfig { provider: "ollama".into(), model: "m".into(), base_url: url.into() };
+        let (lan, local) = (cfg("http://lan:11434"), cfg("http://localhost:11434"));
+        let down = embed::EmbedError { message: "error sending request".into(), refused: false };
+        let t0 = Instant::now();
+        let mut c = QueryCooldown::default();
+        assert_eq!(c.active(&lan, t0), None);
+
+        c.record(&lan, t0, Some(&down));
+        assert_eq!(c.active(&lan, t0 + Duration::from_secs(30)), Some("error sending request"));
+        // New settings are tried at once; the same ones again after a while.
+        assert_eq!(c.active(&local, t0 + Duration::from_secs(30)), None);
+        assert_eq!(c.active(&lan, t0 + QUERY_COOLDOWN), None);
+
+        // A success clears it, and so does a refused query.
+        c.record(&lan, t0, None);
+        assert_eq!(c.active(&lan, t0), None);
+        c.record(&lan, t0, Some(&down));
+        c.record(&lan, t0, Some(&embed::EmbedError { message: "HTTP 400: too long".into(), refused: true }));
+        assert_eq!(c.active(&lan, t0), None);
     }
 
     #[test]

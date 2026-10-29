@@ -1,4 +1,4 @@
-import { useChatStore } from "@/stores/chatStore";
+import { isPreparingSend, useChatStore } from "@/stores/chatStore";
 import { useGlobalMemoryStore } from "@/stores/globalMemoryStore";
 import { connectionLabel, useMcpStore } from "@/stores/mcpStore";
 import { useModelsStore } from "@/stores/modelsStore";
@@ -72,6 +72,12 @@ export async function dispatch(
   if (!cmd) return { kind: "passthrough" };
 
   try {
+    // A command without `usage` or `subcommands` takes no argument. It used
+    // to run anyway and drop the rest: `/regenerate but shorter` regenerated
+    // the same way and lost "but shorter".
+    if (parsed.rest && !cmd.usage && !cmd.subcommands) {
+      throw new Error(`/${cmd.name} doesn't take arguments.`);
+    }
     const result = await run(parsed.name, parsed.rest, deps);
     return { kind: "handled", result };
   } catch (e) {
@@ -272,6 +278,10 @@ async function runClear(deps: CommandDeps): Promise<CommandResult> {
   const session = requireSession();
   const messages = useChatStore.getState().messages[session.id] ?? [];
   if (messages.length === 0) return ok("Chat is already empty");
+  // A running compaction would write its summary back over the emptied chat.
+  if (useChatStore.getState().compactingSessionId === session.id) {
+    throw new Error("This chat is being compacted. Clear it once that finishes.");
+  }
   const approved = await deps.confirm({
     title: "Clear this chat?",
     body: `All ${messages.length} message${messages.length === 1 ? "" : "s"} in “${session.title || "Untitled"}” will be removed permanently.`,
@@ -295,6 +305,15 @@ async function runClear(deps: CommandDeps): Promise<CommandResult> {
       ),
     ),
   }));
+  // The compaction summary parked in the instructions stands in for turns
+  // that are gone now; left there, it kept being sent to the model. The
+  // user's own instructions stay. Read fresh — the confirm was a while ago.
+  const prompt =
+    useChatStore.getState().sessions.find((s) => s.id === session.id)?.system_prompt ?? "";
+  const own = stripSummaryBlock(prompt);
+  if (own !== prompt) {
+    await useChatStore.getState().setSessionSystemPrompt(session.id, own);
+  }
   return ok("Cleared chat", `${messages.length} message${messages.length === 1 ? "" : "s"} removed`);
 }
 
@@ -656,7 +675,12 @@ async function runSpace(rest: string): Promise<CommandResult> {
     );
   }
   const match = matches[0]!;
-  useSpaceStore.getState().selectSpace(match.id);
+  // Typed on a Space's page, go to the new Space's page: switching only the
+  // active Space left the old page up while the next message started its
+  // chat in the new one, with the Library picks made on the old page.
+  const spaceStore = useSpaceStore.getState();
+  if (spaceStore.viewingSpaceId) spaceStore.setViewingSpace(match.id);
+  else spaceStore.selectSpace(match.id);
   return ok("Active Space", match.name);
 }
 
@@ -833,6 +857,11 @@ async function runRegenerate(): Promise<CommandResult> {
   ) {
     throw new Error("This chat is busy — wait for the current reply to finish.");
   }
+  // A send or regenerate still building its request isn't running or queued
+  // yet, and `regenerateLast` drops this call without a word.
+  if (isPreparingSend(session.id)) {
+    throw new Error("A reply is still being prepared — wait for it to start.");
+  }
   // No premature success toast: `regenerateLast` owns failure feedback (it
   // toasts "Couldn't regenerate" if the delete fails), and on success the
   // fresh reply streams in visibly. A success toast here could stack on top
@@ -956,9 +985,11 @@ async function runCompact(): Promise<CommandResult> {
 async function runStop(): Promise<CommandResult> {
   const session = requireSession();
   // Same scope as the composer's Stop button: this chat only. A prompt still
-  // waiting in the queue counts too — `cancelForSession` evicts it.
+  // waiting in the queue counts too — `cancelForSession` evicts it — and so
+  // does a send still building its request, which isn't either yet.
   const state = useChatStore.getState();
-  const running = state.runningTask?.sessionId === session.id;
+  const running =
+    state.runningTask?.sessionId === session.id || isPreparingSend(session.id);
   if (!running && !state.queue.some((t) => t.sessionId === session.id)) {
     return ok("Nothing to stop");
   }

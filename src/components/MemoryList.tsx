@@ -147,6 +147,8 @@ export function MemoryList({
             placeholder="e.g. Prefers TypeScript over JavaScript."
             disabled={!enabled || adding}
             onKeyDown={(e) => {
+              // The Enter that confirms an IME candidate isn't the add's.
+              if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
                 void handleAdd();
@@ -227,6 +229,7 @@ export function MemoryList({
                           onChange={(e) => setEditVal(e.target.value)}
                           onBlur={() => void commitEdit()}
                           onKeyDown={(e) => {
+                            if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
                             if (e.key === "Enter" && !e.shiftKey) {
                               e.preventDefault();
                               (e.target as HTMLTextAreaElement).blur();

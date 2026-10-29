@@ -9,7 +9,7 @@
 import { describe, it, expect } from "vitest";
 import { __testing } from "./SearchBar";
 
-const { parseQuery } = __testing;
+const { parseQuery, followActive } = __testing;
 
 describe("parseQuery", () => {
   it("defaults to searching everywhere", () => {
@@ -86,5 +86,31 @@ describe("parseQuery", () => {
   it("does not accept in:everywhere — that scope is the absence of a token", () => {
     expect(parseQuery("in:everywhere alpha").scope).toBe("everywhere");
     expect(parseQuery("in:everywhere alpha").token).toBeNull();
+  });
+});
+
+// Transcript hits land after the debounce, under a user who may already have
+// arrowed down the title matches. Resetting the highlight to the top then
+// made Enter open a different result than the one highlighted a moment ago.
+describe("followActive", () => {
+  const titles = [
+    { kind: "chat", id: "a" },
+    { kind: "chat", id: "b" },
+    { kind: "space", id: "b" },
+  ] as const;
+
+  it("keeps the highlight on the same result when the list grows", () => {
+    const grown = [...titles, { kind: "message", id: "m1" }] as const;
+    expect(followActive(titles, grown, 2)).toBe(2);
+  });
+
+  it("follows the result when it moves", () => {
+    const moved = [{ kind: "message", id: "m1" }, ...titles] as const;
+    expect(followActive(titles, moved, 1)).toBe(2);
+  });
+
+  it("goes back to the top when the result is gone", () => {
+    expect(followActive(titles, titles.slice(0, 2), 2)).toBe(0);
+    expect(followActive([], titles, 0)).toBe(0);
   });
 });

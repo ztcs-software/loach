@@ -49,11 +49,14 @@ const ACCOUNT: &str = "app_lock";
 
 static MARKER_PATH: OnceCell<PathBuf> = OnceCell::new();
 
-/// Point the marker at the app data dir. Called once from `lib.rs` setup;
-/// until then (and in tests) the marker is skipped and `status` reads the
-/// keyring every time, as before.
+/// Point the marker — and the saved rate-limit state, see below — at the app
+/// data dir, and load that state. Called once from `lib.rs` setup; until
+/// then (and in tests) the marker is skipped and `status` reads the keyring
+/// every time, as before, and the rate limit lives in memory only.
 pub fn init_marker(data_dir: &Path) {
     let _ = MARKER_PATH.set(data_dir.join("app_lock.json"));
+    let _ = ATTEMPTS_PATH.set(data_dir.join("app_lock_attempts.json"));
+    *UNLOCK_STATE.lock() = load_attempts();
 }
 
 fn read_marker() -> Option<LockStatus> {
@@ -80,13 +83,19 @@ fn write_marker(status: &LockStatus) {
 // Rate-limit state for `unlock`.
 //
 // Tracks consecutive failed attempts and, once `LOCKOUT_THRESHOLD` is
-// exceeded, refuses further attempts for an escalating window. The state is
-// held in-memory at module scope — surviving across IPC calls but reset on
-// app restart, which is the right trade-off for a desktop app: persisting
-// the counter to disk would let an attacker reset it by deleting a file,
-// while not persisting it means the bound applies to the (short-lived) IPC
-// session the attacker has — they still pay the wall-clock cost on each
-// fresh launch.
+// exceeded, refuses further attempts for an escalating window. Every check
+// runs through `rate_limited`, which holds the state lock from the lockout
+// check through the verify to recording the outcome — otherwise parallel
+// calls (`unlock` racing `require_unlocked`, …) all passed the check before
+// any of them recorded a failure.
+//
+// The state is also saved next to the marker (`app_lock_attempts.json`) and
+// loaded on start. Kept in memory only, it reset on every restart, and the
+// renderer can restart the app (`process:default` grants `request_restart`)
+// — so a compromised renderer could brute-force the lock by restarting
+// between bursts. Deleting the file still resets it, but that takes access
+// to the user's files, not just the renderer; a missing or unreadable file
+// means no lockout, so a damaged one can never lock the user out for good.
 // ---------------------------------------------------------------------------
 
 #[derive(Default)]
@@ -97,6 +106,72 @@ struct UnlockState {
 
 static UNLOCK_STATE: Lazy<Mutex<UnlockState>> =
     Lazy::new(|| Mutex::new(UnlockState::default()));
+
+static ATTEMPTS_PATH: OnceCell<PathBuf> = OnceCell::new();
+
+/// [`UnlockState`] as it's saved: an `Instant` means nothing to the next
+/// process, so the window's end is kept as wall-clock milliseconds.
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
+struct SavedAttempts {
+    consecutive_failures: u32,
+    locked_until_ms: Option<i64>,
+}
+
+impl UnlockState {
+    fn to_saved(&self, now: Instant, now_ms: i64) -> SavedAttempts {
+        SavedAttempts {
+            consecutive_failures: self.consecutive_failures,
+            locked_until_ms: self.locked_until.map(|until| {
+                now_ms + i64::try_from(until.saturating_duration_since(now).as_millis()).unwrap_or(0)
+            }),
+        }
+    }
+
+    /// The remaining window is capped at the longest one ever handed out, so
+    /// a clock set back since the save can't stretch it.
+    fn from_saved(saved: SavedAttempts, now: Instant, now_ms: i64) -> Self {
+        let max_ms = MAX_LOCKOUT_SECS as i64 * 1000;
+        UnlockState {
+            consecutive_failures: saved.consecutive_failures,
+            locked_until: saved.locked_until_ms.map(|until_ms| {
+                now + Duration::from_millis((until_ms - now_ms).clamp(0, max_ms) as u64)
+            }),
+        }
+    }
+}
+
+fn now_ms() -> i64 {
+    chrono::Utc::now().timestamp_millis()
+}
+
+fn load_attempts() -> UnlockState {
+    ATTEMPTS_PATH
+        .get()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .map(|saved| UnlockState::from_saved(saved, Instant::now(), now_ms()))
+        .unwrap_or_default()
+}
+
+/// Best effort, like the marker. A clean slate is saved as no file at all.
+fn save_attempts(st: &UnlockState) {
+    let Some(path) = ATTEMPTS_PATH.get() else {
+        return;
+    };
+    let result = if st.consecutive_failures == 0 {
+        match std::fs::remove_file(path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(anyhow::Error::from(e)),
+            _ => Ok(()),
+        }
+    } else {
+        serde_json::to_string(&st.to_saved(Instant::now(), now_ms()))
+            .map_err(anyhow::Error::from)
+            .and_then(|json| std::fs::write(path, json).map_err(anyhow::Error::from))
+    };
+    if let Err(e) = result {
+        tracing::warn!("couldn't save the app-lock attempt count: {e:#}");
+    }
+}
 
 const LOCKOUT_THRESHOLD: u32 = 5;
 /// First lockout is 30 s; each additional failure doubles, capped at ~2 h.
@@ -239,8 +314,7 @@ fn status_of(cfg: Option<&LockConfig>) -> LockStatus {
 /// an error with the remaining time when locked; `Ok(())` otherwise. Used
 /// before any argon2 verification so brute-force callers can't even trigger
 /// a hash during the window.
-fn check_lockout() -> Result<()> {
-    let st = UNLOCK_STATE.lock();
+fn check_lockout(st: &UnlockState) -> Result<()> {
     if let Some(until) = st.locked_until {
         let now = Instant::now();
         if until > now {
@@ -259,8 +333,7 @@ fn check_lockout() -> Result<()> {
 /// lockout state. On success, the counter is reset. On failure, the counter
 /// is bumped and, once past the threshold, an exponentially-growing cool-
 /// down window is set.
-fn record_attempt(ok: bool) {
-    let mut st = UNLOCK_STATE.lock();
+fn record_attempt(st: &mut UnlockState, ok: bool) {
     if ok {
         st.consecutive_failures = 0;
         st.locked_until = None;
@@ -275,6 +348,19 @@ fn record_attempt(ok: bool) {
             st.locked_until = Some(Instant::now() + Duration::from_secs(secs));
         }
     }
+}
+
+/// One credential check under the rate limit: refused during a cool-down,
+/// otherwise `verify` runs and its outcome is recorded and saved — all with
+/// the state locked, so concurrent checks queue up behind each other (see
+/// the "Rate-limit state" note).
+fn rate_limited(verify: impl FnOnce() -> bool) -> Result<bool> {
+    let mut st = UNLOCK_STATE.lock();
+    check_lockout(&st)?;
+    let ok = verify();
+    record_attempt(&mut st, ok);
+    save_attempts(&st);
+    Ok(ok)
 }
 
 /// Verify pin + password against a loaded config. Returns true only when
@@ -325,10 +411,7 @@ pub fn setup(
     // exponential cool-down. The initial-setup case (no existing config)
     // skips both checks because there's nothing to brute-force.
     if let Some(existing) = load()? {
-        check_lockout()?;
-        let ok = verify_against_config(&existing, current_pin, current_password);
-        record_attempt(ok);
-        if !ok {
+        if !rate_limited(|| verify_against_config(&existing, current_pin, current_password))? {
             bail!("Current credentials are required to change the app lock.");
         }
     }
@@ -402,7 +485,8 @@ pub fn setup(
 /// rejects further attempts (without even hashing) for an exponentially
 /// growing window. A successful unlock resets the counter.
 pub fn unlock(pin: Option<&str>, password: Option<&str>) -> Result<bool> {
-    check_lockout()?;
+    // Early out before the keyring read; `rate_limited` checks again.
+    check_lockout(&UNLOCK_STATE.lock())?;
 
     let cfg = match load()? {
         Some(c) => c,
@@ -415,15 +499,14 @@ pub fn unlock(pin: Option<&str>, password: Option<&str>) -> Result<bool> {
         }
     };
 
-    let ok = verify_against_config(&cfg, pin, password);
-    record_attempt(ok);
-    Ok(ok)
+    rate_limited(|| verify_against_config(&cfg, pin, password))
 }
 
 fn reset_unlock_state() {
     let mut st = UNLOCK_STATE.lock();
     st.consecutive_failures = 0;
     st.locked_until = None;
+    save_attempts(&st);
 }
 
 pub fn get_hint() -> Result<Option<String>> {
@@ -457,10 +540,7 @@ pub fn clear_with_credentials(
     current_password: Option<&str>,
 ) -> Result<()> {
     if let Some(cfg) = load()? {
-        check_lockout()?;
-        let ok = verify_against_config(&cfg, current_pin, current_password);
-        record_attempt(ok);
-        if !ok {
+        if !rate_limited(|| verify_against_config(&cfg, current_pin, current_password))? {
             bail!("Current credentials are required to remove the app lock.");
         }
     }
@@ -483,10 +563,7 @@ pub fn require_unlocked(
     current_password: Option<&str>,
 ) -> Result<()> {
     if let Some(cfg) = load()? {
-        check_lockout()?;
-        let ok = verify_against_config(&cfg, current_pin, current_password);
-        record_attempt(ok);
-        if !ok {
+        if !rate_limited(|| verify_against_config(&cfg, current_pin, current_password))? {
             bail!("Current app-lock credentials are required for this action.");
         }
     }
@@ -519,7 +596,9 @@ mod tests {
     #[test]
     fn status_answers_from_the_marker_without_the_keyring() {
         // The marker path is process-wide and set once; this is the only test
-        // that sets it, and the only one that calls `status`.
+        // that sets it, and the only one that calls `status`. Setting it also
+        // loads `UNLOCK_STATE`, hence the lock.
+        let _g = LOCKOUT_TEST_LOCK.lock();
         let dir = tempfile::tempdir().unwrap();
         init_marker(dir.path());
         let cfg = LockConfig {
@@ -543,6 +622,83 @@ mod tests {
         // keyring instead of trusting a half-written answer.
         std::fs::write(dir.path().join("app_lock.json"), "{\"configured\":tr").unwrap();
         assert!(read_marker().is_none());
+
+        // The attempt count lives beside the marker, so a restart — which
+        // the renderer can ask for — doesn't wipe a lockout…
+        let attempts = dir.path().join("app_lock_attempts.json");
+        for _ in 0..LOCKOUT_THRESHOLD {
+            rate_limited(|| false).unwrap();
+        }
+        assert!(attempts.exists());
+        *UNLOCK_STATE.lock() = load_attempts(); // as the next launch would
+        assert!(check_lockout(&UNLOCK_STATE.lock()).is_err(), "the lockout didn't survive");
+        // …a clean slate is no file at all…
+        reset_unlock_state();
+        assert!(!attempts.exists());
+        // …and a damaged file means no lockout rather than a permanent one.
+        std::fs::write(&attempts, "{\"consecutive_failures\":9,\"locked_until_ms\":").unwrap();
+        assert!(check_lockout(&load_attempts()).is_ok());
+        reset_unlock_state();
+    }
+
+    /// Saved and loaded across a restart, the window keeps its end — but a
+    /// clock set back since can't stretch it past the longest window.
+    #[test]
+    fn saved_attempts_keep_the_window_and_cap_it() {
+        let now = Instant::now();
+        let st = UnlockState {
+            consecutive_failures: 6,
+            locked_until: Some(now + Duration::from_secs(60)),
+        };
+        let saved = st.to_saved(now, 1_000_000);
+        assert_eq!(
+            saved,
+            SavedAttempts { consecutive_failures: 6, locked_until_ms: Some(1_060_000) }
+        );
+
+        // Twenty seconds later, in the next process.
+        let later = Instant::now();
+        let loaded = UnlockState::from_saved(saved, later, 1_020_000);
+        assert_eq!(loaded.consecutive_failures, 6);
+        assert_eq!(loaded.locked_until, Some(later + Duration::from_secs(40)));
+        assert!(check_lockout(&loaded).is_err());
+
+        // Already over: no lockout. Clock moved back a day: capped.
+        let over = SavedAttempts { consecutive_failures: 6, locked_until_ms: Some(900_000) };
+        assert!(check_lockout(&UnlockState::from_saved(over, later, 1_000_000)).is_ok());
+        let skewed = SavedAttempts {
+            consecutive_failures: 6,
+            locked_until_ms: Some(1_000_000 + 24 * 3600 * 1000),
+        };
+        let capped = UnlockState::from_saved(skewed, later, 1_000_000);
+        assert_eq!(capped.locked_until, Some(later + Duration::from_secs(MAX_LOCKOUT_SECS)));
+    }
+
+    /// Regression: the lockout check, the verify and the recording weren't
+    /// one step, so parallel checks all got past the check before any of
+    /// them recorded its failure. Now only `LOCKOUT_THRESHOLD` get to verify.
+    #[test]
+    fn concurrent_checks_cannot_outrun_the_lockout() {
+        let _g = LOCKOUT_TEST_LOCK.lock();
+        reset_unlock_state();
+        let verified = std::sync::atomic::AtomicU32::new(0);
+        let refused = std::thread::scope(|s| {
+            let calls: Vec<_> = (0..LOCKOUT_THRESHOLD * 3)
+                .map(|_| {
+                    s.spawn(|| {
+                        rate_limited(|| {
+                            verified.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            std::thread::sleep(Duration::from_millis(5));
+                            false
+                        })
+                    })
+                })
+                .collect();
+            calls.into_iter().map(|c| c.join().unwrap()).filter(Result::is_err).count()
+        });
+        assert_eq!(verified.into_inner(), LOCKOUT_THRESHOLD);
+        assert_eq!(refused as u32, LOCKOUT_THRESHOLD * 2);
+        reset_unlock_state();
     }
 
     #[test]
@@ -648,17 +804,16 @@ mod tests {
 
     #[test]
     fn lockout_after_threshold_failures() {
-        let _g = LOCKOUT_TEST_LOCK.lock();
-        reset_unlock_state();
+        let mut st = UnlockState::default();
 
         // Below threshold: still allowed to attempt.
         for _ in 0..(LOCKOUT_THRESHOLD - 1) {
-            record_attempt(false);
-            check_lockout().expect("not yet locked out below threshold");
+            record_attempt(&mut st, false);
+            check_lockout(&st).expect("not yet locked out below threshold");
         }
         // Threshold-th failure trips the lockout window.
-        record_attempt(false);
-        let err = check_lockout()
+        record_attempt(&mut st, false);
+        let err = check_lockout(&st)
             .err()
             .expect("expected lockout after threshold");
         let msg = err.to_string();
@@ -668,23 +823,20 @@ mod tests {
         );
 
         // A successful attempt clears the counter and the lockout.
-        reset_unlock_state();
-        record_attempt(true);
-        check_lockout().expect("lockout cleared after success");
+        record_attempt(&mut st, true);
+        check_lockout(&st).expect("lockout cleared after success");
     }
 
     #[test]
     fn lockout_window_scales_exponentially_up_to_cap() {
-        let _g = LOCKOUT_TEST_LOCK.lock();
-        reset_unlock_state();
+        let mut st = UnlockState::default();
 
         // Push the counter way past the cap-shift threshold (12). The
         // `locked_until` instant should never exceed `MAX_LOCKOUT_SECS` in
         // the future, even at unbounded failure counts.
         for _ in 0..(LOCKOUT_THRESHOLD + 20) {
-            record_attempt(false);
+            record_attempt(&mut st, false);
         }
-        let st = UNLOCK_STATE.lock();
         let until = st.locked_until.expect("locked out");
         let now = Instant::now();
         let remaining = until.saturating_duration_since(now).as_secs();
@@ -698,7 +850,5 @@ mod tests {
             remaining >= BASE_LOCKOUT_SECS,
             "lockout {remaining}s shorter than BASE_LOCKOUT_SECS={BASE_LOCKOUT_SECS}s"
         );
-        drop(st);
-        reset_unlock_state();
     }
 }

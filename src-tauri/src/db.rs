@@ -141,8 +141,9 @@ pub struct Space {
     pub memory_enabled: bool,
     /// How the Space's sources reach the model: `"auto"` (full text while
     /// they fit, retrieved excerpts once they don't), `"full"` or
-    /// `"retrieval"`. Defaults to `"auto"` on exports that predate it.
-    #[serde(default = "default_retrieval_mode")]
+    /// `"retrieval"`. Defaults to `"full"` on exports that predate it — what
+    /// those Spaces did, as the 1.6 migration keeps for existing rows.
+    #[serde(default = "pre_library_retrieval_mode")]
     pub retrieval_mode: String,
     pub created_at: i64,
     pub updated_at: i64,
@@ -154,6 +155,10 @@ fn default_true() -> bool {
 
 fn default_retrieval_mode() -> String {
     "auto".to_string()
+}
+
+fn pre_library_retrieval_mode() -> String {
+    "full".to_string()
 }
 
 /// One free-text fact persisted across chats in a Space. The extractor
@@ -938,11 +943,17 @@ impl Database {
 
         // Library (v1.6): how sources reach the model, per Space and per chat
         // (NULL on a chat = inherit), and the per-source on/off switch for a
-        // Space's own uploads. Existing rows land on "auto" / enabled, which
-        // is what every Space did before: inline everything that fits.
+        // Space's own uploads. Spaces that exist when the column arrives get
+        // "full" — what every Space did before 1.6: inline every file, at any
+        // size. "auto" (the default for new Spaces) would switch an existing
+        // Space whose files pass half the window to excerpts without the user
+        // ever choosing it. Uploads land enabled.
         if !has_column(&conn, "spaces", "retrieval_mode")? {
             conn.execute_batch(
-                "ALTER TABLE spaces ADD COLUMN retrieval_mode TEXT NOT NULL DEFAULT 'auto';",
+                "BEGIN;
+                 ALTER TABLE spaces ADD COLUMN retrieval_mode TEXT NOT NULL DEFAULT 'auto';
+                 UPDATE spaces SET retrieval_mode = 'full';
+                 COMMIT;",
             )?;
         }
         if !has_column(&conn, "sessions", "retrieval_mode")? {
@@ -1158,7 +1169,9 @@ impl Database {
     /// Create a new session as a fork of `source_id`, copying the source's
     /// title / provider / model / system prompt / params / space verbatim,
     /// and duplicating its messages up to (and including) `up_to_message_id`
-    /// — or every message in the source when that arg is None.
+    /// — or every message in the source when that arg is None. The one
+    /// exception to "verbatim" is a compaction summary that covers turns
+    /// after the cut (see below).
     ///
     /// Message copies get fresh ids and a fresh session_id but keep the
     /// source's `created_at` so transcript ordering matches the original.
@@ -1191,6 +1204,18 @@ impl Database {
             }
         };
         let to_copy = &messages[..take_until_idx];
+        // A compaction summary in the prompt stands in for every compacted
+        // turn. When the cut falls before the last of them, the fork would
+        // inherit a summary of turns it doesn't contain — so it drops the
+        // summary and sends the turns it does copy in full again.
+        let drop_summary = messages[take_until_idx..]
+            .iter()
+            .any(|m| m.compacted_at.is_some());
+        let system_prompt = if drop_summary {
+            source.system_prompt.as_deref().map(strip_summary_block)
+        } else {
+            source.system_prompt.clone()
+        };
 
         let new_id = Uuid::new_v4().to_string();
         let now = Utc::now().timestamp_millis();
@@ -1214,7 +1239,7 @@ impl Database {
                 source.title,
                 source.provider,
                 source.model,
-                source.system_prompt,
+                system_prompt,
                 source.params_json,
                 source.space_id,
                 source.id,
@@ -1252,7 +1277,7 @@ impl Database {
                     m.attachments_json,
                     m.metrics_json,
                     m.tool_calls_json,
-                    m.compacted_at,
+                    if drop_summary { None } else { m.compacted_at },
                     m.created_at,
                     m.import_group,
                     m.import_hidden,
@@ -1268,7 +1293,7 @@ impl Database {
             title: source.title,
             provider: source.provider,
             model: source.model,
-            system_prompt: source.system_prompt,
+            system_prompt,
             params_json: source.params_json,
             space_id: source.space_id,
             pinned_at: None,
@@ -2970,6 +2995,9 @@ impl Database {
                 // `postgresql://user:pass@host/db` as its one argument) or
                 // after a `--token` doesn't.
                 s.args_json = s.args_json.as_deref().and_then(redact_args_json);
+                // An HTTP server's URL can carry its credentials too: a token
+                // as the userinfo or as a query parameter.
+                s.url = redact_http_url(&s.url);
                 s
             })
             .collect();
@@ -3671,6 +3699,67 @@ fn redact_url_password(text: &str) -> String {
     out
 }
 
+/// An HTTP server's `url` as it goes into an export: the whole userinfo
+/// (`user:pass@`, or a bare token as in `https://ghp_x@github.com`) and the
+/// value of every query parameter are replaced with [`REDACTED`]. Scheme,
+/// host, path and parameter names stay, so the row still names its endpoint
+/// and passes `validate_mcp_input` on the way back in.
+fn redact_http_url(url: &str) -> String {
+    let mut out = String::with_capacity(url.len());
+    let mut rest = url;
+    if let Some(at) = rest.find("://") {
+        let (head, tail) = rest.split_at(at + 3);
+        out.push_str(head);
+        let authority_end = tail.find(['/', '?', '#']).unwrap_or(tail.len());
+        rest = match tail[..authority_end].rfind('@') {
+            Some(at_sign) => {
+                out.push_str(REDACTED);
+                &tail[at_sign..]
+            }
+            None => tail,
+        };
+    }
+    let (rest, fragment) = rest.split_at(rest.find('#').unwrap_or(rest.len()));
+    match rest.split_once('?') {
+        Some((path, query)) => {
+            out.push_str(path);
+            out.push('?');
+            let params: Vec<String> = query
+                .split('&')
+                .map(|p| match p.split_once('=') {
+                    Some((name, value)) if !value.is_empty() => format!("{name}={REDACTED}"),
+                    _ => p.to_string(),
+                })
+                .collect();
+            out.push_str(&params.join("&"));
+        }
+        None => out.push_str(rest),
+    }
+    out.push_str(fragment);
+    out
+}
+
+/// `prompt` without the summary block the Compact button parks in a chat's
+/// system prompt — the twin of `stripSummaryBlock` in
+/// `src/lib/contextUsage.ts`, whose markers these must match.
+fn strip_summary_block(prompt: &str) -> String {
+    const START: &str = "[Loach: earlier conversation summary]";
+    const END: &str = "[End of Loach summary]";
+    let mut out = String::with_capacity(prompt.len());
+    let mut rest = prompt;
+    while let Some(start) = rest.find(START) {
+        let Some(end) = rest[start..].find(END) else { break };
+        out.push_str(&rest[..start]);
+        rest = &rest[start + end + END.len()..];
+        // The block is followed by a blank line before the user's own text.
+        for _ in 0..2 {
+            rest = rest.strip_prefix('\n').unwrap_or(rest);
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Authoritative "does this column exist?" check via `PRAGMA table_info`.
 /// Used by `migrate()` to decide whether to run an `ALTER TABLE ADD COLUMN`.
 /// Returns an `Err` only on genuine query failures (bad table name,
@@ -3878,6 +3967,76 @@ mod tests {
             ]
         );
         assert_eq!(redact_args_json("not json"), None);
+    }
+
+    /// An HTTP server's URL loses its userinfo (a bare token included) and
+    /// its query values in an export, but keeps everything that says which
+    /// endpoint it is — and still parses, so the row imports again.
+    #[test]
+    fn exported_http_urls_lose_their_credentials() {
+        for (url, want) in [
+            ("https://ghp_abc@github.com/mcp", "https://REDACTED@github.com/mcp"),
+            ("https://me:hunter2@host.local:8443/mcp", "https://REDACTED@host.local:8443/mcp"),
+            (
+                "https://mcp.example.com/sse?api_key=sk-123&region=eu&flag",
+                "https://mcp.example.com/sse?api_key=REDACTED&region=REDACTED&flag",
+            ),
+            ("http://localhost:3000/mcp", "http://localhost:3000/mcp"),
+            ("https://example.com/a@b?k=", "https://example.com/a@b?k="),
+            ("", ""),
+        ] {
+            let out = redact_http_url(url);
+            assert_eq!(out, want, "{url}");
+            if !url.is_empty() {
+                reqwest::Url::parse(&out).expect("a redacted URL still parses");
+            }
+        }
+
+        let (db, _dir) = fresh_db();
+        let mut row = mcp_draft("gh", "http");
+        row.url = "https://ghp_abc@api.example.com/mcp?token=t0k".into();
+        db.upsert_mcp_server(&row).expect("insert");
+        let snap = db.snapshot().expect("snapshot");
+        assert_eq!(
+            snap.data.mcp_servers[0].url,
+            "https://REDACTED@api.example.com/mcp?token=REDACTED"
+        );
+    }
+
+    /// Forking above the end of a compacted range: the summary covers turns
+    /// the fork doesn't get, so the fork drops it and un-hides the turns it
+    /// did copy. Forking below the range keeps both.
+    #[test]
+    fn fork_before_the_compacted_range_drops_the_summary() {
+        let (db, _dir) = fresh_db();
+        let s = db.create_session("c", "ollama", "llama3", None, None).unwrap();
+        let ids: Vec<String> = (0..6)
+            .map(|i| {
+                let role = if i % 2 == 0 { "user" } else { "assistant" };
+                db.append_message(&s.id, role, &format!("m{i}"), None).unwrap().id
+            })
+            .collect();
+        db.mark_messages_compacted(&s.id, &ids[..4]).unwrap();
+        db.update_session_system_prompt(
+            &s.id,
+            "[Loach: earlier conversation summary]\n- m0..m3\n[End of Loach summary]\n\nBe terse.",
+        )
+        .unwrap();
+
+        let early = db.fork_session(&s.id, Some(&ids[1])).unwrap();
+        assert_eq!(early.system_prompt.as_deref(), Some("Be terse."));
+        let copied = db.list_messages(&early.id).unwrap();
+        assert_eq!(copied.len(), 2);
+        assert!(copied.iter().all(|m| m.compacted_at.is_none()), "copies stayed hidden");
+        assert_eq!(
+            db.get_session(&early.id).unwrap().unwrap().system_prompt.as_deref(),
+            Some("Be terse.")
+        );
+
+        let late = db.fork_session(&s.id, Some(&ids[4])).unwrap();
+        assert!(late.system_prompt.unwrap().starts_with("[Loach: earlier conversation summary]"));
+        let copied = db.list_messages(&late.id).unwrap();
+        assert_eq!(copied.iter().filter(|m| m.compacted_at.is_some()).count(), 4);
     }
 
     /// A workspace root is local to this machine, so it must not travel in
@@ -4101,6 +4260,53 @@ mod tests {
         let (db, _dir) = fresh_db();
         db.migrate().expect("second migrate");
         db.migrate().expect("third migrate");
+    }
+
+    /// Spaces from before 1.6 keep inlining every file, as they always did;
+    /// only Spaces created afterwards start on "auto", which may switch to
+    /// excerpts. Imports of pre-1.6 exports get the same treatment.
+    #[test]
+    fn pre_library_spaces_keep_full_text() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("loach.db");
+
+        {
+            let db = Database::open(&path).expect("open");
+            db.migrate().expect("initial migrate");
+            // Rebuild `spaces` as 1.5 left it (no `retrieval_mode`) with one
+            // Space in it. (SQLite predating DROP COLUMN is why this goes the
+            // long way round.)
+            let conn = db.conn.lock();
+            conn.execute_batch(
+                r#"
+                DROP TABLE spaces;
+                CREATE TABLE spaces (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    description TEXT NOT NULL DEFAULT '',
+                    instructions TEXT NOT NULL DEFAULT '',
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
+                INSERT INTO spaces (id, name, created_at, updated_at) VALUES ('old', 'Notes', 0, 0);
+                "#,
+            )
+            .expect("simulate a 1.5 database");
+        }
+
+        let db = Database::open(&path).expect("reopen");
+        db.migrate().expect("migrate a 1.5 database");
+        let old = db.get_space("old").expect("read").expect("kept");
+        assert_eq!(old.retrieval_mode, "full");
+        let new = db.create_space("Fresh", "", "").expect("create");
+        assert_eq!(new.retrieval_mode, "auto");
+
+        let imported: Space = serde_json::from_value(serde_json::json!({
+            "id": "s", "name": "Notes", "description": "", "instructions": "",
+            "created_at": 0, "updated_at": 0,
+        }))
+        .expect("pre-1.6 export row");
+        assert_eq!(imported.retrieval_mode, "full");
     }
 
     /// A migration interrupted part-way through must be finishable on the

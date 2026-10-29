@@ -34,6 +34,7 @@ import { useSpaceStore } from "@/stores/spaceStore";
 import { useSnippetStore } from "@/stores/snippetStore";
 import { useUIStore } from "@/stores/uiStore";
 import { domainOf, mixLabel, typeLabel } from "@/components/library/libraryUi";
+import { modalDialogOpen } from "@/components/KeyboardShortcuts";
 import { expandAndPrimeSnippet } from "@/lib/runSnippet";
 import type {
   LibraryDataset,
@@ -186,6 +187,19 @@ function parseQuery(raw: string): ParsedQuery {
   };
 }
 
+/** Where the highlight goes when the list changes under an unchanged query:
+ *  onto the same result if it's still listed, else back to the top. */
+function followActive(
+  prev: readonly Pick<Result, "kind" | "id">[],
+  next: readonly Pick<Result, "kind" | "id">[],
+  index: number,
+): number {
+  const was = prev[index];
+  if (!was) return 0;
+  const at = next.findIndex((r) => r.kind === was.kind && r.id === was.id);
+  return at >= 0 ? at : 0;
+}
+
 const MAX_RESULTS = 20;
 
 /** How many transcript hits the backend is asked for, and how many slots the
@@ -255,6 +269,10 @@ export function SearchBar() {
       // regular app behind it — including surfacing persisted chat titles,
       // which is exactly what the TitleBar's disabled search pill prevents.
       if (usePrivateChatStore.getState().open) return;
+      // Nor over another dialog (Settings, a confirm): the palette's
+      // navigation would land behind it. Pressing it again with the palette
+      // already open still just refocuses the input.
+      if (!panelRef.current && modalDialogOpen()) return;
       // Only capture a restore target while the palette is closed. Pressing
       // Ctrl+K again with it already open used to overwrite the target with
       // whatever had focus inside the palette — the input, or an item of the
@@ -489,10 +507,18 @@ export function SearchBar() {
     ];
   }, [terms, scope, sessions, spaces, snippets, libraryItems, datasets, recentSessionIds, messageHits]);
 
-  // Keep the active row valid whenever the result set changes.
+  // Keep the active row valid whenever the result set changes: back to the
+  // top for a new query, but on the same result when the list changes under
+  // the same one — transcript hits arrive after the debounce, and resetting
+  // then moved the highlight off the row the user had already arrowed to.
+  const shown = useRef({ query, results });
   useEffect(() => {
-    setActiveIndex(0);
-  }, [query, results.length]);
+    const prev = shown.current;
+    shown.current = { query, results };
+    setActiveIndex((i) =>
+      prev.query === query ? followActive(prev.results, results, i) : 0,
+    );
+  }, [query, results]);
 
   // Options are no longer focusable (see the listbox markup below), so the
   // browser won't scroll them into view the way it did when each row was a
@@ -548,6 +574,8 @@ export function SearchBar() {
     // open Radix owns Escape and Tab — handling them again here would close
     // the menu and wipe the query on a single keystroke.
     if (scopeMenuOpen) return;
+    // The input's IME keys bubble up here too.
+    if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
     if (e.key === "Escape") {
       e.preventDefault();
       if (query) setQuery("");
@@ -588,14 +616,19 @@ export function SearchBar() {
   const commit = async (r: Result) => {
     close();
 
+    // Every route below but an item preview leaves a model's page too: App
+    // shows that page ahead of the sidebar tab, so it stayed on screen over
+    // the chat that had just been picked.
     if (r.kind === "chat") {
       setViewingSpace(null);
+      useModelsStore.getState().setViewingModel(null);
       setSidebarTab("chats");
       await select(r.id);
       return;
     }
 
     if (r.kind === "space") {
+      useModelsStore.getState().setViewingModel(null);
       setSidebarTab("spaces");
       setViewingSpace(r.id);
       return;
@@ -603,6 +636,7 @@ export function SearchBar() {
 
     if (r.kind === "message") {
       setViewingSpace(null);
+      useModelsStore.getState().setViewingModel(null);
       setSidebarTab("chats");
       // Park the target BEFORE selecting, so it's already waiting whichever
       // way the race goes — ChatCanvas picks it up as soon as the row is in
@@ -630,6 +664,7 @@ export function SearchBar() {
     // is created once the variables are filled, not before.
     await expandAndPrimeSnippet(r.snippet, async () => {
       setViewingSpace(null);
+      useModelsStore.getState().setViewingModel(null);
       setSidebarTab("chats");
       await newSession({
         spaceId: null,
@@ -640,6 +675,9 @@ export function SearchBar() {
   };
 
   const onKeyDown = (e: ReactKeyboardEvent<HTMLInputElement>) => {
+    // Keys confirming or cancelling an IME candidate belong to the IME: Enter
+    // opened a result, Esc wiped the query. keyCode 229 too — see ChatInput.
+    if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
     if (e.key === "ArrowDown") {
       e.preventDefault();
       setActiveIndex((i) =>
@@ -925,4 +963,4 @@ function ResultIcon({ kind }: { kind: ResultKind }) {
   return <SquareTerminal className={cls} />;
 }
 
-export const __testing = { parseQuery };
+export const __testing = { parseQuery, followActive };

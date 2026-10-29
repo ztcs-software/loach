@@ -261,6 +261,46 @@ async function extractDocxText(buf: ArrayBuffer): Promise<ExtractionResult> {
   return { text, truncated: true };
 }
 
+/** UI languages whose legacy ("ANSI") Windows text files are Windows-1250,
+ *  the Central European code page, rather than Windows-1252. */
+const CENTRAL_EUROPEAN_LANGS = new Set(["pl", "cs", "sk", "hu", "hr", "sl", "ro"]);
+
+/**
+ * A text file's bytes as a string. `File.text()` reads everything as UTF-8,
+ * so a UTF-16 file (Notepad's "Unicode", Windows PowerShell's `>`) arrived
+ * as NUL-ridden noise, and a legacy ANSI one lost every accented letter to
+ * U+FFFD. Tried in order: a byte-order mark; UTF-16 without one, told by the
+ * NUL byte every ASCII character carries; strict UTF-8; else the ANSI code
+ * page the UI language (`locale`, e.g. `navigator.language`) suggests.
+ */
+export function decodeTextBytes(bytes: Uint8Array, locale: string): string {
+  const [b0, b1, b2] = bytes;
+  if (b0 === 0xef && b1 === 0xbb && b2 === 0xbf) return new TextDecoder("utf-8").decode(bytes);
+  if (b0 === 0xff && b1 === 0xfe) return new TextDecoder("utf-16le").decode(bytes);
+  if (b0 === 0xfe && b1 === 0xff) return new TextDecoder("utf-16be").decode(bytes);
+
+  const pairs = Math.floor(Math.min(bytes.length, 4096) / 2);
+  let evenNuls = 0;
+  let oddNuls = 0;
+  for (let i = 0; i < pairs * 2; i += 2) {
+    if (bytes[i] === 0) evenNuls++;
+    if (bytes[i + 1] === 0) oddNuls++;
+  }
+  if (pairs > 0 && oddNuls > pairs * 0.3 && evenNuls < pairs * 0.05) {
+    return new TextDecoder("utf-16le").decode(bytes);
+  }
+  if (pairs > 0 && evenNuls > pairs * 0.3 && oddNuls < pairs * 0.05) {
+    return new TextDecoder("utf-16be").decode(bytes);
+  }
+
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    const lang = locale.toLowerCase().split(/[-_]/)[0];
+    return new TextDecoder(CENTRAL_EUROPEAN_LANGS.has(lang) ? "windows-1250" : "windows-1252").decode(bytes);
+  }
+}
+
 export async function fileToAttachment(file: File): Promise<Attachment> {
   if (file.size > MAX_FILE_BYTES) {
     throw new FileTooLargeError(file.name, file.size);
@@ -320,7 +360,7 @@ export async function fileToAttachment(file: File): Promise<Attachment> {
 
   // Text / code files — read as plain text so they can be inlined into the prompt
   if (TEXT_EXTENSIONS.has(ext) || TEXT_EXTENSIONS.has(file.name.toLowerCase()) || mime.startsWith("text/")) {
-    let text = await file.text();
+    let text = decodeTextBytes(new Uint8Array(await file.arrayBuffer()), navigator.language);
     let truncated = false;
     if (text.length > MAX_EXTRACTED_CHARS) {
       text =

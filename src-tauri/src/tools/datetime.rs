@@ -14,7 +14,7 @@ use chrono::format::{Item, StrftimeItems};
 use chrono::{
     DateTime, Datelike, Days, LocalResult, Months, NaiveDate, NaiveDateTime, TimeZone, Utc, Weekday,
 };
-use chrono_tz::{Tz, UTC};
+use chrono_tz::Tz;
 use serde_json::{json, Value};
 
 use crate::mcp::McpCallResult;
@@ -48,17 +48,24 @@ pub fn tool_description() -> &'static str {
      `format` (render a datetime with a strftime pattern), \
      `add` (add or subtract a unit — use negative amount to subtract; \
      calendar units `years`, `months`, `weeks`, `days`, `business_days` \
-     preserve wall-clock time across DST boundaries; duration units \
-     `hours`, `minutes`, `seconds` preserve absolute elapsed time and \
-     may shift the wall clock across DST), \
-     `diff` (difference between two datetimes in a chosen unit), \
-     `tz_convert` (convert a datetime to a target timezone, DST-aware), \
+     preserve wall-clock time across DST boundaries — a result in a \
+     repeated DST hour takes the earlier one, one in a skipped hour is an \
+     error; duration units `hours`, `minutes`, `seconds` preserve absolute \
+     elapsed time and may shift the wall clock across DST), \
+     `diff` (whole units elapsed between two datetimes, negative when `to` \
+     is earlier; `years` / `months` count a period once the same day of \
+     the month comes round, or the last day of a shorter month — Jan 31 → \
+     Feb 28 is 1 month, Jan 15 → Feb 14 is 0 — and `days` / `weeks` count \
+     wall-clock days in `timezone`, like `add`), \
+     `tz_convert` (convert a datetime to the target `timezone`, DST-aware; \
+     an input without offset is read in `source_timezone`, default UTC), \
      `weekday` (weekday name for a date), \
      `business_days_from` (N business days forward or back from a date, \
      skipping Saturday and Sunday — does not account for holidays). \
      Datetime strings must be RFC 3339 (`2026-05-25T14:30:00Z`, \
      `2026-05-25T14:30:00+02:00`), ISO-8601 without offset \
-     (`2026-05-25T14:30:00` — interpreted in `timezone` or UTC), or date \
+     (`2026-05-25T14:30:00` — interpreted in `timezone`, default UTC; for \
+     `tz_convert`, in `source_timezone`), or date \
      only (`2026-05-25`). Timezones are IANA names like \
      `Europe/Warsaw` or `America/New_York`. Units for add/diff: \
      `years`, `months`, `weeks`, `days`, `hours`, `minutes`, `seconds`, \
@@ -81,6 +88,7 @@ pub fn input_schema() -> Value {
             "from": { "type": "string", "description": "Source datetime for `diff`." },
             "to": { "type": "string", "description": "Target datetime for `diff`." },
             "timezone": { "type": "string", "description": "IANA timezone. For `now`, `parse`, `format`, `weekday`, `add`: the display tz and the tz a naïve input is interpreted in. For `tz_convert`: the target tz." },
+            "source_timezone": { "type": "string", "description": "IANA timezone a naïve `input` is interpreted in for `tz_convert`. Defaults to UTC; ignored when `input` carries an offset." },
             "unit": {
                 "type": "string",
                 "enum": ["years", "months", "weeks", "days", "hours", "minutes", "seconds", "business_days"],
@@ -264,11 +272,15 @@ fn op_tz_convert(args: &Value) -> McpCallResult {
         Ok(tz) => tz,
         Err(e) => return err(e),
     };
-    // Naïve inputs to tz_convert are interpreted in UTC — anything else
-    // would silently misinterpret strings like `2026-05-25T14:30:00` as
-    // wall-clock time in the *target* tz, which is the bug we're trying
-    // to prevent. The model should add an offset for unambiguous input.
-    let dt = match parse_input(input, &UTC) {
+    // Naïve inputs to tz_convert are interpreted in `source_timezone` (UTC
+    // when absent), never in the *target* tz — that would silently read
+    // `2026-05-25T14:30:00` as wall-clock time where it's being converted
+    // to, which is the bug we're trying to prevent.
+    let source_tz = match resolve_tz(args.get("source_timezone").and_then(|v| v.as_str())) {
+        Ok(tz) => tz,
+        Err(e) => return err(e),
+    };
+    let dt = match parse_input(input, &source_tz) {
         Ok(dt) => dt,
         Err(e) => return err(e),
     };
@@ -383,17 +395,17 @@ fn add_unit(start: DateTime<Utc>, tz: &Tz, unit: &str, amount: i64) -> Result<Da
         "years" => {
             let months = mag.checked_mul(12).ok_or_else(|| "years × 12 overflowed".to_string())?;
             let months = u32::try_from(months).map_err(|_| "year amount too large for chrono".to_string())?;
-            apply_months_local(local, months, neg)
+            apply_months_local(local, tz, months, neg)
         }
         "months" => {
             let months = u32::try_from(mag).map_err(|_| "month amount too large for chrono".to_string())?;
-            apply_months_local(local, months, neg)
+            apply_months_local(local, tz, months, neg)
         }
         "weeks" => {
             let days = mag.checked_mul(7).ok_or_else(|| "weeks × 7 overflowed".to_string())?;
-            apply_days_local(local, days, neg)
+            apply_days_local(local, tz, days, neg)
         }
-        "days" => apply_days_local(local, mag, neg),
+        "days" => apply_days_local(local, tz, mag, neg),
         "hours" => {
             let secs = (mag as i64).checked_mul(3600).ok_or_else(|| "hours × 3600 overflowed".to_string())?;
             apply_seconds(start, secs, neg)
@@ -411,39 +423,49 @@ fn add_unit(start: DateTime<Utc>, tz: &Tz, unit: &str, amount: i64) -> Result<Da
             let signed = if neg { -(mag as i64) } else { mag as i64 };
             let new_date = add_business_days(date, signed)
                 .ok_or_else(|| "business-day arithmetic overflowed".to_string())?;
-            let naive = new_date.and_time(local.time());
-            match tz.from_local_datetime(&naive) {
-                LocalResult::Single(dt) => Ok(dt.with_timezone(&Utc)),
-                LocalResult::Ambiguous(early, _) => Ok(early.with_timezone(&Utc)),
-                LocalResult::None => Err(format!(
-                    "result lands on a DST gap in `{tz}` ({naive})"
-                )),
-            }
+            shifted_to_utc(new_date.and_time(local.time()), tz)
         }
         other => Err(format!("unknown unit `{other}`")),
     }
 }
 
-fn apply_months_local(local: DateTime<Tz>, months: u32, neg: bool) -> Result<DateTime<Utc>, String> {
-    let m = Months::new(months);
-    let out = if neg {
-        local.checked_sub_months(m)
-    } else {
-        local.checked_add_months(m)
-    };
-    out.map(|d| d.with_timezone(&Utc))
-        .ok_or_else(|| "result is outside chrono's supported range".to_string())
+/// The instant a calendar shift lands on, from its local wall-clock time:
+/// an hour the fall-back repeats resolves to its earlier occurrence, and
+/// one the spring-forward skips is an error that says so. chrono's own
+/// `DateTime::checked_add_*` give up on both, which surfaced as a
+/// misleading "outside chrono's supported range".
+fn shifted_to_utc(naive: NaiveDateTime, tz: &Tz) -> Result<DateTime<Utc>, String> {
+    match tz.from_local_datetime(&naive) {
+        LocalResult::Single(dt) => Ok(dt.with_timezone(&Utc)),
+        LocalResult::Ambiguous(early, _) => Ok(early.with_timezone(&Utc)),
+        LocalResult::None => Err(format!(
+            "result lands on a DST gap in `{tz}` ({naive})"
+        )),
+    }
 }
 
-fn apply_days_local(local: DateTime<Tz>, days: u64, neg: bool) -> Result<DateTime<Utc>, String> {
-    let d = Days::new(days);
+fn apply_months_local(local: DateTime<Tz>, tz: &Tz, months: u32, neg: bool) -> Result<DateTime<Utc>, String> {
+    let m = Months::new(months);
+    let naive = local.naive_local();
     let out = if neg {
-        local.checked_sub_days(d)
+        naive.checked_sub_months(m)
     } else {
-        local.checked_add_days(d)
+        naive.checked_add_months(m)
     };
-    out.map(|d| d.with_timezone(&Utc))
-        .ok_or_else(|| "result is outside chrono's supported range".to_string())
+    let shifted = out.ok_or_else(|| "result is outside chrono's supported range".to_string())?;
+    shifted_to_utc(shifted, tz)
+}
+
+fn apply_days_local(local: DateTime<Tz>, tz: &Tz, days: u64, neg: bool) -> Result<DateTime<Utc>, String> {
+    let d = Days::new(days);
+    let naive = local.naive_local();
+    let out = if neg {
+        naive.checked_sub_days(d)
+    } else {
+        naive.checked_add_days(d)
+    };
+    let shifted = out.ok_or_else(|| "result is outside chrono's supported range".to_string())?;
+    shifted_to_utc(shifted, tz)
 }
 
 fn apply_seconds(start: DateTime<Utc>, secs: i64, neg: bool) -> Result<DateTime<Utc>, String> {
@@ -464,17 +486,17 @@ fn diff_unit(from: DateTime<Utc>, to: DateTime<Utc>, tz: &Tz, unit: &str) -> Res
     // are frame-independent, so those keep using the UTC instants directly.
     let from_local = from.with_timezone(tz);
     let to_local = to.with_timezone(tz);
+    // Calendar units count whole periods elapsed on the local wall clock,
+    // the inverse of `add`: what `add` would reach from `from` without
+    // passing `to`. Subtracting the year/month fields instead counted
+    // boundaries crossed (Dec 31 → Jan 1 was a year), and an absolute
+    // day count came up an hour short of every day a spring-forward is in.
+    let wall_clock = to_local.naive_local() - from_local.naive_local();
     match unit {
-        // Calendar-based: subtract fields, not durations, so "Jan 31 → Feb 1"
-        // is 1 month rather than ~0.97 of a month.
-        "years" => Ok(to_local.year() as i64 - from_local.year() as i64),
-        "months" => {
-            let y = to_local.year() as i64 - from_local.year() as i64;
-            let m = to_local.month() as i64 - from_local.month() as i64;
-            Ok(y * 12 + m)
-        }
-        "weeks" => Ok(to.signed_duration_since(from).num_weeks()),
-        "days" => Ok(to.signed_duration_since(from).num_days()),
+        "years" => Ok(whole_months_between(from_local.naive_local(), to_local.naive_local())? / 12),
+        "months" => whole_months_between(from_local.naive_local(), to_local.naive_local()),
+        "weeks" => Ok(wall_clock.num_weeks()),
+        "days" => Ok(wall_clock.num_days()),
         "hours" => Ok(to.signed_duration_since(from).num_hours()),
         "minutes" => Ok(to.signed_duration_since(from).num_minutes()),
         "seconds" => Ok(to.signed_duration_since(from).num_seconds()),
@@ -496,6 +518,25 @@ fn diff_unit(from: DateTime<Utc>, to: DateTime<Utc>, tz: &Tz, unit: &str) -> Res
         }
         other => Err(format!("unknown unit `{other}`")),
     }
+}
+
+/// Whole months from `from` to `to`: the most `add` can move `from` forward
+/// without passing `to`, so a month counts once the same day of the month
+/// comes round — or the last day of a month too short to have it (Jan 31 →
+/// Feb 28 is one month). Negative when `to` is earlier, by the size of the
+/// span the other way round.
+fn whole_months_between(from: NaiveDateTime, to: NaiveDateTime) -> Result<i64, String> {
+    if to < from {
+        return whole_months_between(to, from).map(|n| -n);
+    }
+    let crossed = (to.year() as i64 - from.year() as i64) * 12 + to.month() as i64 - from.month() as i64;
+    // `crossed` lands in `to`'s own month, so it's either right or one too
+    // many — when that month's day and time haven't come round yet.
+    let reached = u32::try_from(crossed)
+        .ok()
+        .and_then(|n| from.checked_add_months(Months::new(n)))
+        .ok_or_else(|| "date span is outside chrono's supported range".to_string())?;
+    Ok(if reached > to { crossed - 1 } else { crossed })
 }
 
 /// Add `n` business days (Mon–Fri) to `date`. Negative `n` walks backward.
@@ -668,16 +709,54 @@ mod tests {
         assert_eq!(r.content_text, "5");
     }
 
+    fn diff(from: &str, to: &str, unit: &str, tz: &str) -> String {
+        let r = dispatch(&json!({ "op": "diff", "from": from, "to": to, "unit": unit, "timezone": tz }));
+        assert!(!r.is_error, "{from} → {to} in {unit}: {}", r.content_text);
+        r.content_text
+    }
+
+    /// Calendar diffs count whole periods elapsed, not boundaries crossed:
+    /// someone born on 1990-12-31 is 35 on 2026-01-01, not 36.
     #[test]
-    fn diff_months_is_calendar_based() {
-        let r = dispatch(&json!({
-            "op": "diff",
-            "from": "2026-01-31",
-            "to": "2026-02-01",
-            "unit": "months",
-        }));
-        assert!(!r.is_error);
-        assert_eq!(r.content_text, "1");
+    fn diff_years_and_months_count_whole_periods() {
+        assert_eq!(diff("1990-12-31", "2026-01-01", "years", "UTC"), "35");
+        assert_eq!(diff("1990-12-31", "2025-12-31", "years", "UTC"), "35");
+        assert_eq!(diff("1990-12-31", "2025-12-30", "years", "UTC"), "34");
+        assert_eq!(diff("2026-01-15", "2026-02-14", "months", "UTC"), "0");
+        assert_eq!(diff("2026-01-15", "2026-02-15", "months", "UTC"), "1");
+        assert_eq!(diff("2026-01-31", "2026-02-01", "months", "UTC"), "0");
+        // The time of day counts too: the month isn't up until 10:00.
+        assert_eq!(diff("2026-01-15T10:00:00", "2026-02-15T09:59:00", "months", "UTC"), "0");
+        // Reversed spans are negative, with the same magnitude.
+        assert_eq!(diff("2026-01-01", "1990-12-31", "years", "UTC"), "-35");
+        assert_eq!(diff("2026-02-14", "2026-01-15", "months", "UTC"), "0");
+    }
+
+    /// The end-of-month convention matches `add`, which clamps Jan 31 + 1
+    /// month to Feb 28: reaching the last day of a shorter month counts.
+    #[test]
+    fn diff_months_counts_a_short_months_last_day() {
+        assert_eq!(diff("2026-01-31", "2026-02-28", "months", "UTC"), "1");
+        assert_eq!(diff("2026-01-31", "2026-02-27", "months", "UTC"), "0");
+        assert_eq!(diff("2026-01-31", "2026-03-30", "months", "UTC"), "1");
+        assert_eq!(diff("2026-01-31", "2026-03-31", "months", "UTC"), "2");
+        assert_eq!(diff("2028-02-29", "2029-02-28", "years", "UTC"), "1");
+        let added = dispatch(&json!({ "op": "add", "input": "2026-01-31", "unit": "months", "amount": 1 }));
+        assert_eq!(added.content_text, "2026-02-28T00:00:00+00:00");
+    }
+
+    /// `days` and `weeks` count wall-clock days in `timezone`, as `add`
+    /// moves by them: a span holding the spring-forward has a 23-hour day
+    /// in it, and an absolute count came up one short.
+    #[test]
+    fn diff_days_and_weeks_follow_the_wall_clock_across_dst() {
+        assert_eq!(diff("2026-03-01", "2026-04-01", "days", "Europe/Warsaw"), "31");
+        assert_eq!(diff("2026-03-02", "2026-03-30", "weeks", "Europe/Warsaw"), "4");
+        assert_eq!(diff("2026-04-01", "2026-03-01", "days", "Europe/Warsaw"), "-31");
+        // Less than a whole day of wall-clock time is still zero days.
+        assert_eq!(diff("2026-05-25T10:00:00", "2026-05-26T09:00:00", "days", "UTC"), "0");
+        // Hours stay absolute: that March has one hour fewer.
+        assert_eq!(diff("2026-03-01", "2026-04-01", "hours", "Europe/Warsaw"), "743");
     }
 
     #[test]
@@ -698,17 +777,40 @@ mod tests {
 
     #[test]
     fn diff_months_uses_the_requested_timezone() {
-        // 20:00 on Jan 31 in New York is already Feb 1 in UTC, so the UTC
-        // reading collapsed a month boundary the caller straddles.
+        // 20:00 on Jan 31 in New York is already Feb 1 in UTC, and the
+        // clocks spring forward before Mar 31: read in UTC, the two-month
+        // mark fell at 21:00 local and this span came out as one month.
         let r = dispatch(&json!({
             "op": "diff",
             "from": "2026-01-31T20:00:00-05:00",
-            "to": "2026-02-01T10:00:00-05:00",
+            "to": "2026-03-31T20:30:00-04:00",
             "timezone": "America/New_York",
             "unit": "months",
         }));
         assert!(!r.is_error, "{}", r.content_text);
-        assert_eq!(r.content_text, "1");
+        assert_eq!(r.content_text, "2");
+    }
+
+    /// A calendar add that lands in the hour the fall-back repeats takes its
+    /// earlier occurrence, as the business-day path did; one that lands in
+    /// the skipped spring-forward hour says so. chrono's own `checked_add_*`
+    /// refused both as "outside chrono's supported range".
+    #[test]
+    fn calendar_adds_resolve_dst_ambiguity_and_name_the_gap() {
+        for (input, unit) in [("2026-09-25T02:30:00", "months"), ("2026-10-24T02:30:00", "days")] {
+            let r = dispatch(&json!({
+                "op": "add", "input": input, "timezone": "Europe/Warsaw", "unit": unit, "amount": 1,
+            }));
+            assert!(!r.is_error, "{unit}: {}", r.content_text);
+            assert_eq!(r.content_text, "2026-10-25T02:30:00+02:00", "{unit}");
+        }
+        for (input, unit) in [("2025-03-29T02:30:00", "years"), ("2026-03-22T02:30:00", "weeks")] {
+            let r = dispatch(&json!({
+                "op": "add", "input": input, "timezone": "Europe/Warsaw", "unit": unit, "amount": 1,
+            }));
+            assert!(r.is_error, "{unit}: {}", r.content_text);
+            assert!(r.content_text.contains("DST gap"), "{unit}: {}", r.content_text);
+        }
     }
 
     #[test]
@@ -735,6 +837,40 @@ mod tests {
         }));
         assert!(!r.is_error, "{}", r.content_text);
         assert!(r.content_text.starts_with("2026-07-04T08:00:00-04:00"), "got: {}", r.content_text);
+    }
+
+    /// An offset-less input is read in `source_timezone` — UTC without one,
+    /// never the target `timezone` — and an explicit offset wins over it.
+    #[test]
+    fn tz_convert_reads_a_naive_input_in_the_source_timezone() {
+        let convert = |args: Value| {
+            let r = dispatch(&args);
+            assert!(!r.is_error, "{}", r.content_text);
+            r.content_text
+        };
+        assert_eq!(
+            convert(json!({
+                "op": "tz_convert", "input": "2026-07-04T09:00:00",
+                "source_timezone": "Europe/Warsaw", "timezone": "America/New_York",
+            })),
+            "2026-07-04T03:00:00-04:00"
+        );
+        assert_eq!(
+            convert(json!({ "op": "tz_convert", "input": "2026-07-04T09:00:00", "timezone": "America/New_York" })),
+            "2026-07-04T05:00:00-04:00"
+        );
+        assert_eq!(
+            convert(json!({
+                "op": "tz_convert", "input": "2026-07-04T09:00:00Z",
+                "source_timezone": "Europe/Warsaw", "timezone": "America/New_York",
+            })),
+            "2026-07-04T05:00:00-04:00"
+        );
+        let bad = dispatch(&json!({
+            "op": "tz_convert", "input": "2026-07-04T09:00:00",
+            "source_timezone": "Middle/Earth", "timezone": "UTC",
+        }));
+        assert!(bad.is_error && bad.content_text.contains("unknown timezone"), "{}", bad.content_text);
     }
 
     #[test]

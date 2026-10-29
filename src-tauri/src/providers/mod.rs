@@ -337,42 +337,57 @@ fn messages_payload_size(messages: &[Value]) -> usize {
 /// had said. The stub keeps the tool call's place in the transcript so
 /// the model still sees the call→reply rhythm.
 ///
-/// `search_from` advances each iteration so we never re-stub the same
-/// slot (the stub text itself is >64 bytes, which would otherwise still
-/// satisfy `is_substantive_tool_msg` and trap the loop spinning forever
-/// in the rare case where one stub alone isn't enough to get back under
-/// the cap — e.g. three multi-MB tool results in a row).
+/// Nor the results of the turn that just ran — the tool messages after the
+/// last other one, which the model is about to read. Images and inlined
+/// files count toward the cap too, and once they alone filled it, every
+/// result was stubbed, the newest included: the model never saw what it
+/// asked for, asked again, and ran into the turn cap.
+///
+/// One pass, oldest first, each slot visited once: the stub text itself
+/// is >64 bytes and still satisfies `is_substantive_tool_msg`, so
+/// re-searching from the start would find the same slot forever when one
+/// stub alone isn't enough (e.g. three multi-MB tool results in a row). The
+/// size is serialised once and then adjusted per stub, not re-serialised
+/// each time.
 pub(super) fn bound_messages_payload(messages: &mut [Value]) {
-    let mut search_from: usize = 0;
-    while messages_payload_size(messages) > SOFT_MESSAGES_CAP_BYTES {
-        let mut found_idx: Option<usize> = None;
-        for i in search_from..messages.len() {
-            if is_substantive_tool_msg(&messages[i]) {
-                found_idx = Some(i);
-                break;
-            }
+    let mut size = messages_payload_size(messages);
+    if size <= SOFT_MESSAGES_CAP_BYTES {
+        return;
+    }
+    let current_turn = messages
+        .iter()
+        .rposition(|m| m.get("role").and_then(Value::as_str) != Some("tool"))
+        .map_or(0, |i| i + 1);
+    for m in &mut messages[..current_turn] {
+        if size <= SOFT_MESSAGES_CAP_BYTES {
+            return;
         }
-        match found_idx {
-            Some(i) => {
-                stub_tool_message(&mut messages[i]);
-                search_from = i + 1;
-            }
-            None => {
-                // Nothing left to drop — the system / user / assistant
-                // turns alone exceed the cap, or every tool message is
-                // already either short or stubbed. Bail rather than
-                // spinning; let the provider's own context-length error
-                // surface to the user if it doesn't fit.
-                tracing::warn!(
-                    "messages payload {} bytes exceeds cap of {} bytes after \
-                     dropping every tool result — sending as-is",
-                    messages_payload_size(messages),
-                    SOFT_MESSAGES_CAP_BYTES
-                );
-                break;
-            }
+        if is_substantive_tool_msg(m) {
+            let before = content_size(m);
+            stub_tool_message(m);
+            size = size - before + content_size(m);
         }
     }
+    if size > SOFT_MESSAGES_CAP_BYTES {
+        // Nothing left to drop — the system / user / assistant turns and
+        // this turn's results alone exceed the cap, or every earlier tool
+        // message is already either short or stubbed. Let the provider's
+        // own context-length error surface to the user if it doesn't fit.
+        tracing::warn!(
+            "messages payload {size} bytes exceeds cap of {} bytes after \
+             dropping every earlier tool result — sending as-is",
+            SOFT_MESSAGES_CAP_BYTES
+        );
+    }
+}
+
+/// Serialised size of a message's `content`, the only part a stub changes.
+/// Compact JSON writes a value the same way wherever it sits, so the
+/// difference before and after is exactly what the whole array changes by.
+fn content_size(m: &Value) -> usize {
+    m.get("content")
+        .and_then(|c| serde_json::to_vec(c).ok())
+        .map_or(0, |v| v.len())
 }
 
 fn is_substantive_tool_msg(m: &Value) -> bool {
@@ -558,8 +573,8 @@ mod tests {
         // used `iter_mut().find(...)` and re-found the same just-stubbed
         // slot on every iteration — spinning forever because the stub
         // text itself is >64 bytes and `is_substantive_tool_msg` still
-        // matched it. With `search_from` advancing per iteration, each
-        // slot is visited at most once and the loop terminates.
+        // matched it. With a single forward pass, each slot is visited at
+        // most once and the loop terminates.
         let big = "y".repeat(SOFT_MESSAGES_CAP_BYTES / 2);
         let mut msgs = vec![
             json!({ "role": "user", "content": "go" }),
@@ -630,6 +645,31 @@ mod tests {
         ];
         bound_messages_payload(&mut msgs);
         assert_eq!(msgs[1], short_tool);
+    }
+
+    #[test]
+    fn bound_messages_payload_never_stubs_the_results_the_model_is_about_to_read() {
+        // An attached image alone fills the cap. Earlier results go, but the
+        // ones this turn produced stay: stubbing them too had the model ask
+        // for the same thing again until it hit the turn cap.
+        let image = "i".repeat(SOFT_MESSAGES_CAP_BYTES);
+        let result = "r".repeat(1024);
+        let mut msgs = vec![
+            json!({ "role": "user", "content": image }),
+            json!({ "role": "assistant", "content": null, "tool_calls": [] }),
+            json!({ "role": "tool", "tool_call_id": "1", "content": result.clone() }),
+            json!({ "role": "assistant", "content": null, "tool_calls": [] }),
+            json!({ "role": "tool", "tool_call_id": "2", "content": result.clone() }),
+            json!({ "role": "tool", "tool_call_id": "3", "content": result.clone() }),
+        ];
+        bound_messages_payload(&mut msgs);
+        assert!(
+            msgs[2]["content"].as_str().unwrap().contains("dropped to keep the conversation"),
+            "an earlier turn's result is stubbed: {:?}",
+            msgs[2]
+        );
+        assert_eq!(msgs[4]["content"], result.as_str());
+        assert_eq!(msgs[5]["content"], result.as_str());
     }
 }
 

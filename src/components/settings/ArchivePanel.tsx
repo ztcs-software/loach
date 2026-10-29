@@ -11,8 +11,10 @@ import { cn } from "@/lib/utils";
 import { useChatStore } from "@/stores/chatStore";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { useState } from "react";
+import { useModelsStore } from "@/stores/modelsStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useToastStore } from "@/stores/toastStore";
+import { useUIStore } from "@/stores/uiStore";
 
 export function ArchivePanel({ onOpenChat }: { onOpenChat: () => void }) {
   const sessions = useChatStore((s) => s.sessions);
@@ -21,6 +23,8 @@ export function ArchivePanel({ onOpenChat }: { onOpenChat: () => void }) {
   const removeAllArchived = useChatStore((s) => s.removeAllArchived);
   const select = useChatStore((s) => s.selectSession);
   const setViewingSpace = useSpaceStore((s) => s.setViewingSpace);
+  const setViewingModel = useModelsStore((s) => s.setViewingModel);
+  const setSidebarTab = useUIStore((s) => s.setSidebarTab);
   const { confirm } = useConfirm();
   const [removingAll, setRemovingAll] = useState(false);
 
@@ -29,7 +33,12 @@ export function ArchivePanel({ onOpenChat }: { onOpenChat: () => void }) {
     .sort((a, b) => (b.archived_at ?? 0) - (a.archived_at ?? 0));
 
   const handleOpen = async (id: string) => {
+    // App routes on a viewed Space or model, then the sidebar tab, before
+    // the chat — opened from the Library, Snippets or Models page, the chat
+    // was selected behind that page and never shown.
     setViewingSpace(null);
+    setViewingModel(null);
+    setSidebarTab("chats");
     await select(id);
     onOpenChat();
   };

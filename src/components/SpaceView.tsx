@@ -736,6 +736,8 @@ function ChatRow({
           onChange={(e) => setDraft(e.target.value)}
           onBlur={() => onCommitRename(draft)}
           onKeyDown={(e) => {
+            // The Enter that confirms an IME candidate isn't the rename's.
+            if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
             if (e.key === "Enter") {
               e.preventDefault();
               (e.target as HTMLInputElement).blur();
@@ -763,6 +765,10 @@ function ChatRow({
         tabIndex={0}
         onClick={onOpen}
         onKeyDown={(e) => {
+          // Only the row's own keys: Enter on its ⋯ button (or a menu item,
+          // which bubbles here through the portal) belongs to that control —
+          // a keyboard Delete or Rename used to open the chat as well.
+          if (e.target !== e.currentTarget) return;
           if (e.key === "Enter" || e.key === " ") {
             e.preventDefault();
             onOpen();

@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { useSecurityStore } from "@/stores/securityStore";
 import {
@@ -159,6 +159,11 @@ export function ConfirmDialogHost({ children }: { children: ReactNode }) {
     setPromptValue("");
   }, [unlocked, settlePending]);
 
+  // Stable across host renders: a fresh object here re-rendered every
+  // `useConfirm()` consumer — memo'd sidebar rows included — on each App
+  // render and each prompt open, close or keystroke.
+  const ctx = useMemo(() => ({ confirm, prompt }), [confirm, prompt]);
+
   const closeWith = (value: boolean | string | null) => {
     const current = activeRef.current;
     if (!current) return;
@@ -172,7 +177,7 @@ export function ConfirmDialogHost({ children }: { children: ReactNode }) {
   };
 
   return (
-    <ConfirmContext.Provider value={{ confirm, prompt }}>
+    <ConfirmContext.Provider value={ctx}>
       {children}
       <Dialog
         open={active !== null}
@@ -199,6 +204,8 @@ export function ConfirmDialogHost({ children }: { children: ReactNode }) {
               placeholder={active.placeholder}
               onChange={(e) => setPromptValue(e.target.value)}
               onKeyDown={(e) => {
+                // The Enter that confirms an IME candidate isn't the prompt's.
+                if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
                 if (e.key === "Enter") {
                   e.preventDefault();
                   closeWith(promptValue);

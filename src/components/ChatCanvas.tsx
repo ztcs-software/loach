@@ -397,6 +397,9 @@ export function ChatCanvas() {
   };
 
   const onSearchKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    // Enter / Esc confirming or cancelling an IME candidate belong to the
+    // IME, not the finder. keyCode 229 too — see ChatInput.
+    if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
     if (e.key === "Escape") {
       e.preventDefault();
       closeSearch();

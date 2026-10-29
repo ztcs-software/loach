@@ -74,6 +74,7 @@ import { Button } from "@/components/ui/button";
 import { SquarePen } from "lucide-react";
 import { resolveDefaultModelChoice, useChatStore } from "@/stores/chatStore";
 import { useModelsStore } from "@/stores/modelsStore";
+import { useMcpStore } from "@/stores/mcpStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { chatCancelAll, ollamaPreloadModel, ollamaStart } from "@/lib/tauri";
 import { logger } from "@/lib/logger";
@@ -100,6 +101,7 @@ export default function App() {
   const hydrateLibrary = useLibraryStore((s) => s.hydrate);
   const hydrateSnippetVars = useSnippetVarStore((s) => s.hydrate);
   const hydrateModels = useModelsStore((s) => s.hydrate);
+  const hydrateMcp = useMcpStore((s) => s.hydrate);
   const hydrateSecurity = useSecurityStore((s) => s.hydrate);
   const securityHydrated = useSecurityStore((s) => s.hydrated);
   const securityConfigured = useSecurityStore((s) => s.status.configured);
@@ -159,10 +161,37 @@ export default function App() {
     chatCancelAll().catch((e) => logger.warn("couldn't stop leftover chat streams", e));
   }, []);
 
+  // A file dropped where nothing accepts it (the Spaces or Snippets page, a
+  // model's details, "No chat open", the lock screen) reached the webview's
+  // default handling, which opens the file in place of the app — Tauri's
+  // drag-drop is off, so nothing else catches it. Only cancel the default:
+  // the composer's and the Library's own drop handlers still do the work.
+  useEffect(() => {
+    const guard = (e: DragEvent) => {
+      if (e.dataTransfer?.types.includes("Files")) e.preventDefault();
+    };
+    window.addEventListener("dragover", guard);
+    window.addEventListener("drop", guard);
+    return () => {
+      window.removeEventListener("dragover", guard);
+      window.removeEventListener("drop", guard);
+    };
+  }, []);
+
   // Re-lock triggers (idle timeout / minimize). Self-gating: does nothing
   // until a lock is configured AND the user has opted into a trigger, so
   // it costs nothing for the installs that never set a lock up.
   useAutoLock();
+
+  // Locking ends a Private Chat session the way closing it does. The
+  // overlay unmounts behind the lock screen anyway; keeping its transcript
+  // for whoever unlocks contradicted "nothing outlives the session", and its
+  // stream kept running while the regular chat queue was released.
+  useEffect(() => {
+    if (!unlocked && usePrivateChatStore.getState().open) {
+      usePrivateChatStore.getState().wipe();
+    }
+  }, [unlocked]);
 
   // See `warmLazyChunks`. `requestIdleCallback` is missing on the oldest
   // webviews we support (Safari gained it in 17.4), hence the timeout path.
@@ -218,6 +247,10 @@ export default function App() {
     void hydrateSnippets();
     void hydrateSnippetVars();
     void hydrateLibrary();
+    // `/tools` and `/list mcp` read the server list from this store, which
+    // used to load only when Settings → MCP mounted — so until then they
+    // reported "No MCP servers" to anyone who had some.
+    void hydrateMcp();
     // `hydrateModels` is network-bound (Ollama /api/tags) — fire-and-forget
     // so its latency never blocks anything the user sees. It lists from the
     // configured URLs, so it starts once settings land: started alongside
@@ -295,6 +328,7 @@ export default function App() {
     hydrateLibrary,
     hydrateChats,
     hydrateModels,
+    hydrateMcp,
   ]);
 
   // Narrow-window squeeze relief. At the 900 px minimum, the expanded
@@ -382,38 +416,42 @@ export default function App() {
             extractor. */}
         <div className="flex min-h-0 flex-1" inert={privateChatOpen}>
           <Sidebar />
+          {/* Every boundary in this slot is keyed by what it shows. They all
+              sit at the same position, so unkeyed React kept one instance
+              across them and a crash's fallback stayed up on the next page,
+              Space, model or chat the user moved to. */}
           {viewingSpaceId ? (
-            <ErrorBoundary name="Space">
+            <ErrorBoundary key={`space:${viewingSpaceId}`} name="Space">
               <Suspense fallback={null}>
                 <SpaceView />
               </Suspense>
             </ErrorBoundary>
           ) : viewingModel ? (
-            <ErrorBoundary name="Model details">
+            <ErrorBoundary key={`model:${viewingModel}`} name="Model details">
               <Suspense fallback={null}>
                 <ModelsView />
               </Suspense>
             </ErrorBoundary>
           ) : sidebarTab === "spaces" ? (
-            <ErrorBoundary name="Spaces library">
+            <ErrorBoundary key="spaces" name="Spaces library">
               <Suspense fallback={null}>
                 <SpacesLibrary />
               </Suspense>
             </ErrorBoundary>
           ) : sidebarTab === "library" ? (
-            <ErrorBoundary name="Library">
+            <ErrorBoundary key="library" name="Library">
               <Suspense fallback={null}>
                 <LibraryView />
               </Suspense>
             </ErrorBoundary>
           ) : sidebarTab === "snippets" ? (
-            <ErrorBoundary name="Snippets library">
+            <ErrorBoundary key="snippets" name="Snippets library">
               <Suspense fallback={null}>
                 <SnippetsLibrary />
               </Suspense>
             </ErrorBoundary>
           ) : sidebarTab === "models" ? (
-            <ErrorBoundary name="Models library">
+            <ErrorBoundary key="models" name="Models library">
               <Suspense fallback={null}>
                 <ModelsLibrary />
               </Suspense>
@@ -424,7 +462,7 @@ export default function App() {
                   crash in markdown rendering or a parameter widget doesn't
                   take the whole pair down — the user still has the other
                   half to work with. */}
-              <ErrorBoundary name="Chat">
+              <ErrorBoundary key={`chat:${session?.id ?? ""}`} name="Chat">
                 <main className="relative flex min-w-0 flex-1 flex-col">
                   <ChatHeader session={session} />
                   {!session ? (
@@ -452,7 +490,10 @@ export default function App() {
                   keeps the layout legible. The canvas store survives across
                   this swap, so the user's snippet is still there if they
                   toggle params back. */}
-              <ErrorBoundary name={canvasOpen ? "Code canvas" : "Parameters"}>
+              <ErrorBoundary
+                key={canvasOpen ? "canvas" : `params:${session?.id ?? ""}`}
+                name={canvasOpen ? "Code canvas" : "Parameters"}
+              >
                 {canvasOpen ? (
                   <Suspense fallback={null}>
                     <CodeCanvas />
@@ -539,8 +580,8 @@ export default function App() {
         </ErrorBoundary>
       )}
       {/* Global toast host. Mounted unconditionally so messages from any
-          surface (including the lock screen path, in the future) land in a
-          predictable spot. Renders nothing when no toasts are queued. */}
+          surface land in a predictable spot. Renders nothing when no toasts
+          are queued, and nothing while locked (it clears the stack on lock). */}
       <ToastHost />
       </ConfirmDialogHost>
       </SwitchVariantProvider>

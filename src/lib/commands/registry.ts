@@ -7,7 +7,8 @@ import type { CommandSpec } from "./types";
 // handler in `./dispatch.ts`; the palette reads `description` / `usage` /
 // `subcommands` to render hints; the `/help` dialog reads `group` to render
 // scannable sections. Keep this list ordered the way it should appear in the
-// palette — there's no separate sort layer.
+// palette — there's no separate sort layer. An entry with neither `usage` nor
+// `subcommands` takes no argument: the dispatcher refuses one.
 export const COMMANDS: readonly CommandSpec[] = [
   // ----- chat session control -----
   {

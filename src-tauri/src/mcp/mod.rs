@@ -307,7 +307,7 @@ async fn collect_one(server: &McpServer, slug: &str) -> Result<Vec<McpToolDef>> 
             );
             continue;
         }
-        let qualified = format!("{slug}__{safe}");
+        let qualified = qualify(slug, &safe);
         // Two raw names on the same server can sanitise to the same string
         // (`repo.search` and `repo/search` both collapse to `repo_search`).
         // The qualified-name dedup at the slug level only handles cross-
@@ -432,7 +432,8 @@ pub async fn dispatch_tool_call(
                     // and keeping a session it rejects makes every later call
                     // fail identically until the TTL ages it out.
                     //
-                    // Except a stdio server that is merely slow: dropping its
+                    // Except a server that answered with a JSON-RPC error,
+                    // and a stdio server that is merely slow: dropping its
                     // session stops the process, and with it whatever the
                     // call was still doing — over one late reply.
                     if !keeps_session(p, &e) {
@@ -465,15 +466,22 @@ pub async fn dispatch_tool_call(
     out
 }
 
-/// Whether a pooled session survives `err` from a call on it: only a stdio
-/// server that is still running and just didn't answer in time, or answered
-/// with more than Loach reads in one go. Stopping it would stop whatever it
-/// was still doing — a long download, a sign-in page it opened — over one
-/// reply; a late one, when it comes, is ignored.
+/// Whether a pooled session survives `err` from a call on it. A server that
+/// answered with a JSON-RPC error is up and talking: bad arguments or an
+/// unknown tool say nothing against the session, and dropping it stopped a
+/// healthy stdio server (and sent HTTP back through the handshake) over a
+/// routine refusal.
+/// Beyond that, only a stdio server that is still running and just didn't
+/// answer in time, or answered with more than — or other than — Loach can
+/// read. Stopping it would stop whatever it was still doing — a long
+/// download, a sign-in page it opened — over one reply; a late one, when it
+/// comes, is ignored. A second miss in a row makes it hung, and no longer
+/// fresh (see `StdioSession::is_hung`).
 fn keeps_session(p: &PooledSession, err: &anyhow::Error) -> bool {
-    matches!(p.session, Session::Stdio(_))
-        && p.is_fresh()
-        && (stdio::is_reply_timeout(err) || stdio::is_reply_too_long(err))
+    p.is_fresh()
+        && (client::is_rpc_error(err)
+            || (matches!(p.session, Session::Stdio(_))
+                && (stdio::is_reply_timeout(err) || stdio::is_unreadable_reply(err))))
 }
 
 /// Whether a call to `tool_name` on `server_id` must be confirmed by the
@@ -640,11 +648,11 @@ struct PooledSession {
 impl PooledSession {
     /// HTTP sessions age out after [`SESSION_TTL`] (servers expire idle
     /// sessions on their own schedule). A stdio process is the session —
-    /// it stays good for as long as it is running.
+    /// it stays good for as long as it is running and answering.
     fn is_fresh(&self) -> bool {
         match &self.session {
             Session::Http(_) => self.created_at.elapsed() < SESSION_TTL,
-            Session::Stdio(s) => s.is_alive(),
+            Session::Stdio(s) => s.is_alive() && !s.is_hung(),
         }
     }
 }
@@ -716,6 +724,25 @@ fn sanitise_tool_name(name: &str) -> String {
     out
 }
 
+/// Longest function name OpenAI accepts. One tool over it fails every
+/// request that offers tools, not just calls to that one.
+const MAX_QUALIFIED_NAME_LEN: usize = 64;
+
+/// `slug__tool`, cut to [`MAX_QUALIFIED_NAME_LEN`] when the pair runs over
+/// it. A cut name ends in a hash of the whole one, so two long names that
+/// start alike stay apart. It only has to be unique: a call is routed by
+/// looking the name up (`providers::resolve_qualified`), never by taking it
+/// apart.
+fn qualify(slug: &str, tool: &str) -> String {
+    let full = format!("{slug}__{tool}");
+    if full.len() <= MAX_QUALIFIED_NAME_LEN {
+        return full;
+    }
+    let hash = stable_id_suffix(&full);
+    // Slugs and sanitised tool names are ASCII, so any cut is a char boundary.
+    format!("{}_{hash}", &full[..MAX_QUALIFIED_NAME_LEN - hash.len() - 1])
+}
+
 /// Build per-server slugs, disambiguating collisions by appending a
 /// short slice of the server id. The first server to land on a given
 /// slug keeps it bare; subsequent collisions get `_<6-char-id>` suffixed
@@ -771,8 +798,9 @@ fn build_unique_slugs(servers: &[McpServer]) -> Vec<String> {
 /// 6-character base-36 hash of a server id. Stable across runs (same
 /// input always yields the same suffix) so a qualified tool name persists
 /// even if the DB row order shifts or another server is removed from the
-/// configured list. Only used as a defensive fallback when the id itself
-/// contains no usable alphanumeric characters.
+/// configured list. For ids, only used as a defensive fallback when the id
+/// itself contains no usable alphanumeric characters; [`qualify`] also
+/// hashes an over-long qualified name with it.
 fn stable_id_suffix(id: &str) -> String {
     // FNV-1a 64-bit. Cheap, no deps, plenty of bits for a 6-char base-36
     // window — collisions in that window only matter inside a single
@@ -961,7 +989,7 @@ mod tests {
             created_at: Instant::now(),
             session: Session::Stdio(StdioSession::spawn(&row).await.expect("spawn")),
         };
-        let too_long = anyhow::Error::new(stdio::ReplyTooLong)
+        let too_long = anyhow::Error::new(stdio::UnreadableReply)
             .context("MCP server `big`: its reply was over 4 MiB");
         let late = anyhow::Error::new(stdio::ReplyTimeout)
             .context("MCP server `big` did not reply to `tools/call` within 30s");
@@ -971,6 +999,60 @@ mod tests {
             &pooled,
             &anyhow!("MCP server `big` exited before replying to `tools/call`")
         ));
+    }
+
+    /// A JSON-RPC error reply comes from a server that is up and answering,
+    /// so neither transport loses its session over one; a transport failure
+    /// or an HTTP status still does.
+    #[tokio::test]
+    async fn a_json_rpc_error_reply_keeps_the_session() {
+        let resp: types::JsonRpcResponse = serde_json::from_value(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "error": { "code": -32602, "message": "Invalid params" },
+        }))
+        .expect("parses");
+        let refused = client::unwrap_response::<Value>(resp)
+            .expect_err("an error reply")
+            .context("MCP server `x`");
+        assert!(format!("{refused:#}").contains("server returned error -32602: Invalid params"));
+
+        let row = stdio_row("x", "set /p _=", "read _");
+        let stdio = PooledSession {
+            fingerprint: session_fingerprint(&row),
+            created_at: Instant::now(),
+            session: Session::Stdio(StdioSession::spawn(&row).await.expect("spawn")),
+        };
+        let web = http_row("x");
+        let http = PooledSession {
+            fingerprint: session_fingerprint(&web),
+            created_at: Instant::now(),
+            session: Session::Http(McpSession::new(reqwest::Client::new(), &web).expect("session")),
+        };
+        for pooled in [&stdio, &http] {
+            assert!(keeps_session(pooled, &refused));
+            assert!(!keeps_session(pooled, &anyhow!("POST to MCP server failed")));
+        }
+        assert!(!keeps_session(&http, &anyhow!("server responded with HTTP 400: not initialized")));
+    }
+
+    /// OpenAI refuses a function name over 64 characters, so a long server
+    /// plus tool name is cut — and stays unique and the same across runs.
+    #[test]
+    fn long_qualified_names_are_cut_to_the_limit_and_kept_apart() {
+        assert_eq!(qualify("github", "search"), "github__search");
+        let at_limit = "t".repeat(MAX_QUALIFIED_NAME_LEN - "srv__".len());
+        assert_eq!(qualify("srv", &at_limit), format!("srv__{at_limit}"));
+
+        let slug = "acme_production_internal_tools_gateway";
+        let a = qualify(slug, "list_pull_request_review_comments_for_repository");
+        let b = qualify(slug, "list_pull_request_review_comments_for_organization");
+        assert_eq!(a.len(), MAX_QUALIFIED_NAME_LEN);
+        assert_eq!(b.len(), MAX_QUALIFIED_NAME_LEN);
+        assert_ne!(a, b, "names alike up to the cut stay apart");
+        assert_eq!(a, qualify(slug, "list_pull_request_review_comments_for_repository"));
+        assert!(a.starts_with("acme_production_internal_tools_gateway__list_pull"));
+        assert!(a.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'), "{a}");
     }
 
     /// A stdio server that dies while starting leaves its stderr — which can

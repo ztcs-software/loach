@@ -1209,6 +1209,48 @@ pub async fn openai_list_models(
         .map_err(err)
 }
 
+/// `openai_list_models` with `api_key` in place of the stored key, so
+/// onboarding can check a key the user just typed *before* it replaces the
+/// stored one. Storing first meant a failed check deleted the key — and with
+/// it a working key the typo had replaced. Same link-local refusal, bearer
+/// rule and 30 s ceiling as `providers::openai::list_models`.
+#[tauri::command]
+pub async fn openai_list_models_with_key(
+    state: State<'_, AppState>,
+    base_url: String,
+    api_key: String,
+) -> Result<Vec<ModelInfo>, String> {
+    #[derive(Deserialize)]
+    struct Models {
+        data: Vec<Model>,
+    }
+    #[derive(Deserialize)]
+    struct Model {
+        id: String,
+    }
+
+    providers::refuse_link_local_host(&base_url).await?;
+    let url = format!("{}/models", base_url.trim_end_matches('/'));
+    let mut req = state.http.get(url).timeout(std::time::Duration::from_secs(30));
+    let key = api_key.trim();
+    if !key.is_empty() && providers::openai::is_safe_for_bearer(&base_url) {
+        req = req.bearer_auth(key);
+    }
+    let resp = req.send().await.and_then(|r| r.error_for_status()).map_err(err)?;
+    let body: Models = resp.json().await.map_err(err)?;
+    Ok(body
+        .data
+        .into_iter()
+        .map(|m| ModelInfo {
+            id: m.id.clone(),
+            label: m.id,
+            provider: "openai".into(),
+            family: None,
+            size: None,
+        })
+        .collect())
+}
+
 // ---------- spaces ----------
 
 #[tauri::command]
@@ -1915,20 +1957,26 @@ impl From<McpImportRejection> for String {
     }
 }
 
+/// The name heads the stdio consent dialog, so it gets the dialog's rules:
+/// one short line that reads as what it is.
+const MAX_MCP_NAME_CHARS: usize = 100;
+
+/// `screen_host: false` skips resolving and screening an HTTP server's host,
+/// returning no addresses — for a row saved disabled, which connects to
+/// nothing (see `mcp_save`). Every structural check still runs.
 async fn validate_mcp_input(
     input: &McpServerInput,
+    screen_host: bool,
 ) -> Result<Vec<std::net::SocketAddr>, McpImportRejection> {
     use McpImportRejection::{Rejected, Unscreenable};
     if input.name.trim().is_empty() {
         return Err(Rejected("server name is required".into()));
     }
-    // The name heads the stdio consent dialog, so it gets the dialog's
-    // rules: one short line that reads as what it is.
-    const MAX_NAME_CHARS: usize = 100;
-    if input.name.chars().count() > MAX_NAME_CHARS || input.name.chars().any(unreviewable_char) {
+    if input.name.chars().count() > MAX_MCP_NAME_CHARS || input.name.chars().any(unreviewable_char)
+    {
         return Err(Rejected(format!(
-            "Server name must be a single line of at most {MAX_NAME_CHARS} characters, with no \
-             control or invisible characters."
+            "Server name must be a single line of at most {MAX_MCP_NAME_CHARS} characters, with \
+             no control or invisible characters."
         )));
     }
     validate_allowed_tools(input)?;
@@ -1967,22 +2015,6 @@ async fn validate_mcp_input(
         }
     }
 
-    // Resolve + screen the host: literal IPs are rejected only if link-local,
-    // hostnames are DNS-resolved and every returned address screened the same
-    // way. Returning the addresses lets the caller pin them into a per-request
-    // client at connect time so a malicious DNS server can't flip the answer
-    // from public to link-local between validate and dial.
-    let resolved = crate::tools::fetch_url::resolve_lan_addrs(&parsed)
-        .await
-        .map_err(|e| {
-            let msg = format!("MCP server URL rejected: {e}");
-            match e {
-                // DNS didn't answer, so the host was never actually screened.
-                crate::tools::fetch_url::HostScreenError::Unresolvable(_) => Unscreenable(msg),
-                _ => Rejected(msg),
-            }
-        })?;
-
     // Header k/v validation. We do NOT call out to the network here, so the
     // only protection we can offer is structural: reject names / values
     // that would let an attacker smuggle CRLF-injected headers via a
@@ -2009,7 +2041,26 @@ async fn validate_mcp_input(
         }
     }
 
-    Ok(resolved)
+    if !screen_host {
+        return Ok(Vec::new());
+    }
+    // Resolve + screen the host: literal IPs are rejected only if link-local,
+    // hostnames are DNS-resolved and every returned address screened the same
+    // way. Returning the addresses lets the caller pin them into a per-request
+    // client at connect time so a malicious DNS server can't flip the answer
+    // from public to link-local between validate and dial. Last, after the
+    // structural checks, so a row quarantined over a DNS failure on import
+    // has still had its headers checked.
+    crate::tools::fetch_url::resolve_lan_addrs(&parsed)
+        .await
+        .map_err(|e| {
+            let msg = format!("MCP server URL rejected: {e}");
+            match e {
+                // DNS didn't answer, so the host was never actually screened.
+                crate::tools::fetch_url::HostScreenError::Unresolvable(_) => Unscreenable(msg),
+                _ => Rejected(msg),
+            }
+        })
 }
 
 /// A character the consent dialog can't show faithfully: control
@@ -2041,6 +2092,36 @@ fn unreviewable_char(c: char) -> bool {
                 | '\u{E0000}'..='\u{E007F}'
                 | '\u{E0100}'..='\u{E01EF}'
         )
+}
+
+/// An imported server name brought within the name rule `validate_mcp_input`
+/// enforces: the characters it refuses dropped, cut to
+/// [`MAX_MCP_NAME_CHARS`], never empty and — being a name the user never
+/// typed — not one another row in `taken` already has. `None` when the name
+/// already passes. Names saved before the rule existed (≤1.4 took
+/// "👨‍💻 dev", whose emoji is joined by a ZWJ) would otherwise sink the
+/// whole restore.
+fn sanitize_imported_mcp_name(
+    name: &str,
+    taken: &std::collections::HashSet<String>,
+) -> Option<String> {
+    if !name.trim().is_empty()
+        && name.chars().count() <= MAX_MCP_NAME_CHARS
+        && !name.chars().any(unreviewable_char)
+    {
+        return None;
+    }
+    let kept: String = name.chars().filter(|&c| !unreviewable_char(c)).collect();
+    let base = match kept.trim() {
+        "" => "MCP server",
+        s => s,
+    };
+    (1..).find_map(|n: usize| {
+        let suffix = if n == 1 { String::new() } else { format!(" ({n})") };
+        let head: String = base.chars().take(MAX_MCP_NAME_CHARS - suffix.chars().count()).collect();
+        let candidate = format!("{}{suffix}", head.trim_end());
+        (!taken.contains(&candidate)).then_some(candidate)
+    })
 }
 
 /// Structural checks for a stdio row. There is no host to screen here;
@@ -2430,8 +2511,13 @@ pub async fn mcp_save(
     // We don't pin DNS on save (no network call), but we do still resolve
     // and screen so a save can't smuggle a private-IP-backed hostname into
     // the DB for a later, weaker code path to pick up.
-    validate_mcp_input(&input).await?;
+    //
+    // Except for a row saved disabled: nothing connects to it, and turning it
+    // back on is another save that screens. Asking DNS here only stopped the
+    // user switching off or renaming a server whose host doesn't resolve
+    // from where they are (offline, off the VPN).
     let mut draft = input.to_draft();
+    validate_mcp_input(&input, draft.enabled).await?;
     // "Always allow" was an answer about the program or endpoint it was
     // given for. A save that points the row at a different one starts the
     // list over, so `write_file` allowed for one filesystem server doesn't
@@ -2493,7 +2579,7 @@ pub async fn mcp_test(
     state: State<'_, AppState>,
     input: McpServerInput,
 ) -> Result<McpTestResult, String> {
-    let addrs = validate_mcp_input(&input).await?;
+    let addrs = validate_mcp_input(&input, true).await?;
     let draft = input.to_draft();
     if draft.is_stdio() {
         require_stdio_consent(&app, &state, &draft, true).await?;
@@ -3447,7 +3533,7 @@ pub async fn save_binary_to_file(
 
 /// Row counts and byte totals for the Settings -> Data storage tile.
 ///
-/// On the blocking pool for the same reason as `export_data_json`: the
+/// On the blocking pool for the same reason as `export_data_to_file`: the
 /// `SUM(LENGTH(...))` scans walk every message and space file, including
 /// their inlined base64 bodies, so on an attachment-heavy database this is
 /// firmly CPU-bound and would otherwise stall a runtime worker.
@@ -3459,21 +3545,61 @@ pub async fn storage_stats(state: State<'_, AppState>) -> Result<StorageStats, S
         .map_err(|e| format!("storage stats task panicked: {e}"))?
 }
 
-/// Serialise every table to a JSON string. Pretty-printed so users can
-/// diff or grep an export manually. The schema tag `"loach/v1"` is the
-/// forward-compat knob — `import_data_with_dialog` rejects anything else.
+/// Open a native save dialog and write every table, as JSON, to the path the
+/// user picks. Returns that path, or `None` if they cancelled. Pretty-printed
+/// so users can diff or grep an export manually. The schema tag `"loach/v1"`
+/// is the forward-compat knob — `import_data_with_dialog` rejects anything
+/// else.
+///
+/// The snapshot streams straight into the file. It used to come back to the
+/// renderer as one string and go out again through `save_text_to_file`,
+/// which held several copies of it in the JS heap and then refused anything
+/// over `MAX_SAVE_BYTES` only after all of them had been built.
 #[tauri::command]
-pub async fn export_data_json(state: State<'_, AppState>) -> Result<String, String> {
+pub async fn export_data_to_file(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Option<String>, String> {
+    use std::io::Write as _;
+    use tauri_plugin_dialog::DialogExt;
+
+    let file_name = format!("loach-export-{}.json", chrono::Utc::now().format("%Y-%m-%d"));
+    let path_opt = tauri::async_runtime::spawn_blocking(move || {
+        app.dialog()
+            .file()
+            .set_file_name(&file_name)
+            .add_filter("Loach export", &["json"])
+            .blocking_save_file()
+    })
+    .await
+    .map_err(|e| format!("save dialog task failed: {e}"))?;
+
+    let chosen = match path_opt {
+        Some(fp) => fp,
+        None => return Ok(None),
+    };
+    let path = chosen
+        .into_path()
+        .map_err(|e| format!("invalid path returned from dialog: {e}"))?;
+
     // `snapshot()` reads every table (messages and space files carry inlined
-    // base64 bodies) under the DB lock, and the pretty-print doubles that in
-    // memory — both CPU-bound and both blocking. The import counterpart is
-    // already on the blocking pool for exactly this reason; the export half
-    // wasn't, so a large attachment-heavy database stalled a runtime worker
-    // and queued every other command behind it.
+    // base64 bodies) under the DB lock, and the write that follows is as big
+    // — both blocking, so both on the blocking pool, like the import.
     let db = state.db.clone();
-    tokio::task::spawn_blocking(move || -> Result<String, String> {
+    tokio::task::spawn_blocking(move || -> Result<Option<String>, String> {
         let snap = db.snapshot().map_err(err)?;
-        serde_json::to_string_pretty(&snap).map_err(err)
+        let failed = |e: std::io::Error| format!("couldn't write {}: {e}", path.display());
+        let mut out = std::io::BufWriter::new(std::fs::File::create(&path).map_err(failed)?);
+        let written = serde_json::to_writer_pretty(&mut out, &snap)
+            .map_err(std::io::Error::from)
+            .and_then(|()| out.flush());
+        if let Err(e) = written {
+            drop(out);
+            // A cut-off export reads as a backup until the day it won't import.
+            let _ = std::fs::remove_file(&path);
+            return Err(failed(e));
+        }
+        Ok(Some(path.to_string_lossy().to_string()))
     })
     .await
     .map_err(|e| format!("export task panicked: {e}"))?
@@ -3551,7 +3677,18 @@ pub async fn import_data_with_dialog(
     // importing a tampered file.
     let mut quarantined: Vec<String> = Vec::new();
     let mut stdio_parked: Vec<String> = Vec::new();
+    let mut renamed: Vec<String> = Vec::new();
+    let mut taken: std::collections::HashSet<String> =
+        snap.data.mcp_servers.iter().map(|r| r.name.clone()).collect();
     for (idx, row) in snap.data.mcp_servers.iter_mut().enumerate() {
+        // A name the rule refuses is fixed up rather than failing the import:
+        // it's a label, and a backup from before the rule shouldn't cost the
+        // user every chat in it.
+        if let Some(name) = sanitize_imported_mcp_name(&row.name, &taken) {
+            renamed.push(format!("{:?} → {name:?}", row.name));
+            taken.insert(name.clone());
+            row.name = name;
+        }
         let parsed_headers: Option<std::collections::HashMap<String, String>> =
             parse_import_json(idx, &row.name, "headers_json", row.headers_json.as_deref())?;
         let parsed_env: Option<std::collections::HashMap<String, String>> =
@@ -3577,7 +3714,7 @@ pub async fn import_data_with_dialog(
             allowed_tools: parsed_allowed,
             enabled: Some(row.enabled),
         };
-        match validate_mcp_input(&synthetic).await {
+        match validate_mcp_input(&synthetic, true).await {
             Ok(_) => {
                 // A stdio row is a command line nobody has confirmed on
                 // *this* machine, in *this* session — and a snapshot is the
@@ -3639,6 +3776,13 @@ pub async fn import_data_with_dialog(
             "import: {} MCP server(s) could not be screened and were imported disabled: {}",
             quarantined.len(),
             quarantined.join(", ")
+        );
+    }
+    if !renamed.is_empty() {
+        tracing::info!(
+            "import: {} MCP server name(s) didn't fit the name rule and were renamed: {}",
+            renamed.len(),
+            renamed.join(", ")
         );
     }
     if !stdio_parked.is_empty() {
@@ -4220,11 +4364,64 @@ mod tests {
         assert!(validate_stdio_fields(&stdio_input("npx", &["tag\u{E0041}"], &[])).is_err());
         let mut spoofed = stdio_input("npx", &[], &[]);
         spoofed.name = "Filesystem\u{2029}Verified by Loach".into();
-        assert!(validate_mcp_input(&spoofed).await.is_err());
+        assert!(validate_mcp_input(&spoofed, true).await.is_err());
         spoofed.name = "x".repeat(101);
-        assert!(validate_mcp_input(&spoofed).await.is_err());
+        assert!(validate_mcp_input(&spoofed, true).await.is_err());
         spoofed.name = "Filesystem (work)".into();
-        assert!(validate_mcp_input(&spoofed).await.is_ok());
+        assert!(validate_mcp_input(&spoofed, true).await.is_ok());
+    }
+
+    /// A name from before the name rule is fixed up on import rather than
+    /// failing it, and the result passes the rule without colliding with
+    /// another row's name.
+    #[tokio::test]
+    async fn imported_names_are_fixed_up_to_pass_the_name_rule() {
+        let taken: std::collections::HashSet<String> =
+            ["dev".to_string(), "MCP server".to_string()].into();
+        let fixed = |name: &str| sanitize_imported_mcp_name(name, &taken);
+        // Regression: "👨‍💻 dev" (ZWJ) or "⚙️ tools" (VS16) failed the whole restore.
+        assert_eq!(fixed("👨\u{200D}💻 dev").as_deref(), Some("👨💻 dev"));
+        assert_eq!(fixed("⚙\u{FE0F} tools").as_deref(), Some("⚙ tools"));
+        // Stripped down to an existing name, or to nothing: numbered.
+        assert_eq!(fixed("dev\u{200B}").as_deref(), Some("dev (2)"));
+        assert_eq!(fixed(" \u{200D} ").as_deref(), Some("MCP server (2)"));
+        // Too long: cut, leaving room for a suffix when one is needed.
+        assert_eq!(fixed(&"x".repeat(150)).unwrap().chars().count(), MAX_MCP_NAME_CHARS);
+        // Names that already pass are left exactly as they are.
+        assert_eq!(fixed("Filesystem (work)"), None);
+        assert_eq!(fixed("dev"), None);
+
+        let mut input = stdio_input("npx", &[], &[]);
+        for name in ["👨\u{200D}💻 dev", "\u{200B}", &"ż\u{200F}".repeat(80)] {
+            input.name = fixed(name).unwrap();
+            assert!(validate_mcp_input(&input, true).await.is_ok(), "{:?}", input.name);
+        }
+    }
+
+    /// A disabled HTTP row isn't DNS-screened, so it can be switched off or
+    /// renamed while its host doesn't resolve — but it still gets every
+    /// structural check, and an enabled one is still screened.
+    #[tokio::test]
+    async fn disabled_rows_skip_only_the_host_screen() {
+        let mut input: McpServerInput = serde_json::from_value(json!({
+            "name": "vpn-only",
+            "url": "https://mcp.loach-test.invalid/mcp",
+            "enabled": false,
+        }))
+        .unwrap();
+        assert!(validate_mcp_input(&input, false).await.unwrap().is_empty());
+        assert!(matches!(
+            validate_mcp_input(&input, true).await,
+            Err(McpImportRejection::Unscreenable(_))
+        ));
+        input.headers = Some([("Bad Name".to_string(), "x".to_string())].into());
+        assert!(matches!(
+            validate_mcp_input(&input, false).await,
+            Err(McpImportRejection::Rejected(_))
+        ));
+        input.headers = None;
+        input.url = "ftp://example.com".into();
+        assert!(validate_mcp_input(&input, false).await.is_err());
     }
 
     /// Only a click on "Start server" starts anything — not Enter (which

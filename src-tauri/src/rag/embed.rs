@@ -140,9 +140,11 @@ pub async fn embed_batch(http: &reqwest::Client, cfg: &EmbedConfig, inputs: &[St
 }
 
 /// Embed one trivial input: whether the model embeds anything at all, when
-/// every real input was refused.
+/// an input failed on its own or every real input was refused. Background
+/// work, so the indexer's patience: after a runner crashed on an input,
+/// Ollama reloads the model before answering.
 pub async fn probe(http: &reqwest::Client, cfg: &EmbedConfig) -> Result<(), EmbedError> {
-    embed(http, cfg, &["hello".to_string()], QUERY_TIMEOUT).await.map(|_| ())
+    embed(http, cfg, &["hello".to_string()], EMBED_TIMEOUT).await.map(|_| ())
 }
 
 #[derive(Deserialize)]

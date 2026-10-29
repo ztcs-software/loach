@@ -100,7 +100,6 @@ interface UIState {
   setSidebarTab: (tab: SidebarTab) => void;
   /** Record that a chat was opened. Called by `chatStore.selectSession`. */
   noteSessionVisit: (sessionId: string) => void;
-  setComposerDraft: (text: string) => void;
   insertComposerDraft: (text: string) => void;
   /** One-shot: seed both text and attachments into the composer. Used by
    *  Snippets' "Run" action. */
@@ -160,7 +159,6 @@ export const useUIStore = create<UIState>((set, get) => ({
         ].slice(0, 10),
       };
     }),
-  setComposerDraft: (composerDraft) => set({ composerDraft }),
   insertComposerDraft: (text) =>
     set((s) => ({
       composerDraft: text,

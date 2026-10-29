@@ -47,7 +47,7 @@ import {
 import { ChatLabelSubmenu } from "@/components/ChatLabelMenu";
 import { ChatSpaceSubmenu } from "@/components/ChatSpaceMenu";
 import { useConfirm } from "@/components/ConfirmDialog";
-import { useChatStore } from "@/stores/chatStore";
+import { isPreparingSend, useChatStore } from "@/stores/chatStore";
 import { useModelsStore } from "@/stores/modelsStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useToastStore } from "@/stores/toastStore";
@@ -135,7 +135,16 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
   const [exportOpen, setExportOpen] = useState(false);
   const [exportMode, setExportMode] = useState<"full" | "compacted">("full");
   const [fullText, setFullText] = useState<string | null>(null);
-  const [compactedText, setCompactedText] = useState<string | null>(null);
+  // Keyed by chat: a compaction is a model round-trip that can outlive the
+  // dialog, and its result used to land in — and stay cached for — whichever
+  // chat's export was open by the time it finished.
+  const [compacted, setCompacted] = useState<{ sessionId: string; text: string } | null>(
+    null,
+  );
+  const compactedText =
+    compacted && compacted.sessionId === session?.id ? compacted.text : null;
+  const currentSessionId = useRef(session?.id);
+  currentSessionId.current = session?.id;
   const [exportError, setExportError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const exportText = exportMode === "full" ? fullText : compactedText;
@@ -215,6 +224,11 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
 
   const handleFork = async () => {
     if (!session) return;
+    // The fork copies what's on disk, and a reply's row stays empty until its
+    // stream finishes — so a fork taken mid-reply (or as a send starts one)
+    // got an empty answer. The menu item is disabled while streaming; this
+    // covers the send that's still being prepared, which isn't reactive.
+    if (isPreparingSend(session.id)) return;
     try {
       await forkChat(session.id);
     } catch (e) {
@@ -238,7 +252,7 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
     setExportOpen(true);
     setExportMode("full");
     setFullText(null);
-    setCompactedText(null);
+    setCompacted(null);
     setExportError(null);
     setCopied(false);
     try {
@@ -272,10 +286,13 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
     // Already summarized once this dialog session — reuse the cached text
     // rather than spending another model round-trip.
     if (compactedText !== null || !session) return;
+    const sessionId = session.id;
     try {
-      const md = await exportCompactedContext(session.id);
-      setCompactedText(md);
+      const md = await exportCompactedContext(sessionId);
+      if (currentSessionId.current !== sessionId) return;
+      setCompacted({ sessionId, text: md });
     } catch (e) {
+      if (currentSessionId.current !== sessionId) return;
       setExportError(e instanceof Error ? e.message : String(e));
     }
   };
@@ -599,7 +616,11 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
               <Pencil className="mr-2 h-4 w-4" />
               Rename
             </DropdownMenuItem>
-            <DropdownMenuItem onSelect={() => void handleFork()}>
+            <DropdownMenuItem
+              onSelect={() => void handleFork()}
+              disabled={streamingHere}
+              title={streamingHere ? "Wait for the reply to finish" : undefined}
+            >
               <GitFork className="mr-2 h-4 w-4" />
               Fork this chat
             </DropdownMenuItem>
@@ -670,6 +691,8 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
               value={renameDraft}
               onChange={(e) => setRenameDraft(e.target.value)}
               onKeyDown={(e) => {
+                // The Enter that confirms an IME candidate isn't the rename's.
+                if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
                 if (e.key === "Enter") {
                   e.preventDefault();
                   commitRename();

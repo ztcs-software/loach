@@ -137,6 +137,17 @@ const config: Config = {
               {
                 paddingInlineEnd: "0.85em",
               },
+            // Size-modifier override for code, for the same cascade reason:
+            // the plugin emits `.prose-sm :where(pre)` AFTER
+            // `.prose :where(pre)` at identical specificity. See the `pre`
+            // note in DEFAULT: `prose-sm` sets its own `font-size:
+            // 0.857143em`, which re-scaled the size CodeBlock had already
+            // picked and rendered code at ~10px against 13px prose.
+            // Repeating the override here is what actually lands.
+            //
+            // Keep every `prose-sm` override in this one `sm` key: a second
+            // `sm` key in this object silently replaces the first.
+            pre: { fontSize: "inherit" },
           },
         },
         DEFAULT: {
@@ -359,20 +370,6 @@ const config: Config = {
             "a:hover": {
               borderBottomColor: "hsl(var(--primary))",
             },
-          },
-        },
-
-        // Size-modifier overrides. The chat renders `prose prose-sm`, and
-        // the plugin emits `.prose-sm :where(pre)` AFTER `.prose :where(pre)`
-        // at identical specificity — so anything `prose-sm` also declares
-        // beats the DEFAULT block above and has to be repeated here.
-        sm: {
-          css: {
-            // See the `pre` note in DEFAULT: `prose-sm` sets its own
-            // `font-size: 0.857143em`, which re-scaled the size CodeBlock
-            // had already picked and rendered code at ~10px against 13px
-            // prose. Repeating the override here is what actually lands.
-            pre: { fontSize: "inherit" },
           },
         },
       }),

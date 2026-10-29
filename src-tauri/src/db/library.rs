@@ -896,10 +896,10 @@ impl Database {
         Ok(())
     }
 
-    /// Mark chunks the model refused on their own as done for `model`,
-    /// without a vector, so they stop holding up the rest of the index.
-    /// They stay keyword-searchable; an edit, a model change or a rebuild
-    /// gives them another try.
+    /// Mark chunks the model refused or failed on, on their own, as done for
+    /// `model`, without a vector, so they stop holding up the rest of the
+    /// index. They stay keyword-searchable; an edit, new embedding settings
+    /// or a rebuild gives them another try.
     pub fn skip_rag_chunks(&self, model: &str, ids: &[i64]) -> Result<()> {
         let mut conn = self.conn.lock();
         let tx = conn.transaction()?;
@@ -912,6 +912,18 @@ impl Database {
             }
         }
         tx.commit()?;
+        Ok(())
+    }
+
+    /// Put the chunks [`skip_rag_chunks`](Self::skip_rag_chunks) set aside
+    /// for `model` back in the queue — the embedding settings changed but
+    /// kept the model (another server), so its vectors stay.
+    pub fn retry_skipped_rag_chunks(&self, model: &str) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "UPDATE rag_chunks SET embed_model = NULL WHERE embed_model = ?1 AND embedding IS NULL",
+            params![model],
+        )?;
         Ok(())
     }
 
@@ -1274,6 +1286,35 @@ mod tests {
         assert_eq!((vectors.len(), total, left), (0, 1, 0));
         // Another model gives it another try.
         assert_eq!(db.rag_pending_embeddings("ollama:m2", 10).unwrap().len(), 1);
+    }
+
+    // Regression: a chunk that failed every time held the lowest ids, so the
+    // indexer asked for the same batch every minute and nothing after it was
+    // ever embedded.
+    #[test]
+    fn a_chunk_set_aside_lets_the_queue_move_on_until_retried() {
+        let (db, _dir) = fresh_db();
+        let m = "ollama:m1";
+        let a = text_item(&db, "A", "poison");
+        let b = text_item(&db, "B", "fine");
+        let first = db.rag_pending_embeddings(m, 1).unwrap();
+        db.skip_rag_chunks(m, &[first[0].id]).unwrap();
+        assert_eq!(db.rag_pending_embeddings(m, 1).unwrap()[0].text, "fine", "the queue moved on");
+        db.store_rag_embeddings(m, &in_flight(&db, m)).unwrap();
+        // Not pending in the status, nor in a search's "still indexing".
+        assert_eq!(db.rag_counts(Some(m)).unwrap(), (2, 2));
+        let s = scope(&[(DOC_LIBRARY, &a.id), (DOC_LIBRARY, &b.id)]);
+        let (vectors, total, left) = db.rag_vectors(&s, m).unwrap();
+        assert_eq!((vectors.len(), total, left), (1, 2, 0));
+
+        // New settings for the same model: only the set-aside chunk is redone.
+        db.retry_skipped_rag_chunks(m).unwrap();
+        let again = db.rag_pending_embeddings(m, 10).unwrap();
+        assert_eq!(again.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(), vec!["poison"]);
+        // A rebuild redoes everything, set-aside chunks included.
+        db.skip_rag_chunks(m, &[again[0].id]).unwrap();
+        db.clear_rag_embeddings().unwrap();
+        assert_eq!(db.rag_counts(Some(m)).unwrap(), (2, 0));
     }
 
     #[test]

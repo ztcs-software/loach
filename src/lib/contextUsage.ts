@@ -1,13 +1,33 @@
 import type { GenerationParams, Message } from "@/types";
 
 /**
- * Char/4 token estimate. English is ~4 chars/token for common tokenizers
- * (BPE, SentencePiece); accuracy is roughly within ±15% — good enough for
- * a UI progress bar but never quote this as a real billing number.
+ * Char/4 token estimate, scaled down for CJK text. English is ~4
+ * chars/token for common tokenizers (BPE, SentencePiece); accuracy is
+ * roughly within ±15% — good enough for a UI progress bar but never quote
+ * this as a real billing number.
  */
 export function estimateTokens(text: string | null | undefined): number {
   if (!text) return 0;
-  return Math.ceil(text.length / 4);
+  return Math.ceil(text.length / charsPerToken(text));
+}
+
+const CJK = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
+
+/**
+ * Characters per token for text like `sample`: ~4 for Latin-script text,
+ * ~1 for Chinese, Japanese and Korean, where common tokenizers spend about
+ * a token per character — so a flat 4 sized CJK sources and excerpts at a
+ * quarter of what they really cost. Blended by the share of CJK characters
+ * in (the first 2000 characters of) the sample.
+ */
+export function charsPerToken(sample: string): number {
+  let total = 0;
+  let cjk = 0;
+  for (const ch of sample.slice(0, 2000)) {
+    total += 1;
+    if (CJK.test(ch)) cjk += 1;
+  }
+  return total === 0 ? 4 : 4 - (3 * cjk) / total;
 }
 
 export interface ContextUsageBreakdown {
@@ -87,12 +107,12 @@ export function computeContextUsage(
     // system_prompt field) AND messages flagged `compacted_at` (rolled
     // into the running auto-summary). Mirror both filters here so the
     // popup's "what reaches the model" estimate stays accurate after a
-    // compaction.
+    // compaction. It sends only `content`, too: a reply's thinking stays
+    // in the transcript and never goes back to the model.
     if (m.role === "system") continue;
     if (m.compacted_at != null) continue;
     nonSystemCount += 1;
     messageChars += m.content.length;
-    if (m.thinking) messageChars += m.thinking.length;
     if (m.role === "user") {
       attachmentChars += attachmentCharsIn(m.content);
     }

@@ -20,6 +20,16 @@ interface SnippetState {
    *  create mode; when a `NewSnippetSeed`, opens in create mode with the
    *  prompt pre-filled. `null` keeps the dialog closed. */
   dialogTarget: Snippet | "new" | NewSnippetSeed | null;
+  /** The editor's unsaved fields. Kept here, not in the dialog: the app lock
+   *  unmounts the dialog, and the edits must still be there when it comes
+   *  back. Dropped on save or close. */
+  draft: {
+    target: Snippet | "new" | NewSnippetSeed;
+    title: string;
+    prompt: string;
+    provider: ProviderId | null;
+    model: string | null;
+  } | null;
   /** True once `hydrate()` has run (success or failure) so the library can tell
    *  "still loading" apart from "genuinely empty". */
   hydrated: boolean;
@@ -48,6 +58,7 @@ interface SnippetState {
 export const useSnippetStore = create<SnippetState>((set) => ({
   snippets: [],
   dialogTarget: null,
+  draft: null,
   hydrated: false,
   error: null,
 
@@ -108,6 +119,10 @@ export const useSnippetStore = create<SnippetState>((set) => ({
     set((s) => ({ snippets: s.snippets.filter((sn) => sn.id !== id) }));
   },
 
-  openDialog: (target) => set({ dialogTarget: target }),
-  closeDialog: () => set({ dialogTarget: null }),
+  openDialog: (target) =>
+    set((s) => ({
+      dialogTarget: target,
+      draft: s.draft?.target === target ? s.draft : null,
+    })),
+  closeDialog: () => set({ dialogTarget: null, draft: null }),
 }));

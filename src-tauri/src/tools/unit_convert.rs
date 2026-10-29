@@ -290,7 +290,7 @@ pub fn dispatch(args: &Value) -> McpCallResult {
         return err("conversion result is out of range (overflowed)");
     }
     McpCallResult {
-        content_text: format_number(result),
+        content_text: super::calculate::format_number(result),
         is_error: false,
         ..Default::default()
     }
@@ -316,25 +316,6 @@ fn convert_temperature(value: f64, from: &str, to: &str) -> Result<f64, String> 
         "k" | "kelvin" => kelvin,
         other => return Err(format!("unknown temperature unit `{other}`")),
     })
-}
-
-/// Same trick as `calculate::format_result`: integer-valued floats become
-/// `N`, otherwise trim trailing zeros from a 12-digit display so the
-/// output reads cleanly.
-fn format_number(v: f64) -> String {
-    if v.fract() == 0.0 && v.abs() < 1e15 {
-        return format!("{}", v as i64);
-    }
-    let s = format!("{v:.12}");
-    let trimmed = s.trim_end_matches('0').trim_end_matches('.');
-    // `v` is non-zero here (an exact zero took the integer branch above), so
-    // a result that rounds away at 12 decimals — 0.0001 mg in tonnes, say —
-    // must not be reported as a flat "0"/"-0". Surface those in scientific
-    // notation, the same guard `calculate::format_result` already carries.
-    if trimmed.is_empty() || trimmed == "-" || trimmed == "0" || trimmed == "-0" {
-        return format!("{v:e}");
-    }
-    trimmed.to_string()
 }
 
 fn err(msg: impl Into<String>) -> McpCallResult {
@@ -407,5 +388,21 @@ mod tests {
         let r = dispatch(&json!({"value": 1.0, "from": "furlong", "to": "ft"}));
         assert!(!r.is_error);
         assert_eq!(r.content_text, "660");
+    }
+
+    /// 12 significant digits, as `calculate` prints: a tiny result keeps its
+    /// digits and a huge one doesn't print f64 noise past them.
+    #[test]
+    fn results_keep_twelve_significant_digits() {
+        for (value, from, to, want) in [
+            (5.1, "mg", "t", "5.1e-9"),
+            (1.0, "ly", "km", "9.46073047258e12"),
+            (1.0, "pc", "m", "3.08567758149e16"),
+            (1.0, "m", "ft", "3.28083989501"),
+        ] {
+            let r = dispatch(&json!({"value": value, "from": from, "to": to}));
+            assert!(!r.is_error, "{}", r.content_text);
+            assert_eq!(r.content_text, want, "{value} {from} → {to}");
+        }
     }
 }

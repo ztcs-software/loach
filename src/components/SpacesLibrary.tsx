@@ -203,6 +203,10 @@ function SpaceCard({
       aria-label={`Open Space: ${space.name}`}
       onClick={onOpen}
       onKeyDown={(e) => {
+        // Only the card's own keys: Enter on its New chat or ⋯ button (or a
+        // menu item, which bubbles here through the portal) belongs to that
+        // control — a keyboard Delete used to open the Space as well.
+        if (e.target !== e.currentTarget) return;
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
           onOpen();

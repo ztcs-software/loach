@@ -11,6 +11,7 @@ import {
   makeRequestId,
 } from "@/lib/tauri";
 import { useSettingsStore } from "./settingsStore";
+import { useSpaceStore } from "./spaceStore";
 import { useToastStore } from "./toastStore";
 import { parseModelParameters } from "@/lib/modelParams";
 import {
@@ -90,8 +91,7 @@ interface ModelsState {
   modelThinkPrefs: Record<string, boolean>;
   /** Set / clear the per-model thinking preference. Pass `null` to clear
    *  back to the model's natural default; passing `true` / `false`
-   *  records an explicit override. Stored in-memory only for now — no
-   *  persistence layer yet. */
+   *  records an explicit override. Kept per device in localStorage. */
   setModelThinkPref: (modelId: string, value: boolean | null) => void;
 
   hydrate: () => Promise<void>;
@@ -124,6 +124,24 @@ interface ModelsState {
  *  cancel without putting function handles into zustand state (which would
  *  make state non-serialisable for devtools). */
 const activeRuns = new Map<string, AdminRun>();
+
+/** localStorage key for `modelThinkPrefs`. The Models page labels the toggle
+ *  "Default for new chats with this model", and in memory only it was gone
+ *  on the next launch. */
+const THINK_PREFS_KEY = "loach:model-think-prefs";
+
+function loadThinkPrefs(): Record<string, boolean> {
+  try {
+    const saved: unknown = JSON.parse(localStorage.getItem(THINK_PREFS_KEY) ?? "{}");
+    if (!saved || typeof saved !== "object" || Array.isArray(saved)) return {};
+    return Object.fromEntries(
+      Object.entries(saved).filter((e): e is [string, boolean] => typeof e[1] === "boolean"),
+    );
+  } catch {
+    // No storage (or a corrupt entry): start with no preferences.
+    return {};
+  }
+}
 
 /** In-flight `loadModelDefaults` calls, keyed by model id. Lets concurrent
  *  callers share one `/api/show` round-trip instead of each issuing their
@@ -163,13 +181,19 @@ export const useModelsStore = create<ModelsState>((set, get) => ({
   runs: {},
   modelDefaults: {},
   modelCapabilities: {},
-  modelThinkPrefs: {},
+  modelThinkPrefs: loadThinkPrefs(),
 
   setModelThinkPref: (modelId, value) =>
     set((s) => {
       const next = { ...s.modelThinkPrefs };
       if (value === null) delete next[modelId];
       else next[modelId] = value;
+      try {
+        localStorage.setItem(THINK_PREFS_KEY, JSON.stringify(next));
+      } catch (e) {
+        // Still applies for this run; only the next launch loses it.
+        logger.warn("couldn't save the model's Thinking default", e);
+      }
       return { modelThinkPrefs: next };
     }),
 
@@ -308,6 +332,7 @@ export const useModelsStore = create<ModelsState>((set, get) => ({
     if (get().viewingModel === name) set({ viewingModel: null });
     forgetModel(set, name);
     await get().refresh();
+    await unpinDeletedModel(name);
   },
 
   copyModel: async (source, destination) => {
@@ -573,5 +598,34 @@ async function unpinAbandonedPull(streamId: string) {
     await settings.update("default_model", "");
   } catch (e) {
     logger.warn("could not clear the default model after an abandoned pull", e);
+  }
+}
+
+/** Unpin every default aimed at a model the user just deleted, the way
+ *  `unpinAbandonedPull` does for a pull that never landed: the global one
+ *  (the Settings pick and the last-used pair) and any Space's. Left in
+ *  place, each new chat started on a tag Ollama no longer has. */
+async function unpinDeletedModel(name: string) {
+  const settings = useSettingsStore.getState();
+  // `update` reports a failed write itself (a toast) and reverts.
+  if (settings.default_model_choice === `model:ollama:${name}`) {
+    await settings.update("default_model_choice", "recent");
+  }
+  if (settings.default_provider === "ollama" && settings.default_model === name) {
+    await settings.update("default_model", "");
+  }
+  for (const space of useSpaceStore.getState().spaces) {
+    if (space.default_provider !== "ollama" || space.default_model !== name) continue;
+    try {
+      await useSpaceStore.getState().updateSpace(space.id, {
+        name: space.name,
+        description: space.description,
+        instructions: space.instructions,
+        default_provider: null,
+        default_model: null,
+      });
+    } catch (e) {
+      logger.warn("could not clear a Space's default model after deleting it", e);
+    }
   }
 }

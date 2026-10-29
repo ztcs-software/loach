@@ -247,6 +247,37 @@ describe("normalizeMath — code is never touched", () => {
     expect(normalizeMath(src)).toContain("sed 's/\\(a\\)/\\1/' f");
   });
 
+  it("leaves a fence opened on a list item's own line intact", () => {
+    // Regression: `1. ```bash` wasn't seen as a fence, so its body was
+    // rewritten as prose (BRE grouping turned into math) and the indented
+    // closer was taken for an opener — inverting code and prose for the
+    // rest of the message.
+    const src = [
+      "1. ```bash",
+      "   sed 's/\\(a\\)/\\1/' f",
+      "   echo $HOME$USER",
+      "   ```",
+      "2. Then \\( y \\).",
+      "",
+      "- ~~~",
+      "  grep '\\(foo\\)'",
+      "  ~~~",
+      "",
+      "After \\( z \\).",
+    ].join("\n");
+    const out = normalizeMath(src);
+    expect(out).toContain("   sed 's/\\(a\\)/\\1/' f");
+    expect(out).toContain("   echo $HOME$USER");
+    expect(out).toContain("  grep '\\(foo\\)'");
+    expect(out).toContain("2. Then $$ y $$.");
+    expect(out).toContain("After $$ z $$.");
+  });
+
+  it("does not take a list-item line inside a fence for its closer", () => {
+    const src = ["```markdown", "- ```", "inner \\(code\\) and $x$ here", "```"].join("\n");
+    expect(normalizeMath(src)).toBe(src);
+  });
+
   it("does not let a short inner fence close a longer outer one", () => {
     // A ```` block whose body shows ``` fenced markdown: the inner run is
     // content, so the `$$…$$` in the example must survive as written.

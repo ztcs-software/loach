@@ -7,7 +7,7 @@
 // panel happened to be opened.
 
 import { describe, it, expect, vi } from "vitest";
-import type { OllamaShowResponse, Session } from "@/types";
+import { OPENAI_COMPAT_NUM_CTX, type OllamaShowResponse, type Session } from "@/types";
 
 vi.mock("@/lib/tauri", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/tauri")>();
@@ -61,5 +61,18 @@ describe("a chat sent from with a cold model-defaults cache", () => {
 
     expect(request.params.num_ctx).toBe(32768);
     expect(request.params.temperature).toBe(0.2);
+  });
+});
+
+describe("an OpenAI-compatible chat", () => {
+  // Those servers ignore num_ctx and don't report their window, so it only
+  // sizes sources — and 8192 pushed a 128k model's sources to excerpts.
+  it("is sized against the assumed window, not the Ollama default", async () => {
+    useLibraryStore.setState({ hydrated: true, items: [], datasets: [], sources: {} });
+    const openai = { ...chat, id: "chat-2", provider: "openai", model: "gpt-4o" } as Session;
+
+    const { request } = await __testing.buildTaskRequest(openai, openai.id, [], "hi", []);
+
+    expect(request.params.num_ctx).toBe(OPENAI_COMPAT_NUM_CTX);
   });
 });

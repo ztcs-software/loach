@@ -132,6 +132,10 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
     ],
   );
 
+  // The GPU layer count this chat falls back to without one of its own: the
+  // Space's, else the Modelfile's, else none (Ollama auto-detects).
+  const inheritedNumGpu = spaceLayer.num_gpu ?? modelDefaults?.num_gpu;
+
   // Only the keys the user has actually touched in this panel session are held
   // locally; every other value is read live off `initial`. Holding a full
   // merged snapshot instead froze whatever the layers happened to be at mount
@@ -477,8 +481,14 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
               {isAdvanced && (
                 <GpuLayersRow
                   value={params.num_gpu ?? null}
+                  inherited={inheritedNumGpu ?? null}
+                  // Clearing lands on what the chat inherits. A cleared key is
+                  // just dropped from the saved override, so the Space's or
+                  // Modelfile's count was still sent while this read "auto" —
+                  // and the request can't carry "auto" over it (`num_gpu` is
+                  // unsigned on the Rust side, so no -1).
                   onChange={(num_gpu) =>
-                    update({ num_gpu: num_gpu ?? undefined })
+                    update({ num_gpu: num_gpu ?? inheritedNumGpu })
                   }
                   isOpenAI={isOpenAI}
                 />
@@ -492,9 +502,9 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
                     ? true
                     : (params.low_vram ?? false)
                 }
-                onChange={(next) =>
-                  update({ low_vram: next ? true : undefined })
-                }
+                // An explicit false: dropping the key let a Space's
+                // `low_vram: true` through while the switch read off.
+                onChange={(next) => update({ low_vram: next })}
                 isOpenAI={isOpenAI}
                 pinnedByGlobal={lowVramGlobal && !isOpenAI}
               />
@@ -842,7 +852,8 @@ function SliderRow({
  *
  *   - **Auto** (`value === null`) — the field is blank, Ollama auto-detects
  *     based on available VRAM. The default for every chat unless either
- *     the user overrides it or the model's Modelfile lists `num_gpu`.
+ *     the user overrides it or the model's Modelfile (or the Space) lists
+ *     `num_gpu` — clearing the field then lands on that `inherited` count.
  *   - **CPU only** (`value === 0`) — useful for testing CPU paths or when
  *     even one layer on GPU OOMs the system.
  *   - **Custom** (`value > 0`) — user explicitly picks how many layers
@@ -854,10 +865,12 @@ function SliderRow({
  */
 function GpuLayersRow({
   value,
+  inherited,
   onChange,
   isOpenAI,
 }: {
   value: number | null;
+  inherited: number | null;
   onChange: (v: number | null) => void;
   isOpenAI: boolean;
 }) {
@@ -917,7 +930,7 @@ function GpuLayersRow({
           disabled={isOpenAI}
           className="h-8 border-foreground/10 bg-foreground/[0.04] text-sm tabular-nums focus-visible:border-foreground/25"
         />
-        {value !== null && !isOpenAI && (
+        {value !== null && value !== inherited && !isOpenAI && (
           <Button
             type="button"
             variant="ghost"
@@ -927,7 +940,7 @@ function GpuLayersRow({
               setDraft("");
               onChange(null);
             }}
-            title="Clear (let Ollama auto-detect)"
+            title={inherited === null ? "Clear (let Ollama auto-detect)" : "Clear (use the model's default)"}
           >
             <X className="h-4 w-4" />
           </Button>
@@ -936,7 +949,9 @@ function GpuLayersRow({
       <p className="mt-1.5 text-[10.5px] leading-snug text-foreground/50">
         {isOpenAI
           ? "Ignored by OpenAI providers — server-side decision."
-          : "How many model layers to offload to the GPU. 0 = CPU only; leave blank for Ollama's auto-detect."}
+          : inherited === null
+            ? "How many model layers to offload to the GPU. 0 = CPU only; leave blank for Ollama's auto-detect."
+            : `How many model layers to offload to the GPU. 0 = CPU only; leave blank for the model's default (${inherited}).`}
       </p>
     </div>
   );
@@ -946,8 +961,8 @@ function GpuLayersRow({
  * Low-VRAM toggle. Sends `low_vram: true` to Ollama, which trades
  * throughput for footprint (smaller batches, leaner KV cache). Off by
  * default — only flip when you're hitting OOMs and `num_gpu` alone
- * isn't enough. We persist `undefined` instead of `false` so a session
- * that hasn't touched the toggle reads as "no override".
+ * isn't enough. Turning it off persists `false`, not `undefined`, so it
+ * still wins over a Space that pins it on.
  *
  * `pinnedByGlobal` reflects the Settings → Features master switch. When
  * true, the per-chat toggle is forced on and disabled — flipping it

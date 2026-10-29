@@ -3,6 +3,7 @@ import {
   buildExtractorSystemPrompt,
   describesRequest,
   isDuplicate,
+  looksLikeSecret,
   normalize,
   parseExtractionJson,
   selectMemoriesForPrompt,
@@ -104,6 +105,40 @@ describe("describesRequest", () => {
     expect(req("Asked to be called Andy.")).toBe(false);
     expect(req("Requested that answers be in Polish.")).toBe(false);
     expect(req("Wants answers in Polish.")).toBe(false);
+  });
+});
+
+describe("looksLikeSecret", () => {
+  it("flags keys with a known prefix", () => {
+    expect(looksLikeSecret("Uses the OpenAI key sk-proj-4f9aT2bQx7LmZ0pW3eRk")).toBe(true);
+    expect(looksLikeSecret("GitHub token: ghp_16C7e42F292c6912E7710c838347Ae178B4a")).toBe(true);
+    expect(looksLikeSecret("CI uses gho_16C7e42F292c6912E7710c838347Ae178B4a")).toBe(true);
+    expect(looksLikeSecret("AWS key id is AKIAIOSFODNN7EXAMPLE")).toBe(true);
+    expect(looksLikeSecret("Slack bot token xoxb-123456789012-abcdefABCDEF")).toBe(true);
+  });
+
+  it("flags a credential named and given", () => {
+    expect(looksLikeSecret("Home Wi-Fi password is hunter2")).toBe(true);
+    expect(looksLikeSecret("The password for the router: Tr0ub4dor")).toBe(true);
+    expect(looksLikeSecret("Bank card PIN is 4821")).toBe(true);
+    expect(looksLikeSecret("Phone passcode = 112233")).toBe(true);
+    expect(looksLikeSecret("Hasło do wifi to kotek123")).toBe(true);
+  });
+
+  it("flags a long random token of an unknown shape", () => {
+    // From an attached .env: no prefix, but nothing a word or slug looks like.
+    expect(looksLikeSecret("Stripe test key is in the env as 9fQ2xLk7Wm3ZpR8tVb4NcH6yJd1sGe5A")).toBe(true);
+    expect(looksLikeSecret("Webhook secret 3f786850e387550fdab836ed7e6dc881de23001b")).toBe(true);
+  });
+
+  it("keeps ordinary facts, including ones about passwords", () => {
+    expect(looksLikeSecret("Prefers a password manager over browser autofill")).toBe(false);
+    expect(looksLikeSecret("Uses 1Password at work")).toBe(false);
+    expect(looksLikeSecret("Lives in Gdańsk, Poland")).toBe(false);
+    expect(looksLikeSecret("Works on a Tauri desktop app called Loach")).toBe(false);
+    expect(looksLikeSecret("Maintains the repo at github.com/ztcs-software/loach")).toBe(false);
+    expect(looksLikeSecret("Writes state-of-the-art-2024-roadmap-planning docs")).toBe(false);
+    expect(looksLikeSecret("Uses scikit-learn for risk-scoring models")).toBe(false);
   });
 });
 

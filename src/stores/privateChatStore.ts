@@ -8,6 +8,7 @@ import {
   imagesFromAttachments,
   inlineTextAttachments,
 } from "@/lib/files";
+import { cancelMemoryExtraction } from "@/lib/memory";
 import { getPersona } from "@/lib/personas";
 import { getTone } from "@/lib/tones";
 import { useModelsStore } from "./modelsStore";
@@ -232,6 +233,10 @@ export const usePrivateChatStore = create<PrivateChatState>((set, get) => ({
     if (!state.model) {
       throw new Error("Pick an Ollama model to start the conversation.");
     }
+    // The regular queue is held while this overlay is open, but a memory
+    // extraction already running for a regular chat isn't part of it and
+    // would compete for the model. Stop it; its turns stay queued.
+    cancelMemoryExtraction();
 
     // Resolve Ollama base URL from the regular settings — the picker requires
     // Ollama to be reachable, so this read is safe.

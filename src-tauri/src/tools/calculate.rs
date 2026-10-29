@@ -127,8 +127,22 @@ fn operand_end(cs: &[char], mut i: usize) -> usize {
     while i < cs.len() && (cs[i].is_whitespace() || cs[i] == '-' || cs[i] == '+') {
         i += 1;
     }
+    let start = i;
     while i < cs.len() && (cs[i].is_alphanumeric() || cs[i] == '.' || cs[i] == '_') {
         i += 1;
+    }
+    // A number's exponent carries its own sign (`1e-3`), which the scan
+    // above stops at — so `-1e-3` became `(0-1e)-3`. Take the signed
+    // exponent into the operand when what came before it is a mantissa.
+    if is_mantissa_and_e(&cs[start..i])
+        && i + 1 < cs.len()
+        && matches!(cs[i], '-' | '+')
+        && cs[i + 1].is_ascii_digit()
+    {
+        i += 1;
+        while i < cs.len() && cs[i].is_ascii_digit() {
+            i += 1;
+        }
     }
     let open = skip_spaces(cs, i);
     if open < cs.len() && cs[open] == '(' {
@@ -149,6 +163,19 @@ fn operand_end(cs: &[char], mut i: usize) -> usize {
         return cs.len();
     }
     i
+}
+
+/// Whether `run` is a number literal cut off right after its `e` / `E` —
+/// digits and a dot, then the exponent marker — rather than an identifier
+/// that happens to end in `e`.
+fn is_mantissa_and_e(run: &[char]) -> bool {
+    match run.split_last() {
+        Some((&('e' | 'E'), mantissa)) => {
+            mantissa.iter().any(|c| c.is_ascii_digit())
+                && mantissa.iter().all(|c| c.is_ascii_digit() || *c == '.')
+        }
+        _ => false,
+    }
 }
 
 /// End of an operand *plus* any `^` chain hanging off it, which is the extent
@@ -295,6 +322,15 @@ fn format_result(value: f64) -> String {
         }
         .to_string();
     }
+    format_number(value)
+}
+
+/// Print a finite `f64` for the model; `unit_convert` shares it so both
+/// tools write numbers alike. Integer-valued results show as `42`, not
+/// `42.0`; anything else gets 12 significant digits, written out for
+/// ordinary magnitudes and in scientific notation (`5.1e-12`) for very
+/// small or large ones, switching where C's `%g` does.
+pub(super) fn format_number(value: f64) -> String {
     // Integer-valued floats render as integers. The 1e15 guard keeps us
     // inside the range where f64 can represent every integer exactly —
     // beyond that, displaying as "integer" would be a lie.
@@ -302,18 +338,30 @@ fn format_result(value: f64) -> String {
         return format!("{}", value as i64);
     }
     // Default Display gives ~17 significant digits for round-trippability.
-    // That's noisy for chat output; trim to 12 significant digits which
-    // is still well beyond what the user can verify by hand.
-    let s = format!("{value:.12}");
-    let trimmed = s.trim_end_matches('0').trim_end_matches('.');
-    // `value` is non-zero here (an exact zero takes the integer branch
-    // above), but a tiny magnitude can still round away to "0" / "-0" at
-    // 12 decimals. Surface those in scientific notation so a real result
-    // like 1.2e-15 isn't reported as a flat "0".
-    if trimmed.is_empty() || trimmed == "-" || trimmed == "0" || trimmed == "-0" {
-        return format!("{value:e}");
+    // That's noisy for chat output; 12 is still well beyond what the user
+    // can verify by hand. `{:.12}` gave 12 *decimal places* instead, so
+    // 5.1e-12 came out as 0.000000000005 and 1e17/3 as 33333333333333332.
+    // `{:.11e}` rounds to 12 significant digits and reports the exponent
+    // after rounding (9.99999999999999 → 1.00000000000e1), so it picks the
+    // layout.
+    let sci = format!("{value:.11e}");
+    let (mantissa, exp) = sci.split_once('e').expect("`{:e}` always writes an exponent");
+    let exp: i32 = exp.parse().expect("`{:e}` writes an integer exponent");
+    if (-4..12).contains(&exp) {
+        trim_fraction(&format!("{value:.*}", (11 - exp) as usize)).to_string()
+    } else {
+        format!("{}e{exp}", trim_fraction(mantissa))
     }
-    trimmed.to_string()
+}
+
+/// Drop the trailing zeros of a decimal fraction, and the point when
+/// nothing is left after it. Text without a point is an integer — left alone.
+fn trim_fraction(s: &str) -> &str {
+    if s.contains('.') {
+        s.trim_end_matches('0').trim_end_matches('.')
+    } else {
+        s
+    }
 }
 
 #[cfg(test)]
@@ -468,9 +516,46 @@ mod tests {
         // through the float path rather than as an integer.
         let r = dispatch(&json!({"expression": "6.022e23 / 2"}));
         assert!(!r.is_error, "{}", r.content_text);
-        assert!(r.content_text.starts_with("301100000000"), "got: {}", r.content_text);
+        assert_eq!(r.content_text, "3.011e23");
         // The `e` constant still resolves when it isn't part of a literal.
         assert_evaluates(&[("log(e)", "1"), ("e^0", "1")]);
+    }
+
+    /// A literal's exponent sign is part of the literal, so a unary minus in
+    /// front of one must cover it: `-1e-3` used to become `(0-1e)-3`,
+    /// which exmex can't parse.
+    #[test]
+    fn unary_minus_covers_a_signed_exponent() {
+        assert_evaluates(&[
+            ("-1e-3", "-0.001"),
+            ("-1e+3", "-1000"),
+            ("-1.602e-19", "-1.602e-19"),
+            ("2*-6.626e-34", "-1.3252e-33"),
+            ("abs(-1e-3)", "0.001"),
+            ("-2e-1^2", "-0.04"),
+            ("10/-2E-1", "-50"),
+            // The constant `e` isn't a mantissa: these minuses stay binary.
+            ("-e-1", "-3.71828182846"),
+            ("e-1", "1.71828182846"),
+        ]);
+        assert_eq!(normalize_expression("-1e-3"), "(0-1e-3)");
+        let r = dispatch(&json!({"expression": "sqrt(-1e-3)"}));
+        assert!(!r.is_error && r.content_text.contains("NaN"), "{}", r.content_text);
+    }
+
+    /// Results carry 12 significant digits, not 12 decimal places: a tiny
+    /// value keeps its digits and a huge one doesn't print f64 noise.
+    #[test]
+    fn results_keep_twelve_significant_digits() {
+        assert_eq!(format_number(5.1e-12), "5.1e-12");
+        assert_eq!(format_number(1e17 / 3.0), "3.33333333333e16");
+        assert_eq!(format_number(2.0 / 3.0), "0.666666666667");
+        assert_eq!(format_number(0.1 + 0.2), "0.3");
+        assert_eq!(format_number(0.000123456789), "0.000123456789");
+        assert_eq!(format_number(123456.789), "123456.789");
+        assert_eq!(format_number(1234567890123.5), "1.23456789012e12");
+        assert_eq!(format_number(-9.99999999999999), "-10");
+        assert_eq!(format_number(1e15), "1e15");
     }
 
     /// The rewrites are textual, so they must leave non-ASCII identifiers and

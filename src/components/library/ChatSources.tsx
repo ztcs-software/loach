@@ -25,6 +25,7 @@ import { useToastStore } from "@/stores/toastStore";
 import { useUIStore } from "@/stores/uiStore";
 import {
   DEFAULT_PARAMS,
+  OPENAI_COMPAT_NUM_CTX,
   type LibraryDataset,
   type LibraryItemMeta,
   type RetrievalMode,
@@ -230,7 +231,11 @@ function ModeChip({ sessionId, spaceId }: { sessionId: string; spaceId: string |
   useLibraryStore((s) => s.items);
   useLibraryStore((s) => s.sources);
   const modelNumCtx = useModelsStore((s) =>
-    session?.provider === "ollama" && session.model ? s.modelDefaults[session.model]?.num_ctx : undefined,
+    session?.provider === "ollama" && session.model
+      ? s.modelDefaults[session.model]?.num_ctx
+      : session
+        ? OPENAI_COMPAT_NUM_CTX
+        : undefined,
   );
   const numCtx = chatNumCtx(session?.params_json, space?.default_params_json, modelNumCtx);
   if (!session) return null;

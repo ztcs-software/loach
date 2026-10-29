@@ -27,7 +27,10 @@ pub fn tool_description() -> &'static str {
      validates as a side effect), \
      `extract` (returns the value at a JSON Pointer path, RFC 6901, e.g. \
      `/users/0/name`; leading slash, slash-separated, integer indices for \
-     arrays, `~1` escapes `/`, `~0` escapes `~`)."
+     arrays, `~1` escapes `/`, `~0` escapes `~`). `format` and `extract` \
+     keep key order but re-write numbers as 64-bit values: an integer \
+     beyond the 64-bit range, or a decimal with more than ~17 significant \
+     digits, comes back rounded."
 }
 
 pub fn input_schema() -> Value {
@@ -165,6 +168,19 @@ mod tests {
         let r = dispatch(&json!({"input": r#"{"a":1}"#, "op": "format", "indent": 4}));
         assert!(!r.is_error);
         assert!(r.content_text.contains("\n    \"a\""));
+    }
+
+    /// Keys come back in the order the model wrote them; without serde_json's
+    /// `preserve_order` they were re-sorted alphabetically.
+    #[test]
+    fn format_and_extract_keep_key_order() {
+        let input = r#"{"zeta":1,"alpha":{"y":2,"b":3},"mid":[{"k2":0,"k1":0}]}"#;
+        let r = dispatch(&json!({"input": input, "op": "format", "indent": 0}));
+        assert!(!r.is_error, "{}", r.content_text);
+        assert_eq!(r.content_text.replace('\n', ""), input.replace(':', ": "));
+        let r = dispatch(&json!({"input": input, "op": "extract", "path": "/alpha"}));
+        assert!(!r.is_error, "{}", r.content_text);
+        assert_eq!(r.content_text, "{\n  \"y\": 2,\n  \"b\": 3\n}");
     }
 
     #[test]

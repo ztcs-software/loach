@@ -180,47 +180,57 @@ function PdfPage({ doc, pageNumber }: { doc: PDFDocumentProxy; pageNumber: numbe
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [dims, setDims] = useState<{ width: number; height: number } | null>(null);
   const [visible, setVisible] = useState(false);
-  const [rendered, setRendered] = useState(false);
 
-  // IntersectionObserver flips `visible` once the placeholder enters (or
-  // gets near) the viewport. `rootMargin` extends the trigger zone so pages
-  // start rendering slightly before they're scrolled into view — masks the
-  // raster latency for fast scrollers.
+  // Two IntersectionObservers on the page scroller: one flips `visible` on
+  // as the placeholder nears the scroller's viewport — `rootMargin` extends
+  // the trigger zone so pages start rendering slightly before they're
+  // scrolled into view, masking the raster latency for fast scrollers — and
+  // one flips it off once the page is well clear again, which drops its
+  // canvas. The gap between the two margins keeps a page scrolled back and
+  // forth across one edge from re-rasterising each time. The scroller, not
+  // the window, is the root: with the window, the scroller's clipping hid
+  // every page outside it and the margins never applied.
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
-    const obs = new IntersectionObserver(
+    const root = el.parentElement;
+    const near = new IntersectionObserver(
       (entries) => {
-        for (const e of entries) {
-          if (e.isIntersecting) {
-            setVisible(true);
-            obs.disconnect();
-            break;
-          }
-        }
+        if (entries[entries.length - 1]?.isIntersecting) setVisible(true);
       },
-      { rootMargin: "400px 0px" },
+      { root, rootMargin: "400px 0px" },
     );
-    obs.observe(el);
-    return () => obs.disconnect();
+    const far = new IntersectionObserver(
+      (entries) => {
+        if (entries[entries.length - 1]?.isIntersecting === false) setVisible(false);
+      },
+      { root, rootMargin: "1200px 0px" },
+    );
+    near.observe(el);
+    far.observe(el);
+    return () => {
+      near.disconnect();
+      far.disconnect();
+    };
   }, []);
 
-  // Once visible, kick off the actual page render. We rasterise at 2× the
-  // CSS width so the canvas stays sharp when CSS scales it down to fit the
-  // container — the previous version set an explicit pixel `style.width` on
-  // the canvas, which overflowed the dialog's max-width and clipped the
-  // page horizontally. Letting CSS own the layout via `w-full` keeps every
-  // page snapped to the scroller's width.
+  // While visible, render the page; once it isn't, release the raster. We
+  // rasterise at 2× the CSS width so the canvas stays sharp when CSS scales
+  // it down to fit the container — the previous version set an explicit
+  // pixel `style.width` on the canvas, which overflowed the dialog's
+  // max-width and clipped the page horizontally. Letting CSS own the layout
+  // via `w-full` keeps every page snapped to the scroller's width.
   useEffect(() => {
-    if (!visible || rendered) return;
+    if (!visible) return;
     let cancelled = false;
     let renderTask: RenderTask | null = null;
     (async () => {
       const page = await doc.getPage(pageNumber);
       // 2× device-pixel-ratio is a good sharpness/cost balance: high-DPI
-      // displays get crisp text, while CPU/memory cost stays bounded
-      // (one A4 page at 2×2 is ~3 MB of pixel data — fine even for a
-      // 100-page PDF).
+      // displays get crisp text. It isn't cheap, though — one A4 page is
+      // ~8 MB of pixel data at 2×, ~32 MB at 2× on a 2× display — so only
+      // the pages near the viewport keep a canvas (see the observers above);
+      // keeping every one a 200-page PDF had shown could run out of memory.
       const dpr = Math.min(window.devicePixelRatio || 1, 2);
       const viewport = page.getViewport({ scale: 2 * dpr });
       // Resolve this page's true aspect now, lazily (deferred from open). The
@@ -245,10 +255,9 @@ function PdfPage({ doc, pageNumber }: { doc: PDFDocumentProxy; pageNumber: numbe
       renderTask = page.render({ canvas, canvasContext: ctx, viewport });
       try {
         await renderTask.promise;
-        if (!cancelled) setRendered(true);
       } catch {
         // `render()` rejects when its task is cancelled mid-flight — expected
-        // during unmount, nothing to surface.
+        // during unmount or a scroll away, nothing to surface.
       } finally {
         page.cleanup();
       }
@@ -262,8 +271,15 @@ function PdfPage({ doc, pageNumber }: { doc: PDFDocumentProxy; pageNumber: numbe
           /* ignore */
         }
       }
+      // A zero-sized canvas gives its backing store back. `dims` keeps the
+      // placeholder at the page's height, so nothing below it moves.
+      const canvas = canvasRef.current;
+      if (canvas) {
+        canvas.width = 0;
+        canvas.height = 0;
+      }
     };
-  }, [visible, rendered, doc, pageNumber]);
+  }, [visible, doc, pageNumber]);
 
   // Container fills the scroller's width (capped by its `max-w-4xl`); the
   // `aspectRatio` from the page's natural dimensions keeps the placeholder

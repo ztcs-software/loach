@@ -31,10 +31,74 @@
       }
     }
 
+    // Pins `value` in place of `obj[name]`: the page can neither
+    // reassign nor redefine it. Deliberately not in a try — if an engine
+    // refuses, this script stops before "ready" and nothing renders.
+    const pin = (obj, name, value) =>
+      Object.defineProperty(obj, name, { value, writable: false, configurable: false });
+
+    // The CSP stops every request the page could make except one: WebRTC,
+    // whose ICE traffic to a STUN server carries whatever the page puts in
+    // it. Take the constructors away, carried over like the storage above.
+    for (const name of ["RTCPeerConnection", "webkitRTCPeerConnection", "RTCDataChannel"]) {
+      pin(window, name, undefined);
+    }
+
+    // A nested frame would bring fresh ones: a `srcdoc` or `javascript:`
+    // frame runs its own script in a new window, and the CSP's frame-src
+    // stops neither. So frames go as soon as they're added — the observer
+    // runs as a microtask, while a frame's document arrives in a later task —
+    // in shadow roots too, which `attachShadow` now reports here.
+    const FRAMES = "iframe, frame, object, embed";
+    const frameWatch = new MutationObserver((records) => {
+      for (const { addedNodes } of records) {
+        for (const node of addedNodes) {
+          if (!(node instanceof Element)) continue;
+          if (node.matches(FRAMES)) node.remove();
+          for (const frame of node.querySelectorAll(FRAMES)) frame.remove();
+        }
+      }
+    });
+    const watch = (root) => frameWatch.observe(root, { childList: true, subtree: true });
+    const { attachShadow } = Element.prototype;
+    pin(Element.prototype, "attachShadow", function (init) {
+      const root = attachShadow.call(this, init);
+      watch(root);
+      return root;
+    });
+    // A shadow root declared in markup doesn't pass through attachShadow,
+    // and a closed one leaves no handle to watch. So the parser never gets
+    // to make one: the attribute asking for it is renamed in everything
+    // this page or its scripts hand to the parser.
+    const noShadowRoots = (html) => String(html).replace(/shadowrootmode/gi, "data-$&");
+    for (const [obj, name] of [
+      [Element.prototype, "setHTMLUnsafe"],
+      [ShadowRoot.prototype, "setHTMLUnsafe"],
+      [Document, "parseHTMLUnsafe"],
+    ]) {
+      const parse = obj[name];
+      if (parse) pin(obj, name, function (html, options) {
+        return parse.call(this, noShadowRoots(html), options);
+      });
+    }
+    // Writes all feed one stream, so a name can also arrive split across
+    // two of them; a space at the start of the second splits it apart.
+    let written = "";
+    for (const name of ["write", "writeln"]) {
+      const write = Document.prototype[name];
+      pin(Document.prototype, name, function (...text) {
+        let html = noShadowRoots(text.map(String).join(""));
+        if (/shadowrootmode/i.test(written + html.slice(0, 13))) html = " " + html;
+        written = (written + html).slice(-13);
+        return write.call(this, html);
+      });
+    }
+
     addEventListener("message", (e) => {
       const msg = e.data;
       if (e.source !== parent || msg?.type !== "loach-preview:render") return;
       document.open();
+      watch(document);
       document.write(String(msg.html));
       document.close();
     });

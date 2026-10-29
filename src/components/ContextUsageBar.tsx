@@ -8,7 +8,17 @@ import { useGlobalMemoryStore } from "@/stores/globalMemoryStore";
 import { useLibraryStore } from "@/stores/libraryStore";
 import { selectMemoriesForPrompt } from "@/lib/memoryRules";
 import { estimateChatSources } from "@/lib/sources";
-import { DEFAULT_PARAMS, type GenerationParams, type Message, type SpaceFile } from "@/types";
+import {
+  DEFAULT_PARAMS,
+  OPENAI_COMPAT_NUM_CTX,
+  type GenerationParams,
+  type Message,
+  type SpaceFile,
+} from "@/types";
+
+/** Stands in for an OpenAI-compatible model's (absent) Modelfile defaults.
+ *  Module-level so the store selector returns the same object each time. */
+const OPENAI_COMPAT_DEFAULTS: Partial<GenerationParams> = { num_ctx: OPENAI_COMPAT_NUM_CTX };
 import {
   baseSystemPrompt,
   computeContextUsage,
@@ -68,10 +78,13 @@ export function ContextUsageBar() {
       : EMPTY_MESSAGES,
   );
   const globalSystemPrompt = useSettingsStore((s) => s.global_system_prompt);
+  const isOllama = session?.provider === "ollama";
   const modelDefaults = useModelsStore((s) =>
-    session?.provider === "ollama" && session.model
+    isOllama && session?.model
       ? s.modelDefaults[session.model]
-      : undefined,
+      : session && !isOllama
+        ? OPENAI_COMPAT_DEFAULTS
+        : undefined,
   );
   const space = useSpaceStore((s) =>
     session?.space_id ? s.spaces.find((x) => x.id === session.space_id) : null,
@@ -302,6 +315,9 @@ export function ContextUsageBar() {
           compacting={isCompacting}
           onCompact={() => void compactContext(session.id)}
           expandedSize={usage.total * 2}
+          // OpenAI-compatible servers ignore `num_ctx`: "expanding" there
+          // would only change Loach's own estimate, not the model's window.
+          canExpand={isOllama}
           onExpand={() => {
             // Merge into the EXISTING per-chat override, not the merged
             // stack. `params` is DEFAULT_PARAMS + model defaults + space
@@ -339,6 +355,8 @@ interface PopoverProps {
   sourcesLabel: string | null;
   compacting: boolean;
   onCompact: () => void;
+  /** False for OpenAI-compatible chats, whose servers ignore `num_ctx`. */
+  canExpand: boolean;
   onExpand: () => void;
   expandedSize: number;
   onClose: () => void;
@@ -350,6 +368,7 @@ const ContextUsagePopover = ({
   sourcesLabel,
   compacting,
   onCompact,
+  canExpand,
   onExpand,
   expandedSize,
   onClose,
@@ -480,27 +499,31 @@ const ContextUsagePopover = ({
             : "Not enough history yet — keep chatting and try again when usage climbs."}
       </p>
 
-      <div className="my-3 h-px bg-foreground/10" />
+      {canExpand && (
+        <>
+          <div className="my-3 h-px bg-foreground/10" />
 
-      <button
-        type="button"
-        onClick={onExpand}
-        disabled={compacting}
-        className={cn(
-          "flex w-full items-center justify-center gap-2 rounded-full px-3 py-2 text-[12px] font-medium transition-colors",
-          "bg-foreground/[0.08] text-foreground/85",
-          "hover:bg-foreground/[0.14] hover:text-foreground",
-          "disabled:opacity-50 disabled:cursor-not-allowed",
-          "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40",
-        )}
-      >
-        <Maximize2 className="h-3.5 w-3.5" />
-        Expand context window
-      </button>
-      <p className="mt-1.5 text-[10.5px] leading-relaxed text-foreground/45">
-        Doubles the window from {formatTokens(usage.total)} to{" "}
-        {formatTokens(expandedSize)} tokens.
-      </p>
+          <button
+            type="button"
+            onClick={onExpand}
+            disabled={compacting}
+            className={cn(
+              "flex w-full items-center justify-center gap-2 rounded-full px-3 py-2 text-[12px] font-medium transition-colors",
+              "bg-foreground/[0.08] text-foreground/85",
+              "hover:bg-foreground/[0.14] hover:text-foreground",
+              "disabled:opacity-50 disabled:cursor-not-allowed",
+              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40",
+            )}
+          >
+            <Maximize2 className="h-3.5 w-3.5" />
+            Expand context window
+          </button>
+          <p className="mt-1.5 text-[10.5px] leading-relaxed text-foreground/45">
+            Doubles the window from {formatTokens(usage.total)} to{" "}
+            {formatTokens(expandedSize)} tokens.
+          </p>
+        </>
+      )}
     </div>
   );
 };

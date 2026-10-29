@@ -44,6 +44,25 @@ pub fn is_pre_execution(err: &anyhow::Error) -> bool {
     err.chain().any(|c| c.is::<PreExecutionFailure>())
 }
 
+/// A JSON-RPC `error` reply — invalid params, an unknown tool. The server
+/// got the request and answered it, so unlike a transport failure it says
+/// nothing against the session it came over (see `mcp::keeps_session`).
+#[derive(Debug)]
+pub struct RpcError(JsonRpcError);
+
+impl std::fmt::Display for RpcError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&format_rpc_error(&self.0))
+    }
+}
+
+impl std::error::Error for RpcError {}
+
+/// True when `err` is an [`RpcError`] reply.
+pub fn is_rpc_error(err: &anyhow::Error) -> bool {
+    err.chain().any(|c| c.is::<RpcError>())
+}
+
 /// Cap on the response body we'll buffer per JSON-RPC call. MCP responses
 /// in practice are kilobytes (an initialize handshake or a tools/list of
 /// a few dozen tools); 4 MiB leaves a generous safety margin while still
@@ -422,7 +441,7 @@ async fn test_http(server: &McpServer, http: &reqwest::Client) -> Result<McpTest
 
 pub(super) fn unwrap_response<T: serde::de::DeserializeOwned>(resp: JsonRpcResponse) -> Result<T> {
     if let Some(err) = resp.error {
-        bail!(format_rpc_error(&err));
+        return Err(RpcError(err).into());
     }
     let result = resp
         .result
@@ -482,7 +501,10 @@ async fn post_rpc_raw(
             // server, so replaying it can't double-run anything. Anything
             // else (notably a timeout) may have been delivered and executed.
             let tag_safe = e.is_connect();
-            let err = anyhow::Error::new(e).context("POST to MCP server failed");
+            // Without the URL reqwest quotes: this text reaches the model and
+            // the transcript, and an MCP URL can carry its credential in the
+            // path or query (`https://mcp.zapier.com/api/mcp/s/<secret>/mcp`).
+            let err = anyhow::Error::new(e.without_url()).context("POST to MCP server failed");
             return Err(if tag_safe {
                 err.context(PreExecutionFailure)
             } else {
@@ -750,6 +772,27 @@ mod tests {
         let r = assemble_call_result(content, false);
         assert!(r.content_text.contains("file:///x"));
         assert!(r.attachments.is_empty());
+    }
+
+    /// A transport error goes to the model and the transcript, so it must
+    /// not quote a URL that carries the server's credential.
+    #[tokio::test]
+    async fn a_failed_post_leaves_the_url_out_of_its_error() {
+        // A server that hangs up without answering.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        tokio::spawn(async move {
+            if let Ok((conn, _)) = listener.accept().await {
+                drop(conn);
+            }
+        });
+        let url = format!("http://127.0.0.1:{port}/api/mcp/s/sk-secret-123/mcp");
+        let err = post_rpc_raw(&reqwest::Client::new(), &url, &HashMap::new(), &json!({}), None)
+            .await
+            .expect_err("the server hung up");
+        let shown = format!("{err:#}");
+        assert!(shown.contains("POST to MCP server failed"), "{shown}");
+        assert!(!shown.contains("sk-secret-123"), "{shown}");
     }
 
     #[test]

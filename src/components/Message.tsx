@@ -1131,10 +1131,14 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
                     Regenerate
                   </DropdownMenuItem>
                 )}
+                {/* Not while this reply streams: its row on disk stays empty
+                    until the stream finishes, and that's what a fork copies. */}
                 <DropdownMenuItem
                   onSelect={() =>
                     void forkChat(message.session_id, message.id)
                   }
+                  disabled={isStreaming}
+                  title={isStreaming ? "Wait for the reply to finish" : undefined}
                   className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
                 >
                   <GitFork className="h-4 w-4 text-foreground/60" />

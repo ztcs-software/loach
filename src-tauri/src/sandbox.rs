@@ -24,6 +24,12 @@
 //! * **The app's `frame-src`** (`tauri.conf.json`) allows only this scheme,
 //!   which also stops the preview navigating itself to an outside URL — the
 //!   webview's navigation hook only sees the main frame.
+//! * **The host page** (`assets/sandbox/preview.html`) covers what no CSP
+//!   directive does. It takes WebRTC away before the HTML runs (a peer
+//!   connection's ICE traffic reaches a STUN server regardless of
+//!   `connect-src`), and removes nested frames as they're added: a `srcdoc`
+//!   or `javascript:` frame isn't stopped by `frame-src` and would run its
+//!   own script with a fresh `RTCPeerConnection`.
 
 use tauri::http::{header, Request, Response, StatusCode};
 
@@ -120,5 +126,17 @@ mod tests {
         for name in ["connect-src", "frame-src", "child-src", "worker-src", "object-src"] {
             assert!(!CSP.contains(name), "`{name}` must stay on the default-src fallback");
         }
+    }
+
+    /// The CSP can't stop WebRTC, so the host page has to: it takes every
+    /// constructor away and keeps the page from opening a frame that would
+    /// bring them back.
+    #[test]
+    fn the_host_page_takes_webrtc_away() {
+        let page = std::str::from_utf8(PREVIEW_HOST).unwrap();
+        for name in ["RTCPeerConnection", "webkitRTCPeerConnection", "RTCDataChannel"] {
+            assert!(page.contains(&format!("\"{name}\"")), "`{name}` is left in place");
+        }
+        assert!(page.contains("new MutationObserver"), "nested frames are no longer removed");
     }
 }

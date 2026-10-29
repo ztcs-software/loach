@@ -546,10 +546,16 @@ const NUMERIC_FIELDS: {
   group: (typeof PARAM_GROUPS)[number];
   step?: number;
   hint?: string;
+  /** Set on the fields every chat with the model sends as its defaults,
+   *  where the chat request types them as whole numbers (`u32`, `i64` for
+   *  the seed). Ollama itself takes e.g. `num_predict -1`, but a chat can't
+   *  carry it, so the editor refuses what a chat couldn't send. */
+  integer?: boolean;
+  min?: number;
 }[] = [
   { key: "temperature", label: "Temperature", group: "Sampling", step: 0.05, hint: "0 – 2" },
   { key: "top_p", label: "Top-P", group: "Sampling", step: 0.01, hint: "0 – 1" },
-  { key: "top_k", label: "Top-K", group: "Sampling", step: 1 },
+  { key: "top_k", label: "Top-K", group: "Sampling", step: 1, integer: true, min: 0 },
   { key: "min_p", label: "Min-P", group: "Sampling", step: 0.01, hint: "0 – 1" },
   { key: "tfs_z", label: "Tail-free (tfs_z)", group: "Sampling", step: 0.05 },
   { key: "typical_p", label: "Typical-P", group: "Sampling", step: 0.01 },
@@ -558,16 +564,16 @@ const NUMERIC_FIELDS: {
   // (Η/Τ) are indistinguishable from Latin H/T.
   { key: "mirostat_eta", label: "Mirostat eta", group: "Sampling", step: 0.05 },
   { key: "mirostat_tau", label: "Mirostat tau", group: "Sampling", step: 0.5 },
-  { key: "num_ctx", label: "Context (num_ctx)", group: "Length", step: 256 },
-  { key: "num_predict", label: "Max tokens (num_predict)", group: "Length", step: 16 },
+  { key: "num_ctx", label: "Context (num_ctx)", group: "Length", step: 256, integer: true, min: 0 },
+  { key: "num_predict", label: "Max tokens (num_predict)", group: "Length", step: 16, integer: true, min: 0 },
   { key: "repeat_penalty", label: "Repeat penalty", group: "Repetition", step: 0.05 },
   { key: "repeat_last_n", label: "Repeat look-back", group: "Repetition", step: 8 },
   { key: "frequency_penalty", label: "Frequency penalty", group: "Repetition", step: 0.05 },
   { key: "presence_penalty", label: "Presence penalty", group: "Repetition", step: 0.05 },
   { key: "num_batch", label: "Batch size (num_batch)", group: "Performance", step: 8 },
-  { key: "num_gpu", label: "GPU layers (num_gpu)", group: "Performance", step: 1 },
+  { key: "num_gpu", label: "GPU layers (num_gpu)", group: "Performance", step: 1, integer: true, min: 0 },
   { key: "num_thread", label: "CPU threads (num_thread)", group: "Performance", step: 1 },
-  { key: "seed", label: "Seed (blank = random)", group: "Reproducibility", step: 1 },
+  { key: "seed", label: "Seed (blank = random)", group: "Reproducibility", step: 1, integer: true },
 ];
 
 /**
@@ -667,6 +673,8 @@ function ParamsGrid({
                 label={f.label}
                 hint={f.hint}
                 step={f.step}
+                integer={f.integer}
+                min={f.min}
                 value={params[f.key] ?? null}
                 onChange={(v) =>
                   onChange({ [f.key]: v } as Partial<ModelfileParams>)
@@ -685,12 +693,16 @@ function NumField({
   hint,
   value,
   step,
+  integer,
+  min,
   onChange,
 }: {
   label: string;
   hint?: string;
   value: number | null;
   step?: number;
+  integer?: boolean;
+  min?: number;
   onChange: (v: number | null) => void;
 }) {
   // `label` is a prop, so the id can't be a literal — one per instance.
@@ -710,8 +722,13 @@ function NumField({
       return;
     }
     const n = Number(trimmed);
-    if (!Number.isFinite(n)) {
-      // Revert on garbage input rather than silently zeroing the field.
+    if (
+      !Number.isFinite(n) ||
+      (integer && !Number.isSafeInteger(n)) ||
+      (min !== undefined && n < min)
+    ) {
+      // Revert on garbage (or out-of-range) input rather than silently
+      // zeroing the field.
       setText(value === null ? "" : String(value));
       return;
     }
@@ -728,6 +745,7 @@ function NumField({
         type="number"
         inputMode="decimal"
         step={step}
+        min={min}
         value={text}
         onChange={(e) => setText(e.target.value)}
         onBlur={commit}

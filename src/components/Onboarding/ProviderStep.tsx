@@ -35,6 +35,7 @@ import {
   ollamaListModels,
   ollamaStart,
   openaiListModels,
+  openaiListModelsWithKey,
   systemInfo,
 } from "@/lib/tauri";
 import {
@@ -380,11 +381,15 @@ function OllamaPath({ onProvisioned }: { onProvisioned: () => void }) {
         // this same setting, and the probe re-runs on every remount of this
         // path (toggling the provider switch away and back, saving a base URL,
         // leaving and re-entering the step). Pinning unconditionally stamped
-        // the user's explicit choice back to `list[0]` each time.
+        // the user's explicit choice back to `list[0]` each time. Nor over
+        // another provider's default: a model verified on the OpenAI tab
+        // stays the default when the user merely looks at this one — the
+        // picker below shows nothing picked, and picking is explicit.
         const settings = useSettingsStore.getState();
         const alreadyPinned =
-          settings.default_provider === "ollama" &&
-          list.some((m) => m.id === settings.default_model);
+          settings.default_provider === "ollama"
+            ? list.some((m) => m.id === settings.default_model)
+            : !!settings.default_model;
         if (!alreadyPinned) await setProviderDefault("ollama", list[0].id);
         await refreshModels();
         onProvisioned();
@@ -692,7 +697,9 @@ function DefaultModelPicker({
   onSelect: (id: string) => void;
   hint: string;
 }) {
-  const current = models.find((m) => m.id === value) ?? models[0];
+  // No fallback to `models[0]`: a check on a model that isn't the default
+  // says new chats will use it when they won't.
+  const current = models.find((m) => m.id === value);
   return (
     <div className="rounded-xl border border-foreground/[0.08] bg-foreground/[0.015] p-3">
       <Label className="text-[12px]">Default model</Label>
@@ -1264,7 +1271,6 @@ function OpenAIPath({ onProvisioned }: { onProvisioned: () => void }) {
   const pinnedModel = useSettingsStore((s) => s.default_model);
   const update = useSettingsStore((s) => s.update);
   const setOpenAIKey = useSettingsStore((s) => s.setOpenAIKey);
-  const clearOpenAIKey = useSettingsStore((s) => s.clearOpenAIKey);
   const setProviderDefault = useSettingsStore((s) => s.setProviderDefault);
   const refreshModels = useModelsStore((s) => s.refresh);
 
@@ -1282,11 +1288,10 @@ function OpenAIPath({ onProvisioned }: { onProvisioned: () => void }) {
   // navigated back), the parent's `provisioned` flag has reset but there's
   // nothing left to do — mark provisioned so Continue re-enables without
   // forcing a full re-type. Snapshot the flag at MOUNT rather than
-  // subscribing to it: `setOpenAIKey` flips `openai_key_set` true before
-  // the probe validates the key, so a live subscription would fire
-  // mid-save and enable Continue — and a failed probe only rolls the key
-  // back, never the parent's `provisioned` flag. At mount no save can be
-  // in flight, so a stored key here really is a verified one.
+  // subscribing to it: `setOpenAIKey` flips `openai_key_set` true partway
+  // through a save, so a live subscription would fire mid-save and enable
+  // Continue before the rest of the save has landed. At mount no save can
+  // be in flight, so a stored key here really is a verified one.
   const keySetAtMount = useRef(useSettingsStore.getState().openai_key_set);
   useEffect(() => {
     if (!keySetAtMount.current) return;
@@ -1318,42 +1323,29 @@ function OpenAIPath({ onProvisioned }: { onProvisioned: () => void }) {
     // requests, and the Rust side already omits the Authorization header
     // when no key is stored.
     const newKey = key.trim();
+    const url = urlDraft.trim() || baseUrl;
     try {
-      // Persist URL changes first so the model-list call uses the right base.
-      if (urlDraft.trim() && urlDraft.trim() !== baseUrl) {
-        await update("openai_base_url", urlDraft.trim());
+      // Probe — a key that isn't valid will surface here as a 401. A typed
+      // key is checked as typed, before anything is saved: a failed check
+      // then leaves the stored URL and key — possibly a working pair, which
+      // the parent's `provisioned` flag still vouches for — as they were.
+      // Nothing typed probes with whatever is stored: usually nothing, the
+      // keyless local-server case, or a stored key re-verified without a
+      // re-type.
+      const list = newKey
+        ? await openaiListModelsWithKey(url, newKey)
+        : await openaiListModels(url);
+      if (url !== baseUrl) await update("openai_base_url", url);
+      if (newKey) await setOpenAIKey(newKey);
+      const ranked = rankChatModels(list);
+      setCatalog(ranked);
+      if (ranked.length > 0) {
+        // Pin the best chat candidate rather than whatever `/v1/models`
+        // listed first — on api.openai.com that's frequently an embedding
+        // or audio model. The picker below shows the result either way.
+        await setProviderDefault("openai", ranked[0].id);
       }
-      // Probe — a key that isn't valid will surface here as a 401.
-      const probe = async () => {
-        const list = await openaiListModels(urlDraft.trim() || baseUrl);
-        const ranked = rankChatModels(list);
-        setCatalog(ranked);
-        if (ranked.length > 0) {
-          // Pin the best chat candidate rather than whatever `/v1/models`
-          // listed first — on api.openai.com that's frequently an embedding
-          // or audio model. The picker below shows the result either way.
-          await setProviderDefault("openai", ranked[0].id);
-        }
-        await refreshModels();
-      };
-      if (newKey) {
-        // The probe reads the key from the keyring, so it must be stored
-        // first. If the probe then fails, roll the key back — leaving a
-        // known-bad key stored would flip `keySet` true and auto-provision
-        // it on re-entry.
-        await setOpenAIKey(newKey);
-        try {
-          await probe();
-        } catch (probeErr) {
-          await clearOpenAIKey().catch(() => {});
-          throw probeErr;
-        }
-      } else {
-        // Nothing typed: probe with whatever is stored — usually nothing,
-        // the keyless local-server case. A stored key stays untouched, so
-        // this also re-verifies without forcing a re-type.
-        await probe();
-      }
+      await refreshModels();
       setVerified(true);
       setKey("");
       onProvisioned();

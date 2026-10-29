@@ -657,6 +657,12 @@ struct OllamaChunk {
     /// builds that don't report it.
     #[serde(default)]
     eval_duration: Option<u64>,
+    /// What went wrong when Ollama fails mid-reply (the runner crashed or
+    /// ran out of memory): it writes one last `{"error":"…"}` line and
+    /// closes the stream without a `done: true`. Read as an empty chunk,
+    /// that cut-off reply ended as a normal completion.
+    #[serde(default)]
+    error: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1113,12 +1119,17 @@ async fn run_one_turn(
                         let mut pending_token = String::new();
                         let mut pending_think = String::new();
                         let mut finished = false;
+                        let mut stream_error: Option<String> = None;
                         while let Some(pos) = buf.iter().position(|b| *b == b'\n') {
                             let line: Vec<u8> = buf.drain(..=pos).collect();
                             let line = &line[..line.len() - 1];
                             if line.is_empty() { continue; }
                             match serde_json::from_slice::<OllamaChunk>(line) {
                                 Ok(parsed) => {
+                                    if let Some(e) = parsed.error {
+                                        stream_error = Some(e);
+                                        break;
+                                    }
                                     if let Some(n) = parsed.eval_count {
                                         turn_eval = Some(n);
                                     }
@@ -1179,6 +1190,16 @@ async fn run_one_turn(
                                 channel,
                                 StreamEvent::Token { delta: pending_token },
                             );
+                        }
+                        // The text so far went out above; the reply ends
+                        // here as an error, not Done.
+                        if let Some(e) = stream_error {
+                            let _ = app.emit(
+                                channel,
+                                StreamEvent::Error { message: format!("Ollama stopped mid-reply: {e}") },
+                            );
+                            registry.finish(stream_id);
+                            return Err(anyhow!("ollama stream error: {e}"));
                         }
                         if finished {
                             // Fold this turn's reported count (if any)
@@ -1528,6 +1549,19 @@ mod tests {
             serialise_tool_call(&call),
             json!({ "function": { "name": "", "arguments": {} } })
         );
+    }
+
+    // --- OllamaChunk ------------------------------------------------------------
+
+    #[test]
+    fn a_mid_stream_error_line_is_read_as_an_error() {
+        // What Ollama writes when the runner dies mid-reply: no `done`, no
+        // message — it used to parse as an empty chunk and end as Done.
+        let chunk: OllamaChunk =
+            serde_json::from_str(r#"{"error":"llama runner process has terminated"}"#)
+                .expect("parses");
+        assert_eq!(chunk.error.as_deref(), Some("llama runner process has terminated"));
+        assert!(!chunk.done);
     }
 }
 

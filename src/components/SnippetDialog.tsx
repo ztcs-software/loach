@@ -44,10 +44,16 @@ export function SnippetDialog() {
       : null;
   const isEditMode = !!editing;
 
-  const [title, setTitle] = useState("");
-  const [prompt, setPrompt] = useState("");
-  const [provider, setProvider] = useState<ProviderId | null>(null);
-  const [model, setModel] = useState<string | null>(null);
+  // A draft kept for this target — the dialog was unmounted by the app lock
+  // while it was open (see `draft`).
+  const keptDraft = () => {
+    const d = useSnippetStore.getState().draft;
+    return d && d.target === target ? d : null;
+  };
+  const [title, setTitle] = useState(() => keptDraft()?.title ?? "");
+  const [prompt, setPrompt] = useState(() => keptDraft()?.prompt ?? "");
+  const [provider, setProvider] = useState<ProviderId | null>(() => keptDraft()?.provider ?? null);
+  const [model, setModel] = useState<string | null>(() => keptDraft()?.model ?? null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const promptRef = useRef<HTMLTextAreaElement>(null);
@@ -83,7 +89,13 @@ export function SnippetDialog() {
 
   useEffect(() => {
     if (!target) return;
-    if (target === "new") {
+    const kept = keptDraft();
+    if (kept) {
+      setTitle(kept.title);
+      setPrompt(kept.prompt);
+      setProvider(kept.provider);
+      setModel(kept.model);
+    } else if (target === "new") {
       setTitle("");
       setPrompt("");
       setProvider(null);
@@ -100,7 +112,15 @@ export function SnippetDialog() {
       setModel(editing.model);
     }
     setError(null);
+    // Re-seed only when a different snippet opens.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [target, isSeed, editing]);
+
+  // Keep the store's copy of the draft current, so it outlives an unmount.
+  useEffect(() => {
+    if (!target) return;
+    useSnippetStore.setState({ draft: { target, title, prompt, provider, model } });
+  }, [target, title, prompt, provider, model]);
 
   const canSave = !saving && !!title.trim() && !!prompt.trim();
 

@@ -70,11 +70,24 @@ import {
 } from "@/lib/commands/parser";
 import { orderByRecency, parseRecentCommands } from "@/lib/commands/recency";
 import type { CommandResult } from "@/lib/commands/types";
-import type { Attachment } from "@/types";
+import { OPENAI_COMPAT_NUM_CTX, type Attachment } from "@/types";
 
 interface ChatInputProps {
   centered?: boolean;
 }
+
+/** Composer drafts by chat — `space:<id>` for the composer on a Space's page
+ *  — so text and files stay with the chat they were written in. App renders
+ *  one unkeyed composer for every chat, so its state used to follow the user:
+ *  a file attached in one chat went out with the next chat's send. Kept out
+ *  here because moving between an empty chat, a chat with messages and a
+ *  Space's page mounts a different composer. In memory only. */
+const drafts = new Map<string, { text: string; attachments: Attachment[] }>();
+
+/** The `composerInsertSeq` last applied. One composer is mounted at a time,
+ *  so a newer one at mount is a primer (a snippet's Run, a failed send put
+ *  back) that landed while none was. */
+let appliedInsertSeq = 0;
 
 export function ChatInput({ centered = false }: ChatInputProps) {
   // "Streaming in this chat" means the global runner is currently producing
@@ -89,6 +102,7 @@ export function ChatInput({ centered = false }: ChatInputProps) {
   // (see `sendUserMessage`), so the chat left open is neither its target nor
   // what its send button may stop or wait on.
   const composerSessionId = viewingSpaceId ? null : activeSessionId;
+  const draftKey = viewingSpaceId ? `space:${viewingSpaceId}` : (activeSessionId ?? "");
   const streamingSessionId = useChatStore((s) => s.streamingSessionId);
   const waitingHere = useChatStore((s) =>
     !!composerSessionId &&
@@ -127,7 +141,6 @@ export function ChatInput({ centered = false }: ChatInputProps) {
   const composerDraft = useUIStore((s) => s.composerDraft);
   const composerAttachments = useUIStore((s) => s.composerAttachments);
   const composerInsertSeq = useUIStore((s) => s.composerInsertSeq);
-  const setComposerDraft = useUIStore((s) => s.setComposerDraft);
   const personaIdBySession = useUIStore((s) => s.personaIdBySession);
   const pendingPersonaId = useUIStore((s) => s.pendingPersonaId);
   const setSessionPersona = useUIStore((s) => s.setSessionPersona);
@@ -172,8 +185,47 @@ export function ChatInput({ centered = false }: ChatInputProps) {
       : null;
   const toneFromGlobal = !sessionToneId;
 
-  const [text, setText] = useState(composerDraft);
-  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [text, setText] = useState(() => drafts.get(draftKey)?.text ?? "");
+  const [attachments, setAttachments] = useState<Attachment[]>(
+    () => drafts.get(draftKey)?.attachments ?? [],
+  );
+  /** A slash command's text while it runs. It isn't kept as the draft: the
+   *  command has it, even when it moves the composer to another chat (`/new`,
+   *  `/space`) or remounts it (`/clear` empties the chat). State, so the
+   *  draft is written without it before either can happen. */
+  const [runningCommand, setRunningCommand] = useState<string | null>(null);
+  // Latest text, for what outlives the render it started in: a command still
+  // running, a dictation result.
+  const textRef = useRef(text);
+  textRef.current = text;
+  /** Whose draft is in the box. */
+  const draftKeyRef = useRef(draftKey);
+  const mountedRef = useRef(false);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+  // File the draft as it changes, not when the composer unmounts: one that
+  // mounts in the same commit — an emptied chat's hero, a first send's chat
+  // view — reads it before this one's cleanup would run. Ahead of the swap
+  // below, so a change landing with a switch is filed under its own chat.
+  useEffect(() => {
+    drafts.set(draftKeyRef.current, {
+      text: text === runningCommand ? "" : text,
+      attachments,
+    });
+  }, [text, attachments, runningCommand]);
+  // Swap drafts when the composer moves to another chat. Declared before the
+  // primer effect below so a primer for the chat just opened wins.
+  useEffect(() => {
+    if (draftKeyRef.current === draftKey) return;
+    draftKeyRef.current = draftKey;
+    const saved = drafts.get(draftKey);
+    setText(saved?.text ?? "");
+    setAttachments(saved?.attachments ?? []);
+  }, [draftKey]);
   const [error, setError] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
   // Guards the menu item while the native dialog is up. The dialog is modal
@@ -214,11 +266,16 @@ export function ChatInput({ centered = false }: ChatInputProps) {
   );
   const chatSources = useChatSources(composerSessionId, sourcesSpaceId);
   const hasChatSources = chatSources.chips.length > 0 || chatSources.spaceCount > 0;
-  // A Modelfile's own window, which the send layers under the chat's.
+  // A Modelfile's own window, which the send layers under the chat's (for
+  // an OpenAI-compatible chat, the window Loach assumes for it).
   const composerModelCtx = useModelsStore((s) =>
-    composerSessionId && activeSession?.provider === "ollama" && activeSession.model
-      ? s.modelDefaults[activeSession.model]?.num_ctx
-      : undefined,
+    !composerSessionId || !activeSession
+      ? undefined
+      : activeSession.provider === "ollama"
+        ? activeSession.model
+          ? s.modelDefaults[activeSession.model]?.num_ctx
+          : undefined
+        : OPENAI_COMPAT_NUM_CTX,
   );
   const libraryItems = useLibraryStore((s) => s.items);
   const libraryDatasets = useLibraryStore((s) => s.datasets);
@@ -288,7 +345,6 @@ export function ChatInput({ centered = false }: ChatInputProps) {
     const after = text.slice(caret).replace(/^ /, "");
     const next = before + after;
     setText(next);
-    setComposerDraft(next);
     void attachFromLibrary(
       entry.kind === "dataset"
         ? { itemIds: [], datasetIds: [entry.id] }
@@ -320,7 +376,6 @@ export function ChatInput({ centered = false }: ChatInputProps) {
 
   const acceptPaletteEntry = (entry: PaletteEntry) => {
     setText(entry.insertText);
-    setComposerDraft(entry.insertText);
     // Back to the top row, where the exact match for the accepted text
     // lands. A highlight left further down could point at a longer name
     // that also contains it (`llama3` → `llama3:70b`), and Enter would
@@ -338,12 +393,21 @@ export function ChatInput({ centered = false }: ChatInputProps) {
   // External insert (e.g. from suggestion chips or a Snippet "Run") bumps
   // the seq counter. Text always reseeds; attachments reseed only when the
   // primer supplied some (so plain suggestion-chip inserts don't wipe the
-  // user's pending file picks).
+  // user's pending file picks). On mount only a primer not yet applied
+  // counts. `newSession`'s reset (no text, no files) is passed over: the
+  // composer moves on to the new chat's own empty draft, and applying it
+  // here wiped the draft of whichever chat it was still showing.
   useEffect(() => {
-    setText(composerDraft);
-    if (composerAttachments.length > 0) {
-      setAttachments(composerAttachments);
+    if (
+      composerInsertSeq !== appliedInsertSeq &&
+      (composerDraft || composerAttachments.length > 0)
+    ) {
+      setText(composerDraft);
+      if (composerAttachments.length > 0) {
+        setAttachments(composerAttachments);
+      }
     }
+    appliedInsertSeq = composerInsertSeq;
     const el = textareaRef.current;
     if (el) {
       requestAnimationFrame(() => {
@@ -598,6 +662,18 @@ export function ChatInput({ centered = false }: ChatInputProps) {
       picked = fileItems;
     }
 
+    // Office apps put a picture of the selection beside its text: cells
+    // copied from Excel or a paragraph from Word arrived as a PNG, and the
+    // text was dropped. Text wins over images-only. Plain text, not HTML: a
+    // browser's "Copy image" carries just an `<img>` tag in text/html, and
+    // pasting that into the textarea would insert nothing.
+    if (
+      dt.getData("text/plain").trim() &&
+      picked.every((f) => f.type.startsWith("image/"))
+    ) {
+      return;
+    }
+
     if (picked.length > 0) {
       e.preventDefault();
       await ingest(picked);
@@ -629,7 +705,6 @@ export function ChatInput({ centered = false }: ChatInputProps) {
     const end = sel?.end ?? el?.selectionEnd ?? text.length;
     const next = text.slice(0, start) + clip + text.slice(end);
     setText(next);
-    setComposerDraft(next);
     requestAnimationFrame(() => {
       if (!el) return;
       el.focus();
@@ -649,7 +724,6 @@ export function ChatInput({ centered = false }: ChatInputProps) {
     }
     const next = text.slice(0, sel.start) + text.slice(sel.end);
     setText(next);
-    setComposerDraft(next);
     requestAnimationFrame(() => {
       const el = textareaRef.current;
       if (!el) return;
@@ -699,9 +773,12 @@ export function ChatInput({ centered = false }: ChatInputProps) {
   // Anchor the dictation against the text that was already in the box when
   // the user pressed the mic. Each interim result is rendered as
   // `baseText + interim`; each final result is committed back into
-  // `baseText`. This way the user can keep typing between phrases without
-  // having their typing clobbered by a mid-sentence interim update.
+  // `baseText`. `dictatedRef` is what the last result wrote: when the box
+  // holds anything else by the next one, the user edited it meanwhile, and
+  // that becomes the new base — writing `baseText + interim` regardless
+  // erased whatever they typed while dictating.
   const baseTextRef = useRef("");
+  const dictatedRef = useRef("");
 
   // Tear down recognition on unmount so we don't leave the mic hot.
   useEffect(
@@ -730,11 +807,15 @@ export function ChatInput({ centered = false }: ChatInputProps) {
     recognition.interimResults = true;
     recognition.maxAlternatives = 1;
     baseTextRef.current = text;
+    dictatedRef.current = text;
 
     const joinWithSpace = (a: string, b: string) =>
       a.length === 0 || /\s$/.test(a) || b.length === 0 ? a + b : `${a} ${b}`;
 
     recognition.onresult = (ev) => {
+      if (textRef.current !== dictatedRef.current) {
+        baseTextRef.current = textRef.current;
+      }
       let interim = "";
       let appendedFinal = "";
       for (let i = ev.resultIndex; i < ev.results.length; i++) {
@@ -752,8 +833,11 @@ export function ChatInput({ centered = false }: ChatInputProps) {
       const next = interim
         ? joinWithSpace(baseTextRef.current, interim)
         : baseTextRef.current;
+      dictatedRef.current = next;
+      // Ahead of the render, so a result landing before it isn't taken for
+      // an edit.
+      textRef.current = next;
       setText(next);
-      setComposerDraft(next);
     };
 
     recognition.onerror = (ev) => {
@@ -811,7 +895,10 @@ export function ChatInput({ centered = false }: ChatInputProps) {
     // reaches the model (the "ignore unknown" rule).
     if (trimmed && isCommandInput(trimmed)) {
       const insertSeq = useUIStore.getState().composerInsertSeq;
+      const key = draftKey;
+      setRunningCommand(text);
       const outcome = await dispatchCommand(trimmed, { confirm });
+      setRunningCommand(null);
       if (outcome.kind === "handled") {
         // "Handled" covers the failed-command case too, and that's the
         // behaviour we want: reaching for a command is the signal recency
@@ -819,16 +906,23 @@ export function ChatInput({ centered = false }: ChatInputProps) {
         // retry. `passthrough` (unregistered text) is correctly excluded.
         const name = parseInput(trimmed)?.name;
         if (name) recordCommandUse(name);
-        // A command that filled the composer itself (`/snippet` primes it
-        // with the snippet's text) leaves that text in place; clearing here
-        // too wiped it before it ever showed.
-        if (useUIStore.getState().composerInsertSeq === insertSeq) {
+        const result = outcome.result;
+        // Clear the command once it's done, unless:
+        // - it failed: its text stays, to be fixed and run again;
+        // - it filled the composer itself (`/snippet` primes it with the
+        //   snippet's text): clearing too wiped that before it ever showed;
+        // - the box holds something else by now: anything typed while a slow
+        //   one ran (`/fetch` can take 30 s) is the user's, not the command's.
+        if (
+          !(result.kind === "toast" && result.tone === "error") &&
+          useUIStore.getState().composerInsertSeq === insertSeq &&
+          draftKeyRef.current === key &&
+          textRef.current === text
+        ) {
           setText("");
-          setComposerDraft("");
         }
         setError(null);
         setPaletteDismissed(false);
-        const result = outcome.result;
         if (result.kind === "toast") {
           useToastStore.getState().push({
             kind: result.tone === "error" ? "error" : "info",
@@ -870,8 +964,13 @@ export function ChatInput({ centered = false }: ChatInputProps) {
     if (busyHere) return;
 
     // Stop dictation before sending so the recogniser doesn't keep writing
-    // into the now-empty textarea.
-    if (listening) stopDictation();
+    // into the now-empty textarea — and drop what it still delivers: `stop()`
+    // hands over a last final result, which refilled the box with the
+    // message just sent.
+    if (listening) {
+      if (recognitionRef.current) recognitionRef.current.onresult = null;
+      stopDictation();
+    }
 
     // Optimistic clear so the composer feels snappy. We snapshot what we're
     // sending so the catch branch can put it back — losing the user's draft
@@ -879,8 +978,11 @@ export function ChatInput({ centered = false }: ChatInputProps) {
     const sentText = trimmed;
     const sentAttachments = attachments;
     setText("");
-    setComposerDraft("");
     setAttachments([]);
+    // Filed here, not by the effect: a send from a Space's page unmounts this
+    // composer in this same render, before that could run, and the draft left
+    // behind for the page mustn't be this message.
+    drafts.set(draftKey, { text: "", attachments: [] });
     setError(null);
 
     try {
@@ -890,15 +992,25 @@ export function ChatInput({ centered = false }: ChatInputProps) {
       // canvas tells the user that happened.
       await send(sentText, sentAttachments);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to send message");
+      const message = e instanceof Error ? e.message : "Failed to send message";
+      if (!mountedRef.current) {
+        // Sent from a Space's page: `sendUserMessage` left the page, and so
+        // this composer, before failing — its error line and state are gone.
+        // Prime the composer on screen now (the new chat's) and say why.
+        useUIStore.getState().primeComposer(sentText, sentAttachments);
+        useToastStore.getState().push({
+          kind: "error",
+          title: "Couldn't send message",
+          body: message,
+        });
+        return;
+      }
+      setError(message);
       // Restore the draft only if the user hasn't started a new one in the
       // meantime — failures are typically synchronous ("no model selected")
       // so this branch usually wins, but we don't want to clobber fresh
       // typing if the send took long enough to lose to.
       setText((curr) => (curr === "" ? sentText : curr));
-      if (useUIStore.getState().composerDraft === "") {
-        setComposerDraft(sentText);
-      }
       setAttachments((curr) => (curr.length === 0 ? sentAttachments : curr));
     }
   };
@@ -1120,13 +1232,7 @@ export function ChatInput({ centered = false }: ChatInputProps) {
               aria-label="Message"
               value={text}
               onChange={(e) => {
-                // Mirror every keystroke into the persisted draft. ChatInput is
-                // mounted at several sites (hero composer, normal composer,
-                // SpaceView) and switching sessions / entering a Space remounts
-                // it; without this the in-progress draft re-seeds from a stale
-                // composerDraft on remount and is silently lost.
                 setText(e.target.value);
-                setComposerDraft(e.target.value);
                 setCaret(e.target.selectionStart ?? e.target.value.length);
               }}
               onSelect={(e) => setCaret(e.currentTarget.selectionStart ?? 0)}

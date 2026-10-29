@@ -5,6 +5,7 @@ import {
   isHtmlLanguage,
   type CanvasView,
 } from "@/stores/canvasStore";
+import { usePrivateChatStore } from "@/stores/privateChatStore";
 import { useMarkdownSource } from "./markdownSource";
 import { saveCodeToFile, defaultFilename } from "@/lib/codeExport";
 import { cn } from "@/lib/utils";
@@ -47,6 +48,11 @@ export function CodeBlock({ className, children, raw, language }: CodeBlockProps
   const [copied, setCopied] = useState(false);
   const openCanvas = useCanvasStore((s) => s.open);
   const openCanvasLive = useCanvasStore((s) => s.openLive);
+  // Private Chat renders replies through this same block, but the canvas
+  // belongs to the regular window and outlives the overlay: a private
+  // snippet (or a running HTML preview) opened there would still be on
+  // screen after Private Chat closes. Offer no canvas while it's open.
+  const privateChatOpen = usePrivateChatStore((s) => s.open);
   const source = useMarkdownSource();
 
   const lineCount = useMemo(() => {
@@ -110,7 +116,7 @@ export function CodeBlock({ className, children, raw, language }: CodeBlockProps
           {language || "text"}
         </span>
         <div className="flex shrink-0 items-center gap-0.5">
-          {isHtmlLanguage(language) && (
+          {!privateChatOpen && isHtmlLanguage(language) && (
             <ToolbarButton
               onClick={() => onOpenCanvas("preview")}
               label="Preview in canvas"
@@ -119,13 +125,15 @@ export function CodeBlock({ className, children, raw, language }: CodeBlockProps
               Preview
             </ToolbarButton>
           )}
-          <ToolbarButton
-            onClick={() => onOpenCanvas()}
-            label="Open in canvas"
-            icon={<PanelRight className="h-3 w-3" />}
-          >
-            Open
-          </ToolbarButton>
+          {!privateChatOpen && (
+            <ToolbarButton
+              onClick={() => onOpenCanvas()}
+              label="Open in canvas"
+              icon={<PanelRight className="h-3 w-3" />}
+            >
+              Open
+            </ToolbarButton>
+          )}
           <ToolbarButton
             onClick={onExport}
             label={`Export to ${defaultFilename(language)}`}

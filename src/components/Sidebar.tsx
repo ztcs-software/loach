@@ -938,6 +938,8 @@ const SessionRow = memo(function SessionRowImpl({
             }
           }}
           onKeyDown={(e) => {
+            // The Enter that confirms an IME candidate isn't the rename's.
+            if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
             if (e.key === "Enter") (e.target as HTMLInputElement).blur();
             if (e.key === "Escape") {
               setDraft(session.title);

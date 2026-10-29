@@ -73,24 +73,31 @@ pub fn is_reply_timeout(err: &anyhow::Error) -> bool {
     err.chain().any(|c| c.is::<ReplyTimeout>())
 }
 
-/// Marks a reply too big to take in (over [`MAX_LINE_BYTES`]). The server
-/// did answer and is still running, so this fails the call only — no
-/// reason to stop the server either.
+/// Marks a reply Loach couldn't take in: too big (over [`MAX_LINE_BYTES`])
+/// or not a JSON-RPC response it can read. The server did answer and is
+/// still running, so this fails the call only — no reason to stop the
+/// server either.
 #[derive(Debug)]
-pub struct ReplyTooLong;
+pub struct UnreadableReply;
 
-impl std::fmt::Display for ReplyTooLong {
+impl std::fmt::Display for UnreadableReply {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("the server is still running")
     }
 }
 
-impl std::error::Error for ReplyTooLong {}
+impl std::error::Error for UnreadableReply {}
 
-/// True when `err` is a [`ReplyTooLong`].
-pub fn is_reply_too_long(err: &anyhow::Error) -> bool {
-    err.chain().any(|c| c.is::<ReplyTooLong>())
+/// True when `err` is an [`UnreadableReply`].
+pub fn is_unreadable_reply(err: &anyhow::Error) -> bool {
+    err.chain().any(|c| c.is::<UnreadableReply>())
 }
+
+/// Requests in a row a server may leave unanswered before it counts as
+/// hung. One late reply is a slow tool, and stopping the server would stop
+/// whatever it was still doing; with nothing answered across two, its event
+/// loop is likely blocked, and every later call would sit out the timeout.
+const HUNG_AFTER_MISSED_REPLIES: u32 = 2;
 
 /// Starts the stderr tail [`StdioSession::stderr_suffix`] appends to an
 /// error message.
@@ -121,7 +128,8 @@ const CLIENT_NAME: &str = "loach";
 const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Requests waiting for their reply. The reader delivers either the reply
-/// or why Loach couldn't read one — a reply too big to take in.
+/// or why Loach couldn't read one — a reply too big to take in, or one
+/// that isn't a valid response.
 type Pending = Arc<Mutex<HashMap<i64, oneshot::Sender<Result<JsonRpcResponse, String>>>>>;
 type StderrTail = Arc<Mutex<Vec<u8>>>;
 
@@ -136,6 +144,8 @@ pub struct StdioSession {
     alive: Arc<AtomicBool>,
     stderr_tail: StderrTail,
     next_id: i64,
+    /// Requests timed out since the last one the server answered.
+    missed_replies: u32,
     /// For error messages.
     label: String,
 }
@@ -445,6 +455,7 @@ impl StdioSession {
             alive,
             stderr_tail,
             next_id: 1,
+            missed_replies: 0,
             label: server.name.clone(),
         })
     }
@@ -453,6 +464,13 @@ impl StdioSession {
     /// closed its end. The pool treats a dead session as absent.
     pub fn is_alive(&self) -> bool {
         self.alive.load(Ordering::Acquire)
+    }
+
+    /// `true` once [`HUNG_AFTER_MISSED_REPLIES`] requests in a row went
+    /// unanswered. The pool treats a hung session like a dead one, so the
+    /// next call starts the server afresh.
+    pub fn is_hung(&self) -> bool {
+        self.missed_replies >= HUNG_AFTER_MISSED_REPLIES
     }
 
     fn fresh_id(&mut self) -> i64 {
@@ -541,13 +559,15 @@ impl StdioSession {
         match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(Ok(resp))) => {
                 in_flight.unanswered = false;
+                self.missed_replies = 0;
                 Ok(resp)
             }
             // The server did answer, and is still running: Loach just
             // couldn't take the answer in.
             Ok(Ok(Err(why))) => {
                 in_flight.unanswered = false;
-                Err(anyhow::Error::new(ReplyTooLong)
+                self.missed_replies = 0;
+                Err(anyhow::Error::new(UnreadableReply)
                     .context(format!("MCP server `{}`: {why}", self.label)))
             }
             // Sender dropped: the reader task cleared the map because the
@@ -562,6 +582,7 @@ impl StdioSession {
             }
             // `in_flight` tells the server to stop as it drops.
             Err(_) => {
+                self.missed_replies += 1;
                 Err(anyhow::Error::new(ReplyTimeout).context(format!(
                     "MCP server `{}` did not reply to `{method}` within {}s",
                     self.label,
@@ -732,8 +753,13 @@ async fn pump_stdout(
                     (Some(tx), Ok(resp)) => {
                         let _ = tx.send(Ok(resp));
                     }
-                    (Some(_), Err(e)) => {
+                    // Dropping the sender here read as the server having
+                    // exited, and got a running server stopped.
+                    (Some(tx), Err(e)) => {
                         tracing::warn!("MCP stdio `{label}`: malformed response for id {id}: {e}");
+                        let _ = tx.send(Err(format!(
+                            "its reply wasn't a valid JSON-RPC response ({e})"
+                        )));
                     }
                     // A reply to a request that already timed out.
                     (None, _) => {}
@@ -1203,6 +1229,60 @@ mod tests {
         drop(session);
         tokio::time::sleep(Duration::from_secs(4)).await;
         assert!(marker.exists(), "what the server left running was killed");
+    }
+
+    /// One missed reply is a slow server; two in a row is a hung one, which
+    /// the pool then starts afresh instead of waiting out every call on it.
+    #[tokio::test]
+    async fn a_server_that_misses_two_replies_in_a_row_is_hung() {
+        // Runs, reads nothing, says nothing.
+        #[cfg(windows)]
+        let (command, args) = (
+            "cmd".to_string(),
+            vec!["/d".into(), "/c".into(), "ping -n 30 127.0.0.1 >nul".into()],
+        );
+        #[cfg(unix)]
+        let (command, args) = ("sh".to_string(), vec!["-c".into(), "sleep 30".into()]);
+
+        let mut session = StdioSession::spawn(&script_server(command, args)).await.expect("spawn");
+        let quick = Duration::from_millis(300);
+        let e = session.request("tools/list", None, quick).await.expect_err("no reply");
+        assert!(is_reply_timeout(&e), "{e:#}");
+        assert!(!session.is_hung(), "one late reply is no reason to restart it");
+        session.request("tools/list", None, quick).await.expect_err("no reply");
+        assert!(session.is_hung());
+        assert!(session.is_alive(), "hung, not exited");
+    }
+
+    /// A reply Loach can't parse fails its call as unreadable — not as a
+    /// server that exited, which got a running server stopped.
+    #[tokio::test]
+    async fn a_malformed_reply_reaches_its_request() {
+        let reply = r#"{"jsonrpc":"2.0","id":1,"error":"boom"}"#;
+        #[cfg(windows)]
+        let dir = tempfile::TempDir::new().unwrap();
+        #[cfg(windows)]
+        let (command, args) = {
+            // `set /p` takes our request off stdin before the reply goes out.
+            let script = dir.path().join("server.cmd");
+            std::fs::write(&script, format!("@set /p _=\r\n@echo {reply}\r\n@ping -n 10 127.0.0.1 >nul\r\n"))
+                .unwrap();
+            (script.display().to_string(), Vec::<String>::new())
+        };
+        #[cfg(unix)]
+        let (command, args) = (
+            "sh".to_string(),
+            vec!["-c".to_string(), format!("read _; printf '%s\\n' '{reply}'; sleep 10")],
+        );
+
+        let mut session = StdioSession::spawn(&script_server(command, args)).await.expect("spawn");
+        let e = session
+            .request("tools/list", None, Duration::from_secs(10))
+            .await
+            .expect_err("the reply is malformed");
+        assert!(is_unreadable_reply(&e), "{e:#}");
+        assert!(format!("{e:#}").contains("valid JSON-RPC response"), "{e:#}");
+        assert!(session.is_alive());
     }
 
     #[test]

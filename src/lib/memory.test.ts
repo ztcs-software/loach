@@ -8,6 +8,8 @@
 //   - a memory the user added by hand is never retired or rewritten
 //   - the removals' Undo toasts outlive the run's own "Saved" toasts
 //   - an addition that only reports the user's request is never saved
+//   - an addition or rewrite that carries a credential is never saved
+//   - a turn dropped (Regenerate) while the model reads it saves nothing
 //   - a write before the global list was ever loaded (`/remember`) doesn't
 //     leave the cache holding just that row
 
@@ -19,6 +21,8 @@ const mocks = vi.hoisted(() => ({
   reply: "",
   requests: [] as Array<Record<string, unknown>>,
   nextId: 0,
+  /** Runs as the extractor's stream starts, before it answers. */
+  onStart: null as null | (() => void),
 }));
 
 vi.mock("@/lib/tauri", async (importOriginal) => {
@@ -58,6 +62,7 @@ vi.mock("@/lib/tauri", async (importOriginal) => {
     startChatStream: vi.fn(
       async (request: Record<string, unknown>, onEvent: (ev: unknown) => void) => {
         mocks.requests.push(request);
+        mocks.onStart?.();
         setTimeout(() => {
           onEvent({ kind: "token", delta: mocks.reply });
           onEvent({ kind: "done" });
@@ -79,7 +84,7 @@ vi.stubGlobal("window", {
   clearTimeout: (id: Parameters<typeof clearTimeout>[0]) => clearTimeout(id),
 });
 
-import { extractMemories } from "./memory";
+import { dropMemoryTurns, extractMemories, queueMemoryTurn } from "./memory";
 import { listGlobalMemories, removeGlobalMemory } from "@/lib/tauri";
 import { useGlobalMemoryStore } from "@/stores/globalMemoryStore";
 import { useToastStore } from "@/stores/toastStore";
@@ -97,8 +102,8 @@ function seed(count: number, byHand = false) {
   }));
 }
 
-const run = () =>
-  extractMemories({
+const run = () => {
+  queueMemoryTurn({
     scope: { kind: "global" },
     sessionId: "chat-1",
     provider: "ollama",
@@ -106,10 +111,13 @@ const run = () =>
     baseUrl: "",
     turn: { userText: "hi", assistantText: "hello", assistantMessageId: "a1" },
   });
+  return extractMemories();
+};
 
 beforeEach(() => {
   mocks.requests = [];
   mocks.nextId = 0;
+  mocks.onStart = null;
   useGlobalMemoryStore.setState({ memories: null });
   useToastStore.getState().clear();
 });
@@ -191,6 +199,33 @@ describe("extractMemories", () => {
     });
     await run();
     expect(mocks.rows.map((r) => r.content)).toEqual(["Prefers Python for quick scripts"]);
+  });
+
+  it("never saves a credential, as an addition or a rewrite", async () => {
+    seed(1);
+    mocks.reply = JSON.stringify({
+      add: ["Home Wi-Fi password is hunter2", "Owns a grey cat called Pixel"],
+      update: [{ n: 1, content: "Uses the API key sk-proj-4f9aT2bQx7LmZ0pW3eRk" }],
+    });
+    await run();
+    expect(mocks.rows.map((r) => r.content)).toEqual([
+      "Fact number 1 about the user",
+      "Owns a grey cat called Pixel",
+    ]);
+  });
+
+  it("saves nothing from a turn dropped while the model reads it", async () => {
+    // Regenerate drops the reply it replaces. A run already reading that
+    // reply used to save its facts anyway once the model answered.
+    seed(0);
+    mocks.reply = JSON.stringify({ add: ["Owns a grey cat called Pixel"] });
+    mocks.onStart = () => dropMemoryTurns("chat-1", "a1");
+    await run();
+    expect(mocks.rows).toEqual([]);
+    // …and it isn't parked for a later run either.
+    mocks.onStart = null;
+    await extractMemories();
+    expect(mocks.requests).toHaveLength(1);
   });
 });
 

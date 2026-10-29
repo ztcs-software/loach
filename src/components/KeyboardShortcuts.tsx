@@ -23,8 +23,9 @@ import { matches, SHORTCUTS, type ShortcutAction } from "@/lib/shortcuts";
  *   - lock screen (security configured + still locked)
  *   - onboarding (not yet completed)
  *   - private chat (owns the whole UI below the title bar)
+ *   - a modal dialog, the Ctrl/Cmd+K palette included
  *
- * `lock-now` is the one exception: it runs through the last two, since the
+ * `lock-now` is the one exception: it runs through the last three, since the
  * point of a panic key is that it works wherever you are.
  *
  * The Cmd/Ctrl-K palette has its OWN listener inside `SearchBar` that
@@ -33,6 +34,17 @@ import { matches, SHORTCUTS, type ShortcutAction } from "@/lib/shortcuts";
  * we just dispatch via the global handler instead of re-implementing the
  * overlay.
  */
+
+/** Is a modal dialog open? Radix dialogs mark their content `role="dialog"`
+ *  with `data-state="open"`; the hand-rolled overlays (the Ctrl/Cmd+K
+ *  palette, Private Chat, onboarding) set `aria-modal`. The context-usage
+ *  popover is a `role="dialog"` with neither, and doesn't block the app. */
+export function modalDialogOpen(): boolean {
+  return !!document.querySelector(
+    '[role="dialog"][data-state="open"], [role="dialog"][aria-modal="true"]',
+  );
+}
+
 export function KeyboardShortcuts() {
   const { confirm } = useConfirm();
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
@@ -62,8 +74,18 @@ export function KeyboardShortcuts() {
       // a panic key that goes dead on the most sensitive surface in the app
       // (an off-the-record chat) is worse than not shipping one. It stays
       // gated on `locked` because re-locking a locked app does nothing.
+      //
+      // The rest wait for an open dialog to close: they acted on the app
+      // behind it — Ctrl+Shift+Backspace under the Ctrl+K palette opened the
+      // delete confirm beneath it, with focus on its Delete button for the
+      // next Enter.
       const panic = spec.action === "lock-now";
-      if (locked || ((onboardingActive || priv.open) && !panic)) return;
+      if (
+        locked ||
+        ((onboardingActive || priv.open || modalDialogOpen()) && !panic)
+      ) {
+        return;
+      }
 
       e.preventDefault();
       e.stopPropagation();
@@ -120,7 +142,14 @@ export function KeyboardShortcuts() {
 
         case "delete-current-chat": {
           const chat = useChatStore.getState();
-          const id = chat.activeSessionId;
+          // Only a chat that's on screen. A Space's page, a model's page or
+          // another sidebar tab (Library, say) hides the open chat, and the
+          // shortcut used to delete it from behind them.
+          const onScreen =
+            !useSpaceStore.getState().viewingSpaceId &&
+            !useModelsStore.getState().viewingModel &&
+            useUIStore.getState().sidebarTab === "chats";
+          const id = onScreen ? chat.activeSessionId : null;
           if (!id) return;
           const session = chat.sessions.find((s) => s.id === id);
           if (!session) return;
