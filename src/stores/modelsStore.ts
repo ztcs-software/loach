@@ -72,14 +72,14 @@ interface ModelsState {
    *  `parameters` block). Lazy-populated by `loadModelDefaults`; entries are
    *  keyed by model id (e.g. `llama3.1:8b`). Empty `{}` is a valid result
    *  meaning "we looked, the model lists no overrides" — distinct from
-   *  "missing key" which means "we haven't asked yet". */
+   *  "missing key" which means "we haven't asked yet, or asking failed". */
   modelDefaults: Record<string, Partial<GenerationParams>>;
 
   /** Per-model capability tags from `/api/show` (e.g. `"thinking"`,
    *  `"tools"`, `"vision"`). Populated alongside `modelDefaults` by
    *  `loadModelDefaults`. Empty `[]` means "we looked and the model lists
-   *  none"; missing key means "we haven't asked yet". Older Ollama builds
-   *  that omit the field show up as `[]` here. */
+   *  none"; missing key means "we haven't asked yet, or asking failed".
+   *  Older Ollama builds that omit the field show up as `[]` here. */
   modelCapabilities: Record<string, string[]>;
 
   /** User-set "default thinking" preference per model (the Thinking toggle
@@ -276,7 +276,8 @@ export const useModelsStore = create<ModelsState>((set, get) => ({
     // parameters, so we cache an empty patch and move on. Identifying it
     // through the existing `models` array works as long as the user has
     // refreshed at least once; if they haven't, we conservatively try
-    // Ollama's `/api/show` and let it 404 — cached as `{}` either way.
+    // Ollama's `/api/show` and let it 404 — which, like any failed show,
+    // caches nothing (see below).
     const known = get().models.find((m) => m.id === modelId);
     if (known && known.provider !== "ollama") {
       set((s) => ({
@@ -288,18 +289,19 @@ export const useModelsStore = create<ModelsState>((set, get) => ({
 
     const base = useSettingsStore.getState().ollama_base_url;
     const load = (async () => {
-      let patch: Partial<GenerationParams> = {};
-      let caps: string[] = [];
+      let patch: Partial<GenerationParams>;
+      let caps: string[];
       try {
         const resp = await ollamaShowModel(base, modelId);
         patch = parseModelParameters(resp.parameters);
         caps = resp.capabilities ?? [];
       } catch {
-        // Network / 404 — cache empty so we don't retry on every render.
-        // The user will still see app defaults; it's the same behaviour as
-        // before this feature landed.
-        patch = {};
-        caps = [];
+        // Network / 404 — app defaults for now, but nothing cached: Ollama
+        // simply not running yet failed here, and a cached `{}` / `[]` then
+        // outlived its start — the panel said the model can't think, and
+        // sends dropped the Modelfile's num_ctx — until a restart. The next
+        // caller (a send, opening the chat or the panel) asks again.
+        return {};
       }
       set((s) => ({
         modelDefaults: { ...s.modelDefaults, [modelId]: patch },

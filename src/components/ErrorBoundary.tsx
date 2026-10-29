@@ -30,10 +30,6 @@ interface Props {
    *  ("Something went wrong in {name}.") and in the clipboard report. */
   name?: string;
   scope?: Scope;
-  /** Optional hook fired on "Try again". Useful when the parent holds state
-   *  the boundary alone can't reset (e.g., clear an active selection). The
-   *  boundary always clears its own error state regardless. */
-  onReset?: () => void;
 }
 
 interface State {
@@ -64,7 +60,6 @@ export class ErrorBoundary extends Component<Props, State> {
 
   private handleReset = () => {
     this.setState({ error: null, info: null, copied: false });
-    this.props.onReset?.();
   };
 
   private handleReload = () => {

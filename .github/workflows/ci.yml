@@ -45,6 +45,10 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm test
+      # React hooks rules only (rules-of-hooks, exhaustive-deps) — see
+      # .oxlintrc.json. oxlint rather than ESLint: typescript-eslint can't
+      # parse with TypeScript 7.
+      - run: npm run lint
 
   rust:
     name: cargo test
@@ -82,9 +86,11 @@ jobs:
   # flag in src/ollama_launch.rs. A mistake in one of those would pass every
   # PR check and first fail inside release.yml's build matrix, potentially
   # after another platform's job has already pushed the tag (which then
-  # forces the delete-tag-and-draft recovery dance). `check` rather than
-  # `test`: the point is that the platform's code compiles, and the tests
-  # themselves are platform-independent.
+  # forces the delete-tag-and-draft recovery dance). The whole suite isn't
+  # run here — most tests are platform-independent — but the workspace file
+  # tools' are not: drive letters, reserved names, 8.3 short names and
+  # junctions only exist on Windows, and their confinement tests never ran
+  # anywhere else. (The job keeps its name: branch protection matches it.)
   rust-windows:
     name: cargo check (windows)
     runs-on: windows-latest
@@ -98,6 +104,9 @@ jobs:
           workspaces: src-tauri
 
       - run: cargo check --locked --all-targets
+        working-directory: src-tauri
+
+      - run: cargo test --locked --lib tools::fs
         working-directory: src-tauri
 
   # macOS-only compile check. Until this existed, the macOS target was built

@@ -235,28 +235,36 @@ const MAX_TOOL_DESCRIPTION_CHARS: usize = 2_000;
 const MAX_TOOL_SCHEMA_BYTES: usize = 16 * 1024;
 
 async fn collect_one(server: &McpServer, slug: &str) -> Result<Vec<McpToolDef>> {
-    let raws = if server.is_stdio() {
-        // Reuse the pooled process. Spawning one just to list tools and
-        // another for the first call would pay the cold start twice — an
-        // `npx`-backed server takes seconds each time — and the pool is
-        // what keeps the process alive between turns anyway.
-        let slot = session_slot(&server.id);
-        let mut pooled = slot.lock().await;
+    // Reuse the pooled session, whichever the transport. Spawning a stdio
+    // process just to list tools and another for the first call would pay
+    // the cold start twice — an `npx`-backed server takes seconds each time —
+    // and the pool is what keeps the process alive between turns anyway. An
+    // HTTP server was handshaken afresh on every send, leaving a session
+    // behind on the server each time.
+    let slot = session_slot(&server.id);
+    let mut pooled = slot.lock().await;
+    let mut retried = false;
+    let raws = loop {
+        let reused = pooled
+            .as_ref()
+            .is_some_and(|p| p.fingerprint == session_fingerprint(server) && p.is_fresh());
         let session = ensure_pooled(&mut pooled, server).await?;
         match session.list_tools_raw().await {
-            Ok(r) => r,
+            Ok(r) => break r,
             Err(e) => {
                 if !pooled.as_ref().is_some_and(|p| keeps_session(p, &e)) {
                     *pooled = None;
+                    // Listing changes nothing, so a reused session that has
+                    // gone bad — expired on the server, most often — gets
+                    // one more try on a fresh one.
+                    if reused && !retried {
+                        retried = true;
+                        continue;
+                    }
                 }
                 return Err(e);
             }
         }
-    } else {
-        let (http, _) = pin_client_for(server).await?;
-        let mut session = McpSession::new(http, server)?;
-        session.initialize().await?;
-        session.list_tools_raw().await?
     };
     // Hoist the per-server clones out of the loop. The strings end up
     // copied into every `McpToolDef` anyway, but doing it once and reusing
@@ -1034,6 +1042,61 @@ mod tests {
             assert!(!keeps_session(pooled, &anyhow!("POST to MCP server failed")));
         }
         assert!(!keeps_session(&http, &anyhow!("server responded with HTTP 400: not initialized")));
+    }
+
+    /// Server names are free-form; the slug keeps only what a function name
+    /// may hold, turns whitespace into `_`, and never comes out empty.
+    #[test]
+    fn slug_for_keeps_only_function_name_characters() {
+        assert_eq!(slug_for("GitHub"), "GitHub");
+        assert_eq!(slug_for("ACME — production"), "ACME__production");
+        assert_eq!(slug_for("my-server_2"), "my-server_2");
+        assert_eq!(slug_for("Zürich files!"), "Zrich_files");
+        assert_eq!(slug_for("💼"), "srv");
+        assert_eq!(slug_for(""), "srv");
+    }
+
+    /// MCP's own separators become `_` so namespaced names stay readable;
+    /// anything else outside the pattern is dropped, down to nothing.
+    #[test]
+    fn sanitise_tool_name_maps_separators_and_drops_the_rest() {
+        assert_eq!(sanitise_tool_name("search"), "search");
+        assert_eq!(sanitise_tool_name("repo.search"), "repo_search");
+        assert_eq!(sanitise_tool_name("notebook/list"), "notebook_list");
+        assert_eq!(sanitise_tool_name("ns:get item"), "ns_get_item");
+        assert_eq!(sanitise_tool_name("ask?(now)"), "asknow");
+        assert_eq!(sanitise_tool_name("🔧"), "", "the caller drops the tool");
+    }
+
+    /// Two servers whose names slug alike get distinct prefixes, decided by
+    /// their ids — not their order — so a qualified name survives a restart.
+    #[test]
+    fn colliding_slugs_are_told_apart_by_server_id() {
+        let server = |id: &str, name: &str| McpServer {
+            id: id.into(),
+            ..http_row(name)
+        };
+        let slugs = build_unique_slugs(&[
+            server("abc123def", "GitHub"),
+            server("xyz789uvw", "GitHub!"),
+            server("other", "Linear"),
+        ]);
+        assert_eq!(slugs, ["GitHub", "GitHub_xyz789", "Linear"]);
+
+        // Same first six id characters: the full-id hash separates them.
+        let slugs = build_unique_slugs(&[
+            server("aaaaaa-1", "fs"),
+            server("aaaaaa-2", "fs"),
+            server("aaaaaa-3", "fs"),
+        ]);
+        assert_eq!(slugs[0], "fs");
+        assert_eq!(slugs[1], "fs_aaaaaa");
+        assert_eq!(slugs[2], format!("fs_{}", stable_id_suffix("aaaaaa-3")));
+
+        // An id with no usable characters still gets a stable suffix.
+        let slugs = build_unique_slugs(&[server("x", "db"), server("---", "db")]);
+        assert_eq!(slugs[1], format!("db_{}", stable_id_suffix("---")));
+        assert_eq!(slugs, build_unique_slugs(&[server("x", "db"), server("---", "db")]));
     }
 
     /// OpenAI refuses a function name over 64 characters, so a long server

@@ -216,7 +216,8 @@ pub struct LockStatus {
 }
 
 fn entry() -> Result<Entry> {
-    Ok(Entry::new(SERVICE, ACCOUNT)?)
+    // Not `Entry::new`: see `keyring_entry` for the Linux retry.
+    Ok(crate::secrets::keyring_entry(SERVICE, ACCOUNT)?)
 }
 
 fn load() -> Result<Option<LockConfig>> {

@@ -92,7 +92,9 @@ pub fn dispatch(args: &Value) -> McpCallResult {
         "char" => inline_diff(TextDiff::configure().timeout(DIFF_TIMEOUT).diff_chars(a, b)),
         other => return err(format!("unknown mode `{other}`")),
     };
-    if out.trim().is_empty() {
+    // Word and char modes render shared text too, so identical inputs came
+    // back whole rather than as line mode's `(no differences)`.
+    if a == b || out.trim().is_empty() {
         return McpCallResult {
             content_text: "(no differences)".to_string(),
             is_error: false,
@@ -167,9 +169,11 @@ mod tests {
 
     #[test]
     fn identical_inputs_report_no_differences() {
-        let r = dispatch(&json!({"a": "same\nstuff\n", "b": "same\nstuff\n"}));
-        assert!(!r.is_error);
-        assert_eq!(r.content_text, "(no differences)");
+        for mode in ["line", "word", "char"] {
+            let r = dispatch(&json!({"a": "same\nstuff\n", "b": "same\nstuff\n", "mode": mode}));
+            assert!(!r.is_error);
+            assert_eq!(r.content_text, "(no differences)", "{mode}");
+        }
     }
 
     #[test]

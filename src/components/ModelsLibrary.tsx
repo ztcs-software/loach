@@ -83,6 +83,13 @@ export function ModelsLibrary() {
     if (!tag) return;
     setPullOpen(false);
     setPullTag("");
+    // Not a second pull of a tag already downloading — its chip is right
+    // below, and cancelling either would unpin the tag under the other. As
+    // onboarding's `startPull` guards it.
+    const live = Object.values(useModelsStore.getState().runs).some(
+      (r) => r.kind === "pull" && r.target === tag && r.finished === null,
+    );
+    if (live) return;
     await pullModel(tag);
   };
 
@@ -151,6 +158,8 @@ export function ModelsLibrary() {
                   value={pullTag}
                   onChange={(e) => setPullTag(e.target.value)}
                   onKeyDown={(e) => {
+                    // The Enter that confirms an IME candidate isn't a pull.
+                    if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
                     if (e.key === "Enter") void handleStartPull();
                     if (e.key === "Escape") {
                       setPullOpen(false);
@@ -237,9 +246,22 @@ export function ModelsLibrary() {
                       defaultValue: `${m.id.split(":")[0]}-copy`,
                       confirmLabel: "Duplicate",
                     });
-                    if (dest && dest.trim()) {
-                      void copyModel(m.id, dest.trim());
+                    if (!dest || !dest.trim()) return;
+                    // A copy replaces whatever is under the tag already — the
+                    // source itself included. A bare name is Ollama's `:latest`.
+                    const fullTag = (t: string) => (t.includes(":") ? t : `${t}:latest`);
+                    if (
+                      ollamaModels.some((x) => fullTag(x.id) === fullTag(dest.trim())) &&
+                      !(await confirm({
+                        title: `Replace “${dest.trim()}”?`,
+                        body: "A model with this tag already exists. Duplicating replaces it with this one.",
+                        confirmLabel: "Replace",
+                        destructive: true,
+                      }))
+                    ) {
+                      return;
                     }
+                    void copyModel(m.id, dest.trim());
                   }}
                   onDelete={async () => {
                     const ok = await confirm({

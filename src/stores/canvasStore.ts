@@ -1,4 +1,6 @@
 import { create } from "zustand";
+import { codeBlocks } from "@/lib/codeBlocks";
+import { useChatStore } from "@/stores/chatStore";
 
 /** localStorage key for the persisted canvas width. */
 const WIDTH_KEY = "loach:canvas-width";
@@ -35,12 +37,17 @@ function initialWidth(): number {
   return 560;
 }
 
-/** Identifies the live source a canvas is bound to: a specific message whose
- *  LAST fenced code block we mirror as it streams. Null for static snapshots
- *  (attachments, or a completed code block opened after the fact). */
+/** Identifies the live source a canvas is bound to: the fenced code block of
+ *  a streaming message that the canvas was opened on, which we mirror as it
+ *  streams. Null for static snapshots (attachments, a completed code block
+ *  opened after the fact, or a live one whose reply has finished). */
 export interface CanvasBinding {
   sessionId: string;
   messageId: string;
+  /** The block's position among the message's fenced blocks. Following the
+   *  message's last block instead switched a "Preview" of an ```html block
+   *  over to the ```bash block the reply went on to write. */
+  blockIndex: number;
 }
 
 /** What the canvas body shows: the source, or — for HTML — the rendered page. */
@@ -69,10 +76,10 @@ interface CanvasState {
    *  `snippet.md`). Null when the canvas was opened from a code block in
    *  a model reply, where there's no source filename to preserve. */
   name: string | null;
-  /** When set, the canvas mirrors the last fenced code block of this message
-   *  as it streams. `code`/`language` still hold the snapshot captured at
-   *  open time so the canvas renders before the first live tick and after the
-   *  source message goes away. */
+  /** When set, the canvas mirrors this block of the message as it streams.
+   *  `code`/`language` still hold the snapshot captured at open time so the
+   *  canvas renders before the first live tick and after the source message
+   *  goes away. */
   binding: CanvasBinding | null;
   /** Code or rendered preview. Only honoured for HTML; other languages
    *  always show the code. */
@@ -88,8 +95,9 @@ interface CanvasState {
     name?: string;
     view?: CanvasView;
   }) => void;
-  /** Open bound to a streaming message's last code block. The snapshot seeds
-   *  the initial render; the canvas re-derives from the live message after. */
+  /** Open bound to a streaming message's last code block — the one still
+   *  growing. The snapshot seeds the initial render; the canvas re-derives
+   *  from the live message after. */
   openLive: (args: {
     sessionId: string;
     messageId: string;
@@ -98,6 +106,8 @@ interface CanvasState {
     title?: string;
     view?: CanvasView;
   }) => void;
+  /** Drop the live binding, keeping the block as it now stands. */
+  freeze: (code: string, language: string | null) => void;
   setView: (view: CanvasView) => void;
   close: () => void;
   setWidth: (width: number) => void;
@@ -130,16 +140,25 @@ export const useCanvasStore = create<CanvasState>((set) => ({
       binding: null,
       view: view ?? "code",
     }),
-  openLive: ({ sessionId, messageId, code, language, title, view }) =>
+  openLive: ({ sessionId, messageId, code, language, title, view }) => {
+    const content =
+      useChatStore.getState().messages[sessionId]?.find((m) => m.id === messageId)
+        ?.content ?? "";
     set({
       isOpen: true,
       code,
       language,
       title: title ?? null,
       name: null,
-      binding: { sessionId, messageId },
+      binding: {
+        sessionId,
+        messageId,
+        blockIndex: Math.max(0, codeBlocks(content).length - 1),
+      },
       view: view ?? "code",
-    }),
+    });
+  },
+  freeze: (code, language) => set({ code, language, binding: null }),
   setView: (view) => set({ view }),
   close: () => set({ isOpen: false, binding: null }),
   setWidth: (width) => {

@@ -43,6 +43,9 @@ export function Onboarding() {
   // Esc → close (with the same confirm gating as the X button).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // Already handled — Radix marks the Esc that closes a menu (the
+      // "Default model" dropdown), which mustn't also ask to skip setup.
+      if (e.defaultPrevented) return;
       if (e.key === "Escape") {
         if (confirming) {
           setConfirming(false);

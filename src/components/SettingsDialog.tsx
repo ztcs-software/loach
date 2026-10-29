@@ -67,7 +67,6 @@ import {
   openaiListModels,
 } from "@/lib/tauri";
 
-/** Keys of `Settings` whose value is a boolean — the ones a Switch can drive. */
 const API_BASE_URL_PRESETS: ReadonlyArray<{ label: string; url: string }> = [
   { label: "OpenAI", url: "https://api.openai.com/v1" },
   { label: "llama.cpp (llama-server)", url: "http://localhost:8080/v1" },
@@ -286,7 +285,7 @@ export function SettingsDialog() {
                     </Button>
                   </div>
                   {ollamaTest.kind !== "idle" && ollamaTest.kind !== "testing" && (
-                    <ConnTestResult className="mt-2.5" result={ollamaTest} providerLabel="Ollama" />
+                    <ConnTestResult className="mt-2.5" result={ollamaTest} provider="ollama" providerLabel="Ollama" />
                   )}
                 </div>
 
@@ -458,7 +457,7 @@ export function SettingsDialog() {
                     )}
                   </div>
                   {openaiTest.kind !== "idle" && openaiTest.kind !== "testing" && (
-                    <ConnTestResult className="mt-2.5" result={openaiTest} providerLabel="OpenAI" />
+                    <ConnTestResult className="mt-2.5" result={openaiTest} provider="openai" providerLabel="OpenAI" />
                   )}
                 </div>
 
@@ -574,9 +573,3 @@ export function SettingsDialog() {
     </Dialog>
   );
 }
-
-
-
-/** Inline success / failure card for the Providers "Test connection"
- *  buttons. Mirrors `McpPanel`'s TestResultCard styling so users see the
- *  same visual language no matter which connection they're checking. */

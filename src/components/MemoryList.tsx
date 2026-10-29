@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Brain, MessageSquare, Plus, Search, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -85,6 +85,21 @@ export function MemoryList({
       setAdding(false);
     }
   };
+
+  // Radix hears Escape on the document in the capture phase, before the
+  // field does, so in the Global memories dialog Esc closed the whole dialog
+  // instead of the edit. Marked handled from the window — which the capture
+  // phase reaches first — the dialog stays open, and the field's own handler
+  // still cancels the edit.
+  const editRef = useRef<HTMLTextAreaElement>(null);
+  useEffect(() => {
+    if (!editingId) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !e.isComposing && e.target === editRef.current) e.preventDefault();
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [editingId]);
 
   const startEdit = (m: MemoryRow) => {
     setEditingId(m.id);
@@ -224,6 +239,7 @@ export function MemoryList({
                     <div className="min-w-0 flex-1">
                       {editingId === m.id ? (
                         <Textarea
+                          ref={editRef}
                           autoFocus
                           value={editVal}
                           onChange={(e) => setEditVal(e.target.value)}

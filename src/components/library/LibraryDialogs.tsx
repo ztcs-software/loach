@@ -104,8 +104,9 @@ export function useDeleteDataset() {
       confirmLabel: "Delete dataset",
       destructive: true,
     });
-    if (ok) await deleteDataset(id);
-    return ok;
+    // The store toasts a failed delete; report it so the caller doesn't
+    // navigate away from a dataset that still exists.
+    return ok && (await deleteDataset(id));
   };
 }
 
@@ -178,6 +179,9 @@ export function TextEditorDialog() {
   const [title, setTitle] = useState(() => keptDraft()?.title ?? "");
   const [body, setBody] = useState(() => keptDraft()?.body ?? "");
   const [loading, setLoading] = useState(false);
+  // The saved text couldn't be read: there's nothing to edit, and saving
+  // would overwrite the item with whatever the field holds.
+  const [loadFailed, setLoadFailed] = useState(false);
   const [saving, setSaving] = useState(false);
   // State lags a render behind, so two quick Ctrl+Enters both saw `saving`
   // false and created the text twice. A ref holds the save synchronously.
@@ -196,6 +200,7 @@ export function TextEditorDialog() {
 
   useEffect(() => {
     setError(null);
+    setLoadFailed(false);
     if (!target) return;
     const kept = keptDraft();
     if (kept) {
@@ -212,6 +217,9 @@ export function TextEditorDialog() {
     }
     const savedTitle = item?.title ?? "";
     setTitle(savedTitle);
+    // Not the last text edited: if this load fails, Save must not write that
+    // into this item.
+    setBody("");
     setLoading(true);
     getContents([target])
       .then(([full]) => {
@@ -221,6 +229,7 @@ export function TextEditorDialog() {
       })
       .catch((e) => {
         setError(e instanceof Error ? e.message : String(e));
+        setLoadFailed(true);
         setBaseline({ title: savedTitle, body: "" });
       })
       .finally(() => setLoading(false));
@@ -230,9 +239,9 @@ export function TextEditorDialog() {
 
   // Keep the store's copy of the draft current, so it outlives an unmount.
   useEffect(() => {
-    if (!target || loading) return;
+    if (!target || loading || loadFailed) return;
     useLibraryStore.setState({ editDraft: { target, title, body } });
-  }, [target, title, body, loading]);
+  }, [target, title, body, loading, loadFailed]);
 
   const save = async () => {
     if (savingRef.current) return;
@@ -269,7 +278,7 @@ export function TextEditorDialog() {
     close();
   };
 
-  const canSave = !saving && !loading && !!title.trim() && !!body.trim();
+  const canSave = !saving && !loading && !loadFailed && !!title.trim() && !!body.trim();
   const tokens = Math.ceil(body.length / 4);
   return (
     <Dialog open={!!target} onOpenChange={(o) => !o && void requestClose()}>
@@ -297,7 +306,7 @@ export function TextEditorDialog() {
                 ref={bodyRef}
                 value={body}
                 onChange={(e) => setBody(e.target.value)}
-                disabled={loading}
+                disabled={loading || loadFailed}
                 placeholder="Write or paste the text…"
                 className="min-h-[340px] rounded-2xl border-foreground/10 bg-foreground/[0.05] text-[13.5px] leading-relaxed"
                 onKeyDown={(e) => dialogEnter(e, () => void save(), { ready: canSave })}
@@ -374,6 +383,10 @@ export function AddLinkDialog({
     try {
       if (existing) {
         await refreshLink(existing.id);
+        // A failed refresh is toasted by the store, not thrown: only a fresh
+        // fetch counts, so a failure stays open and out of the dataset.
+        const fresh = useLibraryStore.getState().items.find((i) => i.id === existing.id);
+        if (!fresh || fresh.updated_at === existing.updated_at) return;
         onAdded?.(existing.id);
       } else {
         const item = await addLink(normalized);

@@ -57,7 +57,7 @@ Behind a calm, beautifully crafted UI sits a rich feature set - ready when you n
 - **Pinned responses** - pin any reply and jump straight back to it from a bar under the chat header.
 - **Private chats** - an ephemeral chat that writes nothing to disk and wipes its transcript the moment you close it; open it from the ghost icon in the title bar.
 - **Chat archive** - move chats out of the sidebar without deleting them, with an inline Undo if you mis-clicked; restore or delete them from dedicated archive view.
-- **Search** - search across chats, message content, spaces and snippets, narrowed with a scope picker or an `in:` filter, plus a browser-style in-chat finder with phrase highlighting.
+- **Search** - search across chats, message content, spaces, snippets and the Library, narrowed with a scope picker or an `in:` filter (`in:library` for Library items and datasets), plus a browser-style in-chat finder with phrase highlighting.
 
 #### Composing & steering a chat
 - **Slash commands** - type `/` in the composer for a command palette: `/fork`, `/regenerate`, `/compact`, `/private`, `/model`, `/persona`, `/snippet`, `/remember` and more.
@@ -137,7 +137,7 @@ Auto-updates are delivered through Loach's own signed updater (independent of Ap
 
 #### Prerequisites
 
-- **Node.js 20.19+** (or 22.12+) and **npm** — Vite 8 won't run on older 20.x point releases.
+- **Node.js 22.13+** (or 24 / 26+) and **npm** — the locked pdfjs-dist 6 needs 22.13, and Vitest 5 runs only on Node 22, 24 and 26+.
 - **Rust 1.90+** via [`rustup`](https://rustup.rs) — the dependency tree's minimum; CI builds on 1.90.0
 - Platform build tooling — install once via the official Tauri prerequisites guide: <https://tauri.app/start/prerequisites/>
   - **Windows**: Microsoft Visual Studio Build Tools, WebView2 runtime (preinstalled on Windows 11)
@@ -218,12 +218,12 @@ Only one OpenAI-compatible endpoint is active at a time — switch the base URL 
 | Storage | SQLite via `rusqlite` (bundled feature — no system dependency) |
 | Library search | SQLite FTS5 keyword index + optional embeddings (Ollama or OpenAI-compatible), merged by reciprocal-rank fusion |
 | Secrets | `keyring` crate → Windows Credential Manager / Linux Secret Service / macOS Keychain |
-| Argon2id | `argon2` + `rand_core` (for app-lock hashing) |
+| Argon2id | `argon2` (for app-lock hashing) |
 | HTTP | `reqwest` with streaming + `rustls-tls` |
 | Markdown | `react-markdown` + `remark-gfm` + `rehype-highlight` (highlight.js) |
 | Math | `remark-math` + `rehype-katex` + KaTeX, lazy-loaded from the bundle on first use |
 | Document parsing | `pdfjs-dist` (PDF) + `mammoth` (DOCX) |
-| PDF generation | `printpdf` 0.12 with bundled Liberation Sans fonts, subset at render time (Unicode-capable output) |
+| PDF generation | `printpdf` 0.12 with bundled Liberation Sans fonts, subset at render time (Latin-script text; other characters print as `?`) |
 | Workspace files | `walkdir` + `glob` + `regex` (no backtracking), `encoding_rs` + `chardetng` to edit non-UTF-8 files in their own encoding |
 | System tray | Tauri 2 built-in (`tray-icon` feature) |
 | Bundle targets | `.exe` (NSIS) on Windows; `.deb` / `.rpm` / `.AppImage` on Linux; `.dmg` + `.app` on macOS (Apple Silicon) |
@@ -237,6 +237,7 @@ Only one OpenAI-compatible endpoint is active at a time — switch the base URL 
 | Chats, messages, folders, spaces (instructions, reference sources, memories), the Library (texts, files, links, datasets and their search index), global memories, snippets, snippet variables and saved fill-ins, MCP servers (including their headers and environment variables, in plain text), app settings | SQLite at `<app-data-dir>/loach.db` |
 | OpenAI API key | OS credential manager (Windows Credential Manager / Linux Secret Service / macOS Keychain) |
 | App-lock hash + hint | OS credential manager — same store, separate entry |
+| App-lock marker (whether a lock is set, its method, PIN length and whether it has a hint — no hashes) and failed-unlock count | `app_lock.json` and `app_lock_attempts.json` next to `loach.db` |
 | Attached files (images, text, PDF, DOCX) and PDFs the pdf tool generates | Stored with their message in `loach.db`; no separate file store |
 | App data dir on Windows | `%APPDATA%\dev.loach.app\` |
 | App data dir on Linux | `~/.local/share/dev.loach.app/` |

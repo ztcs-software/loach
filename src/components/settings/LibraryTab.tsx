@@ -76,8 +76,11 @@ export function LibraryTab() {
 
   const setProvider = async (p: ProviderId) => {
     if (p === provider) return;
-    await update("embedding_provider", p);
+    // Model first: each write wakes the indexer, which in the other order
+    // briefly sent Library text to the new provider's endpoint under the
+    // old provider's model name.
     await update("embedding_model", "");
+    await update("embedding_provider", p);
   };
 
   const rebuild = async () => {
@@ -200,6 +203,8 @@ export function LibraryTab() {
             Runs on your{" "}
             {provider === "ollama" ? "Ollama" : "OpenAI-compatible endpoint (Settings → Providers)"}.
             Changing it re-embeds every source in the background.
+            {provider === "openai" &&
+              " Your sources are sent there to be embedded, and so is every message that searches them — in chats with a local model too."}
           </p>
         </div>
         <div className="inline-flex rounded-xl border border-foreground/10 bg-foreground/[0.04] p-0.5">

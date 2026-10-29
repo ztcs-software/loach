@@ -534,7 +534,10 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
                 {openaiKeySet ? "No models" : "Not connected"}
               </DropdownMenuItem>
             )}
-            {openaiModels.slice(0, 30).map((m) => (
+            {/* All of them: the menu scrolls, and typing a model's first
+                letters jumps to it. A cap at 30 left OpenRouter's and
+                OpenAI's later models with no way in. */}
+            {openaiModels.map((m) => (
               <DropdownMenuItem key={`openai:${m.id}`} onSelect={() => select("openai", m.id)}>
                 {m.label}
               </DropdownMenuItem>

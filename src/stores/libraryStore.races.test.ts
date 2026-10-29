@@ -64,12 +64,36 @@ describe("library store races", () => {
   it("a refresh in flight keeps an item created meanwhile, once", async () => {
     const refresh = store().refreshItems();
     await store().createText("new", "body");
-    // The refresh was read before "new" existed.
+    // The refresh was read before "new" existed, so it reads again.
     gate.list!({ items: [{ ...item("old", 1), embedded: 1 }], datasets: [] });
+    await tick();
+    gate.list!({ items: [item("new", 2), { ...item("old", 1), embedded: 1 }], datasets: [] });
     await refresh;
     expect(store().items.map((i) => i.id)).toEqual(["new", "old"]);
     // …and the server's copy of what it did know wins.
     expect(store().items.find((i) => i.id === "old")?.embedded).toBe(1);
+  });
+
+  // An indexer pass settling fires a refresh, and a list read before a delete
+  // or a rename put the deleted item back, or the old title.
+  it("a refresh in flight doesn't undo a delete or a rename made meanwhile", async () => {
+    useLibraryStore.setState({ items: [item("old", 1), item("gone", 1)] });
+    const refresh = store().refreshItems();
+    await store().deleteItems(["gone"]);
+    await store().rename("old", "Renamed");
+    gate.list!({ items: [item("old", 1), item("gone", 1)], datasets: [] });
+    await tick();
+    gate.list!({ items: [{ ...item("old", 1), title: "Renamed" }], datasets: [] });
+    await refresh;
+    expect(store().items.map((i) => [i.id, i.title])).toEqual([["old", "Renamed"]]);
+  });
+
+  it("overlapping additions to a dataset each build on the one before", async () => {
+    useLibraryStore.setState({
+      datasets: [{ id: "ds", name: "ds", description: "", item_ids: ["a"], created_at: 0, updated_at: 0 }],
+    });
+    await Promise.all([store().addToDataset("ds", ["b"]), store().addToDataset("ds", ["c"])]);
+    expect(store().datasets[0].item_ids).toEqual(["a", "b", "c"]);
   });
 
   it("a refresh that already has the new item doesn't show it twice", async () => {

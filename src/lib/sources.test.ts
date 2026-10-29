@@ -27,6 +27,7 @@ import {
   resolveSources,
   retrievalBudgetTokens,
   retrievalQuery,
+  sourceTokens,
   sourcesTokenCost,
   sourcesVerdict,
   spaceSourceCount,
@@ -100,6 +101,16 @@ describe("mode selection", () => {
     expect(sourcesTokenCost("auto", 50_000, 8192)).toBe(2048);
     // Forced full text is cut to 80% of the window.
     expect(sourcesTokenCost("full", 50_000, 8192)).toBe(Math.round(8192 * 0.8));
+  });
+});
+
+describe("sourceTokens", () => {
+  // The send rounded each source up and the context bar rounded the total,
+  // so near the full-text threshold one could say full text and the other
+  // excerpts.
+  it("rounds the total, not each source", () => {
+    expect(sourceTokens(Array.from({ length: 5 }, () => ({ chars: 3, text: "abc" })))).toBe(4);
+    expect(sourceTokens([])).toBe(0);
   });
 });
 

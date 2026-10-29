@@ -36,10 +36,21 @@ import { expandSources, useLibraryStore } from "@/stores/libraryStore";
 import { useModelsStore } from "@/stores/modelsStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useUIStore } from "@/stores/uiStore";
-import type { LibraryItemMeta, RetrievalMode, Space, SpaceFile } from "@/types";
+import {
+  OPENAI_COMPAT_NUM_CTX,
+  type LibraryItemMeta,
+  type LibrarySource,
+  type RetrievalMode,
+  type Space,
+  type SpaceFile,
+} from "@/types";
 import { chatNumCtx, MODE_LABELS } from "./ChatSources";
 import { LibraryPicker } from "./LibraryPicker";
 import { DatasetIcon, ItemIcon, itemTokens, mixLabel, typeLabel } from "./libraryUi";
+
+/** Stable stand-in while a Space's links load: a fresh `[]` each render made
+ *  the source estimate below recompute on every render. */
+const NO_LINKS: LibrarySource[] = [];
 
 /**
  * The Sources tab of a Space: its own uploads plus Library items and
@@ -76,14 +87,30 @@ export function SpaceSourcesTab({
   const saveToLibrary = useLibraryStore((s) => s.saveToLibrary);
   const setFileEnabled = useSpaceStore((s) => s.setFileEnabled);
   const setSpaceTab = useSpaceStore((s) => s.setSpaceTab);
+  const loadModelDefaults = useModelsStore((s) => s.loadModelDefaults);
+  // The Space's model's own window, which a chat's send layers under the
+  // Space's: a Modelfile's num_ctx, or the one assumed for an
+  // OpenAI-compatible model.
+  const modelNumCtx = useModelsStore((s) =>
+    !space.default_model
+      ? undefined
+      : space.default_provider === "ollama"
+        ? s.modelDefaults[space.default_model]?.num_ctx
+        : OPENAI_COMPAT_NUM_CTX,
+  );
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   useEffect(() => {
-    void ensureSources("space", space.id).catch(() => undefined);
+    setLoadError(null);
+    ensureSources("space", space.id).catch((e) => setLoadError(e instanceof Error ? e.message : String(e)));
   }, [space.id, ensureSources]);
+  useEffect(() => {
+    if (space.default_provider === "ollama" && space.default_model) void loadModelDefaults(space.default_model);
+  }, [space.default_provider, space.default_model, loadModelDefaults]);
 
   const byId = useMemo(() => new Map(items.map((i) => [i.id, i])), [items]);
   const dsById = useMemo(() => new Map(datasets.map((d) => [d.id, d])), [datasets]);
-  const links = sources ?? [];
+  const links = sources ?? NO_LINKS;
 
   // What the model gets: enabled uploads + enabled links, each item once.
   // The count includes images (they reach the model too) so it matches the
@@ -100,7 +127,7 @@ export function SpaceSourcesTab({
     return { tokens: Math.ceil(chars / 4), count: spaceSourceCount(files, links, datasets, items) };
   }, [files, links, datasets, items]);
 
-  const numCtx = chatNumCtx(null, space.default_params_json);
+  const numCtx = chatNumCtx(null, space.default_params_json, modelNumCtx);
   const effective = resolveMode(space.retrieval_mode, tokens, numCtx);
   const threshold = Math.round(numCtx * FULL_TEXT_SHARE);
   const totalBytes = files.reduce((acc, f) => acc + f.size, 0);
@@ -125,7 +152,9 @@ export function SpaceSourcesTab({
     useUIStore.getState().setSidebarTab("library");
   };
 
-  const empty = files.length === 0 && links.length === 0;
+  // A failed link load isn't "no sources": the Space may well have some.
+  const linksFailed = !sources && !!loadError;
+  const empty = files.length === 0 && links.length === 0 && !linksFailed;
 
   return (
     <div className="space-y-4">
@@ -233,7 +262,24 @@ export function SpaceSourcesTab({
         }}
       />
 
-      {error && <p className="text-xs text-destructive">{error}</p>}
+      {error && <p className="whitespace-pre-line text-xs text-destructive">{error}</p>}
+      {linksFailed && (
+        <p className="text-xs text-destructive">
+          Couldn't load the Library sources linked to this Space: {loadError}{" "}
+          <button
+            type="button"
+            onClick={() => {
+              setLoadError(null);
+              ensureSources("space", space.id).catch((e) =>
+                setLoadError(e instanceof Error ? e.message : String(e)),
+              );
+            }}
+            className="underline underline-offset-2 hover:text-foreground"
+          >
+            Retry
+          </button>
+        </p>
+      )}
 
       {!empty && (
         <ul className="divide-y divide-foreground/[0.06] overflow-hidden rounded-xl border border-foreground/10 bg-foreground/[0.02]">
@@ -339,8 +385,10 @@ export function SpaceSourcesTab({
         title="Add from Library"
         description={`Link datasets, texts, files and links to “${space.name}”. Every chat in the Space can use them.`}
         confirmLabel="Add to Space"
-        linkedItemIds={links.filter((l) => l.item_id).map((l) => l.item_id!)}
-        linkedDatasetIds={links.filter((l) => l.dataset_id).map((l) => l.dataset_id!)}
+        linkedItemIds={links.filter((l) => l.enabled && l.item_id).map((l) => l.item_id!)}
+        linkedDatasetIds={links.filter((l) => l.enabled && l.dataset_id).map((l) => l.dataset_id!)}
+        offItemIds={links.filter((l) => !l.enabled && l.item_id).map((l) => l.item_id!)}
+        offDatasetIds={links.filter((l) => !l.enabled && l.dataset_id).map((l) => l.dataset_id!)}
         numCtx={numCtx}
         spaceId={space.id}
         mode={space.retrieval_mode}

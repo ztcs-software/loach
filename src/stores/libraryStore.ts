@@ -103,16 +103,36 @@ function withNew<T extends { id: string }>(list: T[], added: T[]): T[] {
   return [...added, ...list.filter((x) => !ids.has(x.id))];
 }
 
-/** Rows in `local` that a list fetched at `since` couldn't have known about. */
-function createdSince<T extends { id: string; created_at: number }>(local: T[], fetched: T[], since: number): T[] {
-  const ids = new Set(fetched.map((x) => x.id));
-  return local.filter((x) => !ids.has(x.id) && x.created_at >= since);
-}
-
 /** Bodies already fetched, keyed by id and valid while `updated_at` matches.
  *  The send path asks for the same sources every turn; this keeps them from
- *  crossing IPC again until one is edited. */
+ *  crossing IPC again until one is edited. Least recently used first, and
+ *  bounded by size — image bodies are whole base64 files, and nothing else
+ *  ever let one go. */
 const contentCache = new Map<string, LibraryItem>();
+const CONTENT_CACHE_CHARS = 32 * 1024 * 1024;
+let contentCacheChars = 0;
+
+function cacheContent(item: LibraryItem) {
+  dropContent(item.id);
+  contentCache.set(item.id, item);
+  contentCacheChars += item.content.length;
+  for (const [id] of contentCache) {
+    if (contentCacheChars <= CONTENT_CACHE_CHARS || id === item.id) break;
+    dropContent(id);
+  }
+}
+
+function dropContent(id: string) {
+  const hit = contentCache.get(id);
+  if (!hit) return;
+  contentCache.delete(id);
+  contentCacheChars -= hit.content.length;
+}
+
+/** Each dataset's membership writes, run one after another: each sends a
+ *  whole member list, so two built at once each left out the other's
+ *  additions, and whichever landed last won. */
+const membershipWrites = new Map<string, Promise<void>>();
 
 /** Per-owner version of the cached link lists. Every change bumps it, so a
  *  list read before the change can't land after it and undo it. */
@@ -168,9 +188,11 @@ interface LibraryState {
   updateDataset: (id: string, name: string, description: string) => Promise<void>;
   setDatasetItems: (id: string, itemIds: string[]) => Promise<void>;
   addToDataset: (id: string, itemIds: string[]) => Promise<void>;
-  deleteDataset: (id: string) => Promise<void>;
+  /** False when the delete failed (a toast already said why). */
+  deleteDataset: (id: string) => Promise<boolean>;
   /** Save a body from elsewhere (an attachment, a Space file, a reply).
-   *  Skips — with a toast — when the same body is already stored. */
+   *  Skips — with a toast — when the same body is already stored.
+   *  `truncated` marks a body cut at extraction (a long PDF or Word file). */
   saveToLibrary: (args: {
     kind: "text" | "file";
     title: string;
@@ -178,6 +200,7 @@ interface LibraryState {
     media: "text" | "image";
     content: string;
     size: number;
+    truncated?: boolean;
   }) => Promise<LibraryItemMeta | null>;
 
   loadSources: (owner: LibrarySourceOwner, ownerId: string) => Promise<LibrarySource[]>;
@@ -203,13 +226,14 @@ interface LibraryState {
    *  Picks parked for a different Space are dropped. */
   addPending: (sel: { itemIds: string[]; datasetIds: string[] }, spaceId: string | null) => void;
   removePending: (id: string) => void;
-  /** Take (and clear) the pending sources — none unless they were picked
-   *  for a chat in `spaceId`. */
+  /** Take (and clear) the pending sources — none, and nothing cleared,
+   *  unless they were picked for a chat in `spaceId`. */
   consumePending: (spaceId: string | null) => { itemIds: string[]; datasetIds: string[] };
   setViewingDataset: (id: string | null) => void;
 }
 
-let unlistenIndex: (() => void) | null = null;
+/** Set by the first hydrate, which subscribes to the indexer's status. */
+let indexListening = false;
 
 export const useLibraryStore = create<LibraryState>((set, get) => ({
   items: [],
@@ -225,27 +249,28 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
   pending: { itemIds: [], datasetIds: [], spaceId: null },
 
   hydrate: async () => {
+    // The link lists and bodies already cached stay: they're current (every
+    // write keeps them so), and a data import reloads the window. Cleared
+    // here, a second hydrate — the send path retrying a failed one, or
+    // racing the startup one — wiped link lists loaded since and restarted
+    // their version numbers under loads still in flight.
     try {
       const { items, datasets } = await libraryList();
       set({ items, datasets, hydrated: true, error: null });
-      // A fresh hydrate (startup, or after an import rewrote the tables)
-      // invalidates every cached link list and body.
-      contentCache.clear();
-      sourceVersions.clear();
-      set({ sources: {} });
     } catch (e) {
       logger.error("library hydrate failed", e);
       set({ hydrated: true, error: errorText(e) });
     }
-    if (!unlistenIndex) {
+    // Claimed before the await inside, so a second hydrate in the meantime
+    // doesn't subscribe again.
+    if (!indexListening) {
+      indexListening = true;
       // When a pass of the indexer settles, the per-item embedded counts in
       // the list are stale — re-read them.
       void onIndexStatus((status) => {
         const was = get().indexStatus;
         set({ indexStatus: status });
         if (was?.busy && !status.busy) void get().refreshItems();
-      }).then((u) => {
-        unlistenIndex = u;
       });
       void ragStatus()
         .then((status) => set((s) => ({ indexStatus: s.indexStatus ?? status })))
@@ -254,16 +279,20 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
   },
 
   refreshItems: async () => {
-    // Writes can land while the list is in flight — an upload finishing,
-    // say. Rows created since it was asked for are kept rather than wiped,
-    // and the server's copy wins for everything else.
-    const since = Date.now();
+    // Writes can land while the list is in flight — an upload finishing, an
+    // item deleted or renamed, a dataset's members changed — and a list
+    // read before one would put back what it changed. Every such write
+    // replaces `items` or `datasets`, so read again until neither moved
+    // while the list was out (as `spaceStore.loadSpaceFiles` does).
     try {
-      const { items, datasets } = await libraryList();
-      set((s) => ({
-        items: [...createdSince(s.items, items, since), ...items],
-        datasets: [...createdSince(s.datasets, datasets, since), ...datasets],
-      }));
+      for (;;) {
+        const { items: itemsBefore, datasets: datasetsBefore } = get();
+        const { items, datasets } = await libraryList();
+        if (get().items === itemsBefore && get().datasets === datasetsBefore) {
+          set({ items, datasets });
+          return;
+        }
+      }
     } catch (e) {
       logger.warn("library refresh failed", e);
     }
@@ -284,7 +313,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
 
   updateText: async (id, title, content) => {
     const item = await libraryUpdateText({ id, title, content });
-    contentCache.delete(id);
+    dropContent(id);
     set((s) => ({ items: s.items.map((i) => (i.id === id ? item : i)) }));
   },
 
@@ -324,7 +353,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
   refreshLink: async (id) => {
     try {
       const item = await libraryRefreshLink(id);
-      contentCache.delete(id);
+      dropContent(id);
       set((s) => ({ items: s.items.map((i) => (i.id === id ? item : i)) }));
       useToastStore.getState().push({ kind: "info", title: "Link refreshed" });
     } catch (e) {
@@ -340,7 +369,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     // The server's row, not a local `Date.now()`: `getContents` keys its
     // cache on `updated_at`, and a client timestamp would never match it.
     const item = await libraryRenameItem(id, title);
-    contentCache.delete(id);
+    dropContent(id);
     set((s) => ({
       items: s.items.map((i) => (i.id === id ? (item ?? { ...i, title }) : i)),
     }));
@@ -358,7 +387,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
       return false;
     }
     const gone = new Set(ids);
-    ids.forEach((id) => contentCache.delete(id));
+    ids.forEach(dropContent);
     set((s) => ({
       items: s.items.filter((i) => !gone.has(i.id)),
       datasets: s.datasets.map((d) => ({
@@ -393,22 +422,12 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     }));
   },
 
-  setDatasetItems: async (id, itemIds) => {
-    const stored = await librarySetDatasetItems(id, itemIds);
-    const now = Date.now();
-    set((s) => ({
-      datasets: s.datasets.map((d) =>
-        d.id === id ? { ...d, item_ids: stored, updated_at: now } : d,
-      ),
-    }));
-  },
+  setDatasetItems: (id, itemIds) => writeMembers(id, () => itemIds),
 
-  addToDataset: async (id, itemIds) => {
-    const ds = get().datasets.find((d) => d.id === id);
-    if (!ds) return;
-    const next = [...ds.item_ids, ...itemIds.filter((i) => !ds.item_ids.includes(i))];
-    await get().setDatasetItems(id, next);
-  },
+  // The members to add go onto the list as it stands once the writes queued
+  // before this one have landed — not as it stood when it was asked for.
+  addToDataset: (id, itemIds) =>
+    writeMembers(id, (current) => current && [...current, ...itemIds.filter((i) => !current.includes(i))]),
 
   deleteDataset: async (id) => {
     try {
@@ -419,7 +438,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
         title: "Couldn't delete dataset",
         body: errorText(e),
       });
-      return;
+      return false;
     }
     set((s) => ({
       datasets: s.datasets.filter((d) => d.id !== id),
@@ -430,6 +449,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
         ]),
       ),
     }));
+    return true;
   },
 
   saveToLibrary: async (args) => {
@@ -527,14 +547,26 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
 
   getContents: async (ids) => {
     const metas = new Map(get().items.map((i) => [i.id, i]));
-    const missing = ids.filter((id) => {
+    // Collected here rather than read back from the cache, which may have
+    // let some of them go to make room for the rest.
+    const found = new Map<string, LibraryItem>();
+    const missing: string[] = [];
+    for (const id of ids) {
       const hit = contentCache.get(id);
-      return !hit || hit.updated_at !== metas.get(id)?.updated_at;
-    });
-    if (missing.length > 0) {
-      for (const item of await libraryGetItems(missing)) contentCache.set(item.id, item);
+      if (hit && hit.updated_at === metas.get(id)?.updated_at) {
+        cacheContent(hit); // now the most recently used
+        found.set(id, hit);
+      } else {
+        missing.push(id);
+      }
     }
-    return ids.map((id) => contentCache.get(id)).filter((i): i is LibraryItem => !!i);
+    if (missing.length > 0) {
+      for (const item of await libraryGetItems(missing)) {
+        cacheContent(item);
+        found.set(item.id, item);
+      }
+    }
+    return ids.map((id) => found.get(id)).filter((i): i is LibraryItem => !!i);
   },
 
   openPreview: (id) => set({ previewItemId: id }),
@@ -564,11 +596,39 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     })),
   consumePending: (spaceId) => {
     const { itemIds, datasetIds, spaceId: pickedFor } = get().pending;
+    // Picks parked for another composer stay for it: a chat started from the
+    // welcome screen used to throw away what was picked on a Space's page.
+    if (pickedFor !== spaceId) return { itemIds: [], datasetIds: [] };
     set({ pending: { itemIds: [], datasetIds: [], spaceId: null } });
-    return pickedFor === spaceId ? { itemIds, datasetIds } : { itemIds: [], datasetIds: [] };
+    return { itemIds, datasetIds };
   },
   setViewingDataset: (id) => set({ viewingDatasetId: id }),
 }));
+
+/** Queue a membership write for dataset `id` (see `membershipWrites`).
+ *  `members` builds the list to store from the members as they stand when
+ *  the write's turn comes; `undefined` writes nothing. */
+function writeMembers(
+  id: string,
+  members: (current: string[] | undefined) => string[] | undefined,
+): Promise<void> {
+  const run = async () => {
+    const itemIds = members(useLibraryStore.getState().datasets.find((d) => d.id === id)?.item_ids);
+    if (!itemIds) return;
+    const stored = await librarySetDatasetItems(id, itemIds);
+    const now = Date.now();
+    useLibraryStore.setState((s) => ({
+      datasets: s.datasets.map((d) =>
+        d.id === id ? { ...d, item_ids: stored, updated_at: now } : d,
+      ),
+    }));
+  };
+  const prev = membershipWrites.get(id);
+  // After the previous write, whether or not it failed.
+  const queued = prev ? prev.then(run, run) : run();
+  membershipWrites.set(id, queued);
+  return queued;
+}
 
 /** Resolve an owner's links into the distinct, enabled items they reach —
  *  datasets expanded in order, an item reached twice counted once. */

@@ -16,6 +16,11 @@ import { useSpaceStore } from "@/stores/spaceStore";
 import { useToastStore } from "@/stores/toastStore";
 import { useUIStore } from "@/stores/uiStore";
 
+/**
+ * Embedded Archive browser — same rows the old full-page ArchiveView had,
+ * just squeezed into the Settings dialog's right column. Opening a chat
+ * closes the dialog so the user lands straight in the chat.
+ */
 export function ArchivePanel({ onOpenChat }: { onOpenChat: () => void }) {
   const sessions = useChatStore((s) => s.sessions);
   const archive = useChatStore((s) => s.archive);
@@ -212,23 +217,3 @@ function ArchivedRow({
     </li>
   );
 }
-
-/* ───────────────────────── Data tab panel ─────────────────────────
- *
- * Four bulk operations live here:
- *
- *   1. Export   — dump the whole DB to a JSON file via a save dialog.
- *   2. Import   — pick a JSON dump, replace everything with its contents,
- *                 then reload the window so every store re-hydrates from
- *                 the freshly-written DB.
- *   3. Archive all — flip every live chat to archived in one shot.
- *   4. Erase    — two-mode destructive flow (user-data vs factory reset),
- *                 gated on a typed "YES" confirmation.
- *
- * The destructive actions rebuild the whole app by calling
- * `window.location.reload()` — every Zustand store derives from SQLite
- * on mount (see App.tsx's hydrate useEffect), so a reload is the
- * cheapest way to get back to a consistent state without writing a
- * bespoke rehydrate function per store.
- * ─────────────────────────────────────────────────────────────────── */
-

@@ -6,6 +6,7 @@ import {
   addSpaceMemory,
   createSpace,
   deleteSpace,
+  getSpaceContext,
   listSpaceFiles,
   listSpaceMemories,
   listSpaces,
@@ -18,10 +19,12 @@ import {
 } from "@/lib/tauri";
 import { SPACE_BYTES_CAP } from "@/lib/files";
 import {
-  invalidateSpaceContext,
+  getCachedSpaceContext,
+  invalidateSpaceContext as dropCachedContext,
   invalidateAllSpaceContext,
+  setCachedSpaceContext,
 } from "@/lib/spaceContextCache";
-import type { RetrievalMode, Space, SpaceFile, SpaceMemory } from "@/types";
+import type { RetrievalMode, Space, SpaceContext, SpaceFile, SpaceMemory } from "@/types";
 import { useChatStore } from "./chatStore";
 import { useLibraryStore } from "./libraryStore";
 
@@ -95,6 +98,10 @@ interface SpaceState {
   setRetrievalMode: (spaceId: string, mode: RetrievalMode) => Promise<void>;
 
   loadSpaceMemories: (spaceId: string) => Promise<SpaceMemory[]>;
+  /** The context a send in the Space reads — instructions, sources and
+   *  memories — cached until a write changes it. Its memories also refresh
+   *  `spaceMemories`. */
+  loadSpaceContext: (spaceId: string) => Promise<SpaceContext>;
   /** Insert a new memory and return the persisted row. Used by both the
    *  extractor (auto-save) and the Memory tab's "Add manually" affordance.
    *  Source ids are optional so manual entries leave both NULL. */
@@ -123,6 +130,22 @@ let memoryWrites = 0;
  *  put the old state back. */
 let fileWrites = 0;
 
+/** And for the context a send reads (instructions, sources, memories): a
+ *  read already under way when a write dropped the cached copy used to be
+ *  cached in its place, and sent until the next write. */
+let contextWrites = 0;
+
+function invalidateSpaceContext(spaceId: string) {
+  contextWrites++;
+  dropCachedContext(spaceId);
+}
+
+/** Each Space's `updateSpace` calls, run one after another. A call fills the
+ *  fields it isn't given from the Space as it stands, and built at once, a
+ *  later save took them from before an earlier one landed — and wrote the
+ *  old values back over it. */
+const spaceUpdates = new Map<string, Promise<void>>();
+
 export const useSpaceStore = create<SpaceState>((set, get) => ({
   spaces: [],
   activeSpaceId: null,
@@ -140,6 +163,7 @@ export const useSpaceStore = create<SpaceState>((set, get) => ({
       set({ spaces, hydrated: true, error: null });
       // A fresh hydrate (startup, or after a data import rewrote the spaces
       // tables) means any previously-cached context may be stale.
+      contextWrites++;
       invalidateAllSpaceContext();
     } catch (e) {
       logger.error("space hydrate failed", e);
@@ -160,63 +184,71 @@ export const useSpaceStore = create<SpaceState>((set, get) => ({
     return space;
   },
 
-  updateSpace: async (id, fields) => {
-    // Snapshot the current row so callers can pass a partial set of fields
-    // (e.g. just the name, just the model) without clobbering the rest.
-    const current = get().spaces.find((s) => s.id === id);
-    const next = {
-      name: fields.name,
-      description: fields.description,
-      instructions: fields.instructions,
-      default_provider:
-        fields.default_provider !== undefined
-          ? fields.default_provider
-          : current?.default_provider ?? null,
-      default_model:
-        fields.default_model !== undefined
-          ? fields.default_model
-          : current?.default_model ?? null,
-      default_params_json:
-        fields.default_params_json !== undefined
-          ? fields.default_params_json
-          : current?.default_params_json ?? null,
-      // memory_enabled is a tri-state at the *call* layer (`undefined` =
-      // "don't touch the existing value"). On the wire, Rust's
-      // `Option<bool>` collapses `null` and missing key both to `None`,
-      // so passing `undefined` and `null` are functionally equivalent
-      // for skipping the column. We pass `undefined` to make the intent
-      // explicit and to avoid the earlier "passes null but the comment
-      // says undefined" mismatch that existed here.
-      memory_enabled:
-        fields.memory_enabled !== undefined ? fields.memory_enabled : undefined,
+  updateSpace: (id, fields) => {
+    const run = async () => {
+      // Snapshot the current row so callers can pass a partial set of fields
+      // (e.g. just the name, just the model) without clobbering the rest —
+      // taken once the previous save has landed (see `spaceUpdates`).
+      const current = get().spaces.find((s) => s.id === id);
+      const next = {
+        name: fields.name,
+        description: fields.description,
+        instructions: fields.instructions,
+        default_provider:
+          fields.default_provider !== undefined
+            ? fields.default_provider
+            : current?.default_provider ?? null,
+        default_model:
+          fields.default_model !== undefined
+            ? fields.default_model
+            : current?.default_model ?? null,
+        default_params_json:
+          fields.default_params_json !== undefined
+            ? fields.default_params_json
+            : current?.default_params_json ?? null,
+        // memory_enabled is a tri-state at the *call* layer (`undefined` =
+        // "don't touch the existing value"). On the wire, Rust's
+        // `Option<bool>` collapses `null` and missing key both to `None`,
+        // so passing `undefined` and `null` are functionally equivalent
+        // for skipping the column. We pass `undefined` to make the intent
+        // explicit and to avoid the earlier "passes null but the comment
+        // says undefined" mismatch that existed here.
+        memory_enabled:
+          fields.memory_enabled !== undefined ? fields.memory_enabled : undefined,
+      };
+      await updateSpace({ id, ...next });
+      invalidateSpaceContext(id);
+      set((s) => ({
+        spaces: s.spaces.map((sp) =>
+          sp.id === id
+            ? {
+                ...sp,
+                name: next.name,
+                description: next.description,
+                instructions: next.instructions,
+                default_provider: (next.default_provider as Space["default_provider"]) ?? null,
+                default_model: next.default_model,
+                default_params_json: next.default_params_json,
+                // Mirror only when the caller actually supplied a value.
+                // `fields.memory_enabled?: boolean | null`, so we have to
+                // treat both `null` and `undefined` as "no change" to keep
+                // the Space.memory_enabled invariant of `boolean` (never
+                // null in the local mirror).
+                memory_enabled:
+                  next.memory_enabled !== null && next.memory_enabled !== undefined
+                    ? next.memory_enabled
+                    : sp.memory_enabled,
+                updated_at: Date.now(),
+              }
+            : sp,
+        ),
+      }));
     };
-    await updateSpace({ id, ...next });
-    invalidateSpaceContext(id);
-    set((s) => ({
-      spaces: s.spaces.map((sp) =>
-        sp.id === id
-          ? {
-              ...sp,
-              name: next.name,
-              description: next.description,
-              instructions: next.instructions,
-              default_provider: (next.default_provider as Space["default_provider"]) ?? null,
-              default_model: next.default_model,
-              default_params_json: next.default_params_json,
-              // Mirror only when the caller actually supplied a value.
-              // `fields.memory_enabled?: boolean | null`, so we have to
-              // treat both `null` and `undefined` as "no change" to keep
-              // the Space.memory_enabled invariant of `boolean` (never
-              // null in the local mirror).
-              memory_enabled:
-                next.memory_enabled !== null && next.memory_enabled !== undefined
-                  ? next.memory_enabled
-                  : sp.memory_enabled,
-              updated_at: Date.now(),
-            }
-          : sp,
-      ),
-    }));
+    const prev = spaceUpdates.get(id);
+    // After the previous save, whether or not it failed.
+    const queued = prev ? prev.then(run, run) : run();
+    spaceUpdates.set(id, queued);
+    return queued;
   },
 
   deleteSpace: async (id) => {
@@ -379,6 +411,23 @@ export const useSpaceStore = create<SpaceState>((set, get) => ({
         return memories;
       }
     }
+  },
+
+  loadSpaceContext: async (spaceId) => {
+    let ctx = getCachedSpaceContext(spaceId);
+    while (!ctx) {
+      const before = contextWrites;
+      const read = await getSpaceContext(spaceId);
+      if (contextWrites === before) {
+        setCachedSpaceContext(spaceId, read);
+        ctx = read;
+      }
+    }
+    // No await since the context was read or found cached, and every memory
+    // write drops the cached copy — so these are current.
+    const { memories } = ctx;
+    set((s) => ({ spaceMemories: { ...s.spaceMemories, [spaceId]: memories } }));
+    return ctx;
   },
 
   // The memory writes patch a Space's cached list only once it has been

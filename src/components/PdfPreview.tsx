@@ -222,6 +222,9 @@ function PdfPage({ doc, pageNumber }: { doc: PDFDocumentProxy; pageNumber: numbe
   // via `w-full` keeps every page snapped to the scroller's width.
   useEffect(() => {
     if (!visible) return;
+    // The canvas this run draws into, kept for the cleanup below: the ref
+    // may point elsewhere by the time the cleanup runs.
+    const ownCanvas = canvasRef.current;
     let cancelled = false;
     let renderTask: RenderTask | null = null;
     (async () => {
@@ -273,10 +276,9 @@ function PdfPage({ doc, pageNumber }: { doc: PDFDocumentProxy; pageNumber: numbe
       }
       // A zero-sized canvas gives its backing store back. `dims` keeps the
       // placeholder at the page's height, so nothing below it moves.
-      const canvas = canvasRef.current;
-      if (canvas) {
-        canvas.width = 0;
-        canvas.height = 0;
+      if (ownCanvas) {
+        ownCanvas.width = 0;
+        ownCanvas.height = 0;
       }
     };
   }, [visible, doc, pageNumber]);

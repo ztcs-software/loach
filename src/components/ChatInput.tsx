@@ -40,6 +40,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { useToastStore } from "@/stores/toastStore";
 import { cn } from "@/lib/utils";
 import { logger } from "@/lib/logger";
+import { formatShortcut, modalDialogOpen } from "@/lib/shortcuts";
 import { openSessionWorkspace } from "@/lib/tauri";
 import { chatRetrievalMode } from "@/lib/sources";
 import { ChipDivider, PersonaChip, ToneChip } from "./ComposerChip";
@@ -64,6 +65,7 @@ import { dispatch as dispatchCommand } from "@/lib/commands/dispatch";
 import {
   isCommandInput,
   matchCommands,
+  modelArgValues,
   parseInput,
   type ArgSources,
   type PaletteEntry,
@@ -77,11 +79,11 @@ interface ChatInputProps {
 }
 
 /** Composer drafts by chat — `space:<id>` for the composer on a Space's page
- *  — so text and files stay with the chat they were written in. App renders
- *  one unkeyed composer for every chat, so its state used to follow the user:
- *  a file attached in one chat went out with the next chat's send. Kept out
- *  here because moving between an empty chat, a chat with messages and a
- *  Space's page mounts a different composer. In memory only. */
+ *  — so text and files stay with the chat they were written in. The composer
+ *  remounts for each chat (App keys the chat view by session), so a draft
+ *  kept in component state would be lost on every switch — and before that
+ *  keying, one composer's state followed the user, sending a file attached in
+ *  one chat with the next chat's message. Kept out here, in memory only. */
 const drafts = new Map<string, { text: string; attachments: Attachment[] }>();
 
 /** The `composerInsertSeq` last applied. One composer is mounted at a time,
@@ -288,7 +290,7 @@ export function ChatInput({ centered = false }: ChatInputProps) {
   const snippets = useSnippetStore((s) => s.snippets);
   const argSources: ArgSources = useMemo(
     () => ({
-      model: models.map((m) => m.id),
+      model: modelArgValues(models),
       space: spaces.map((s) => s.name),
       snippet: snippets.map((s) => s.title),
     }),
@@ -316,13 +318,16 @@ export function ChatInput({ centered = false }: ChatInputProps) {
     !paletteDismissed && isCommandInput(text) && paletteEntries.length > 0;
 
   const mention = paletteOpen ? null : mentionAt(text, caret);
+  // Keyed on the query string, not the `mention` object, which is new on
+  // every keystroke.
+  const mentionQuery = mention?.query;
   const mentionEntries: MentionEntry[] = useMemo(() => {
-    if (!mention) return [];
+    if (mentionQuery === undefined) return [];
     const linked = new Set(chatSources.chips.map((c) => `${c.kind}:${c.id}`));
-    return matchMentions(mention.query, libraryItems, libraryDatasets, 12)
+    return matchMentions(mentionQuery, libraryItems, libraryDatasets, 12)
       .filter((e) => !linked.has(`${e.kind}:${e.id}`))
       .slice(0, 8);
-  }, [mention?.query, mention?.start, libraryItems, libraryDatasets, chatSources.chips]);
+  }, [mentionQuery, libraryItems, libraryDatasets, chatSources.chips]);
   const mentionOpen =
     !!mention && mentionEntries.length > 0 && mentionDismissedAt !== mention.start;
 
@@ -366,13 +371,21 @@ export function ChatInput({ centered = false }: ChatInputProps) {
     if (!isCommandInput(text) && paletteDismissed) setPaletteDismissed(false);
   }, [text, paletteDismissed]);
 
-  // Clamp the highlight when the entry list shrinks (e.g. the user typed
-  // another character and only one suggestion remains).
+  // Back to the top row whenever the text changes, like the mention list: a
+  // highlight left on row 2 of `/model ll` was still on row 2 once `llama3`
+  // was typed out — `llama3:70b` — and Enter swapped that in.
   useEffect(() => {
-    if (paletteIndex >= paletteEntries.length) {
-      setPaletteIndex(Math.max(0, paletteEntries.length - 1));
-    }
-  }, [paletteEntries.length, paletteIndex]);
+    setPaletteIndex(0);
+  }, [text]);
+
+  // Clamp the highlight when the entry list shrinks under unchanged text
+  // (the model list refreshing, say). An updater, not the rendered value:
+  // when typing shrinks the list, the reset above runs in the same commit,
+  // and clamping the stale index here overrode it.
+  useEffect(() => {
+    const last = Math.max(0, paletteEntries.length - 1);
+    setPaletteIndex((i) => Math.min(i, last));
+  }, [paletteEntries.length]);
 
   const acceptPaletteEntry = (entry: PaletteEntry) => {
     setText(entry.insertText);
@@ -470,15 +483,16 @@ export function ChatInput({ centered = false }: ChatInputProps) {
     // Private Chat covers this composer without unmounting it, and these
     // listeners are on the window — so a file dropped onto the overlay was
     // attached here, to the regular chat behind it, and saved (and read by
-    // the memory extractor) with that chat's next send. Refuse drops while
-    // it's open; the events stay cancelled, as before, so they never fall
-    // through to the webview's own file handling.
-    const privateChatOpen = () => usePrivateChatStore.getState().open;
+    // the memory extractor) with that chat's next send. The same went for a
+    // modal dialog (Settings, the snippet editor, Import) open over it.
+    // Refuse drops while either is; the events stay cancelled, as before, so
+    // they never fall through to the webview's own file handling.
+    const covered = () => usePrivateChatStore.getState().open || modalDialogOpen();
 
     const onDragEnter = (e: DragEvent) => {
       if (!hasFiles(e)) return;
       e.preventDefault();
-      if (privateChatOpen()) return;
+      if (covered()) return;
       depth += 1;
       if (depth === 1) setDragging(true);
     };
@@ -486,10 +500,10 @@ export function ChatInput({ centered = false }: ChatInputProps) {
       if (!hasFiles(e)) return;
       // Must preventDefault on dragover for the subsequent `drop` event to
       // fire. Setting the dropEffect here also changes the OS cursor to the
-      // "copy" affordance (or "not allowed" under Private Chat).
+      // "copy" affordance (or "not allowed" under Private Chat or a dialog).
       e.preventDefault();
       if (e.dataTransfer) {
-        e.dataTransfer.dropEffect = privateChatOpen() ? "none" : "copy";
+        e.dataTransfer.dropEffect = covered() ? "none" : "copy";
       }
     };
     const onDragLeave = (e: DragEvent) => {
@@ -502,7 +516,7 @@ export function ChatInput({ centered = false }: ChatInputProps) {
       e.preventDefault();
       depth = 0;
       setDragging(false);
-      if (privateChatOpen()) return;
+      if (covered()) return;
       const files = e.dataTransfer?.files;
       if (files && files.length) await ingest(Array.from(files));
     };
@@ -1538,6 +1552,8 @@ function PrimaryButton({
 // Paste stays enabled unconditionally — checking the clipboard requires an
 // async `readText()` and a permission round-trip, so an enabled item that
 // no-ops on empty clipboards is friendlier than a flicker of disabled state.
+// The key hints use the platform's modifier (⌘ on macOS), like the rest of
+// the app's shortcut labels.
 // ---------------------------------------------------------------------------
 
 interface TextareaContextMenuProps {
@@ -1589,28 +1605,28 @@ const TextareaContextMenu = React.forwardRef<HTMLDivElement, TextareaContextMenu
         <CtxItem
           icon={<Scissors className="h-4 w-4" />}
           label="Cut"
-          shortcut="Ctrl+X"
+          shortcut={formatShortcut({ mod: true, keys: ["x"] })}
           disabled={!hasSelection}
           onSelect={onCut}
         />
         <CtxItem
           icon={<ClipboardCopy className="h-4 w-4" />}
           label="Copy"
-          shortcut="Ctrl+C"
+          shortcut={formatShortcut({ mod: true, keys: ["c"] })}
           disabled={!hasSelection}
           onSelect={onCopy}
         />
         <CtxItem
           icon={<ClipboardPaste className="h-4 w-4" />}
           label="Paste"
-          shortcut="Ctrl+V"
+          shortcut={formatShortcut({ mod: true, keys: ["v"] })}
           onSelect={onPaste}
         />
         <div className="my-1 h-px bg-foreground/10" />
         <CtxItem
           icon={<TextCursorInput className="h-4 w-4" />}
           label="Select All"
-          shortcut="Ctrl+A"
+          shortcut={formatShortcut({ mod: true, keys: ["a"] })}
           disabled={!hasText}
           onSelect={onSelectAll}
         />

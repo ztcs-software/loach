@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use crate::db::library::ChunkRow;
+use crate::db::library::{ChunkRow, ChunkVector};
 use crate::db::Database;
 
 pub mod embed;
@@ -275,6 +275,42 @@ impl QueryCooldown {
     }
 }
 
+/// What [`fuse`] made of a search's keyword and vector rankings.
+#[derive(Debug)]
+struct Fused {
+    /// Chunk ids with their fused score, best first.
+    ranked: Vec<(i64, f32)>,
+    /// Whether the ranking by meaning contributed anything.
+    used_vectors: bool,
+    /// Vectors of another length than the query, left out.
+    stale: usize,
+}
+
+/// Fuse the keyword ranking (`keyword`, best first) with the [`CANDIDATES`]
+/// `vectors` closest to the query embedding `query`. Both are unit-length,
+/// so closeness is a dot product; equal ones rank by id, as in [`rrf`]. A
+/// zero vector points nowhere, so it ranks nowhere — and a zero or empty
+/// (not embedded) query ranks no vector at all. Vectors of another length
+/// than the query came from another build of the model and can't be
+/// compared: they're left out and counted as `stale`.
+fn fuse(keyword: Vec<i64>, query: &[f32], vectors: &[ChunkVector]) -> Fused {
+    let directed = |v: &[f32]| v.iter().any(|x| *x != 0.0);
+    let mut scored = Vec::new();
+    let mut stale = 0;
+    if directed(query) {
+        for (id, v) in vectors {
+            if v.len() != query.len() {
+                stale += 1;
+            } else if directed(v) {
+                scored.push((*id, dot(query, v)));
+            }
+        }
+    }
+    scored.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+    let semantic: Vec<i64> = scored.into_iter().take(CANDIDATES).map(|(id, _)| id).collect();
+    Fused { used_vectors: !semantic.is_empty(), ranked: rrf(&[keyword, semantic]), stale }
+}
+
 /// Search `args.docs` for excerpts relevant to `args.query`.
 pub async fn search(
     db: Arc<Database>,
@@ -297,12 +333,18 @@ pub async fn search(
     };
 
     let mut warning = None;
-    let mut semantic = Vec::new();
-    let mut used_vectors = false;
-    if let Some(cfg) = embed::EmbedConfig::from_db(&db) {
-        let key = cfg.model_key();
-        let (db2, scope2, k) = (db.clone(), scope.clone(), key.clone());
-        let (vectors, total, pending) = tokio::task::spawn_blocking(move || db2.rag_vectors(&scope2, &k))
+    // The query's embedding — left empty when the search goes by keyword
+    // alone, which ranks nothing by meaning (see `fuse`) — and the vectors in
+    // scope to compare it with.
+    let (mut query_vector, mut vectors, mut total) = (Vec::new(), Vec::new(), 0);
+    // A message that's only an attachment searches for "": the vectors
+    // closest to nothing are arbitrary, and OpenAI-compatible servers refuse
+    // empty input, so that's left to the overview below.
+    let cfg = if args.query.trim().is_empty() { None } else { embed::EmbedConfig::from_db(&db) };
+    if let Some(cfg) = cfg {
+        let (db2, scope2, key) = (db.clone(), scope.clone(), cfg.model_key());
+        let pending;
+        (vectors, total, pending) = tokio::task::spawn_blocking(move || db2.rag_vectors(&scope2, &key))
             .await
             .map_err(|e| e.to_string())?
             .map_err(|e| e.to_string())?;
@@ -324,7 +366,7 @@ pub async fn search(
         let status = indexer.status();
         let failing = status
             .error
-            .filter(|_| status.model.as_deref() == Some(key.as_str()))
+            .filter(|_| status.model == Some(cfg.model_label()))
             .or_else(|| indexer.query_cooldown.lock().active(&cfg, Instant::now()).map(str::to_string));
         if let Some(e) = failing {
             warning = Some(format!("Embedding model unavailable ({e}); searched by keyword only."));
@@ -332,26 +374,12 @@ pub async fn search(
             let result = embed::embed_query(http, &cfg, &args.query).await;
             indexer.query_cooldown.lock().record(&cfg, Instant::now(), result.as_ref().err());
             match result {
-                Ok(q) => {
-                    let mut scored: Vec<(i64, f32)> = vectors
-                        .iter()
-                        .filter(|(_, v)| v.len() == q.len())
-                        .map(|(id, v)| (*id, dot(&q, v)))
-                        .collect();
-                    // Vectors of another length came from a different model
-                    // under the same name (a re-pulled tag, a swapped
-                    // server): they can't be compared, so say how to fix it
-                    // rather than quietly searching by keyword.
-                    let stale = vectors.len() - scored.len();
-                    if stale > 0 {
-                        warning = Some(format!(
-                            "{stale} of {total} excerpts were embedded by a different version of the model — \
-                             rebuild the index in Settings → Library to search them by meaning."
-                        ));
-                    }
-                    scored.sort_by(|a, b| b.1.total_cmp(&a.1));
-                    semantic = scored.into_iter().take(CANDIDATES).map(|(id, _)| id).collect();
-                    used_vectors = !semantic.is_empty();
+                Ok(q) => query_vector = q,
+                // This query, not the model: too long for the server, say.
+                Err(e) if e.refused => {
+                    warning = Some(format!(
+                        "The embedding model turned this message down ({e}); searched by keyword only."
+                    ));
                 }
                 Err(e) => {
                     warning = Some(format!("Embedding model unavailable ({e}); searched by keyword only."));
@@ -360,8 +388,19 @@ pub async fn search(
         }
     }
 
-    let mut method = if used_vectors { "hybrid" } else { "keyword" };
-    let mut ranked = rrf(&[keyword, semantic]);
+    let fused = fuse(keyword, &query_vector, &vectors);
+    // Vectors of another length came from a different model under the same
+    // key (a re-pulled tag): they can't be compared, so say how to fix it
+    // rather than quietly searching by keyword.
+    if fused.stale > 0 {
+        warning = Some(format!(
+            "{} of {total} excerpts were embedded by a different version of the model — \
+             rebuild the index in Settings → Library to search them by meaning.",
+            fused.stale
+        ));
+    }
+    let mut method = if fused.used_vectors { "hybrid" } else { "keyword" };
+    let mut ranked = fused.ranked;
     if ranked.is_empty() {
         method = "overview";
         let (db2, scope2) = (db.clone(), scope.clone());
@@ -491,6 +530,49 @@ mod tests {
         let fused = rrf(&[vec![1, 2, 3], vec![3, 4]]);
         assert_eq!(fused[0].0, 3, "id ranked by both lists wins");
         assert_eq!(fused.len(), 4);
+    }
+
+    fn ids(f: &Fused) -> Vec<i64> {
+        f.ranked.iter().map(|r| r.0).collect()
+    }
+
+    #[test]
+    fn fusion_keeps_hits_only_one_ranking_found() {
+        // 10 has no vector, 12 no keyword match: both still rank, below the
+        // one both found.
+        let f = fuse(vec![10, 11], &[1.0, 0.0], &[(11, vec![1.0, 0.0]), (12, vec![0.6, 0.8])]);
+        assert_eq!(ids(&f), vec![11, 10, 12]);
+        assert!(f.used_vectors);
+        assert_eq!(f.stale, 0);
+    }
+
+    #[test]
+    fn fusion_breaks_ties_by_id() {
+        let f = fuse(vec![], &[1.0, 0.0], &[(7, vec![0.6, 0.8]), (3, vec![0.6, 0.8]), (5, vec![1.0, 0.0])]);
+        assert_eq!(ids(&f), vec![5, 3, 7]);
+        // The cut to the closest candidates too, whatever order rows came in.
+        let n = CANDIDATES as i64;
+        let same: Vec<ChunkVector> = (0..n + 5).rev().map(|id| (id, vec![1.0, 0.0])).collect();
+        assert_eq!(ids(&fuse(vec![], &[1.0, 0.0], &same)), (0..n).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn fusion_leaves_out_vectors_it_cant_compare() {
+        // Another length: another build of the model, counted as stale.
+        let f = fuse(vec![], &[1.0, 0.0], &[(1, vec![1.0, 0.0, 0.0]), (2, vec![0.0, 1.0])]);
+        assert_eq!((ids(&f), f.stale), (vec![2], 1));
+        let f = fuse(vec![9], &[1.0, 0.0], &[(1, vec![1.0, 0.0, 0.0])]);
+        assert_eq!((ids(&f), f.used_vectors, f.stale), (vec![9], false, 1));
+        // A zero vector has no direction to be close to.
+        let f = fuse(vec![], &[1.0, 0.0], &[(1, vec![0.0, 0.0]), (2, vec![-1.0, 0.0])]);
+        assert_eq!(ids(&f), vec![2]);
+        // Regression: a query embedding with no direction made every chunk
+        // equally "close", fusing in arbitrary ones. With none, or no query
+        // embedding at all, the keyword ranking stands alone.
+        for q in [&[0.0, 0.0][..], &[]] {
+            let f = fuse(vec![4], q, &[(1, vec![1.0, 0.0]), (2, vec![1.0, 0.0, 0.0])]);
+            assert_eq!((ids(&f), f.used_vectors, f.stale), (vec![4], false, 0));
+        }
     }
 
     // Regression: a fully embedded index publishes no error, so with the

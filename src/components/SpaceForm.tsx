@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
+import { useConfirm } from "@/components/ConfirmDialog";
 import { Field } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -14,6 +15,7 @@ import { useSpaceStore } from "@/stores/spaceStore";
 import { dialogEnter } from "@/lib/shortcuts";
 
 export function SpaceForm() {
+  const { confirm } = useConfirm();
   const open = useSpaceStore((s) => s.spaceFormOpen);
   const setOpen = useSpaceStore((s) => s.setSpaceFormOpen);
   const doCreate = useSpaceStore((s) => s.createSpace);
@@ -30,7 +32,21 @@ export function SpaceForm() {
     setError(null);
   };
 
-  const handleCancel = () => {
+  // Escape, the backdrop, ✕ and Cancel all come through here, so none of them
+  // can throw typed text away without asking.
+  const handleCancel = async () => {
+    if (
+      (name.trim() || description.trim()) &&
+      !(await confirm({
+        title: "Discard unsaved changes?",
+        body: "This Space hasn't been created yet.",
+        confirmLabel: "Discard",
+        cancelLabel: "Keep editing",
+        destructive: true,
+      }))
+    ) {
+      return;
+    }
     setOpen(false);
     reset();
   };
@@ -57,7 +73,7 @@ export function SpaceForm() {
   };
 
   return (
-    <Dialog open={open} onOpenChange={(o) => (o ? setOpen(true) : handleCancel())}>
+    <Dialog open={open} onOpenChange={(o) => (o ? setOpen(true) : void handleCancel())}>
       <DialogContent className="max-w-lg">
         <DialogHeader>
           <DialogTitle>New Space</DialogTitle>
@@ -94,7 +110,7 @@ export function SpaceForm() {
         <div className="mt-3 flex items-center justify-end gap-2">
           <Button
             variant="outline"
-            onClick={handleCancel}
+            onClick={() => void handleCancel()}
             className="rounded-lg"
           >
             Cancel

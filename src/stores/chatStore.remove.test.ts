@@ -20,6 +20,7 @@ import type { Message, Session } from "@/types";
 const mocks = vi.hoisted(() => ({
   deleteSession: vi.fn((_id: string) => Promise.resolve()),
   listMessages: vi.fn((_id: string) => Promise.resolve([] as Message[])),
+  dropMemoryTurns: vi.fn((_id: string) => undefined),
 }));
 
 vi.mock("@/lib/tauri", async (importOriginal) => {
@@ -29,6 +30,11 @@ vi.mock("@/lib/tauri", async (importOriginal) => {
     deleteSession: mocks.deleteSession,
     listMessages: mocks.listMessages,
   };
+});
+
+vi.mock("@/lib/memory", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/memory")>();
+  return { ...actual, dropMemoryTurns: mocks.dropMemoryTurns };
 });
 
 import { useChatStore } from "./chatStore";
@@ -59,6 +65,7 @@ function session(id: string, updatedAt: number, archived = false): Session {
 beforeEach(() => {
   mocks.deleteSession.mockClear();
   mocks.listMessages.mockClear();
+  mocks.dropMemoryTurns.mockClear();
   useChatStore.setState({
     sessions: [],
     folders: [],
@@ -127,6 +134,41 @@ describe("chatStore remove", () => {
     await get().remove("doomed");
 
     expect(get().activeSessionId).toBeNull();
+    expect(mocks.listMessages).not.toHaveBeenCalled();
+  });
+});
+
+describe("chatStore removeAllArchived", () => {
+  // It skipped what `remove` does for one chat, so a deleted chat's unread
+  // dot, parked memory turns and queued reply outlived it.
+  it("cleans up after every archived chat the way remove does", async () => {
+    const waiting = { id: "t1", sessionId: "old" } as never;
+    useChatStore.setState({
+      sessions: [session("old", 100, true), session("live", 200)],
+      activeSessionId: "live",
+      messages: { old: [], live: [] },
+      unread: { old: true, live: true },
+      queue: [waiting],
+    });
+
+    await get().removeAllArchived();
+
+    expect(get().sessions.map((s) => s.id)).toEqual(["live"]);
+    expect(get().unread).toEqual({ live: true });
+    expect(get().queue).toEqual([]);
+    expect(mocks.dropMemoryTurns).toHaveBeenCalledWith("old");
+  });
+});
+
+describe("chatStore selectSession", () => {
+  // An approval toast's "Open" can outlive its chat; selecting the dead id
+  // made the next send throw on the missing session.
+  it("ignores a chat that no longer exists", async () => {
+    useChatStore.setState({ sessions: [session("live", 200)], activeSessionId: "live" });
+
+    await get().selectSession("deleted");
+
+    expect(get().activeSessionId).toBe("live");
     expect(mocks.listMessages).not.toHaveBeenCalled();
   });
 });

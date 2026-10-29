@@ -84,10 +84,17 @@ impl EmbedConfig {
         Some(Self { provider: provider.to_string(), model, base_url })
     }
 
-    /// What `rag_chunks.embed_model` records, so switching provider or model
-    /// marks every existing vector stale.
-    pub fn model_key(&self) -> String {
+    /// `provider:model`, as the index status names the model.
+    pub fn model_label(&self) -> String {
         format!("{}:{}", self.provider, self.model)
+    }
+
+    /// What `rag_chunks.embed_model` records, so switching provider, model
+    /// or server marks every existing vector stale: the same tag on another
+    /// server can be another build of the model, with vectors of the same
+    /// length that don't compare.
+    pub fn model_key(&self) -> String {
+        format!("{}@{}", self.model_label(), self.base_url.trim_end_matches('/'))
     }
 }
 
@@ -255,7 +262,18 @@ mod tests {
         // EmbeddingGemma 2 kept the first one's prompts.
         assert_eq!(document_input(&cfg("embeddinggemma-2:270m"), "", "x"), "title: none | text: x");
         assert_eq!(document_input(&cfg("bge-m3"), "T", "x"), "T\n\nx");
-        assert_eq!(cfg("bge-m3").model_key(), "ollama:bge-m3");
+    }
+
+    // Regression: the key left out the server, so pointing the same tag at
+    // another server (another build of the model) mixed old and new vectors.
+    #[test]
+    fn the_index_key_names_the_server() {
+        let at = |url: &str| EmbedConfig { base_url: url.into(), ..cfg("bge-m3") };
+        assert_eq!(at("http://localhost:11434").model_key(), "ollama:bge-m3@http://localhost:11434");
+        assert_ne!(at("http://localhost:11434").model_key(), at("http://lan:11434").model_key());
+        // A trailing slash is the same server.
+        assert_eq!(at("http://lan:11434/").model_key(), at("http://lan:11434").model_key());
+        assert_eq!(at("http://lan:11434").model_label(), "ollama:bge-m3");
     }
 
     #[test]

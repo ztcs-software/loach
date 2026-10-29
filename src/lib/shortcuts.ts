@@ -65,7 +65,7 @@ export const SHORTCUTS: ShortcutSpec[] = [
   // Navigation
   {
     action: "global-search",
-    label: "Search chats, Spaces, snippets",
+    label: "Search chats, messages, Spaces, snippets, Library",
     group: "Navigation",
     mod: true,
     keys: ["k"],
@@ -172,23 +172,51 @@ export function dialogEnter(
   return true;
 }
 
+/** The Latin key at this key's position: `KeyK` → "k", `Digit7` → "7",
+ *  `Slash` → "/". */
+function keyFromCode(code: string): string | null {
+  const m = /^(?:Key([A-Z])|Digit(\d))$/.exec(code);
+  if (m) return (m[1] ?? m[2]).toLowerCase();
+  return code === "Slash" ? "/" : null;
+}
+
 /** Does this keyboard event match the spec? `mod` is `primaryMod`. Strict on
- *  Shift (must match exactly) so Ctrl+S and Ctrl+Shift+S don't collide.
- *  Strict on Alt/Option (must not be pressed) so Ctrl+Alt+K doesn't
- *  accidentally trigger Ctrl+K. */
+ *  Shift (must match exactly) so Ctrl+S and Ctrl+Shift+S don't collide —
+ *  except on a punctuation key, whose character may itself need Shift: `/`
+ *  is Shift+7 on German and Nordic layouts, Shift+: on French. Strict on
+ *  Alt/Option (must not be pressed) so Ctrl+Alt+K doesn't accidentally
+ *  trigger Ctrl+K.
+ *
+ *  A layout without Latin letters (Cyrillic, Greek) reports its own
+ *  character in `e.key`, so a non-ASCII key falls back to the key's position
+ *  in `e.code` — the key the shortcut labels name. */
 export function matches(spec: ShortcutSpec, e: KeyboardEvent): boolean {
   const mod = primaryMod(e);
   if (spec.mod !== mod) return false;
-  if (!!spec.shift !== e.shiftKey) return false;
   if (e.altKey) return false;
-  const k = e.key.toLowerCase();
-  return spec.keys.some((target) => target.toLowerCase() === k);
+  let k = e.key.toLowerCase();
+  if (e.key.length === 1 && e.key.charCodeAt(0) > 0x7f) k = keyFromCode(e.code) ?? k;
+  if (!spec.keys.some((target) => target.toLowerCase() === k)) return false;
+  const punctuation = k.length === 1 && !/[a-z0-9]/.test(k);
+  return spec.shift ? e.shiftKey : !e.shiftKey || punctuation;
+}
+
+/** Is a modal dialog open? Radix dialogs mark their content `role="dialog"`
+ *  with `data-state="open"`; the hand-rolled overlays (the Ctrl/Cmd+K
+ *  palette, Private Chat, onboarding) set `aria-modal`. The context-usage
+ *  popover is a `role="dialog"` with neither, and doesn't block the app. */
+export function modalDialogOpen(): boolean {
+  return !!document.querySelector(
+    '[role="dialog"][data-state="open"], [role="dialog"][aria-modal="true"]',
+  );
 }
 
 /** Renders a spec as a human-readable label, e.g. "⌘K" on macOS or
  *  "Ctrl K" on Windows/Linux. Used by both the title bar pill and the
  *  shortcut-list dialog. */
-export function formatShortcut(spec: ShortcutSpec): string {
+export function formatShortcut(
+  spec: Pick<ShortcutSpec, "mod" | "shift" | "keys">,
+): string {
   const parts: string[] = [];
   if (spec.mod) parts.push(IS_MAC ? "⌘" : "Ctrl");
   if (spec.shift) parts.push(IS_MAC ? "⇧" : "Shift");

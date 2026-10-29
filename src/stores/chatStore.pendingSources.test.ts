@@ -111,10 +111,16 @@ describe("sources picked before the chat exists", () => {
     useSpaceStore.setState({ spaces: [{ id: "space-B", name: "B" }] as never });
     pick("for-A", "space-A");
 
-    // Sent from Space B's page: the picks for A are dropped, not attached.
+    // Sent from Space B's page: the picks for A aren't attached — and stay
+    // parked for A's page rather than being thrown away.
     useSpaceStore.setState({ viewingSpaceId: "space-B", activeSpaceId: "space-B" });
     await get().sendUserMessage("hello", []);
     expect(calls.linked).toEqual([]);
+    expect(useLibraryStore.getState().pending).toEqual({
+      itemIds: ["for-A"],
+      datasetIds: [],
+      spaceId: "space-A",
+    });
 
     // Picked and sent on the same page: attached.
     useChatStore.setState({ activeSessionId: null });

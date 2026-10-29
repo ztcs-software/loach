@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Check, Copy, Download, RotateCw, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -13,7 +13,7 @@ import {
 } from "@/stores/canvasStore";
 import { useChatStore } from "@/stores/chatStore";
 import { useToastStore } from "@/stores/toastStore";
-import { lastCodeBlock } from "@/lib/codeBlocks";
+import { codeBlocks } from "@/lib/codeBlocks";
 import { openInVscode } from "@/lib/tauri";
 import { saveCodeToFile, defaultFilename } from "@/lib/codeExport";
 import { cn } from "@/lib/utils";
@@ -64,14 +64,14 @@ export function CodeCanvas() {
   // Bumped by the preview's Reload button to remount the frame.
   const [reloadNonce, setReloadNonce] = useState(0);
 
-  // When bound to a live message, re-extract its last fenced block so the
-  // canvas tracks the streaming code — verbatim, since code is never
-  // TeX-rewritten. Falls back to the snapshot the canvas was opened with
-  // (attachments, completed blocks, or a deleted source).
+  // When bound to a live message, re-extract the bound block so the canvas
+  // tracks the streaming code — verbatim, since code is never TeX-rewritten.
+  // Falls back to the snapshot the canvas was opened with (attachments,
+  // completed blocks, or a deleted source).
   const live = useMemo(
     () =>
       binding && liveContent != null
-        ? lastCodeBlock(liveContent)
+        ? (codeBlocks(liveContent)[binding.blockIndex] ?? null)
         : null,
     [binding, liveContent],
   );
@@ -88,6 +88,15 @@ export function CodeCanvas() {
     const last = msgs && msgs.length > 0 ? msgs[msgs.length - 1] : null;
     return !!last && last.id === binding.messageId;
   });
+
+  // Once the reply has finished the block is final: keep it as a snapshot.
+  // A binding left live went on following the message after it was done.
+  const freeze = useCanvasStore((s) => s.freeze);
+  useEffect(() => {
+    if (binding && !bindingStreaming) {
+      freeze(live ? live.code : code, live ? live.language : language);
+    }
+  }, [binding, bindingStreaming, live, code, language, freeze]);
 
   if (!isOpen) return null;
 

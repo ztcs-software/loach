@@ -24,7 +24,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
 import { logger } from "@/lib/logger";
-import { primaryMod } from "@/lib/shortcuts";
+import { matches, modalDialogOpen, SHORTCUTS } from "@/lib/shortcuts";
 import { searchMessages } from "@/lib/tauri";
 import { useChatStore } from "@/stores/chatStore";
 import { useLibraryStore } from "@/stores/libraryStore";
@@ -32,9 +32,9 @@ import { useModelsStore } from "@/stores/modelsStore";
 import { usePrivateChatStore } from "@/stores/privateChatStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useSnippetStore } from "@/stores/snippetStore";
+import { useSecurityStore } from "@/stores/securityStore";
 import { useUIStore } from "@/stores/uiStore";
 import { domainOf, mixLabel, typeLabel } from "@/components/library/libraryUi";
-import { modalDialogOpen } from "@/components/KeyboardShortcuts";
 import { expandAndPrimeSnippet } from "@/lib/runSnippet";
 import type {
   LibraryDataset,
@@ -200,6 +200,33 @@ function followActive(
   return at >= 0 ? at : 0;
 }
 
+/** Cut the name matches down to `room` by sharing it out between their kinds,
+ *  a slot each in turn, rather than first come first served: chats are listed
+ *  first, and a query matching many of them pushed every Library hit off the
+ *  end — and this is the Library's only search. A kind with fewer matches
+ *  than its share leaves the rest to the others. Each kind keeps its order,
+ *  and the kinds keep theirs. */
+function shareRoom<T extends Pick<Result, "kind">>(results: readonly T[], room: number): T[] {
+  const byKind = new Map<ResultKind, T[]>();
+  for (const r of results) {
+    const list = byKind.get(r.kind);
+    if (list) list.push(r);
+    else byKind.set(r.kind, [r]);
+  }
+  const taken = new Map<ResultKind, number>();
+  let left = Math.min(room, results.length);
+  while (left > 0) {
+    for (const [kind, list] of byKind) {
+      const n = taken.get(kind) ?? 0;
+      if (left > 0 && n < list.length) {
+        taken.set(kind, n + 1);
+        left -= 1;
+      }
+    }
+  }
+  return [...byKind].flatMap(([kind, list]) => list.slice(0, taken.get(kind) ?? 0));
+}
+
 const MAX_RESULTS = 20;
 
 /** How many transcript hits the backend is asked for, and how many slots the
@@ -269,6 +296,11 @@ export function SearchBar() {
       // regular app behind it — including surfacing persisted chat titles,
       // which is exactly what the TitleBar's disabled search pill prevents.
       if (usePrivateChatStore.getState().open) return;
+      // Nor before the security probe has said whether the app is locked:
+      // App shows only its background until then, and the palette opened on
+      // top of it, chat titles and all.
+      const sec = useSecurityStore.getState();
+      if (!sec.hydrated || (sec.status.configured && !sec.unlocked)) return;
       // Nor over another dialog (Settings, a confirm): the palette's
       // navigation would land behind it. Pressing it again with the palette
       // already open still just refocuses the input.
@@ -296,8 +328,11 @@ export function SearchBar() {
         inputRef.current?.select();
       }, 0);
     };
+    // Through `matches`, like every other shortcut, so it works on layouts
+    // without Latin letters too.
+    const spec = SHORTCUTS.find((s) => s.action === "global-search")!;
     const onKey = (e: KeyboardEvent) => {
-      if (primaryMod(e) && e.key.toLowerCase() === "k") {
+      if (matches(spec, e)) {
         e.preventDefault();
         focus();
       }
@@ -502,7 +537,7 @@ export function SearchBar() {
       : [];
 
     return [
-      ...matches.slice(0, MAX_RESULTS - Math.min(messages.length, messageRoom)),
+      ...shareRoom(matches, MAX_RESULTS - Math.min(messages.length, messageRoom)),
       ...messages.slice(0, messageRoom),
     ];
   }, [terms, scope, sessions, spaces, snippets, libraryItems, datasets, recentSessionIds, messageHits]);
@@ -963,4 +998,4 @@ function ResultIcon({ kind }: { kind: ResultKind }) {
   return <SquareTerminal className={cls} />;
 }
 
-export const __testing = { parseQuery, followActive };
+export const __testing = { parseQuery, followActive, shareRoom };

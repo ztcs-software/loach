@@ -10,6 +10,7 @@ import {
 } from "@/lib/files";
 import { cancelMemoryExtraction } from "@/lib/memory";
 import { getPersona } from "@/lib/personas";
+import { formatProviderError } from "@/lib/providerErrors";
 import { getTone } from "@/lib/tones";
 import { useModelsStore } from "./modelsStore";
 import { useSettingsStore } from "./settingsStore";
@@ -151,9 +152,9 @@ function composeSystemPrompt(args: {
 //   - `pcReset` clears the pending frame AND the buffer — every teardown and
 //     `wipe()` calls it so a stale rAF can never write into a torn-down (or
 //     wiped) overlay, which would otherwise resurrect private content.
-/** Monotonic token identifying the newest send. Bumped on each `send` and
- *  on `wipe`, so a stream still resolving its connect can tell whether the
- *  overlay it belongs to is still the current one. */
+/** Monotonic token identifying the newest send. Bumped on each `send`, on
+ *  `cancel` and on `wipe`, so a stream — its events, and its handle when the
+ *  connect resolves — can tell whether it still belongs to the overlay. */
 let pcSendToken = 0;
 let pcPendingFrame: number | null = null;
 let pcBuffer:
@@ -297,11 +298,15 @@ export const usePrivateChatStore = create<PrivateChatState>((set, get) => ({
 
     // Ollama is the only provider Private Chat talks to, so the Ollama-only
     // layers (Thinking default, Modelfile defaults, Low-VRAM pin) always apply.
+    const models = useModelsStore.getState();
     const params = effectivePrivateParams(
       state.params,
-      useModelsStore.getState().modelDefaults[state.model],
+      models.modelDefaults[state.model],
       settings,
     );
+    // As in a regular chat (`chatStore.readSessionParams`): `think` only for
+    // a model that lists the capability — any other answers it with a 400.
+    if (!models.modelCapabilities[state.model]?.includes("thinking")) delete params.think;
 
     // Update helper that mutates only the assistant placeholder. Identity
     // stability matters less here than in the main chat (no global runner,
@@ -317,7 +322,13 @@ export const usePrivateChatStore = create<PrivateChatState>((set, get) => ({
     };
 
     const myToken = ++pcSendToken;
+    // Set once this stream has ended, so a handle that arrives afterwards
+    // isn't installed as if it were still running.
+    let ended = false;
+    const friendly = (raw: string) =>
+      formatProviderError({ provider: "ollama", baseUrl, raw });
     const teardown = () => {
+      ended = true;
       // Drop any pending flush + buffer so a stale rAF can't write into the
       // torn-down overlay. Callers flush first when the final frame matters.
       pcReset();
@@ -352,8 +363,16 @@ export const usePrivateChatStore = create<PrivateChatState>((set, get) => ({
           // breaking the "nothing leaves this box" promise the overlay
           // makes. See `commands::chat_stream`.
           private: true,
+          // The built-in tools too: the overlay has nowhere to show a call,
+          // its result or a file one makes, so the model would use them
+          // unseen — and announce a PDF that never appears.
+          no_tools: true,
         },
         (ev) => {
+          // Only this send's own stream writes here. After a cancel, a wipe
+          // or a newer send, its late events would land in the buffer —
+          // and the conversation — of whatever came next.
+          if (pcSendToken !== myToken) return;
           if (ev.kind === "token") {
             if (pcBuffer) {
               pcBuffer.content += ev.delta;
@@ -380,7 +399,7 @@ export const usePrivateChatStore = create<PrivateChatState>((set, get) => ({
             // Fold the notice into the buffered content and flush once so the
             // partial reply + error land together before teardown.
             if (pcBuffer) {
-              pcBuffer.content += `\n\n_⚠ ${ev.message}_`;
+              pcBuffer.content += `\n\n_⚠ ${friendly(ev.message)}_`;
               pcBuffer.contentDirty = true;
             }
             pcFlush();
@@ -393,13 +412,16 @@ export const usePrivateChatStore = create<PrivateChatState>((set, get) => ({
           }
         },
       );
-      // Only adopt the handle if this send still owns the overlay. `wipe()`
-      // reads `activeStream`, which is still null for the whole duration of
-      // the `await` above — so a close landing in that window couldn't stop
-      // this run, and installing the handle afterwards parked a live stream
-      // on a closed overlay. Same guard `chatStore` applies to its own
+      // Only adopt the handle if this send still owns the overlay and its
+      // stream is still running. `wipe()` and `cancel()` read `activeStream`,
+      // which is still null for the whole duration of the `await` above — so
+      // a close or Stop landing in that window couldn't stop this run, and
+      // installing the handle afterwards parked a live stream on a closed
+      // overlay. A stream that already ended in that window (a fast error)
+      // has been torn down; installed, its handle would sit there stale with
+      // its listener attached. Same guard `chatStore` applies to its own
       // connect window.
-      if (pcSendToken !== myToken) {
+      if (pcSendToken !== myToken || ended) {
         try {
           handle.unlisten();
         } catch {
@@ -410,30 +432,38 @@ export const usePrivateChatStore = create<PrivateChatState>((set, get) => ({
       }
       set({ activeStream: { stop: handle.stop, unlisten: handle.unlisten } });
     } catch (e) {
+      // Retired meanwhile: the overlay may hold a newer send by now.
+      if (pcSendToken !== myToken) return;
       const detail = e instanceof Error ? e.message : String(e);
       logger.error("private chat stream failed", e);
-      patchAssistant(() => ({ content: `_⚠ ${detail}_` }));
+      patchAssistant(() => ({ content: `_⚠ ${friendly(detail)}_` }));
       teardown();
     }
   },
 
   cancel: async () => {
     const stream = get().activeStream;
-    if (!stream) return;
+    // No handle yet while the stream connects, but a Stop then must still
+    // work: retiring the send makes `send` stop the stream once its handle
+    // arrives, and drops its events from here on.
+    if (!stream && !get().isStreaming) return;
+    pcSendToken++;
     // Land any buffered tokens so the partial reply stays visible, then drop
-    // the buffer — this path unlistens, so the stream's own Cancelled event
-    // never re-enters the handler to flush for us.
+    // the buffer — this send's handler ignores the stream from here on, so
+    // its own Cancelled event never flushes for us.
     pcFlush();
     pcReset();
-    try {
-      stream.unlisten();
-    } catch {
-      /* ignore */
-    }
-    try {
-      await stream.stop();
-    } catch (e) {
-      logger.error("private chat cancel failed", e);
+    if (stream) {
+      try {
+        stream.unlisten();
+      } catch {
+        /* ignore */
+      }
+      try {
+        await stream.stop();
+      } catch (e) {
+        logger.error("private chat cancel failed", e);
+      }
     }
     set({
       activeStream: null,

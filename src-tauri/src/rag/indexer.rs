@@ -33,8 +33,9 @@ const RETRY_AFTER: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Serialize, Clone, Default)]
 pub struct IndexStatus {
-    /// Model key (`provider:model`) chunks are embedded with; `None` when no
-    /// embedding model is configured and the index is keyword-only.
+    /// Model (`provider:model`, see [`EmbedConfig::model_label`]) chunks are
+    /// embedded with; `None` when no embedding model is configured and the
+    /// index is keyword-only.
     pub model: Option<String>,
     pub total: i64,
     pub embedded: i64,
@@ -133,10 +134,11 @@ impl Indexer {
                 self.publish(app, IndexStatus { model: None, total, embedded, busy: false, error: None });
                 return Outcome::Idle;
             };
-            let key = cfg.model_key();
+            let (key, label) = (cfg.model_key(), cfg.model_label());
             // Chunks are set aside for what one server made of them, so new
-            // settings give them another try — a new model does anyway, but
-            // the same model on another server keeps its vectors.
+            // settings give them another try. New settings mostly mean a new
+            // key, under which every chunk is pending anyway; this covers
+            // settings that come back to an earlier key.
             if last.replace(cfg.clone()).is_some_and(|was| was != cfg) {
                 let (d, k) = (db.clone(), key.clone());
                 if let Err(e) = blocking(move || d.retry_skipped_rag_chunks(&k)).await {
@@ -145,11 +147,11 @@ impl Indexer {
                 continue;
             }
             if pending.is_empty() {
-                self.publish(app, IndexStatus { model: Some(key), total, embedded, busy: false, error: None });
+                self.publish(app, IndexStatus { model: Some(label), total, embedded, busy: false, error: None });
                 return Outcome::Idle;
             }
 
-            self.publish(app, IndexStatus { model: Some(key.clone()), total, embedded, busy: true, error: None });
+            self.publish(app, IndexStatus { model: Some(label.clone()), total, embedded, busy: true, error: None });
             let inputs: Vec<String> = pending
                 .iter()
                 .map(|c| embed::document_input(&cfg, &c.title, &c.text))
@@ -179,7 +181,7 @@ impl Indexer {
                 tracing::warn!("{key} couldn't embed {} chunk(s) on their own, left keyword-only", done.set_aside.len());
             }
             let Isolated { rows, set_aside, failure } = done;
-            let (d, k) = (db.clone(), key.clone());
+            let (d, k) = (db.clone(), key);
             let stored = blocking(move || {
                 d.store_rag_embeddings(&k, &rows)?;
                 d.skip_rag_chunks(&k, &set_aside)
@@ -188,10 +190,10 @@ impl Indexer {
             if let Err(e) = stored {
                 // Without a pause the same batch would be re-embedded at once,
                 // over and over.
-                return self.fail(app, key, total, embedded, format!("couldn't save embeddings: {e}"));
+                return self.fail(app, label, total, embedded, format!("couldn't save embeddings: {e}"));
             }
             if let Some(e) = failure {
-                return self.fail(app, key, total, embedded, e);
+                return self.fail(app, label, total, embedded, e);
             }
         }
     }
@@ -230,9 +232,9 @@ impl Indexer {
         out
     }
 
-    fn fail(&self, app: &AppHandle, key: String, total: i64, embedded: i64, error: String) -> Outcome {
-        tracing::warn!("embedding with {key} failed: {error}");
-        self.publish(app, IndexStatus { model: Some(key), total, embedded, busy: false, error: Some(error) });
+    fn fail(&self, app: &AppHandle, label: String, total: i64, embedded: i64, error: String) -> Outcome {
+        tracing::warn!("embedding with {label} failed: {error}");
+        self.publish(app, IndexStatus { model: Some(label), total, embedded, busy: false, error: Some(error) });
         Outcome::Retry
     }
 }

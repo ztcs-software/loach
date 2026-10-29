@@ -142,6 +142,15 @@ interface MemoryOps {
   remove: (id: string) => Promise<boolean>;
 }
 
+/** Whether `scope` still has memory switched on — its Space's toggle, or
+ *  the global setting. The chat store checks it when a reply ends; a run
+ *  reads it again when it starts and before it writes, since the user can
+ *  switch memory off while a turn waits or the model reads it. */
+function rememberingIn(scope: MemoryScope): boolean {
+  if (scope.kind === "global") return useSettingsStore.getState().global_memory_enabled;
+  return !!useSpaceStore.getState().spaces.find((s) => s.id === scope.spaceId)?.memory_enabled;
+}
+
 function opsFor(scope: MemoryScope): MemoryOps {
   if (scope.kind === "global") {
     const s = () => useGlobalMemoryStore.getState();
@@ -230,7 +239,7 @@ export async function extractMemories(): Promise<void> {
  */
 async function extractRun(run: PendingRun, epoch: number): Promise<void> {
   const { scope, sessionId, provider, model, baseUrl } = run;
-  if (!model) return;
+  if (!model || !rememberingIn(scope)) return;
 
   const ops = opsFor(scope);
   // Pull the latest cached memories — a stale cache would cause us to
@@ -318,6 +327,9 @@ async function extractRun(run: PendingRun, epoch: number): Promise<void> {
 
   const parsed = parseExtractionJson(raw);
   if (!parsed) return;
+  // Memory switched off while the model read the turns: nothing from them
+  // may be added, rewritten or removed.
+  if (!rememberingIn(scope)) return;
 
   const byNumber = (n: number): MemoryRow | undefined => editable[n - 1];
   const latestMessageId = turns[turns.length - 1].assistantMessageId;
@@ -456,15 +468,16 @@ async function runOneShotStream(
     // This run's own stop handle. Kept separately from the module-global
     // `memoryStopFn` so cleanup can tell "my handle" from "a newer run's".
     let stopFn: (() => Promise<unknown>) | null = null;
-    // `timedOut` covers the race where `startChatStream`'s setup takes
-    // longer than the wall-clock budget: the timer fires first, but
-    // `unlistenFn` is still null because the `.then` hasn't run. Without
-    // this flag we'd silently leak the listener once the .then finally
-    // installs it. We also use it to short-circuit the .then so we don't
-    // hand a now-useless handle back into the world.
-    let timedOut = false;
+    // `settled` covers the races where the run ends before
+    // `startChatStream` resolves: the timer fires first, or the stream's own
+    // done / error / cancelled arrives first — either way `unlistenFn` is
+    // still null because the `.then` hasn't run. Without this flag the
+    // `.then` installed the listener and the module-global stop handle of a
+    // run that was already over, and nothing would ever remove them.
+    let settled = false;
 
     const cleanup = () => {
+      settled = true;
       try {
         unlistenFn?.();
       } catch {
@@ -482,7 +495,6 @@ async function runOneShotStream(
     // Hard ceiling on extractor wall-clock. If a model goes off the rails
     // and never emits `done`, we'd otherwise leak a listener.
     const timeoutId = window.setTimeout(() => {
-      timedOut = true;
       // Stop the backend generation, don't just drop the listener: the model
       // would otherwise keep burning a generation slot with nobody reading
       // it, competing with the user's next visible turn — and since cleanup
@@ -523,7 +535,10 @@ async function runOneShotStream(
         } else if (ev.kind === "done") {
           window.clearTimeout(timeoutId);
           cleanup();
-          resolve(buffer);
+          // A send that landed while the stream connected had no stop handle
+          // to call, so this run may have finished anyway: its output is
+          // still never used.
+          resolve(epoch === cancelEpoch ? buffer : null);
         } else if (ev.kind === "error") {
           window.clearTimeout(timeoutId);
           cleanup();
@@ -539,19 +554,20 @@ async function runOneShotStream(
       },
     )
       .then((handle) => {
-        // The timer may have already fired and rejected the promise. If
-        // it has, the handle's unlisten is the only thing keeping the
+        // The run may already be over — timed out, or its stream ended. If
+        // it is, the handle's unlisten is the only thing keeping the
         // Rust-side event listener alive — call it immediately rather
         // than stashing it.
-        if (timedOut) {
+        if (settled) {
           try {
             handle.unlisten();
           } catch {
             /* ignore */
           }
-          // Stop the generation too — the timer already gave up on reading
-          // it, so leaving it running would strand the model exactly as the
-          // timeout path above describes.
+          // Stop the generation too — after a timeout nobody reads it any
+          // more, so leaving it running would strand the model exactly as
+          // the timeout path above describes. (A stream that ended on its
+          // own just ignores the stop.)
           void handle.stop().catch(() => {});
           return;
         }

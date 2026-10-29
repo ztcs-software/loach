@@ -20,6 +20,7 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Manager,
 };
+#[cfg(not(target_os = "linux"))]
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 
 use crate::db::Database;
@@ -40,6 +41,28 @@ fn fatal_setup_error(app: &tauri::AppHandle, what: &str, err: impl std::fmt::Dis
     // the dialog can't be shown (very headless CI, broken display) this
     // returns immediately — we still exit afterwards so the app doesn't
     // limp on with broken state.
+    //
+    // Not on Linux: `setup` runs inside tao's event loop, which holds GLib's
+    // default main context for as long as it runs, and rfd's GTK dialog is
+    // created from an idle callback on that context — so with this thread
+    // blocked waiting for it (here, or on any other thread we joined) it never
+    // appeared and the window hung blank. `gtk_dialog_run` spins a nested
+    // loop on this thread instead, which owns the context.
+    #[cfg(target_os = "linux")]
+    {
+        use gtk::prelude::*;
+        let _ = app; // the plugin's dialog is the one path that needs it
+        let dialog = gtk::MessageDialog::new(
+            None::<&gtk::Window>,
+            gtk::DialogFlags::MODAL,
+            gtk::MessageType::Error,
+            gtk::ButtonsType::Ok,
+            &body,
+        );
+        dialog.set_title("Loach failed to start");
+        dialog.run();
+    }
+    #[cfg(not(target_os = "linux"))]
     let _ = app
         .dialog()
         .message(&body)
@@ -91,6 +114,18 @@ pub fn run() {
         .init();
 
     tauri::Builder::default()
+        // First, as the plugin requires. A second launch (Start menu while
+        // hidden to the tray, a desktop file, a double click on the app)
+        // brings the running window back and exits, instead of a second
+        // process sharing loach.db, running its own indexer and MCP servers,
+        // and overwriting edits made in the other window.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.show();
+                let _ = w.unminimize();
+                let _ = w.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
@@ -301,14 +336,23 @@ pub fn run() {
                             // app lock; the renderer locks on this when one is
                             // set (`useAutoLock`), so a close still locks.
                             let _ = w.emit("window://close-hidden", ());
-                            if w.is_fullscreen().unwrap_or(false) {
-                                // Hiding a full-screen window leaves its Space
-                                // behind, empty and black. Hiding the app (⌘H)
-                                // steps out of the Space properly.
-                                let _ = w.app_handle().hide();
-                            } else {
-                                let _ = w.hide();
-                            }
+                            // Hiding in the same breath left the renderer no
+                            // frame to paint the lock screen in, so a Dock
+                            // reopen could flash the unlocked chat first. Give
+                            // it a moment, then hide.
+                            let fullscreen = w.is_fullscreen().unwrap_or(false);
+                            let w = w.clone();
+                            tauri::async_runtime::spawn(async move {
+                                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                                if fullscreen {
+                                    // Hiding a full-screen window leaves its
+                                    // Space behind, empty and black. Hiding
+                                    // the app (⌘H) steps out of it properly.
+                                    let _ = w.app_handle().hide();
+                                } else {
+                                    let _ = w.hide();
+                                }
+                            });
                         }
                     });
                 }
@@ -449,9 +493,11 @@ pub fn run() {
         .expect("error while building Loach")
         .run(|_app, event| match event {
             tauri::RunEvent::Exit => {
-                // Pooled stdio MCP servers are our child processes. Kill
-                // them now rather than rely on each one noticing its stdin
-                // closing once we're gone.
+                // Pooled stdio MCP servers are our child processes. Dropping
+                // the sessions closes their stdin; `kill_all_now` then gives
+                // them a shared second to exit on their own and kills
+                // whatever is left, rather than relying on each one noticing
+                // once we're gone.
                 crate::mcp::drop_all_sessions();
                 crate::mcp::stdio::kill_all_now();
             }

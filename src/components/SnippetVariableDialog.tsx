@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { useConfirm } from "@/components/ConfirmDialog";
 import { Field } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import {
@@ -21,6 +22,7 @@ import { dialogEnter } from "@/lib/shortcuts";
  * the inline check keeps the save button honest before the round-trip.
  */
 export function SnippetVariableDialog() {
+  const { confirm } = useConfirm();
   const target = useSnippetVarStore((s) => s.dialogTarget);
   const close = useSnippetVarStore((s) => s.closeDialog);
   const create = useSnippetVarStore((s) => s.create);
@@ -75,6 +77,31 @@ export function SnippetVariableDialog() {
 
   const canSave = !saving && !!key.trim() && !inlineKeyError;
 
+  // What the fields held when the dialog opened — closing with anything else
+  // asks first.
+  const baseline = editing
+    ? { key: editing.key, value: editing.value, description: editing.description ?? "" }
+    : { key: "", value: "", description: "" };
+  const dirty = key !== baseline.key || value !== baseline.value || description !== baseline.description;
+
+  // Escape, the backdrop, ✕ and Cancel all come through here, so none of them
+  // can throw a typed value away without asking.
+  const requestClose = async () => {
+    if (
+      dirty &&
+      !(await confirm({
+        title: "Discard unsaved changes?",
+        body: isEditMode ? "Your edits to this variable haven't been saved." : "This variable hasn't been saved yet.",
+        confirmLabel: "Discard",
+        cancelLabel: "Keep editing",
+        destructive: true,
+      }))
+    ) {
+      return;
+    }
+    close();
+  };
+
   const handleSave = async () => {
     const k = key.trim().toUpperCase();
     const v = value;
@@ -104,7 +131,7 @@ export function SnippetVariableDialog() {
   };
 
   return (
-    <Dialog open={!!target} onOpenChange={(o) => !o && close()}>
+    <Dialog open={!!target} onOpenChange={(o) => !o && void requestClose()}>
       <DialogContent className="max-w-lg">
         <DialogHeader>
           <DialogTitle>
@@ -156,7 +183,7 @@ export function SnippetVariableDialog() {
         </div>
 
         <div className="mt-3 flex items-center justify-end gap-2">
-          <Button variant="outline" onClick={close} className="rounded-lg">
+          <Button variant="outline" onClick={() => void requestClose()} className="rounded-lg">
             Cancel
           </Button>
           <Button

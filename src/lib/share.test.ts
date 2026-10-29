@@ -12,6 +12,14 @@ describe("truncate", () => {
     expect(out).toHaveLength(10);
     expect(out.endsWith("…")).toBe(true);
   });
+
+  // Measured in UTF-16 units but cut by code points, 200 emoji against a
+  // 270 limit came back whole — 400 units — with an ellipsis on the end.
+  it("clips emoji to the limit too, without splitting one", () => {
+    const out = truncate("😀".repeat(200), 270);
+    expect(out.length).toBeLessThanOrEqual(270);
+    expect(out).toBe(`${"😀".repeat(134)}…`);
+  });
 });
 
 describe("buildShareUrl", () => {

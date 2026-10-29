@@ -603,6 +603,13 @@ fn kept_encoding_note(enc: TextEncoding) -> String {
 ///
 /// An existing file's permissions carry over (an executable script stays
 /// executable), and a read-only one is refused, as an in-place write was.
+/// On Unix the new file is created with the old one's mode, so a `0600`
+/// `.env` is never readable by others while it's being written. On Windows
+/// the new file takes its folder's inherited ACL, while it's written and
+/// after: explicit entries on the old file are lost. Copying them faithfully
+/// — explicit entries kept, inherited ones still following the folder —
+/// takes `SetNamedSecurityInfoW`, behind a `windows` feature
+/// (`Win32_Security_Authorization`) this crate doesn't enable.
 fn replace_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write as _;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -625,7 +632,16 @@ fn replace_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
     let written = (|| {
-        let mut f = fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        if let Some(m) = &existing {
+            use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+            // The umask can only take bits away; `set_permissions` below
+            // restores the exact mode.
+            options.mode(m.permissions().mode());
+        }
+        let mut f = options.open(&tmp)?;
         f.write_all(bytes)?;
         f.sync_all()?;
         drop(f);
@@ -1240,6 +1256,16 @@ fn find_files(root: &Path, args: &Value, max_visited: usize) -> McpCallResult {
     ok(text)
 }
 
+/// The contents of `path`, or `None` when it holds more than `cap` bytes.
+/// The size checks before a read are a cheap early answer, not the bound:
+/// a log still being written, or a FUSE file that reports no size, can be
+/// far past it by the time it's read — so the read stops at `cap + 1`.
+fn read_capped(path: &Path, cap: u64) -> std::io::Result<Option<Vec<u8>>> {
+    let mut bytes = Vec::new();
+    fs::File::open(path)?.take(cap + 1).read_to_end(&mut bytes)?;
+    Ok((bytes.len() as u64 <= cap).then_some(bytes))
+}
+
 pub fn dispatch_read_file(root: &Path, args: &Value) -> McpCallResult {
     let Some(rel) = args.get("path").and_then(|v| v.as_str()) else {
         return err("missing required `path` argument (string)");
@@ -1260,18 +1286,21 @@ pub fn dispatch_read_file(root: &Path, args: &Value) -> McpCallResult {
 
     // Size first, so a huge file is refused with a stat rather than after
     // being pulled into memory.
-    let len = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-    if len > MAX_READ_FILE_BYTES {
-        return err(format!(
-            "`{}` is {}; read_file handles files up to {}. Use search_files to \
+    let too_big = |size: String| {
+        err(format!(
+            "`{}` is {size}; read_file handles files up to {}. Use search_files to \
              find the lines you need.",
             display_rel(rel),
-            human_size(len),
             human_size(MAX_READ_FILE_BYTES)
-        ));
+        ))
+    };
+    let len = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    if len > MAX_READ_FILE_BYTES {
+        return too_big(human_size(len));
     }
-    let bytes = match fs::read(&path) {
-        Ok(b) => b,
+    let bytes = match read_capped(&path, MAX_READ_FILE_BYTES) {
+        Ok(Some(b)) => b,
+        Ok(None) => return too_big(format!("over {}", human_size(MAX_READ_FILE_BYTES))),
         Err(e) => return err(format!("couldn't read `{}`: {e}", display_rel(rel))),
     };
     let Some(decoded) = encoding::decode(&bytes, true) else {
@@ -1451,7 +1480,9 @@ pub fn dispatch_search_files(root: &Path, args: &Value) -> McpCallResult {
         if size > MAX_SEARCH_FILE_BYTES {
             continue;
         }
-        let Ok(bytes) = fs::read(path) else { continue };
+        let Ok(Some(bytes)) = read_capped(path, MAX_SEARCH_FILE_BYTES) else {
+            continue;
+        };
         files_read += 1;
         // Each file in its own encoding, so a Windows-1250 or UTF-16 file
         // is searched rather than skipped; only binaries are.
@@ -1597,17 +1628,20 @@ pub fn dispatch_edit_file(root: &Path, args: &Value) -> McpCallResult {
     // Size first, as in `read_file`: the whole file is about to be held in
     // memory, and anything past this is a file the model couldn't have read
     // the text to edit from anyway.
+    let too_big = |size: String| {
+        err(format!(
+            "`{}` is {size}; edit_file handles files up to {}, the same as read_file.",
+            display_rel(rel),
+            human_size(MAX_READ_FILE_BYTES)
+        ))
+    };
     let len = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
     if len > MAX_READ_FILE_BYTES {
-        return err(format!(
-            "`{}` is {}; edit_file handles files up to {}, the same as read_file.",
-            display_rel(rel),
-            human_size(len),
-            human_size(MAX_READ_FILE_BYTES)
-        ));
+        return too_big(human_size(len));
     }
-    let bytes = match fs::read(&path) {
-        Ok(b) => b,
+    let bytes = match read_capped(&path, MAX_READ_FILE_BYTES) {
+        Ok(Some(b)) => b,
+        Ok(None) => return too_big(format!("over {}", human_size(MAX_READ_FILE_BYTES))),
         Err(e) => return err(format!("couldn't read `{}`: {e}", display_rel(rel))),
     };
     let Some(decoded) = encoding::decode(&bytes, true) else {
@@ -1753,9 +1787,13 @@ pub fn dispatch_move_file(root: &Path, args: &Value) -> McpCallResult {
         // `to` resolved to `from` itself. On a case-insensitive filesystem
         // (Windows, macOS) that is how a rename changing only case arrives —
         // `readme.md` → `README.md` — and it is allowed: the one entry is
-        // renamed and nothing is overwritten.
+        // renamed and nothing is overwritten. On a case-sensitive one the
+        // new name can be an entry of its own that leads to `from` — a link
+        // `README.md` → `readme.md` — and the replacing rename below would
+        // overwrite it, so the new name must open the very same entry.
         match case_renamed(&src, to) {
-            Some(renamed) => renamed,
+            Some(renamed) if same_entry(&src, &renamed) => renamed,
+            Some(_) => return err(already_exists(to)),
             None => {
                 return err(format!(
                     "`{}` already exists — it is `{}` itself, or a link to it.",
@@ -1877,6 +1915,41 @@ fn case_renamed(src: &Path, to: &str) -> Option<PathBuf> {
     let same_letters =
         wanted.to_string_lossy().to_lowercase() == current.to_string_lossy().to_lowercase();
     (wanted != current && same_letters).then(|| src.with_file_name(wanted))
+}
+
+/// Whether `a` and `b` open one directory entry — the same file id, links
+/// not followed. Two spellings of a name do on a case-insensitive
+/// filesystem; on a case-sensitive one `Notes.md` is an entry of its own.
+/// Anything that can't be opened counts as different.
+fn same_entry(a: &Path, b: &Path) -> bool {
+    #[cfg(unix)]
+    let id = |p: &Path| {
+        use std::os::unix::fs::MetadataExt as _;
+        fs::symlink_metadata(p).ok().map(|m| (m.dev(), m.ino()))
+    };
+    #[cfg(windows)]
+    let id = |p: &Path| {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        use std::os::windows::io::AsRawHandle as _;
+        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::Storage::FileSystem::{
+            GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS,
+            FILE_FLAG_OPEN_REPARSE_POINT,
+        };
+        // No access asked for, just the id; the flags open a directory, and
+        // a link as itself.
+        let file = fs::OpenOptions::new()
+            .access_mode(0)
+            .custom_flags((FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT).0)
+            .open(p)
+            .ok()?;
+        let mut info = BY_HANDLE_FILE_INFORMATION::default();
+        // SAFETY: `file` keeps the handle open for the call, and `info` is
+        // a struct of plain integers the call fills in.
+        unsafe { GetFileInformationByHandle(HANDLE(file.as_raw_handle()), &mut info) }.ok()?;
+        Some((info.dwVolumeSerialNumber, info.nFileIndexHigh, info.nFileIndexLow))
+    };
+    matches!((id(a), id(b)), (Some(x), Some(y)) if x == y)
 }
 
 pub fn dispatch_delete_file(root: &Path, args: &Value) -> McpCallResult {
@@ -2218,6 +2291,15 @@ mod tests {
         let w = dispatch_write_file(&root, &json!({ "path": "run.sh", "content": "#!/bin/sh\necho new\n" }));
         assert!(!w.is_error, "{}", w.content_text);
         assert_eq!(fs::metadata(&script).unwrap().permissions().mode() & 0o777, 0o755);
+
+        // A private file stays private (it is also created that way, so it
+        // isn't readable by others while the write is in flight).
+        let env = root.join(".env");
+        fs::write(&env, "TOKEN=old\n").unwrap();
+        fs::set_permissions(&env, fs::Permissions::from_mode(0o600)).unwrap();
+        let w = dispatch_write_file(&root, &json!({ "path": ".env", "content": "TOKEN=new\n" }));
+        assert!(!w.is_error, "{}", w.content_text);
+        assert_eq!(fs::metadata(&env).unwrap().permissions().mode() & 0o777, 0o600);
     }
 
     /// No standing grant covers `.git`: hooks and config there run commands.
@@ -3092,6 +3174,47 @@ mod tests {
             dispatch_move_file(&root, &json!({ "from": "README.txt", "to": "README.txt" }));
         assert!(same.is_error);
         assert!(same.content_text.contains("already exists"), "{}", same.content_text);
+    }
+
+    /// On a case-sensitive filesystem `Notes.md` can be a link to
+    /// `notes.md`, so `to` resolves to `from` like a case-only rename — and
+    /// the replacing rename that one takes used to overwrite the link.
+    #[test]
+    fn a_case_only_rename_never_replaces_a_separate_entry() {
+        let (_d, root) = workspace();
+        fs::write(root.join("notes.md"), "x\n").unwrap();
+        // A case-insensitive filesystem has no room for the link: nothing to test.
+        if !try_symlink(&root.join("notes.md"), &root.join("Notes.md"), false) {
+            return;
+        }
+        let r = dispatch_move_file(&root, &json!({ "from": "notes.md", "to": "Notes.md" }));
+        assert!(r.is_error, "{}", r.content_text);
+        assert!(r.content_text.contains("already exists"), "{}", r.content_text);
+        assert!(fs::symlink_metadata(root.join("Notes.md")).unwrap().file_type().is_symlink());
+        assert_eq!(fs::read_to_string(root.join("notes.md")).unwrap(), "x\n");
+    }
+
+    #[test]
+    fn same_entry_tells_one_entry_from_two() {
+        let (_d, root) = workspace();
+        let readme = root.join("README.md");
+        assert!(same_entry(&readme, &readme));
+        assert!(!same_entry(&readme, &root.join("src/main.rs")));
+        assert!(!same_entry(&readme, &root.join("absent.md")));
+        if try_symlink(&readme, &root.join("alias.md"), false) {
+            assert!(!same_entry(&readme, &root.join("alias.md")), "a link is an entry of its own");
+        }
+    }
+
+    /// A file's size can be out of date by the time it's read, so the read
+    /// itself stops one byte past the cap.
+    #[test]
+    fn read_capped_refuses_more_than_the_cap() {
+        let (_d, root) = workspace();
+        let path = root.join("grow.log");
+        fs::write(&path, "12345").unwrap();
+        assert_eq!(read_capped(&path, 5).unwrap().as_deref(), Some(b"12345".as_slice()));
+        assert_eq!(read_capped(&path, 4).unwrap(), None);
     }
 
     /// The 1 MiB write cap used to apply to the *edited file*, so nothing

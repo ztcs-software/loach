@@ -226,8 +226,10 @@ pub fn tool_description() -> &'static str {
      area (m2, cm2, km2, ft2, in2, yd2, mi2, acre, hectare), \
      energy (J, kJ, cal, kcal, Wh, kWh, BTU), \
      pressure (Pa, kPa, MPa, bar, psi, atm, mmHg, torr), \
-     temperature (C, F, K). Names are case-insensitive. Both units must \
-     belong to the same category."
+     temperature (C, F, K — `°C` works too). Names are case-insensitive, \
+     except `Cal`: the food Calorie, a kcal, where `cal` is the small \
+     calorie. Plurals (`kilograms`, `hours`) work. Both units must belong to \
+     the same category."
 }
 
 pub fn input_schema() -> Value {
@@ -297,8 +299,29 @@ pub fn dispatch(args: &Value) -> McpCallResult {
 }
 
 fn find_unit(name: &str) -> Option<&'static Unit> {
-    let needle = name.trim().to_ascii_lowercase();
-    UNITS.iter().find(|u| u.name == needle)
+    let name = name.trim();
+    // The degree sign names the same scales as the bare letters: `°C`, or
+    // the one-character `℃` / `℉`.
+    let scale = match name {
+        "℃" => Some("C"),
+        "℉" => Some("F"),
+        _ => name.strip_prefix('°'),
+    };
+    if let Some(scale) = scale {
+        return find_unit(scale).filter(|u| u.category == Category::Temperature);
+    }
+    // `Cal` is the food Calorie, a kilocalorie: only the capital tells it
+    // from the `cal` a thousand times smaller, so it's matched before case
+    // is folded.
+    if matches!(name, "Cal" | "Cals") {
+        return find_unit("kcal");
+    }
+    let needle = name.to_ascii_lowercase();
+    UNITS.iter().find(|u| u.name == needle).or_else(|| {
+        // Regular plurals — `kilograms`, `hours`, `mins` — of any name.
+        let singular = needle.strip_suffix('s')?;
+        UNITS.iter().find(|u| u.name == singular)
+    })
 }
 
 /// Affine temperature conversion, routed through Kelvin so each pair is
@@ -310,6 +333,9 @@ fn convert_temperature(value: f64, from: &str, to: &str) -> Result<f64, String> 
         "k" | "kelvin" => value,
         other => return Err(format!("unknown temperature unit `{other}`")),
     };
+    if kelvin < 0.0 {
+        return Err(format!("{value} {from} is below absolute zero (0 K)"));
+    }
     Ok(match to {
         "c" | "celsius" => kelvin - 273.15,
         "f" | "fahrenheit" => kelvin * 9.0 / 5.0 - 459.67,
@@ -388,6 +414,53 @@ mod tests {
         let r = dispatch(&json!({"value": 1.0, "from": "furlong", "to": "ft"}));
         assert!(!r.is_error);
         assert_eq!(r.content_text, "660");
+    }
+
+    fn convert(value: f64, from: &str, to: &str) -> McpCallResult {
+        dispatch(&json!({"value": value, "from": from, "to": to}))
+    }
+
+    /// Folding case read the food `Cal` as the small `cal`, 1000× off.
+    #[test]
+    fn capital_cal_is_the_food_calorie() {
+        assert_eq!(convert(1.0, "Cal", "kcal").content_text, "1");
+        assert_eq!(convert(2.0, "Cals", "kJ").content_text, "8.368");
+        assert_eq!(convert(1000.0, "cal", "kcal").content_text, "1");
+        assert_eq!(convert(1.0, "CAL", "J").content_text, "4.184");
+    }
+
+    #[test]
+    fn degree_signs_name_temperature_scales() {
+        for (from, to) in [("°C", "°F"), ("℃", "℉"), ("° C", "F")] {
+            let r = convert(100.0, from, to);
+            assert!(!r.is_error, "{from} → {to}: {}", r.content_text);
+            assert_eq!(r.content_text, "212", "{from} → {to}");
+        }
+        assert!(convert(1.0, "°m", "m").is_error, "the degree sign is for temperatures only");
+    }
+
+    #[test]
+    fn regular_plurals_are_accepted() {
+        for (from, to, want) in [
+            ("kilograms", "grams", "1000"),
+            ("hours", "minutes", "60"),
+            ("mins", "secs", "60"),
+            ("Miles", "yards", "1760"),
+        ] {
+            let r = convert(1.0, from, to);
+            assert!(!r.is_error, "{from} → {to}: {}", r.content_text);
+            assert_eq!(r.content_text, want, "{from} → {to}");
+        }
+    }
+
+    #[test]
+    fn temperatures_below_absolute_zero_are_refused() {
+        for (value, from) in [(-273.16, "C"), (-460.0, "F"), (-1.0, "K")] {
+            let r = convert(value, from, "K");
+            assert!(r.is_error, "{value} {from}: {}", r.content_text);
+            assert!(r.content_text.contains("absolute zero"), "{}", r.content_text);
+        }
+        assert_eq!(convert(-273.15, "C", "K").content_text, "0");
     }
 
     /// 12 significant digits, as `calculate` prints: a tiny result keeps its

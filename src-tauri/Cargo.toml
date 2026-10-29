@@ -22,12 +22,12 @@ tauri-plugin-dialog = "2"
 tauri-plugin-shell = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+tauri-plugin-single-instance = "2"
 
 # Async runtime + HTTP
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls", "http2", "gzip", "brotli"], default-features = false }
 futures-util = "0.3"
-async-stream = "0.3"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -86,7 +86,8 @@ ipnet = "2"
 # from a structured spec and subsets a bundled Liberation Sans TTF (see
 # src-tauri/assets/fonts) into each file, so output supports Unicode —
 # Latin, European accents, common symbols — not just ASCII. Glyphs the
-# font lacks (e.g. CJK, emoji) fall back to `?` at render time.
+# font lacks (Cyrillic, Greek, CJK, emoji — the bundled cut is Latin-only)
+# fall back to `?` at render time.
 #
 # `default-features = false` drops printpdf's `html` feature, which we never
 # touch — the tool builds documents from a structured spec, not from markup.
@@ -158,6 +159,19 @@ windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Dx
 # the tree through tokio.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# All three already in the tree on Linux (tauri / tao, and keyring's `v1`
+# store), so declaring them costs no new crate.
+#
+# `gtk` shows the fatal startup dialog on the main thread's own GLib loop:
+# `setup` runs inside tao's loop, which holds the default main context, so a
+# dialog waited on from anywhere else never gets drawn (`lib.rs`).
+# `keyring-core` + the Secret Service store rebuild the keyring store when
+# keyring's one-shot init failed (`secrets::keyring_entry`).
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
+keyring-core = "1"
+zbus-secret-service-keyring-store = { version = "1", features = ["crypto-rust"] }
 
 [dev-dependencies]
 # Only used by the db.rs test suite, which opens a fresh database in a

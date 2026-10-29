@@ -41,7 +41,7 @@ import type {
   ToolCallRecord,
 } from "@/types";
 import { cn } from "@/lib/utils";
-import { safeImageMime, stripInlinedAttachments } from "@/lib/files";
+import { NO_DOCX_TEXT, NO_PDF_TEXT, safeImageMime, stripInlinedAttachments } from "@/lib/files";
 import { Bookmark, BookmarkPlus } from "lucide-react";
 import { useChatStore } from "@/stores/chatStore";
 import { useShareStore } from "@/stores/shareStore";
@@ -153,7 +153,10 @@ function ApprovalCard({ call }: { call: ToolCallRecord }) {
   const [sent, setSent] = useState(false);
   const decide = (decision: ToolApprovalDecision) => {
     setSent(true);
-    void respond(call.id, decision);
+    // A failed send is toasted and the card restored by the store, so re-arm
+    // the buttons once it settles. On success the card goes away, and a late
+    // click on an answered call is dropped by the store.
+    void respond(call.id, decision).finally(() => setSent(false));
   };
   const tool = rawToolName(call.tool);
   // Workspace file tools get a readable preview — the file, the diff, the
@@ -658,8 +661,16 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
   );
   const saveToLibrary = useLibraryStore((s) => s.saveToLibrary);
   const saveAttachmentsToLibrary = async () => {
+    const unreadable: string[] = [];
     for (const a of attachments) {
       if (a.kind === "file") continue;
+      // As in the Library's own upload (`prepareFiles`): a scanned PDF or an
+      // empty document is only the shared "no text" note — stored, it'd be a
+      // source with nothing in it, and the next one would look like a duplicate.
+      if (a.kind === "text" && (a.data === NO_PDF_TEXT || a.data === NO_DOCX_TEXT || !a.data.trim())) {
+        unreadable.push(a.name);
+        continue;
+      }
       await saveToLibrary({
         kind: "file",
         title: a.name,
@@ -667,6 +678,14 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
         media: a.kind === "image" ? "image" : "text",
         content: a.data,
         size: a.kind === "image" ? Math.round((a.data.length * 3) / 4) : new TextEncoder().encode(a.data).length,
+        truncated: a.truncated,
+      });
+    }
+    if (unreadable.length > 0) {
+      useToastStore.getState().push({
+        kind: "error",
+        title: unreadable.length === 1 ? `Couldn't save ${unreadable[0]}` : `Couldn't save ${unreadable.length} files`,
+        body: "No readable text — it may be a scanned PDF. Add its pages as images, or a text version, instead.",
       });
     }
   };

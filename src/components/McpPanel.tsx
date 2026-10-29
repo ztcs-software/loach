@@ -3,6 +3,8 @@ import {
   CheckCircle2,
   ChevronLeft,
   CircleAlert,
+  Eye,
+  EyeOff,
   Loader2,
   Plug,
   Plus,
@@ -302,6 +304,46 @@ function kvToLines(map: Record<string, string>, sep: string): string {
     .join("\n");
 }
 
+/** A textarea for lines that carry tokens (auth headers, env vars), masked
+ *  behind a show/hide toggle as the onboarding API-key field is — opening a
+ *  server to edit it put its secrets on screen. Starts shown when empty, so
+ *  the placeholder's example stays readable. */
+function SecretTextarea({
+  id,
+  value,
+  onChange,
+  placeholder,
+}: {
+  id: string;
+  value: string;
+  onChange: (next: string) => void;
+  placeholder: string;
+}) {
+  const [shown, setShown] = useState(!value);
+  return (
+    <div className="relative mt-1.5">
+      <Textarea
+        id={id}
+        rows={3}
+        className="resize-none pr-9 font-mono text-xs"
+        // Not in csstype; WebView2 and WebKit both mask with it.
+        style={shown ? undefined : ({ WebkitTextSecurity: "disc" } as React.CSSProperties)}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+      />
+      <button
+        type="button"
+        onClick={() => setShown((v) => !v)}
+        className="absolute right-1 top-1 inline-flex h-7 w-7 items-center justify-center rounded-md text-foreground/55 hover:bg-foreground/[0.06] hover:text-foreground"
+        aria-label={shown ? "Hide values" : "Show values"}
+      >
+        {shown ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+      </button>
+    </div>
+  );
+}
+
 function McpEditor({ initial, onCancel, onSaved }: EditorProps) {
   const save = useMcpStore((s) => s.save);
   const test = useMcpStore((s) => s.test);
@@ -450,12 +492,10 @@ function McpEditor({ initial, onCancel, onSaved }: EditorProps) {
 
           <div>
             <Label htmlFor="mcp-headers">Headers (one per line)</Label>
-            <Textarea
+            <SecretTextarea
               id="mcp-headers"
-              rows={3}
-              className="mt-1.5 resize-none font-mono text-xs"
               value={headersText}
-              onChange={(e) => setHeadersText(e.target.value)}
+              onChange={setHeadersText}
               placeholder={"Authorization: Bearer sk-…\nX-API-Key: …"}
             />
             <p className="mt-1.5 text-[11px] text-foreground/50">
@@ -500,12 +540,10 @@ function McpEditor({ initial, onCancel, onSaved }: EditorProps) {
 
           <div>
             <Label htmlFor="mcp-env">Environment variables (one per line)</Label>
-            <Textarea
+            <SecretTextarea
               id="mcp-env"
-              rows={3}
-              className="mt-1.5 resize-none font-mono text-xs"
               value={envText}
-              onChange={(e) => setEnvText(e.target.value)}
+              onChange={setEnvText}
               placeholder={"GITHUB_PERSONAL_ACCESS_TOKEN=ghp_…"}
             />
             <p className="mt-1.5 text-[11px] text-foreground/50">

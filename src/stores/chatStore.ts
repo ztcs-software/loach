@@ -19,7 +19,6 @@ import {
   readWorkspaceInstructions,
   clearSessionWorkspace,
   importMessages as tauriImportMessages,
-  getSpaceContext,
   listMessages,
   listSessions,
   sessionMessageCounts,
@@ -65,10 +64,6 @@ import { getPersona } from "@/lib/personas";
 import { getTone } from "@/lib/tones";
 import { applyTemporalAwareness } from "@/lib/temporal";
 import { cutText, resolveSources } from "@/lib/sources";
-import {
-  getCachedSpaceContext,
-  setCachedSpaceContext,
-} from "@/lib/spaceContextCache";
 import {
   buildFetchToolRecords,
   extractUrls,
@@ -355,8 +350,8 @@ let runningBuffers: {
   /** Ordered list of tool calls + results made during this turn. Appended
    *  on `tool_call`; the matching entry's `result` / `is_error` are
    *  filled in on `tool_result`. Persisted as JSON on the assistant
-   *  message at `finishRunning` (or in real time on each tool_result
-   *  event so a cancel mid-loop doesn't lose partial work). */
+   *  message only at `finishRunning` — a cancel mid-loop goes through it
+   *  too, so the calls made so far are saved with the partial reply. */
   toolCalls: ToolCallRecord[];
   /** Attachments produced by built-in tools mid-turn (today only `pdf`).
    *  Accumulated across `tool_result` events with non-empty `attachments`
@@ -544,8 +539,9 @@ function parseOverrides(json: string | null): Partial<GenerationParams> {
  *  chat. Only `newSession`, a model switch and the parameter panel warmed
  *  that cache, so a chat reopened after a restart sent DEFAULT_PARAMS over
  *  its model's Modelfile (num_ctx 8192 instead of the model's own) until the
- *  panel was opened. Cached after the first call, so later sends don't
- *  wait; a failed `/api/show` resolves to `{}` rather than throwing. */
+ *  panel was opened. Cached after the first successful call, so later sends
+ *  don't wait; a failed `/api/show` resolves to `{}` rather than throwing,
+ *  and is asked again next time. */
 async function warmModelDefaults(session: Session): Promise<void> {
   if (session.provider === "ollama" && session.model) {
     await useModelsStore.getState().loadModelDefaults(session.model);
@@ -603,6 +599,14 @@ function readSessionParams(session: Session | undefined): GenerationParams {
   // shouldn't include settings the user never touched in the panel.
   if (isOllama && settingsState.low_vram_global) {
     merged.low_vram = true;
+  }
+  // `think` goes only to a model whose capabilities list "thinking": Ollama
+  // answers any other model (llama3, gemma, …) with a 400, and the retry
+  // without the field cost a second request on every message. Capabilities
+  // not loaded (the `/api/show` above failed) count as no — leaving the field
+  // out lets the model use its own default.
+  if (isOllama && !modelsState?.modelCapabilities[session.model]?.includes("thinking")) {
+    delete merged.think;
   }
   return merged;
 }
@@ -826,16 +830,13 @@ async function buildTaskRequest(
   // Serve the space context from the per-space cache when warm, so repeat
   // sends in a Space don't re-ship every reference file across IPC. The
   // cache is invalidated by every spaceStore mutation that can change a
-  // space's instructions / files / memories (see spaceContextCache.ts).
+  // space's instructions / files / memories, and a read that one of them
+  // overtook is never cached (see `loadSpaceContext`).
   let spaceCtx: SpaceContext | null = null;
   let spaceCtxError: unknown = null;
   if (session.space_id) {
     try {
-      spaceCtx = getCachedSpaceContext(session.space_id) ?? null;
-      if (!spaceCtx) {
-        spaceCtx = await getSpaceContext(session.space_id);
-        setCachedSpaceContext(session.space_id, spaceCtx);
-      }
+      spaceCtx = await useSpaceStore.getState().loadSpaceContext(session.space_id);
     } catch (e) {
       spaceCtxError = e;
     }
@@ -899,9 +900,6 @@ async function buildTaskRequest(
         memoryBlock += `- ${m.content}\n`;
       }
     }
-    useSpaceStore.setState((s) => ({
-      spaceMemories: { ...s.spaceMemories, [session.space_id!]: ctx.memories },
-    }));
     // Space instructions replace the per-chat prompt, but a compaction
     // summary parked there stands in for the turns `chatHistory` no longer
     // sends — `baseSystemPrompt` keeps it, or the model sees neither the
@@ -997,7 +995,15 @@ async function maybeAutoTitle(
   // that failure aborted the chat's first send.
   const draft = raw.length > 28 ? cutText(raw, 28).trimEnd() + "…" : raw;
   if (!draft) return;
-  await renameSession(sessionId, draft);
+  // Best-effort: the user's turn is already saved, and a throw here failed
+  // the send — the composer put the draft back, and sending it again
+  // duplicated the turn.
+  try {
+    await renameSession(sessionId, draft);
+  } catch (e) {
+    logger.warn("couldn't title the chat from its first message", e);
+    return;
+  }
   setStore({
     sessions: store().sessions.map((s) =>
       s.id === sessionId ? { ...s, title: draft } : s,
@@ -1315,19 +1321,24 @@ function promoteQueueHead(get: Getter, set: Setter) {
  *  dispatcher landing in that window (a queue promotion mid-start, or a
  *  send in another chat) would direct-start too — both streams would run,
  *  and the loser's just-persisted assistant placeholder would sit in the
- *  transcript forever with no reply and no error. Returns false without
- *  starting when something is already running or mid-start; callers park
- *  the task in the queue instead, and the lock holder's trailing re-promote
- *  (or the running task's `finishRunning`) picks it up. */
+ *  transcript forever with no reply and no error. Resolves "busy" without
+ *  starting when something is already running or mid-start, or the queue is
+ *  held for Private Chat; callers park the task in the queue instead, and
+ *  the lock holder's trailing re-promote (or the running task's
+ *  `finishRunning`, or the hold's release) picks it up. "failed" means the
+ *  reply couldn't be created at all — `startTask` has told the user. */
 async function tryDirectStart(
   task: QueueTask,
   get: Getter,
   set: Setter,
-): Promise<boolean> {
-  if (get().runningTask || dispatching) return false;
+): Promise<"started" | "busy" | "failed"> {
+  // The hold too: a send still preparing when Private Chat opened would
+  // otherwise start behind the overlay and compete for the model.
+  if (queueHeld || get().runningTask || dispatching) return "busy";
   dispatching = true;
+  let started: boolean;
   try {
-    await startTask(task, get, set);
+    started = await startTask(task, get, set);
   } finally {
     dispatching = false;
   }
@@ -1335,13 +1346,15 @@ async function tryDirectStart(
   // inside `startTask`, so re-check the queue for anything parked while the
   // lock was held. On success the promote's inner guards bail immediately.
   promoteQueueHead(get, set);
-  return true;
+  return started ? "started" : "failed";
 }
 
 /** Starts a QueueTask: creates the assistant placeholder, opens the stream,
  *  wires event handlers. On any startup error, tears down and tries the
- *  next waiter so one broken task can't stall the whole queue. */
-async function startTask(task: QueueTask, get: Getter, set: Setter) {
+ *  next waiter so one broken task can't stall the whole queue. Resolves
+ *  false only when the placeholder couldn't be written, so the turn went
+ *  unanswered. */
+async function startTask(task: QueueTask, get: Getter, set: Setter): Promise<boolean> {
   const { sessionId } = task;
   const cancels = cancelCount(sessionId);
 
@@ -1356,11 +1369,25 @@ async function startTask(task: QueueTask, get: Getter, set: Setter) {
       content: "",
     });
   } catch (e) {
-    // Session might have been deleted while the task waited. Silently drop
-    // and move on to the next — the .finally hook in `promoteQueueHead`'s
-    // caller will pick the next waiter once the dispatch lock is released.
+    // Drop it and move on to the next — the .finally hook in
+    // `promoteQueueHead`'s caller will pick the next waiter once the
+    // dispatch lock is released. A chat deleted or archived while the task
+    // waited has nothing to report; otherwise say so, or the user's message
+    // just sits there with no reply and no sign of why.
     logger.error("failed to create assistant placeholder", e);
-    return;
+    if (cancelCount(sessionId) !== cancels) return true;
+    const title = get().sessions.find((s) => s.id === sessionId)?.title;
+    useToastStore.getState().push({
+      kind: "error",
+      title: "Couldn't start the reply",
+      body: `${title ? `“${title}”: ` : ""}${e instanceof Error ? e.message : String(e)}`,
+    });
+    // Like a reply that failed mid-stream (`finishRunning`): a chat in the
+    // background gets the dot.
+    if (get().activeSessionId !== sessionId) {
+      set((s) => ({ unread: { ...s.unread, [sessionId]: true } }));
+    }
+    return false;
   }
   // Cancelled while the placeholder was written: out of the queue but not
   // yet running, this task was invisible to `cancelForSession`. Drop the
@@ -1369,7 +1396,7 @@ async function startTask(task: QueueTask, get: Getter, set: Setter) {
     void deleteMessage(assistantMsg.id, sessionId).catch((e) =>
       logger.warn("couldn't remove a cancelled reply's placeholder", e),
     );
-    return;
+    return true;
   }
 
   // Seed pre-stream tool-call records (e.g. web-fetch outcomes) onto
@@ -1583,7 +1610,7 @@ async function startTask(task: QueueTask, get: Getter, set: Setter) {
     // connect window already tore it down (and another task may now own the
     // streaming state). Bail before patching an error bubble or resetting
     // state we no longer own.
-    if (get().runningTask?.id !== task.id) return;
+    if (get().runningTask?.id !== task.id) return true;
     // The placeholder assistant row was created above so the bubble could
     // show "thinking…" while we connected. Now that the connection itself
     // failed, replace its contents with a visible error message instead of
@@ -1639,6 +1666,7 @@ async function startTask(task: QueueTask, get: Getter, set: Setter) {
     // queue a microtask while `dispatching` is still set and the nested
     // call would silently bail.
   }
+  return true;
 }
 
 /**
@@ -1835,6 +1863,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   selectSession: async (id) => {
+    // A chat deleted since the caller looked it up — an approval toast's
+    // "Open", a fork's link to its source — stays unselected: the composer
+    // would otherwise send into an id with no session behind it.
+    if (id && !get().sessions.some((s) => s.id === id)) return;
     // Opening a chat clears its unread flag — the user is now looking at
     // whatever the assistant produced. We do this regardless of whether
     // the chat had unread content; harmless when the entry was already
@@ -1883,12 +1915,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // under lazy hydration most sessions' messages aren't resident, so the old
     // `messages[s.id] ?? await listMessages(s.id)` would re-import the exact
     // cost hydrate was changed to avoid. In-memory length wins when present
-    // (it reflects just-sent messages the counts query might predate).
-    const { sessions, messages } = get();
+    // (it reflects just-sent messages the counts query might predate), so
+    // it's read after that query.
     const counts = await sessionMessageCounts();
+    const { sessions, messages } = get();
     const emptyIds: string[] = [];
     for (const s of sessions) {
       if (s.archived_at) continue; // leave archived chats untouched
+      // A chat whose first message is still being prepared (a web fetch can
+      // take seconds) has no rows yet — deleted, that send failed on its
+      // missing chat.
+      if (sendingSessions.has(s.id)) continue;
       const count = messages[s.id]?.length ?? counts[s.id] ?? 0;
       if (count === 0) emptyIds.push(s.id);
     }
@@ -2212,15 +2249,24 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   removeAllArchived: async () => {
+    const archivedIds = new Set(
+      get().sessions.filter((x) => x.archived_at != null).map((x) => x.id),
+    );
+    // The same cleanup `remove` does for one chat, starting with a cancel:
+    // an archived chat can still be opened and sent to.
+    for (const id of archivedIds) await get().cancelForSession(id);
     const n = await deleteArchivedSessions();
+    if (archivedIds.size === 0) return n;
+    for (const id of archivedIds) dropMemoryTurns(id);
     set((s) => {
-      const archivedIds = new Set(
-        s.sessions.filter((x) => x.archived_at != null).map((x) => x.id),
-      );
-      if (archivedIds.size === 0) return s;
       const sessions = s.sessions.filter((x) => !archivedIds.has(x.id));
       const messages = { ...s.messages };
-      for (const id of archivedIds) delete messages[id];
+      const unread = { ...s.unread };
+      for (const id of archivedIds) {
+        delete messages[id];
+        delete unread[id];
+      }
+      const queue = s.queue.filter((t) => !archivedIds.has(t.sessionId));
       // Defensive: if activeSessionId somehow points at an archived chat
       // (deep link, restored state), drop the selection — the underlying
       // row is gone.
@@ -2228,7 +2274,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         s.activeSessionId && archivedIds.has(s.activeSessionId)
           ? null
           : s.activeSessionId;
-      return { sessions, messages, activeSessionId: active };
+      return { sessions, messages, unread, queue, activeSessionId: active };
     });
     return n;
   },
@@ -2390,8 +2436,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // A send from a Space's page always starts a new chat there — even when
     // the chat left open belongs to that Space, the page reads as "start a
     // chat here", and appending to whichever chat was last opened surprised
-    // users. No session at all also means a new one.
-    if (!sessionId || viewingSpaceId) {
+    // users. No session at all — or an open one that has since been
+    // deleted — also means a new one.
+    if (!sessionId || viewingSpaceId || !state.sessions.some((s) => s.id === sessionId)) {
       const created = await get().newSession();
       sessionId = created.id;
       // Library sources picked in this composer before the chat existed.
@@ -2408,7 +2455,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
         }
       }
     }
-    const session = get().sessions.find((s) => s.id === sessionId)!;
+    const session = get().sessions.find((s) => s.id === sessionId);
+    // Removed while the picked sources above were linked.
+    if (!session) throw new Error("This chat no longer exists. Start a new one.");
     if (!session.model) {
       throw new Error("No model selected. Pick one from the model dropdown.");
     }
@@ -2572,7 +2621,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       //    deleted, cleared, stopped): the user message stays, as it does
       //    for a cancelled waiter.
         if (cancelCount(sessionId) !== cancels) return;
-        if (!(await tryDirectStart(task, get, set))) {
+        // "failed" isn't thrown on: the user's turn is saved, and a failed
+        // send would put the draft back for a resend that duplicates it.
+        if ((await tryDirectStart(task, get, set)) === "busy") {
           set((s) => ({ queue: [...s.queue, task] }));
         }
     } finally {
@@ -2681,7 +2732,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
       // Cancelled while the request was built — as on a send.
       if (cancelCount(sessionId) !== cancels) return;
-      if (!(await tryDirectStart(task, get, set))) {
+      if ((await tryDirectStart(task, get, set)) === "busy") {
         set((s) => ({ queue: [...s.queue, task] }));
       }
     } finally {
@@ -2738,7 +2789,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const task = state.queue.find((t) => t.sessionId === sessionId);
       if (!task) return;
       set((s) => ({ queue: s.queue.filter((t) => t.id !== task.id) }));
-      if (!(await tryDirectStart(task, get, set))) {
+      if ((await tryDirectStart(task, get, set)) === "busy") {
         set((s) => ({ queue: [task, ...s.queue] }));
       }
       return;
@@ -2955,7 +3006,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       extractSummary(session.system_prompt ?? null),
     );
 
-    return buildCompactedMarkdown(session, summary, []);
+    return buildCompactedMarkdown(session, summary);
   },
 
   setQueueHeld: (held) => {

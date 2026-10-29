@@ -32,6 +32,7 @@ vi.mock("@/lib/tauri", async (importOriginal) => {
 import { __testing } from "./chatStore";
 import { useLibraryStore } from "./libraryStore";
 import { useModelsStore } from "./modelsStore";
+import { useSettingsStore } from "./settingsStore";
 
 const chat = {
   id: "chat-1",
@@ -61,6 +62,21 @@ describe("a chat sent from with a cold model-defaults cache", () => {
 
     expect(request.params.num_ctx).toBe(32768);
     expect(request.params.temperature).toBe(0.2);
+  });
+});
+
+// Ollama answers `think` on a model without the capability (llama3, gemma)
+// with a 400, and the retry without it cost a second request per message.
+describe("the Thinking default", () => {
+  it("goes only to a model that lists the thinking capability", async () => {
+    useLibraryStore.setState({ hydrated: true, items: [], datasets: [], sources: {} });
+    useSettingsStore.setState({ thinking_default: true });
+
+    useModelsStore.setState({ modelDefaults: { "custom:8b": {} }, modelCapabilities: { "custom:8b": ["thinking"] } });
+    expect((await __testing.buildTaskRequest(chat, chat.id, [], "hi", [])).request.params.think).toBe(true);
+
+    useModelsStore.setState({ modelCapabilities: { "custom:8b": ["completion"] } });
+    expect((await __testing.buildTaskRequest(chat, chat.id, [], "hi", [])).request.params).not.toHaveProperty("think");
   });
 });
 

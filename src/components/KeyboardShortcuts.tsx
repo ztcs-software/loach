@@ -9,7 +9,12 @@ import { usePrivateChatStore } from "@/stores/privateChatStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useSecurityStore } from "@/stores/securityStore";
 import { deleteChatConfirm } from "@/lib/confirmations";
-import { matches, SHORTCUTS, type ShortcutAction } from "@/lib/shortcuts";
+import {
+  matches,
+  modalDialogOpen,
+  SHORTCUTS,
+  type ShortcutAction,
+} from "@/lib/shortcuts";
 
 /**
  * App-wide keyboard shortcut handler. Mounts once near the root and owns a
@@ -20,6 +25,7 @@ import { matches, SHORTCUTS, type ShortcutAction } from "@/lib/shortcuts";
  *
  * Gated surfaces — shortcuts are suppressed when any of these own the
  * screen, mirroring the same gates `TitleBar` uses:
+ *   - the security probe still pending (App renders only the background)
  *   - lock screen (security configured + still locked)
  *   - onboarding (not yet completed)
  *   - private chat (owns the whole UI below the title bar)
@@ -35,13 +41,13 @@ import { matches, SHORTCUTS, type ShortcutAction } from "@/lib/shortcuts";
  * overlay.
  */
 
-/** Is a modal dialog open? Radix dialogs mark their content `role="dialog"`
- *  with `data-state="open"`; the hand-rolled overlays (the Ctrl/Cmd+K
- *  palette, Private Chat, onboarding) set `aria-modal`. The context-usage
- *  popover is a `role="dialog"` with neither, and doesn't block the app. */
-export function modalDialogOpen(): boolean {
-  return !!document.querySelector(
-    '[role="dialog"][data-state="open"], [role="dialog"][aria-modal="true"]',
+/** Is the chat view what's on screen? A Space's page, a model's page or
+ *  another sidebar tab (Library, say) hides the open chat. */
+function chatOnScreen(): boolean {
+  return (
+    !useSpaceStore.getState().viewingSpaceId &&
+    !useModelsStore.getState().viewingModel &&
+    useUIStore.getState().sidebarTab === "chats"
   );
 }
 
@@ -68,7 +74,11 @@ export function KeyboardShortcuts() {
       const settings = useSettingsStore.getState();
       const priv = usePrivateChatStore.getState();
       const onboardingActive =
-        settings.hydrated && !settings.onboarding_completed;
+        settings.hydrated && !settings.loadError && !settings.onboarding_completed;
+      // Until the security probe lands the lock isn't known: a configured
+      // lock still reads as unlocked, and Ctrl+N made a chat behind the blank
+      // screen App shows meanwhile. Nothing to lock yet either.
+      const probing = !sec.hydrated;
       const locked = sec.status.configured && !sec.unlocked;
       // `lock-now` deliberately survives the onboarding / private-chat gates:
       // a panic key that goes dead on the most sensitive surface in the app
@@ -81,6 +91,7 @@ export function KeyboardShortcuts() {
       // next Enter.
       const panic = spec.action === "lock-now";
       if (
+        probing ||
         locked ||
         ((onboardingActive || priv.open || modalDialogOpen()) && !panic)
       ) {
@@ -131,11 +142,13 @@ export function KeyboardShortcuts() {
 
         case "toggle-params": {
           // Right slot is mutually exclusive with the code canvas. The
-          // params panel itself only renders when a session exists, so
-          // we no-op otherwise to avoid toggling a flag the user can't
-          // see take effect.
+          // params panel itself only renders beside an open chat, so we
+          // no-op otherwise to avoid toggling a flag the user can't see take
+          // effect — on a Space's, the Library's or a model's page it opened
+          // nothing, yet collapsed the sidebar on a narrow window to make
+          // room for it.
           const chat = useChatStore.getState();
-          if (!chat.activeSessionId) return;
+          if (!chat.activeSessionId || !chatOnScreen()) return;
           useUIStore.getState().toggleParams();
           return;
         }
@@ -145,11 +158,7 @@ export function KeyboardShortcuts() {
           // Only a chat that's on screen. A Space's page, a model's page or
           // another sidebar tab (Library, say) hides the open chat, and the
           // shortcut used to delete it from behind them.
-          const onScreen =
-            !useSpaceStore.getState().viewingSpaceId &&
-            !useModelsStore.getState().viewingModel &&
-            useUIStore.getState().sidebarTab === "chats";
-          const id = onScreen ? chat.activeSessionId : null;
+          const id = chatOnScreen() ? chat.activeSessionId : null;
           if (!id) return;
           const session = chat.sessions.find((s) => s.id === id);
           if (!session) return;

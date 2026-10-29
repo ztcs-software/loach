@@ -199,7 +199,7 @@ async fn drive_progress_stream(
         biased;
         _ = cancel.notified() => {
             let _ = app.emit(&channel, AdminEvent::Cancelled);
-            registry.finish(&stream_id);
+            registry.finish_own(&stream_id, &cancel);
             return Ok(());
         }
         r = http.post(&url).json(&body).send() => r,
@@ -213,21 +213,21 @@ async fn drive_progress_stream(
                     message: format!("Ollama request failed: {e}"),
                 },
             );
-            registry.finish(&stream_id);
+            registry.finish_own(&stream_id, &cancel);
             return Err(e.into());
         }
     };
 
     if !resp.status().is_success() {
         let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
+        let text = super::error_body(resp).await;
         let _ = app.emit(
             &channel,
             AdminEvent::Error {
                 message: format!("Ollama HTTP {status}: {text}"),
             },
         );
-        registry.finish(&stream_id);
+        registry.finish_own(&stream_id, &cancel);
         return Err(anyhow!("ollama http error"));
     }
 
@@ -248,7 +248,7 @@ async fn drive_progress_stream(
                 // to notice the client gave up and abort the download.
                 drop(byte_stream);
                 let _ = app.emit(&channel, AdminEvent::Cancelled);
-                registry.finish(&stream_id);
+                registry.finish_own(&stream_id, &cancel);
                 return Ok(());
             }
             maybe = byte_stream.next() => {
@@ -268,7 +268,7 @@ async fn drive_progress_stream(
                                     ),
                                 },
                             );
-                            registry.finish(&stream_id);
+                            registry.finish_own(&stream_id, &cancel);
                             return Err(anyhow!("ollama admin stream frame too large"));
                         }
                         while let Some(pos) = buf.iter().position(|b| *b == b'\n') {
@@ -282,7 +282,7 @@ async fn drive_progress_stream(
                                             &channel,
                                             AdminEvent::Error { message: err },
                                         );
-                                        registry.finish(&stream_id);
+                                        registry.finish_own(&stream_id, &cancel);
                                         return Ok(());
                                     }
                                     let status = parsed.status.unwrap_or_else(|| "working".into());
@@ -298,7 +298,7 @@ async fn drive_progress_stream(
                                     );
                                     if done_now {
                                         let _ = app.emit(&channel, AdminEvent::Done);
-                                        registry.finish(&stream_id);
+                                        registry.finish_own(&stream_id, &cancel);
                                         return Ok(());
                                     }
                                 }
@@ -313,7 +313,7 @@ async fn drive_progress_stream(
                             &channel,
                             AdminEvent::Error { message: format!("stream error: {e}") },
                         );
-                        registry.finish(&stream_id);
+                        registry.finish_own(&stream_id, &cancel);
                         return Err(e.into());
                     }
                     None => {
@@ -321,7 +321,7 @@ async fn drive_progress_stream(
                         // treat EOF as a successful completion so callers don't
                         // hang forever on a silently-closed connection.
                         let _ = app.emit(&channel, AdminEvent::Done);
-                        registry.finish(&stream_id);
+                        registry.finish_own(&stream_id, &cancel);
                         return Ok(());
                     }
                 }
@@ -347,7 +347,7 @@ pub async fn pull_model(
             &admin_channel(&stream_id),
             AdminEvent::Error { message: e },
         );
-        registry.finish(&stream_id);
+        registry.finish_own(&stream_id, &cancel);
         return Ok(());
     }
     let url = format!("{}/api/pull", base_url.trim_end_matches('/'));
@@ -370,7 +370,7 @@ pub async fn create_model(
             &admin_channel(&stream_id),
             AdminEvent::Error { message: e },
         );
-        registry.finish(&stream_id);
+        registry.finish_own(&stream_id, &cancel);
         return Ok(());
     }
     let url = format!("{}/api/create", base_url.trim_end_matches('/'));
@@ -388,7 +388,7 @@ pub async fn create_model(
                     message: format!("Couldn't read the Modelfile: {e}"),
                 },
             );
-            registry.finish(&stream_id);
+            registry.finish_own(&stream_id, &cancel);
             return Ok(());
         }
     };
@@ -733,7 +733,7 @@ pub async fn chat_stream(
     // there) while allowing loopback, RFC 1918, CGNAT, and public IPs.
     if let Err(e) = super::refuse_link_local_host(&req.base_url).await {
         let _ = app.emit(&channel, StreamEvent::Error { message: e });
-        registry.finish(&req.stream_id);
+        registry.finish_own(&req.stream_id, &cancel);
         return Ok(());
     }
 
@@ -813,6 +813,9 @@ pub async fn chat_stream(
             body["tools"] = tools.clone();
         }
 
+        // What the model says this turn, kept for the history should the
+        // turn end in tool calls.
+        let mut turn_text = String::new();
         let outcome = match run_one_turn(
             &app,
             &http,
@@ -824,6 +827,7 @@ pub async fn chat_stream(
             &mut reported_tokens,
             &mut reported_eval_ns,
             &mut think_already_drop,
+            &mut turn_text,
             &req.stream_id,
             &registry,
         )
@@ -846,7 +850,7 @@ pub async fn chat_stream(
                     tool_ctx.approval_wait(),
                 );
                 let _ = app.emit(&channel, StreamEvent::Done);
-                registry.finish(&req.stream_id);
+                registry.finish_own(&req.stream_id, &cancel);
                 return Ok(());
             }
             // Asked for tools on the last round anyway: nothing would read
@@ -854,13 +858,16 @@ pub async fn chat_stream(
             TurnOutcome::Tools(_) if turn + 1 == MAX_TOOL_TURNS => break,
             TurnOutcome::Tools(calls) => {
                 // Append the assistant turn including the tool_calls block,
-                // so subsequent /api/chat calls see the full conversation.
-                // We use `Value::Null` for content (rather than "") because
-                // strict OpenAI-compat gateways reject empty strings here;
-                // recent Ollama accepts both, so Null is the safer choice.
+                // so subsequent /api/chat calls see the full conversation —
+                // the text the model streamed before its calls included, or
+                // it saw no trace of that preamble and said it all again.
+                // We use `Value::Null` for content (rather than "") when it
+                // said nothing, because strict OpenAI-compat gateways reject
+                // empty strings here; recent Ollama accepts both, so Null is
+                // the safer choice.
                 messages.push(json!({
                     "role": "assistant",
-                    "content": Value::Null,
+                    "content": if turn_text.is_empty() { Value::Null } else { json!(turn_text) },
                     "tool_calls": calls
                         .iter()
                         .map(serialise_tool_call)
@@ -921,7 +928,7 @@ pub async fn chat_stream(
                     .await
                     else {
                         let _ = app.emit(&channel, StreamEvent::Cancelled);
-                        registry.finish(&req.stream_id);
+                        registry.finish_own(&req.stream_id, &cancel);
                         return Ok(());
                     };
 
@@ -955,7 +962,7 @@ pub async fn chat_stream(
             ),
         },
     );
-    registry.finish(&req.stream_id);
+    registry.finish_own(&req.stream_id, &cancel);
     Ok(())
 }
 
@@ -975,6 +982,7 @@ async fn run_one_turn(
     reported_tokens: &mut Option<u32>,
     reported_eval_ns: &mut Option<u64>,
     think_already_drop: &mut bool,
+    turn_text: &mut String,
     stream_id: &str,
     registry: &StreamRegistry,
 ) -> Result<Option<TurnOutcome>> {
@@ -990,7 +998,7 @@ async fn run_one_turn(
         biased;
         _ = cancel.notified() => {
             let _ = app.emit(channel, StreamEvent::Cancelled);
-            registry.finish(stream_id);
+            registry.finish_own(stream_id, cancel);
             return Ok(None);
         }
         r = http.post(&url).json(body).send() => r,
@@ -1004,7 +1012,7 @@ async fn run_one_turn(
                     message: format!("Ollama request failed: {e}"),
                 },
             );
-            registry.finish(stream_id);
+            registry.finish_own(stream_id, cancel);
             return Err(e.into());
         }
     };
@@ -1017,7 +1025,7 @@ async fn run_one_turn(
     // once before giving up.
     if !resp.status().is_success() && body.get("think").is_some() {
         let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
+        let text = super::error_body(resp).await;
         if text.contains("does not support thinking") {
             if let Some(obj) = body.as_object_mut() {
                 obj.remove("think");
@@ -1032,7 +1040,7 @@ async fn run_one_turn(
                 biased;
                 _ = cancel.notified() => {
                     let _ = app.emit(channel, StreamEvent::Cancelled);
-                    registry.finish(stream_id);
+                    registry.finish_own(stream_id, cancel);
                     return Ok(None);
                 }
                 r = http.post(&url).json(body).send() => r,
@@ -1046,7 +1054,7 @@ async fn run_one_turn(
                             message: format!("Ollama request failed: {e}"),
                         },
                     );
-                    registry.finish(stream_id);
+                    registry.finish_own(stream_id, cancel);
                     return Err(e.into());
                 }
             };
@@ -1057,21 +1065,21 @@ async fn run_one_turn(
                     message: format!("Ollama HTTP {status}: {text}"),
                 },
             );
-            registry.finish(stream_id);
+            registry.finish_own(stream_id, cancel);
             return Err(anyhow!("ollama http error"));
         }
     }
 
     if !resp.status().is_success() {
         let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
+        let text = super::error_body(resp).await;
         let _ = app.emit(
             channel,
             StreamEvent::Error {
                 message: format!("Ollama HTTP {status}: {text}"),
             },
         );
-        registry.finish(stream_id);
+        registry.finish_own(stream_id, cancel);
         return Err(anyhow!("ollama http error"));
     }
 
@@ -1095,7 +1103,7 @@ async fn run_one_turn(
             _ = cancel.notified() => {
                 drop(byte_stream);
                 let _ = app.emit(channel, StreamEvent::Cancelled);
-                registry.finish(stream_id);
+                registry.finish_own(stream_id, cancel);
                 return Ok(None);
             }
             maybe = byte_stream.next() => {
@@ -1112,7 +1120,7 @@ async fn run_one_turn(
                                     ),
                                 },
                             );
-                            registry.finish(stream_id);
+                            registry.finish_own(stream_id, cancel);
                             return Err(anyhow!("ollama chat stream frame too large"));
                         }
 
@@ -1146,6 +1154,7 @@ async fn run_one_turn(
                                             if !delta.is_empty() {
                                                 *total_tokens += 1;
                                                 pending_token.push_str(&delta);
+                                                turn_text.push_str(&delta);
                                             }
                                         }
                                         if !msg.tool_calls.is_empty() {
@@ -1198,7 +1207,7 @@ async fn run_one_turn(
                                 channel,
                                 StreamEvent::Error { message: format!("Ollama stopped mid-reply: {e}") },
                             );
-                            registry.finish(stream_id);
+                            registry.finish_own(stream_id, cancel);
                             return Err(anyhow!("ollama stream error: {e}"));
                         }
                         if finished {
@@ -1224,7 +1233,7 @@ async fn run_one_turn(
                             channel,
                             StreamEvent::Error { message: format!("stream error: {e}") },
                         );
-                        registry.finish(stream_id);
+                        registry.finish_own(stream_id, cancel);
                         return Err(e.into());
                     }
                     None => {

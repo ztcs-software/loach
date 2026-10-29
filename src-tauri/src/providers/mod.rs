@@ -3,6 +3,7 @@ pub mod openai;
 
 use std::time::Duration;
 
+use futures_util::{FutureExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
@@ -102,7 +103,9 @@ pub(super) struct ToolOutcome {
 /// Returns `None` when the stream was cancelled while waiting — for an
 /// answer or for the tool — in which case nothing has been emitted for
 /// this call beyond `ToolCall`, and the caller emits `Cancelled` and
-/// returns exactly as it did before.
+/// returns exactly as it did before. The one exception is a workspace tool
+/// that changes files: once dispatched it runs to the end whatever Stop
+/// does, so its `ToolResult` goes out first and the change is on record.
 pub(super) async fn execute_tool_call(
     ctx: &ToolCallCtx<'_>,
     call_id: &str,
@@ -238,26 +241,37 @@ pub(super) async fn execute_tool_call(
         args,
         ctx.workspace_root,
     );
-    let (content, is_error, attachments) = select! {
-        biased;
-        _ = ctx.cancel.notified() => return None,
-        r = dispatch => match r {
-            Ok(r) => (r.content_text, r.is_error, r.attachments),
-            Err(e) => {
-                // The whole error, a stdio server's stderr tail included,
-                // goes to the log. The model — and the transcript, and so
-                // exports — get it cut before the stderr, which can quote
-                // anything the server printed, a key in a URL included.
-                // Settings → MCP → Test connection shows it in full.
-                let full = format!("{e:#}");
-                tracing::warn!("tool `{}` failed: {full}", tool_def.qualified_name);
-                (
-                    format!("tool call failed: {}", crate::mcp::stdio::without_stderr(&full)),
-                    true,
-                    Vec::new(),
-                )
-            }
-        },
+    // A write, edit, move or delete isn't raced against Stop: its blocking
+    // task can't be stopped once started (see `dispatch_builtin_guarded`),
+    // so dropping it here only lost the record of a change that still
+    // landed on disk. It finishes, its result goes out like any other, and
+    // a Stop pressed meanwhile — a stored permit — is honoured right after.
+    let mutates = builtin && crate::tools::fs::requires_approval(tool_name);
+    let outcome = if mutates {
+        dispatch.await
+    } else {
+        select! {
+            biased;
+            _ = ctx.cancel.notified() => return None,
+            r = dispatch => r,
+        }
+    };
+    let (content, is_error, attachments) = match outcome {
+        Ok(r) => (r.content_text, r.is_error, r.attachments),
+        Err(e) => {
+            // The whole error, a stdio server's stderr tail included,
+            // goes to the log. The model — and the transcript, and so
+            // exports — get it cut before the stderr, which can quote
+            // anything the server printed, a key in a URL included.
+            // Settings → MCP → Test connection shows it in full.
+            let full = format!("{e:#}");
+            tracing::warn!("tool `{}` failed: {full}", tool_def.qualified_name);
+            (
+                format!("tool call failed: {}", crate::mcp::stdio::without_stderr(&full)),
+                true,
+                Vec::new(),
+            )
+        }
     };
 
     // Cap what we feed back to the model. The UI gets the original
@@ -275,6 +289,9 @@ pub(super) async fn execute_tool_call(
             timed_out: false,
         },
     );
+    if mutates && ctx.cancel.notified().now_or_never().is_some() {
+        return None;
+    }
     Some(ToolOutcome { for_model })
 }
 
@@ -303,6 +320,45 @@ pub(super) fn cap_tool_text(s: &str, max_bytes: usize) -> String {
         max_bytes,
         s.len()
     )
+}
+
+/// Most of a failed response's body that goes into an error message. The
+/// message lands in a `StreamEvent::Error`, which the transcript keeps, and a
+/// base URL pointed at the wrong thing answers with a whole HTML page. A
+/// provider's own error JSON is far shorter.
+const MAX_ERROR_BODY_BYTES: usize = 4 * 1024;
+
+/// How long reading that body may take. The shared client carries no
+/// timeout (generations run long), so a server that sent its status and then
+/// trickled the body held the turn open with it.
+const ERROR_BODY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The start of a failed response's body, for an error message: at most
+/// [`MAX_ERROR_BODY_BYTES`] of it, read for at most [`ERROR_BODY_TIMEOUT`].
+pub(super) async fn error_body(resp: reqwest::Response) -> String {
+    let mut stream = resp.bytes_stream();
+    let mut raw: Vec<u8> = Vec::new();
+    let _ = tokio::time::timeout(ERROR_BODY_TIMEOUT, async {
+        while raw.len() <= MAX_ERROR_BODY_BYTES {
+            match stream.next().await {
+                Some(Ok(chunk)) => raw.extend_from_slice(&chunk),
+                _ => break,
+            }
+        }
+    })
+    .await;
+    clip_error_body(&raw)
+}
+
+/// `raw` as trimmed text, cut at [`MAX_ERROR_BODY_BYTES`] with a `…` to say so.
+fn clip_error_body(raw: &[u8]) -> String {
+    let text = String::from_utf8_lossy(&raw[..raw.len().min(MAX_ERROR_BODY_BYTES)]);
+    if raw.len() > MAX_ERROR_BODY_BYTES {
+        // The cut can split a multi-byte character; drop what's left of it.
+        format!("{}…", text.trim_end_matches('\u{FFFD}').trim())
+    } else {
+        text.trim().to_string()
+    }
 }
 
 /// Soft ceiling on the serialized `messages` array we'll ship to the
@@ -634,6 +690,47 @@ mod tests {
     }
 
     #[test]
+    fn clip_error_body_trims_and_cuts_on_a_char_boundary() {
+        assert_eq!(clip_error_body(b"  {\"error\":\"model not found\"}\n"), r#"{"error":"model not found"}"#);
+        // "é" is two bytes; one straddling the cut leaves no stray half.
+        let mut raw = vec![b'x'; MAX_ERROR_BODY_BYTES - 1];
+        raw.extend_from_slice("é tail".as_bytes());
+        let out = clip_error_body(&raw);
+        assert!(out.ends_with("x…"), "{}", &out[out.len() - 8..]);
+        assert_eq!(out.len(), MAX_ERROR_BODY_BYTES - 1 + '…'.len_utf8());
+    }
+
+    /// A base URL aimed at a web server answers with a page, not an error
+    /// object. Only its start reaches the message — and the transcript.
+    #[tokio::test]
+    async fn error_body_reads_only_the_start_of_a_large_page() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        tokio::spawn(async move {
+            let Ok((mut conn, _)) = listener.accept().await else { return };
+            let mut request = [0u8; 4096];
+            let _ = conn.read(&mut request).await;
+            let page = format!("<html>{}</html>", "x".repeat(1024 * 1024));
+            let head = format!(
+                "HTTP/1.1 502 Bad Gateway\r\ncontent-type: text/html\r\ncontent-length: {}\r\n\r\n",
+                page.len()
+            );
+            let _ = conn.write_all(head.as_bytes()).await;
+            let _ = conn.write_all(page.as_bytes()).await;
+        });
+        let resp = reqwest::Client::new()
+            .get(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+            .send()
+            .await
+            .expect("send");
+        let body = error_body(resp).await;
+        assert!(body.starts_with("<html>xxx"), "{}", &body[..20]);
+        assert!(body.ends_with('…'));
+        assert!(body.len() <= MAX_ERROR_BODY_BYTES + '…'.len_utf8());
+    }
+
+    #[test]
     fn bound_messages_payload_leaves_short_tool_messages_alone() {
         // Even when the array is over the cap, short tool messages stay —
         // dropping a 30-byte content for a 30-byte stub buys nothing and
@@ -709,9 +806,11 @@ pub struct GenerationParams {
     /// Reasoning toggle for thinking-capable models (Qwen3, DeepSeek-R1,
     /// GPT-OSS, …). `Some(true)` forces a chain-of-thought before the
     /// reply; `Some(false)` suppresses it; `None` lets Ollama use the
-    /// model's own default. Models without thinking capability ignore the
-    /// flag — Ollama returns an error for them, but the frontend gates the
-    /// toggle on the model's `capabilities` so we never send it for those.
+    /// model's own default. Ollama answers the flag with an error for a
+    /// model that can't think, so it should only be set for models whose
+    /// `capabilities` include `thinking` — and when one slips through (an
+    /// older build that doesn't report capabilities), the Ollama provider
+    /// drops it and retries.
     #[serde(default)]
     pub think: Option<bool>,
     /// Number of model layers to offload to the GPU (Ollama `num_gpu`).

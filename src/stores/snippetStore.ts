@@ -96,10 +96,12 @@ export const useSnippetStore = create<SnippetState>((set) => ({
       provider: provider ?? null,
       model: model ?? null,
     });
+    // `attachments_json` too: the row now has none, and a legacy snippet kept
+    // running with its old files until a restart.
     set((s) => ({
       snippets: s.snippets.map((sn) =>
         sn.id === id
-          ? { ...sn, title, prompt, provider, model, updated_at: Date.now() }
+          ? { ...sn, title, prompt, attachments_json: null, provider, model, updated_at: Date.now() }
           : sn,
       ),
     }));

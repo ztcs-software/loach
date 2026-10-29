@@ -36,6 +36,45 @@ describe("primary modifier", () => {
   });
 });
 
+// `/` needs Shift on German, Nordic and French layouts, and layouts without
+// Latin letters (Cyrillic, Greek) report their own character in `e.key`.
+describe("keyboard layouts", () => {
+  async function load() {
+    const { SHORTCUTS, matches } = await loadOn("Win32");
+    const spec = (action: string) => SHORTCUTS.find((s) => s.action === action)!;
+    return { matches, help: spec("show-shortcuts"), newChat: spec("new-chat"), sidebar: spec("toggle-sidebar") };
+  }
+
+  it("takes Ctrl+/ where `/` itself needs Shift", async () => {
+    const { matches, help } = await load();
+    expect(matches(help, press("/", { code: "Digit7", ctrlKey: true, shiftKey: true }))).toBe(true);
+    expect(matches(help, press("/", { code: "Slash", ctrlKey: true }))).toBe(true);
+  });
+
+  it("stays strict on Shift for letters", async () => {
+    const { matches, newChat, sidebar } = await load();
+    expect(matches(newChat, press("N", { code: "KeyN", ctrlKey: true, shiftKey: true }))).toBe(false);
+    expect(matches(sidebar, press("s", { code: "KeyS", ctrlKey: true }))).toBe(false);
+  });
+
+  it("reads the key's position on a layout without Latin letters", async () => {
+    const { matches, newChat, sidebar } = await load();
+    // The N key types "т" on Russian, "ν" on Greek.
+    expect(matches(newChat, press("т", { code: "KeyN", ctrlKey: true }))).toBe(true);
+    expect(matches(newChat, press("ν", { code: "KeyN", ctrlKey: true }))).toBe(true);
+    expect(matches(sidebar, press("Ы", { code: "KeyS", ctrlKey: true, shiftKey: true }))).toBe(true);
+  });
+
+  it("goes by the character on a Latin layout, not the key's position", async () => {
+    const { matches, help, newChat } = await load();
+    // Dvorak types "n" on the L key and "b" on the N key; German has "-"
+    // where US has "/".
+    expect(matches(newChat, press("n", { code: "KeyL", ctrlKey: true }))).toBe(true);
+    expect(matches(newChat, press("b", { code: "KeyN", ctrlKey: true }))).toBe(false);
+    expect(matches(help, press("-", { code: "Slash", ctrlKey: true }))).toBe(false);
+  });
+});
+
 describe("dialogEnter", () => {
   const key = (tagName: "INPUT" | "TEXTAREA", mods: Partial<KeyboardEvent> = {}) => {
     const e = {

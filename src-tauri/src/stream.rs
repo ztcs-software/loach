@@ -73,9 +73,21 @@ impl StreamRegistry {
         }
     }
 
+    /// Retire `id` whoever holds it. Callers that have their handle use
+    /// [`finish_own`](Self::finish_own).
     pub fn finish(&self, id: &str) {
         self.chats.remove(id);
         self.inner.remove(id);
+    }
+
+    /// Retire `id` — but only while it is still `own`'s. After a collision
+    /// (see [`register`](Self::register)) the old stream winds down and
+    /// finishes too; removing by id alone took the newer stream's handle with
+    /// it, and that stream could no longer be stopped.
+    pub fn finish_own(&self, id: &str, own: &Arc<Notify>) {
+        if self.inner.remove_if(id, |_, n| Arc::ptr_eq(n, own)).is_some() {
+            self.chats.remove(id);
+        }
     }
 }
 
@@ -360,6 +372,34 @@ mod tests {
         reg.cancel("s2");
         let woke = timeout(Duration::from_millis(50), n.notified()).await;
         assert!(woke.is_err(), "no permit should exist after finish()");
+    }
+
+    /// The stream a collision replaced finishes after the newcomer has
+    /// registered. Its `finish_own` must leave the newcomer's handle in
+    /// place — Stop and the reload sweep still have to reach it — while the
+    /// newcomer's own finish retires the id.
+    #[tokio::test]
+    async fn a_replaced_streams_finish_leaves_the_new_handle_alone() {
+        let reg = StreamRegistry::new();
+        let old = reg.register_chat("dup3".into());
+        let new = reg.register_chat("dup3".into());
+        reg.finish_own("dup3", &old);
+        reg.cancel("dup3");
+        timeout(Duration::from_secs(1), new.notified())
+            .await
+            .expect("the newer stream must still be cancellable");
+
+        let newer = reg.register_chat("dup4".into());
+        reg.finish_own("dup4", &old);
+        assert_eq!(reg.cancel_chats(), 1, "still in the reload sweep");
+        assert!(timeout(Duration::from_millis(50), newer.notified()).await.is_ok());
+
+        let own = reg.register_chat("dup5".into());
+        reg.finish_own("dup5", &own);
+        reg.cancel("dup5");
+        let woke = timeout(Duration::from_millis(50), own.notified()).await;
+        assert!(woke.is_err(), "its own finish retires the id");
+        assert_eq!(reg.cancel_chats(), 0);
     }
 
     /// After a reload the chat streams are stopped; a model pull running

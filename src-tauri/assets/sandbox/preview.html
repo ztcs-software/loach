@@ -94,10 +94,37 @@
       });
     }
 
+    // Typing or playing in here never reaches the app's own listeners: its
+    // idle lock fired mid-game, and its panic key (Ctrl/Cmd+Shift+L) was dead
+    // while this frame had focus. Tell the app — activity at most every few
+    // seconds — in the two fixed messages it accepts. `parent` is taken now:
+    // the page can replace that property on its window.
+    const host = parent;
+    let lastPing = 0;
+    const ping = () => {
+      const now = Date.now();
+      if (now - lastPing < 5000) return;
+      lastPing = now;
+      host.postMessage({ type: "loach-preview:activity" }, "*");
+    };
+    const report = () => {
+      for (const type of ["pointerdown", "pointermove", "keydown", "wheel", "touchstart"]) {
+        addEventListener(type, ping, { capture: true, passive: true });
+      }
+      addEventListener("keydown", (e) => {
+        if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && String(e.key).toLowerCase() === "l") {
+          host.postMessage({ type: "loach-preview:lock" }, "*");
+        }
+      }, { capture: true });
+    };
+
     addEventListener("message", (e) => {
       const msg = e.data;
       if (e.source !== parent || msg?.type !== "loach-preview:render") return;
       document.open();
+      // After open(), which erases this window's listeners, and before the
+      // page's own scripts, so these run ahead of anything they add.
+      report();
       watch(document);
       document.write(String(msg.html));
       document.close();

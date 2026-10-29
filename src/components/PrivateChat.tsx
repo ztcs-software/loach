@@ -187,6 +187,14 @@ function isCloudModel(id: string): boolean {
   return /:(?:.+-)?cloud$/i.test(id);
 }
 
+/** An embedding-only model (EmbeddingGemma, nomic-embed-text, …), which
+ *  can't chat: its `/api/show` capabilities lack "completion" — or, before
+ *  they're known (or when they came back empty), its name says "embed". */
+function isEmbeddingModel(id: string, capabilities: string[] | undefined): boolean {
+  if (capabilities && capabilities.length > 0) return !capabilities.includes("completion");
+  return /embed/i.test(id);
+}
+
 /** Does this base URL name this machine? Mirrors the backend's
  *  `ollama_launch::is_loopback_host`, so `0.0.0.0` counts as local. */
 function isLoopbackUrl(baseUrl: string): boolean {
@@ -237,16 +245,20 @@ function ModelPicker() {
           // Auto-pick a default model if none chosen yet — the user shouldn't
           // have to open the dropdown just to send their first message. Prefer
           // their most-recent Ollama model from regular sessions, falling
-          // back to the first installed one.
+          // back to the first installed one that can chat: the list is newest
+          // first, so after pulling an embedding model for the Library that
+          // was the pick, and the first send failed.
           const current = usePrivateChatStore.getState().model;
           if (!current && m.length > 0) {
             const sessions = useChatStore.getState().sessions;
             const recent = sessions
               .filter((s) => s.provider === "ollama" && s.model)
               .sort((a, b) => b.updated_at - a.updated_at)[0]?.model;
+            const caps = useModelsStore.getState().modelCapabilities;
+            const chat = m.filter((x) => !isEmbeddingModel(x.id, caps[x.id]));
             const preferred =
-              recent && m.find((x) => x.id === recent) ? recent : m[0].id;
-            setModel(preferred);
+              recent && chat.find((x) => x.id === recent) ? recent : chat[0]?.id;
+            if (preferred) setModel(preferred);
           }
         } else {
           setModels([]);
@@ -927,8 +939,9 @@ function SliderRow({
       stopIdx = i;
     }
   }
-  const displayValue = stops[stopIdx];
-  const displayText = format ? format(displayValue) : String(displayValue);
+  // The readout is the real value — a Modelfile's num_ctx 2048 sits below
+  // the first stop — while the thumb can only sit on the nearest stop.
+  const displayText = format ? format(value) : String(value);
 
   return (
     <div>
@@ -1255,4 +1268,4 @@ function PrivateChatComposer() {
   );
 }
 
-export const __testing = { isCloudModel, isLoopbackUrl };
+export const __testing = { isCloudModel, isEmbeddingModel, isLoopbackUrl };

@@ -374,7 +374,7 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
               <Section title="Sampling">
                 <SliderRow
                   label="Temperature"
-                  value={Math.min(params.temperature ?? 0.7, 1)}
+                  value={params.temperature ?? 0.7}
                   min={0}
                   max={1}
                   step={0.05}
@@ -794,7 +794,10 @@ function SliderRow({
   // Live slider position: the in-flight drag value while dragging, else derived
   // from props (`stopIdx` for stops, the raw `value` for continuous).
   const pos = drag ?? (usingStops ? stopIdx : value);
-  const displayValue = usingStops ? stops![pos] : pos;
+  // The readout is the real value, not where the thumb can land: a
+  // Modelfile's num_ctx 2048 sits below the first stop, and a temperature of
+  // 1.2 past the slider's end. The thumb clamps; the number doesn't.
+  const displayValue = usingStops ? (drag === null ? value : stops![pos]) : pos;
   const displayText = format
     ? format(displayValue)
     : displayValue.toFixed(precision);
@@ -827,7 +830,7 @@ function SliderRow({
         <Slider
           thumbLabel={label}
           thumbValueText={displayText}
-          value={[pos]}
+          value={[Math.min(max, Math.max(min, pos))]}
           min={min}
           max={max}
           step={step}
@@ -921,6 +924,8 @@ function GpuLayersRow({
           onChange={(e) => setDraft(e.target.value)}
           onBlur={() => commit(draft)}
           onKeyDown={(e) => {
+            // The Enter that confirms an IME candidate isn't a commit.
+            if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
             if (e.key === "Enter") {
               e.preventDefault();
               commit(draft);
@@ -1029,7 +1034,12 @@ function SeedRow({
       return;
     }
     const n = Number(trimmed);
-    if (Number.isFinite(n) && Number.isInteger(n)) onChange(n);
+    // The request carries the seed as an i64, and a JS number is exact only
+    // to 2^53: past that every send failed. Anything else that isn't a whole
+    // number goes back to what's in effect rather than staying on screen
+    // while the seed is random.
+    if (Number.isSafeInteger(n)) onChange(n);
+    else setDraft(value === null ? "" : String(value));
   };
 
   return (
@@ -1053,6 +1063,8 @@ function SeedRow({
           onChange={(e) => setDraft(e.target.value)}
           onBlur={() => commit(draft)}
           onKeyDown={(e) => {
+            // The Enter that confirms an IME candidate isn't a commit.
+            if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
             if (e.key === "Enter") {
               e.preventDefault();
               commit(draft);

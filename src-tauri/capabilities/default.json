@@ -20,7 +20,12 @@
     "",
     "Deliberately NOT granted: core:default's image, menu and tray sets. The",
     "renderer uses none of them, and core:image:default let it read any PNG",
-    "on disk through Image.fromPath, which has no path scope."
+    "on disk through Image.fromPath, which has no path scope.",
+    "",
+    "shell:allow-open carries no URL scope: the shell plugin's open command",
+    "never reads one. What it may open is the plugins.shell.open regex in",
+    "tauri.conf.json (http, https and mailto only); left unset, the plugin's",
+    "default would also let tel: through."
   ],
   "permissions": [
     "core:app:default",
@@ -33,14 +38,7 @@
     "core:window:allow-toggle-maximize",
     "core:window:allow-close",
     "core:window:allow-start-dragging",
-    {
-      "identifier": "shell:allow-open",
-      "allow": [
-        { "url": "https://*" },
-        { "url": "http://*" },
-        { "url": "mailto:*" }
-      ]
-    },
+    "shell:allow-open",
     "updater:default",
     "process:default"
   ]

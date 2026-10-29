@@ -22,13 +22,14 @@ const REDDIT_TITLE_LIMIT = 300;
 export function truncate(text: string, max: number): string {
   const t = text.trim();
   if (t.length <= max) return t;
-  // Slice by code POINT, not code unit: cutting mid-surrogate leaves a lone
-  // half that renders as the replacement glyph right before the ellipsis.
-  // `Array.from` iterates code points, so an astral character (emoji, many
-  // CJK extensions) is kept or dropped whole.
-  const chars = Array.from(t);
-  const kept = chars.length <= max - 1 ? chars : chars.slice(0, max - 1);
-  return `${kept.join("").trimEnd()}…`;
+  // Measured and cut in the same unit, UTF-16 code units (an emoji is two,
+  // as X counts it): checked in units but cut by code points, 200 emoji
+  // against X's limit came back whole with an ellipsis on the end. Never
+  // between a surrogate pair's halves, though — a lone half renders as the
+  // replacement glyph right before the ellipsis.
+  const cut = t.slice(0, max - 1);
+  const kept = /[\uD800-\uDBFF]$/.test(cut) ? cut.slice(0, -1) : cut;
+  return `${kept.trimEnd()}…`;
 }
 
 /**

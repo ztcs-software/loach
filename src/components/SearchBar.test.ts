@@ -9,7 +9,7 @@
 import { describe, it, expect } from "vitest";
 import { __testing } from "./SearchBar";
 
-const { parseQuery, followActive } = __testing;
+const { parseQuery, followActive, shareRoom } = __testing;
 
 describe("parseQuery", () => {
   it("defaults to searching everywhere", () => {
@@ -112,5 +112,40 @@ describe("followActive", () => {
   it("goes back to the top when the result is gone", () => {
     expect(followActive(titles, titles.slice(0, 2), 2)).toBe(0);
     expect(followActive([], titles, 0)).toBe(0);
+  });
+});
+
+// The Library has no search box of its own, and its matches are listed after
+// chats, Spaces and snippets — a query matching many chat titles cut them all.
+describe("shareRoom", () => {
+  const of = (kind: "chat" | "space" | "library", n: number) =>
+    Array.from({ length: n }, (_, i) => ({ kind, id: `${kind}-${i}` }));
+
+  it("keeps a slot for each kind that matched", () => {
+    const out = shareRoom([...of("chat", 30), ...of("library", 2)], 12);
+    expect(out).toHaveLength(12);
+    expect(out.filter((r) => r.kind === "library").map((r) => r.id)).toEqual([
+      "library-0",
+      "library-1",
+    ]);
+  });
+
+  it("hands a kind's unused share to the others and keeps the order", () => {
+    const out = shareRoom([...of("chat", 5), ...of("space", 1), ...of("library", 5)], 8);
+    expect(out.map((r) => r.id)).toEqual([
+      "chat-0",
+      "chat-1",
+      "chat-2",
+      "chat-3",
+      "space-0",
+      "library-0",
+      "library-1",
+      "library-2",
+    ]);
+  });
+
+  it("leaves a list that fits untouched", () => {
+    const all = [...of("chat", 2), ...of("library", 2)];
+    expect(shareRoom(all, 20)).toEqual(all);
   });
 });

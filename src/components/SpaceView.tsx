@@ -48,7 +48,7 @@ import { useLibraryStore } from "@/stores/libraryStore";
 import { useToastStore } from "@/stores/toastStore";
 import { useUIStore } from "@/stores/uiStore";
 import { deleteChatConfirm } from "@/lib/confirmations";
-import { fileToAttachment } from "@/lib/files";
+import { fileToAttachment, NO_DOCX_TEXT, NO_PDF_TEXT } from "@/lib/files";
 import { dialogEnter } from "@/lib/shortcuts";
 import { spaceSourceCount } from "@/lib/sources";
 import { cn, relativeDay } from "@/lib/utils";
@@ -178,15 +178,18 @@ export function SpaceView() {
   // defaults) fire-and-forget, so route them through this wrapper to surface
   // failures. EditSpaceDialog uses `doUpdate` directly because it renders its
   // own inline error — toasting here too would double up.
+  /** False when the save failed (a toast already said why). */
   const doUpdateNotify = async (fields: Parameters<typeof doUpdate>[1]) => {
     try {
       await doUpdate(space.id, fields);
+      return true;
     } catch (e) {
       useToastStore.getState().push({
         kind: "error",
         title: "Couldn't save Space",
         body: e instanceof Error ? e.message : String(e),
       });
+      return false;
     }
   };
 
@@ -378,17 +381,36 @@ export function SpaceView() {
                   space={space}
                   files={files}
                   onUpload={async (fileList) => {
+                    // Each file on its own, as the Library's `prepareFiles`
+                    // reads them: one bad file doesn't stop the rest, and a
+                    // scanned PDF or an empty document — only the shared "no
+                    // text" note — isn't stored as a source.
+                    const failed: string[] = [];
                     for (const f of Array.from(fileList)) {
-                      const att = await fileToAttachment(f);
-                      await doAddFile(
-                        space.id,
-                        att.name,
-                        att.mime,
-                        att.kind,
-                        att.data,
-                        f.size,
-                      );
+                      try {
+                        const att = await fileToAttachment(f);
+                        if (
+                          att.kind === "text" &&
+                          (att.data === NO_PDF_TEXT || att.data === NO_DOCX_TEXT || !att.data.trim())
+                        ) {
+                          failed.push(
+                            `${f.name}: no readable text${att.data === NO_PDF_TEXT ? " — it may be a scanned PDF" : ""}`,
+                          );
+                          continue;
+                        }
+                        await doAddFile(
+                          space.id,
+                          att.name,
+                          att.mime,
+                          att.kind,
+                          att.data,
+                          f.size,
+                        );
+                      } catch (e) {
+                        failed.push(`${f.name}: ${e instanceof Error ? e.message : String(e)}`);
+                      }
                     }
+                    if (failed.length > 0) throw new Error(failed.join("\n"));
                   }}
                   onRemoveFile={async (id) => {
                     // An upload lives only in this Space, so removing it is a
@@ -497,10 +519,29 @@ function EditSpaceDialog({
   initialDescription: string;
   onSave: (next: { name: string; description: string }) => Promise<void>;
 }) {
+  const { confirm } = useConfirm();
   const [name, setName] = useState(initialName);
   const [description, setDescription] = useState(initialDescription);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Escape, the backdrop, ✕ and Cancel all come through here, so none of them
+  // can throw typed text away without asking.
+  const requestClose = async () => {
+    if (
+      (name !== initialName || description !== initialDescription) &&
+      !(await confirm({
+        title: "Discard unsaved changes?",
+        body: "Your edits to this Space haven't been saved.",
+        confirmLabel: "Discard",
+        cancelLabel: "Keep editing",
+        destructive: true,
+      }))
+    ) {
+      return;
+    }
+    onOpenChange(false);
+  };
 
   // Reseed when the dialog opens so a stale draft from a prior open doesn't
   // leak across edits, and so navigating to a different space picks up its
@@ -543,7 +584,7 @@ function EditSpaceDialog({
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={(o) => (o ? onOpenChange(true) : void requestClose())}>
       <DialogContent className="max-w-lg">
         <DialogHeader>
           <DialogTitle>Edit Space</DialogTitle>
@@ -580,7 +621,7 @@ function EditSpaceDialog({
         <div className="mt-3 flex items-center justify-end gap-2">
           <Button
             variant="outline"
-            onClick={() => onOpenChange(false)}
+            onClick={() => void requestClose()}
             className="rounded-lg"
           >
             Cancel
@@ -864,7 +905,8 @@ function InstructionsTab({
   onSave,
 }: {
   space: { id: string; instructions: string };
-  onSave: (instructions: string) => Promise<void>;
+  /** False when the save failed. */
+  onSave: (instructions: string) => Promise<boolean>;
 }) {
   const [val, setVal] = useState(space.instructions);
   useEffect(() => {
@@ -876,11 +918,15 @@ function InstructionsTab({
   // Saved on blur, and again when the tab goes away with edits the blur never
   // caught — a keyboard shortcut or the app lock leaves without blurring the
   // field. `sent` keeps a blur followed straight by an unmount (clicking
-  // another tab) from saving the same text twice.
+  // another tab) from saving the same text twice. It holds a save only
+  // while it's in flight or once it landed: a failed one is forgotten, so
+  // leaving the tab tries it again.
   const sent = useRef<string | null>(null);
   const save = (text: string) => {
     sent.current = text;
-    void onSave(text.trim());
+    void onSave(text.trim()).then((ok) => {
+      if (!ok && sent.current === text) sent.current = null;
+    });
   };
   const latest = useRef({ val, dirty, save });
   useEffect(() => {
@@ -944,7 +990,7 @@ function SettingsTab({
     memory_enabled: boolean;
     retrieval_mode: RetrievalMode;
   };
-  onSave: (patch: SettingsPatch) => Promise<void>;
+  onSave: (patch: SettingsPatch) => Promise<unknown>;
   onSetMode: (mode: RetrievalMode) => void;
 }) {
   return (

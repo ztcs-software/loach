@@ -6,7 +6,7 @@
 // opening the picker.
 
 import { describe, it, expect } from "vitest";
-import { matchCommands } from "./parser";
+import { matchCommands, modelArgValues } from "./parser";
 
 const sources = {
   model: ["llama3:70b", "llama3", "qwen3:8b"],
@@ -49,6 +49,38 @@ describe("argument completion", () => {
 
   it("falls back to the bare command when there are no names to offer", () => {
     expect(matchCommands("model").map((e) => e.insertText)).toEqual(["/model"]);
+  });
+
+  // They take on|off, and Enter on `/thinking ` used to run a usage error
+  // because there was nothing to complete.
+  it("offers on and off for the toggles", () => {
+    expect(inserts("thinking ")).toEqual(["/thinking on", "/thinking off"]);
+    expect(inserts("web-fetch o")).toEqual(["/web-fetch on", "/web-fetch off"]);
+    expect(inserts("thin")).toEqual(["/thinking "]);
+  });
+});
+
+describe("modelArgValues", () => {
+  it("prefixes an id both providers serve, and only that one", () => {
+    expect(
+      modelArgValues([
+        { id: "llama3", provider: "ollama" },
+        { id: "qwen3:8b", provider: "ollama" },
+        { id: "llama3", provider: "openai" },
+        { id: "gpt-4o", provider: "openai" },
+      ]),
+    ).toEqual(["ollama/llama3", "qwen3:8b", "openai/llama3", "gpt-4o"]);
+  });
+
+  it("completes the two as separate rows", () => {
+    const model = modelArgValues([
+      { id: "llama3", provider: "ollama" },
+      { id: "llama3", provider: "openai" },
+    ]);
+    expect(matchCommands("model llama3", { model }).map((e) => e.insertText)).toEqual([
+      "/model ollama/llama3",
+      "/model openai/llama3",
+    ]);
   });
 });
 

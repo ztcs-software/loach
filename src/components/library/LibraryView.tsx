@@ -85,8 +85,16 @@ function readTab(): LibraryTab | null {
 async function startChatWith(sel: { itemIds: string[]; datasetIds: string[] }, spaceId: string | null = null) {
   useSpaceStore.getState().setViewingSpace(null);
   useUIStore.getState().setSidebarTab("chats");
-  const session = await useChatStore.getState().newSession({ spaceId });
-  await useLibraryStore.getState().addSources("session", session.id, sel);
+  try {
+    const session = await useChatStore.getState().newSession({ spaceId });
+    await useLibraryStore.getState().addSources("session", session.id, sel);
+  } catch (e) {
+    useToastStore.getState().push({
+      kind: "error",
+      title: "Couldn't start the chat with these sources",
+      body: e instanceof Error ? e.message : String(e),
+    });
+  }
 }
 
 /** "New chat in Space ▸": the same chat as **New chat**, started inside a
@@ -259,36 +267,25 @@ export function LibraryView() {
     }
   };
 
-  // The page's own handlers cover only <main>. A file dropped on the
-  // sidebar or the title bar would reach the webview's default handling,
-  // which opens the file in place of the app (Tauri's drag-drop is off, so
-  // nothing else catches it). The composer guards the window the same way,
-  // but it isn't mounted on this page.
-  useEffect(() => {
-    const guard = (e: DragEvent) => {
-      if (e.dataTransfer?.types.includes("Files")) e.preventDefault();
-    };
-    window.addEventListener("dragover", guard);
-    window.addEventListener("drop", guard);
-    return () => {
-      window.removeEventListener("dragover", guard);
-      window.removeEventListener("drop", guard);
-    };
-  }, []);
-
+  // The dialogs, the "Add to dataset" picker and the menus are portalled
+  // but still React children of <main>, so their drag events bubble here
+  // too — a file dropped on a dialog would upload into the Library. Only
+  // the page's own DOM counts.
+  const onPage = (e: React.DragEvent) =>
+    e.dataTransfer.types.includes("Files") && e.currentTarget.contains(e.target as Node);
   const onDragEnter = (e: React.DragEvent) => {
-    if (!e.dataTransfer.types.includes("Files") || usePrivateChatStore.getState().open) return;
+    if (!onPage(e) || usePrivateChatStore.getState().open) return;
     e.preventDefault();
     dragDepth.current += 1;
     if (dragDepth.current === 1) setDragging(true);
   };
   const onDragLeave = (e: React.DragEvent) => {
-    if (!e.dataTransfer.types.includes("Files")) return;
+    if (!onPage(e)) return;
     dragDepth.current = Math.max(0, dragDepth.current - 1);
     if (dragDepth.current === 0) setDragging(false);
   };
   const onDrop = (e: React.DragEvent) => {
-    if (!e.dataTransfer.types.includes("Files")) return;
+    if (!onPage(e)) return;
     e.preventDefault();
     dragDepth.current = 0;
     setDragging(false);
@@ -305,6 +302,16 @@ export function LibraryView() {
       else next.add(id);
       return next;
     });
+  // Ids deleted meanwhile (from a card's menu, or elsewhere) leave the
+  // selection, or the bar would keep counting them and clicks would keep
+  // toggling instead of opening.
+  useEffect(() => {
+    setSelected((prev) => {
+      const live = new Set([...items.map((i) => i.id), ...datasets.map((d) => d.id)]);
+      const next = [...prev].filter((id) => live.has(id));
+      return next.length === prev.size ? prev : new Set(next);
+    });
+  }, [items, datasets]);
   const selecting = selected.size > 0;
   // The selection holds item and dataset ids alike; actions that only make
   // sense for one kind take that part. Ids deleted meanwhile drop out.
@@ -342,7 +349,7 @@ export function LibraryView() {
       className="relative flex min-w-0 flex-1 flex-col"
       onDragEnter={onDragEnter}
       onDragOver={(e) => {
-        if (e.dataTransfer.types.includes("Files")) e.preventDefault();
+        if (onPage(e)) e.preventDefault();
       }}
       onDragLeave={onDragLeave}
       onDrop={onDrop}

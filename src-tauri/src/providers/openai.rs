@@ -13,7 +13,7 @@ use super::{resolve_qualified, ChatRequest, ModelInfo};
 use crate::db::Database;
 use crate::mcp::McpToolDef;
 use crate::secrets;
-use crate::sse::find_frame_end;
+use crate::sse::{find_frame_end, frame_lines};
 use crate::stream::{event_channel, StreamEvent, StreamRegistry};
 
 /// Per-frame ceiling on the SSE buffer between blank-line delimiters. Mirrors
@@ -84,7 +84,14 @@ pub async fn list_models(http: &Client, base_url: &str) -> Result<Vec<ModelInfo>
     // `openai_base_url` — would ship the key in cleartext on every
     // model-list refresh, the exact leak the chat path already prevents.
     // Off the runtime — blocking OS-keyring read (see chat_stream's note).
-    if let Some(key) = tokio::task::spawn_blocking(secrets::get_openai_key).await?? {
+    // A keyring that can't be read counts as no key, as it does there: on
+    // Linux without a Secret Service, failing here kept a keyless LM Studio
+    // from listing its models while chatting with it worked.
+    let key = tokio::task::spawn_blocking(|| secrets::get_openai_key().ok().flatten())
+        .await
+        .ok()
+        .flatten();
+    if let Some(key) = key {
         if !key.is_empty() && is_safe_for_bearer(base_url) {
             req = req.bearer_auth(key);
         }
@@ -124,6 +131,11 @@ struct DeltaMsg {
     content: Option<String>,
     #[serde(default)]
     reasoning_content: Option<String>,
+    /// The same thing under the name Ollama's `/v1`, OpenRouter and newer
+    /// vLLM use. Read only when `reasoning_content` is absent or empty, so a server
+    /// sending both doesn't show its reasoning twice.
+    #[serde(default)]
+    reasoning: Option<String>,
     #[serde(default, deserialize_with = "null_as_empty")]
     tool_calls: Vec<DeltaToolCall>,
 }
@@ -278,7 +290,7 @@ pub async fn chat_stream(
     // there.
     if let Err(e) = super::refuse_link_local_host(&req.base_url).await {
         let _ = app.emit(&channel, StreamEvent::Error { message: e });
-        registry.finish(&req.stream_id);
+        registry.finish_own(&req.stream_id, &cancel);
         return Ok(());
     }
 
@@ -369,6 +381,9 @@ pub async fn chat_stream(
             apply_refusal(&mut body, field);
         }
 
+        // What the model says this turn, kept for the history should the
+        // turn end in tool calls.
+        let mut turn_text = String::new();
         let outcome = match run_one_turn(
             &app,
             &http,
@@ -380,6 +395,7 @@ pub async fn chat_stream(
             &mut refused,
             &mut total_tokens,
             &mut reported_tokens,
+            &mut turn_text,
             &req.stream_id,
             &registry,
         )
@@ -397,7 +413,7 @@ pub async fn chat_stream(
                 let tokens_for_metrics = reported_tokens.unwrap_or(total_tokens);
                 emit_metrics(&app, &channel, tokens_for_metrics, start, tool_ctx.approval_wait());
                 let _ = app.emit(&channel, StreamEvent::Done);
-                registry.finish(&req.stream_id);
+                registry.finish_own(&req.stream_id, &cancel);
                 return Ok(());
             }
             // Asked for tools on the last round anyway (a server that
@@ -407,8 +423,9 @@ pub async fn chat_stream(
             TurnOutcome::Tools(calls) => {
                 // Assistant turn carrying the tool calls. OpenAI requires
                 // the tool_calls array (with `id` and the `function` object)
-                // and a `content` field that may be empty when the model
-                // immediately reached for a tool.
+                // and a `content` field: whatever the model said before
+                // reaching for the tools — left out, the model saw no trace
+                // of it and said it all again — or null when it said nothing.
                 let oa_calls: Vec<Value> = calls
                     .iter()
                     .enumerate()
@@ -429,7 +446,7 @@ pub async fn chat_stream(
                     // turn is purely tool calls. Strict gateways (Azure,
                     // some local OpenAI-compat proxies) 400 on empty
                     // strings here, so we use Null explicitly.
-                    "content": Value::Null,
+                    "content": if turn_text.is_empty() { Value::Null } else { json!(turn_text) },
                     "tool_calls": oa_calls,
                 }));
 
@@ -483,7 +500,7 @@ pub async fn chat_stream(
                     .await
                     else {
                         let _ = app.emit(&channel, StreamEvent::Cancelled);
-                        registry.finish(&req.stream_id);
+                        registry.finish_own(&req.stream_id, &cancel);
                         return Ok(());
                     };
 
@@ -508,7 +525,7 @@ pub async fn chat_stream(
             ),
         },
     );
-    registry.finish(&req.stream_id);
+    registry.finish_own(&req.stream_id, &cancel);
     Ok(())
 }
 
@@ -581,6 +598,7 @@ async fn run_one_turn(
     refused: &mut Vec<String>,
     total_tokens: &mut u32,
     reported_tokens: &mut Option<u32>,
+    turn_text: &mut String,
     stream_id: &str,
     registry: &StreamRegistry,
 ) -> Result<Option<TurnOutcome>> {
@@ -630,7 +648,7 @@ async fn run_one_turn(
         biased;
         _ = cancel.notified() => {
             let _ = app.emit(channel, StreamEvent::Cancelled);
-            registry.finish(stream_id);
+            registry.finish_own(stream_id, cancel);
             return Ok(None);
         }
         r = http_req.send() => r,
@@ -644,7 +662,7 @@ async fn run_one_turn(
                     message: format!("OpenAI request failed: {e}"),
                 },
             );
-            registry.finish(stream_id);
+            registry.finish_own(stream_id, cancel);
             return Err(e.into());
         }
     };
@@ -658,7 +676,7 @@ async fn run_one_turn(
     // for the stream's later turns. Mirrors the Ollama path's `think` retry.
     // Metrics fall back to the chunk counter without `stream_options`.
     while resp.status() == reqwest::StatusCode::BAD_REQUEST {
-        let text = resp.text().await.unwrap_or_default();
+        let text = super::error_body(resp).await;
         let Some(field) = refused_field(&body, &text).filter(|f| !refused.contains(f)) else {
             // A 400 about something else. The body is already consumed, so
             // report it here rather than falling through to the block below.
@@ -668,7 +686,7 @@ async fn run_one_turn(
                     message: format!("OpenAI HTTP 400 Bad Request: {text}"),
                 },
             );
-            registry.finish(stream_id);
+            registry.finish_own(stream_id, cancel);
             return Err(anyhow!("openai http error"));
         };
         tracing::warn!("server refused `{field}`; retrying without it");
@@ -678,7 +696,7 @@ async fn run_one_turn(
             biased;
             _ = cancel.notified() => {
                 let _ = app.emit(channel, StreamEvent::Cancelled);
-                registry.finish(stream_id);
+                registry.finish_own(stream_id, cancel);
                 return Ok(None);
             }
             r = build_req(&body).send() => r,
@@ -692,7 +710,7 @@ async fn run_one_turn(
                         message: format!("OpenAI request failed: {e}"),
                     },
                 );
-                registry.finish(stream_id);
+                registry.finish_own(stream_id, cancel);
                 return Err(e.into());
             }
         };
@@ -700,7 +718,7 @@ async fn run_one_turn(
 
     if !resp.status().is_success() {
         let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
+        let text = super::error_body(resp).await;
         // If the server rejected the request for auth reasons AND we
         // deliberately withheld the bearer because the base URL is cleartext
         // to a non-loopback host, surface the *why* — a bare "401" against
@@ -721,7 +739,7 @@ async fn run_one_turn(
                 message: format!("OpenAI HTTP {status}: {text}{suffix}"),
             },
         );
-        registry.finish(stream_id);
+        registry.finish_own(stream_id, cancel);
         return Err(anyhow!("openai http error"));
     }
 
@@ -745,7 +763,7 @@ async fn run_one_turn(
             _ = cancel.notified() => {
                 drop(byte_stream);
                 let _ = app.emit(channel, StreamEvent::Cancelled);
-                registry.finish(stream_id);
+                registry.finish_own(stream_id, cancel);
                 return Ok(None);
             }
             _ = tokio::time::sleep_until(
@@ -773,7 +791,7 @@ async fn run_one_turn(
                                     ),
                                 },
                             );
-                            registry.finish(stream_id);
+                            registry.finish_own(stream_id, cancel);
                             return Err(anyhow!("openai stream frame too large"));
                         }
 
@@ -791,7 +809,7 @@ async fn run_one_turn(
                                 &frame[..frame.len() - sep_len],
                             )
                             .to_string();
-                            for line in text.lines() {
+                            for line in frame_lines(&text) {
                                 let line = line.trim_start();
                                 if !line.starts_with("data:") { continue; }
                                 let data = line[5..].trim_start();
@@ -849,7 +867,11 @@ async fn run_one_turn(
                                     if finish_seen { continue; }
                                     for c in parsed.choices {
                                         if let Some(d) = c.delta {
-                                            if let Some(think) = d.reasoning_content {
+                                            let think = d
+                                                .reasoning_content
+                                                .filter(|t| !t.is_empty())
+                                                .or(d.reasoning);
+                                            if let Some(think) = think {
                                                 if !think.is_empty() {
                                                     pending_think.push_str(&think);
                                                 }
@@ -858,28 +880,19 @@ async fn run_one_turn(
                                                 if !delta.is_empty() {
                                                     *total_tokens += 1;
                                                     pending_token.push_str(&delta);
+                                                    turn_text.push_str(&delta);
                                                 }
                                             }
-                                            for tc in d.tool_calls {
+                                            for (pos, tc) in d.tool_calls.into_iter().enumerate() {
                                                 // OpenAI's wire protocol
                                                 // always includes the
                                                 // index. A compat server
-                                                // that omits it confuses
-                                                // multi-call assembly
-                                                // (without `index` we
-                                                // can't tell which slot
-                                                // a delta belongs to) —
-                                                // log and skip rather
-                                                // than silently collapse
-                                                // every call into slot 0.
-                                                let Some(idx_raw) = tc.index else {
-                                                    tracing::warn!(
-                                                        "openai stream: tool_call delta has no `index`; \
-                                                         skipping frame to avoid collapsing into slot 0"
-                                                    );
-                                                    continue;
-                                                };
-                                                let idx = idx_raw as usize;
+                                                // that omits it sends each
+                                                // call whole, so its place
+                                                // in this delta's list is
+                                                // its slot — skipping them
+                                                // dropped every call.
+                                                let idx = tc.index.map_or(pos, |i| i as usize);
                                                 // `index` is untrusted server
                                                 // input — cap it so a single
                                                 // frame can't drive `resize_with`
@@ -931,7 +944,7 @@ async fn run_one_turn(
                                                             ),
                                                         },
                                                     );
-                                                    registry.finish(stream_id);
+                                                    registry.finish_own(stream_id, cancel);
                                                     return Err(anyhow!("openai tool-call payload too large"));
                                                 }
                                             }
@@ -986,7 +999,7 @@ async fn run_one_turn(
                                     message: format!("OpenAI stream stopped mid-reply: {message}"),
                                 },
                             );
-                            registry.finish(stream_id);
+                            registry.finish_own(stream_id, cancel);
                             return Err(anyhow!("openai stream error: {message}"));
                         }
                         if finished {
@@ -1007,7 +1020,7 @@ async fn run_one_turn(
                             channel,
                             StreamEvent::Error { message: format!("stream error: {e}") },
                         );
-                        registry.finish(stream_id);
+                        registry.finish_own(stream_id, cancel);
                         return Err(e.into());
                     }
                     None => {
@@ -1431,6 +1444,18 @@ mod tests {
                 .expect("parses");
         assert!(usage_only.choices.is_empty());
         assert_eq!(usage_only.usage.and_then(|u| u.completion_tokens), Some(7));
+    }
+
+    /// Ollama's `/v1`, OpenRouter and newer vLLM name the field `reasoning`;
+    /// reading only `reasoning_content` dropped their thinking.
+    #[test]
+    fn reasoning_is_read_under_either_name() {
+        let chunk: SseChunk =
+            serde_json::from_str(r#"{"choices":[{"delta":{"reasoning":"Let me see"}}]}"#)
+                .expect("parses");
+        let delta = chunk.choices[0].delta.as_ref().expect("delta");
+        assert_eq!(delta.reasoning.as_deref(), Some("Let me see"));
+        assert!(delta.reasoning_content.is_none());
     }
 
     #[test]

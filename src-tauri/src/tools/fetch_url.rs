@@ -150,15 +150,21 @@ pub async fn fetch_capped(raw_url: &str, max_text_chars: usize) -> Result<Fetche
         // per-request client. Reqwest will use this map instead of re-
         // resolving before it dials, so a hostname can't flip from public →
         // private between our check and the actual connection.
-        let resolved = resolve_safe_addrs(&url).await?;
+        //
+        // The lookup spends the same budget: checked only after it, a
+        // resolver that never answered held each hop as long as the OS let it.
+        let over_budget = || format!("Fetch exceeded its {}s time budget", FETCH_TIMEOUT.as_secs());
+        let resolved = tokio::time::timeout(
+            deadline.saturating_duration_since(Instant::now()),
+            resolve_safe_addrs(&url),
+        )
+        .await
+        .map_err(|_| over_budget())??;
         let http = build_pinned_client(&url, &resolved)?;
 
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            return Err(format!(
-                "Fetch exceeded its {}s time budget",
-                FETCH_TIMEOUT.as_secs()
-            ));
+            return Err(over_budget());
         }
         let resp = http
             .get(url.clone())
@@ -496,6 +502,25 @@ pub fn is_public_ip(ip: &IpAddr) -> bool {
             if (segs[0] & 0xffc0) == 0xfe80 {
                 return false;
             }
+            // fec0::/10 — site-local: deprecated, but where it's still used
+            // it's a private range like fc00::/7.
+            if (segs[0] & 0xffc0) == 0xfec0 {
+                return false;
+            }
+            // Tunnels and translators that pass the packet on to an IPv4
+            // address carried inside the IPv6 one, which an AAAA record could
+            // aim at a private host: 6to4 (2002::/16), Teredo (2001::/32),
+            // local-use NAT64 (64:ff9b:1::/48) and IPv4-translated addresses
+            // (::ffff:0:0:0/96). All are obsolete or site-local, so refusing
+            // them outright loses no public host, where decoding each layout
+            // would be more to get wrong.
+            if segs[0] == 0x2002
+                || (segs[0] == 0x2001 && segs[1] == 0)
+                || (segs[0] == 0x0064 && segs[1] == 0xff9b && segs[2] == 0x0001)
+                || (segs[..4] == [0, 0, 0, 0] && segs[4] == 0xffff && segs[5] == 0)
+            {
+                return false;
+            }
             // Helper: rebuild the embedded IPv4 from the low 32 bits and run
             // it back through the v4 screen.
             let embedded_v4 = |segs: &[u16; 8]| {
@@ -612,10 +637,17 @@ pub(crate) fn is_link_local(ip: &IpAddr) -> bool {
 /// windows-1250 came out full of replacement characters, and a Library link
 /// keeps that text for good. A byte-order mark wins over both.
 fn decode_body(buf: &[u8], content_type: &str) -> String {
-    let label = charset_param(content_type).or_else(|| meta_charset(buf));
-    let encoding = label
-        .and_then(|l| encoding_rs::Encoding::for_label(l.as_bytes()))
-        .unwrap_or(encoding_rs::UTF_8);
+    let encoding = match charset_param(content_type) {
+        Some(label) => encoding_rs::Encoding::for_label(label.as_bytes()),
+        // As the HTML spec's prescan reads a `<meta>`: one declaring UTF-16
+        // means UTF-8 — the page that spelt it out in ASCII can't be UTF-16 —
+        // and a "replacement" label (`iso-2022-kr`) must not collapse the
+        // whole page into one U+FFFD. `output_encoding` maps both to UTF-8.
+        None => meta_charset(buf)
+            .and_then(|label| encoding_rs::Encoding::for_label(label.as_bytes()))
+            .map(encoding_rs::Encoding::output_encoding),
+    }
+    .unwrap_or(encoding_rs::UTF_8);
     encoding.decode(buf).0.into_owned()
 }
 
@@ -630,17 +662,20 @@ fn charset_param(content_type: &str) -> Option<String> {
 }
 
 /// The charset an HTML page names in its first 1 KiB — `<meta charset=…>` or
-/// a `http-equiv` Content-Type — where the HTML spec's prescan looks.
+/// a `http-equiv` Content-Type — where the HTML spec's prescan looks. Only
+/// inside a `<meta>` tag: a `charset=` in the page's text or in another tag
+/// declares nothing.
 fn meta_charset(buf: &[u8]) -> Option<String> {
     let head = String::from_utf8_lossy(&buf[..buf.len().min(1024)]).to_ascii_lowercase();
-    if !head.contains("<meta") {
-        return None;
-    }
-    let rest = head[head.find("charset=")? + "charset=".len()..].trim_start_matches(['"', '\'']);
-    let end = rest
-        .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':' | '.')))
-        .unwrap_or(rest.len());
-    Some(rest[..end].to_string()).filter(|l| !l.is_empty())
+    head.match_indices("<meta").find_map(|(at, _)| {
+        let tag = &head[at..];
+        let tag = &tag[..tag.find('>').unwrap_or(tag.len())];
+        let rest = tag[tag.find("charset=")? + "charset=".len()..].trim_start_matches(['"', '\'']);
+        let end = rest
+            .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':' | '.')))
+            .unwrap_or(rest.len());
+        Some(rest[..end].to_string()).filter(|l| !l.is_empty())
+    })
 }
 
 fn looks_like_html(body: &str) -> bool {
@@ -752,7 +787,7 @@ fn strip_blocks_with_lower(
     // whole pass O(n·k).
     let mut next_open: Vec<Option<usize>> = blocks_l
         .iter()
-        .map(|(open_l, _, _)| lower.find(open_l.as_str()))
+        .map(|(open_l, _, _)| find_opener(lower, open_l, 0))
         .collect();
 
     let mut out = String::with_capacity(hay.len());
@@ -764,7 +799,7 @@ fn strip_blocks_with_lower(
         let mut best: Option<(usize, usize)> = None; // (opener_pos, block index)
         for (idx, (open_l, _, _)) in blocks_l.iter().enumerate() {
             if matches!(next_open[idx], Some(pos) if pos < i) {
-                next_open[idx] = lower[i..].find(open_l.as_str()).map(|rel| i + rel);
+                next_open[idx] = find_opener(lower, open_l, i);
             }
             if let Some(pos) = next_open[idx] {
                 if best.map_or(true, |(bp, _)| pos < bp) {
@@ -794,6 +829,23 @@ fn strip_blocks_with_lower(
         }
     }
     out
+}
+
+/// Byte offset of the first `opener` — a tag opening like `<style` — at or
+/// after `from` in `lower` that names that tag and no longer one: followed by
+/// whitespace, `>` or `/`. Without that check `<style-switcher>` or
+/// `<scripts>` opened a block, and with no `</style>` after it the rest of
+/// the page was dropped.
+fn find_opener(lower: &str, opener: &str, from: usize) -> Option<usize> {
+    let mut at = from;
+    loop {
+        let pos = at + lower[at..].find(opener)?;
+        let next = pos + opener.len();
+        match lower.as_bytes().get(next) {
+            None | Some(b'>' | b'/' | b' ' | b'\t' | b'\n' | b'\r' | b'\x0c') => return Some(pos),
+            Some(_) => at = next,
+        }
+    }
 }
 
 /// Replace any occurrence of any needle in `needles` with `repl`. Single
@@ -1137,6 +1189,49 @@ mod tests {
         assert!(is_public_ip(&"64:ff9b::808:808".parse().unwrap()));
     }
 
+    /// Special-purpose IPv4 ranges the screen refuses beyond the RFC 1918
+    /// ones above.
+    #[test]
+    fn rejects_reserved_ipv4_ranges() {
+        for ip in [
+            "0.1.2.3",         // 0.0.0.0/8, "this network"
+            "0.0.0.0",         // unspecified
+            "192.0.0.8",       // 192.0.0.0/24, IETF protocol assignments
+            "198.19.255.1",    // 198.18.0.0/15, benchmarking
+            "240.0.0.1",       // 240.0.0.0/4, reserved
+            "255.255.255.255", // broadcast
+            "224.0.0.1",       // multicast
+            "239.255.255.250", // multicast (SSDP)
+        ] {
+            assert!(!is_public_ip(&ip.parse().unwrap()), "{ip}");
+        }
+        assert!(is_public_ip(&"198.20.0.1".parse().unwrap()));
+        assert!(is_public_ip(&"192.0.1.1".parse().unwrap()));
+    }
+
+    /// IPv6 forms that hand the packet to an embedded IPv4 address, plus
+    /// site-local, multicast and unspecified.
+    #[test]
+    fn rejects_tunnelled_translated_and_special_ipv6() {
+        for ip in [
+            "fec0::1",                 // site-local
+            "2002:7f00:1::1",          // 6to4 around 127.0.0.1
+            "2002:808:808::1",         // 6to4, even around a public v4
+            "2001:0:4136:e378::1",     // Teredo
+            "64:ff9b:1::a9fe:a9fe",    // local-use NAT64
+            "::ffff:0:7f00:1",         // IPv4-translated 127.0.0.1
+            "::ffff:0:808:808",        // IPv4-translated, public v4
+            "ff02::1",                 // multicast
+            "::",                      // unspecified
+        ] {
+            assert!(!is_public_ip(&ip.parse().unwrap()), "{ip}");
+        }
+        // Neighbours of those ranges stay public.
+        for ip in ["2001:4860:4860::8888", "2003::1", "64:ff9b:2::1"] {
+            assert!(is_public_ip(&ip.parse().unwrap()), "{ip}");
+        }
+    }
+
     #[test]
     fn rejects_ipv4_compatible_private() {
         // ::a.b.c.d (deprecated IPv4-compatible). ::1 is loopback and handled
@@ -1243,6 +1338,44 @@ mod tests {
         assert_eq!(decode_body("zwykły tekst".as_bytes(), "text/plain"), "zwykły tekst");
         assert_eq!(charset_param("text/html;charset=utf-8").as_deref(), Some("utf-8"));
         assert_eq!(meta_charset(b"<p>no meta here, charset=nothing</p>"), None);
+    }
+
+    /// A `charset=` counts only inside a `<meta>` tag, not wherever it first
+    /// turns up once any `<meta` has.
+    #[test]
+    fn meta_charset_is_read_from_meta_tags_only() {
+        assert_eq!(
+            meta_charset(b"<meta name=\"viewport\" content=\"width=device-width\"><p>charset=koi8-r</p>"),
+            None
+        );
+        assert_eq!(
+            meta_charset(b"<meta name=\"viewport\"><meta charset=\"windows-1250\">").as_deref(),
+            Some("windows-1250")
+        );
+    }
+
+    /// The HTML spec reads a `<meta>` naming UTF-16 as UTF-8, and a label
+    /// for the "replacement" encoding decoded the page to a single U+FFFD.
+    #[test]
+    fn meta_utf16_and_replacement_labels_read_as_utf8() {
+        for label in ["utf-16", "unicode", "utf-16be", "iso-2022-kr", "hz-gb-2312"] {
+            let page = format!("<html><head><meta charset=\"{label}\"></head><body>Zażółć</body></html>");
+            let text = decode_body(page.as_bytes(), "text/html");
+            assert!(text.contains("Zażółć"), "{label}: {text:?}");
+        }
+    }
+
+    /// `<style-switcher>` isn't a `<style>`: with no `</style>` after it,
+    /// taking it for one dropped the rest of the page.
+    #[test]
+    fn tags_that_merely_start_like_style_or_script_are_kept() {
+        let html = "<body><style-switcher>Theme</style-switcher><scripts>s</scripts>\
+                    <p>Rest of the page</p><style media=\"x\">x{}</style>\
+                    <script\ntype=\"module\">alert(1)</script>End</body>";
+        let (_, text) = html_to_text(html);
+        assert!(text.contains("Rest of the page"), "{text:?}");
+        assert!(text.contains("Theme") && text.contains("End"), "{text:?}");
+        assert!(!text.contains("x{}") && !text.contains("alert"), "{text:?}");
     }
 
     #[test]

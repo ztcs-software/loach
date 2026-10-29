@@ -105,7 +105,7 @@ export function useChatSources(sessionId: string | null, spaceId: string | null)
     }
     const fromSpace = spaceSourceCount(spaceFiles ?? EMPTY_FILES, spaceSources ?? [], datasets, items);
     return { chips, spaceCount: fromSpace };
-  }, [items, datasets, sessionSources, spaceSources, spaceFiles, pending, sessionId]);
+  }, [items, datasets, sessionSources, spaceSources, spaceFiles, pending, sessionId, spaceId]);
 }
 
 /**

@@ -1,5 +1,17 @@
 import { useEffect, useRef } from "react";
+import { noteActivity } from "@/lib/autoLock";
 import { sandboxPreviewUrl } from "@/lib/tauri";
+import { useSecurityStore } from "@/stores/securityStore";
+
+/** One of the host page's reports (`preview.html`): exactly `{ type }`. */
+function isFrameMessage(data: unknown, type: string): boolean {
+  return (
+    typeof data === "object" &&
+    data !== null &&
+    Object.keys(data).length === 1 &&
+    (data as { type?: unknown }).type === type
+  );
+}
 
 /**
  * Renders untrusted HTML — a model's code block, an `.html` attachment — as a
@@ -19,9 +31,25 @@ export function HtmlPreview({ html }: { html: string }) {
   useEffect(() => {
     const onMessage = (e: MessageEvent) => {
       const frame = frameRef.current?.contentWindow;
-      if (!frame || e.source !== frame || e.data?.type !== "loach-preview:ready") {
+      if (!frame || e.source !== frame) return;
+      // Typing or playing in the frame never reaches the app's own listeners,
+      // so the host page reports it, and the panic key pressed in there.
+      // Nothing else the frame sends is honoured.
+      if (isFrameMessage(e.data, "loach-preview:lock")) {
+        useSecurityStore.getState().lock();
         return;
       }
+      if (isFrameMessage(e.data, "loach-preview:activity")) {
+        // The page can post this too, and could hold the idle lock off for
+        // someone who walked away. So it counts only right after a real
+        // click or keypress in the frame, whose user activation reaches this
+        // window as well — or, where that isn't exposed, while the frame
+        // has focus.
+        const ua = (navigator as { userActivation?: { isActive: boolean } }).userActivation;
+        if (ua ? ua.isActive : document.activeElement === frameRef.current) noteActivity();
+        return;
+      }
+      if (e.data?.type !== "loach-preview:ready") return;
       // The frame's origin is opaque, so "*" is the only target that reaches
       // it; `frame-src` means only our own host page can be loaded there.
       frame.postMessage({ type: "loach-preview:render", html }, "*");

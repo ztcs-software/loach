@@ -48,6 +48,19 @@ export function findCommand(name: string): CommandSpec | undefined {
  *  supplies them so this module stays free of store imports. */
 export type ArgSources = Readonly<Record<string, readonly string[]>>;
 
+/** `/model`'s values: each model's id, or `<provider>/<id>` for an id both
+ *  providers serve — the same `llama3` from Ollama and an OpenAI-compatible
+ *  server used to complete to one row, and `/model llama3` took the first. */
+export function modelArgValues(
+  models: readonly { id: string; provider: string }[],
+): string[] {
+  const providers = new Map<string, Set<string>>();
+  for (const m of models) {
+    providers.set(m.id, (providers.get(m.id) ?? new Set()).add(m.provider));
+  }
+  return models.map((m) => (providers.get(m.id)!.size > 1 ? `${m.provider}/${m.id}` : m.id));
+}
+
 /** Suggestions for the autocomplete palette. Returns commands whose name
  *  starts with the typed prefix, plus any sub-command entries when the
  *  parent matches. Empty query (just `/`) returns every command. */

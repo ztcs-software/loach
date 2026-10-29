@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { formatTokens } from "@/lib/contextUsage";
+import { sourceTokens } from "@/lib/sources";
 import { cn } from "@/lib/utils";
 import { useLibraryStore } from "@/stores/libraryStore";
 import { useUIStore } from "@/stores/uiStore";
@@ -36,9 +37,9 @@ export function tabOf(item: LibraryItemMeta): Exclude<LibraryTab, "datasets"> {
 }
 
 /** Rough token cost of an item's text (images cost nothing here — they go
- *  to vision models as images). */
+ *  to vision models as images), counted the way the send counts it. */
 export function itemTokens(item: LibraryItemMeta): number {
-  return item.media === "text" ? Math.ceil(item.chars / 4) : 0;
+  return item.media === "text" ? sourceTokens([item]) : 0;
 }
 
 export function tokensLabel(tokens: number): string {

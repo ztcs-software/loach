@@ -428,56 +428,49 @@ pub async fn export_session(
     id: String,
     format: String,
 ) -> Result<String, String> {
-    let mut session = state
-        .db
-        .get_session(&id)
-        .map_err(err)?
-        .ok_or_else(|| "session not found".to_string())?;
-    // Machine-local, and it names the user's folders — left out, the same
-    // as in a full backup.
-    session.workspace_root = None;
-    let messages = state.db.list_messages(&id).map_err(err)?;
-
-    match format.as_str() {
-        "json" => {
-            let payload = serde_json::json!({
-                "session": session,
-                "messages": messages,
-            });
-            serde_json::to_string_pretty(&payload).map_err(err)
-        }
-        "md" | "markdown" => {
-            let mut out = String::new();
-            out.push_str(&format!("# {}\n\n", session.title));
-            out.push_str(&format!(
-                "_Provider: {} · Model: {}_\n\n",
-                session.provider, session.model
-            ));
-            if let Some(sys) = session.system_prompt.as_deref() {
-                if !sys.is_empty() {
-                    out.push_str("## System prompt\n\n");
-                    out.push_str(sys);
-                    out.push_str("\n\n");
-                }
+    if format != "md" {
+        return Err(format!("unsupported format: {format}"));
+    }
+    // A whole transcript, inlined attachments and all, read and formatted —
+    // blocking work, so on the blocking pool like the other DB-heavy reads.
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || -> Result<String, String> {
+        let session = db
+            .get_session(&id)
+            .map_err(err)?
+            .ok_or_else(|| "session not found".to_string())?;
+        let messages = db.list_messages(&id).map_err(err)?;
+        let mut out = String::new();
+        out.push_str(&format!("# {}\n\n", session.title));
+        out.push_str(&format!(
+            "_Provider: {} · Model: {}_\n\n",
+            session.provider, session.model
+        ));
+        if let Some(sys) = session.system_prompt.as_deref() {
+            if !sys.is_empty() {
+                out.push_str("## System prompt\n\n");
+                out.push_str(sys);
+                out.push_str("\n\n");
             }
-            for m in &messages {
+        }
+        for m in &messages {
             // Hidden imported rows are deliberately folded out of the
             // transcript; a user sharing an export shouldn't unknowingly
             // publish context they believe is tucked away.
             if m.import_hidden {
                 continue;
             }
-                let role = match m.role.as_str() {
-                    "user" => "You",
-                    "assistant" => "Assistant",
-                    _ => "System",
-                };
-                out.push_str(&format!("## {role}\n\n{}\n\n", m.content));
-            }
-            Ok(out)
+            let role = match m.role.as_str() {
+                "user" => "You",
+                "assistant" => "Assistant",
+                _ => "System",
+            };
+            out.push_str(&format!("## {role}\n\n{}\n\n", m.content));
         }
-        _ => Err(format!("unsupported format: {format}")),
-    }
+        Ok(out)
+    })
+    .await
+    .map_err(|e| format!("export task panicked: {e}"))?
 }
 
 // ---------- messages ----------
@@ -1326,7 +1319,10 @@ pub async fn update_space(
 
 #[tauri::command]
 pub async fn delete_space(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    state.db.delete_space(&id).map_err(err)
+    state.db.delete_space(&id).map_err(err)?;
+    // Its files' chunks went with it (triggers); let the index status catch up.
+    state.indexer.wake();
+    Ok(())
 }
 
 #[tauri::command]
@@ -1353,9 +1349,11 @@ pub async fn add_space_file(
     state: State<'_, AppState>,
     args: AddSpaceFileArgs,
 ) -> Result<SpaceFile, String> {
-    let file = state
-        .db
-        .add_space_file(
+    // Chunks and FTS-indexes the whole document under the writer lock —
+    // blocking work, so on the blocking pool.
+    let db = state.db.clone();
+    let file = tokio::task::spawn_blocking(move || {
+        db.add_space_file(
             &args.space_id,
             &args.name,
             &args.mime,
@@ -1364,7 +1362,10 @@ pub async fn add_space_file(
             args.size,
             args.position,
         )
-        .map_err(err)?;
+    })
+    .await
+    .map_err(err)?
+    .map_err(err)?;
     state.indexer.wake();
     Ok(file)
 }
@@ -1374,7 +1375,10 @@ pub async fn remove_space_file(
     state: State<'_, AppState>,
     file_id: String,
 ) -> Result<(), String> {
-    state.db.remove_space_file(&file_id).map_err(err)
+    state.db.remove_space_file(&file_id).map_err(err)?;
+    // Its chunks went with it (trigger); let the index status catch up.
+    state.indexer.wake();
+    Ok(())
 }
 
 #[derive(Debug, Serialize)]
@@ -2666,7 +2670,7 @@ pub async fn chat_stream(
                 biased;
                 _ = cancel.notified() => {
                     let _ = app.emit(&channel, crate::stream::StreamEvent::Cancelled);
-                    registry.finish(&request.stream_id);
+                    registry.finish_own(&request.stream_id, &cancel);
                     return;
                 }
                 r = agg_fut => r,
@@ -2768,7 +2772,7 @@ pub async fn chat_stream(
                     biased;
                     _ = cancel.notified() => {
                         let _ = app.emit(&channel, crate::stream::StreamEvent::Cancelled);
-                        registry.finish(&request.stream_id);
+                        registry.finish_own(&request.stream_id, &cancel);
                         return;
                     }
                     r = lookup => r.unwrap_or((None, None)),
@@ -2836,9 +2840,10 @@ pub async fn chat_stream(
         // bare names used by built-ins (`calculate`, `datetime`, …)
         // can't collide with `resolve_qualified`'s first-match scan.
         //
-        // Built-ins are purely local (no network, no DB writes), so we
-        // expose them in Private Chat too — the privacy guarantee is
-        // about data leaving the box, not about hiding local compute.
+        // Built-ins are purely local (no network, no DB writes), so a
+        // private request could take them — but Private Chat sends
+        // `no_tools`: its overlay has nowhere to show a tool call, and a
+        // generated file (the pdf tool) was silently lost.
         if !request.no_tools {
             request.tools.extend(crate::tools::builtin::enabled_builtin_defs(
                 &db,
@@ -2872,7 +2877,7 @@ pub async fn chat_stream(
                         ),
                     },
                 );
-                registry.finish(&request.stream_id);
+                registry.finish_own(&request.stream_id, &cancel);
                 Ok(())
             }
         };
@@ -3064,10 +3069,15 @@ pub async fn library_rename_item(
     title: String,
 ) -> Result<LibraryItemMeta, String> {
     let key = embed_model_key(&state);
-    let meta = state
-        .db
-        .rename_library_item(&id, &library_title(&title, "Untitled"), key.as_deref())
-        .map_err(err)?;
+    let db = state.db.clone();
+    // Re-issues every chunk of the item — on the blocking pool, like the
+    // other Library writes.
+    let meta = tokio::task::spawn_blocking(move || {
+        db.rename_library_item(&id, &library_title(&title, "Untitled"), key.as_deref())
+    })
+    .await
+    .map_err(err)?
+    .map_err(err)?;
     // The title is embedded with every chunk, so a new one means new vectors.
     state.indexer.wake();
     Ok(meta)
@@ -3106,12 +3116,7 @@ pub async fn library_update_text(
 async fn fetch_for_library(url: &str) -> Result<FetchedPage, String> {
     let page = fetch_url_tool::fetch_capped(url, LIBRARY_MAX_CHARS).await?;
     let ct = page.content_type.to_ascii_lowercase();
-    let textual = ct.is_empty()
-        || ct.contains("html")
-        || ct.starts_with("text/")
-        || ct.contains("json")
-        || ct.contains("xml");
-    if !textual {
+    if !is_textual_content_type(&ct) {
         return Err(format!(
             "This link serves `{}`, which can't be read as text. Download it and add it under Files instead.",
             ct.split(';').next().unwrap_or(&ct).trim()
@@ -3121,6 +3126,17 @@ async fn fetch_for_library(url: &str) -> Result<FetchedPage, String> {
         return Err("The page has no readable text.".to_string());
     }
     Ok(page)
+}
+
+/// Whether a (lowercased) `Content-Type` can be read as text. Office Open
+/// XML (`application/vnd.openxmlformats-officedocument.*` — .docx, .xlsx,
+/// .pptx) names XML but is a zip archive, so it's refused like any binary.
+fn is_textual_content_type(ct: &str) -> bool {
+    ct.is_empty()
+        || ct.contains("html")
+        || ct.starts_with("text/")
+        || ct.contains("json")
+        || (ct.contains("xml") && !ct.contains("openxmlformats"))
 }
 
 fn link_mime(page: &FetchedPage) -> String {
@@ -3206,7 +3222,10 @@ pub async fn library_refresh_link(
 
 #[tauri::command]
 pub async fn library_delete_items(state: State<'_, AppState>, ids: Vec<String>) -> Result<(), String> {
-    state.db.delete_library_items(&ids).map_err(err)
+    state.db.delete_library_items(&ids).map_err(err)?;
+    // Their chunks went with them (trigger); let the index status catch up.
+    state.indexer.wake();
+    Ok(())
 }
 
 #[tauri::command]
@@ -3314,7 +3333,7 @@ pub async fn set_space_file_enabled(
 }
 
 fn check_retrieval_mode(mode: &str) -> Result<(), String> {
-    if matches!(mode, "auto" | "full" | "retrieval") {
+    if crate::db::is_retrieval_mode(mode) {
         Ok(())
     } else {
         Err(format!("unknown retrieval mode `{mode}`"))
@@ -3547,9 +3566,9 @@ pub async fn storage_stats(state: State<'_, AppState>) -> Result<StorageStats, S
 
 /// Open a native save dialog and write every table, as JSON, to the path the
 /// user picks. Returns that path, or `None` if they cancelled. Pretty-printed
-/// so users can diff or grep an export manually. The schema tag `"loach/v1"`
-/// is the forward-compat knob — `import_data_with_dialog` rejects anything
-/// else.
+/// so users can diff or grep an export manually. The schema tag
+/// (`db::SNAPSHOT_SCHEMA`) is the forward-compat knob —
+/// `import_data_with_dialog` rejects any tag this build can't read.
 ///
 /// The snapshot streams straight into the file. It used to come back to the
 /// renderer as one string and go out again through `save_text_to_file`,
@@ -3656,10 +3675,11 @@ pub async fn import_data_with_dialog(
                 .map_err(|e| format!("couldn't read {}: {e}", path.display()))?;
             let snap: DatabaseSnapshot = serde_json::from_str(&text)
                 .map_err(|e| format!("file doesn't look like a Loach export: {e}"))?;
-            if snap.schema != "loach/v1" {
+            if !crate::db::is_supported_snapshot_schema(&snap.schema) {
                 return Err(format!(
-                    "unsupported export schema '{}' — this build expects 'loach/v1'",
-                    snap.schema
+                    "unsupported export schema '{}' — this build reads 'loach/v1' and '{}'",
+                    snap.schema,
+                    crate::db::SNAPSHOT_SCHEMA
                 ));
             }
             Ok(snap)
@@ -3933,7 +3953,13 @@ pub async fn wipe_user_data(
     auth: Option<DestructiveAuthArgs>,
 ) -> Result<(), String> {
     check_destructive_auth(auth).await?;
-    state.db.wipe_user_data().map_err(err)?;
+    // Bulk DELETEs, each chunk row through its FTS trigger — on the blocking
+    // pool.
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || db.wipe_user_data())
+        .await
+        .map_err(err)?
+        .map_err(err)?;
     // The wipe deletes every `mcp_servers` row, so the cached tool catalogue
     // is now stale. The webview reloads afterwards but `AppState` doesn't, so
     // without this the next chat send would still advertise the just-erased
@@ -3960,7 +3986,12 @@ pub async fn factory_reset(
     auth: Option<DestructiveAuthArgs>,
 ) -> Result<(), String> {
     check_destructive_auth(auth).await?;
-    state.db.wipe_all().map_err(err)?;
+    // Blocking bulk DELETEs, as in `wipe_user_data`.
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || db.wipe_all())
+        .await
+        .map_err(err)?
+        .map_err(err)?;
     // Same reason as in `wipe_user_data`: the MCP rows are gone, so the
     // in-process tool catalogue has to go with them.
     crate::mcp::invalidate_tools_cache(&state.mcp_tools_cache).await;
@@ -4441,5 +4472,77 @@ mod tests {
         let long = "x".repeat(CONSENT_MAX_CHARS);
         let err = stdio_consent_text(&stdio_input("npx", &[&long], &[]).to_draft()).unwrap_err();
         assert!(err.contains("too long"), "{err}");
+    }
+
+    /// The consent dialog guards what *would run*: a new enabled row, a new
+    /// command line, and — the import path — enabling a row that was off.
+    /// Renames and switching a row off never ask.
+    #[test]
+    fn save_asks_for_consent_only_when_what_runs_changes() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let db = crate::db::Database::open(&dir.path().join("loach.db")).expect("open");
+        db.migrate().expect("migrate");
+
+        let fresh = stdio_input("npx", &["-y", "server-a"], &[]).to_draft();
+        assert!(save_changes_what_runs(&db, &fresh), "a new enabled row");
+        assert!(!save_changes_what_runs(&db, &McpServer { enabled: false, ..fresh.clone() }));
+
+        // Stored disabled, as a snapshot import parks it.
+        let parked = db
+            .upsert_mcp_server(&McpServer { enabled: false, ..fresh.clone() })
+            .expect("save");
+        assert!(save_changes_what_runs(&db, &McpServer { enabled: true, ..parked.clone() }));
+
+        let running = db
+            .upsert_mcp_server(&McpServer { enabled: true, ..parked.clone() })
+            .expect("enable");
+        assert!(!save_changes_what_runs(&db, &McpServer { name: "renamed".into(), ..running.clone() }));
+        assert!(!save_changes_what_runs(&db, &McpServer { enabled: false, ..running.clone() }));
+        let other = McpServer {
+            args_json: Some(r#"["-y","server-b"]"#.into()),
+            ..running.clone()
+        };
+        assert!(save_changes_what_runs(&db, &other), "a new command line");
+
+        // A row nothing knows about is treated as new.
+        assert!(save_changes_what_runs(&db, &McpServer { id: "gone".into(), ..running }));
+    }
+
+    /// The CRLF-injection guard on MCP headers: names are RFC 7230 tokens,
+    /// values visible ASCII plus space and tab, and neither may break a line.
+    #[test]
+    fn header_names_and_values_cannot_inject_lines() {
+        for ok in ["Authorization", "X-API-Key", "x_custom.v2", "!#$%&'*+-.^_`|~"] {
+            assert!(is_valid_header_name(ok), "{ok:?}");
+        }
+        for bad in ["", "Bad Name", "X-Key:", "X\r\nInjected", "X\nY", "Ключ", "a\tb"] {
+            assert!(!is_valid_header_name(bad), "{bad:?}");
+        }
+        for ok in ["", "Bearer abc.def", "a\tb", "~!@#$%^&*()"] {
+            assert!(is_valid_header_value(ok), "{ok:?}");
+        }
+        for bad in ["x\r\nX-Injected: 1", "x\ny", "x\rx", "nul\0", "żółw", "del\u{7f}"] {
+            assert!(!is_valid_header_value(bad), "{bad:?}");
+        }
+        assert!(is_valid_header_value(&"v".repeat(4096)));
+        assert!(!is_valid_header_value(&"v".repeat(4097)));
+    }
+
+    /// Office Open XML names XML in its type but is a zip archive, so a link
+    /// to a .docx/.xlsx/.pptx is refused like any binary; real XML isn't.
+    #[test]
+    fn office_documents_are_not_textual() {
+        for ok in ["", "text/html; charset=utf-8", "application/json", "application/xml", "application/rss+xml", "text/plain"] {
+            assert!(is_textual_content_type(ok), "{ok:?}");
+        }
+        for bad in [
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            "application/pdf",
+            "image/png",
+        ] {
+            assert!(!is_textual_content_type(bad), "{bad:?}");
+        }
     }
 }

@@ -54,6 +54,23 @@ function notInTauri<T>(fallback: T): Promise<T> {
   return Promise.resolve(fallback);
 }
 
+/** `invoke` for a command whose events `unlisten` was subscribed for first.
+ *  A rejected start returns no handle, so the caller never gets the
+ *  `unlisten` either — drop the listener here, or each failed start leaked
+ *  one. */
+async function invokeOrUnlisten<T>(
+  unlisten: UnlistenFn,
+  cmd: string,
+  args: Record<string, unknown>,
+): Promise<T> {
+  try {
+    return await invoke<T>(cmd, args);
+  } catch (e) {
+    unlisten();
+    throw e;
+  }
+}
+
 /**
  * Hand a URL to the OS browser, or to a new tab when running outside the
  * Tauri shell.
@@ -275,7 +292,7 @@ export function readWorkspaceInstructions(sessionId: string): Promise<string | n
   return invoke("read_workspace_instructions", { sessionId });
 }
 
-export function exportSession(id: string, format: "json" | "md"): Promise<string> {
+export function exportSession(id: string, format: "md"): Promise<string> {
   if (!isTauri) return notInTauri("");
   return invoke("export_session", { id, format });
 }
@@ -703,7 +720,7 @@ export async function ollamaPullModel(
   const unlisten = await listen<AdminEvent>(channel, (payload) =>
     onEvent(payload.payload),
   );
-  const handle = await invoke<{ stream_id: string }>("ollama_pull_model", {
+  const handle = await invokeOrUnlisten<{ stream_id: string }>(unlisten, "ollama_pull_model", {
     args,
   });
   return {
@@ -732,7 +749,7 @@ export async function ollamaCreateModel(
   const unlisten = await listen<AdminEvent>(channel, (payload) =>
     onEvent(payload.payload),
   );
-  const handle = await invoke<{ stream_id: string }>("ollama_create_model", {
+  const handle = await invokeOrUnlisten<{ stream_id: string }>(unlisten, "ollama_create_model", {
     args,
   });
   return {
@@ -960,6 +977,7 @@ export function libraryAddLink(url: string): Promise<LibraryItemMeta> {
 }
 
 export function libraryRefreshLink(id: string): Promise<LibraryItemMeta> {
+  if (!isTauri) return Promise.reject(new Error("library_refresh_link requires the Tauri runtime"));
   return invoke("library_refresh_link", { id });
 }
 
@@ -1353,7 +1371,7 @@ export async function startChatStream(
   const unlisten = await listen<StreamEvent>(channel, (payload) => {
     onEvent(payload.payload);
   });
-  const handle = await invoke<{ stream_id: string }>("chat_stream", { request });
+  const handle = await invokeOrUnlisten<{ stream_id: string }>(unlisten, "chat_stream", { request });
   return {
     streamId: handle.stream_id,
     stop: async () => {

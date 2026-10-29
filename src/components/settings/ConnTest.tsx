@@ -3,6 +3,7 @@
 
 import { CheckCircle2, CircleAlert } from "lucide-react";
 import { cn } from "@/lib/utils";
+import type { ProviderId } from "@/types";
 
 export type ConnTestState =
   | { kind: "idle" }
@@ -17,8 +18,9 @@ export type ConnTestState =
  *  produces (SSRF guard text, reqwest's HTTP/IO display, our own URL-parse
  *  error). Returns an empty hint when nothing matches — the raw message is
  *  still shown verbatim above the hint, so unrecognised errors degrade
- *  gracefully instead of swallowing context. */
-function classifyConnError(msg: string): { hint: string } {
+ *  gracefully instead of swallowing context. HTTP statuses read per
+ *  provider: Ollama is asked for /api/tags and is sent no API key. */
+export function classifyConnError(msg: string, provider: ProviderId): { hint: string } {
   const m = msg.toLowerCase();
   if (m.includes("refusing to connect")) {
     return {
@@ -41,12 +43,18 @@ function classifyConnError(msg: string): { hint: string } {
     m.includes("forbidden")
   ) {
     return {
-      hint: "The server rejected the request as unauthorized. Check that the API key is set and valid for this endpoint.",
+      hint:
+        provider === "ollama"
+          ? "The server rejected the request as unauthorized. Loach sends Ollama no credentials — if a proxy in front of it asks for a login, point Loach at Ollama directly."
+          : "The server rejected the request as unauthorized. Check that the API key is set and valid for this endpoint.",
     };
   }
   if (m.includes("404") || m.includes("not found")) {
     return {
-      hint: "The /models endpoint wasn't found. Double-check the base URL — OpenAI itself ends in /v1, but LiteLLM and Ollama's OpenAI-compat proxy don't.",
+      hint:
+        provider === "ollama"
+          ? "Ollama's /api/tags endpoint wasn't found. Use the server's address without a path — e.g. http://localhost:11434, not …/v1 or …/api."
+          : "The /models endpoint wasn't found. Double-check the base URL — OpenAI itself ends in /v1, but LiteLLM and Ollama's OpenAI-compat proxy don't.",
     };
   }
   if (
@@ -65,19 +73,24 @@ function classifyConnError(msg: string): { hint: string } {
   return { hint: "" };
 }
 
+/** Inline success / failure card for the Providers "Test connection"
+ *  buttons. Mirrors `McpPanel`'s TestResultCard styling so users see the
+ *  same visual language no matter which connection they're checking. */
 export function ConnTestResult({
   result,
+  provider,
   providerLabel,
   className,
 }: {
   result:
     | { kind: "ok"; modelCount: number }
     | { kind: "error"; error: string };
+  provider: ProviderId;
   providerLabel: string;
   className?: string;
 }) {
   if (result.kind === "error") {
-    const { hint } = classifyConnError(result.error || "");
+    const { hint } = classifyConnError(result.error || "", provider);
     return (
       <div
         className={cn(
@@ -118,23 +131,3 @@ export function ConnTestResult({
     </div>
   );
 }
-
-/* ─────────────────────── Default-model picker ───────────────────────
- *
- * Encodes the user's "what model should new chats start in" preference
- * as a single string so it round-trips through the string-keyed KV
- * settings table without serialisation gymnastics:
- *
- *   "recent"                  → use whatever the user touched last
- *   "provider:<id>"           → pin to that provider (most recent model)
- *   "model:<provider>:<id>"   → always start in this exact model
- *
- * The encoding lives in `chatStore.resolveDefaultModelChoice` too — keep
- * the two in sync.
- *
- * The picker reads the live model list from `useModelsStore`; if it's
- * empty (e.g. Ollama unreachable, no OpenAI key) the model section just
- * collapses and the user is left with "recent" + per-provider choices,
- * which still works.
- * ─────────────────────────────────────────────────────────────────── */
-

@@ -217,6 +217,7 @@ export const COMMANDS: readonly CommandSpec[] = [
     name: "web-fetch",
     description: "Toggle URL fetching for prompts",
     usage: "on|off",
+    subcommands: ["on", "off"],
     group: "Tools & web",
   },
   {
@@ -229,6 +230,7 @@ export const COMMANDS: readonly CommandSpec[] = [
     name: "thinking",
     description: "Toggle the model's reasoning step (Ollama)",
     usage: "on|off",
+    subcommands: ["on", "off"],
     group: "Tools & web",
   },
 

@@ -11,7 +11,8 @@
 //! PDF — so accented text (e.g. Polish), the euro sign, em dashes and
 //! bullets render correctly. Wrapping and cell truncation measure text with
 //! the font's own advance widths, so a line can't run past the margin.
-//! Glyphs outside the bundled set (e.g. CJK, emoji) are replaced with `?`
+//! Glyphs outside the bundled Latin-only set (Cyrillic, Greek, CJK, emoji)
+//! are replaced with `?`
 //! at render time so the file stays legible rather than showing blank
 //! `.notdef` boxes, and the tool result counts them so the model can tell
 //! the user.
@@ -322,7 +323,7 @@ struct PageSpec {
 #[serde(tag = "type", rename_all = "snake_case")]
 enum Block {
     Heading {
-        #[serde(default = "default_heading_level")]
+        #[serde(default = "default_heading_level", deserialize_with = "lenient_level")]
         level: u8,
         text: String,
     },
@@ -346,6 +347,16 @@ enum Block {
 
 fn default_heading_level() -> u8 {
     2
+}
+
+/// `level` as models write it: the `1.0` local models emit for `1` failed
+/// the whole document, where the tools' top-level integer arguments take it
+/// ([`crate::tools::lenient_i64`]).
+fn lenient_level<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u8, D::Error> {
+    let v = Value::deserialize(d)?;
+    crate::tools::lenient_i64_value(&v)
+        .and_then(|n| u8::try_from(n).ok())
+        .ok_or_else(|| serde::de::Error::custom(format!("invalid heading `level` {v} — use 1, 2 or 3")))
 }
 
 // ---------- rendering ----------
@@ -378,10 +389,22 @@ impl<'f> RenderState<'f> {
         }
     }
 
+    /// Whether nothing has been drawn on the page in progress yet.
+    fn page_is_blank(&self) -> bool {
+        self.ops.len() == page_init_ops().len()
+    }
+
     /// Flush the in-progress page and begin a fresh one with the cursor
     /// back at the top margin — or refuse, if that would be one page more
     /// than [`MAX_PAGES`].
     fn new_page(&mut self) -> Result<(), String> {
+        // A page with nothing on it yet stays the page in progress: a
+        // `page_break` first thing on a page, or just before the next spec
+        // page starts one, used to flush it blank.
+        if self.page_is_blank() {
+            self.cursor_y_mm = PAGE_HEIGHT_MM - MARGIN_MM;
+            return Ok(());
+        }
         // `pages` holds the finished ones; the page in progress is one more.
         if self.pages.len() + 1 >= MAX_PAGES {
             return Err(format!(
@@ -408,10 +431,14 @@ impl<'f> RenderState<'f> {
         self.cursor_y_mm -= dy_mm;
     }
 
-    /// Consume the state, flushing the last in-progress page.
+    /// Consume the state, flushing the last in-progress page — unless the
+    /// document ended on a `page_break` and left it blank, and it isn't the
+    /// only page.
     fn into_pages(mut self) -> Vec<PdfPage> {
-        self.pages
-            .push(PdfPage::new(Mm(PAGE_WIDTH_MM), Mm(PAGE_HEIGHT_MM), self.ops));
+        if !self.page_is_blank() || self.pages.is_empty() {
+            self.pages
+                .push(PdfPage::new(Mm(PAGE_WIDTH_MM), Mm(PAGE_HEIGHT_MM), self.ops));
+        }
         self.pages
     }
 
@@ -590,18 +617,20 @@ fn render_list(
     items: &[String],
     style: ListStyle,
 ) -> Result<(), String> {
-    let indent_mm = 6.0;
-    let bullet_col_mm = MARGIN_MM;
-    let text_col_mm = MARGIN_MM + indent_mm;
-    let wrap_width_mm = body_width_mm() - indent_mm;
-    for (i, item) in items.iter().enumerate() {
-        let marker = match style {
+    let markers: Vec<String> = (1..=items.len())
+        .map(|n| match style {
             ListStyle::Bullet => "•".to_string(),
             // Numbers wrap monotonically; we don't try to detect nested
             // ordering, so always the flat `1.` style.
-            ListStyle::Numbered => format!("{}.", i + 1),
-        };
-        let marker = sanitise(&marker, state.regular_font);
+            ListStyle::Numbered => format!("{n}."),
+        })
+        .collect();
+    let indent_mm = list_indent_mm(&markers, state.regular_font);
+    let bullet_col_mm = MARGIN_MM;
+    let text_col_mm = MARGIN_MM + indent_mm;
+    let wrap_width_mm = body_width_mm() - indent_mm;
+    for (item, marker) in items.iter().zip(&markers) {
+        let marker = sanitise(marker, state.regular_font);
         let cleaned = sanitise(item, state.regular_font);
         let lines = wrap_text(&cleaned, wrap_width_mm, state.regular_font, BODY_FONT_SIZE_PT);
         for (line_idx, line) in lines.iter().enumerate() {
@@ -618,6 +647,17 @@ fn render_list(
     }
     state.advance(BODY_LINE_HEIGHT_MM * 0.4);
     Ok(())
+}
+
+/// How far a list's text sits from the margin: 6 mm, or past its widest
+/// marker with a gap to spare when that's further. A fixed 6 mm fits `•`
+/// and `9.`, but from `100.` on the number ran into the item's text.
+fn list_indent_mm(markers: &[String], font: &ParsedFont) -> f32 {
+    let widest_mm = markers
+        .iter()
+        .map(|m| text_width_mm(m, font, BODY_FONT_SIZE_PT))
+        .fold(0.0, f32::max);
+    (widest_mm + 2.0).max(6.0)
 }
 
 fn render_hr(state: &mut RenderState) -> Result<(), String> {
@@ -839,14 +879,31 @@ fn pt_to_mm(pt: f32) -> f32 {
     pt * 0.352_777_8
 }
 
+/// Longest the filename's stem may be, in UTF-8 bytes. Linux and macOS cap a
+/// name at 255 bytes, Windows at 255 UTF-16 units (which never outnumber the
+/// UTF-8 bytes), and this leaves room for `.pdf` and the ` (1)` a download
+/// gets when the name is taken.
+const MAX_FILENAME_STEM_BYTES: usize = 120;
+
+/// The title as a filename: letters and digits of any script, `-` and `_`,
+/// with whitespace as `_`. Letters are safe in a name on Windows, macOS and
+/// Linux alike — keeping only ASCII ones turned `Zażółć gęślą jaźń` into
+/// `Za_gl_ja` — while separators, `:`, dots, control and text-direction
+/// characters are not, and are dropped. Cut to [`MAX_FILENAME_STEM_BYTES`].
 fn build_filename(raw_title: &str) -> String {
     let mut slug = String::with_capacity(raw_title.len());
-    for ch in raw_title.chars() {
-        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
-            slug.push(ch);
+    for ch in raw_title.trim().chars() {
+        let kept = if ch.is_alphanumeric() || ch == '-' || ch == '_' {
+            ch
         } else if ch.is_whitespace() {
-            slug.push('_');
+            '_'
+        } else {
+            continue;
+        };
+        if slug.len() + kept.len_utf8() > MAX_FILENAME_STEM_BYTES {
+            break;
         }
+        slug.push(kept);
     }
     let slug = slug.trim_matches('_').to_string();
     let base = if slug.is_empty() { "document" } else { &slug };
@@ -1127,8 +1184,16 @@ mod tests {
     /// text that flows on add pages the spec's `pages` array doesn't show.
     #[test]
     fn physical_pages_are_counted_and_capped() {
-        let breaks = |n: usize| vec![json!({ "type": "page_break" }); n];
-        let r = dispatch(&json!({ "action": "create", "pages": [{ "blocks": breaks(2) }] }));
+        // `n` pages of text, a page break between each two.
+        let paged = |n: usize| {
+            let text = json!({ "type": "paragraph", "text": "x" });
+            let mut blocks = vec![text.clone()];
+            for _ in 1..n {
+                blocks.extend([json!({ "type": "page_break" }), text.clone()]);
+            }
+            blocks
+        };
+        let r = dispatch(&json!({ "action": "create", "pages": [{ "blocks": paged(3) }] }));
         assert!(!r.is_error, "{}", r.content_text);
         assert!(r.content_text.contains("(3 pages,"), "{}", r.content_text);
 
@@ -1140,12 +1205,77 @@ mod tests {
         assert!(!r.is_error, "{}", r.content_text);
         assert!(r.content_text.contains("(3 pages,"), "{}", r.content_text);
 
-        let r = dispatch(&json!({ "action": "create", "pages": [{ "blocks": breaks(MAX_PAGES) }] }));
+        let r = dispatch(&json!({ "action": "create", "pages": [{ "blocks": paged(MAX_PAGES + 1) }] }));
         assert!(r.is_error, "{}", r.content_text);
         assert!(r.content_text.contains("cap"), "{}", r.content_text);
-        let r = dispatch(&json!({ "action": "create", "pages": [{ "blocks": breaks(MAX_PAGES - 1) }] }));
+        let r = dispatch(&json!({ "action": "create", "pages": [{ "blocks": paged(MAX_PAGES) }] }));
         assert!(!r.is_error, "{}", r.content_text);
         assert!(r.content_text.contains(&format!("({MAX_PAGES} pages,")), "{}", r.content_text);
+    }
+
+    /// A page break with nothing before it on its page — first thing in the
+    /// document, straight after another break, or the last block before the
+    /// next spec page — doesn't put out a blank page; nor does one at the end.
+    #[test]
+    fn page_breaks_never_leave_a_blank_page() {
+        let text = || json!({ "type": "paragraph", "text": "x" });
+        let brk = || json!({ "type": "page_break" });
+        let pages_in = |pages: Value| {
+            let r = dispatch(&json!({ "action": "create", "pages": pages }));
+            assert!(!r.is_error, "{}", r.content_text);
+            r.content_text
+        };
+        for (pages, want) in [
+            (json!([{ "blocks": [brk(), text()] }]), "(1 page,"),
+            (json!([{ "blocks": [text(), brk(), brk(), text()] }]), "(2 pages,"),
+            (json!([{ "blocks": [text(), brk()] }, { "blocks": [text()] }]), "(2 pages,"),
+            (json!([{ "blocks": [text(), brk()] }]), "(1 page,"),
+            // Nothing drawn at all is still a one-page PDF.
+            (json!([{ "blocks": [brk()] }]), "(1 page,"),
+        ] {
+            let got = pages_in(pages.clone());
+            assert!(got.contains(want), "{pages}: {got}");
+        }
+    }
+
+    #[test]
+    fn heading_level_accepts_a_float_shaped_integer() {
+        let heading = |level: Value| {
+            dispatch(&json!({
+                "action": "create",
+                "pages": [{ "blocks": [{ "type": "heading", "level": level, "text": "Title" }] }]
+            }))
+        };
+        let r = heading(json!(1.0));
+        assert!(!r.is_error, "{}", r.content_text);
+        let r = heading(json!(1.5));
+        assert!(r.is_error, "{}", r.content_text);
+        assert!(r.content_text.contains("level"), "{}", r.content_text);
+    }
+
+    #[test]
+    fn filenames_keep_letters_of_any_script_and_stay_short() {
+        assert_eq!(build_filename("Zażółć gęślą jaźń"), "Zażółć_gęślą_jaźń.pdf");
+        assert_eq!(build_filename("Отчёт: 2026/Q4"), "Отчёт_2026Q4.pdf");
+        assert_eq!(build_filename("🦊 \u{202E}"), "document.pdf");
+        let long = build_filename(&"ż".repeat(300));
+        assert!(long.len() <= MAX_FILENAME_STEM_BYTES + ".pdf".len(), "{}", long.len());
+        assert!(long.starts_with("żżż") && long.ends_with("ż.pdf"), "{long}");
+    }
+
+    /// From `100.` on, a number is wider than the old fixed 6 mm indent and
+    /// ran into the item's text.
+    #[test]
+    fn list_text_clears_its_widest_marker() {
+        let (regular, _) = fonts();
+        let numbered = |n: usize| (1..=n).map(|i| format!("{i}.")).collect::<Vec<_>>();
+        assert_eq!(list_indent_mm(&["•".to_string()], &regular), 6.0);
+        assert_eq!(list_indent_mm(&numbered(9), &regular), 6.0);
+        for n in [100, 1000] {
+            let marker_mm = text_width_mm(&format!("{n}."), &regular, BODY_FONT_SIZE_PT);
+            let indent = list_indent_mm(&numbered(n), &regular);
+            assert!(indent > marker_mm + 1.0, "{n}: {indent} mm for a {marker_mm} mm marker");
+        }
     }
 
     #[test]

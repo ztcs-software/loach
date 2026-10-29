@@ -54,6 +54,9 @@
     }
   },
   "plugins": {
+    "shell": {
+      "open": "((https?://\\w+)|(mailto:\\w+)).+"
+    },
     "updater": {
       "endpoints": [
         "https://github.com/ztcs-software/loach/releases/latest/download/latest.json"

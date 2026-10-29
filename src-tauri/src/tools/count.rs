@@ -19,7 +19,9 @@ pub fn tool_description() -> &'static str {
      in a string. Use this rather than estimating — tokenization hides the \
      actual character count from you, and you will be wrong even on simple \
      inputs like `strawberry`. Modes: \
-     `chars` (Unicode scalar values), \
+     `chars` (Unicode scalar values, not the characters a reader sees: an \
+     emoji with a skin tone, a flag, or a letter built from a base and a \
+     combining accent counts as 2 or more), \
      `bytes` (UTF-8 byte length), \
      `words` (whitespace-separated tokens), \
      `lines` (count of `\\n`-separated lines, treating the final unterminated \
@@ -61,6 +63,9 @@ pub fn dispatch(args: &Value) -> McpCallResult {
         None => return err("missing required `mode` argument"),
     };
     let n = match mode {
+        // Scalar values, as the description says: counting what a reader
+        // sees as one character takes grapheme segmentation, which no
+        // direct dependency provides.
         "chars" => input.chars().count(),
         "bytes" => input.len(),
         "words" => input.split_whitespace().count(),
@@ -123,6 +128,17 @@ mod tests {
         let r = dispatch(&json!({"input": "naïve", "mode": "bytes"}));
         // ï is 2 bytes in UTF-8, so 5 chars = 6 bytes.
         assert_eq!(r.content_text, "6");
+    }
+
+    /// `chars` counts scalar values, as the description warns: one visible
+    /// emoji with a skin tone, or one flag, is two of them.
+    #[test]
+    fn chars_counts_scalar_values_not_graphemes() {
+        for input in ["👍🏽", "🇵🇱"] {
+            let r = dispatch(&json!({"input": input, "mode": "chars"}));
+            assert_eq!(r.content_text, "2", "{input}");
+        }
+        assert!(tool_description().contains("scalar values"));
     }
 
     #[test]

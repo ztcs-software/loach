@@ -36,7 +36,8 @@ export function TitleBar() {
   // the user's attention and lets them dismiss with X.
   const settingsHydrated = useSettingsStore((s) => s.hydrated);
   const onboardingCompleted = useSettingsStore((s) => s.onboarding_completed);
-  const onboardingActive = settingsHydrated && !onboardingCompleted;
+  const settingsLoadError = useSettingsStore((s) => s.loadError);
+  const onboardingActive = settingsHydrated && !settingsLoadError && !onboardingCompleted;
   // Mirror App.tsx's lock gate (`showLock`). While the lock screen owns
   // the surface, the sidebar toggle / search pill / Private Chat button
   // are HIDDEN rather than disabled: the surfaces they operate don't

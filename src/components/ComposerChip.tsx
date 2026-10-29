@@ -65,6 +65,11 @@ export function ChipRemove({
         e.stopPropagation();
         onClick();
       }}
+      onKeyDown={(e) => {
+        // …and the keys that activate it, which the wrapper would otherwise
+        // take as "open the preview" (cancelling this button's own click).
+        if (e.key === "Enter" || e.key === " ") e.stopPropagation();
+      }}
       aria-label={label}
       disabled={disabled}
       className="-mr-1 grid h-5 w-5 shrink-0 place-items-center rounded-full text-foreground/50 transition-colors hover:bg-foreground/10 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-foreground/50"

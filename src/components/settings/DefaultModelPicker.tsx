@@ -14,6 +14,25 @@ import { useMemo } from "react";
 import { useModelsStore } from "@/stores/modelsStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 
+/* ─────────────────────── Default-model picker ───────────────────────
+ *
+ * Encodes the user's "what model should new chats start in" preference
+ * as a single string so it round-trips through the string-keyed KV
+ * settings table without serialisation gymnastics:
+ *
+ *   "recent"                  → use whatever the user touched last
+ *   "provider:<id>"           → pin to that provider (most recent model)
+ *   "model:<provider>:<id>"   → always start in this exact model
+ *
+ * The encoding lives in `chatStore.resolveDefaultModelChoice` too — keep
+ * the two in sync.
+ *
+ * The picker reads the live model list from `useModelsStore`; if it's
+ * empty (e.g. Ollama unreachable, no OpenAI key) the model section just
+ * collapses and the user is left with "recent" + per-provider choices,
+ * which still works.
+ * ─────────────────────────────────────────────────────────────────── */
+
 function decodeModelChoice(
   choice: string,
 ):

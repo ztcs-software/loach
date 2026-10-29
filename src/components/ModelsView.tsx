@@ -115,6 +115,16 @@ export function ModelsView() {
       });
   }, [viewingModel, showModel]);
 
+  const previewText = useMemo(() => {
+    try {
+      return buildModelfile(form);
+    } catch (e) {
+      return `# Modelfile preview unavailable\n# ${
+        e instanceof Error ? e.message : String(e)
+      }`;
+    }
+  }, [form]);
+
   if (!viewingModel) return null;
 
   const handleBack = () => {
@@ -147,21 +157,44 @@ export function ModelsView() {
       setSaveError("Give the new model a tag, e.g. `my-llama:v1`.");
       return;
     }
+    // Ollama's create replaces whatever is under the tag already — the base
+    // model itself, if the tag is its FROM. Ask first. A bare name is
+    // Ollama's `:latest`.
+    const fullTag = (t: string) => (t.includes(":") ? t : `${t}:latest`);
+    const isBase = fullTag(targetName) === fullTag(form.from.trim());
+    if (
+      (isBase || models.some((m) => m.provider === "ollama" && fullTag(m.id) === fullTag(targetName))) &&
+      !(await confirm({
+        title: `Replace “${targetName}”?`,
+        body: isBase
+          ? "That's the base model this one is built from. Saving replaces it with the customized version."
+          : "A model with this tag already exists. Saving replaces it with this one.",
+        confirmLabel: "Replace",
+        destructive: true,
+      }))
+    ) {
+      return;
+    }
+    // The editor the save started from. The user may open another model's
+    // editor while it runs; the result mustn't pull them back to this one
+    // (discarding that form) or land its error there.
+    const editing = viewingModel;
+    const stillHere = () => useModelsStore.getState().viewingModel === editing;
     setSaving(true);
     try {
       const run = await createModel(targetName, modelfile);
       if (run?.finished === "ok") {
         // Land the user on the freshly-created model so they can immediately
         // iterate on it or try it in a new chat.
-        setViewingModel(targetName);
+        if (stillHere()) setViewingModel(targetName);
       } else if (run?.finished === "error") {
         // The create reached a terminal error — surface the real reason
         // instead of navigating to a model that was never created.
-        setSaveError(run.error ?? "Couldn't create the model.");
+        if (stillHere()) setSaveError(run.error ?? "Couldn't create the model.");
       }
       // `cancelled` → the user aborted; stay on the form with no error.
     } catch (e) {
-      setSaveError(e instanceof Error ? e.message : String(e));
+      if (stillHere()) setSaveError(e instanceof Error ? e.message : String(e));
     } finally {
       setSaving(false);
     }
@@ -177,16 +210,6 @@ export function ModelsView() {
     });
     setSidebarTab("chats");
   };
-
-  const previewText = useMemo(() => {
-    try {
-      return buildModelfile(form);
-    } catch (e) {
-      return `# Modelfile preview unavailable\n# ${
-        e instanceof Error ? e.message : String(e)
-      }`;
-    }
-  }, [form]);
 
   return (
     <main className="flex min-w-0 flex-1 flex-col">
@@ -208,9 +231,14 @@ export function ModelsView() {
           {/* Header */}
           <div className="mb-6 flex items-start justify-between gap-4">
             <div className="min-w-0 flex-1">
-              <h1 className="flex items-center gap-2 truncate text-3xl font-semibold tracking-tight">
-                <Cpu className="h-6 w-6 text-foreground/60" />
-                {viewingModel}
+              {/* The tag in its own span: `truncate` on the flex row itself
+                  draws no ellipsis, so a long tag was just clipped. */}
+              <h1
+                className="flex min-w-0 items-center gap-2 text-3xl font-semibold tracking-tight"
+                title={viewingModel}
+              >
+                <Cpu className="h-6 w-6 shrink-0 text-foreground/60" />
+                <span className="truncate">{viewingModel}</span>
               </h1>
               <p className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-foreground/50">
                 {baseInfo?.family && <span>Family: {baseInfo.family}</span>}
@@ -750,6 +778,8 @@ function NumField({
         onChange={(e) => setText(e.target.value)}
         onBlur={commit}
         onKeyDown={(e) => {
+          // The Enter that confirms an IME candidate isn't a commit.
+          if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
           if (e.key === "Enter") (e.target as HTMLInputElement).blur();
         }}
         placeholder="(inherit)"
@@ -807,6 +837,8 @@ function StopEditor({
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={(e) => {
+            // The Enter that confirms an IME candidate isn't an add.
+            if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
             if (e.key === "Enter") {
               e.preventDefault();
               add();

@@ -1,6 +1,6 @@
 import { ragSearch } from "@/lib/tauri";
 import { charsPerToken } from "@/lib/contextUsage";
-import { fitImageForModel, stripInlinedAttachments } from "@/lib/files";
+import { cutText, fenceFor, fitImageForModel, promptLabel, stripInlinedAttachments } from "@/lib/files";
 import { logger } from "@/lib/logger";
 import { expandSources, useLibraryStore } from "@/stores/libraryStore";
 import { useSpaceStore } from "@/stores/spaceStore";
@@ -27,7 +27,9 @@ import type {
  *    turn to turn so a local model's prompt cache keeps them;
  *  - **retrieval** — the excerpts most relevant to this message are found
  *    by `rag_search` (keyword + embeddings) and appended to the trailing
- *    user turn only, never persisted into the transcript.
+ *    user turn only: never saved into that turn, so they don't reach the
+ *    model again with later messages. The reply's `library_sources` record
+ *    keeps a copy, which the transcript's sources chip shows.
  *
  * Images go with the trailing user turn in either mode, scaled down by
  * `fitImageForModel` and named in the system prompt.
@@ -86,28 +88,9 @@ export function sourcesVerdict(pref: RetrievalMode, tokens: number, numCtx: numb
   return pref === "full" && tokens > Math.round(numCtx * FORCED_FULL_SHARE) ? "cut" : "full";
 }
 
-/** `s` cut to at most `max` UTF-16 units, never between the two halves of an
- *  emoji (a surrogate pair): a lone surrogate fails the IPC's JSON decode,
- *  and with it the whole request — every send, for a source cut that way. */
-export function cutText(s: string, max: number): string {
-  const cut = s.slice(0, max);
-  return /[\uD800-\uDBFF]$/.test(cut) ? cut.slice(0, -1) : cut;
-}
-
-/** A title or URL made safe for one prompt line: whitespace runs (newlines
- *  included) collapse to a space and backticks go, so a page title can't
- *  close its label or start lines of its own outside the fence. */
-export function promptLabel(s: string, max = 160): string {
-  const flat = s.replace(/\s+/g, " ").replace(/`/g, "'").trim();
-  return flat.length > max ? `${cutText(flat, max).trimEnd()}…` : flat;
-}
-
-/** A code fence long enough not to be closed by anything inside `text`. */
-function fenceFor(text: string): string {
-  let longest = 0;
-  for (const m of text.matchAll(/`{3,}/g)) longest = Math.max(longest, m[0].length);
-  return "`".repeat(Math.max(3, longest + 1));
-}
+// Kept in `files.ts`, which the attachment and web-page inliners share and
+// which this module already imports; re-exported for the existing callers.
+export { cutText, promptLabel };
 
 export interface FullTextDoc {
   title: string;
@@ -229,6 +212,15 @@ interface Doc {
 /** Characters per token across `docs`, judged from a slice of each. */
 function docsCharsPerToken(docs: { text?: string; preview?: string }[]): number {
   return charsPerToken(docs.map((d) => (d.text ?? d.preview ?? "").slice(0, 500)).join(""));
+}
+
+/** What a set of text sources costs in tokens, as the full-text-or-excerpts
+ *  decision counts it — the send, the context bar and the Library picker's
+ *  badge all go through this, so near the threshold they can't round apart.
+ *  `text` (or else `preview`) is a sample of each, to tell its script by. */
+export function sourceTokens(docs: { chars: number; text?: string; preview?: string }[]): number {
+  const chars = docs.reduce((n, d) => n + d.chars, 0);
+  return chars === 0 ? 0 : Math.ceil(chars / docsCharsPerToken(docs));
 }
 
 interface ImageSource {
@@ -390,8 +382,7 @@ export async function resolveSources(args: {
     : null;
   const pref = chatRetrievalMode(session, space?.retrieval_mode);
   const cpt = docsCharsPerToken(docs);
-  const totalTokens = docs.reduce((n, d) => n + Math.ceil(d.chars / cpt), 0);
-  const mode = resolveMode(pref, totalTokens, numCtx);
+  const mode = resolveMode(pref, sourceTokens(docs), numCtx);
   const unreadable = (): ResolvedSources => ({
     systemBlock: imageBlock,
     userBlock: "",
@@ -547,14 +538,10 @@ export function estimateChatSources(args: {
 }): { tokens: number; mode: "full" | "retrieval" | null; count: number } {
   const { session, spaceFiles, spaceMode, numCtx } = args;
   const lib = useLibraryStore.getState();
-  let chars = 0;
-  let count = 0;
-  const samples: { text?: string; preview?: string }[] = [];
+  const docs: { chars: number; text?: string; preview?: string }[] = [];
   for (const f of spaceFiles) {
     if (f.enabled === false || f.kind !== "text") continue;
-    chars += f.data.length;
-    count += 1;
-    samples.push({ text: f.data });
+    docs.push({ chars: f.data.length, text: f.data });
   }
   const lists = [
     session.space_id ? lib.sources[`space:${session.space_id}`] ?? [] : [],
@@ -562,16 +549,14 @@ export function estimateChatSources(args: {
   ];
   for (const item of expandSources(lists.flat(), lib.datasets, lib.items)) {
     if (item.media !== "text") continue;
-    chars += item.chars;
-    count += 1;
-    samples.push({ preview: item.preview });
+    docs.push({ chars: item.chars, preview: item.preview });
   }
-  if (count === 0) return { tokens: 0, mode: null, count: 0 };
+  if (docs.length === 0) return { tokens: 0, mode: null, count: 0 };
   const pref = chatRetrievalMode(session, spaceMode);
-  const sourceTokens = Math.ceil(chars / docsCharsPerToken(samples));
+  const tokens = sourceTokens(docs);
   return {
-    tokens: sourcesTokenCost(pref, sourceTokens, numCtx),
-    mode: resolveMode(pref, sourceTokens, numCtx),
-    count,
+    tokens: sourcesTokenCost(pref, tokens, numCtx),
+    mode: resolveMode(pref, tokens, numCtx),
+    count: docs.length,
   };
 }

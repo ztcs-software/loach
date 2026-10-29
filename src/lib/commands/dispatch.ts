@@ -1,5 +1,6 @@
 import { isPreparingSend, useChatStore } from "@/stores/chatStore";
 import { useGlobalMemoryStore } from "@/stores/globalMemoryStore";
+import { useLibraryStore } from "@/stores/libraryStore";
 import { connectionLabel, useMcpStore } from "@/stores/mcpStore";
 import { useModelsStore } from "@/stores/modelsStore";
 import { usePrivateChatStore } from "@/stores/privateChatStore";
@@ -10,6 +11,7 @@ import { useSpaceStore } from "@/stores/spaceStore";
 import { useUIStore, type SettingsTab } from "@/stores/uiStore";
 import { deleteChatConfirm } from "@/lib/confirmations";
 import { CHAT_LABELS } from "@/lib/labels";
+import { logger } from "@/lib/logger";
 import { DEFAULT_PERSONA_ID, PERSONAS, getPersona } from "@/lib/personas";
 import { DEFAULT_TONE_ID, TONES, getTone } from "@/lib/tones";
 import { expandAndPrimeSnippet } from "@/lib/runSnippet";
@@ -31,9 +33,10 @@ import type {
   MemoryRow,
   Message,
   MessageMetrics,
+  ModelInfo,
   Session,
 } from "@/types";
-import { findCommand, parseInput } from "./parser";
+import { findCommand, modelArgValues, parseInput } from "./parser";
 import type { CommandResult, CommandResultItem } from "./types";
 
 /** Result of attempting to dispatch a slash command.
@@ -163,6 +166,14 @@ async function patchParams(patch: Partial<GenerationParams>): Promise<void> {
   await useChatStore.getState().setSessionParams(session.id, merged as GenerationParams);
 }
 
+/** Whether the chat's row now passes `test`. The session setters catch a
+ *  failed save, toast it and leave the row as it was rather than throw, so
+ *  this is how a command tells before reporting success. */
+function sessionHas(id: string, test: (s: Session) => boolean): boolean {
+  const session = useChatStore.getState().sessions.find((s) => s.id === id);
+  return !!session && test(session);
+}
+
 function ok(title: string, body?: string): CommandResult {
   return { kind: "toast", title, body };
 }
@@ -264,10 +275,26 @@ async function run(
 }
 
 async function runNew(): Promise<CommandResult> {
+  // A composer with no chat of its own (a Space's page) parks its Library
+  // picks until a chat exists. This is that chat, so it takes them — the
+  // hand-off a send from there makes. Left parked, they attached to some
+  // later chat instead.
+  const viewingSpaceId = useSpaceStore.getState().viewingSpaceId;
+  const picksFor = composerSessionId() ? undefined : viewingSpaceId;
   const session = await useChatStore.getState().newSession();
+  if (picksFor !== undefined) {
+    const picked = useLibraryStore.getState().consumePending(picksFor);
+    if (picked.itemIds.length > 0 || picked.datasetIds.length > 0) {
+      try {
+        await useLibraryStore.getState().addSources("session", session.id, picked);
+      } catch (e) {
+        logger.warn("couldn't attach the picked Library sources", e);
+      }
+    }
+  }
   // From a Space's page the chat is created in that Space; go to it, or it
   // would sit behind the page the user is still looking at.
-  if (useSpaceStore.getState().viewingSpaceId) {
+  if (viewingSpaceId) {
     useSpaceStore.setState({ viewingSpaceId: null });
     useUIStore.getState().setSidebarTab("chats");
   }
@@ -351,6 +378,14 @@ async function runDelete(deps: CommandDeps): Promise<CommandResult> {
 
 async function runFork(): Promise<CommandResult> {
   const session = requireSession();
+  // The fork copies what's on disk, and a reply's row stays empty until its
+  // stream finishes — the header's Fork waits too.
+  if (
+    useChatStore.getState().streamingSessionId === session.id ||
+    isPreparingSend(session.id)
+  ) {
+    throw new Error("Wait for the reply to finish before forking this chat.");
+  }
   const forked = await useChatStore.getState().fork(session.id);
   return ok("Forked chat", forked.title || "Untitled");
 }
@@ -376,28 +411,42 @@ async function runModel(rest: string): Promise<CommandResult> {
   }
   const models = useModelsStore.getState().models;
   const lower = query.toLowerCase();
-  const exact = models.find(
-    (m) => m.id.toLowerCase() === lower || m.label.toLowerCase() === lower,
-  );
-  const matches = exact
-    ? [exact]
-    : models.filter(
-        (m) =>
-          m.id.toLowerCase().includes(lower) ||
-          m.label.toLowerCase().includes(lower),
-      );
+  // `ollama/llama3` or `openai/llama3` names the provider as well, for an id
+  // both serve. Read as such only after the query as a whole, since an
+  // OpenAI-compatible server's ids carry slashes of their own (OpenRouter's
+  // `openai/gpt-4o`).
+  const readings: [readonly ModelInfo[], string][] = [[models, lower]];
+  const prefixed = /^(ollama|openai)\/(.+)$/.exec(lower);
+  if (prefixed) {
+    readings.push([models.filter((m) => m.provider === prefixed[1]), prefixed[2]!]);
+  }
+  const find = (hit: (field: string, q: string) => boolean): ModelInfo[] => {
+    for (const [pool, q] of readings) {
+      const found = pool.filter((m) => hit(m.id.toLowerCase(), q) || hit(m.label.toLowerCase(), q));
+      if (found.length > 0) return found;
+    }
+    return [];
+  };
+  let matches = find((field, q) => field === q);
+  if (matches.length === 0) matches = find((field, q) => field.includes(q));
   if (matches.length === 0) {
     throw new Error(`No model matches "${query}". Try /list models.`);
   }
   if (matches.length > 1) {
+    // Prefixed where two providers serve the id, so the row says what to type.
+    const names = modelArgValues(matches);
     return listItems(
       `Multiple models match "${query}"`,
-      matches.map((m) => ({ label: m.id, detail: m.provider, hint: m.label !== m.id ? m.label : undefined })),
+      matches.map((m, i) => ({ label: names[i]!, detail: m.provider, hint: m.label !== m.id ? m.label : undefined })),
     );
   }
   const picked = matches[0]!;
   const provider = picked.provider === "openai" ? "openai" : "ollama";
   await useChatStore.getState().setSessionModel(session.id, provider, picked.id);
+  // `setSessionModel` toasts its own failure and leaves the chat as it was.
+  if (!sessionHas(session.id, (s) => s.provider === provider && s.model === picked.id)) {
+    return { kind: "noop" };
+  }
   return ok("Switched model", `${picked.id} (${provider})`);
 }
 
@@ -549,13 +598,19 @@ async function runInstructions(rest: string): Promise<CommandResult> {
   const summary = extractSummary(session.system_prompt ?? null);
   const withSummary = (own: string) =>
     summary ? `${SUMMARY_START_TAG}\n${summary}\n${SUMMARY_END_TAG}\n\n${own}` : own;
+  // `setSessionSystemPrompt` toasts its own failure, so only a prompt that
+  // landed is reported.
+  const save = async (prompt: string) => {
+    await useChatStore.getState().setSessionSystemPrompt(session.id, prompt);
+    return sessionHas(session.id, (s) => s.system_prompt === prompt);
+  };
   if (value.toLowerCase() === "clear") {
-    await useChatStore.getState().setSessionSystemPrompt(session.id, withSummary(""));
+    if (!(await save(withSummary("")))) return { kind: "noop" };
     return ok("Cleared instructions");
   }
   // We deliberately keep the user's raw text (including newlines after the
   // first space) — that's why `rest` was preserved verbatim in the parser.
-  await useChatStore.getState().setSessionSystemPrompt(session.id, withSummary(value));
+  if (!(await save(withSummary(value)))) return { kind: "noop" };
   return ok("Saved instructions", value.length > 80 ? value.slice(0, 80) + "…" : value);
 }
 
@@ -719,6 +774,10 @@ async function runWebFetch(rest: string): Promise<CommandResult> {
   const flag = rest.trim().toLowerCase();
   if (flag !== "on" && flag !== "off") throw new Error("Usage: /web-fetch on|off");
   await useSettingsStore.getState().update("web_fetch_enabled", flag === "on");
+  // `update` toasts a failed save and puts the old value back.
+  if (useSettingsStore.getState().web_fetch_enabled !== (flag === "on")) {
+    return { kind: "noop" };
+  }
   return ok("Web fetch", flag === "on" ? "Enabled" : "Disabled");
 }
 
@@ -800,21 +859,25 @@ async function runCopy(rest: string): Promise<CommandResult> {
 }
 
 // Settings tabs the dialog can land on. Mirrors `SettingsTab` in uiStore —
-// we re-state the list here so a typo in the user's `/settings` arg falls
-// back to "general" instead of routing to an undefined tab.
-const SETTINGS_TABS: readonly SettingsTab[] = [
-  "general",
-  "providers",
-  "features",
-  "tools",
-  "appearance",
-  "mcp",
-  "archive",
-  "data",
-  "security",
-  "updates",
-  "about",
-];
+// we re-state the list here so a typo in the user's `/settings` arg is
+// refused instead of routing to an undefined tab. A map keyed by the type, so
+// a tab added there fails to compile until it's listed here too: "library"
+// was missed once, and `/settings library` refused a real tab.
+const SETTINGS_TAB_SET: Record<SettingsTab, true> = {
+  general: true,
+  providers: true,
+  features: true,
+  tools: true,
+  library: true,
+  appearance: true,
+  mcp: true,
+  archive: true,
+  data: true,
+  security: true,
+  updates: true,
+  about: true,
+};
+const SETTINGS_TABS = Object.keys(SETTINGS_TAB_SET) as SettingsTab[];
 
 async function runSettings(rest: string): Promise<CommandResult> {
   const arg = rest.trim().toLowerCase();
@@ -998,7 +1061,12 @@ async function runStop(): Promise<CommandResult> {
 }
 
 async function runFind(rest: string): Promise<CommandResult> {
-  requireSession();
+  const session = requireSession();
+  // An empty chat shows the welcome composer instead of a transcript, so
+  // there's no finder to open — the command did nothing, silently.
+  if ((useChatStore.getState().messages[session.id] ?? []).length === 0) {
+    return ok("Nothing to find in an empty chat");
+  }
   // ChatCanvas owns the finder overlay; this is the event the header's
   // "Search in chat" item fires, plus the text to prefill.
   window.dispatchEvent(

@@ -6,6 +6,18 @@ use serde_json::Value;
 /// that don't support exactly this version usually negotiate down.
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
 
+/// Most `tools/list` pages followed for one server. A server that paginates
+/// hands out its catalogue a page at a time, and only the first used to be
+/// read; this bounds one that never stops handing out cursors. Past it the
+/// aggregate keeps only `MAX_TOOLS_PER_SERVER` anyway.
+pub const MAX_TOOL_PAGES: usize = 10;
+
+/// Longest a `tools/call` may run while the server keeps reporting progress
+/// on it. Each `notifications/progress` for the call restarts its usual
+/// per-request timeout, so a long tool that says it's still working isn't
+/// cut off at 30 s — but one that reports forever still is, here.
+pub const MAX_TOOL_CALL_TIME: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
 // ---------- JSON-RPC 2.0 framing ----------
 //
 // Requests / notifications are built with `serde_json::json!(...)` in the
@@ -61,6 +73,9 @@ pub struct ServerInfo {
 pub struct ListToolsResult {
     #[serde(default)]
     pub tools: Vec<McpToolRaw>,
+    /// Where the next page starts, when there is one.
+    #[serde(default, rename = "nextCursor")]
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

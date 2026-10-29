@@ -161,6 +161,12 @@ fn pre_library_retrieval_mode() -> String {
     "full".to_string()
 }
 
+/// The values a `retrieval_mode` column may hold. The Space page looks its
+/// labels up by the value, so anything else breaks it.
+pub fn is_retrieval_mode(mode: &str) -> bool {
+    matches!(mode, "auto" | "full" | "retrieval")
+}
+
 /// One free-text fact persisted across chats in a Space. The extractor
 /// proposes new rows after each assistant turn; users can edit, delete, or
 /// pin entries from the Memory tab. `source_session_id` / `source_message_id`
@@ -550,11 +556,6 @@ impl Database {
             read_pool,
             path: path.to_path_buf(),
         })
-    }
-
-    /// Path to the SQLite file backing this handle.
-    pub fn path(&self) -> &Path {
-        &self.path
     }
 
     /// Run a read-only closure against a pooled connection. Use this for
@@ -1379,15 +1380,23 @@ impl Database {
     pub fn pin_session(&self, id: &str, pinned: bool) -> Result<()> {
         let conn = self.conn.lock();
         let now = Utc::now().timestamp_millis();
-        let pinned_at: Option<i64> = if pinned { Some(now) } else { None };
-        // Bump `updated_at` too so the sidebar's `ORDER BY updated_at DESC`
-        // surfaces the just-pinned chat to the top. Without this, pinning
-        // a buried chat leaves it visually unchanged even though the
-        // pinned-icon flipped on.
-        conn.execute(
-            "UPDATE sessions SET pinned_at = ?1, updated_at = ?2 WHERE id = ?3",
-            params![pinned_at, now, id],
-        )?;
+        // Pinning bumps `updated_at` too so the sidebar's `ORDER BY
+        // updated_at DESC` surfaces the just-pinned chat to the top. Without
+        // this, pinning a buried chat leaves it visually unchanged even
+        // though the pinned-icon flipped on. Unpinning leaves it alone — the
+        // chat drops back to its own date group instead of jumping to
+        // "Today".
+        if pinned {
+            conn.execute(
+                "UPDATE sessions SET pinned_at = ?1, updated_at = ?1 WHERE id = ?2",
+                params![now, id],
+            )?;
+        } else {
+            conn.execute(
+                "UPDATE sessions SET pinned_at = NULL WHERE id = ?1",
+                params![id],
+            )?;
+        }
         Ok(())
     }
 
@@ -1739,8 +1748,14 @@ impl Database {
                 mcp_servers: scalar("SELECT COUNT(*) FROM mcp_servers")?,
                 library_items: scalar("SELECT COUNT(*) FROM library_items")?,
 
+                // The transcript as stored: the reply text plus its reasoning,
+                // tool-call records (results included) and per-turn metrics.
                 message_bytes: scalar(
-                    "SELECT COALESCE(SUM(LENGTH(CAST(content AS BLOB))), 0) FROM messages",
+                    "SELECT COALESCE(SUM(LENGTH(CAST(content AS BLOB))
+                                       + LENGTH(CAST(COALESCE(thinking, '') AS BLOB))
+                                       + LENGTH(CAST(COALESCE(tool_calls_json, '') AS BLOB))
+                                       + LENGTH(CAST(COALESCE(metrics_json, '') AS BLOB))), 0)
+                     FROM messages",
                 )?,
                 // Attachments are inlined as base64 into the owning row —
                 // there's no separate file store — so they're the bucket
@@ -2973,8 +2988,8 @@ impl Database {
         // eleven separate reads, and with the lock released between them a
         // streaming flush or a session create could commit halfway through —
         // producing a file whose `messages` reference a session absent from
-        // `sessions`. FK enforcement is off during restore, so those orphans
-        // then import silently as rows nothing displays.
+        // `sessions`. A restore drops such orphans (`clear_dangling_refs`), so
+        // they'd be silently lost on the way back in.
         //
         // Every read below goes through the pool, and no pooled read takes
         // this lock, so holding it here freezes the database without
@@ -3016,7 +3031,7 @@ impl Database {
             })
             .collect();
         Ok(DatabaseSnapshot {
-            schema: "loach/v1".to_string(),
+            schema: SNAPSHOT_SCHEMA.to_string(),
             exported_at: Utc::now().timestamp_millis(),
             loach_version: env!("CARGO_PKG_VERSION").to_string(),
             data: SnapshotData {
@@ -3044,7 +3059,8 @@ impl Database {
     /// row-count breakdown for the UI to display ("Imported 12 chats, 145
     /// messages, …"). FK enforcement is disabled for the duration so a
     /// snapshot that's missing e.g. a referenced space_id for a session
-    /// still imports cleanly (the orphan FK becomes NULL at next write).
+    /// still imports; `clear_dangling_refs` then settles every such
+    /// reference before the commit, the way the FK's own action would have.
     ///
     /// `PRAGMA foreign_keys = ON` is restored on every exit path — including
     /// errors mid-import — so a bad snapshot can't leave the shared
@@ -3113,6 +3129,11 @@ impl Database {
         // of that, and it also means a hand-edited snapshot can't grant a
         // model access to a path the user never picked. Don't "complete" this
         // list.
+        //
+        // `retrieval_mode` is screened here because a snapshot never passes
+        // the setters' `check_retrieval_mode`: an unknown value goes back to
+        // inheriting (NULL), and an unknown Space mode below to what a new
+        // Space gets.
         for s in &d.sessions {
             tx.execute(
                 "INSERT INTO sessions (id, title, provider, model, system_prompt, params_json,
@@ -3134,7 +3155,7 @@ impl Database {
                     s.folder_id,
                     s.created_at,
                     s.updated_at,
-                    s.retrieval_mode,
+                    s.retrieval_mode.as_deref().filter(|m| is_retrieval_mode(m)),
                 ],
             )?;
         }
@@ -3186,7 +3207,11 @@ impl Database {
                     if sp.memory_enabled { 1_i64 } else { 0_i64 },
                     sp.created_at,
                     sp.updated_at,
-                    sp.retrieval_mode,
+                    if is_retrieval_mode(&sp.retrieval_mode) {
+                        sp.retrieval_mode.clone()
+                    } else {
+                        default_retrieval_mode()
+                    },
                 ],
             )?;
         }
@@ -3295,8 +3320,9 @@ impl Database {
 
         for f in &d.snippet_fill_values {
             // `snippet_id` references `snippets(id)`. FK is OFF for this
-            // transaction so an orphaned row imports cleanly — but with the
-            // snippets table populated above, the common case lines up.
+            // transaction so an orphaned row inserts cleanly (and is dropped
+            // by `clear_dangling_refs`) — but with the snippets table
+            // populated above, the common case lines up.
             tx.execute(
                 "INSERT INTO snippet_fill_values (snippet_id, key, value, updated_at)
                  VALUES (?1, ?2, ?3, ?4)
@@ -3319,6 +3345,13 @@ impl Database {
         // restore, so an export never carries embeddings from a model the
         // importing machine may not even have.
         library::restore_library(&tx, d)?;
+
+        let dropped = clear_dangling_refs(&tx)?;
+        if dropped > 0 {
+            tracing::warn!(
+                "restore: dropped {dropped} row(s) whose chat, Space or other parent the snapshot didn't carry"
+            );
+        }
 
         let stats = ImportStats {
             sessions: d.sessions.len(),
@@ -3463,6 +3496,52 @@ impl Database {
         tx.commit()?;
         Ok(())
     }
+}
+
+/// Settle the references a restore left dangling — FK enforcement is off
+/// for it, so a snapshot naming a Space, folder or chat it doesn't carry
+/// (hand-edited, or trimmed) inserts cleanly and nothing would otherwise
+/// fix it: a chat pointing at a missing Space sits in no list at all. Does
+/// what each FK's own action would have done had the parent been deleted:
+/// the optional pointers on `sessions` go NULL (`ON DELETE SET NULL`), and
+/// every row whose required parent is missing — which nothing can display
+/// or ever cascade away — is dropped (`ON DELETE CASCADE`). Returns how many
+/// rows were dropped.
+fn clear_dangling_refs(tx: &Connection) -> Result<usize> {
+    tx.execute_batch(
+        "UPDATE sessions SET space_id = NULL
+          WHERE space_id IS NOT NULL AND space_id NOT IN (SELECT id FROM spaces);
+         UPDATE sessions SET folder_id = NULL
+          WHERE folder_id IS NOT NULL AND folder_id NOT IN (SELECT id FROM folders);
+         UPDATE sessions SET forked_from_session_id = NULL
+          WHERE forked_from_session_id IS NOT NULL
+            AND forked_from_session_id NOT IN (SELECT id FROM sessions);",
+    )?;
+    // What's left are the children of a missing required parent. No table
+    // here is WITHOUT ROWID, so every violation names its row. A row with two
+    // dangling references is listed twice; the second DELETE finds nothing.
+    let orphans: Vec<(String, i64)> = tx
+        .prepare("PRAGMA foreign_key_check")?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<Result<_, _>>()?;
+    let mut dropped = 0;
+    for (table, rowid) in &orphans {
+        dropped +=
+            tx.execute(&format!("DELETE FROM \"{table}\" WHERE rowid = ?1"), params![rowid])?;
+    }
+    Ok(dropped)
+}
+
+/// The wire-format tag every export is written with. v2 (1.6) added the
+/// Library tables, `retrieval_mode` and `space_files.enabled`: a 1.5 build
+/// accepts only v1, so the bump makes it refuse a 1.6 export instead of
+/// wiping everything and restoring it without the Library.
+pub const SNAPSHOT_SCHEMA: &str = "loach/v2";
+
+/// Whether this build can restore an export tagged `schema`. v1 exports
+/// load with the 1.6 fields at their serde defaults.
+pub fn is_supported_snapshot_schema(schema: &str) -> bool {
+    matches!(schema, "loach/v1" | SNAPSHOT_SCHEMA)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -3630,20 +3709,27 @@ fn build_snippet(text: &str, needle: &str) -> Option<String> {
 /// Stands in for a secret [`redact_args_json`] leaves out of an export.
 const REDACTED: &str = "REDACTED";
 
-/// A stdio server's `args_json` as it goes into an export: a password in a
-/// URL (`scheme://user:pass@host`) and the value of a flag whose name says
-/// it holds a credential (`--token x`, `--api-key=x`) are replaced with
-/// [`REDACTED`]; everything else is kept as typed. A value that doesn't
-/// parse as a list of strings is dropped whole — it's not a shape Loach
-/// writes, so nothing in it can be told apart from a secret.
+/// Whether a flag, environment variable, header or query parameter called
+/// `name` holds a credential. `auth` only counts as a whole word (`--auth`,
+/// `--basic-auth`), so `--author` and `--authority` keep their values.
+fn is_secret_name(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    ["token", "secret", "password", "passwd", "apikey", "api-key", "api_key", "authorization"]
+        .iter()
+        .any(|w| n.contains(w))
+        || n.split(['-', '_', '.']).any(|word| word == "auth")
+}
+
+/// A stdio server's `args_json` as it goes into an export: the value of a
+/// flag whose name says it holds a credential (`--token x`, `--api-key=x`),
+/// of such an environment assignment or header (`-e GITHUB_TOKEN=x`,
+/// `--header "Authorization: Bearer x"`), and a URL's credentials (see
+/// [`redact_url_credentials`]) are replaced with [`REDACTED`]; everything
+/// else is kept as typed. A value that doesn't parse as a list of strings is
+/// dropped whole — it's not a shape Loach writes, so nothing in it can be
+/// told apart from a secret.
 fn redact_args_json(json: &str) -> Option<String> {
     let args: Vec<String> = serde_json::from_str(json).ok()?;
-    let secret_flag = |name: &str| {
-        let n = name.to_ascii_lowercase();
-        ["token", "secret", "password", "passwd", "apikey", "api-key", "api_key", "auth"]
-            .iter()
-            .any(|w| n.contains(w))
-    };
     let mut out = Vec::with_capacity(args.len());
     let mut value_is_secret = false;
     for arg in args {
@@ -3654,23 +3740,51 @@ fn redact_args_json(json: &str) -> Option<String> {
         if let Some(flag) = arg.strip_prefix('-') {
             let flag = flag.trim_start_matches('-');
             match flag.split_once('=') {
-                Some((name, _)) if secret_flag(name) => {
-                    let keep = arg.len() - flag.len() + name.len() + 1;
-                    out.push(format!("{}{REDACTED}", &arg[..keep]));
+                Some((name, value)) => {
+                    let keep = &arg[..arg.len() - flag.len() + name.len() + 1];
+                    if is_secret_name(name) {
+                        out.push(format!("{keep}{REDACTED}"));
+                    } else {
+                        // `--env=GITHUB_TOKEN=x`, `--header=Authorization: …`
+                        out.push(format!("{keep}{}", redact_arg_value(value)));
+                    }
                     continue;
                 }
-                None if secret_flag(flag) => value_is_secret = true,
-                _ => {}
+                None if is_secret_name(flag) => value_is_secret = true,
+                None => {}
             }
         }
-        out.push(redact_url_password(&arg));
+        out.push(redact_arg_value(&arg));
     }
     serde_json::to_string(&out).ok()
 }
 
-/// `text` with the password of any `scheme://user:pass@host` in it
-/// replaced by [`REDACTED`].
-fn redact_url_password(text: &str) -> String {
+/// One argument, or a flag's inline value, as it goes into an export. An
+/// environment assignment (`GITHUB_TOKEN=x`, as `docker run -e` takes it) or
+/// a header (`Authorization: Bearer x`, as `--header` takes it) whose name
+/// says it holds a credential keeps only its name; a URL in it loses its
+/// credentials.
+fn redact_arg_value(arg: &str) -> String {
+    let is_name = |s: &str| {
+        !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    };
+    for sep in ['=', ':'] {
+        if let Some((name, value)) = arg.split_once(sep) {
+            if is_name(name) && is_secret_name(name) {
+                let keep = arg.len() - value.trim_start().len();
+                return format!("{}{REDACTED}", &arg[..keep]);
+            }
+        }
+    }
+    redact_url_credentials(arg)
+}
+
+/// `text` with the credentials of any URL in it replaced by [`REDACTED`]:
+/// the password of `scheme://user:pass@host`, a bare userinfo whole (it's
+/// as likely a token, as in `https://ghp_x@github.com`, as a user name), and
+/// the value of a query parameter whose name says it holds a credential
+/// (`?api_key=x`).
+fn redact_url_credentials(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(at) = rest.find("://") {
@@ -3681,19 +3795,36 @@ fn redact_url_password(text: &str) -> String {
         let authority_end = tail.find(['/', '?', '#']).unwrap_or(tail.len());
         match tail[..authority_end].rfind('@') {
             Some(at_sign) => {
-                let userinfo = &tail[..at_sign];
-                match userinfo.split_once(':') {
-                    Some((user, _)) => {
-                        out.push_str(user);
-                        out.push(':');
-                        out.push_str(REDACTED);
-                    }
-                    None => out.push_str(userinfo),
+                if let Some((user, _)) = tail[..at_sign].split_once(':') {
+                    out.push_str(user);
+                    out.push(':');
                 }
+                out.push_str(REDACTED);
                 rest = &tail[at_sign..];
             }
             None => rest = tail,
         }
+    }
+    out.push_str(rest);
+
+    let text = out;
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text.as_str();
+    while let Some(i) = rest.find(['?', '&']) {
+        let (head, tail) = rest.split_at(i + 1);
+        out.push_str(head);
+        let end = tail
+            .find(|c: char| c == '&' || c == '#' || c.is_whitespace())
+            .unwrap_or(tail.len());
+        rest = match tail[..end].split_once('=') {
+            Some((name, value)) if !value.is_empty() && is_secret_name(name) => {
+                out.push_str(name);
+                out.push('=');
+                out.push_str(REDACTED);
+                &tail[end..]
+            }
+            _ => tail,
+        };
     }
     out.push_str(rest);
     out
@@ -3969,6 +4100,58 @@ mod tests {
         assert_eq!(redact_args_json("not json"), None);
     }
 
+    /// The other places a stdio command line carries a credential — a token
+    /// as the whole URL userinfo, an env assignment for `docker run -e`, an
+    /// auth header, a key in the query — lose it too, while flags that only
+    /// contain "auth" in a longer word keep their values.
+    #[test]
+    fn exported_arguments_lose_tokens_in_env_headers_and_queries() {
+        let args = serde_json::to_string(&[
+            "https://ghp_abc@github.com/org/repo",
+            "-e",
+            "GITHUB_TOKEN=ghp_abc",
+            "-e",
+            "GITHUB_PERSONAL_ACCESS_TOKEN",
+            "--env=OPENAI_API_KEY=sk-123",
+            "--header",
+            "Authorization: Bearer abc",
+            "--header=X-Api-Key: abc",
+            "-H",
+            "X-Request-Id: 42",
+            "https://mcp.example.com/sse?api_key=sk-123&region=eu",
+            "--author",
+            "Jane",
+            "--authority=ca.example.com",
+            "--auth",
+            "hunter2",
+        ])
+        .unwrap();
+        let out: Vec<String> =
+            serde_json::from_str(&redact_args_json(&args).expect("a list of strings")).unwrap();
+        assert_eq!(
+            out,
+            [
+                "https://REDACTED@github.com/org/repo",
+                "-e",
+                "GITHUB_TOKEN=REDACTED",
+                "-e",
+                "GITHUB_PERSONAL_ACCESS_TOKEN",
+                "--env=OPENAI_API_KEY=REDACTED",
+                "--header",
+                "Authorization: REDACTED",
+                "--header=X-Api-Key: REDACTED",
+                "-H",
+                "X-Request-Id: 42",
+                "https://mcp.example.com/sse?api_key=REDACTED&region=eu",
+                "--author",
+                "Jane",
+                "--authority=ca.example.com",
+                "--auth",
+                "REDACTED",
+            ]
+        );
+    }
+
     /// An HTTP server's URL loses its userinfo (a bare token included) and
     /// its query values in an export, but keeps everything that says which
     /// endpoint it is — and still parses, so the row imports again.
@@ -4073,6 +4256,90 @@ mod tests {
         );
     }
 
+    /// Exports carry the v2 tag (so a 1.5 build, which reads only v1,
+    /// refuses them instead of restoring them without the Library); this
+    /// build still reads v1.
+    #[test]
+    fn snapshots_are_tagged_v2_and_v1_still_restores() {
+        let (db, _dir) = fresh_db();
+        assert_eq!(db.snapshot().expect("snapshot").schema, "loach/v2");
+        assert!(is_supported_snapshot_schema("loach/v1"));
+        assert!(is_supported_snapshot_schema("loach/v2"));
+        assert!(!is_supported_snapshot_schema("loach/v3"));
+        assert!(!is_supported_snapshot_schema(""));
+    }
+
+    /// A snapshot that names a Space, folder or fork source it doesn't carry
+    /// restores with those pointers cleared, and rows whose required parent
+    /// is missing are dropped — FK enforcement is off for the restore, so
+    /// nothing else would settle them.
+    #[test]
+    fn restore_settles_references_the_snapshot_does_not_carry() {
+        let (db, _dir) = fresh_db();
+        let sp = db.create_space("Work", "", "").unwrap();
+        let f = db.create_folder("Research").unwrap();
+        let src = db
+            .create_session("src", "ollama", "llama3", None, Some(&sp.id))
+            .unwrap();
+        db.set_session_folder(&src.id, Some(&f.id)).unwrap();
+        db.append_message(&src.id, "user", "hi", None).unwrap();
+        let fork = db.fork_session(&src.id, None).unwrap();
+        db.add_space_file(&sp.id, "f.txt", "text/plain", "text", "x", 1, 0)
+            .unwrap();
+
+        let mut snap = db.snapshot().unwrap();
+        // Trim the parents out, as a hand-edited export might.
+        snap.data.spaces.clear();
+        snap.data.folders.clear();
+        snap.data.sessions.retain(|s| s.id != src.id);
+
+        let (db2, _dir2) = fresh_db();
+        db2.restore_snapshot(&snap).expect("restore");
+        let kept = db2.get_session(&fork.id).unwrap().expect("the fork is kept");
+        assert_eq!(kept.space_id, None);
+        assert_eq!(kept.folder_id, None);
+        assert_eq!(kept.forked_from_session_id, None);
+        assert_eq!(db2.list_messages(&fork.id).unwrap().len(), 1);
+        assert!(db2.list_messages(&src.id).unwrap().is_empty(), "orphan messages dropped");
+        assert!(db2.all_space_files().unwrap().is_empty(), "orphan files dropped");
+        let violations: i64 = db2
+            .conn
+            .lock()
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(violations, 0);
+    }
+
+    /// The setters refuse an unknown `retrieval_mode`, but a snapshot never
+    /// passes them; restore falls back instead of storing a value the Space
+    /// page can't label.
+    #[test]
+    fn restore_replaces_unknown_retrieval_modes() {
+        let (db, _dir) = fresh_db();
+        let sp = db.create_space("Work", "", "").unwrap();
+        let s = db
+            .create_session("t", "ollama", "llama3", None, Some(&sp.id))
+            .unwrap();
+        let mut snap = db.snapshot().unwrap();
+        snap.data.spaces[0].retrieval_mode = "bogus".into();
+        snap.data.sessions[0].retrieval_mode = Some("bogus".into());
+
+        let (db2, _dir2) = fresh_db();
+        db2.restore_snapshot(&snap).expect("restore");
+        assert_eq!(db2.get_space(&sp.id).unwrap().unwrap().retrieval_mode, "auto");
+        assert_eq!(db2.get_session(&s.id).unwrap().unwrap().retrieval_mode, None);
+
+        // Known values pass through untouched.
+        snap.data.spaces[0].retrieval_mode = "retrieval".into();
+        snap.data.sessions[0].retrieval_mode = Some("full".into());
+        db2.restore_snapshot(&snap).expect("restore again");
+        assert_eq!(db2.get_space(&sp.id).unwrap().unwrap().retrieval_mode, "retrieval");
+        assert_eq!(
+            db2.get_session(&s.id).unwrap().unwrap().retrieval_mode.as_deref(),
+            Some("full")
+        );
+    }
+
     #[test]
     fn workspace_root_clears_back_to_none() {
         let (db, _dir) = fresh_db();
@@ -4117,16 +4384,20 @@ mod tests {
         // 5 chars, 10 octets in UTF-8 — the gap a character count would miss.
         db.append_message(&s.id, "user", "źdźbło", Some("[\"att\"]"))
             .expect("message");
+        // Reasoning, tool calls and metrics are part of the transcript too.
+        let reply = db.append_message(&s.id, "assistant", "ok", None).expect("reply");
+        db.update_message(&reply.id, &s.id, "ok", Some("hmm"), Some("{}"), Some("[]"), None)
+            .expect("finish reply");
         let sp = db.create_space("s", "", "").expect("space");
         db.add_space_file(&sp.id, "f.txt", "text/plain", "text", "0123456789", 10, 0)
             .expect("file");
 
         let st = db.storage_stats().expect("stats");
         assert_eq!(st.sessions, 1);
-        assert_eq!(st.messages, 1);
+        assert_eq!(st.messages, 2);
         assert_eq!(st.spaces, 1);
         assert_eq!(st.space_files, 1);
-        assert_eq!(st.message_bytes, "źdźbło".len() as i64);
+        assert_eq!(st.message_bytes, ("źdźbło".len() + "ok".len() + "hmm{}[]".len()) as i64);
         assert_eq!(st.attachment_bytes, 7);
         assert_eq!(st.space_bytes, 10);
         // Session title + the two NULL-coalesced columns.
@@ -4402,6 +4673,34 @@ mod tests {
 
         db.update_session_label(&s.id, None).expect("clear");
         assert_eq!(db.get_session(&s.id).unwrap().unwrap().label, None);
+    }
+
+    /// Pinning lifts a chat to the top of the list; unpinning must not, or
+    /// a month-old chat would land in "Today" just for being unpinned.
+    #[test]
+    fn unpinning_leaves_updated_at_alone() {
+        let (db, _dir) = fresh_db();
+        let s = db
+            .create_session("t", "ollama", "llama3", None, None)
+            .expect("create");
+        db.conn
+            .lock()
+            .execute("UPDATE sessions SET updated_at = 1 WHERE id = ?1", params![s.id])
+            .unwrap();
+
+        db.pin_session(&s.id, true).expect("pin");
+        let pinned = db.get_session(&s.id).unwrap().unwrap();
+        assert!(pinned.pinned_at.is_some());
+        assert!(pinned.updated_at > 1, "pinning surfaces the chat");
+
+        db.conn
+            .lock()
+            .execute("UPDATE sessions SET updated_at = 1 WHERE id = ?1", params![s.id])
+            .unwrap();
+        db.pin_session(&s.id, false).expect("unpin");
+        let unpinned = db.get_session(&s.id).unwrap().unwrap();
+        assert_eq!(unpinned.pinned_at, None);
+        assert_eq!(unpinned.updated_at, 1, "unpinning must not re-sort the chat");
     }
 
     #[test]

@@ -80,6 +80,29 @@ export class FileTooLargeError extends Error {
   }
 }
 
+/** `s` cut to at most `max` UTF-16 units, never between the two halves of an
+ *  emoji (a surrogate pair): a lone surrogate fails the IPC's JSON decode,
+ *  and with it the whole request — every send, for a source cut that way. */
+export function cutText(s: string, max: number): string {
+  const cut = s.slice(0, max);
+  return /[\uD800-\uDBFF]$/.test(cut) ? cut.slice(0, -1) : cut;
+}
+
+/** A title or URL made safe for one prompt line: whitespace runs (newlines
+ *  included) collapse to a space and backticks go, so a page title can't
+ *  close its label or start lines of its own outside the fence. */
+export function promptLabel(s: string, max = 160): string {
+  const flat = s.replace(/\s+/g, " ").replace(/`/g, "'").trim();
+  return flat.length > max ? `${cutText(flat, max).trimEnd()}…` : flat;
+}
+
+/** A code fence long enough not to be closed by anything inside `text`. */
+export function fenceFor(text: string): string {
+  let longest = 0;
+  for (const m of text.matchAll(/`{3,}/g)) longest = Math.max(longest, m[0].length);
+  return "`".repeat(Math.max(3, longest + 1));
+}
+
 function extOf(name: string): string {
   const i = name.lastIndexOf(".");
   return i >= 0 ? name.slice(i + 1).toLowerCase() : "";
@@ -192,43 +215,59 @@ async function extractPdfText(buf: ArrayBuffer): Promise<ExtractionResult> {
   const pdfjs = await getPdfjs();
   // `data` is cloned internally; pass a fresh Uint8Array to avoid
   // "ArrayBuffer detached" when the same buffer is reused.
-  const doc = await pdfjs.getDocument({ data: new Uint8Array(buf) }).promise;
-  const totalPages = doc.numPages;
+  const loadingTask = pdfjs.getDocument({ data: new Uint8Array(buf) });
   const pages: string[] = [];
-  let charsAccum = 0;
+  let totalPages = 0;
   let pagesExtracted = 0;
-  // Stop extracting once the running char count crosses the cap. We still
-  // pay the cost of decoding the page that pushes us over (so the loop
-  // can't infinitely-loop on a degenerate page), but we don't keep going
-  // past it.
-  for (let i = 1; i <= totalPages; i++) {
-    if (charsAccum >= MAX_EXTRACTED_CHARS) break;
-    const page = await doc.getPage(i);
-    try {
-      const textContent = await page.getTextContent();
-      // Each item either exposes a `str` (TextItem) or is a marker (TextMarkedContent).
-      const pageText = textContent.items
-        .map((it) => ("str" in it ? it.str : ""))
-        .join(" ")
-        .replace(/\s+\n/g, "\n")
-        .replace(/[ \t]{2,}/g, " ")
-        .trim();
-      if (pageText) {
-        pages.push(`# Page ${i}\n${pageText}`);
-        charsAccum += pageText.length + 16; // +overhead for the "# Page N\n" header
-      }
+  // Destroyed however this ends: a password-protected file rejects the
+  // `promise` below, and the worker and document it had set up stayed
+  // alive for good.
+  try {
+    const doc = await loadingTask.promise;
+    totalPages = doc.numPages;
+    let charsAccum = 0;
+    // Stop extracting once the running char count crosses the cap. We still
+    // pay the cost of decoding the page that pushes us over (so the loop
+    // can't infinitely-loop on a degenerate page), but we don't keep going
+    // past it.
+    for (let i = 1; i <= totalPages; i++) {
+      if (charsAccum >= MAX_EXTRACTED_CHARS) break;
+      // A page that can't be read is skipped, not the whole document.
       pagesExtracted = i;
-    } finally {
-      // Release the per-page render cache before moving on. Without this
-      // `doc.cleanup()` at the end is the only opportunity to free per-
-      // page state, so a 1 000-page PDF can spike memory linearly until
-      // the loop finishes. `page.cleanup()` doesn't invalidate the
-      // already-extracted text since we copied it into `pageText` above.
-      page.cleanup();
+      let page;
+      try {
+        page = await doc.getPage(i);
+      } catch {
+        continue;
+      }
+      try {
+        const textContent = await page.getTextContent();
+        // Each item either exposes a `str` (TextItem) or is a marker (TextMarkedContent).
+        const pageText = textContent.items
+          .map((it) => ("str" in it ? it.str : ""))
+          .join(" ")
+          .replace(/\s+\n/g, "\n")
+          .replace(/[ \t]{2,}/g, " ")
+          .trim();
+        if (pageText) {
+          pages.push(`# Page ${i}\n${pageText}`);
+          charsAccum += pageText.length + 16; // +overhead for the "# Page N\n" header
+        }
+      } catch {
+        // Skipped, as above.
+      } finally {
+        // Release the per-page render cache before moving on. Without this
+        // `doc.cleanup()` at the end is the only opportunity to free per-
+        // page state, so a 1 000-page PDF can spike memory linearly until
+        // the loop finishes. `page.cleanup()` doesn't invalidate the
+        // already-extracted text since we copied it into `pageText` above.
+        page.cleanup();
+      }
     }
+    await doc.cleanup();
+  } finally {
+    await loadingTask.destroy();
   }
-  await doc.cleanup();
-  await doc.loadingTask.destroy();
 
   let text = pages.join("\n\n");
   let truncated = pagesExtracted < totalPages;
@@ -411,14 +450,20 @@ export function inlineTextAttachments(
   let out = content;
   const skippedNames: string[] = [];
   for (const a of texts) {
+    // The name made safe for its line and the fence longer than any run of
+    // backticks in the body: a file holding ``` (any Markdown with code in
+    // it) closed a fixed fence early, and the rest of it read as the user's
+    // own words.
+    const name = promptLabel(a.name);
     const label =
       a.mime === "application/pdf"
-        ? `Attached PDF: \`${a.name}\` (text extracted)`
+        ? `Attached PDF: \`${name}\` (text extracted)`
         : a.mime.includes("wordprocessingml")
-          ? `Attached Word document: \`${a.name}\` (text extracted)`
-          : `Attached file: \`${a.name}\``;
-    const header = `\n\n---\n${label}\n\`\`\`\n`;
-    const footer = "\n```";
+          ? `Attached Word document: \`${name}\` (text extracted)`
+          : `Attached file: \`${name}\``;
+    const fence = fenceFor(a.data);
+    const header = `\n\n---\n${label}\n${fence}\n`;
+    const footer = `\n${fence}`;
     const wrapCost = header.length + footer.length;
     const remaining = MAX_INLINED_CHARS_PER_MESSAGE - out.length - wrapCost;
 
@@ -432,7 +477,8 @@ export function inlineTextAttachments(
     let body = a.data;
     let clippedHere = false;
     if (body.length > remaining) {
-      body = body.slice(0, remaining);
+      // `cutText`: half an emoji at the cut failed the whole send's IPC.
+      body = cutText(body, remaining);
       clippedHere = true;
     }
     out += header + body;

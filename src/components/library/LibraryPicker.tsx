@@ -48,6 +48,8 @@ export function LibraryPicker({
   allowDatasets = true,
   linkedItemIds = [],
   linkedDatasetIds = [],
+  offItemIds = [],
+  offDatasetIds = [],
   numCtx,
   spaceId = null,
   mode = "auto",
@@ -62,6 +64,10 @@ export function LibraryPicker({
   /** Already attached — shown ticked and locked. */
   linkedItemIds?: string[];
   linkedDatasetIds?: string[];
+  /** Attached but switched off — locked like the rest, but left out of the
+   *  estimate: they don't reach the model. */
+  offItemIds?: string[];
+  offDatasetIds?: string[];
   /** Context window the selection will be measured against. */
   numCtx?: number;
   /** The Space whose sources the chat (or Space) already gets. They count
@@ -103,6 +109,8 @@ export function LibraryPicker({
 
   const linkedItems = useMemo(() => new Set(linkedItemIds), [linkedItemIds]);
   const linkedDatasets = useMemo(() => new Set(linkedDatasetIds), [linkedDatasetIds]);
+  const offItems = useMemo(() => new Set(offItemIds), [offItemIds]);
+  const offDatasets = useMemo(() => new Set(offDatasetIds), [offDatasetIds]);
   const byId = useMemo(() => new Map(items.map((i) => [i.id, i])), [items]);
   const spaceLinks = useLibraryStore((s) => (spaceId ? s.sources[`space:${spaceId}`] : undefined));
   const spaceFiles = useSpaceStore((s) => (spaceId ? s.spaceFiles[spaceId] : undefined));
@@ -131,7 +139,7 @@ export function LibraryPicker({
             icon: <DatasetIcon size="sm" />,
             title: d.name,
             sub: `${mixLabel(members)} · ~${formatTokens(members.reduce((n, i) => n + itemTokens(i), 0))} tokens`,
-            locked: lockOf(linkedDatasets.has(d.id), fromSpace.datasets.has(d.id)),
+            locked: lockOf(linkedDatasets.has(d.id) || offDatasets.has(d.id), fromSpace.datasets.has(d.id)),
           };
         });
     }
@@ -152,10 +160,9 @@ export function LibraryPicker({
           i.kind === "link" ? domainOf(i.url) : formatBytes(i.size),
           i.media === "text" ? `~${formatTokens(itemTokens(i))} tokens` : "image",
         ].join(" · "),
-        locked: lockOf(linkedItems.has(i.id), fromSpace.items.has(i.id)),
+        locked: lockOf(linkedItems.has(i.id) || offItems.has(i.id), fromSpace.items.has(i.id)),
       }));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab, datasets, items, q, byId, linkedDatasets, linkedItems, fromSpace]);
+  }, [tab, datasets, items, q, byId, linkedDatasets, linkedItems, offDatasets, offItems, fromSpace]);
 
   // What the selection would add, each item counted once even when it's
   // also inside a picked dataset — or already attached. `total` adds what's

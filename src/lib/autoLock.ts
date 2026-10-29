@@ -58,6 +58,16 @@ const ACTIVITY_EVENTS = [
  *  15 s is inside the noise for a 1-minute floor. */
 const IDLE_POLL_MS = 15_000;
 
+/** Pushes the armed idle deadline out; null while the idle trigger is off. */
+let bumpActivity: (() => void) | null = null;
+
+/** Activity this window's listeners can't see — typing or playing inside
+ *  the cross-origin HTML preview frame, which reports it (`HtmlPreview`).
+ *  Counts like a keypress here; does nothing while the idle trigger is off. */
+export function noteActivity(): void {
+  bumpActivity?.();
+}
+
 /**
  * Wire up whichever triggers are enabled and return a teardown. Split out of
  * the hook so it can be exercised without a React renderer — see
@@ -85,6 +95,10 @@ export function startAutoLock({
         window.removeEventListener(type, bump, { capture: true }),
       );
     }
+    bumpActivity = bump;
+    teardown.push(() => {
+      bumpActivity = null;
+    });
     const poll = window.setInterval(() => {
       if (Date.now() - lastActivity >= idleMs) lock();
     }, IDLE_POLL_MS);
@@ -112,6 +126,39 @@ export function startAutoLock({
 }
 
 /**
+ * The trigger that isn't opt-in: on macOS closing the window only hides it,
+ * where it used to quit — and a relaunch always meets the lock. Locking on
+ * close keeps that. Armed only while there's something to re-lock — a
+ * configured lock, currently unlocked. Split out of the hook, like
+ * `startAutoLock`, so it can be tested without a renderer. Returns a
+ * teardown.
+ */
+export function startLockOnClose({
+  configured,
+  unlocked,
+  lock,
+  listen = onWindowCloseHidden,
+}: {
+  configured: boolean;
+  unlocked: boolean;
+  lock: () => void;
+  /** Subscribes to the close-to-hidden event; `onWindowCloseHidden`. */
+  listen?: (cb: () => void) => Promise<() => void>;
+}): () => void {
+  if (!configured || !unlocked) return () => undefined;
+  let off: (() => void) | undefined;
+  let cancelled = false;
+  void listen(lock).then((u) => {
+    if (cancelled) u();
+    else off = u;
+  });
+  return () => {
+    cancelled = true;
+    off?.();
+  };
+}
+
+/**
  * Mounted once from `App`. Arms the triggers only while there is something to
  * re-lock — a configured lock, currently unlocked — so the listeners don't
  * exist at all for the majority of users who never set a lock up.
@@ -135,19 +182,13 @@ export function useAutoLock() {
     });
   }, [configured, unlocked, timeout, onHide]);
 
-  // Not opt-in: on macOS closing the window only hides it, where it used to
-  // quit — and a relaunch always meets the lock. Locking on close keeps that.
-  useEffect(() => {
-    if (!configured || !unlocked) return;
-    let off: (() => void) | undefined;
-    let cancelled = false;
-    void onWindowCloseHidden(() => useSecurityStore.getState().lock()).then((u) => {
-      if (cancelled) u();
-      else off = u;
-    });
-    return () => {
-      cancelled = true;
-      off?.();
-    };
-  }, [configured, unlocked]);
+  useEffect(
+    () =>
+      startLockOnClose({
+        configured,
+        unlocked,
+        lock: () => useSecurityStore.getState().lock(),
+      }),
+    [configured, unlocked],
+  );
 }

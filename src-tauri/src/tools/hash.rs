@@ -4,7 +4,6 @@
 //! is just made up. SHA-1 and MD5 are intentionally not exposed: they
 //! are broken for cryptographic use and we'd rather not encourage them.
 
-use base64::Engine;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha224, Sha256, Sha384, Sha512};
 
@@ -22,7 +21,8 @@ pub fn tool_description() -> &'static str {
      shape. Algorithms: `sha224`, `sha256` (default), `sha384`, `sha512`. \
      `input_format` controls how `input` is interpreted before hashing: \
      `utf8` (default), `hex` (decode a hex string), `base64` (decode a \
-     standard base64 string). Output is lowercase hex of the digest."
+     standard or URL-safe base64 string; padding optional). Output is \
+     lowercase hex of the digest."
 }
 
 pub fn input_schema() -> Value {
@@ -85,13 +85,13 @@ fn decode_input(input: &str, fmt: &str) -> Result<Vec<u8>, String> {
         "utf8" => Ok(input.as_bytes().to_vec()),
         "hex" => {
             let cleaned: String = input.chars().filter(|c| !c.is_ascii_whitespace()).collect();
-            // Reject non-ASCII before the byte-index slicing below. `cleaned`
-            // is built by filtering `chars()`, so a retained multi-byte char
-            // (e.g. `中`) would otherwise make `&cleaned[i..i + 2]` slice mid-
-            // character and panic ("byte index N is not a char boundary").
-            // Hex digits are ASCII by definition, so anything else is invalid
-            // input, not a crash.
-            if !cleaned.is_ascii() {
+            // Reject anything but hex digits before the byte-index slicing
+            // below. `cleaned` is built by filtering `chars()`, so a retained
+            // multi-byte char (e.g. `中`) would otherwise make
+            // `&cleaned[i..i + 2]` slice mid-character and panic ("byte index
+            // N is not a char boundary"). And `from_str_radix` takes a sign:
+            // `+a+b` hashed as the bytes 0a 0b.
+            if !cleaned.bytes().all(|b| b.is_ascii_hexdigit()) {
                 return Err("hex input must contain only ASCII hex digits".to_string());
             }
             if cleaned.len() % 2 != 0 {
@@ -103,8 +103,10 @@ fn decode_input(input: &str, fmt: &str) -> Result<Vec<u8>, String> {
                 .collect::<Result<Vec<u8>, _>>()
                 .map_err(|e| format!("invalid hex input: {e}"))
         }
-        "base64" => base64::engine::general_purpose::STANDARD
-            .decode(input.trim())
+        // Read as leniently as the `base64` tool decodes — no padding needed,
+        // line breaks ignored — in either alphabet: `-` and `_` only occur in
+        // the URL-safe one.
+        "base64" => super::base64_tool::decode_lenient(input, input.contains(['-', '_']))
             .map_err(|e| format!("invalid base64 input: {e}")),
         other => Err(format!("unknown input_format `{other}` — use utf8/hex/base64")),
     }
@@ -179,5 +181,27 @@ mod tests {
     fn rejects_bad_algorithm() {
         let r = dispatch(&json!({"input": "x", "algorithm": "md5"}));
         assert!(r.is_error);
+    }
+
+    /// `from_str_radix` accepts a leading sign, which isn't a hex digit.
+    #[test]
+    fn hex_input_rejects_signs() {
+        let r = dispatch(&json!({"input": "+a+b", "input_format": "hex"}));
+        assert!(r.is_error, "{}", r.content_text);
+    }
+
+    /// The bytes fb ff: `+/8=` in the standard alphabet, `-_8=` in the
+    /// URL-safe one. Every spelling the `base64` tool decodes hashes alike.
+    #[test]
+    fn base64_input_decodes_like_the_base64_tool() {
+        let digest = |input: &str, format: &str| {
+            let r = dispatch(&json!({"input": input, "input_format": format}));
+            assert!(!r.is_error, "{input}: {}", r.content_text);
+            r.content_text
+        };
+        let want = digest("fbff", "hex");
+        for input in ["+/8=", "+/8", "-_8=", "-_8", "+/\n8="] {
+            assert_eq!(digest(input, "base64"), want, "{input}");
+        }
     }
 }

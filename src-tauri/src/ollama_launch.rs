@@ -32,6 +32,14 @@ const POLL_INTERVAL: Duration = Duration::from_millis(300);
 /// the server answers — including the common case where it was already up
 /// and nothing was spawned.
 pub async fn start(http: &Client, base_url: &str) -> Result<(), String> {
+    // One start at a time. Auto-launch on boot and a "Start Ollama" click
+    // could overlap: both found the server down, both spawned one, and the
+    // second — unable to bind the port the first now held — reported
+    // "exited immediately" while the first came up fine. A start that waits
+    // here finds the first one's server answering and returns.
+    static STARTING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _one_at_a_time = STARTING.lock().await;
+
     // Everything we PROBE goes to a connectable address; everything we
     // CONFIGURE keeps the user's own host. They differ for `0.0.0.0` — see
     // `probe_url`.
@@ -134,13 +142,17 @@ fn probe_url(base_url: &str) -> String {
 
 /// `host:port` for the spawned server's `OLLAMA_HOST`, from the user's
 /// configured base URL. Returns `None` when the URL has no usable host.
+///
+/// The port is always spelled out. A URL without one is dialled — by the
+/// readiness probe and by every request after it — on its scheme's default
+/// (80 / 443), but a bare `OLLAMA_HOST` host makes Ollama pick its own
+/// 11434: the probe timed out after 20 s and left that server running where
+/// nothing would ever look.
 fn ollama_host_env(base_url: &str) -> Option<String> {
     let url = reqwest::Url::parse(base_url).ok()?;
     let host = url.host_str()?;
-    match url.port() {
-        Some(port) => Some(format!("{host}:{port}")),
-        None => Some(host.to_string()),
-    }
+    let port = url.port_or_known_default()?;
+    Some(format!("{host}:{port}"))
 }
 
 /// Whether `base_url` names this machine. Deliberately stricter than
@@ -353,10 +365,15 @@ mod tests {
             ollama_host_env("http://localhost:11434").as_deref(),
             Some("localhost:11434")
         );
-        // No explicit port — hand Ollama the bare host and let it default.
+        // No explicit port: bind where the probe and the app will dial, not
+        // on Ollama's own default of 11434.
         assert_eq!(
             ollama_host_env("http://localhost").as_deref(),
-            Some("localhost")
+            Some("localhost:80")
+        );
+        assert_eq!(
+            ollama_host_env("http://[::1]").as_deref(),
+            Some("[::1]:80")
         );
         assert_eq!(ollama_host_env("not a url"), None);
     }

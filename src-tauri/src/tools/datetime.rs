@@ -352,13 +352,31 @@ fn parse_input(s: &str, fallback_tz: &Tz) -> Result<DateTime<Utc>, String> {
         }
     }
     if let Ok(date) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
-        let naive = date
-            .and_hms_opt(0, 0, 0)
-            .expect("00:00:00 is always a valid time");
-        return resolve_naive(naive, fallback_tz);
+        return start_of_day(date, fallback_tz);
     }
     Err(format!(
         "could not parse `{s}` as a datetime (try RFC 3339, ISO 8601, or `YYYY-MM-DD`)"
+    ))
+}
+
+/// The first instant of `date` in `tz`, which a date given alone stands for.
+/// That's midnight almost everywhere, but where the clocks spring forward at
+/// 00:00 (Africa/Cairo, America/Santiago, Havana, Asunción) midnight doesn't
+/// exist, and a bare date there failed as a DST gap: the day starts where the
+/// gap ends instead. Clocks change on whole minutes (bar a few local-mean-time
+/// switches before 1972), so the first minute that exists is that start.
+fn start_of_day(date: NaiveDate, tz: &Tz) -> Result<DateTime<Utc>, String> {
+    for minute in 0..24 * 60 {
+        let naive = date
+            .and_hms_opt(minute / 60, minute % 60, 0)
+            .expect("a minute of the day is always a valid time");
+        // A repeated midnight takes its earlier occurrence, as in `resolve_naive`.
+        if let Some(dt) = tz.from_local_datetime(&naive).earliest() {
+            return Ok(dt.with_timezone(&Utc));
+        }
+    }
+    Err(format!(
+        "date `{date}` does not exist in timezone `{tz}` — its clocks skipped the whole day"
     ))
 }
 
@@ -558,32 +576,28 @@ fn add_business_days(mut date: NaiveDate, n: i64) -> Option<NaiveDate> {
     Some(date)
 }
 
-/// Count business days between two dates (sign preserved). `from == to`
-/// is zero; same-week Mon→Fri is 4.
+/// Count business days between two dates (sign preserved): the weekdays
+/// after the earlier date up to and including the later one, negative when
+/// `to` is the earlier. `from == to` is zero; same-week Mon→Fri is 4.
+/// Swapping the ends only flips the sign — walking backward used to count
+/// the days it walked *to*, so with a weekend at one end Sat→Mon was 1 but
+/// Mon→Sat 0.
 fn business_days_between(from: NaiveDate, to: NaiveDate) -> i64 {
-    if from == to {
-        return 0;
+    if to < from {
+        return -business_days_between(to, from);
     }
-    let step: i64 = if to > from { 1 } else { -1 };
     let mut cur = from;
     let mut count: i64 = 0;
     while cur != to {
-        cur = if step > 0 {
-            match cur.succ_opt() {
-                Some(d) => d,
-                None => return count * step,
-            }
-        } else {
-            match cur.pred_opt() {
-                Some(d) => d,
-                None => return count * step,
-            }
+        cur = match cur.succ_opt() {
+            Some(d) => d,
+            None => return count,
         };
         if !is_weekend(cur.weekday()) {
             count += 1;
         }
     }
-    count * step
+    count
 }
 
 fn is_weekend(w: Weekday) -> bool {
@@ -939,5 +953,39 @@ mod tests {
             ),
             4
         );
+    }
+
+    /// Reversing a span only flips the sign, a weekend end included.
+    #[test]
+    fn business_days_diff_is_antisymmetric() {
+        // 2026-05-30 is a Saturday, 2026-06-01 the Monday after it.
+        for (from, to, want) in [
+            ("2026-05-30", "2026-06-01", "1"),
+            ("2026-06-01", "2026-05-30", "-1"),
+            ("2026-05-29", "2026-05-31", "0"),
+            ("2026-05-31", "2026-05-29", "0"),
+            ("2026-05-25", "2026-06-06", "9"),
+            ("2026-06-06", "2026-05-25", "-9"),
+        ] {
+            assert_eq!(diff(from, to, "business_days", "UTC"), want, "{from} → {to}");
+        }
+    }
+
+    /// Egypt springs forward at midnight, so 2026-04-24 has no 00:00 in
+    /// Cairo: a bare date there is the first minute it does have.
+    #[test]
+    fn a_date_starts_after_a_midnight_dst_gap() {
+        let r = dispatch(&json!({ "op": "parse", "input": "2026-04-24", "timezone": "Africa/Cairo" }));
+        assert!(!r.is_error, "{}", r.content_text);
+        assert_eq!(r.content_text, "2026-04-24T01:00:00+03:00");
+        let r = dispatch(&json!({ "op": "weekday", "input": "2026-04-24", "timezone": "Africa/Cairo" }));
+        assert_eq!(r.content_text, "Friday");
+        // An ordinary midnight is still midnight.
+        let r = dispatch(&json!({ "op": "parse", "input": "2026-04-23", "timezone": "Africa/Cairo" }));
+        assert_eq!(r.content_text, "2026-04-23T00:00:00+02:00");
+        // Samoa skipped 2011-12-30 outright when it crossed the date line.
+        let r = dispatch(&json!({ "op": "parse", "input": "2011-12-30", "timezone": "Pacific/Apia" }));
+        assert!(r.is_error, "{}", r.content_text);
+        assert!(r.content_text.contains("skipped the whole day"), "{}", r.content_text);
     }
 }

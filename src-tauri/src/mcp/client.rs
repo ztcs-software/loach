@@ -6,11 +6,13 @@ use futures_util::StreamExt;
 use serde_json::{json, Value};
 
 use crate::db::McpServer;
-use crate::sse::find_frame_end;
+use crate::sse::{find_frame_end, frame_lines};
 
+use super::stdio::{classify, server_request_reply, Incoming};
 use super::types::{
     Attachment, CallToolContent, CallToolResult, InitializeResult, JsonRpcError, JsonRpcResponse,
-    ListToolsResult, McpCallResult, McpTestResult, McpTool, McpToolRaw, PROTOCOL_VERSION,
+    ListToolsResult, McpCallResult, McpTestResult, McpTool, McpToolRaw, MAX_TOOL_CALL_TIME,
+    MAX_TOOL_PAGES, PROTOCOL_VERSION,
 };
 
 /// Per-request ceiling. Remote MCP servers can take a few seconds to cold
@@ -40,8 +42,12 @@ impl std::fmt::Display for PreExecutionFailure {
 impl std::error::Error for PreExecutionFailure {}
 
 /// True when `err` was tagged [`PreExecutionFailure`] anywhere in its chain.
+///
+/// `downcast_ref`, not `chain()`: the tag is always attached with
+/// `.context(…)`, and `chain()` hands a context layer back as anyhow's own
+/// wrapper type, so the tag was never found and no failure was ever retried.
 pub fn is_pre_execution(err: &anyhow::Error) -> bool {
-    err.chain().any(|c| c.is::<PreExecutionFailure>())
+    err.downcast_ref::<PreExecutionFailure>().is_some()
 }
 
 /// A JSON-RPC `error` reply — invalid params, an unknown tool. The server
@@ -132,9 +138,14 @@ pub struct McpSession {
     url: String,
     headers: HashMap<String, String>,
     session_id: Option<String>,
+    /// The protocol version `initialize` settled on, sent back as
+    /// `MCP-Protocol-Version` on every request after it, as the spec asks of
+    /// HTTP clients. `None` before that, or when the server named none (or
+    /// something that can't go in a header).
+    protocol_version: Option<String>,
     /// Monotonic JSON-RPC `id` counter. Streamable HTTP is one-POST-one-
-    /// reply so we don't pair replies to pending requests, but a fresh id
-    /// per call keeps the logs and any server-side telemetry sane.
+    /// reply, but the reply may share its SSE stream with the server's own
+    /// messages, so it is told apart by this id.
     next_id: i64,
 }
 
@@ -154,6 +165,7 @@ impl McpSession {
             url: url.to_string(),
             headers,
             session_id: None,
+            protocol_version: None,
             next_id: 1,
         })
     }
@@ -177,18 +189,16 @@ impl McpSession {
                 "clientInfo": { "name": CLIENT_NAME, "version": CLIENT_VERSION },
             },
         });
-        let (resp, sid) = post_rpc(
-            &self.http,
-            &self.url,
-            &self.headers,
-            &init,
-            self.session_id.as_deref(),
-        )
-        .await?;
+        let (resp, sid) = post_rpc(self, &init).await?;
         if let Some(s) = accept_session_id(sid) {
             self.session_id = Some(s);
         }
         let parsed: InitializeResult = unwrap_response(resp)?;
+        self.protocol_version = parsed.protocol_version.clone().filter(|v| {
+            !v.is_empty()
+                && v.len() <= 64
+                && v.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.')
+        });
 
         // Best-effort initialized notification. Some servers (notably the
         // GitHub gateway) require this before they'll honour tools/* calls.
@@ -196,40 +206,44 @@ impl McpSession {
             "jsonrpc": "2.0",
             "method": "notifications/initialized",
         });
-        let _ = post_rpc_raw(
-            &self.http,
-            &self.url,
-            &self.headers,
-            &note,
-            self.session_id.as_deref(),
-        )
-        .await;
+        let _ = post_rpc_raw(self, &note).await;
 
         Ok(parsed)
     }
 
-    /// Fetch the full tool catalog. Returns the raw shape (includes the
-    /// JSON-Schema for each tool's arguments) so callers that need to
-    /// forward schemas to an LLM don't lose them.
+    /// Fetch the full tool catalog, every page of it. Returns the raw shape
+    /// (includes the JSON-Schema for each tool's arguments) so callers that
+    /// need to forward schemas to an LLM don't lose them.
     pub async fn list_tools_raw(&mut self) -> Result<Vec<McpToolRaw>> {
-        let body = json!({
-            "jsonrpc": "2.0",
-            "id": self.fresh_id(),
-            "method": "tools/list",
-        });
-        let (resp, sid) = post_rpc(
-            &self.http,
-            &self.url,
-            &self.headers,
-            &body,
-            self.session_id.as_deref(),
-        )
-        .await?;
-        if let Some(s) = accept_session_id(sid) {
-            self.session_id = Some(s);
+        let mut tools = Vec::new();
+        let mut cursor: Option<String> = None;
+        for page in 1.. {
+            let mut body = json!({
+                "jsonrpc": "2.0",
+                "id": self.fresh_id(),
+                "method": "tools/list",
+            });
+            if let Some(c) = cursor.take() {
+                body["params"] = json!({ "cursor": c });
+            }
+            let (resp, sid) = post_rpc(self, &body).await?;
+            if let Some(s) = accept_session_id(sid) {
+                self.session_id = Some(s);
+            }
+            let parsed: ListToolsResult = unwrap_response(resp)?;
+            tools.extend(parsed.tools);
+            match parsed.next_cursor.filter(|c| !c.is_empty()) {
+                None => break,
+                Some(_) if page >= MAX_TOOL_PAGES => {
+                    tracing::warn!(
+                        "MCP: tools/list still paging after {MAX_TOOL_PAGES} pages — keeping what's in"
+                    );
+                    break;
+                }
+                next => cursor = next,
+            }
         }
-        let parsed: ListToolsResult = unwrap_response(resp)?;
-        Ok(parsed.tools)
+        Ok(tools)
     }
 
     /// Invoke a single tool. Returns the concatenated text content + the
@@ -238,23 +252,21 @@ impl McpSession {
     /// without validating against the schema (the server will reject
     /// invalid shapes itself and the model will react to the error).
     pub async fn call_tool(&mut self, name: &str, arguments: &Value) -> Result<McpCallResult> {
+        let id = self.fresh_id();
         let body = json!({
             "jsonrpc": "2.0",
-            "id": self.fresh_id(),
+            "id": id,
             "method": "tools/call",
             "params": {
                 "name": name,
                 "arguments": arguments,
+                // Asks for progress under the call's own id; a long tool that
+                // reports it keeps the call's deadline moving (see
+                // `post_rpc_raw`).
+                "_meta": { "progressToken": id },
             },
         });
-        let (resp, sid) = post_rpc(
-            &self.http,
-            &self.url,
-            &self.headers,
-            &body,
-            self.session_id.as_deref(),
-        )
-        .await?;
+        let (resp, sid) = post_rpc(self, &body).await?;
         if let Some(s) = accept_session_id(sid) {
             self.session_id = Some(s);
         }
@@ -264,6 +276,43 @@ impl McpSession {
         // notably image → attachment — is unit-testable without a live
         // server.
         Ok(assemble_call_result(parsed.content, parsed.is_error))
+    }
+
+    /// A request carrying everything that places it in this session: the
+    /// configured headers, the session id, the negotiated protocol version.
+    fn request(&self, method: reqwest::Method) -> reqwest::RequestBuilder {
+        let mut req = self.http.request(method, &self.url);
+        for (k, v) in &self.headers {
+            req = req.header(k, v);
+        }
+        if let Some(s) = &self.session_id {
+            req = req.header("Mcp-Session-Id", s);
+        }
+        if let Some(v) = &self.protocol_version {
+            req = req.header("MCP-Protocol-Version", v);
+        }
+        req
+    }
+}
+
+/// End the session on the server — the spec's HTTP DELETE — whenever one is
+/// dropped: replaced in the pool, aged out, or done with after a Test
+/// connection. Without it every session Loach ever opened stayed allocated
+/// until the server expired it. Best effort, and only from the runtime: at
+/// app exit nothing would be left to send it.
+impl Drop for McpSession {
+    fn drop(&mut self) {
+        if self.session_id.is_none() {
+            return;
+        }
+        let Ok(rt) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let req = self.request(reqwest::Method::DELETE).timeout(REQUEST_TIMEOUT);
+        rt.spawn(async move {
+            // A server that doesn't support it answers 405, which is fine.
+            let _ = req.send().await;
+        });
     }
 }
 
@@ -456,13 +505,10 @@ fn format_rpc_error(err: &JsonRpcError) -> String {
 /// POST a JSON-RPC frame, returning the decoded response and any session-id
 /// header the server advertised.
 async fn post_rpc(
-    http: &reqwest::Client,
-    url: &str,
-    headers: &HashMap<String, String>,
+    session: &McpSession,
     body: &Value,
-    session: Option<&str>,
 ) -> Result<(JsonRpcResponse, Option<String>)> {
-    let (raw, sid) = post_rpc_raw(http, url, headers, body, session).await?;
+    let (raw, sid) = post_rpc_raw(session, body).await?;
     // `truncate` the body before it lands in the message: `raw` is bounded
     // only by MAX_RESPONSE_BYTES (4 MiB), and this error string is surfaced
     // as a ToolResult event that gets persisted into the transcript and
@@ -473,28 +519,33 @@ async fn post_rpc(
 }
 
 async fn post_rpc_raw(
-    http: &reqwest::Client,
-    url: &str,
-    headers: &HashMap<String, String>,
+    session: &McpSession,
     body: &Value,
-    session: Option<&str>,
 ) -> Result<(String, Option<String>)> {
-    let mut req = http
-        .post(url)
+    // A request that asked for progress (`tools/call`) may run past
+    // REQUEST_TIMEOUT for as long as the server keeps reporting progress
+    // on it, up to MAX_TOOL_CALL_TIME. reqwest's own timeout can't move,
+    // so for such a request it holds only that cap, and `deadline` —
+    // which the SSE reader moves on each report — the rest.
+    let reports_progress = body.pointer("/params/_meta/progressToken").is_some();
+    let started = tokio::time::Instant::now();
+    let deadline = started + REQUEST_TIMEOUT;
+    let req = session
+        .request(reqwest::Method::POST)
         .header("Content-Type", "application/json")
         // Streamable HTTP servers can reply with either JSON or SSE; tell
         // them we'll accept either so we get the most compatible response.
         .header("Accept", "application/json, text/event-stream")
         .json(body)
-        .timeout(REQUEST_TIMEOUT);
-    for (k, v) in headers {
-        req = req.header(k, v);
-    }
-    if let Some(s) = session {
-        req = req.header("Mcp-Session-Id", s);
-    }
+        .timeout(if reports_progress { MAX_TOOL_CALL_TIME } else { REQUEST_TIMEOUT });
 
-    let resp = match req.send().await {
+    let Ok(sent) = tokio::time::timeout_at(deadline, req.send()).await else {
+        bail!(
+            "POST to MCP server failed: no response within {}s",
+            REQUEST_TIMEOUT.as_secs()
+        );
+    };
+    let resp = match sent {
         Ok(r) => r,
         Err(e) => {
             // A connect-phase failure means the request never reached the
@@ -525,15 +576,29 @@ async fn post_rpc_raw(
         .unwrap_or("")
         .to_string();
     if !status.is_success() {
+        let location = resp
+            .headers()
+            .get("location")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
         let text = read_capped_text(resp)
             .await
             .context("read MCP server response")?;
-        let err = anyhow!("server responded with HTTP {}: {}", status, truncate(&text));
+        // Redirects aren't followed — the client is pinned to the address
+        // it resolved — so a bare "HTTP 307" left the user guessing where
+        // the server wanted them. Usually it's a missing trailing `/`.
+        let hint = location
+            .filter(|_| status.is_redirection())
+            .and_then(|l| redirect_hint(&session.url, &l));
+        let err = match hint {
+            Some(hint) => anyhow!("server responded with HTTP {status}: {hint}"),
+            None => anyhow!("server responded with HTTP {}: {}", status, truncate(&text)),
+        };
         // 404 against a session-carrying request is the spec's "unknown or
         // expired session" signal: the server refused the envelope, so it
         // never got as far as running the tool. That's the case the pooled
         // retry exists for.
-        return Err(if status == reqwest::StatusCode::NOT_FOUND && session.is_some() {
+        return Err(if status == reqwest::StatusCode::NOT_FOUND && session.session_id.is_some() {
             err.context(PreExecutionFailure)
         } else {
             err
@@ -544,32 +609,46 @@ async fn post_rpc_raw(
     // stream. Read those incrementally rather than to EOF — see
     // `read_sse_rpc_response`.
     let payload = if content_type.contains("text/event-stream") {
-        read_sse_rpc_response(resp).await?
+        let id = body.get("id").and_then(Value::as_i64);
+        let progress_cap = reports_progress.then_some(started + MAX_TOOL_CALL_TIME);
+        read_sse_rpc_response(session, resp, id, deadline, progress_cap).await?
     } else {
-        read_capped_text(resp)
-            .await
-            .context("read MCP server response")?
+        let Ok(text) = tokio::time::timeout_at(deadline, read_capped_text(resp)).await else {
+            bail!(
+                "MCP server didn't finish its reply within {}s",
+                REQUEST_TIMEOUT.as_secs()
+            );
+        };
+        text.context("read MCP server response")?
     };
 
     Ok((payload, sid))
 }
 
-/// Pull the JSON-RPC *response* out of an SSE body, returning as soon as it
-/// arrives instead of draining the stream first.
+/// Pull the JSON-RPC *response* out of an SSE body, returning as soon as
+/// it arrives instead of draining the stream first.
 ///
-/// Two things went wrong with read-to-EOF-then-parse. The spec only *SHOULD*
-/// close the stream after the response, so a server that legitimately holds
-/// it open stalled every call until the 30 s request timeout — the reply had
-/// been sitting in our buffer the whole time. And a server may send
-/// notifications (progress updates, logging) on the same stream *before* the
-/// response, which `extract_first_sse_data` would hand back as if it were
-/// the answer, failing with "response missing both result and error".
+/// Two things went wrong with read-to-EOF-then-parse. The spec only
+/// *SHOULD* close the stream after the response, so a server that
+/// legitimately holds it open stalled every call until the 30 s request
+/// timeout — the reply had been sitting in our buffer the whole time. And
+/// a server may send its own messages on the same stream *before* the
+/// response — notifications (progress updates, logging), and requests of
+/// its own, a `ping` above all — which `extract_first_sse_data` would hand
+/// back as if they were the answer.
 ///
-/// So: parse frames as they complete, skip anything that is a notification
-/// (a JSON-RPC message with `method` and no `id`), and return the first
-/// frame carrying `result` or `error`. Dropping the response afterwards
+/// So: parse frames as they complete, answer the server's requests, let
+/// progress on this request (`id`) move `deadline` — up to `progress_cap`,
+/// for a request that asked for progress — skip the rest, and return the
+/// frame carrying the reply to `id`. Dropping the response afterwards
 /// closes the connection.
-async fn read_sse_rpc_response(resp: reqwest::Response) -> Result<String> {
+async fn read_sse_rpc_response(
+    session: &McpSession,
+    resp: reqwest::Response,
+    id: Option<i64>,
+    mut deadline: tokio::time::Instant,
+    progress_cap: Option<tokio::time::Instant>,
+) -> Result<String> {
     let mut buf: Vec<u8> = Vec::new();
     let mut scanned = 0usize;
     let mut stream = resp.bytes_stream();
@@ -587,11 +666,18 @@ async fn read_sse_rpc_response(resp: reqwest::Response) -> Result<String> {
             scanned = 0;
 
             if let Some(data) = extract_first_sse_data(&frame) {
-                if !is_jsonrpc_notification(&data) {
-                    return Ok(data);
+                match sse_frame(&data, id) {
+                    SseFrame::Reply => return Ok(data),
+                    SseFrame::Answer(reply) => answer(session, &reply),
+                    SseFrame::Progress => {
+                        if let Some(cap) = progress_cap {
+                            deadline = (tokio::time::Instant::now() + REQUEST_TIMEOUT).min(cap);
+                        }
+                    }
+                    // Legal to receive here. Keep reading for the
+                    // response the caller is actually waiting on.
+                    SseFrame::Skip => {}
                 }
-                // A notification — legal to receive here. Keep reading for
-                // the response the caller is actually waiting on.
             }
         }
         // No complete frame yet. Resume the next scan a few bytes back from
@@ -600,7 +686,13 @@ async fn read_sse_rpc_response(resp: reqwest::Response) -> Result<String> {
         // restarted past its first byte.
         scanned = buf.len().saturating_sub(3);
 
-        match stream.next().await {
+        let Ok(next) = tokio::time::timeout_at(deadline, stream.next()).await else {
+            bail!(
+                "MCP server didn't reply in time — {}s went by without the reply or progress on it",
+                REQUEST_TIMEOUT.as_secs()
+            );
+        };
+        match next {
             Some(chunk) => {
                 let chunk = chunk.context("reading MCP server response body")?;
                 if buf.len() + chunk.len() > MAX_RESPONSE_BYTES {
@@ -611,25 +703,90 @@ async fn read_sse_rpc_response(resp: reqwest::Response) -> Result<String> {
                 buf.extend_from_slice(&chunk);
             }
             // Stream ended. Anything left is a final frame without its
-            // terminating blank line — accept it if it parses.
+            // terminating blank line — accept it if it's the reply.
             None => {
                 let tail = String::from_utf8_lossy(&buf).into_owned();
                 return extract_first_sse_data(&tail)
-                    .filter(|d| !is_jsonrpc_notification(d))
+                    .filter(|d| sse_frame(d, id) == SseFrame::Reply)
                     .ok_or_else(|| anyhow!("event-stream response contained no data frame"));
             }
         }
     }
 }
 
-/// Whether `data` is a JSON-RPC notification rather than the response we're
-/// waiting for. Notifications carry `method` and no `id`; responses carry an
-/// `id` plus `result` or `error`. Unparseable payloads are treated as
-/// non-notifications so the existing error path reports them.
-fn is_jsonrpc_notification(data: &str) -> bool {
-    serde_json::from_str::<serde_json::Value>(data)
-        .ok()
-        .is_some_and(|v| v.get("method").is_some() && v.get("id").is_none())
+/// Answer a request the server made of us on a reply's stream. It goes
+/// back as a POST of its own, like any client message, and in the
+/// background, so the wait for the reply carries on. Best effort.
+fn answer(session: &McpSession, reply: &Value) {
+    let req = session
+        .request(reqwest::Method::POST)
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json, text/event-stream")
+        .json(reply)
+        .timeout(REQUEST_TIMEOUT);
+    tokio::spawn(async move {
+        let _ = req.send().await;
+    });
+}
+
+/// What one `data:` payload on a request's SSE stream is to that request.
+#[derive(Debug, PartialEq)]
+enum SseFrame {
+    /// Its reply — or something unreadable, which the caller then reports.
+    Reply,
+    /// A request the server makes of us first (`ping`); this is the answer.
+    Answer(Value),
+    /// Progress on the request.
+    Progress,
+    /// Anything else: other notifications, a reply to some other id.
+    Skip,
+}
+
+/// Sort a payload by what it is to the request with `id`. The first frame
+/// that wasn't a notification used to be taken for the reply, so a `ping`
+/// the server sent ahead of it failed the call.
+fn sse_frame(data: &str, id: Option<i64>) -> SseFrame {
+    let Ok(msg) = serde_json::from_str::<Value>(data) else {
+        return SseFrame::Reply;
+    };
+    match classify(&msg) {
+        Incoming::Response(r) if id.is_none_or(|id| id == r) => SseFrame::Reply,
+        Incoming::Response(_) => SseFrame::Skip,
+        Incoming::Request { id: theirs, method } => {
+            SseFrame::Answer(server_request_reply(&method, theirs))
+        }
+        Incoming::Progress(token) if Some(token) == id => SseFrame::Progress,
+        Incoming::Progress(_) | Incoming::Notification => SseFrame::Skip,
+        Incoming::Other => SseFrame::Reply,
+    }
+}
+
+/// What a 3xx points at, for the error. Said without quoting the target's
+/// path or query, which can carry the server's credential just as the
+/// configured URL can (see the connect error in `post_rpc_raw`) — except for
+/// the usual case, the same URL with or without a trailing `/`, which is
+/// spelled out because the fix is the user's to make.
+fn redirect_hint(from: &str, location: &str) -> Option<String> {
+    let from = reqwest::Url::parse(from).ok()?;
+    let to = from.join(location).ok()?;
+    let same_origin = from.origin() == to.origin();
+    if same_origin
+        && from.query() == to.query()
+        && from.path() != to.path()
+        && from.path().trim_end_matches('/') == to.path().trim_end_matches('/')
+    {
+        return Some(if to.path().ends_with('/') {
+            "it redirects to the same URL with a trailing `/` — add one to the server URL".into()
+        } else {
+            "it redirects to the same URL without its trailing `/` — remove it from the server URL"
+                .into()
+        });
+    }
+    Some(if same_origin {
+        "it redirects to another address on the same server".into()
+    } else {
+        format!("it redirects to {}", to.origin().ascii_serialization())
+    })
 }
 
 /// Read a reqwest response body as text with a hard `MAX_RESPONSE_BYTES`
@@ -659,9 +816,9 @@ fn extract_first_sse_data(s: &str) -> Option<String> {
     // response across several `data:` lines (legal SSE) handed us a
     // truncated, unparseable frame and its tools silently never loaded.
     // Gather every `data:` line of the first event (terminated by a blank
-    // line) and join them.
+    // line) and join them. Lines may end in `\r` alone, too.
     let mut data: Vec<&str> = Vec::new();
-    for line in s.lines() {
+    for line in frame_lines(s) {
         if let Some(rest) = line.strip_prefix("data:") {
             // Per spec, a single leading space after the colon is stripped.
             data.push(rest.strip_prefix(' ').unwrap_or(rest));
@@ -787,12 +944,269 @@ mod tests {
             }
         });
         let url = format!("http://127.0.0.1:{port}/api/mcp/s/sk-secret-123/mcp");
-        let err = post_rpc_raw(&reqwest::Client::new(), &url, &HashMap::new(), &json!({}), None)
+        let session = McpSession::new(reqwest::Client::new(), &row(&url)).expect("session");
+        let err = post_rpc_raw(&session, &json!({}))
             .await
             .expect_err("the server hung up");
         let shown = format!("{err:#}");
         assert!(shown.contains("POST to MCP server failed"), "{shown}");
         assert!(!shown.contains("sk-secret-123"), "{shown}");
+    }
+
+    fn row(url: &str) -> McpServer {
+        McpServer {
+            id: "t".into(),
+            name: "t".into(),
+            transport: "http".into(),
+            url: url.into(),
+            headers_json: None,
+            command: None,
+            args_json: None,
+            env_json: None,
+            auto_approve: false,
+            allowed_tools_json: None,
+            enabled: true,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    /// A whole HTTP/1.1 response, closing the connection after it.
+    fn http(status: &str, headers: &str, body: &str) -> String {
+        format!(
+            "HTTP/1.1 {status}\r\n{headers}content-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    /// A local server for the transport tests. Each connection carries one
+    /// request, answered with `respond(&request)`; every request it saw comes
+    /// back on the channel, in the order they arrived.
+    async fn mock_server(respond: fn(&str) -> String) -> (String, tokio::sync::mpsc::UnboundedReceiver<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let url = format!("http://127.0.0.1:{}/mcp", listener.local_addr().expect("addr").port());
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Ok((mut conn, _)) = listener.accept().await {
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    // The head, then as much body as it announces.
+                    let mut raw = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    let request = loop {
+                        let n = match conn.read(&mut chunk).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => n,
+                        };
+                        raw.extend_from_slice(&chunk[..n]);
+                        let text = String::from_utf8_lossy(&raw).into_owned();
+                        let Some(head_end) = text.find("\r\n\r\n") else { continue };
+                        let body_len = text[..head_end]
+                            .lines()
+                            .find_map(|l| {
+                                let (k, v) = l.split_once(':')?;
+                                k.eq_ignore_ascii_case("content-length").then(|| v.trim().parse().ok())?
+                            })
+                            .unwrap_or(0);
+                        if raw.len() >= head_end + 4 + body_len {
+                            break text;
+                        }
+                    };
+                    let _ = tx.send(request.clone());
+                    let _ = conn.write_all(respond(&request).as_bytes()).await;
+                });
+            }
+        });
+        (url, rx)
+    }
+
+    /// A server may ask something of its own — a `ping` — on the stream
+    /// ahead of the reply. It used to be taken for the reply; now it is
+    /// answered with a POST of its own, and the wait goes on to the frame
+    /// that carries the request's id.
+    #[tokio::test]
+    async fn a_ping_ahead_of_the_reply_is_answered_and_passed_over() {
+        fn respond(request: &str) -> String {
+            if !request.contains(r#""method":"tools/list""#) {
+                return http("202 Accepted", "", "");
+            }
+            let frames = concat!(
+                "data: {\"jsonrpc\":\"2.0\",\"id\":\"srv-1\",\"method\":\"ping\"}\n\n",
+                "data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/message\",\"params\":{}}\r\n\r\n",
+                "data: {\"jsonrpc\":\"2.0\",\"id\":99,\"result\":{}}\n\n",
+                "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"tools\":[{\"name\":\"a\"}]}}\n\n",
+            );
+            http("200 OK", "content-type: text/event-stream\r\n", frames)
+        }
+        let (url, mut seen) = mock_server(respond).await;
+        let mut session = McpSession::new(reqwest::Client::new(), &row(&url)).expect("session");
+        let tools = session.list_tools_raw().await.expect("the reply after the ping");
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, "a");
+
+        let _list = seen.recv().await;
+        let pong = tokio::time::timeout(Duration::from_secs(5), seen.recv())
+            .await
+            .expect("the ping was answered")
+            .expect("a request");
+        assert!(pong.contains(r#""id":"srv-1""#) && pong.contains(r#""result":{}"#), "{pong}");
+    }
+
+    /// After the handshake every request names the protocol version the
+    /// server settled on, and a catalogue served in pages is read to its
+    /// last page.
+    #[tokio::test]
+    async fn requests_after_initialize_carry_the_version_and_every_page_is_read() {
+        fn respond(request: &str) -> String {
+            let json = "content-type: application/json\r\n";
+            if request.contains(r#""method":"initialize""#) {
+                http("200 OK", json, r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26"}}"#)
+            } else if request.contains(r#""cursor":"p2""#) {
+                http("200 OK", json, r#"{"jsonrpc":"2.0","id":3,"result":{"tools":[{"name":"b"}]}}"#)
+            } else if request.contains(r#""method":"tools/list""#) {
+                http(
+                    "200 OK",
+                    json,
+                    r#"{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"a"}],"nextCursor":"p2"}}"#,
+                )
+            } else {
+                http("202 Accepted", "", "")
+            }
+        }
+        let (url, mut seen) = mock_server(respond).await;
+        let mut session = McpSession::new(reqwest::Client::new(), &row(&url)).expect("session");
+        session.initialize().await.expect("handshake");
+        let names: Vec<String> = session
+            .list_tools_raw()
+            .await
+            .expect("both pages")
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        assert_eq!(names, ["a", "b"]);
+
+        let mut requests = Vec::new();
+        while let Ok(r) = seen.try_recv() {
+            requests.push(r.to_ascii_lowercase());
+        }
+        assert_eq!(requests.len(), 4, "initialize, initialized, two pages");
+        assert!(!requests[0].contains("mcp-protocol-version"), "{}", requests[0]);
+        for r in &requests[1..] {
+            assert!(r.contains("mcp-protocol-version: 2025-03-26"), "{r}");
+        }
+    }
+
+    /// A session the server handed out an id for is ended there — HTTP
+    /// DELETE with that id — once Loach drops it.
+    #[tokio::test]
+    async fn dropping_a_session_ends_it_on_the_server() {
+        fn respond(request: &str) -> String {
+            if request.contains(r#""method":"initialize""#) {
+                http(
+                    "200 OK",
+                    "content-type: application/json\r\nmcp-session-id: sess-42\r\n",
+                    r#"{"jsonrpc":"2.0","id":1,"result":{}}"#,
+                )
+            } else {
+                http("202 Accepted", "", "")
+            }
+        }
+        let (url, mut seen) = mock_server(respond).await;
+        let mut session = McpSession::new(reqwest::Client::new(), &row(&url)).expect("session");
+        session.initialize().await.expect("handshake");
+        drop(session);
+        let delete = loop {
+            let r = tokio::time::timeout(Duration::from_secs(5), seen.recv())
+                .await
+                .expect("a DELETE was sent")
+                .expect("a request");
+            if r.starts_with("DELETE") {
+                break r;
+            }
+        };
+        assert!(delete.to_ascii_lowercase().contains("mcp-session-id: sess-42"), "{delete}");
+    }
+
+    /// The tag rides as context, under more context at times; it must be
+    /// found either way, or the pool's one safe retry never happens.
+    #[test]
+    fn the_pre_execution_tag_is_found_under_any_context() {
+        let tagged = anyhow!("connection refused")
+            .context("POST to MCP server failed")
+            .context(PreExecutionFailure);
+        assert!(is_pre_execution(&tagged));
+        assert!(is_pre_execution(&tagged.context("MCP server `x`")));
+        assert!(!is_pre_execution(&anyhow!("timed out").context("POST to MCP server failed")));
+    }
+
+    #[test]
+    fn sse_frames_are_sorted_by_what_they_are_to_the_request() {
+        let reply = r#"{"jsonrpc":"2.0","id":7,"result":{}}"#;
+        assert_eq!(sse_frame(reply, Some(7)), SseFrame::Reply);
+        assert_eq!(sse_frame(reply, Some(8)), SseFrame::Skip, "another request's reply");
+        assert_eq!(
+            sse_frame(r#"{"jsonrpc":"2.0","id":"s1","method":"ping"}"#, Some(7)),
+            SseFrame::Answer(json!({ "jsonrpc": "2.0", "id": "s1", "result": {} }))
+        );
+        let progress = |token: i64| {
+            json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/progress",
+                "params": { "progressToken": token, "progress": 1 },
+            })
+            .to_string()
+        };
+        assert_eq!(sse_frame(&progress(7), Some(7)), SseFrame::Progress);
+        assert_eq!(sse_frame(&progress(3), Some(7)), SseFrame::Skip);
+        assert_eq!(
+            sse_frame(r#"{"jsonrpc":"2.0","method":"notifications/message","params":{}}"#, Some(7)),
+            SseFrame::Skip
+        );
+        // Unreadable, or an error without an id: the caller reports it.
+        assert_eq!(sse_frame("not json", Some(7)), SseFrame::Reply);
+        assert_eq!(
+            sse_frame(r#"{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"x"}}"#, Some(7)),
+            SseFrame::Reply
+        );
+    }
+
+    #[test]
+    fn extract_first_sse_data_joins_lines_whatever_they_end_in() {
+        assert_eq!(extract_first_sse_data("event: message\ndata: {\"a\":1}").as_deref(), Some("{\"a\":1}"));
+        // A payload split over several `data:` lines is joined with `\n`.
+        assert_eq!(extract_first_sse_data("data: {\"a\":\ndata: 1}").as_deref(), Some("{\"a\":\n1}"));
+        assert_eq!(extract_first_sse_data("data: {\"a\":\r\ndata:1}\r\n").as_deref(), Some("{\"a\":\n1}"));
+        assert_eq!(extract_first_sse_data("data: x\rdata: y").as_deref(), Some("x\ny"));
+        // Only the first event's lines; comments and other fields ignored.
+        assert_eq!(extract_first_sse_data(": hi\nid: 3\ndata: one\n\ndata: two").as_deref(), Some("one"));
+        assert_eq!(extract_first_sse_data("event: ping\n: keep-alive"), None);
+    }
+
+    #[test]
+    fn truncate_cuts_at_300_chars_on_a_char_boundary() {
+        assert_eq!(truncate("short"), "short");
+        let exact = "é".repeat(300);
+        assert_eq!(truncate(&exact), exact);
+        // Two-byte chars put byte 300 mid-char; the cut is by chars.
+        let out = truncate(&"é".repeat(301));
+        assert_eq!(out, format!("{}…", "é".repeat(300)));
+    }
+
+    /// The fix for the usual redirect is spelled out; any other target is
+    /// named by its origin only, since its path can hold a credential.
+    #[test]
+    fn redirects_are_described_without_their_path() {
+        let base = "https://mcp.example.com/api/s/sk-1/mcp";
+        assert!(redirect_hint(base, "/api/s/sk-1/mcp/").unwrap().contains("add one"));
+        assert!(redirect_hint("https://h.example/mcp/", "https://h.example/mcp")
+            .unwrap()
+            .contains("remove it"));
+        let elsewhere = redirect_hint(base, "https://login.example.net/s/sk-2?next=1").unwrap();
+        assert_eq!(elsewhere, "it redirects to https://login.example.net");
+        let same_host = redirect_hint(base, "/v2/s/sk-1/mcp").unwrap();
+        assert!(!same_host.contains("sk-1"), "{same_host}");
+        assert_eq!(redirect_hint("not a url", "/x"), None);
     }
 
     #[test]

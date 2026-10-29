@@ -74,7 +74,9 @@ no Secret Service running.
    desktop environment.
 2. Make sure a login session is unlocked so the keyring is available to
    user processes.
-3. Restart Loach and re-enter the key.
+3. Re-enter the key. Loach connects to the Secret Service again on each
+   try, so a keyring that started after Loach is picked up without a
+   restart; restart Loach if saving still fails.
 
 ### Models list shows no models
 
@@ -132,8 +134,9 @@ above the answer.
 3. The Thinking toggle is **Ollama-only**. In a chat on an
    OpenAI-compatible provider it's disabled and reads off; a thinking block
    still appears there only if the server streams its reasoning as a
-   separate `reasoning_content` field (some DeepSeek, vLLM and llama.cpp
-   setups do).
+   separate `reasoning_content` or `reasoning` field (some DeepSeek, vLLM,
+   llama.cpp and OpenRouter setups do, and so does Ollama's own `/v1`
+   endpoint).
 
 ### A formula shows as raw TeX instead of rendering
 
@@ -227,9 +230,10 @@ there's no usable GPU reading. Which one you get:
   choose a variant that fits its VRAM by hand.
 - **macOS** deliberately uses system RAM: Apple Silicon shares it with the
   GPU, so a separate figure would double-count.
-- Adapters under 1 GB — and, on Windows, any adapter that reports unified
-  memory — are treated as integrated graphics and ignored, since they
-  carve out system RAM the RAM path already counts.
+- Adapters under 1 GB — and any adapter that reports unified memory on
+  Windows, or that amdgpu reports as an APU on Linux — are treated as
+  integrated graphics and ignored, since they carve out system RAM the RAM
+  path already counts.
 
 Any probe that fails falls back to RAM. Nothing here restricts you — every
 catalog entry stays pullable, and the custom-tag field takes any tag at
@@ -373,6 +377,16 @@ not the page content.
 3. Up to **5 URLs per message** are followed. Extras are ignored.
 4. **Private Chat** never fetches URLs, whatever the setting says.
 
+### The model can't use tools in Private Chat
+
+**Problem.** A model that calls tools in regular chats says it has none in
+Private Chat.
+
+**Solution.** By design: Private Chat offers no tools at all — no MCP
+servers, which could carry the conversation off your machine, and no
+built-in tools, since the overlay has nowhere to show a call or a PDF one
+makes. Use a regular chat for tool work.
+
 ### "Refusing to fetch …" for `localhost`, `192.168.x`, or my office VPN
 
 **Problem.** Loach refuses to fetch an internal URL.
@@ -404,7 +418,11 @@ cap and the entry says "truncated by Loach" (so does a page whose
 extracted text runs past ~12,000 characters).
 
 Try the URL in a browser. If it works there but not in Loach, the page is
-likely slow, large, or blocks non-browser user agents.
+likely slow, large, or blocks non-browser user agents — or your network
+only lets traffic out through a proxy. Web fetch, Library links and HTTP
+MCP servers connect directly and never use a proxy (`HTTP(S)_PROXY` or the
+system setting): a proxy looks the host up again itself, which would undo
+the check above.
 
 ### MCP "Test connection" fails (HTTP)
 
@@ -422,6 +440,11 @@ an error.
 3. Check that the response body fits under **4 MiB** — misconfigured
    servers that dump full schemas can exceed this.
 4. Per-request timeout is **30 s**.
+5. Loach doesn't follow redirects. When the error says the server
+   redirects to the same URL with (or without) a trailing `/`, change the
+   server URL to match; for any other target, use the address it names.
+6. Loach connects directly, never through a proxy — a server reachable
+   only through one won't answer.
 
 ### A local (stdio) MCP server won't start
 
@@ -463,8 +486,10 @@ enabled.)
    or pressed Enter, which picks Cancel — nothing was saved or started.
    Save again and click **Start server**.
 7. A tool call that times out doesn't stop the server; it may still be
-   working. If every call times out, disable and re-enable the server to
-   restart it.
+   working (a tool that reports progress gets up to 10 minutes). When two
+   requests in a row go unanswered, Loach treats the server as hung and
+   starts it afresh on the next call; to restart it sooner, disable and
+   re-enable it.
 
 ### A server imported from a backup is disabled and won't turn on
 
@@ -479,10 +504,14 @@ unless their host couldn't be looked up during the import (offline, off
 the VPN), in which case they arrive switched off too; turn them on once
 the host is reachable again.
 
-Backups never contain MCP headers or environment variables, and a password
-in a connection URL or the value after a `--token`-style argument comes back
-as `REDACTED` — so after an import, re-enter any `Authorization` header,
-API-key variable or redacted argument a server needs.
+Backups never contain MCP headers or environment variables, and a URL's
+credentials, the value after a `--token`-style argument and a credential
+passed as `NAME=value` come back as `REDACTED` — as does every query value
+in an HTTP server's URL — so after an import, re-enter any `Authorization`
+header, API-key variable, URL or redacted argument a server needs.
+
+A server whose name breaks the naming rules (from a backup made before
+them) is imported under a fixed-up name rather than failing the import.
 
 ### The reply is stuck on "Waiting for your approval…"
 
@@ -599,7 +628,9 @@ shows the reason:
   embeddings; a chat model won't do.
 
 Loach tries again by itself every minute, and straight away when you change
-the model or the base URL.
+the model or the base URL. Messages sent meanwhile don't wait on the model:
+once one couldn't reach it, those in the next minute go straight to
+keyword search.
 
 ### Indexing never seems to finish
 
@@ -609,9 +640,14 @@ the model or the base URL.
 large Library on a CPU-only machine takes a while; keyword search works
 throughout. If the count stops moving, check **Settings → Library**: when
 something fails the status turns into **Embedding paused** with the reason
-(see above). Passages a model refuses — too long for some servers — are left
-to keyword search and don't hold up the rest. **Rebuild** in **Settings →
-Library** starts over from scratch.
+(see above). Passages a model refuses or fails on by themselves — too long
+for some servers, or one that crashes the model's runner — are set aside
+for keyword search and don't hold up the rest; editing the source, new
+embedding settings or a rebuild gives them another try. **Rebuild** in
+**Settings → Library** starts over from scratch.
+
+Changing the embedding model, or the base URL of the server it runs on,
+re-embeds every source, so the count starts over then.
 
 ### A link won't add
 
@@ -643,6 +679,11 @@ and says whether the model read them **in full** or got **excerpts**.
   text** if they fit.
 - **Cut to fit** — the sources didn't fit the context window. Raise the
   chat's context length, attach fewer sources, or switch to **Excerpts**.
+  On an OpenAI-compatible chat Loach assumes a 32k window unless you set
+  one; set the context length to the model's real window if it's larger.
+  A Space made before 1.6 stays on **Full text**, as it always worked —
+  switch it to **Auto** on its **Settings** tab to have long sources
+  searched once they don't fit.
 - **No chip** — the source isn't reaching the chat at all: check it's
   switched on (a Space's **Sources** tab) and attached to this chat or its
   Space. Private Chat never uses sources.
@@ -704,8 +745,12 @@ options are:
   - **macOS** — in **Keychain Access**, delete the `dev.loach.app` item
     whose account is `app_lock`.
 
-  Your chats and settings are untouched — only the lock is gone, and Loach
-  starts unlocked on the next launch.
+  Your chats and settings are untouched — only the lock is gone. Loach
+  remembers that a lock was set in a marker file next to its database
+  (`app_lock.json` in the app-data folder), so the next launch still shows
+  the lock screen once: enter any PIN of the right length (and any
+  password) to get in, and it starts unlocked from then on. Deleting
+  `app_lock.json` as well skips that last lock screen.
 
 Deleting the app-data folder does **not** help: it wipes your chats but
 leaves the credential-store entry, so the lock screen comes straight back.
@@ -720,8 +765,9 @@ a red *Too many failed attempts. Try again in N seconds* message.
 
 **Solution.** After 5 consecutive failed attempts, Loach starts an
 escalating cool-down (30 s → 60 s → 2 min … up to 2 h). Wait for the
-window to expire, or **restart the app** — the counter resets on restart
-and on a successful unlock.
+window to expire. Restarting the app doesn't help: the count is saved next
+to the database and only resets on a successful unlock (or when the lock is
+changed or removed).
 
 ### Changing or removing the lock asks for my current password
 
@@ -750,10 +796,24 @@ lock is configured:
   so exporting or attaching a file is safe either way.
 
 If neither is on, check you aren't hitting `Cmd/Ctrl + Shift + L`, which
-locks immediately.
+locks immediately. On macOS, closing the window (red button, `⌘W`) hides
+Loach rather than quitting it, and always locks it.
 
 A reply already streaming keeps running behind the lock screen — unlocking
-returns you to it with the tokens that arrived meanwhile.
+returns you to it with the tokens that arrived meanwhile. A Private Chat
+doesn't survive a lock: locking wipes it, as closing it would.
+
+### macOS asks for keychain access when I unlock
+
+**Problem.** Unlocking Loach brings up a macOS prompt asking to let it use
+its `dev.loach.app` keychain item — often right after an update.
+
+**Solution.** Loach reads the lock from the keychain when you unlock (the
+lock screen itself comes up without it), and macOS can ask again after
+each update, since Loach isn't signed with an Apple Developer ID. Enter
+your login password and choose **Always Allow**. If you deny it, Loach
+can't check your PIN or password and stays locked — try again and allow
+it.
 
 ### The lock fired later than the timeout I set
 
@@ -783,8 +843,9 @@ directives.
 - The **SYSTEM** and **TEMPLATE** bodies cannot contain `"""`. If you need
   a triple-quote in your system prompt, rephrase.
 - **Save as new model** writes under the tag you type. If a model with that
-  tag already exists, it's replaced without asking — pick a tag that
-  isn't taken if you want to keep the old one.
+  tag already exists — or the tag is the base model's own — Loach asks
+  before replacing it; pick a tag that isn't taken if you want to keep the
+  old one.
 
 ### A model pull is stuck
 
@@ -880,6 +941,11 @@ by **Settings → Data → Export data**. The per-chat **Export context**
 Markdown is not an import source; paste it into another chat with
 **Import context** instead.
 
+An "unsupported export schema 'loach/v2'" error means the backup was made
+by Loach 1.6 or later and you're restoring it into 1.5 or older, which
+can't hold the Library. Update Loach first; newer versions still restore
+older backups.
+
 ### "Remove my data" didn't remove my OpenAI key
 
 **Problem.** After erasing, your OpenAI key is still configured.
@@ -925,8 +991,9 @@ uniform.
 **Problem.** The shortcut doesn't open the global search.
 
 **Solution.** The palette is suppressed while the **onboarding wizard**,
-the **lock screen** or **Private Chat** owns the window. Finish
-onboarding, unlock the app or close Private Chat first.
+the **lock screen** or **Private Chat** owns the window, and while another
+dialog (Settings, a confirmation) is open. Finish onboarding, unlock the
+app, close Private Chat or the dialog first.
 
 ### Search doesn't find a phrase I know I wrote
 
@@ -957,6 +1024,17 @@ cases. Try the exact casing you used.
 If titles crowd out what you want, narrow with the scope dropdown or type
 `in:messages` in the query — scoped to messages, transcript hits get the
 whole list instead of a reserved block at the bottom.
+
+### I can't find a Library item
+
+**Problem.** The Library page has no search box, and the palette doesn't
+list an item you know is there.
+
+**Solution.** The Library is searched from the palette (**Cmd/Ctrl+K**);
+type `in:library` or pick *library* in the scope dropdown to see only
+Library items and datasets. Items match by title, the opening of their
+text (about 280 characters) and a link's address — not by words deeper in
+the body. Datasets match by name and description.
 
 ---
 

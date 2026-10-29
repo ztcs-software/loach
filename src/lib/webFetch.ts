@@ -1,5 +1,5 @@
 import { fetchUrl } from "@/lib/tauri";
-import { MAX_INLINED_CHARS_PER_MESSAGE } from "@/lib/files";
+import { cutText, fenceFor, MAX_INLINED_CHARS_PER_MESSAGE, promptLabel } from "@/lib/files";
 import type { FetchedPage, ToolCallRecord } from "@/types";
 
 /**
@@ -54,9 +54,11 @@ export function extractUrls(text: string): string[] {
 }
 
 function stripTrailingPunct(s: string): string {
-  // Strip a closing bracket only if there's no matching open bracket in the
-  // URL — handles cases like "(https://example.com)" without eating the `)`
-  // of "https://en.wikipedia.org/wiki/Rust_(programming_language)".
+  // Strip a closing bracket only while the URL has more closing brackets
+  // than opening ones — handles "(https://example.com)" and "(see
+  // https://en.wikipedia.org/wiki/Rust_(programming_language))" without
+  // eating the `)` that belongs to the article's name.
+  const count = (text: string, ch: string) => text.split(ch).length - 1;
   let end = s.length;
   while (end > 0) {
     const c = s[end - 1];
@@ -64,11 +66,8 @@ function stripTrailingPunct(s: string): string {
       end -= 1;
       continue;
     }
-    if (c === ")" && !s.slice(0, end - 1).includes("(")) {
-      end -= 1;
-      continue;
-    }
-    if (c === "]" && !s.slice(0, end - 1).includes("[")) {
+    const open = c === ")" ? "(" : c === "]" ? "[" : null;
+    if (open && count(s.slice(0, end), c) > count(s.slice(0, end), open)) {
       end -= 1;
       continue;
     }
@@ -120,14 +119,20 @@ export function inlineFetchedPages(
   for (const o of outcomes) {
     if (o.ok) {
       const p = o.page;
+      // The page's title and URL made safe for one line, and a fence longer
+      // than any run of backticks in its text: a title with a line break, or
+      // a page body with ``` in it, otherwise ended the block early, and
+      // whatever followed read as the user's own words.
+      const url = promptLabel(p.final_url, 300);
       const titleStr = p.title
-        ? `Fetched URL: ${p.final_url} — "${p.title}"`
-        : `Fetched URL: ${p.final_url}`;
-      const header = `\n\n---\n${titleStr}\n\`\`\`\n`;
+        ? `Fetched URL: ${url} — "${promptLabel(p.title)}"`
+        : `Fetched URL: ${url}`;
+      const fence = fenceFor(p.text);
+      const header = `\n\n---\n${titleStr}\n${fence}\n`;
       const upstreamTruncSuffix = p.truncated
         ? "\n\n[Content was truncated by the server-side fetcher. Ask the user if you need more.]"
         : "";
-      const footer = "\n```";
+      const footer = `\n${fence}`;
       const wrapCost = header.length + upstreamTruncSuffix.length + footer.length;
       const remaining = MAX_INLINED_CHARS_PER_MESSAGE - out.length - wrapCost;
 
@@ -139,7 +144,8 @@ export function inlineFetchedPages(
       let body = p.text;
       let clippedHere = false;
       if (body.length > remaining) {
-        body = body.slice(0, remaining);
+        // `cutText`: half an emoji at the cut failed the whole send's IPC.
+        body = cutText(body, remaining);
         clippedHere = true;
       }
       out += header + body + upstreamTruncSuffix;

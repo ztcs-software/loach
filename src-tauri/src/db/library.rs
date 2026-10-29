@@ -210,14 +210,20 @@ pub(super) fn replace_chunks(conn: &Connection, doc_kind: &str, doc_id: &str, te
     Ok(())
 }
 
-/// Move chunks — one document's, or with `None` every one — to fresh ids
-/// with no embedding, as if just written. Resetting in place isn't enough:
-/// an indexer batch already in flight for the old ids would store its stale
-/// vectors (the old title, the old model) right over the reset. Ids are
-/// `AUTOINCREMENT`, never reused, so those writes now land nowhere.
-pub(super) fn reissue_chunks(conn: &Connection, doc: Option<(&str, &str)>) -> Result<()> {
+/// The newest chunk id: chunks written after it's read get higher ones.
+fn last_chunk_id(conn: &Connection) -> Result<i64> {
+    Ok(conn.query_row("SELECT COALESCE(MAX(id), 0) FROM rag_chunks", [], |r| r.get(0))?)
+}
+
+/// Move chunks with ids up to `last` — one document's, or with `None` every
+/// one — to fresh ids with no embedding, as if just written. Resetting in
+/// place isn't enough: an indexer batch already in flight for the old ids
+/// would store its stale vectors (the old title, the old model) right over
+/// the reset. Ids are `AUTOINCREMENT`, never reused, so those writes now
+/// land nowhere — and the copies get ids above `last`, out of the delete's
+/// reach.
+pub(super) fn reissue_chunks(conn: &Connection, doc: Option<(&str, &str)>, last: i64) -> Result<()> {
     let (kind, id) = doc.unzip();
-    let last: i64 = conn.query_row("SELECT COALESCE(MAX(id), 0) FROM rag_chunks", [], |r| r.get(0))?;
     let filter = "id <= ?3 AND (?1 IS NULL OR (doc_kind = ?1 AND doc_id = ?2))";
     conn.execute(
         &format!(
@@ -228,6 +234,22 @@ pub(super) fn reissue_chunks(conn: &Connection, doc: Option<(&str, &str)>) -> Re
     )?;
     conn.execute(&format!("DELETE FROM rag_chunks WHERE {filter}"), params![kind, id, last])?;
     Ok(())
+}
+
+/// Chunks [`Database::clear_rag_embeddings`] moves per transaction.
+const REISSUE_BATCH: i64 = 500;
+
+/// SQL keeping the chunks whose document is in the scope bound to `param`
+/// (a JSON array of `kind:id` keys; a kind has no colon). Compared as the
+/// `(doc_kind, doc_id)` pair, each document is looked up through
+/// `idx_rag_chunks_doc` — comparing `doc_kind || ':' || doc_id` read every
+/// chunk in the index, embedding and all, on every search.
+fn in_scope(param: &str) -> String {
+    format!(
+        "(doc_kind, doc_id) IN (SELECT substr(value, 1, instr(value, ':') - 1),
+                                       substr(value, instr(value, ':') + 1)
+                                  FROM json_each({param}))"
+    )
 }
 
 const ITEM_META_SELECT: &str = "
@@ -485,7 +507,7 @@ impl Database {
                 params![title, now, id],
             )?;
             if changed > 0 {
-                reissue_chunks(&tx, Some((DOC_LIBRARY, id)))?;
+                reissue_chunks(&tx, Some((DOC_LIBRARY, id)), last_chunk_id(&tx)?)?;
             }
             tx.commit()?;
         }
@@ -939,13 +961,30 @@ impl Database {
         })
     }
 
-    /// Forget every embedding so the indexer re-embeds from scratch.
+    /// Forget every embedding so the indexer re-embeds from scratch, by
+    /// reissuing every chunk — [`REISSUE_BATCH`] per transaction, so
+    /// rebuilding a large index doesn't hold the write lock (and every send)
+    /// for its whole length, as one copy of the table did. Chunks written in
+    /// between get ids above the starting point and are fresh already. Each
+    /// batch moves its chunks whole, so a rebuild cut short leaves every
+    /// chunk in the index once, the ones it didn't reach still on their old
+    /// vectors until the next rebuild.
     pub fn clear_rag_embeddings(&self) -> Result<()> {
-        let mut conn = self.conn.lock();
-        let tx = conn.transaction()?;
-        reissue_chunks(&tx, None)?;
-        tx.commit()?;
-        Ok(())
+        let last = last_chunk_id(&self.conn.lock())?;
+        loop {
+            let mut conn = self.conn.lock();
+            let tx = conn.transaction()?;
+            let upto: Option<i64> = tx.query_row(
+                "SELECT MAX(id) FROM (SELECT id FROM rag_chunks WHERE id <= ?1 ORDER BY id LIMIT ?2)",
+                params![last, REISSUE_BATCH],
+                |r| r.get(0),
+            )?;
+            let Some(upto) = upto else {
+                return Ok(());
+            };
+            reissue_chunks(&tx, None, upto)?;
+            tx.commit()?;
+        }
     }
 
     /// BM25-ranked chunk ids inside `scope` (a JSON array of `kind:id`
@@ -972,11 +1011,11 @@ impl Database {
     /// those the indexer hasn't reached yet.
     pub fn rag_vectors(&self, scope: &str, model: &str) -> Result<(Vec<ChunkVector>, i64, i64)> {
         self.with_read(|conn| {
-            let mut stmt = conn.prepare(
+            let mut stmt = conn.prepare(&format!(
                 "SELECT id, embedding FROM rag_chunks
-                  WHERE embed_model = ?1 AND embedding IS NOT NULL
-                    AND (doc_kind || ':' || doc_id) IN (SELECT value FROM json_each(?2))",
-            )?;
+                  WHERE embed_model = ?1 AND embedding IS NOT NULL AND {}",
+                in_scope("?2")
+            ))?;
             let rows = stmt
                 .query_map(params![model, scope], |r| {
                     let blob: Vec<u8> = r.get(1)?;
@@ -984,8 +1023,10 @@ impl Database {
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
             let (total, pending): (i64, i64) = conn.query_row(
-                "SELECT COUNT(*), COALESCE(SUM(embed_model IS NOT ?2), 0) FROM rag_chunks
-                  WHERE (doc_kind || ':' || doc_id) IN (SELECT value FROM json_each(?1))",
+                &format!(
+                    "SELECT COUNT(*), COALESCE(SUM(embed_model IS NOT ?2), 0) FROM rag_chunks WHERE {}",
+                    in_scope("?1")
+                ),
                 params![scope, model],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )?;
@@ -1028,12 +1069,12 @@ impl Database {
     /// fallback when nothing in scope matches the query at all.
     pub fn rag_leading_chunks(&self, scope: &str, per_doc: usize) -> Result<Vec<i64>> {
         self.with_read(|conn| {
-            let mut stmt = conn.prepare(
+            let mut stmt = conn.prepare(&format!(
                 "SELECT id FROM rag_chunks
-                  WHERE seq < ?1
-                    AND (doc_kind || ':' || doc_id) IN (SELECT value FROM json_each(?2))
+                  WHERE seq < ?1 AND {}
                   ORDER BY seq, doc_kind, doc_id",
-            )?;
+                in_scope("?2")
+            ))?;
             let rows = stmt
                 .query_map(params![per_doc as i64, scope], |r| r.get(0))?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -1317,6 +1358,29 @@ mod tests {
         assert_eq!(db.rag_counts(Some(m)).unwrap(), (2, 0));
     }
 
+    // Development indexes keyed before the key named the server, like a
+    // switch to another server, leave chunks under an old key: nothing done
+    // under it — vectors or chunks set aside — may count as done under the
+    // new one.
+    #[test]
+    fn a_new_key_requeues_vectors_and_set_aside_chunks() {
+        let (db, _dir) = fresh_db();
+        let (old, new) = ("ollama:m1", "ollama:m1@http://localhost:11434");
+        let a = text_item(&db, "A", "one");
+        let b = text_item(&db, "B", "two");
+        let pending = db.rag_pending_embeddings(old, 10).unwrap();
+        db.store_rag_embeddings(old, &[(pending[0].id, vec![1.0])]).unwrap();
+        db.skip_rag_chunks(old, &[pending[1].id]).unwrap();
+        assert_eq!(db.rag_counts(Some(old)).unwrap(), (2, 2));
+
+        assert_eq!(db.rag_counts(Some(new)).unwrap(), (2, 0));
+        assert_eq!(db.rag_pending_embeddings(new, 10).unwrap().len(), 2);
+        let s = scope(&[(DOC_LIBRARY, &a.id), (DOC_LIBRARY, &b.id)]);
+        let (vectors, total, left) = db.rag_vectors(&s, new).unwrap();
+        assert_eq!((vectors.len(), total, left), (0, 2, 2));
+        assert_eq!(db.library_item_meta(&a.id, Some(new)).unwrap().embedded, 0);
+    }
+
     #[test]
     fn renaming_returns_the_row_and_re_embeds_only_on_change() {
         let (db, _dir) = fresh_db();
@@ -1403,6 +1467,84 @@ mod tests {
         let q = crate::rag::build_fts_query("otters").unwrap();
         let hits = db.rag_keyword_search(&s, &q, 5).unwrap();
         assert_eq!(db.rag_chunks_by_ids(&hits, &s).unwrap()[0].text, "body about otters");
+    }
+
+    // Rebuild used to copy and delete the whole index in one transaction,
+    // holding every send's writes for its length. A batch at a time, each
+    // one — and a rebuild cut short between them — must leave every chunk in
+    // the index exactly once.
+    #[test]
+    fn a_rebuild_moves_every_chunk_once_batch_by_batch() {
+        let (db, _dir) = fresh_db();
+        let m = "ollama:m1";
+        let n = REISSUE_BATCH * 2 + 7;
+        db.conn
+            .lock()
+            .execute(
+                "WITH RECURSIVE s(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM s WHERE i + 1 < ?1)
+                 INSERT INTO rag_chunks (doc_kind, doc_id, seq, text)
+                 SELECT 'library', 'doc', i, 'excerpt ' || i FROM s",
+                params![n],
+            )
+            .unwrap();
+        let stale: Vec<ChunkVector> =
+            db.rag_pending_embeddings(m, n as usize).unwrap().iter().map(|c| (c.id, vec![1.0])).collect();
+        db.store_rag_embeddings(m, &stale).unwrap();
+        let first = last_chunk_id(&db.conn.lock()).unwrap() - n + 1;
+        let q = crate::rag::build_fts_query("excerpt").unwrap();
+        let s = scope(&[(DOC_LIBRARY, "doc")]);
+        let hits = |db: &Database| db.rag_keyword_search(&s, &q, n as usize + 1).unwrap().len() as i64;
+
+        // Cut short after one batch: every chunk still there once, the keyword
+        // index in step, the rest still on their old vectors.
+        reissue_chunks(&db.conn.lock(), None, first + REISSUE_BATCH - 1).unwrap();
+        assert_eq!(db.rag_counts(Some(m)).unwrap(), (n, n - REISSUE_BATCH));
+        assert_eq!(hits(&db), n);
+
+        db.clear_rag_embeddings().unwrap();
+        assert_eq!(db.rag_counts(Some(m)).unwrap(), (n, 0));
+        assert_eq!(hits(&db), n);
+        let distinct: i64 = db
+            .conn
+            .lock()
+            .query_row("SELECT COUNT(DISTINCT seq) FROM rag_chunks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(distinct, n, "each chunk once");
+        // A batch in flight from before lands nowhere.
+        db.store_rag_embeddings(m, &stale).unwrap();
+        assert_eq!(db.rag_counts(Some(m)).unwrap(), (n, 0));
+    }
+
+    // Regression: the scope was matched as `doc_kind || ':' || doc_id`, so
+    // every search read the whole index, past each chunk's embedding.
+    #[test]
+    fn scoped_reads_look_documents_up_by_index() {
+        let (db, _dir) = fresh_db();
+        let m = "ollama:m1";
+        let a = text_item(&db, "A", &"alpha ".repeat(400));
+        let b = text_item(&db, "B", "beta");
+        text_item(&db, "C", "gamma");
+        db.store_rag_embeddings(m, &in_flight(&db, m)).unwrap();
+        assert!(a.chunks >= 2);
+
+        // Out-of-scope documents, a document listed twice and a key of the
+        // wrong kind change nothing.
+        let s = scope(&[(DOC_LIBRARY, &a.id), (DOC_LIBRARY, &b.id), (DOC_LIBRARY, &b.id), (DOC_SPACE_FILE, &a.id)]);
+        let (vectors, total, left) = db.rag_vectors(&s, m).unwrap();
+        assert_eq!((vectors.len() as i64, total, left), (a.chunks + 1, a.chunks + 1, 0));
+        let lead = db.rag_leading_chunks(&s, 2).unwrap();
+        let rows = db.rag_chunks_by_ids(&lead, &s).unwrap();
+        assert_eq!(rows.iter().map(|r| r.seq).collect::<Vec<_>>(), vec![0, 0, 1]);
+        assert_eq!(rows[2].doc_id, a.id);
+
+        let plan: Vec<String> = {
+            let conn = db.conn.lock();
+            let mut stmt = conn
+                .prepare(&format!("EXPLAIN QUERY PLAN SELECT id FROM rag_chunks WHERE {}", in_scope("?1")))
+                .unwrap();
+            stmt.query_map(params![s], |r| r.get(3)).unwrap().collect::<Result<_, _>>().unwrap()
+        };
+        assert!(plan.iter().any(|d| d.contains("INDEX idx_rag_chunks_doc (doc_kind=? AND doc_id=?)")), "{plan:?}");
     }
 
     #[test]

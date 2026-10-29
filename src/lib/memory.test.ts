@@ -12,6 +12,8 @@
 //   - a turn dropped (Regenerate) while the model reads it saves nothing
 //   - a write before the global list was ever loaded (`/remember`) doesn't
 //     leave the cache holding just that row
+//   - memory switched off while the model reads a turn saves nothing
+//   - a stream that ends before its handle arrives leaves no listener behind
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { GlobalMemory } from "@/types";
@@ -85,8 +87,9 @@ vi.stubGlobal("window", {
 });
 
 import { dropMemoryTurns, extractMemories, queueMemoryTurn } from "./memory";
-import { listGlobalMemories, removeGlobalMemory } from "@/lib/tauri";
+import { listGlobalMemories, removeGlobalMemory, startChatStream } from "@/lib/tauri";
 import { useGlobalMemoryStore } from "@/stores/globalMemoryStore";
+import { useSettingsStore } from "@/stores/settingsStore";
 import { useToastStore } from "@/stores/toastStore";
 
 /** `count` rows an earlier extraction saved — or, with `byHand`, rows the
@@ -118,6 +121,7 @@ beforeEach(() => {
   mocks.requests = [];
   mocks.nextId = 0;
   mocks.onStart = null;
+  useSettingsStore.setState({ global_memory_enabled: true });
   useGlobalMemoryStore.setState({ memories: null });
   useToastStore.getState().clear();
 });
@@ -226,6 +230,36 @@ describe("extractMemories", () => {
     mocks.onStart = null;
     await extractMemories();
     expect(mocks.requests).toHaveLength(1);
+  });
+
+  it("saves, rewrites and removes nothing once memory is switched off mid-run", async () => {
+    seed(2);
+    mocks.reply = JSON.stringify({
+      add: ["Owns a grey cat called Pixel"],
+      update: [{ n: 1, content: "Plays chess every Sunday morning" }],
+      remove: [2],
+    });
+    mocks.onStart = () => useSettingsStore.setState({ global_memory_enabled: false });
+    await run();
+    expect(mocks.rows.map((r) => r.content)).toEqual([
+      "Fact number 1 about the user",
+      "Fact number 2 about the user",
+    ]);
+  });
+
+  it("drops the listener of a stream that ended before its handle arrived", async () => {
+    seed(0);
+    const unlisten = vi.fn();
+    vi.mocked(startChatStream).mockImplementationOnce((async (
+      request: { stream_id: string },
+      onEvent: (ev: unknown) => void,
+    ) => {
+      onEvent({ kind: "token", delta: '{"add":[]}' });
+      onEvent({ kind: "done" });
+      return { streamId: request.stream_id, stop: async () => {}, unlisten };
+    }) as never);
+    await run();
+    await vi.waitFor(() => expect(unlisten).toHaveBeenCalledTimes(1));
   });
 });
 

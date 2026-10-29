@@ -18,6 +18,18 @@ export function resolveMode(theme: "light" | "dark" | "system"): Tone {
   return theme;
 }
 
+/* ───────────────────────── Appearance tiles ─────────────────────────
+ *
+ * Card-style selectors inspired by ChatGPT's appearance picker: each
+ * tile shows a miniature mockup of the app rendered with the option's
+ * palette, plus a check indicator + label underneath. Selected tile
+ * gets a primary-coloured ring so the choice reads at a glance.
+ *
+ * Kept local to this file — the mini-mockup is bespoke to the Loach
+ * layout (sidebar + chat column + input bar) and has no reason to
+ * live elsewhere.
+ * ─────────────────────────────────────────────────────────────────── */
+
 export function AppearanceTile({
   title,
   selected,
@@ -215,9 +227,3 @@ export const ColorModePreview = memo(function ColorModePreview({
     </>
   );
 });
-
-/**
- * Embedded Archive browser — same rows the old full-page ArchiveView had,
- * just squeezed into the Settings dialog's right column. Opening a chat
- * closes the dialog so the user lands straight in the chat.
- */

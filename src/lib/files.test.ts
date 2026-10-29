@@ -4,7 +4,9 @@
 // old default) lost every Polish letter to U+FFFD.
 
 import { describe, it, expect } from "vitest";
-import { decodeTextBytes } from "./files";
+import type { Attachment } from "@/types";
+import { decodeTextBytes, inlineTextAttachments } from "./files";
+import { computeContextUsage } from "./contextUsage";
 
 const PL = "Zażółć gęślą jaźń";
 
@@ -44,5 +46,31 @@ describe("decodeTextBytes", () => {
     expect(decodeTextBytes(cp1250, "cs")).toBe("Zażółć");
     // "Café" from a Western European Windows, as Windows-1252.
     expect(decodeTextBytes(new Uint8Array([0x43, 0x61, 0x66, 0xe9]), "en-GB")).toBe("Café");
+  });
+});
+
+// An attached Markdown file with a code block closed the fixed ``` fence
+// early, and the rest of it read as the user's own words.
+describe("inlineTextAttachments", () => {
+  const readme: Attachment = {
+    kind: "text",
+    name: "README`\n.md",
+    mime: "text/markdown",
+    data: "Run:\n```\nnpm test\n```",
+  };
+
+  it("fences an attachment so nothing inside it can close the block", () => {
+    const out = inlineTextAttachments("look", [readme]);
+    expect(out).toBe("look\n\n---\nAttached file: `README' .md`\n````\nRun:\n```\nnpm test\n```\n````");
+  });
+
+  it("still counts such a block as an attachment in the context bar", () => {
+    const content = inlineTextAttachments("look", [readme]);
+    const usage = computeContextUsage(
+      [{ role: "user", content, compacted_at: null } as never],
+      null,
+      { num_ctx: 8192 },
+    );
+    expect(usage.attachmentsTokens).toBe(Math.ceil((content.length - "look".length) / 4));
   });
 });

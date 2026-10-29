@@ -108,6 +108,10 @@ export default function App() {
   const unlocked = useSecurityStore((s) => s.unlocked);
   const backgroundStyle = useSettingsStore((s) => s.background_style);
   const settingsHydrated = useSettingsStore((s) => s.hydrated);
+  // A failed settings read leaves the defaults in place — including
+  // `onboarding_completed: false` — so it must not pass for a fresh install:
+  // onboarding would overwrite the user's stored prompt and URLs.
+  const settingsLoadError = useSettingsStore((s) => s.loadError);
   const onboardingCompleted = useSettingsStore(
     (s) => s.onboarding_completed,
   );
@@ -364,7 +368,7 @@ export default function App() {
   // chat surface but below the TitleBar so window controls keep
   // working — same pattern as LockScreen.
   const showOnboarding =
-    !showLock && !probing && settingsHydrated && !onboardingCompleted;
+    !showLock && !probing && settingsHydrated && !settingsLoadError && !onboardingCompleted;
 
   return (
     <>

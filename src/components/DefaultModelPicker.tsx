@@ -108,7 +108,7 @@ export function DefaultModelPicker({
         {openaiModels.length === 0 && (
           <DropdownMenuItem disabled>{openaiKeySet ? "No models" : "Not connected"}</DropdownMenuItem>
         )}
-        {openaiModels.slice(0, 30).map((m) => (
+        {openaiModels.map((m) => (
           <DropdownMenuItem key={`openai:${m.id}`} onSelect={() => onChange("openai", m.id)}>
             <Check className={cn("h-4 w-4 shrink-0", !isCurrent("openai", m.id) && "opacity-0")} />
             {m.label}

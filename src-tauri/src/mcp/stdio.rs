@@ -37,7 +37,7 @@ use tokio::sync::oneshot;
 use super::client::{assemble_call_result, unwrap_response, PreExecutionFailure};
 use super::types::{
     CallToolResult, InitializeResult, JsonRpcResponse, ListToolsResult, McpCallResult,
-    McpTestResult, McpTool, McpToolRaw, PROTOCOL_VERSION,
+    McpTestResult, McpTool, McpToolRaw, MAX_TOOL_CALL_TIME, MAX_TOOL_PAGES, PROTOCOL_VERSION,
 };
 use crate::db::McpServer;
 
@@ -53,6 +53,12 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long a server gets to exit once its stdin is closed, before it is
 /// killed with everything it started.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
+
+/// The same moment at app exit, shared by every server rather than given to
+/// each: the app waits on it, so it is kept short, and it ends as soon as
+/// the last of them has exited — which a server reading its stdin does
+/// almost at once.
+const EXIT_GRACE: Duration = Duration::from_secs(1);
 
 /// Marks a request the server didn't answer within its timeout. It may
 /// still be working on it — so unlike a dead process, this is no reason
@@ -127,11 +133,22 @@ const STDERR_TAIL_BYTES: usize = 8 * 1024;
 const CLIENT_NAME: &str = "loach";
 const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Requests waiting for their reply. The reader delivers either the reply
-/// or why Loach couldn't read one — a reply too big to take in, or one
-/// that isn't a valid response.
-type Pending = Arc<Mutex<HashMap<i64, oneshot::Sender<Result<JsonRpcResponse, String>>>>>;
+/// Requests waiting for their reply.
+type Pending = Arc<Mutex<HashMap<i64, Waiter>>>;
 type StderrTail = Arc<Mutex<Vec<u8>>>;
+/// The server's stdin, shared with the reader (which answers its pings).
+/// `None` once closed for shutdown — taking it closes the pipe for every
+/// holder at once, which dropping one handle of several doesn't.
+type SharedStdin = Arc<tokio::sync::Mutex<Option<ChildStdin>>>;
+
+/// One request's side of the reader. The reader delivers either the reply
+/// or why Loach couldn't read one — a reply too big to take in, or one that
+/// isn't a valid response — and pokes `progress` when the server reports
+/// progress on the request.
+struct Waiter {
+    reply: oneshot::Sender<Result<JsonRpcResponse, String>>,
+    progress: Arc<tokio::sync::Notify>,
+}
 
 /// A live stdio MCP server: the child plus the reader task that pairs its
 /// replies to our outstanding requests.
@@ -139,13 +156,18 @@ pub struct StdioSession {
     /// Taken by `Drop` and handed to [`shut_down`]; `Some` for as long as
     /// the session exists.
     process: Option<Process>,
-    stdin: Arc<tokio::sync::Mutex<ChildStdin>>,
+    stdin: SharedStdin,
     pending: Pending,
     alive: Arc<AtomicBool>,
     stderr_tail: StderrTail,
     next_id: i64,
     /// Requests timed out since the last one the server answered.
     missed_replies: u32,
+    /// Set while a request is being written, and left set when the write
+    /// never finished — timed out, or dropped by a Stop. Part of a line is
+    /// then in the pipe, and the server would read it as the start of the
+    /// next message, so the session is done for.
+    torn_write: bool,
     /// For error messages.
     label: String,
 }
@@ -170,16 +192,28 @@ impl Drop for StdioSession {
             Ok(rt) => {
                 rt.spawn(shut_down(process, self.stdin.clone()));
             }
-            // Off the runtime — app exit, from `RunEvent::Exit` — nothing
-            // would be left to wait out a graceful exit, so stop it now:
-            // dropping `child` (kill_on_drop) and `tree` does that.
+            // Off the runtime — app exit, from `RunEvent::Exit` — no task
+            // would be left to wait out a graceful exit. Close stdin now and
+            // leave the waiting to `kill_all_now`, which the exit runs next:
+            // every server closed this way gets one shared moment to exit
+            // before what's left is stopped. Stdin held mid-write can't be
+            // closed, and a server that isn't told to go won't — stop that
+            // one now: dropping `child` (kill_on_drop) and `tree` does that.
             Err(_) => {
                 process.reader.abort();
                 process.stderr_pump.abort();
+                if let Ok(mut stdin) = self.stdin.try_lock() {
+                    stdin.take();
+                    EXITING.lock().expect("exiting list poisoned").push(process);
+                }
             }
         }
     }
 }
+
+/// Servers whose stdin was closed as the app exits, waiting for
+/// [`kill_all_now`] to give them their moment.
+static EXITING: Mutex<Vec<Process>> = Mutex::new(Vec::new());
 
 /// Stop a server the way the MCP spec asks for stdio: close its stdin,
 /// give it [`SHUTDOWN_GRACE`] to exit, and only then kill it.
@@ -189,7 +223,7 @@ impl Drop for StdioSession {
 /// browser to sign in, and a browser that wasn't running yet starts as its
 /// descendant. One that doesn't exit in time is killed together with
 /// everything it started.
-async fn shut_down(process: Process, stdin: Arc<tokio::sync::Mutex<ChildStdin>>) {
+async fn shut_down(process: Process, stdin: SharedStdin) {
     let Process {
         mut child,
         tree,
@@ -362,7 +396,31 @@ impl Drop for ProcessTree {
 /// the pool reaches only the sessions no call is holding; one that is
 /// mid-call would be cleared by a task that never runs once the app is
 /// gone, and its server would outlive Loach.
+///
+/// The ones the pool did clear had their stdin closed as they went (see
+/// `Drop for StdioSession`), the spec's way of asking a stdio server to
+/// exit. They get [`EXIT_GRACE`] between them to do so; one that has is
+/// taken at its word like in [`shut_down`], and the rest are killed.
 pub fn kill_all_now() {
+    let mut left: Vec<Process> = std::mem::take(&mut *EXITING.lock().expect("exiting list poisoned"));
+    let deadline = std::time::Instant::now() + EXIT_GRACE;
+    loop {
+        let mut running = Vec::new();
+        for mut p in left {
+            match p.child.try_wait() {
+                Ok(Some(_)) => p.tree.release(),
+                _ => running.push(p),
+            }
+        }
+        left = running;
+        if left.is_empty() || std::time::Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // `child` (kill_on_drop) and `tree` stop the ones still running.
+    drop(left);
+
     #[cfg(unix)]
     for pgid in LIVE_GROUPS.lock().expect("live groups poisoned").drain(..) {
         // SAFETY: only sends a signal to a group we started.
@@ -429,7 +487,7 @@ impl StdioSession {
         let stdout = child.stdout.take().context("child stdout not piped")?;
         let stderr = child.stderr.take().context("child stderr not piped")?;
 
-        let stdin = Arc::new(tokio::sync::Mutex::new(stdin));
+        let stdin: SharedStdin = Arc::new(tokio::sync::Mutex::new(Some(stdin)));
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
         let alive = Arc::new(AtomicBool::new(true));
         let stderr_tail: StderrTail = Arc::new(Mutex::new(Vec::new()));
@@ -456,6 +514,7 @@ impl StdioSession {
             stderr_tail,
             next_id: 1,
             missed_replies: 0,
+            torn_write: false,
             label: server.name.clone(),
         })
     }
@@ -467,10 +526,11 @@ impl StdioSession {
     }
 
     /// `true` once [`HUNG_AFTER_MISSED_REPLIES`] requests in a row went
-    /// unanswered. The pool treats a hung session like a dead one, so the
-    /// next call starts the server afresh.
+    /// unanswered, or a request was left half-written on its stdin. The pool
+    /// treats a hung session like a dead one, so the next call starts the
+    /// server afresh.
     pub fn is_hung(&self) -> bool {
-        self.missed_replies >= HUNG_AFTER_MISSED_REPLIES
+        self.missed_replies >= HUNG_AFTER_MISSED_REPLIES || self.torn_write
     }
 
     fn fresh_id(&mut self) -> i64 {
@@ -494,9 +554,27 @@ impl StdioSession {
     }
 
     pub async fn list_tools_raw(&mut self) -> Result<Vec<McpToolRaw>> {
-        let resp = self.request("tools/list", None, REQUEST_TIMEOUT).await?;
-        let parsed: ListToolsResult = unwrap_response(resp)?;
-        Ok(parsed.tools)
+        let mut tools = Vec::new();
+        let mut cursor: Option<String> = None;
+        for page in 1.. {
+            let params = cursor.take().map(|c| json!({ "cursor": c }));
+            let resp = self.request("tools/list", params, REQUEST_TIMEOUT).await?;
+            let parsed: ListToolsResult = unwrap_response(resp)?;
+            tools.extend(parsed.tools);
+            match parsed.next_cursor.filter(|c| !c.is_empty()) {
+                None => break,
+                Some(_) if page >= MAX_TOOL_PAGES => {
+                    tracing::warn!(
+                        "MCP stdio `{}`: tools/list still paging after {MAX_TOOL_PAGES} pages — \
+                         keeping what's in",
+                        self.label
+                    );
+                    break;
+                }
+                next => cursor = next,
+            }
+        }
+        Ok(tools)
     }
 
     pub async fn call_tool(&mut self, name: &str, arguments: &Value) -> Result<McpCallResult> {
@@ -531,11 +609,22 @@ impl StdioSession {
         if let Some(p) = params {
             frame["params"] = p;
         }
-        let (tx, rx) = oneshot::channel();
-        self.pending
-            .lock()
-            .expect("stdio pending map poisoned")
-            .insert(id, tx);
+        // A tool call asks for progress, under its own id as the token: a
+        // long tool that reports it keeps its deadline moving (see the wait
+        // below), where it used to be cut off at `timeout` regardless.
+        let reports_progress = method == "tools/call" && frame["params"].is_object();
+        if reports_progress {
+            frame["params"]["_meta"] = json!({ "progressToken": id });
+        }
+        let (tx, mut rx) = oneshot::channel();
+        let progress = Arc::new(tokio::sync::Notify::new());
+        self.pending.lock().expect("stdio pending map poisoned").insert(
+            id,
+            Waiter {
+                reply: tx,
+                progress: progress.clone(),
+            },
+        );
         let mut in_flight = InFlight {
             pending: self.pending.clone(),
             stdin: self.stdin.clone(),
@@ -545,26 +634,55 @@ impl StdioSession {
             cancellable: method != "initialize",
         };
 
-        if let Err(e) = self.write_frame(&frame).await {
-            let suffix = self.stderr_suffix();
-            return Err(e
-                .context(format!(
-                    "couldn't write to MCP server `{}`{suffix}",
-                    self.label
-                ))
+        // Under the request's own timeout: a server that has stopped reading
+        // its stdin fills the pipe, and the write waited on it for good —
+        // holding the pool's slot for this server all the while. A write
+        // that doesn't finish, cut off here or dropped by a Stop, leaves
+        // `torn_write` set.
+        self.torn_write = true;
+        match tokio::time::timeout(timeout, self.write_frame(&frame)).await {
+            Ok(Ok(())) => self.torn_write = false,
+            Ok(Err(e)) => {
+                let suffix = self.stderr_suffix();
+                return Err(e
+                    .context(format!(
+                        "couldn't write to MCP server `{}`{suffix}",
+                        self.label
+                    ))
+                    .context(PreExecutionFailure));
+            }
+            // Never fully sent, so never run.
+            Err(_) => {
+                return Err(anyhow!(
+                    "MCP server `{}` isn't reading its input: `{method}` couldn't be sent within {}s",
+                    self.label,
+                    timeout.as_secs()
+                )
                 .context(PreExecutionFailure));
+            }
         }
 
         in_flight.unanswered = true;
-        match tokio::time::timeout(timeout, rx).await {
-            Ok(Ok(Ok(resp))) => {
+        let started = tokio::time::Instant::now();
+        let mut deadline = started + timeout;
+        let reply = loop {
+            tokio::select! {
+                r = &mut rx => break Some(r),
+                _ = progress.notified(), if reports_progress => {
+                    deadline = (tokio::time::Instant::now() + timeout).min(started + MAX_TOOL_CALL_TIME);
+                }
+                _ = tokio::time::sleep_until(deadline) => break None,
+            }
+        };
+        match reply {
+            Some(Ok(Ok(resp))) => {
                 in_flight.unanswered = false;
                 self.missed_replies = 0;
                 Ok(resp)
             }
             // The server did answer, and is still running: Loach just
             // couldn't take the answer in.
-            Ok(Ok(Err(why))) => {
+            Some(Ok(Err(why))) => {
                 in_flight.unanswered = false;
                 self.missed_replies = 0;
                 Err(anyhow::Error::new(UnreadableReply)
@@ -572,7 +690,7 @@ impl StdioSession {
             }
             // Sender dropped: the reader task cleared the map because the
             // process went away — nobody left to tell.
-            Ok(Err(_)) => {
+            Some(Err(_)) => {
                 in_flight.unanswered = false;
                 let suffix = self.stderr_suffix();
                 bail!(
@@ -581,12 +699,12 @@ impl StdioSession {
                 )
             }
             // `in_flight` tells the server to stop as it drops.
-            Err(_) => {
+            None => {
                 self.missed_replies += 1;
                 Err(anyhow::Error::new(ReplyTimeout).context(format!(
                     "MCP server `{}` did not reply to `{method}` within {}s",
                     self.label,
-                    timeout.as_secs()
+                    (deadline - started).as_secs()
                 )))
             }
         }
@@ -604,9 +722,7 @@ impl StdioSession {
         // strings), which is what makes one-message-per-line framing safe.
         let mut line = serde_json::to_string(frame)?;
         line.push('\n');
-        let mut stdin = self.stdin.lock().await;
-        stdin.write_all(line.as_bytes()).await?;
-        stdin.flush().await?;
+        write_line(&self.stdin, line.as_bytes()).await?;
         Ok(())
     }
 
@@ -649,10 +765,21 @@ impl StdioSession {
 /// longer wants the result.
 struct InFlight {
     pending: Pending,
-    stdin: Arc<tokio::sync::Mutex<ChildStdin>>,
+    stdin: SharedStdin,
     id: i64,
     unanswered: bool,
     cancellable: bool,
+}
+
+/// Write one message line to the server. Fails once its stdin has been
+/// closed for shutdown.
+async fn write_line(stdin: &SharedStdin, line: &[u8]) -> std::io::Result<()> {
+    let mut stdin = stdin.lock().await;
+    let pipe = stdin
+        .as_mut()
+        .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::BrokenPipe))?;
+    pipe.write_all(line).await?;
+    pipe.flush().await
 }
 
 impl Drop for InFlight {
@@ -675,9 +802,7 @@ impl Drop for InFlight {
         let stdin = self.stdin.clone();
         rt.spawn(async move {
             let line = format!("{frame}\n");
-            let mut w = stdin.lock().await;
-            let _ = w.write_all(line.as_bytes()).await;
-            let _ = w.flush().await;
+            let _ = write_line(&stdin, line.as_bytes()).await;
         });
     }
 }
@@ -689,7 +814,7 @@ async fn pump_stdout(
     stdout: tokio::process::ChildStdout,
     pending: Pending,
     alive: Arc<AtomicBool>,
-    stdin: Arc<tokio::sync::Mutex<ChildStdin>>,
+    stdin: SharedStdin,
     label: String,
 ) {
     let mut reader = BufReader::new(stdout);
@@ -710,8 +835,8 @@ async fn pump_stdout(
                         .remove(&id)
                 });
                 match waiter {
-                    Some(tx) => {
-                        let _ = tx.send(Err(format!(
+                    Some(w) => {
+                        let _ = w.reply.send(Err(format!(
                             "its reply was over {} MiB, more than Loach reads in one go — \
                              ask the tool for less at a time",
                             MAX_LINE_BYTES / (1024 * 1024)
@@ -750,14 +875,14 @@ async fn pump_stdout(
                     .expect("stdio pending map poisoned")
                     .remove(&id);
                 match (waiter, serde_json::from_value::<JsonRpcResponse>(msg)) {
-                    (Some(tx), Ok(resp)) => {
-                        let _ = tx.send(Ok(resp));
+                    (Some(w), Ok(resp)) => {
+                        let _ = w.reply.send(Ok(resp));
                     }
                     // Dropping the sender here read as the server having
                     // exited, and got a running server stopped.
-                    (Some(tx), Err(e)) => {
+                    (Some(w), Err(e)) => {
                         tracing::warn!("MCP stdio `{label}`: malformed response for id {id}: {e}");
-                        let _ = tx.send(Err(format!(
+                        let _ = w.reply.send(Err(format!(
                             "its reply wasn't a valid JSON-RPC response ({e})"
                         )));
                     }
@@ -769,11 +894,14 @@ async fn pump_stdout(
                 let reply = server_request_reply(&method, id);
                 if let Ok(mut line) = serde_json::to_string(&reply) {
                     line.push('\n');
-                    let mut w = stdin.lock().await;
-                    if let Err(e) = w.write_all(line.as_bytes()).await {
+                    if let Err(e) = write_line(&stdin, line.as_bytes()).await {
                         tracing::debug!("MCP stdio `{label}`: couldn't answer `{method}`: {e}");
                     }
-                    let _ = w.flush().await;
+                }
+            }
+            Incoming::Progress(token) => {
+                if let Some(w) = pending.lock().expect("stdio pending map poisoned").get(&token) {
+                    w.progress.notify_one();
                 }
             }
             Incoming::Notification => {}
@@ -808,19 +936,23 @@ async fn pump_stderr(stderr: tokio::process::ChildStderr, tail: StderrTail) {
     }
 }
 
-/// What kind of JSON-RPC frame the server just sent.
+/// What kind of JSON-RPC frame the server just sent. Shared with the HTTP
+/// transport, which meets the same kinds on a request's SSE stream.
 #[derive(Debug, PartialEq, Eq)]
-enum Incoming {
+pub(super) enum Incoming {
     /// A reply to one of our requests (numeric id we issued).
     Response(i64),
     /// The server is asking *us* something (`ping`, `roots/list`, …).
     Request { id: Value, method: String },
-    /// `method` without `id` — progress / logging; nothing to pair.
+    /// `notifications/progress` on the request whose progress token — the
+    /// request's own id — this is.
+    Progress(i64),
+    /// `method` without `id` — other progress / logging; nothing to pair.
     Notification,
     Other,
 }
 
-fn classify(msg: &Value) -> Incoming {
+pub(super) fn classify(msg: &Value) -> Incoming {
     let has_id = msg.get("id").is_some_and(|v| !v.is_null());
     let method = msg.get("method").and_then(Value::as_str);
     let is_reply = msg.get("result").is_some() || msg.get("error").is_some();
@@ -833,6 +965,12 @@ fn classify(msg: &Value) -> Incoming {
             id: msg["id"].clone(),
             method: m.to_string(),
         },
+        (false, Some("notifications/progress"), _) => {
+            match msg.pointer("/params/progressToken").and_then(Value::as_i64) {
+                Some(token) => Incoming::Progress(token),
+                None => Incoming::Notification,
+            }
+        }
         (false, Some(_), _) => Incoming::Notification,
         _ => Incoming::Other,
     }
@@ -842,7 +980,7 @@ fn classify(msg: &Value) -> Incoming {
 /// the honest reply to anything beyond a `ping` (and the roots query some
 /// SDKs issue unprompted) is "method not found" — the server then carries
 /// on without it rather than hanging on an unanswered id.
-fn server_request_reply(method: &str, id: Value) -> Value {
+pub(super) fn server_request_reply(method: &str, id: Value) -> Value {
     match method {
         "ping" => json!({ "jsonrpc": "2.0", "id": id, "result": {} }),
         "roots/list" => json!({ "jsonrpc": "2.0", "id": id, "result": { "roots": [] } }),
@@ -1094,6 +1232,14 @@ mod tests {
             classify(&json!({ "jsonrpc": "2.0", "method": "notifications/progress", "params": {} })),
             Incoming::Notification
         );
+        assert_eq!(
+            classify(&json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/progress",
+                "params": { "progressToken": 4, "progress": 1 },
+            })),
+            Incoming::Progress(4)
+        );
         // A response whose id isn't one of our integers can't be paired.
         assert_eq!(
             classify(&json!({ "jsonrpc": "2.0", "id": "abc", "result": {} })),
@@ -1252,6 +1398,119 @@ mod tests {
         session.request("tools/list", None, quick).await.expect_err("no reply");
         assert!(session.is_hung());
         assert!(session.is_alive(), "hung, not exited");
+    }
+
+    /// A server that stops reading its stdin can't hold a request — and with
+    /// it the pool's slot for the server — forever: the write gives up at the
+    /// request's timeout, the request counts as never sent, and the line left
+    /// half-written in the pipe ends the session.
+    #[tokio::test]
+    async fn a_request_the_server_never_reads_times_out_and_ends_the_session() {
+        // Runs, reads nothing.
+        #[cfg(windows)]
+        let (command, args) = (
+            "cmd".to_string(),
+            vec!["/d".into(), "/c".into(), "ping -n 30 127.0.0.1 >nul".into()],
+        );
+        #[cfg(unix)]
+        let (command, args) = ("sh".to_string(), vec!["-c".into(), "sleep 30".into()]);
+
+        let mut session = StdioSession::spawn(&script_server(command, args)).await.expect("spawn");
+        // Far more than a pipe holds.
+        let pad = "x".repeat(3 * 1024 * 1024);
+        let e = session
+            .request("tools/list", Some(json!({ "pad": pad })), Duration::from_millis(500))
+            .await
+            .expect_err("nobody reads it");
+        assert!(super::super::client::is_pre_execution(&e), "{e:#}");
+        assert!(format!("{e:#}").contains("isn't reading its input"), "{e:#}");
+        assert!(session.is_hung(), "a half-written line ends the session");
+    }
+
+    /// A tool call that reports progress outlives its timeout for as long as
+    /// the reports keep coming. The server answers after ~3 s, reporting
+    /// progress about once a second; with a 1.8 s timeout the call only
+    /// succeeds if each report moves the deadline.
+    #[tokio::test]
+    async fn progress_on_a_tool_call_keeps_it_from_timing_out() {
+        let progress = r#"{"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":1,"progress":1}}"#;
+        let reply = r#"{"jsonrpc":"2.0","id":1,"result":{"content":[]}}"#;
+        #[cfg(windows)]
+        let dir = tempfile::TempDir::new().unwrap();
+        #[cfg(windows)]
+        let (command, args) = {
+            let tick = format!("@echo {progress}\r\n@ping -n 2 127.0.0.1 >nul\r\n");
+            let script = dir.path().join("server.cmd");
+            std::fs::write(
+                &script,
+                format!("@set /p _=\r\n{tick}{tick}{tick}@echo {reply}\r\n@ping -n 10 127.0.0.1 >nul\r\n"),
+            )
+            .unwrap();
+            (script.display().to_string(), Vec::<String>::new())
+        };
+        #[cfg(unix)]
+        let (command, args) = (
+            "sh".to_string(),
+            vec![
+                "-c".to_string(),
+                format!(
+                    "read _; for i in 1 2 3; do printf '%s\\n' '{progress}'; sleep 1; done; \
+                     printf '%s\\n' '{reply}'; sleep 10"
+                ),
+            ],
+        );
+
+        let mut session = StdioSession::spawn(&script_server(command, args)).await.expect("spawn");
+        let resp = session
+            .request(
+                "tools/call",
+                Some(json!({ "name": "slow", "arguments": {} })),
+                Duration::from_millis(1800),
+            )
+            .await
+            .expect("progress kept the call alive");
+        assert!(resp.result.is_some());
+    }
+
+    /// A server that pages its catalogue has every page read, not just the
+    /// first.
+    #[tokio::test]
+    async fn tools_list_follows_the_next_cursor() {
+        let first = r#"{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"a"}],"nextCursor":"p2"}}"#;
+        let second = r#"{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"b"}]}}"#;
+        #[cfg(windows)]
+        let dir = tempfile::TempDir::new().unwrap();
+        #[cfg(windows)]
+        let (command, args) = {
+            let script = dir.path().join("server.cmd");
+            std::fs::write(
+                &script,
+                format!(
+                    "@set /p _=\r\n@echo {first}\r\n@set /p _=\r\n@echo {second}\r\n\
+                     @ping -n 10 127.0.0.1 >nul\r\n"
+                ),
+            )
+            .unwrap();
+            (script.display().to_string(), Vec::<String>::new())
+        };
+        #[cfg(unix)]
+        let (command, args) = (
+            "sh".to_string(),
+            vec![
+                "-c".to_string(),
+                format!("read _; printf '%s\\n' '{first}'; read _; printf '%s\\n' '{second}'; sleep 10"),
+            ],
+        );
+
+        let mut session = StdioSession::spawn(&script_server(command, args)).await.expect("spawn");
+        let names: Vec<String> = session
+            .list_tools_raw()
+            .await
+            .expect("both pages")
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        assert_eq!(names, ["a", "b"]);
     }
 
     /// A reply Loach can't parse fails its call as unreadable — not as a

@@ -42,7 +42,12 @@ pub mod uuid_gen;
 /// generating one UUID) or reported missing when it was plainly there.
 /// A float is accepted only when it is exactly integral.
 pub fn lenient_i64(args: &serde_json::Value, key: &str) -> Option<i64> {
-    let v = args.get(key)?;
+    lenient_i64_value(args.get(key)?)
+}
+
+/// [`lenient_i64`] for a value already in hand — a field inside a nested
+/// spec rather than a top-level argument.
+pub fn lenient_i64_value(v: &serde_json::Value) -> Option<i64> {
     if let Some(n) = v.as_i64() {
         return Some(n);
     }
