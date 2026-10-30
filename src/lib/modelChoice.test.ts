@@ -9,6 +9,7 @@ import {
   capacityBasis,
   classifyFit,
   formatGb,
+  fullOllamaTag,
   rankChatModels,
   recommendVariant,
   type HostCapacity,
@@ -320,5 +321,22 @@ describe("formatGb", () => {
   it("keeps a decimal under 10 GB and rounds above it", () => {
     expect(formatGb(3.4)).toBe("3.4 GB");
     expect(formatGb(18.2)).toBe("18 GB");
+  });
+});
+
+// The duplicate-pull guards compared tags exactly, so `llama3` pulled again
+// while `llama3:latest` was still downloading.
+describe("fullOllamaTag", () => {
+  it("gives a bare name its :latest tag", () => {
+    expect(fullOllamaTag("llama3")).toBe("llama3:latest");
+    expect(fullOllamaTag(" llama3 ")).toBe("llama3:latest");
+    expect(fullOllamaTag("hf.co/user/repo")).toBe("hf.co/user/repo:latest");
+  });
+
+  it("keeps an explicit tag, and doesn't read a registry port as one", () => {
+    expect(fullOllamaTag("llama3:8b")).toBe("llama3:8b");
+    expect(fullOllamaTag("llama3:latest")).toBe("llama3:latest");
+    expect(fullOllamaTag("hf.co/user/repo:Q4_K_M")).toBe("hf.co/user/repo:Q4_K_M");
+    expect(fullOllamaTag("localhost:5000/team/model")).toBe("localhost:5000/team/model:latest");
   });
 });

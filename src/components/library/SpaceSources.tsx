@@ -37,14 +37,13 @@ import { useModelsStore } from "@/stores/modelsStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useUIStore } from "@/stores/uiStore";
 import {
-  OPENAI_COMPAT_NUM_CTX,
   type LibraryItemMeta,
   type LibrarySource,
   type RetrievalMode,
   type Space,
   type SpaceFile,
 } from "@/types";
-import { chatNumCtx, MODE_LABELS } from "./ChatSources";
+import { chatNumCtx, MODE_LABELS, useNewChatModelCtx } from "./ChatSources";
 import { LibraryPicker } from "./LibraryPicker";
 import { DatasetIcon, ItemIcon, itemTokens, mixLabel, typeLabel } from "./libraryUi";
 
@@ -87,26 +86,15 @@ export function SpaceSourcesTab({
   const saveToLibrary = useLibraryStore((s) => s.saveToLibrary);
   const setFileEnabled = useSpaceStore((s) => s.setFileEnabled);
   const setSpaceTab = useSpaceStore((s) => s.setSpaceTab);
-  const loadModelDefaults = useModelsStore((s) => s.loadModelDefaults);
-  // The Space's model's own window, which a chat's send layers under the
-  // Space's: a Modelfile's num_ctx, or the one assumed for an
-  // OpenAI-compatible model.
-  const modelNumCtx = useModelsStore((s) =>
-    !space.default_model
-      ? undefined
-      : space.default_provider === "ollama"
-        ? s.modelDefaults[space.default_model]?.num_ctx
-        : OPENAI_COMPAT_NUM_CTX,
-  );
+  // The window of the model a new chat here starts on, which a chat's send
+  // layers under the Space's.
+  const modelNumCtx = useNewChatModelCtx(space);
   const [loadError, setLoadError] = useState<string | null>(null);
 
   useEffect(() => {
     setLoadError(null);
     ensureSources("space", space.id).catch((e) => setLoadError(e instanceof Error ? e.message : String(e)));
   }, [space.id, ensureSources]);
-  useEffect(() => {
-    if (space.default_provider === "ollama" && space.default_model) void loadModelDefaults(space.default_model);
-  }, [space.default_provider, space.default_model, loadModelDefaults]);
 
   const byId = useMemo(() => new Map(items.map((i) => [i.id, i])), [items]);
   const dsById = useMemo(() => new Map(datasets.map((d) => [d.id, d])), [datasets]);

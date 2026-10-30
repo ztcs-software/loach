@@ -1072,6 +1072,11 @@ impl Database {
             );
             CREATE INDEX IF NOT EXISTS idx_rag_chunks_doc
                 ON rag_chunks(doc_kind, doc_id, seq);
+            -- Covers the per-document "embedded with this model" counts,
+            -- which otherwise read each row past its embedding BLOB to
+            -- reach `embed_model`.
+            CREATE INDEX IF NOT EXISTS idx_rag_chunks_doc_model
+                ON rag_chunks(doc_kind, doc_id, embed_model);
             CREATE VIRTUAL TABLE IF NOT EXISTS rag_chunks_fts USING fts5(
                 text,
                 content = 'rag_chunks',

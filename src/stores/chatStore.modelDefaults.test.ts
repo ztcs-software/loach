@@ -80,6 +80,21 @@ describe("the Thinking default", () => {
   });
 });
 
+// `chatNumCtx` sizes sources past a num_ctx of 0 or less; the request has to
+// skip it too, or the two disagree on the window.
+describe("a non-positive num_ctx override", () => {
+  it("is unset, so the Modelfile's window applies", async () => {
+    useLibraryStore.setState({ hydrated: true, items: [], datasets: [], sources: {} });
+    useModelsStore.setState({ modelDefaults: { "custom:8b": { num_ctx: 32768 } }, modelCapabilities: {} });
+    for (const num_ctx of [0, -1]) {
+      const zeroed = { ...chat, params_json: JSON.stringify({ num_ctx, temperature: 0.5 }) };
+      const { request } = await __testing.buildTaskRequest(zeroed, zeroed.id, [], "hi", []);
+      expect(request.params.num_ctx).toBe(32768);
+      expect(request.params.temperature).toBe(0.5);
+    }
+  });
+});
+
 describe("an OpenAI-compatible chat", () => {
   // Those servers ignore num_ctx and don't report their window, so it only
   // sizes sources — and 8192 pushed a 128k model's sources to excerpts.

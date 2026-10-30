@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import {
   Dialog,
   DialogContent,
@@ -31,6 +31,9 @@ export function GlobalMemoriesDialog({
   const updateMemory = useGlobalMemoryStore((s) => s.updateMemory);
   const removeMemory = useGlobalMemoryStore((s) => s.removeMemory);
   const enabled = useSettingsStore((s) => s.global_memory_enabled);
+  // Radix hears Escape on the document before the edit field does, so Esc
+  // while editing a memory closed the whole dialog instead of the edit.
+  const [editingMemory, setEditingMemory] = useState(false);
 
   useEffect(() => {
     if (open && memories === null) {
@@ -51,7 +54,12 @@ export function GlobalMemoriesDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-2xl !rounded-3xl">
+      <DialogContent
+        className="max-w-2xl !rounded-3xl"
+        onEscapeKeyDown={(e) => {
+          if (editingMemory) e.preventDefault();
+        }}
+      >
         <DialogHeader>
           <DialogTitle>Global memories</DialogTitle>
           <DialogDescription>
@@ -86,6 +94,7 @@ export function GlobalMemoriesDialog({
               removeMemory(id).catch((e) => notify("remove memory", e))
             }
             onOpenChat={openChat}
+            onEditingChange={setEditingMemory}
           />
         </div>
       </DialogContent>

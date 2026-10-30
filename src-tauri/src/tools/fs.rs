@@ -605,11 +605,8 @@ fn kept_encoding_note(enc: TextEncoding) -> String {
 /// executable), and a read-only one is refused, as an in-place write was.
 /// On Unix the new file is created with the old one's mode, so a `0600`
 /// `.env` is never readable by others while it's being written. On Windows
-/// the new file takes its folder's inherited ACL, while it's written and
-/// after: explicit entries on the old file are lost. Copying them faithfully
-/// — explicit entries kept, inherited ones still following the folder —
-/// takes `SetNamedSecurityInfoW`, behind a `windows` feature
-/// (`Win32_Security_Authorization`) this crate doesn't enable.
+/// it gets the old one's ACL before anything is written to it — see
+/// [`copy_dacl`].
 fn replace_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write as _;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -642,6 +639,10 @@ fn replace_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
             options.mode(m.permissions().mode());
         }
         let mut f = options.open(&tmp)?;
+        #[cfg(windows)]
+        if existing.is_some() {
+            copy_dacl(path, &tmp)?;
+        }
         f.write_all(bytes)?;
         f.sync_all()?;
         drop(f);
@@ -654,6 +655,115 @@ fn replace_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         let _ = fs::remove_file(&tmp);
     }
     written
+}
+
+/// Give `tmp` the DACL `original` has — its explicit entries, and whether it
+/// inherits from the folder at all — where a new file takes only what the
+/// folder hands down, so a file locked down to one user would come out of
+/// [`replace_file`] readable by everyone the folder lets in. The inherited
+/// entries `SetNamedSecurityInfoW` recomputes from the folder, which both
+/// files share.
+///
+/// Nothing is set when the two already match — a file with only inherited
+/// entries, the common case — so an ordinary edit never depends on the
+/// filesystem accepting an ACL. Any other failure fails the write rather
+/// than quietly widening who can read the file.
+#[cfg(windows)]
+fn copy_dacl(original: &Path, tmp: &Path) -> std::io::Result<()> {
+    use windows::core::HSTRING;
+    use windows::Win32::Foundation::{LocalFree, ERROR_SUCCESS, HLOCAL};
+    use windows::Win32::Security::Authorization::{
+        GetNamedSecurityInfoW, SetNamedSecurityInfoW, SE_FILE_OBJECT,
+    };
+    use windows::Win32::Security::{
+        GetSecurityDescriptorControl, ACL, DACL_SECURITY_INFORMATION,
+        PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SE_DACL_PROTECTED,
+        UNPROTECTED_DACL_SECURITY_INFORMATION,
+    };
+
+    /// A file's security descriptor, with its DACL (null when it has none)
+    /// and whether that is protected from inheritance.
+    struct Dacl {
+        sd: PSECURITY_DESCRIPTOR,
+        acl: *mut ACL,
+        protected: bool,
+    }
+    impl Drop for Dacl {
+        fn drop(&mut self) {
+            // SAFETY: `sd` is null or the LocalAlloc'd descriptor that
+            // GetNamedSecurityInfoW returned, which the caller frees.
+            unsafe { LocalFree(Some(HLOCAL(self.sd.0))) };
+        }
+    }
+    impl Dacl {
+        fn bytes(&self) -> &[u8] {
+            if self.acl.is_null() {
+                return &[];
+            }
+            // SAFETY: a non-null DACL points into `sd`, alive as long as
+            // `self`, and `AclSize` is its length in bytes, entries included.
+            unsafe { std::slice::from_raw_parts(self.acl.cast::<u8>(), (*self.acl).AclSize.into()) }
+        }
+    }
+    let read = |p: &Path| -> std::io::Result<Dacl> {
+        let mut d = Dacl {
+            sd: PSECURITY_DESCRIPTOR::default(),
+            acl: std::ptr::null_mut(),
+            protected: false,
+        };
+        // SAFETY: the name outlives the call, and the out-pointers are live
+        // locals; `d`'s drop frees what it allocates.
+        let e = unsafe {
+            GetNamedSecurityInfoW(
+                &HSTRING::from(p),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                None,
+                None,
+                Some(&mut d.acl),
+                None,
+                &mut d.sd,
+            )
+        };
+        if e != ERROR_SUCCESS {
+            return Err(std::io::Error::from_raw_os_error(e.0 as i32));
+        }
+        let (mut control, mut revision) = (0u16, 0u32);
+        // SAFETY: `sd` is the valid descriptor just returned.
+        unsafe { GetSecurityDescriptorControl(d.sd, &mut control, &mut revision) }
+            // The HRESULT wraps a Win32 error code in its low 16 bits.
+            .map_err(|e| std::io::Error::from_raw_os_error(e.code().0 & 0xFFFF))?;
+        d.protected = control & SE_DACL_PROTECTED.0 != 0;
+        Ok(d)
+    };
+
+    let want = read(original)?;
+    let has = read(tmp)?;
+    if want.acl.is_null() || (want.protected == has.protected && want.bytes() == has.bytes()) {
+        return Ok(());
+    }
+    let inheritance = if want.protected {
+        PROTECTED_DACL_SECURITY_INFORMATION
+    } else {
+        UNPROTECTED_DACL_SECURITY_INFORMATION
+    };
+    // SAFETY: the name outlives the call and `want.acl` points into the
+    // descriptor `want` keeps alive.
+    let e = unsafe {
+        SetNamedSecurityInfoW(
+            &HSTRING::from(tmp),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | inheritance,
+            None,
+            None,
+            Some(want.acl.cast_const()),
+            None,
+        )
+    };
+    if e != ERROR_SUCCESS {
+        return Err(std::io::Error::from_raw_os_error(e.0 as i32));
+    }
+    Ok(())
 }
 
 /// Whether a call's `path` — or either end of a move — lies where git runs
@@ -2300,6 +2410,47 @@ mod tests {
         let w = dispatch_write_file(&root, &json!({ "path": ".env", "content": "TOKEN=new\n" }));
         assert!(!w.is_error, "{}", w.content_text);
         assert_eq!(fs::metadata(&env).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+
+    /// The Windows side of the test above: a file's own ACL — inheritance cut
+    /// down to one grant, or an extra grant beside what the folder hands
+    /// down — comes through an edit and a write as it was, where the new file
+    /// used to take only the folder's.
+    #[cfg(windows)]
+    #[test]
+    fn writes_keep_the_file_acl() {
+        use std::process::Command;
+        let (_d, root) = workspace();
+        let owner_only = format!("{}:(F)", std::env::var("USERNAME").expect("USERNAME"));
+        // BUILTIN\Users by SID, so the name doesn't depend on the locale.
+        let cases: [(&str, &[&str]); 2] = [
+            ("private.env", &["/inheritance:r", "/grant:r", &owner_only]),
+            ("shared.txt", &["/grant", "*S-1-5-32-545:(R)"]),
+        ];
+        for (name, grant) in cases {
+            let path = root.join(name);
+            fs::write(&path, "TOKEN=old\n").unwrap();
+            let shown = dunce::simplified(&path).to_owned();
+            let Ok(granted) = Command::new("icacls").arg(&shown).args(grant).output() else {
+                eprintln!("icacls unavailable; skipping");
+                return;
+            };
+            assert!(granted.status.success(), "icacls {grant:?}: {granted:?}");
+            let acl = || {
+                let out = Command::new("icacls").arg(&shown).output().unwrap();
+                String::from_utf8_lossy(&out.stdout).into_owned()
+            };
+            let before = acl();
+
+            let r = if name == "private.env" {
+                dispatch_edit_file(&root, &json!({ "path": name, "old_text": "old", "new_text": "new" }))
+            } else {
+                dispatch_write_file(&root, &json!({ "path": name, "content": "TOKEN=new\n" }))
+            };
+            assert!(!r.is_error, "{}", r.content_text);
+            assert_eq!(fs::read_to_string(&path).unwrap(), "TOKEN=new\n");
+            assert_eq!(acl(), before, "{name}");
+        }
     }
 
     /// No standing grant covers `.git`: hooks and config there run commands.

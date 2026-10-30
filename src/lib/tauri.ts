@@ -1547,8 +1547,11 @@ export function openInVscode(code: string, filename: string): Promise<void> {
  *  builds the per-platform custom-protocol URL (`http://loach-sandbox.localhost/…`
  *  on Windows, `loach-sandbox://localhost/…` elsewhere). Null outside Tauri,
  *  where there is no protocol to serve it. */
-export function sandboxPreviewUrl(): string | null {
-  return isTauri ? convertFileSrc("preview.html", "loach-sandbox") : null;
+export function sandboxPreviewUrl(scripts: boolean): string | null {
+  // The scripts-off page is the same host page under a CSP that runs only
+  // the host's own script (see `src-tauri/src/sandbox.rs`).
+  const page = scripts ? "preview.html" : "preview-static.html";
+  return isTauri ? convertFileSrc(page, "loach-sandbox") : null;
 }
 
 /** Optional app-lock credentials for destructive Tauri commands. */

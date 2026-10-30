@@ -20,7 +20,8 @@
         "visible": true,
         "shadow": true,
         "dragDropEnabled": false,
-        "backgroundColor": "#06070f"
+        "backgroundColor": "#06070f",
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --force-webrtc-ip-handling-policy=disable_non_proxied_udp"
       }
     ]
   }

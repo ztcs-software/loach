@@ -53,6 +53,7 @@ import {
   MentionPalette,
   mentionAt,
   useChatSources,
+  useNewChatModelCtx,
   type MentionEntry,
 } from "./library/ChatSources";
 import { useLibraryStore } from "@/stores/libraryStore";
@@ -269,8 +270,9 @@ export function ChatInput({ centered = false }: ChatInputProps) {
   const chatSources = useChatSources(composerSessionId, sourcesSpaceId);
   const hasChatSources = chatSources.chips.length > 0 || chatSources.spaceCount > 0;
   // A Modelfile's own window, which the send layers under the chat's (for
-  // an OpenAI-compatible chat, the window Loach assumes for it).
-  const composerModelCtx = useModelsStore((s) =>
+  // an OpenAI-compatible chat, the window Loach assumes for it). Before the
+  // chat exists, the window of the model it will start on.
+  const sessionModelCtx = useModelsStore((s) =>
     !composerSessionId || !activeSession
       ? undefined
       : activeSession.provider === "ollama"
@@ -279,6 +281,8 @@ export function ChatInput({ centered = false }: ChatInputProps) {
           : undefined
         : OPENAI_COMPAT_NUM_CTX,
   );
+  const newChatModelCtx = useNewChatModelCtx(sourcesSpace);
+  const composerModelCtx = composerSessionId && activeSession ? sessionModelCtx : newChatModelCtx;
   const libraryItems = useLibraryStore((s) => s.items);
   const libraryDatasets = useLibraryStore((s) => s.datasets);
   const addLibrarySources = useLibraryStore((s) => s.addSources);

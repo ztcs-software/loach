@@ -21,7 +21,11 @@ describe("/new on a Space's page", () => {
     });
     const addSources = vi.fn(async () => {});
     useLibraryStore.setState({
-      pending: { itemIds: ["item-1"], datasetIds: ["set-1"], spaceId: "space-1" },
+      pending: {
+        "space-1": { itemIds: ["item-1"], datasetIds: ["set-1"] },
+        // The welcome screen's picks aren't this chat's.
+        "": { itemIds: ["item-2"], datasetIds: [] },
+      },
       addSources,
     });
 
@@ -34,10 +38,9 @@ describe("/new on a Space's page", () => {
       itemIds: ["item-1"],
       datasetIds: ["set-1"],
     });
+    expect(addSources).toHaveBeenCalledTimes(1);
     expect(useLibraryStore.getState().pending).toEqual({
-      itemIds: [],
-      datasetIds: [],
-      spaceId: null,
+      "": { itemIds: ["item-2"], datasetIds: [] },
     });
     expect(useSpaceStore.getState().viewingSpaceId).toBeNull();
   });

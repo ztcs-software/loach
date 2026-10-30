@@ -890,6 +890,7 @@ const MAX_FILENAME_STEM_BYTES: usize = 120;
 /// Linux alike — keeping only ASCII ones turned `Zażółć gęślą jaźń` into
 /// `Za_gl_ja` — while separators, `:`, dots, control and text-direction
 /// characters are not, and are dropped. Cut to [`MAX_FILENAME_STEM_BYTES`].
+/// A Windows device name gets a trailing `_` (see [`is_windows_device_name`]).
 fn build_filename(raw_title: &str) -> String {
     let mut slug = String::with_capacity(raw_title.len());
     for ch in raw_title.trim().chars() {
@@ -907,7 +908,22 @@ fn build_filename(raw_title: &str) -> String {
     }
     let slug = slug.trim_matches('_').to_string();
     let base = if slug.is_empty() { "document" } else { &slug };
-    format!("{base}.pdf")
+    let suffix = if is_windows_device_name(base) { "_" } else { "" };
+    format!("{base}{suffix}.pdf")
+}
+
+/// Whether Windows takes `stem` for a device — `CON`, `PRN`, `AUX`, `NUL`,
+/// `COM1`–`COM9`, `LPT1`–`LPT9` and the superscript `COM¹`–`LPT³`, in any
+/// case — rather than a file. Windows 10 does so with an extension too, so
+/// saving `con.pdf` there writes to the console instead of a file.
+fn is_windows_device_name(stem: &str) -> bool {
+    let upper = stem.to_ascii_uppercase();
+    matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (matches!(upper.get(..3), Some("COM" | "LPT"))
+            && matches!(
+                &upper[3..],
+                "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+            ))
 }
 
 fn err(msg: impl Into<String>) -> McpCallResult {
@@ -1261,6 +1277,25 @@ mod tests {
         let long = build_filename(&"ż".repeat(300));
         assert!(long.len() <= MAX_FILENAME_STEM_BYTES + ".pdf".len(), "{}", long.len());
         assert!(long.starts_with("żżż") && long.ends_with("ż.pdf"), "{long}");
+    }
+
+    #[test]
+    fn filenames_never_name_a_windows_device() {
+        for (title, name) in [
+            ("CON", "CON_.pdf"),
+            ("nul", "nul_.pdf"),
+            (" Aux ", "Aux_.pdf"),
+            ("Com1", "Com1_.pdf"),
+            ("lpt9", "lpt9_.pdf"),
+            ("COM²", "COM²_.pdf"),
+            // Longer names and other digits are ordinary files.
+            ("CONSOLE", "CONSOLE.pdf"),
+            ("COM10", "COM10.pdf"),
+            ("LPT0", "LPT0.pdf"),
+            ("con.pdf", "conpdf.pdf"),
+        ] {
+            assert_eq!(build_filename(title), name, "{title:?}");
+        }
     }
 
     /// From `100.` on, a number is wider than the old fixed 6 mm indent and

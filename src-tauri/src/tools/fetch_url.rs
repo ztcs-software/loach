@@ -507,6 +507,12 @@ pub fn is_public_ip(ip: &IpAddr) -> bool {
             if (segs[0] & 0xffc0) == 0xfec0 {
                 return false;
             }
+            // 2001:db8::/32 (documentation, the twin of the v4 ranges
+            // `is_documentation()` refuses) and 100::/64 (discard-only,
+            // RFC 6666) name no real host.
+            if (segs[0] == 0x2001 && segs[1] == 0x0db8) || segs[..4] == [0x0100, 0, 0, 0] {
+                return false;
+            }
             // Tunnels and translators that pass the packet on to an IPv4
             // address carried inside the IPv6 one, which an AAAA record could
             // aim at a private host: 6to4 (2002::/16), Teredo (2001::/32),
@@ -574,12 +580,12 @@ pub fn is_public_ip(ip: &IpAddr) -> bool {
 }
 
 /// Returns `true` only for link-local addresses — IPv4 169.254.0.0/16, IPv6
-/// fe80::/10, and the IPv4-mapped / NAT64 / IPv4-compatible IPv6 forms that
-/// smuggle a link-local IPv4 (e.g. `::ffff:169.254.169.254`). This is the
-/// narrow "cloud-metadata" screen shared by the MCP resolver
-/// ([`resolve_lan_addrs`]) and the LLM-provider guard
-/// (`providers::refuse_link_local_host`) — one source of truth, distinct from
-/// the all-private-ranges screen in [`is_public_ip`].
+/// fe80::/10, and the IPv6 forms that smuggle a link-local IPv4 (IPv4-mapped,
+/// -translated and -compatible, NAT64, 6to4 and Teredo — e.g.
+/// `::ffff:169.254.169.254`). This is the narrow "cloud-metadata" screen
+/// shared by the MCP resolver ([`resolve_lan_addrs`]) and the LLM-provider
+/// guard (`providers::refuse_link_local_host`) — one source of truth, distinct
+/// from the all-private-ranges screen in [`is_public_ip`].
 pub(crate) fn is_link_local(ip: &IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => v4.is_link_local(),
@@ -617,7 +623,9 @@ pub(crate) fn is_link_local(ip: &IpAddr) -> bool {
                 && segs[3] == 0
                 && segs[4] == 0
                 && segs[5] == 0;
-            if is_v4_mapped || is_nat64 || is_v4_compat {
+            // ::ffff:0:a.b.c.d — IPv4-translated.
+            let is_v4_translated = segs[..4] == [0, 0, 0, 0] && segs[4] == 0xffff && segs[5] == 0;
+            if is_v4_mapped || is_nat64 || is_v4_compat || is_v4_translated {
                 let embedded = std::net::Ipv4Addr::new(
                     (segs[6] >> 8) as u8,
                     (segs[6] & 0xff) as u8,
@@ -625,6 +633,33 @@ pub(crate) fn is_link_local(ip: &IpAddr) -> bool {
                     (segs[7] & 0xff) as u8,
                 );
                 return embedded.is_link_local();
+            }
+            // The tunnel and translator forms `is_public_ip` refuses outright
+            // carry an IPv4 the packet is handed on to as well. This screen
+            // lets LAN and public hosts through, so it decodes that IPv4
+            // instead of refusing the whole range: a LAN host behind
+            // local-use NAT64 is legitimate here, only 169.254.x.x is not.
+            let o = v6.octets();
+            let link_local_at = |at: [usize; 4]| {
+                std::net::Ipv4Addr::new(o[at[0]], o[at[1]], o[at[2]], o[at[3]]).is_link_local()
+            };
+            // 6to4 (2002::/16): the site router's IPv4 follows the prefix.
+            if segs[0] == 0x2002 {
+                return link_local_at([2, 3, 4, 5]);
+            }
+            // Teredo (2001::/32): the server's IPv4, then the client's with
+            // every bit inverted (RFC 4380) — traffic goes to both.
+            if segs[0] == 0x2001 && segs[1] == 0 {
+                let client = std::net::Ipv4Addr::new(!o[12], !o[13], !o[14], !o[15]);
+                return link_local_at([4, 5, 6, 7]) || client.is_link_local();
+            }
+            // Local-use NAT64 (64:ff9b:1::/48): the operator picks the prefix
+            // length, which moves the IPv4 (RFC 6052 §2.2, skipping the
+            // reserved byte 8), so try each layout a /48 leaves room for.
+            if segs[..3] == [0x0064, 0xff9b, 0x0001] {
+                return [[6, 7, 9, 10], [7, 9, 10, 11], [9, 10, 11, 12], [12, 13, 14, 15]]
+                    .into_iter()
+                    .any(link_local_at);
             }
             false
         }
@@ -906,7 +941,9 @@ fn extract_between_ci(hay: &str, lower: &str, open: &str, close: &str) -> Option
     debug_assert_eq!(lower.len(), hay.len());
     let open_l = open.to_ascii_lowercase();
     let close_l = close.to_ascii_lowercase();
-    let a = lower.find(&open_l)?;
+    // A tag-name match, so a `<titlebar>` ahead of the real `<title>` isn't
+    // taken for it.
+    let a = find_opener(lower, &open_l, 0)?;
     let rest = &lower[a..];
     let b_rel = rest.find(&close_l)?;
     let b = a + b_rel;
@@ -1095,6 +1132,15 @@ mod tests {
     }
 
     #[test]
+    fn title_skips_longer_tag_names() {
+        // `<titlebar>` opened the title match, and its `</titlebar>` closed
+        // it, so the page was titled "Menu".
+        let html = "<head><titlebar>Menu</titlebar><title>Real</title></head><body>x</body>";
+        let (title, _) = html_to_text(html);
+        assert_eq!(title.as_deref(), Some("Real"));
+    }
+
+    #[test]
     fn drops_scripts() {
         let html = "<body><script>alert(1)</script>A</body>";
         let (_, text) = html_to_text(html);
@@ -1233,6 +1279,18 @@ mod tests {
     }
 
     #[test]
+    fn rejects_documentation_and_discard_ipv6() {
+        for ip in ["2001:db8::1", "2001:db8:ffff::8888", "100::1", "100::ffff:1"] {
+            assert!(!is_public_ip(&ip.parse().unwrap()), "{ip}");
+        }
+        // Neighbours stay public: 2001:db9::/32 and 100:0:0:1::/64 are
+        // outside both ranges.
+        for ip in ["2001:db9::1", "100:0:0:1::1"] {
+            assert!(is_public_ip(&ip.parse().unwrap()), "{ip}");
+        }
+    }
+
+    #[test]
     fn rejects_ipv4_compatible_private() {
         // ::a.b.c.d (deprecated IPv4-compatible). ::1 is loopback and handled
         // separately, so a non-trivial embedded v4 is what we screen here.
@@ -1256,6 +1314,32 @@ mod tests {
         assert!(!is_link_local(&"::1".parse().unwrap()));
         assert!(!is_link_local(&"fc00::1".parse().unwrap()));
         assert!(!is_link_local(&"8.8.8.8".parse().unwrap()));
+    }
+
+    /// 169.254.169.254 (`a9fe:a9fe`) carried by the tunnel and translator
+    /// forms is flagged; the same forms around any other IPv4 are not.
+    #[test]
+    fn is_link_local_looks_inside_tunnels_and_translators() {
+        for ip in [
+            "::ffff:0:a9fe:a9fe",                      // IPv4-translated
+            "2002:a9fe:a9fe::1",                       // 6to4
+            "2001:0:a9fe:a9fe::1",                     // Teredo server
+            "2001:0:4136:e378:8000:63bf:5601:5601",    // Teredo client, inverted
+            "64:ff9b:1::a9fe:a9fe",                    // local-use NAT64, /96
+            "64:ff9b:1:a9fe:a9:fe00::",                // local-use NAT64, /48
+            "64:ff9b:1:a9:fe:a9fe::",                  // local-use NAT64, /56
+            "64:ff9b:1:0:a9:fea9:fe00:0",              // local-use NAT64, /64
+        ] {
+            assert!(is_link_local(&ip.parse().unwrap()), "{ip}");
+        }
+        for ip in [
+            "::ffff:0:c0a8:110",                       // IPv4-translated LAN
+            "2002:808:808::1",                         // 6to4 around 8.8.8.8
+            "2001:0:4136:e378:8000:63bf:3fff:fdd2",    // RFC 4380's example
+            "64:ff9b:1::c0a8:110",                     // LAN host via NAT64
+        ] {
+            assert!(!is_link_local(&ip.parse().unwrap()), "{ip}");
+        }
     }
 
     #[tokio::test]

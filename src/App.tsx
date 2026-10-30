@@ -78,6 +78,7 @@ import { useMcpStore } from "@/stores/mcpStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { chatCancelAll, ollamaPreloadModel, ollamaStart } from "@/lib/tauri";
 import { logger } from "@/lib/logger";
+import { restoreMemoryTurns } from "@/lib/memory";
 import { useSnippetStore } from "@/stores/snippetStore";
 import { useLibraryStore } from "@/stores/libraryStore";
 import { useSnippetVarStore } from "@/stores/snippetVarStore";
@@ -247,7 +248,7 @@ export default function App() {
 
     const settingsP = hydrateSettings();
     const chatsP = hydrateChats();
-    void hydrateSpaces();
+    const spacesP = hydrateSpaces();
     void hydrateSnippets();
     void hydrateSnippetVars();
     void hydrateLibrary();
@@ -261,6 +262,16 @@ export default function App() {
     // them, it listed the defaults (localhost Ollama, no OpenAI) and stayed
     // that way for anyone with a remote server or an API key.
     void settingsP.then(() => hydrateModels());
+    // Memory-extraction turns still queued when the app last quit. Checked
+    // against the chats and against each scope's memory switch — a Space's
+    // or the global setting — so it waits for all three.
+    void Promise.all([settingsP, chatsP, spacesP])
+      .then(() =>
+        restoreMemoryTurns((id) =>
+          useChatStore.getState().sessions.find((s) => s.id === id),
+        ),
+      )
+      .catch((e) => logger.warn("couldn't restore queued memory turns", e));
 
     // Optional Ollama auto-launch. Starts `ollama serve` if nothing is
     // answering, so a user who lives in Loach doesn't have to keep the

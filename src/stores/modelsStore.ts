@@ -14,6 +14,7 @@ import { useSettingsStore } from "./settingsStore";
 import { useSpaceStore } from "./spaceStore";
 import { useToastStore } from "./toastStore";
 import { parseModelParameters } from "@/lib/modelParams";
+import { fullOllamaTag } from "@/lib/modelChoice";
 import {
   DEFAULT_SETTINGS,
   type AdminEvent,
@@ -585,7 +586,8 @@ async function unpinAbandonedPull(streamId: string) {
   const models = useModelsStore.getState();
   const run = models.runs[streamId];
   if (!run || run.kind !== "pull" || run.finished === "ok") return;
-  if (models.models.some((m) => m.id === run.target)) return;
+  // Ollama lists a bare tag the user typed as `<name>:latest`.
+  if (models.models.some((m) => fullOllamaTag(m.id) === fullOllamaTag(run.target))) return;
 
   const settings = useSettingsStore.getState();
   if (

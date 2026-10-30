@@ -1,5 +1,6 @@
 // `/set <param> <value>` accepts only what the Parameter panel can show, and
-// `/set reset` drops the chat's override like the panel's Reset button.
+// `/set reset` drops the chat's override like the panel's Reset button. A
+// failed save (here or from `/thinking`) reports no success of its own.
 
 import { beforeEach, describe, it, expect, vi } from "vitest";
 import type { Session } from "@/types";
@@ -17,6 +18,12 @@ import { dispatch } from "./dispatch";
 import { useChatStore } from "@/stores/chatStore";
 
 const deps = { confirm: async () => true };
+
+// The store's failure toast arms a `window.setTimeout`.
+vi.stubGlobal("window", {
+  setTimeout: (...args: Parameters<typeof setTimeout>) => setTimeout(...args),
+  clearTimeout: (id: Parameters<typeof clearTimeout>[0]) => clearTimeout(id),
+});
 
 function openChat(params_json: string | null) {
   useChatStore.setState({
@@ -71,5 +78,35 @@ describe("/set", () => {
     expect(outcome).toMatchObject({ result: { kind: "toast", title: "Reset parameters" } });
     expect(updateSessionParams).toHaveBeenCalledWith({ id: "chat-1", params_json: null });
     expect(storedParams()).toBeNull();
+  });
+
+  // The store toasts the failed save itself; the command must not follow it
+  // with a success toast, and the chat keeps what was actually saved.
+  it.each([
+    ["/set temperature 0.3"],
+    ["/set reset"],
+    ["/thinking on"],
+  ])("%s reports nothing and rolls back when the save fails", async (input) => {
+    const saved = JSON.stringify({ top_k: 20 });
+    openChat(saved);
+    updateSessionParams.mockRejectedValueOnce(new Error("disk full"));
+    const outcome = await dispatch(input, deps);
+    expect(outcome).toMatchObject({ result: { kind: "noop" } });
+    expect(storedParams()).toBe(saved);
+  });
+});
+
+describe("setSessionParams", () => {
+  it("doesn't roll back over a later write that replaced the failed one", async () => {
+    openChat(null);
+    let fail!: (e: Error) => void;
+    updateSessionParams.mockImplementationOnce(
+      () => new Promise<void>((_resolve, reject) => (fail = reject)),
+    );
+    const first = useChatStore.getState().setSessionParams("chat-1", { top_k: 10 } as never);
+    await useChatStore.getState().setSessionParams("chat-1", { top_k: 30 } as never);
+    fail(new Error("disk full"));
+    expect(await first).toBe(false);
+    expect(JSON.parse(storedParams()!)).toEqual({ top_k: 30 });
   });
 });

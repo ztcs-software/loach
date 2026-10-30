@@ -37,10 +37,24 @@ pub struct IndexStatus {
     /// embedded with; `None` when no embedding model is configured and the
     /// index is keyword-only.
     pub model: Option<String>,
+    /// The whole [`EmbedConfig::model_key`], server included, behind `model`.
+    /// Not sent: the frontend reads `model` as `provider:model`.
+    #[serde(skip)]
+    pub key: Option<String>,
     pub total: i64,
     pub embedded: i64,
     pub busy: bool,
     pub error: Option<String>,
+}
+
+impl IndexStatus {
+    /// The last error, if it came from embedding with `cfg` — not from the
+    /// same model on the server the settings named before. Matched by label,
+    /// the old server's error held for the new one until the indexer's next
+    /// pass.
+    pub fn error_for(&self, cfg: &EmbedConfig) -> Option<&str> {
+        self.error.as_deref().filter(|_| self.key.as_deref() == Some(cfg.model_key().as_str()))
+    }
 }
 
 pub struct Indexer {
@@ -131,7 +145,7 @@ impl Indexer {
                 }
             };
             let Some(cfg) = cfg else {
-                self.publish(app, IndexStatus { model: None, total, embedded, busy: false, error: None });
+                self.publish(app, IndexStatus { model: None, key: None, total, embedded, busy: false, error: None });
                 return Outcome::Idle;
             };
             let (key, label) = (cfg.model_key(), cfg.model_label());
@@ -147,11 +161,11 @@ impl Indexer {
                 continue;
             }
             if pending.is_empty() {
-                self.publish(app, IndexStatus { model: Some(label), total, embedded, busy: false, error: None });
+                self.publish(app, IndexStatus { model: Some(label), key: Some(key), total, embedded, busy: false, error: None });
                 return Outcome::Idle;
             }
 
-            self.publish(app, IndexStatus { model: Some(label.clone()), total, embedded, busy: true, error: None });
+            self.publish(app, IndexStatus { model: Some(label), key: Some(key.clone()), total, embedded, busy: true, error: None });
             let inputs: Vec<String> = pending
                 .iter()
                 .map(|c| embed::document_input(&cfg, &c.title, &c.text))
@@ -190,10 +204,10 @@ impl Indexer {
             if let Err(e) = stored {
                 // Without a pause the same batch would be re-embedded at once,
                 // over and over.
-                return self.fail(app, label, total, embedded, format!("couldn't save embeddings: {e}"));
+                return self.fail(app, &cfg, total, embedded, format!("couldn't save embeddings: {e}"));
             }
             if let Some(e) = failure {
-                return self.fail(app, label, total, embedded, e);
+                return self.fail(app, &cfg, total, embedded, e);
             }
         }
     }
@@ -232,9 +246,11 @@ impl Indexer {
         out
     }
 
-    fn fail(&self, app: &AppHandle, label: String, total: i64, embedded: i64, error: String) -> Outcome {
+    fn fail(&self, app: &AppHandle, cfg: &EmbedConfig, total: i64, embedded: i64, error: String) -> Outcome {
+        let label = cfg.model_label();
         tracing::warn!("embedding with {label} failed: {error}");
-        self.publish(app, IndexStatus { model: Some(label), total, embedded, busy: false, error: Some(error) });
+        let key = Some(cfg.model_key());
+        self.publish(app, IndexStatus { model: Some(label), key, total, embedded, busy: false, error: Some(error) });
         Outcome::Retry
     }
 }
@@ -342,6 +358,26 @@ mod tests {
     }
     fn crash() -> Result<Vec<Vec<f32>>, EmbedError> {
         Err(EmbedError { message: "HTTP 500: llama runner process has terminated".into(), refused: false })
+    }
+
+    // Regression: matched by `provider:model` alone, the old server's error
+    // kept searches on the new one from embedding their query.
+    #[test]
+    fn an_error_holds_only_for_the_server_it_came_from() {
+        let cfg = |url: &str| EmbedConfig { provider: "ollama".into(), model: "m".into(), base_url: url.into() };
+        let (old, new) = (cfg("http://lan:11434"), cfg("http://localhost:11434"));
+        let status = IndexStatus {
+            model: Some(old.model_label()),
+            key: Some(old.model_key()),
+            error: Some("connection refused".into()),
+            ..IndexStatus::default()
+        };
+        assert_eq!(status.error_for(&old), Some("connection refused"));
+        assert_eq!(status.error_for(&new), None);
+        // The frontend is sent `model` as before, and not the key.
+        let sent = serde_json::to_value(&status).unwrap();
+        assert_eq!(sent["model"], "ollama:m");
+        assert!(sent.get("key").is_none(), "{sent}");
     }
 
     /// Run [`isolate_failures`] over `ids` after the batch failed with

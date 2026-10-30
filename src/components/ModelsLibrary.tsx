@@ -29,6 +29,7 @@ import { useModelsStore } from "@/stores/modelsStore";
 import type { AdminProgress } from "@/stores/modelsStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useUIStore } from "@/stores/uiStore";
+import { fullOllamaTag } from "@/lib/modelChoice";
 import { cn, formatBytes } from "@/lib/utils";
 import type { ModelInfo, ProviderId } from "@/types";
 
@@ -87,7 +88,10 @@ export function ModelsLibrary() {
     // below, and cancelling either would unpin the tag under the other. As
     // onboarding's `startPull` guards it.
     const live = Object.values(useModelsStore.getState().runs).some(
-      (r) => r.kind === "pull" && r.target === tag && r.finished === null,
+      (r) =>
+        r.kind === "pull" &&
+        fullOllamaTag(r.target) === fullOllamaTag(tag) &&
+        r.finished === null,
     );
     if (live) return;
     await pullModel(tag);

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Check, Copy, Download, RotateCw, X } from "lucide-react";
+import { Check, Copy, Download, Play, RotateCw, Square, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { CodeView } from "./CodeView";
@@ -17,6 +17,12 @@ import { codeBlocks } from "@/lib/codeBlocks";
 import { openInVscode } from "@/lib/tauri";
 import { saveCodeToFile, defaultFilename } from "@/lib/codeExport";
 import { cn } from "@/lib/utils";
+
+/** WebKit (macOS, Linux) runs the preview frame on the app's own main
+ *  thread, so a page that loops forever freezes all of Loach; WebView2 gives
+ *  the cross-site frame a process of its own. Said in the Run tooltip. */
+const PREVIEW_SHARES_APP_THREAD =
+  typeof navigator !== "undefined" && !/Windows/i.test(navigator.userAgent);
 
 /**
  * Right-side code canvas — opens via "Open in canvas" on any inline
@@ -63,6 +69,9 @@ export function CodeCanvas() {
   const [dragWidth, setDragWidth] = useState<number | null>(null);
   // Bumped by the preview's Reload button to remount the frame.
   const [reloadNonce, setReloadNonce] = useState(0);
+  // The source whose preview may run its scripts. Previews start with
+  // scripts off, and any other source (a new block, an edit) is off again.
+  const [scriptsFor, setScriptsFor] = useState<string | null>(null);
 
   // When bound to a live message, re-extract the bound block so the canvas
   // tracks the streaming code — verbatim, since code is never TeX-rewritten.
@@ -113,6 +122,7 @@ export function CodeCanvas() {
   const badgeLabel = isText ? "Text" : displayLanguage;
   const previewable = isHtmlLanguage(displayLanguage);
   const showPreview = previewable && view === "preview";
+  const runScripts = scriptsFor === displayCode;
 
   const onCopy = async () => {
     try {
@@ -277,8 +287,25 @@ export function CodeCanvas() {
                 className="truncate text-[11px] text-foreground/45"
                 title="Previews run sandboxed and offline: scripts, stylesheets, images and fonts from the web don't load, and the page can't reach Loach or your files."
               >
-                Offline sandbox
+                {runScripts ? "Offline sandbox" : "Offline sandbox · scripts off"}
               </span>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setScriptsFor(runScripts ? null : displayCode)}
+                disabled={bindingStreaming}
+                className="h-7 shrink-0 gap-1 rounded-md px-2 text-[11px] text-foreground/65 hover:bg-foreground/10 hover:text-foreground"
+                title={
+                  runScripts
+                    ? "Show the page with its scripts off"
+                    : PREVIEW_SHARES_APP_THREAD
+                      ? "Run the page's scripts. The preview shares Loach's thread here, so a script that never stops freezes the app until you quit it."
+                      : "Run the page's scripts, still sandboxed and offline."
+                }
+              >
+                {runScripts ? <Square className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
+                {runScripts ? "Stop scripts" : "Run scripts"}
+              </Button>
               <Button
                 variant="ghost"
                 size="sm"
@@ -302,7 +329,7 @@ export function CodeCanvas() {
             The preview appears when the code finishes generating.
           </div>
         ) : (
-          <HtmlPreview key={reloadNonce} html={displayCode} />
+          <HtmlPreview key={reloadNonce} html={displayCode} scripts={runScripts} />
         )
       ) : (
         <CodeView

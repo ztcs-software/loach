@@ -213,6 +213,18 @@ const UNITS: &[Unit] = &[
     Unit { name: "kelvin", category: Category::Temperature, factor: 0.0 },
 ];
 
+/// Spellings whose case is the prefix — `M` mega, `m` milli — matched before
+/// case is folded, which read `ML` as `mL` and `mPa` as `MPa`, 10⁹ off. The
+/// all-lower and all-upper spellings carry no such signal and still fold.
+const CASED_UNITS: &[Unit] = &[
+    Unit { name: "Mm", category: Category::Length, factor: 1.0e6 },
+    Unit { name: "Mg", category: Category::Mass, factor: 1_000.0 },
+    Unit { name: "ML", category: Category::Volume, factor: 1.0e6 },
+    Unit { name: "Ml", category: Category::Volume, factor: 1.0e6 },
+    Unit { name: "Ms", category: Category::Time, factor: 1.0e6 },
+    Unit { name: "mPa", category: Category::Pressure, factor: 1.0e-3 },
+];
+
 pub fn tool_description() -> &'static str {
     "Convert a numeric value from one unit to another. Use this rather \
      than guessing a conversion factor — your answer will drift for \
@@ -227,8 +239,9 @@ pub fn tool_description() -> &'static str {
      energy (J, kJ, cal, kcal, Wh, kWh, BTU), \
      pressure (Pa, kPa, MPa, bar, psi, atm, mmHg, torr), \
      temperature (C, F, K — `°C` works too). Names are case-insensitive, \
-     except `Cal`: the food Calorie, a kcal, where `cal` is the small \
-     calorie. Plurals (`kilograms`, `hours`) work. Both units must belong to \
+     except a capital `M` for mega against a small `m` for milli (`ML` is \
+     megalitres, `mL` millilitres; `MPa` and `mPa`), and `Cal`: the food \
+     Calorie, a kcal, where `cal` is the small calorie. Plurals (`kilograms`, `hours`) work. Both units must belong to \
      the same category."
 }
 
@@ -315,6 +328,9 @@ fn find_unit(name: &str) -> Option<&'static Unit> {
     // is folded.
     if matches!(name, "Cal" | "Cals") {
         return find_unit("kcal");
+    }
+    if let Some(u) = CASED_UNITS.iter().find(|u| u.name == name) {
+        return Some(u);
     }
     let needle = name.to_ascii_lowercase();
     UNITS.iter().find(|u| u.name == needle).or_else(|| {
@@ -427,6 +443,31 @@ mod tests {
         assert_eq!(convert(2.0, "Cals", "kJ").content_text, "8.368");
         assert_eq!(convert(1000.0, "cal", "kcal").content_text, "1");
         assert_eq!(convert(1.0, "CAL", "J").content_text, "4.184");
+    }
+
+    /// Folding case read `ML` as `mL` and `mPa` as `MPa`, 10⁹ off.
+    #[test]
+    fn case_tells_mega_from_milli() {
+        for (from, to, want) in [
+            ("ML", "L", "1000000"),
+            ("Ml", "L", "1000000"),
+            ("mL", "L", "0.001"),
+            ("ml", "L", "0.001"),
+            ("MPa", "Pa", "1000000"),
+            ("mPa", "Pa", "0.001"),
+            ("Mg", "kg", "1000"),
+            ("mg", "g", "0.001"),
+            ("Mm", "km", "1000"),
+            ("Ms", "s", "1000000"),
+            ("MS", "s", "0.001"),
+            // No case signal: still folded onto the table's spelling.
+            ("mpa", "kPa", "1000"),
+            ("MM", "m", "0.001"),
+        ] {
+            let r = convert(1.0, from, to);
+            assert!(!r.is_error, "{from} → {to}: {}", r.content_text);
+            assert_eq!(r.content_text, want, "{from} → {to}");
+        }
     }
 
     #[test]

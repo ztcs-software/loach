@@ -365,8 +365,8 @@ pub async fn search(
         // in scope has a vector to compare against yet.
         let status = indexer.status();
         let failing = status
-            .error
-            .filter(|_| status.model == Some(cfg.model_label()))
+            .error_for(&cfg)
+            .map(str::to_string)
             .or_else(|| indexer.query_cooldown.lock().active(&cfg, Instant::now()).map(str::to_string));
         if let Some(e) = failing {
             warning = Some(format!("Embedding model unavailable ({e}); searched by keyword only."));

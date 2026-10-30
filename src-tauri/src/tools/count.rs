@@ -4,6 +4,7 @@
 //! strawberry" failure. This tool just delegates to the standard library.
 
 use serde_json::{json, Value};
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::mcp::McpCallResult;
 
@@ -22,6 +23,7 @@ pub fn tool_description() -> &'static str {
      `chars` (Unicode scalar values, not the characters a reader sees: an \
      emoji with a skin tone, a flag, or a letter built from a base and a \
      combining accent counts as 2 or more), \
+     `graphemes` (the characters a reader sees — each of those counts as 1), \
      `bytes` (UTF-8 byte length), \
      `words` (whitespace-separated tokens), \
      `lines` (count of `\\n`-separated lines, treating the final unterminated \
@@ -36,7 +38,7 @@ pub fn input_schema() -> Value {
             "input": { "type": "string", "description": "The string to count in." },
             "mode": {
                 "type": "string",
-                "enum": ["chars", "bytes", "words", "lines", "occurrences"],
+                "enum": ["chars", "graphemes", "bytes", "words", "lines", "occurrences"],
                 "description": "What to count."
             },
             "needle": { "type": "string", "description": "Substring to count for `occurrences`. Required in that mode." },
@@ -63,10 +65,10 @@ pub fn dispatch(args: &Value) -> McpCallResult {
         None => return err("missing required `mode` argument"),
     };
     let n = match mode {
-        // Scalar values, as the description says: counting what a reader
-        // sees as one character takes grapheme segmentation, which no
-        // direct dependency provides.
+        // Scalar values, as the description says; `graphemes` counts what a
+        // reader sees as one character (extended grapheme clusters).
         "chars" => input.chars().count(),
+        "graphemes" => input.graphemes(true).count(),
         "bytes" => input.len(),
         "words" => input.split_whitespace().count(),
         // `lines()` consumes one trailing `\n` if present and treats the
@@ -139,6 +141,21 @@ mod tests {
             assert_eq!(r.content_text, "2", "{input}");
         }
         assert!(tool_description().contains("scalar values"));
+    }
+
+    /// `graphemes` counts what a reader sees: a toned emoji, a flag and an
+    /// `é` built from `e` + U+0301 are one each, where `chars` says 2.
+    #[test]
+    fn graphemes_count_user_perceived_characters() {
+        for input in ["👍🏽", "🇵🇱", "e\u{301}"] {
+            let r = dispatch(&json!({"input": input, "mode": "graphemes"}));
+            assert!(!r.is_error, "{}", r.content_text);
+            assert_eq!(r.content_text, "1", "{input}");
+            let r = dispatch(&json!({"input": input, "mode": "chars"}));
+            assert_eq!(r.content_text, "2", "{input}");
+        }
+        let r = dispatch(&json!({"input": "Café 👍🏽🇵🇱", "mode": "graphemes"}));
+        assert_eq!(r.content_text, "7");
     }
 
     #[test]

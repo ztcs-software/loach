@@ -1,4 +1,5 @@
-import { makeRequestId, startChatStream } from "@/lib/tauri";
+import { listMessages, makeRequestId, startChatStream } from "@/lib/tauri";
+import { stripInlinedAttachments } from "@/lib/files";
 import { logger } from "@/lib/logger";
 import {
   MAX_MEMORY_CHARS,
@@ -15,7 +16,7 @@ import { useGlobalMemoryStore } from "@/stores/globalMemoryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useToastStore } from "@/stores/toastStore";
-import type { MemoryRow, ProviderId } from "@/types";
+import type { MemoryRow, Message, ProviderId, Session } from "@/types";
 
 /** Where an extraction run reads and writes: one Space's memory, or the
  *  global list. Decided by the chat store when the message is sent — Space
@@ -28,6 +29,7 @@ export type MemoryScope =
 export interface MemoryTurn {
   userText: string;
   assistantText: string;
+  userMessageId: string;
   assistantMessageId: string;
 }
 
@@ -102,12 +104,115 @@ let cancelEpoch = 0;
 /** One pass over the queue at a time: two would compete for the model. */
 let draining = false;
 
+/** localStorage key mirroring the queue, so a restart doesn't lose the turns
+ *  waiting in it. References only — the chat, the turn's two messages and the
+ *  scope picked at send time; the words are read back from the database by
+ *  `restoreMemoryTurns`, never stored here. */
+const QUEUE_KEY = "loach:memory-queue";
+
+interface QueuedTurnRef {
+  sessionId: string;
+  scope: MemoryScope;
+  userMessageId: string;
+  assistantMessageId: string;
+}
+
+/** Rewrite the stored queue after any change to it: the run being read
+ *  first (it was queued longest), then the parked ones in order. */
+function saveQueue(): void {
+  const runs = extracting ? [extracting, ...pendingTurns.values()] : [...pendingTurns.values()];
+  const refs: QueuedTurnRef[] = runs.flatMap(({ sessionId, scope, turns }) =>
+    turns.map((t) => ({
+      sessionId,
+      scope,
+      userMessageId: t.userMessageId,
+      assistantMessageId: t.assistantMessageId,
+    })),
+  );
+  try {
+    if (refs.length > 0) localStorage.setItem(QUEUE_KEY, JSON.stringify(refs));
+    else localStorage.removeItem(QUEUE_KEY);
+  } catch {
+    // No storage: the queue still runs this launch, only a restart loses it.
+  }
+}
+
 /** Park a finished turn until `extractMemories` next runs. Keeps only the
  *  newest turns of each chat so a run's prompt stays bounded. */
 export function queueMemoryTurn({ turn, ...run }: MemoryExtractionArgs): void {
   const key = runKey(run);
   const turns = [...(pendingTurns.get(key)?.turns ?? []), turn];
   pendingTurns.set(key, { ...run, turns: turns.slice(-MAX_TURNS_PER_RUN) });
+  saveQueue();
+}
+
+/**
+ * Re-park the turns that were waiting when the app last quit, reading their
+ * text back from the database. A turn whose chat or messages are gone, or
+ * whose scope has memory switched off now, is dropped. Runs once chats,
+ * Spaces and settings have loaded; the turns then wait, like any parked
+ * turn, for a reply to end with the model idle. `findSession` reads the chat
+ * store, which imports this module.
+ */
+export async function restoreMemoryTurns(
+  findSession: (id: string) => Session | undefined,
+): Promise<void> {
+  let saved: unknown;
+  try {
+    saved = JSON.parse(localStorage.getItem(QUEUE_KEY) ?? "[]");
+  } catch {
+    return;
+  }
+  if (!Array.isArray(saved)) return;
+  const refs = (saved as QueuedTurnRef[]).filter(
+    (r) => findSession(r.sessionId) && rememberingIn(r.scope),
+  );
+  const transcripts = new Map<string, Message[]>();
+  await Promise.all(
+    [...new Set(refs.map((r) => r.sessionId))].map(async (id) => {
+      try {
+        transcripts.set(id, await listMessages(id));
+      } catch (e) {
+        logger.warn("couldn't read a chat's queued memory turns", e);
+      }
+    }),
+  );
+
+  const settings = useSettingsStore.getState();
+  const restored = new Map<string, PendingRun>();
+  for (const ref of refs) {
+    // Looked up again: the chat may have been deleted during the reads.
+    const session = findSession(ref.sessionId);
+    const messages = transcripts.get(ref.sessionId) ?? [];
+    const user = messages.find((m) => m.id === ref.userMessageId);
+    const reply = messages.find((m) => m.id === ref.assistantMessageId);
+    if (!session || !user || !reply) continue;
+    const run = {
+      scope: ref.scope,
+      sessionId: ref.sessionId,
+      provider: session.provider,
+      model: session.model,
+      baseUrl: session.provider === "ollama" ? settings.ollama_base_url : settings.openai_base_url,
+    };
+    const key = runKey(run);
+    const turn: MemoryTurn = {
+      // As `finishTask` reads it: what the user typed, not what was inlined.
+      userText: stripInlinedAttachments(user.content),
+      assistantText: reply.content,
+      userMessageId: user.id,
+      assistantMessageId: reply.id,
+    };
+    restored.set(key, { ...run, turns: [...(restored.get(key)?.turns ?? []), turn] });
+  }
+  // Ahead of anything parked since launch: these have waited longer.
+  for (const [key, run] of pendingTurns) {
+    restored.set(key, { ...run, turns: [...(restored.get(key)?.turns ?? []), ...run.turns] });
+  }
+  pendingTurns.clear();
+  for (const [key, run] of restored) {
+    pendingTurns.set(key, { ...run, turns: run.turns.slice(-MAX_TURNS_PER_RUN) });
+  }
+  saveQueue();
 }
 
 /** Forget turns parked for a chat: all of them when the chat is deleted,
@@ -123,6 +228,7 @@ export function dropMemoryTurns(sessionId: string, assistantMessageId?: string):
     if (run.turns.length === 0) pendingTurns.delete(key);
   }
   if (extracting?.sessionId === sessionId) extracting.turns = extracting.turns.filter(kept);
+  saveQueue();
 }
 
 /** Store-agnostic view of one memory scope's CRUD, so the extractor body
@@ -210,6 +316,8 @@ export async function extractMemories(): Promise<void> {
         await extractRun(run, epoch);
       } finally {
         extracting = null;
+        // Its turns are read, dropped or parked again by now.
+        saveQueue();
       }
     }
   } finally {

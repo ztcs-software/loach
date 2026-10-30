@@ -167,11 +167,11 @@ interface LibraryState {
   /** Dataset the Library page is showing as its own page — the Library's
    *  `spaceStore.viewingSpaceId`. Null shows the Library list. */
   viewingDatasetId: string | null;
-  /** Sources picked in the composer before its chat exists (the welcome
-   *  screen, a Space's page), and the Space — or none — that chat will be in.
-   *  Only the composer's own send links them, to the chat it creates in that
-   *  Space; a chat started any other way never picks them up. */
-  pending: { itemIds: string[]; datasetIds: string[]; spaceId: string | null };
+  /** Sources picked in a composer before its chat exists, keyed by that
+   *  composer: a Space's page by the Space's id, the welcome screen by "".
+   *  Only that composer's own send links them, to the chat it creates; a chat
+   *  started any other way, or from another composer, never picks them up. */
+  pending: Record<string, { itemIds: string[]; datasetIds: string[] }>;
 
   hydrate: () => Promise<void>;
   refreshItems: () => Promise<void>;
@@ -180,7 +180,8 @@ interface LibraryState {
   /** Store already-prepared files. Returns the new items. */
   addPrepared: (files: PreparedFile[]) => Promise<LibraryItemMeta[]>;
   addLink: (url: string) => Promise<LibraryItemMeta>;
-  refreshLink: (id: string) => Promise<void>;
+  /** False when the refresh failed (a toast already said why). */
+  refreshLink: (id: string) => Promise<boolean>;
   rename: (id: string, title: string) => Promise<void>;
   /** False when the delete failed (a toast already said why). */
   deleteItems: (ids: string[]) => Promise<boolean>;
@@ -222,12 +223,12 @@ interface LibraryState {
   getContents: (ids: string[]) => Promise<LibraryItem[]>;
   openPreview: (id: string | null) => void;
   openTextEditor: (target: string | null) => void;
-  /** Park sources for the chat the composer will create in `spaceId`.
-   *  Picks parked for a different Space are dropped. */
+  /** Park sources for the chat the composer on `spaceId`'s page (null: the
+   *  welcome screen) will create. */
   addPending: (sel: { itemIds: string[]; datasetIds: string[] }, spaceId: string | null) => void;
-  removePending: (id: string) => void;
-  /** Take (and clear) the pending sources — none, and nothing cleared,
-   *  unless they were picked for a chat in `spaceId`. */
+  removePending: (id: string, spaceId: string | null) => void;
+  /** Take (and clear) the sources parked by the composer on `spaceId`'s page
+   *  (null: the welcome screen). Other composers' picks stay theirs. */
   consumePending: (spaceId: string | null) => { itemIds: string[]; datasetIds: string[] };
   setViewingDataset: (id: string | null) => void;
 }
@@ -246,7 +247,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
   editTextTarget: null,
   editDraft: null,
   viewingDatasetId: null,
-  pending: { itemIds: [], datasetIds: [], spaceId: null },
+  pending: {},
 
   hydrate: async () => {
     // The link lists and bodies already cached stay: they're current (every
@@ -356,12 +357,14 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
       dropContent(id);
       set((s) => ({ items: s.items.map((i) => (i.id === id ? item : i)) }));
       useToastStore.getState().push({ kind: "info", title: "Link refreshed" });
+      return true;
     } catch (e) {
       useToastStore.getState().push({
         kind: "error",
         title: "Couldn't refresh the link",
         body: errorText(e),
       });
+      return false;
     }
   },
 
@@ -577,30 +580,38 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     })),
   addPending: (sel, spaceId) =>
     set((s) => {
-      const kept = s.pending.spaceId === spaceId ? s.pending : { itemIds: [], datasetIds: [] };
+      const key = spaceId ?? "";
+      const kept = s.pending[key] ?? { itemIds: [], datasetIds: [] };
       return {
         pending: {
-          itemIds: [...new Set([...kept.itemIds, ...sel.itemIds])],
-          datasetIds: [...new Set([...kept.datasetIds, ...sel.datasetIds])],
-          spaceId,
+          ...s.pending,
+          [key]: {
+            itemIds: [...new Set([...kept.itemIds, ...sel.itemIds])],
+            datasetIds: [...new Set([...kept.datasetIds, ...sel.datasetIds])],
+          },
         },
       };
     }),
-  removePending: (id) =>
-    set((s) => ({
-      pending: {
-        ...s.pending,
-        itemIds: s.pending.itemIds.filter((x) => x !== id),
-        datasetIds: s.pending.datasetIds.filter((x) => x !== id),
-      },
-    })),
+  removePending: (id, spaceId) =>
+    set((s) => {
+      const key = spaceId ?? "";
+      const kept = s.pending[key];
+      if (!kept) return {};
+      return {
+        pending: {
+          ...s.pending,
+          [key]: {
+            itemIds: kept.itemIds.filter((x) => x !== id),
+            datasetIds: kept.datasetIds.filter((x) => x !== id),
+          },
+        },
+      };
+    }),
   consumePending: (spaceId) => {
-    const { itemIds, datasetIds, spaceId: pickedFor } = get().pending;
-    // Picks parked for another composer stay for it: a chat started from the
-    // welcome screen used to throw away what was picked on a Space's page.
-    if (pickedFor !== spaceId) return { itemIds: [], datasetIds: [] };
-    set({ pending: { itemIds: [], datasetIds: [], spaceId: null } });
-    return { itemIds, datasetIds };
+    const { [spaceId ?? ""]: picked, ...others } = get().pending;
+    if (!picked) return { itemIds: [], datasetIds: [] };
+    set({ pending: others });
+    return picked;
   },
   setViewingDataset: (id) => set({ viewingDatasetId: id }),
 }));

@@ -23,10 +23,13 @@ function isFrameMessage(data: unknown, type: string): boolean {
  * host replaces itself with it. Keying the iframe on `html` gives every new
  * source a fresh page, and a page that reloads itself asks again and gets
  * the same HTML back.
+ *
+ * With `scripts` off the host page is served under a CSP that runs only its
+ * own script, so the page renders as markup and styles alone.
  */
-export function HtmlPreview({ html }: { html: string }) {
+export function HtmlPreview({ html, scripts }: { html: string; scripts: boolean }) {
   const frameRef = useRef<HTMLIFrameElement>(null);
-  const src = sandboxPreviewUrl();
+  const src = sandboxPreviewUrl(scripts);
 
   useEffect(() => {
     const onMessage = (e: MessageEvent) => {
@@ -68,7 +71,7 @@ export function HtmlPreview({ html }: { html: string }) {
 
   return (
     <iframe
-      key={html}
+      key={`${scripts}:${html}`}
       ref={frameRef}
       src={src}
       title="HTML preview"

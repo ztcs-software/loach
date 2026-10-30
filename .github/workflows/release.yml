@@ -226,6 +226,17 @@ jobs:
 
       - run: npm ci
 
+      # The frontend is built here, apart from `tauri build`, which would run
+      # it as its beforeBuildCommand with the updater signing key in the
+      # environment — where vite, its plugins and every other dev dependency
+      # could read it. The tauri-action step skips that hook (see its
+      # `--config`). TAURI_ENV_PLATFORM is the one variable the CLI would
+      # have set that vite.config.ts reads (it picks the build target).
+      - name: Build the frontend
+        run: npm run build
+        env:
+          TAURI_ENV_PLATFORM: ${{ matrix.platform == 'windows-latest' && 'windows' || (matrix.platform == 'macos-14' && 'darwin' || 'linux') }}
+
       # Signs the macOS app with a stable self-signed identity instead of the
       # ad-hoc one in tauri.conf.json, once the two MACOS_SIGNING_* secrets
       # exist. Gatekeeper treats both alike (neither is notarized); the
@@ -329,4 +340,71 @@ jobs:
           # 2.10.1+) downloads them fine: it sends Accept:
           # application/octet-stream and follows the redirect to the file.
           uploadUpdaterJson: true
-          args: ${{ matrix.args }}
+          # prebuilt-frontend.conf.json empties beforeBuildCommand: the
+          # frontend was built in its own step, without the signing key.
+          # (A file, not inline JSON, so no shell or argument splitting can
+          # mangle its quotes. TAURI_CONFIG doesn't reach the build hooks.)
+          # Cargo's build scripts still see the key — the bundler signs in
+          # this same `tauri build`.
+          args: ${{ matrix.args }} --config src-tauri/prebuilt-frontend.conf.json
+
+  # tauri-action merges each leg's entries into latest.json by downloading,
+  # editing and re-uploading it, so two legs finishing together can drop one
+  # platform's entries. Check the merged file once every leg is done: a gap
+  # fails here, loudly, instead of reaching installs as an update that never
+  # arrives. (The fix is re-running the build leg for the missing platform.)
+  verify-updater-json:
+    needs: [prepare, build]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check latest.json lists every platform
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          TAG="v$VERSION"
+          # Drafts aren't reachable by tag, so find it in the release list.
+          ASSET_ID=$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate \
+            --jq ".[] | select(.tag_name == \"$TAG\") | .assets[] | select(.name == \"latest.json\") | .id" | head -n1)
+          if [ -z "$ASSET_ID" ]; then
+            echo "::error::No latest.json on the $TAG release"
+            exit 1
+          fi
+          gh api -H "Accept: application/octet-stream" \
+            "repos/$GITHUB_REPOSITORY/releases/assets/$ASSET_ID" > latest.json
+
+          ANNOUNCED=$(jq -r '.version' latest.json)
+          if [ "${ANNOUNCED#v}" != "$VERSION" ]; then
+            echo "::error::latest.json announces $ANNOUNCED, not $VERSION"
+            exit 1
+          fi
+          problems=()
+          # The keys CLAUDE.md's release checklist expects (v1.2.3's set).
+          for key in windows-x86_64 windows-x86_64-nsis \
+                     linux-x86_64 linux-x86_64-appimage linux-x86_64-deb linux-x86_64-rpm \
+                     darwin-aarch64 darwin-aarch64-app; do
+            sig=$(jq -r --arg k "$key" '.platforms[$k].signature // ""' latest.json)
+            url=$(jq -r --arg k "$key" '.platforms[$k].url // ""' latest.json)
+            if [ -z "$sig" ] || [ -z "$url" ]; then
+              problems+=("$key: missing")
+              continue
+            fi
+            # The signed version must match the announced one — updater 2.13+
+            # rejects a mismatch (SignedVersionMismatch).
+            comment=$(printf '%s' "$sig" | base64 -d | grep -m1 '^trusted comment:' || true)
+            case "$comment" in
+              *"version:$VERSION"*) ;;
+              *) problems+=("$key: signed for another version ($comment)") ;;
+            esac
+            # Installs on updater < 2.10 read only the plain key, and must
+            # get the AppImage, never a .deb/.rpm.
+            if [ "$key" = linux-x86_64 ] && ! printf '%s' "$comment" | grep -q 'file:[^[:space:]]*\.AppImage'; then
+              problems+=("linux-x86_64: not the AppImage ($comment)")
+            fi
+          done
+          if [ ${#problems[@]} -gt 0 ]; then
+            printf '::error::%s\n' "${problems[@]}"
+            exit 1
+          fi
+          echo "latest.json lists every platform, signed for $VERSION"

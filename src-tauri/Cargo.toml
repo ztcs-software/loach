@@ -81,6 +81,10 @@ sha2 = "0.11"
 similar = "3"
 natord = "1"
 ipnet = "2"
+# Grapheme clusters for the `count` tool's `graphemes` mode — the characters
+# a reader sees, where `chars` counts scalar values. Already in the tree
+# through tao, so declaring it costs no new crate.
+unicode-segmentation = "1.13"
 
 # PDF generation for the built-in `pdf` tool. printpdf builds documents
 # from a structured spec and subsets a bundled Liberation Sans TTF (see
@@ -150,9 +154,11 @@ sysinfo = { version = "0.38", default-features = false, features = ["system", "d
 # signature) put each stdio MCP server in a job, so stopping the server stops
 # every process it started — see `mcp/stdio.rs`. `Win32_Storage_FileSystem`
 # is for `MoveFileExW`, the rename behind `move_file` that refuses to
-# overwrite (`tools/fs.rs`).
+# overwrite (`tools/fs.rs`). `Win32_Security_Authorization` is for
+# `Get`/`SetNamedSecurityInfoW`, which carry a file's ACL over to the copy
+# an edit renames into its place (`tools/fs.rs`).
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D12", "Win32_System_JobObjects", "Win32_Security", "Win32_Storage_FileSystem"] }
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D12", "Win32_System_JobObjects", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem"] }
 
 # `killpg` for the same purpose on macOS / Linux: a stdio MCP server runs in
 # its own process group and the whole group is stopped with it. Already in

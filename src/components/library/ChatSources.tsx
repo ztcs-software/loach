@@ -17,9 +17,10 @@ import { formatTokens } from "@/lib/contextUsage";
 import { setSessionRetrievalMode } from "@/lib/tauri";
 import { chatRetrievalMode, estimateChatSources, spaceSourceCount } from "@/lib/sources";
 import { cn } from "@/lib/utils";
-import { useChatStore } from "@/stores/chatStore";
+import { resolveDefaultModelChoice, useChatStore } from "@/stores/chatStore";
 import { useLibraryStore } from "@/stores/libraryStore";
 import { useModelsStore } from "@/stores/modelsStore";
+import { useSettingsStore } from "@/stores/settingsStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useToastStore } from "@/stores/toastStore";
 import { useUIStore } from "@/stores/uiStore";
@@ -29,6 +30,7 @@ import {
   type LibraryDataset,
   type LibraryItemMeta,
   type RetrievalMode,
+  type Space,
   type SpaceFile,
 } from "@/types";
 import { DatasetIcon, ItemIcon, itemTokens, mixLabel } from "./libraryUi";
@@ -67,7 +69,8 @@ export function useChatSources(sessionId: string | null, spaceId: string | null)
   const datasets = useLibraryStore((s) => s.datasets);
   const sessionSources = useLibraryStore((s) => (sessionId ? s.sources[`session:${sessionId}`] : undefined));
   const spaceSources = useLibraryStore((s) => (spaceId ? s.sources[`space:${spaceId}`] : undefined));
-  const pending = useLibraryStore((s) => s.pending);
+  // This composer's own picks, keyed like `addPending` keys them.
+  const pending = useLibraryStore((s) => s.pending[spaceId ?? ""]);
   const ensureSources = useLibraryStore((s) => s.ensureSources);
   const spaceFiles = useSpaceStore((s) => (spaceId ? s.spaceFiles[spaceId] : undefined));
   const loadSpaceFiles = useSpaceStore((s) => s.loadSpaceFiles);
@@ -98,14 +101,13 @@ export function useChatSources(sessionId: string | null, spaceId: string | null)
         if (src.item_id) push("item", src.item_id, src.id);
         else if (src.dataset_id) push("dataset", src.dataset_id, src.id);
       }
-    } else if (pending.spaceId === spaceId) {
-      // Picks parked for a chat in another Space aren't this composer's.
+    } else if (pending) {
       pending.datasetIds.forEach((id) => push("dataset", id, null));
       pending.itemIds.forEach((id) => push("item", id, null));
     }
     const fromSpace = spaceSourceCount(spaceFiles ?? EMPTY_FILES, spaceSources ?? [], datasets, items);
     return { chips, spaceCount: fromSpace };
-  }, [items, datasets, sessionSources, spaceSources, spaceFiles, pending, sessionId, spaceId]);
+  }, [items, datasets, sessionSources, spaceSources, spaceFiles, pending, sessionId]);
 }
 
 /**
@@ -162,7 +164,7 @@ export function ChatSourceChips({
               onClick={() =>
                 c.sourceId && sessionId
                   ? void removeSource("session", sessionId, c.sourceId)
-                  : removePending(c.id)
+                  : removePending(c.id, spaceId)
               }
             />
           </div>
@@ -220,6 +222,40 @@ export function chatNumCtx(
     }
   }
   return n;
+}
+
+/** The window of the model a new chat starts on — in `space`, or outside
+ *  any Space when null — picked the way `newSession` picks it: the Space's
+ *  pinned model (both halves set), else the app's default. A Modelfile's
+ *  `num_ctx`, or the one assumed for an OpenAI-compatible model; undefined
+ *  until known. For sizing sources before the chat exists. */
+export function useNewChatModelCtx(
+  space: Pick<Space, "default_provider" | "default_model"> | null | undefined,
+): number | undefined {
+  const defaultChoice = useSettingsStore((s) => s.default_model_choice);
+  const recentProvider = useSettingsStore((s) => s.default_provider);
+  const recentModel = useSettingsStore((s) => s.default_model);
+  const sessions = useChatStore((s) => s.sessions);
+  const loadModelDefaults = useModelsStore((s) => s.loadModelDefaults);
+  const pinnedProvider = space?.default_provider;
+  const pinnedModel = space?.default_model;
+  const chatModel = useMemo(
+    () =>
+      pinnedProvider && pinnedModel
+        ? { provider: pinnedProvider, model: pinnedModel }
+        : resolveDefaultModelChoice(defaultChoice, recentProvider, recentModel ?? "", sessions),
+    [pinnedProvider, pinnedModel, defaultChoice, recentProvider, recentModel, sessions],
+  );
+  useEffect(() => {
+    if (chatModel.provider === "ollama" && chatModel.model) void loadModelDefaults(chatModel.model);
+  }, [chatModel.provider, chatModel.model, loadModelDefaults]);
+  return useModelsStore((s) =>
+    !chatModel.model
+      ? undefined
+      : chatModel.provider === "ollama"
+        ? s.modelDefaults[chatModel.model]?.num_ctx
+        : OPENAI_COMPAT_NUM_CTX,
+  );
 }
 
 /** How this chat's sources reach the model, with the effective result. */

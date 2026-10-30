@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Brain, MessageSquare, Plus, Search, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -24,6 +24,7 @@ export function MemoryList({
   onUpdate,
   onRemove,
   onOpenChat,
+  onEditingChange,
 }: {
   memories: MemoryRow[];
   /** Gates manual adds — a disabled scope doesn't accumulate new rows. */
@@ -34,6 +35,9 @@ export function MemoryList({
   onRemove: (id: string) => Promise<unknown>;
   /** Navigate to the chat a memory was extracted from. */
   onOpenChat: (sessionId: string) => void;
+  /** Told when an inline edit opens and closes, so a host dialog can leave
+   *  Escape to the edit (which it cancels) instead of closing on it. */
+  onEditingChange?: (editing: boolean) => void;
 }) {
   const { confirm } = useConfirm();
   const sessions = useChatStore((s) => s.sessions);
@@ -86,20 +90,10 @@ export function MemoryList({
     }
   };
 
-  // Radix hears Escape on the document in the capture phase, before the
-  // field does, so in the Global memories dialog Esc closed the whole dialog
-  // instead of the edit. Marked handled from the window — which the capture
-  // phase reaches first — the dialog stays open, and the field's own handler
-  // still cancels the edit.
-  const editRef = useRef<HTMLTextAreaElement>(null);
+  const editing = editingId !== null;
   useEffect(() => {
-    if (!editingId) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !e.isComposing && e.target === editRef.current) e.preventDefault();
-    };
-    window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
-  }, [editingId]);
+    onEditingChange?.(editing);
+  }, [editing, onEditingChange]);
 
   const startEdit = (m: MemoryRow) => {
     setEditingId(m.id);
@@ -239,7 +233,6 @@ export function MemoryList({
                     <div className="min-w-0 flex-1">
                       {editingId === m.id ? (
                         <Textarea
-                          ref={editRef}
                           autoFocus
                           value={editVal}
                           onChange={(e) => setEditVal(e.target.value)}

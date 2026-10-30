@@ -382,11 +382,9 @@ export function AddLinkDialog({
     setError(null);
     try {
       if (existing) {
-        await refreshLink(existing.id);
         // A failed refresh is toasted by the store, not thrown: only a fresh
         // fetch counts, so a failure stays open and out of the dataset.
-        const fresh = useLibraryStore.getState().items.find((i) => i.id === existing.id);
-        if (!fresh || fresh.updated_at === existing.updated_at) return;
+        if (!(await refreshLink(existing.id))) return;
         onAdded?.(existing.id);
       } else {
         const item = await addLink(normalized);

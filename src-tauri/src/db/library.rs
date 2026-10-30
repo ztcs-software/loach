@@ -1547,6 +1547,32 @@ mod tests {
         assert!(plan.iter().any(|d| d.contains("INDEX idx_rag_chunks_doc (doc_kind=? AND doc_id=?)")), "{plan:?}");
     }
 
+    // Regression: the "embedded with this model" counts — per item in the
+    // Library list, per scope in a search — read each chunk past its
+    // embedding BLOB to reach `embed_model`, where an index answers them.
+    #[test]
+    fn embedded_counts_are_read_from_an_index() {
+        let (db, _dir) = fresh_db();
+        let rag_vectors_count = format!(
+            "SELECT COUNT(*), COALESCE(SUM(embed_model IS NOT ?2), 0) FROM rag_chunks WHERE {}",
+            in_scope("?1")
+        );
+        let cases: [(&str, &[&dyn rusqlite::ToSql]); 2] = [
+            (ITEM_META_SELECT, params!["ollama:m1"]),
+            (&rag_vectors_count, params!["[]", "ollama:m1"]),
+        ];
+        for (sql, args) in cases {
+            let conn = db.conn.lock();
+            let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+            let plan: Vec<String> =
+                stmt.query_map(args, |r| r.get(3)).unwrap().collect::<Result<_, _>>().unwrap();
+            assert!(
+                plan.iter().any(|d| d.contains("COVERING INDEX idx_rag_chunks_doc_model")),
+                "{sql}: {plan:?}"
+            );
+        }
+    }
+
     #[test]
     fn chunk_rows_are_read_back_only_within_scope() {
         let (db, _dir) = fresh_db();

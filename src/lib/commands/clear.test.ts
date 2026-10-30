@@ -18,6 +18,12 @@ vi.mock("@/lib/tauri", async (importOriginal) => {
   return { ...actual, updateSessionSystemPrompt, clearSessionMessages };
 });
 
+const dropMemoryTurns = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/memory", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/memory")>();
+  return { ...actual, dropMemoryTurns };
+});
+
 import { dispatch } from "./dispatch";
 import { useChatStore } from "@/stores/chatStore";
 import { SUMMARY_END_TAG, SUMMARY_START_TAG } from "@/lib/contextUsage";
@@ -54,6 +60,8 @@ describe("/clear", () => {
     expect(updateSessionSystemPrompt).toHaveBeenCalledWith({ id: "chat-1", prompt: "Be terse." });
     expect(storedPrompt()).toBe("Be terse.");
     expect(useChatStore.getState().messages["chat-1"]).toEqual([]);
+    // Turns still waiting for memory extraction go with the messages.
+    expect(dropMemoryTurns).toHaveBeenCalledWith("chat-1");
   });
 
   it("leaves instructions without a summary alone", async () => {

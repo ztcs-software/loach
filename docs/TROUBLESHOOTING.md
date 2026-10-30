@@ -191,6 +191,20 @@ Tokens** and **Repeat Penalty** only appear in its **Advanced** view:
   sliders to discard per-chat overrides and fall back to the Space's and
   model's defaults.
 
+### An HTML preview shows the page but nothing on it works
+
+**Problem.** In the code canvas, buttons, games or animations in a
+previewed page do nothing.
+
+**Solution.** Previews open with the page's scripts off — markup and styles
+only. Click **Run scripts** in the preview bar to turn them on for that
+page; another code block, or an edit, starts off again. On macOS and Linux
+a script that never ends freezes Loach until you quit it, because the
+preview runs on the app's own thread there — only run pages you're willing
+to restart for. If a page still misbehaves with scripts on, it may load a
+library from the web: previews are offline, so a CDN `<script src>` never
+arrives.
+
 ---
 
 ## 3. Performance and VRAM

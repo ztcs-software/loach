@@ -250,8 +250,8 @@ interface ChatState {
   setSessionSystemPrompt: (id: string, prompt: string) => Promise<void>;
   /** Set per-session generation parameters. Pass `null` to remove the
    *  override entirely so the session falls back to (model defaults +
-   *  app defaults). */
-  setSessionParams: (id: string, params: GenerationParams | null) => Promise<void>;
+   *  app defaults). Resolves false when the save failed (already toasted). */
+  setSessionParams: (id: string, params: GenerationParams | null) => Promise<boolean>;
   /** Append parsed messages onto the end of a session's transcript as one
    *  import batch. Used by the "Import context" dialog — see
    *  `lib/importContext.ts` for the parser that produces the input shape.
@@ -469,7 +469,9 @@ const PARAM_GUARDS: {
   top_k: (v) => (typeof v === "number" && Number.isFinite(v) ? v : undefined),
   min_p: (v) => (typeof v === "number" && Number.isFinite(v) ? v : undefined),
   max_tokens: (v) => (typeof v === "number" && Number.isFinite(v) ? v : undefined),
-  num_ctx: (v) => (typeof v === "number" && Number.isFinite(v) ? v : undefined),
+  // No window at all isn't a window: unset, so the layer below applies — as
+  // `chatNumCtx` already reads it when sizing this chat's sources.
+  num_ctx: (v) => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : undefined),
   repeat_penalty: (v) =>
     typeof v === "number" && Number.isFinite(v) ? v : undefined,
   frequency_penalty: (v) =>
@@ -1208,6 +1210,7 @@ function finishRunning(
         // exactly where an injected "remember that I …" would come from.
         userText: stripInlinedAttachments(userMsg.content),
         assistantText: buf.content,
+        userMessageId: userMsg.id,
         assistantMessageId: buf.assistantMsgId,
       },
     };
@@ -2345,10 +2348,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   setSessionParams: async (id, params) => {
     const next = params === null ? null : JSON.stringify(params);
+    const prev = get().sessions.find((x) => x.id === id)?.params_json ?? null;
     // Sliders fire many events during a drag, so update the UI optimistically
-    // and persist in the background. A failed write surfaces a toast — we
-    // deliberately do NOT revert the slider mid-drag because that would be
-    // jarring; the user can re-drag if the chip tells them the save failed.
+    // and persist in the background. The Parameter panel keeps its own copy of
+    // what was dragged, so the rollback below doesn't yank a slider mid-drag.
     set((s) => ({
       sessions: s.sessions.map((x) =>
         x.id === id ? { ...x, params_json: next } : x,
@@ -2356,12 +2359,22 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }));
     try {
       await persistSessionParams({ id, params_json: next });
+      return true;
     } catch (e) {
+      // Roll back so the row matches what was saved — but only while it still
+      // holds this write's value: a later drag step that replaced it is its
+      // own write and settles its own way.
+      set((s) => ({
+        sessions: s.sessions.map((x) =>
+          x.id === id && x.params_json === next ? { ...x, params_json: prev } : x,
+        ),
+      }));
       useToastStore.getState().push({
         kind: "error",
         title: "Couldn't save parameters",
         body: e instanceof Error ? e.message : String(e),
       });
+      return false;
     }
   },
 

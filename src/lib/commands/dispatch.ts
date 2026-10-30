@@ -21,7 +21,7 @@ import {
   SUMMARY_END_TAG,
   SUMMARY_START_TAG,
 } from "@/lib/contextUsage";
-import type { MemoryScope } from "@/lib/memory";
+import { dropMemoryTurns, type MemoryScope } from "@/lib/memory";
 import {
   clearSessionMessages,
   fetchUrl,
@@ -160,10 +160,11 @@ function readCurrentParams(session: Session): Partial<GenerationParams> {
   }
 }
 
-async function patchParams(patch: Partial<GenerationParams>): Promise<void> {
+/** False when the save failed — `setSessionParams` has toasted it already. */
+async function patchParams(patch: Partial<GenerationParams>): Promise<boolean> {
   const session = requireSession();
   const merged = { ...readCurrentParams(session), ...patch };
-  await useChatStore.getState().setSessionParams(session.id, merged as GenerationParams);
+  return useChatStore.getState().setSessionParams(session.id, merged as GenerationParams);
 }
 
 /** Whether the chat's row now passes `test`. The session setters catch a
@@ -324,6 +325,9 @@ async function runClear(deps: CommandDeps): Promise<CommandResult> {
   // busy; this one didn't.
   await useChatStore.getState().cancelForSession(session.id);
   await clearSessionMessages(session.id);
+  // Turns still waiting for memory extraction would otherwise be read —
+  // and their facts saved — after the user wiped them.
+  dropMemoryTurns(session.id);
   useChatStore.setState((s) => ({
     messages: { ...s.messages, [session.id]: [] },
     streamingByMessage: Object.fromEntries(
@@ -796,7 +800,7 @@ async function runFetch(rest: string): Promise<CommandResult> {
 async function runThinking(rest: string): Promise<CommandResult> {
   const flag = rest.trim().toLowerCase();
   if (flag !== "on" && flag !== "off") throw new Error("Usage: /thinking on|off");
-  await patchParams({ think: flag === "on" });
+  if (!(await patchParams({ think: flag === "on" }))) return { kind: "noop" };
   return ok("Thinking", flag === "on" ? "Enabled" : "Disabled");
 }
 
@@ -1195,7 +1199,9 @@ async function runSet(rest: string): Promise<CommandResult> {
   if (rawKey.toLowerCase() === "reset" && !rawValue) {
     // Same as the panel's Reset: drop the override so the chat follows the
     // Space / model / app defaults again.
-    await useChatStore.getState().setSessionParams(session.id, null);
+    if (!(await useChatStore.getState().setSessionParams(session.id, null))) {
+      return { kind: "noop" };
+    }
     return ok("Reset parameters", "Back to the defaults");
   }
   // `hasOwn`, not a bare lookup: `/set constructor 1` would otherwise find
@@ -1230,7 +1236,7 @@ async function runSet(rest: string): Promise<CommandResult> {
         }`;
     throw new Error(`Usage: /set ${key} <value> — ${allowed}.`);
   }
-  await patchParams({ [key]: n });
+  if (!(await patchParams({ [key]: n }))) return { kind: "noop" };
   return ok(`Set ${key}`, String(n));
 }
 

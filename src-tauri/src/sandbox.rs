@@ -30,7 +30,24 @@
 //!   `connect-src`), and removes nested frames as they're added: a `srcdoc`
 //!   or `javascript:` frame isn't stopped by `frame-src` and would run its
 //!   own script with a fresh `RTCPeerConnection`.
+//! * **WebView2's WebRTC policy**, on Windows, behind the host page: the main
+//!   window's `additionalBrowserArgs` (`tauri.conf.json`) add
+//!   `--force-webrtc-ip-handling-policy=disable_non_proxied_udp`, so a peer
+//!   connection that got past the page still has no UDP to reach a STUN
+//!   server with. Setting the field replaces wry's own arguments
+//!   (`--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection`, the
+//!   `default_args` in wry 0.57's `src/webview2/mod.rs`), so they're repeated
+//!   ahead of it — re-check them after a wry upgrade.
+//!
+//! Previews start with the page's scripts off: the same host page is also
+//! served as `preview-static.html` under [`STATIC_CSP`], which lets only the
+//! host's own script run. On macOS and Linux WebKit runs the frame on the
+//! app's main thread, so a page stuck in a loop froze all of Loach — lock
+//! screen included — the moment it was previewed; the canvas now asks first.
 
+use base64::{engine::general_purpose::STANDARD, Engine as _};
+use once_cell::sync::Lazy;
+use sha2::{Digest, Sha256};
 use tauri::http::{header, Request, Response, StatusCode};
 
 /// Scheme name. The frame URL is `loach-sandbox://localhost/…` on macOS and
@@ -50,17 +67,45 @@ const CSP: &str = "default-src 'none'; script-src 'unsafe-inline'; \
                    style-src 'unsafe-inline'; img-src data: blob:; font-src data:; \
                    media-src data: blob:; form-action 'none'; base-uri 'none'";
 
+/// [`CSP`] with `script-src` narrowed to the host page's own script, by
+/// hash: the scripts-off preview. The policy belongs to the document and
+/// survives the host's `document.open()` / `write()`, so the page it renders
+/// can't run inline scripts, event-handler attributes or `javascript:` URLs.
+static STATIC_CSP: Lazy<String> = Lazy::new(|| {
+    CSP.replace(
+        "script-src 'unsafe-inline'",
+        &format!("script-src '{}'", host_script_hash()),
+    )
+});
+
+/// CSP hash of the host page's inline script.
+fn host_script_hash() -> String {
+    let page = std::str::from_utf8(PREVIEW_HOST).expect("preview.html is UTF-8");
+    let start = page.find("<script>").expect("preview.html has its script") + "<script>".len();
+    let end = start + page[start..].find("</script>").expect("its script is closed");
+    script_hash(&page[start..end])
+}
+
+/// A CSP `sha256-` source for an inline script's text, as the browser
+/// computes it: after the HTML parser has turned CRLF and lone CR into LF
+/// (a Windows checkout gives preview.html CRLF line endings).
+fn script_hash(text: &str) -> String {
+    let text = text.replace("\r\n", "\n").replace('\r', "\n");
+    format!("sha256-{}", STANDARD.encode(Sha256::digest(text.as_bytes())))
+}
+
 /// Protocol handler registered in `lib.rs`. Every response, the 404 too,
-/// carries [`CSP`].
+/// carries a CSP: [`CSP`], or [`STATIC_CSP`] for the scripts-off page.
 pub fn handle(request: &Request<Vec<u8>>) -> Response<&'static [u8]> {
-    let (status, body) = match request.uri().path() {
-        "/preview.html" => (StatusCode::OK, PREVIEW_HOST),
-        _ => (StatusCode::NOT_FOUND, &[][..]),
+    let (status, body, csp) = match request.uri().path() {
+        "/preview.html" => (StatusCode::OK, PREVIEW_HOST, CSP),
+        "/preview-static.html" => (StatusCode::OK, PREVIEW_HOST, STATIC_CSP.as_str()),
+        _ => (StatusCode::NOT_FOUND, &[][..], CSP),
     };
     Response::builder()
         .status(status)
         .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
-        .header(header::CONTENT_SECURITY_POLICY, CSP)
+        .header(header::CONTENT_SECURITY_POLICY, csp)
         .body(body)
         .expect("static response parts are valid")
 }
@@ -83,6 +128,35 @@ mod tests {
             assert_eq!(res.status(), StatusCode::OK, "{uri}");
             assert_eq!(*res.body(), PREVIEW_HOST);
         }
+    }
+
+    #[test]
+    fn the_scripts_off_page_runs_only_the_host_script() {
+        let res = get("loach-sandbox://localhost/preview-static.html");
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(*res.body(), PREVIEW_HOST);
+        let csp = res.headers()[header::CONTENT_SECURITY_POLICY].to_str().unwrap();
+        // The host script by hash, and nothing that would let the page's own
+        // scripts, handlers or `javascript:` URLs run…
+        assert!(csp.contains(&format!("script-src '{}'", host_script_hash())), "{csp}");
+        let script_src = csp.split(';').find(|d| d.trim().starts_with("script-src")).unwrap();
+        assert!(!script_src.contains("'unsafe-inline'"), "{script_src}");
+        // …while everything else stays exactly as locked down as the
+        // scripts-on page.
+        assert_eq!(
+            csp.replace(&format!("script-src '{}'", host_script_hash()), ""),
+            CSP.replace("script-src 'unsafe-inline'", ""),
+        );
+    }
+
+    #[test]
+    fn the_script_hash_is_taken_over_lf_line_endings() {
+        // A Windows checkout serves the page with CRLF; the browser hashes
+        // the script text with LF, so the CSP must too.
+        let expected = "sha256-kRFp3arxRq/1OfWMJsSJrzuJLf8P4oPBwmTGWuWqWaI=";
+        assert_eq!(script_hash("a\nb\n"), expected);
+        assert_eq!(script_hash("a\r\nb\r\n"), expected);
+        assert_eq!(script_hash("a\rb\r"), expected);
     }
 
     #[test]

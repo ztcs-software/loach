@@ -112,7 +112,7 @@ const run = () => {
     provider: "ollama",
     model: "m",
     baseUrl: "",
-    turn: { userText: "hi", assistantText: "hello", assistantMessageId: "a1" },
+    turn: { userText: "hi", assistantText: "hello", userMessageId: "u1", assistantMessageId: "a1" },
   });
   return extractMemories();
 };

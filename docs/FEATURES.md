@@ -1117,7 +1117,9 @@ folder you pick. None of them is offered inside Private Chat (§2.8).
   model names, UTC by default) and business-day counting. Differences
   count whole periods elapsed — a year only once the same date comes
   round — and days as wall-clock days in the chosen zone.
-- **count** — count characters, bytes, words, lines, or substring hits.
+- **count** — count characters (Unicode scalar values), user-perceived
+  characters (graphemes — an emoji with a skin tone, a flag or an accented
+  letter counts once), bytes, words, lines, or substring hits.
 - **hash** — SHA-224/256/384/512 over UTF-8, hex, or base64 input.
 - **uuid** — generate v4 or v7 UUIDs (up to 100 per call).
 - **base64** — encode/decode with the standard or URL-safe alphabet.
@@ -1239,9 +1241,8 @@ Writes and edits replace the file rather than rewriting it in place. A
 file that is also hard-linked from elsewhere — a pnpm or uv package store,
 say — gets its own new copy, and the other links keep the old contents;
 a write that fails partway leaves the old file intact. Permissions carry
-over (a script stays executable; on Windows, though, the new copy takes
-its folder's inherited access rules, not ones set on the old file alone),
-and a read-only file is refused.
+over (a script stays executable; on Windows a file's own access rules are
+copied to the new copy), and a read-only file is refused.
 
 So is the text encoding. Files that aren't UTF-8 — Windows-1250 or another
 legacy code page, or UTF-16 with a byte-order mark (what PowerShell 5.1
@@ -1363,9 +1364,15 @@ Inline code blocks in assistant messages get an **Open** button (tooltip
 - **HTML preview** — for HTML (an `html` code block, or an `.html` /
   `.htm` attachment) a **Code / Preview** switch renders the page, and
   HTML code blocks get a **Preview** button that opens the canvas straight
-  on it. Scripts, styles and form handlers work; **Reload** starts the page
-  over. On a reply that's still streaming, the preview appears once the
-  code block is complete.
+  on it. The page shows with its **scripts off**: markup and styles only,
+  enforced by the preview's own security policy (inline scripts, event
+  handlers and `javascript:` links are refused). **Run scripts** turns them
+  on for that page — any other code block or edit starts off again — and
+  then scripts and form handlers work; **Reload** starts the page over. On
+  macOS and Linux the preview runs on Loach's own thread, so a script that
+  never stops freezes the app until you quit it; the button's tooltip says
+  so. On a reply that's still streaming, the preview appears once the code
+  block is complete.
 
   The page runs in a sandbox, on an origin of its own: it can't reach
   Loach, your chats or your files, can't open windows or navigate away,
@@ -1374,7 +1381,8 @@ Inline code blocks in assistant messages get an **Open** button (tooltip
   Chart.js, …) shows without it. `localStorage` and `sessionStorage`
   work but last only until the page reloads; cookies aren't available, and
   `alert()` does nothing. Frames inside the page (`<iframe>`, `<object>`,
-  `<embed>`) are removed as they're added, and WebRTC isn't available.
+  `<embed>`) are removed as they're added, and WebRTC isn't available (on
+  Windows the engine itself also refuses it the UDP it would need).
 
 The canvas and the parameters sidebar share the right slot — the canvas
 wins when both would be open.

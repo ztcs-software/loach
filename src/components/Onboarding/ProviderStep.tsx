@@ -44,6 +44,7 @@ import {
   capacityBasis,
   classifyFit,
   formatGb,
+  fullOllamaTag,
   rankChatModels,
   recommendVariant,
   type FitVerdict,
@@ -389,7 +390,9 @@ function OllamaPath({ onProvisioned }: { onProvisioned: () => void }) {
         const settings = useSettingsStore.getState();
         const alreadyPinned =
           settings.default_provider === "ollama"
-            ? list.some((m) => m.id === settings.default_model)
+            ? list.some(
+                (m) => fullOllamaTag(m.id) === fullOllamaTag(settings.default_model ?? ""),
+              )
             : !!settings.default_model;
         if (!alreadyPinned) await setProviderDefault("ollama", list[0].id);
         await refreshModels();
@@ -879,7 +882,10 @@ function ModelCatalog({
     // Don't stack a second pull of the same tag on top of a live one — the
     // Retry button is reachable while the previous attempt is still running.
     const live = Object.values(useModelsStore.getState().runs).some(
-      (r) => r.kind === "pull" && r.target === tag && r.finished === null,
+      (r) =>
+        r.kind === "pull" &&
+        fullOllamaTag(r.target) === fullOllamaTag(tag) &&
+        r.finished === null,
     );
     if (live) return;
     // Pin as default and unblock Continue immediately — the pull

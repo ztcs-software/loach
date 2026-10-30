@@ -75,7 +75,7 @@ beforeEach(() => {
     items: [],
     datasets: [],
     sources: {},
-    pending: { itemIds: [], datasetIds: [], spaceId: null },
+    pending: {},
   });
   useSpaceStore.setState({ viewingSpaceId: null, activeSpaceId: null });
   useChatStore.setState({
@@ -104,7 +104,7 @@ describe("sources picked before the chat exists", () => {
     useChatStore.setState({ activeSessionId: null });
     await get().sendUserMessage("hello", []);
     expect(calls.linked).toEqual([{ ownerId: get().activeSessionId, itemIds: ["doc"] }]);
-    expect(useLibraryStore.getState().pending.itemIds).toEqual([]);
+    expect(useLibraryStore.getState().pending).toEqual({});
   });
 
   it("stay with the Space whose page they were picked on", async () => {
@@ -117,9 +117,7 @@ describe("sources picked before the chat exists", () => {
     await get().sendUserMessage("hello", []);
     expect(calls.linked).toEqual([]);
     expect(useLibraryStore.getState().pending).toEqual({
-      itemIds: ["for-A"],
-      datasetIds: [],
-      spaceId: "space-A",
+      "space-A": { itemIds: ["for-A"], datasetIds: [] },
     });
 
     // Picked and sent on the same page: attached.
@@ -128,5 +126,28 @@ describe("sources picked before the chat exists", () => {
     useSpaceStore.setState({ viewingSpaceId: "space-B", activeSpaceId: "space-B" });
     await get().sendUserMessage("again", []);
     expect(calls.linked).toEqual([{ ownerId: get().activeSessionId, itemIds: ["for-B"] }]);
+  });
+
+  // One slot used to hold them all: a pick in the plain composer threw away
+  // what was picked on a Space's page, and the other way round.
+  it("are kept apart per composer, each sending only its own", async () => {
+    pick("for-A", "space-A");
+    pick("plain", null);
+    pick("for-A-too", "space-A");
+    useLibraryStore.getState().removePending("plain", "space-A"); // not that composer's
+    expect(useLibraryStore.getState().pending).toEqual({
+      "space-A": { itemIds: ["for-A", "for-A-too"], datasetIds: [] },
+      "": { itemIds: ["plain"], datasetIds: [] },
+    });
+
+    await get().sendUserMessage("hello", []);
+    expect(calls.linked).toEqual([{ ownerId: get().activeSessionId, itemIds: ["plain"] }]);
+
+    useChatStore.setState({ activeSessionId: null });
+    useSpaceStore.setState({ spaces: [{ id: "space-A", name: "A" }] as never });
+    useSpaceStore.setState({ viewingSpaceId: "space-A", activeSpaceId: "space-A" });
+    await get().sendUserMessage("again", []);
+    expect(calls.linked[1]).toEqual({ ownerId: get().activeSessionId, itemIds: ["for-A", "for-A-too"] });
+    expect(useLibraryStore.getState().pending).toEqual({});
   });
 });
