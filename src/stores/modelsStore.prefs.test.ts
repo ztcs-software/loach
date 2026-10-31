@@ -36,6 +36,7 @@ const space = (id: string, provider: Space["default_provider"], model: string | 
     default_params_json: null,
     memory_enabled: true,
     retrieval_mode: "auto",
+    image_scaling_json: null,
     created_at: 0,
     updated_at: 0,
   }) satisfies Space;

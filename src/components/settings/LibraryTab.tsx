@@ -3,6 +3,8 @@ import { AlertTriangle, Check, Download, Loader2, RefreshCw, Search, Sparkles } 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useConfirm } from "@/components/ConfirmDialog";
+import { ImageScalingControl } from "@/components/ImageScalingControl";
+import { parseImageScaling, resolveImageScaling } from "@/lib/imageScaling";
 import { ragReindex, setSetting } from "@/lib/tauri";
 import { pullPercent, useLivePullFor } from "@/lib/usePullRuns";
 import { cn } from "@/lib/utils";
@@ -36,12 +38,15 @@ function sameModel(a: string, b: string): boolean {
 }
 
 /**
- * Settings → Library: the embedding model behind search-by-meaning, and the
- * state of the retrieval index built over Library items and Space sources.
+ * Settings → Library: the embedding model behind search-by-meaning, the
+ * state of the retrieval index built over Library items and Space sources,
+ * and how Library images are scaled.
  */
 export function LibraryTab() {
   const provider = useSettingsStore((s) => s.embedding_provider);
   const model = useSettingsStore((s) => s.embedding_model);
+  const imageScaling = useSettingsStore((s) => s.image_scaling);
+  const libraryImageScaling = useSettingsStore((s) => s.library_image_scaling);
   const update = useSettingsStore((s) => s.update);
   const status = useLibraryStore((s) => s.indexStatus);
   const installed = useModelsStore((s) => s.models);
@@ -291,6 +296,23 @@ export function LibraryTab() {
             );
           })}
         </ul>
+      </div>
+
+      {/* Images */}
+      <div className="space-y-3">
+        <div>
+          <div className="text-sm font-medium text-foreground/85">Images</div>
+          <p className="mt-0.5 text-xs text-foreground/50">
+            How Library images are scaled down before they're sent to a model, in chats and
+            Spaces that don't set their own. The original stays in your Library.
+          </p>
+        </div>
+        <ImageScalingControl
+          value={parseImageScaling(libraryImageScaling)}
+          inherited={resolveImageScaling(imageScaling)}
+          inheritFrom="the app's setting (Settings → Features)"
+          onChange={(next) => void update("library_image_scaling", next ? JSON.stringify(next) : "")}
+        />
       </div>
     </>
   );

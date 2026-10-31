@@ -103,6 +103,7 @@ function session(id: string): Session {
     folder_id: null,
     workspace_root: null,
     retrieval_mode: null,
+    image_scaling_json: null,
     created_at: 0,
     updated_at: 0,
   };

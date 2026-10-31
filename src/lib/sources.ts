@@ -1,10 +1,13 @@
 import { ragSearch } from "@/lib/tauri";
 import { charsPerToken } from "@/lib/contextUsage";
 import { cutText, fenceFor, fitImageForModel, promptLabel, stripInlinedAttachments } from "@/lib/files";
+import { resolveImageScaling } from "@/lib/imageScaling";
 import { logger } from "@/lib/logger";
 import { expandSources, useLibraryStore } from "@/stores/libraryStore";
+import { useSettingsStore } from "@/stores/settingsStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import type {
+  ImageScaling,
   LibraryDataset,
   LibraryItemMeta,
   LibrarySource,
@@ -12,6 +15,7 @@ import type {
   RagHit,
   RetrievalMode,
   Session,
+  Space,
   SpaceContext,
   SpaceFile,
   ToolCallRecord,
@@ -32,7 +36,8 @@ import type {
  *    keeps a copy, which the transcript's sources chip shows.
  *
  * Images go with the trailing user turn in either mode, scaled down by
- * `fitImageForModel` and named in the system prompt.
+ * `fitImageForModel` as {@link chatImageScaling} says and named in the
+ * system prompt.
  *
  * `auto` picks full text while the sources fit {@link FULL_TEXT_SHARE} of
  * the context window. Either way the assistant reply carries a
@@ -238,16 +243,16 @@ interface ImageSource {
 const MAX_IMAGES_PER_TURN = 16;
 
 /** Image sources already scaled for a model, so a chat doesn't decode the
- *  same photo again on every turn. Keyed by source and size; holds one
- *  message's worth, so a chat at the cap still finds them all here. */
+ *  same photo again on every turn. Keyed by source, size and scaling; holds
+ *  one message's worth, so a chat at the cap still finds them all here. */
 const fittedImages = new Map<string, Promise<string>>();
 const FITTED_IMAGES_KEPT = MAX_IMAGES_PER_TURN;
 
-function fittedImage(src: ImageSource & { data: string }): Promise<string> {
-  const key = `${src.kind}:${src.id}:${src.data.length}`;
+function fittedImage(src: ImageSource & { data: string }, scaling: ImageScaling): Promise<string> {
+  const key = `${src.kind}:${src.id}:${src.data.length}:${JSON.stringify(scaling)}`;
   let fitted = fittedImages.get(key);
   if (!fitted) {
-    fitted = fitImageForModel(src.data, src.mime);
+    fitted = fitImageForModel(src.data, src.mime, scaling);
     fittedImages.set(key, fitted);
     if (fittedImages.size > FITTED_IMAGES_KEPT) fittedImages.delete(fittedImages.keys().next().value!);
   }
@@ -257,6 +262,22 @@ function fittedImage(src: ImageSource & { data: string }): Promise<string> {
 /** The effective preference for a chat: its own, else its Space's. */
 export function chatRetrievalMode(session: Session, spaceMode: RetrievalMode | null | undefined): RetrievalMode {
   return session.retrieval_mode ?? spaceMode ?? "auto";
+}
+
+/** How a chat's images are scaled: its own setting, else its Space's, else
+ *  — for Library images — the Library's, else the app's. */
+export function chatImageScaling(
+  session: Pick<Session, "image_scaling_json">,
+  space: Pick<Space, "image_scaling_json"> | null | undefined,
+  library: boolean,
+): ImageScaling {
+  const settings = useSettingsStore.getState();
+  return resolveImageScaling(
+    session.image_scaling_json,
+    space?.image_scaling_json,
+    library ? settings.library_image_scaling : null,
+    settings.image_scaling,
+  );
 }
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
@@ -371,15 +392,19 @@ export async function resolveSources(args: {
   // Images go scaled to fit, named in the system prompt and listed in the
   // record, in every mode — one whose body didn't come back is none of these.
   const sentImages = imageSources.filter((s): s is ImageSource & { data: string } => s.data !== undefined);
-  const images = await Promise.all(sentImages.map(fittedImage));
+  const space = session.space_id
+    ? useSpaceStore.getState().spaces.find((s) => s.id === session.space_id) ?? spaceCtx?.space
+    : null;
+  const uploadScaling = chatImageScaling(session, space, false);
+  const libraryScaling = chatImageScaling(session, space, true);
+  const images = await Promise.all(
+    sentImages.map((s) => fittedImage(s, s.kind === "library" ? libraryScaling : uploadScaling)),
+  );
   const imageBlock = buildImageBlock(sentImages.map((s) => s.title));
   const imageEntries: SourcesReport["sources"] = sentImages.map((s) => ({ kind: s.kind, id: s.id, title: s.title }));
   const withImageCount = (result: string) =>
     [result, sentImages.length > 0 ? `Attached ${plural(sentImages.length, "image")}.` : ""].filter(Boolean).join(" ");
 
-  const space = session.space_id
-    ? useSpaceStore.getState().spaces.find((s) => s.id === session.space_id) ?? spaceCtx?.space
-    : null;
   const pref = chatRetrievalMode(session, space?.retrieval_mode);
   const cpt = docsCharsPerToken(docs);
   const mode = resolveMode(pref, sourceTokens(docs), numCtx);

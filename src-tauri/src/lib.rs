@@ -468,6 +468,8 @@ pub fn run() {
             commands::set_space_file_enabled,
             commands::set_space_retrieval_mode,
             commands::set_session_retrieval_mode,
+            commands::set_space_image_scaling,
+            commands::set_session_image_scaling,
             commands::rag_search,
             commands::rag_status,
             commands::rag_reindex,

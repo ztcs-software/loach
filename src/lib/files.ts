@@ -1,4 +1,5 @@
-import type { Attachment } from "@/types";
+import type { Attachment, ImageScaling } from "@/types";
+import { scaledSize } from "@/lib/imageScaling";
 import { saveBinaryToFile, saveTextToFile } from "@/lib/tauri";
 
 const MAX_FILE_BYTES = 20 * 1024 * 1024; // 20 MB
@@ -139,29 +140,28 @@ function blobToBase64(blob: Blob): Promise<string> {
   });
 }
 
-/** Longest side, in pixels, an image source is sent to a model at. A camera
- *  photo kept whole runs to thousands of image tokens, and models do worse
- *  with it, not better: Gemma 4 on Ollama answered a 24-megapixel dataset
- *  photo as if no picture were attached, and described it at 1024 px. */
-export const MODEL_IMAGE_MAX_SIDE = 1024;
-
 /**
- * `base64` (an image of type `mime`) scaled down to fit
- * {@link MODEL_IMAGE_MAX_SIDE}, as base64 — JPEG stays JPEG, anything else
- * becomes PNG so transparency survives. An image that already fits, or that
- * can't be decoded here, comes back unchanged: sending the original beats
- * sending nothing.
+ * `base64` (an image of type `mime`) scaled down as `scaling` says (see
+ * `src/lib/imageScaling.ts`), as base64 — JPEG stays JPEG, anything else
+ * becomes PNG so transparency survives. An image scaling is off for, one
+ * that already fits, or one that can't be decoded here comes back
+ * unchanged: sending the original beats sending nothing.
  */
-export async function fitImageForModel(base64: string, mime: string): Promise<string> {
+export async function fitImageForModel(
+  base64: string,
+  mime: string,
+  scaling: ImageScaling,
+): Promise<string> {
+  if (!scaling.enabled) return base64;
   try {
     const img = new Image();
     img.src = `data:${safeImageMime(mime)};base64,${base64}`;
     await img.decode();
-    const scale = MODEL_IMAGE_MAX_SIDE / Math.max(img.naturalWidth, img.naturalHeight);
-    if (!(scale < 1)) return base64;
+    const { width, height } = scaledSize(img.naturalWidth, img.naturalHeight, scaling);
+    if (width === img.naturalWidth && height === img.naturalHeight) return base64;
     const canvas = document.createElement("canvas");
-    canvas.width = Math.max(1, Math.round(img.naturalWidth * scale));
-    canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
+    canvas.width = width;
+    canvas.height = height;
     const ctx = canvas.getContext("2d");
     if (!ctx) return base64;
     ctx.imageSmoothingQuality = "high";
@@ -501,8 +501,14 @@ export function inlineTextAttachments(
   return out;
 }
 
-export function imagesFromAttachments(attachments: Attachment[]): string[] {
-  return attachments.filter((a) => a.kind === "image").map((a) => a.data);
+/** The images among `attachments`, as base64 scaled for a model. */
+export function imagesFromAttachments(
+  attachments: Attachment[],
+  scaling: ImageScaling,
+): Promise<string[]> {
+  return Promise.all(
+    attachments.filter((a) => a.kind === "image").map((a) => fitImageForModel(a.data, a.mime, scaling)),
+  );
 }
 
 /**

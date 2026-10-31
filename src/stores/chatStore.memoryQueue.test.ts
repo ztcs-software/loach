@@ -106,6 +106,7 @@ function session(id: string, spaceId: string | null): Session {
     folder_id: null,
     workspace_root: null,
     retrieval_mode: null,
+    image_scaling_json: null,
     created_at: 0,
     updated_at: 0,
   };
@@ -121,6 +122,7 @@ const space = {
   default_params_json: null,
   memory_enabled: true,
   retrieval_mode: "auto",
+  image_scaling_json: null,
   created_at: 0,
   updated_at: 0,
 } satisfies Space;

@@ -63,7 +63,7 @@ import { formatProviderError } from "@/lib/providerErrors";
 import { getPersona } from "@/lib/personas";
 import { getTone } from "@/lib/tones";
 import { applyTemporalAwareness } from "@/lib/temporal";
-import { cutText, resolveSources } from "@/lib/sources";
+import { chatImageScaling, cutText, resolveSources } from "@/lib/sources";
 import {
   buildFetchToolRecords,
   extractUrls,
@@ -803,14 +803,15 @@ ${transcript}
  * `regenerateLast` (with the previous user turn already in history). The
  * caller passes `history` containing every message EXCEPT the trigger user
  * turn — the function appends the trigger as the trailing user turn so
- * `images` is attached only to that one entry.
+ * `images` is attached only to that one entry. The trigger's image
+ * attachments are scaled here, as the chat's image scaling says.
  */
 async function buildTaskRequest(
   session: Session,
   sessionId: string,
   history: Message[],
   triggerContent: string,
-  triggerImages: string[],
+  triggerAttachments: Attachment[],
 ): Promise<{ request: QueueTask["request"]; preToolCalls: ToolCallRecord[] }> {
   const settings = useSettingsStore.getState();
   const baseUrl =
@@ -961,6 +962,14 @@ async function buildTaskRequest(
       ? `${effectiveSystemPrompt}\n\n${tone.systemPrompt}`
       : tone.systemPrompt;
   }
+
+  const space = session.space_id
+    ? useSpaceStore.getState().spaces.find((s) => s.id === session.space_id) ?? spaceCtx?.space
+    : null;
+  const triggerImages = await imagesFromAttachments(
+    triggerAttachments,
+    chatImageScaling(session, space, false),
+  );
 
   // Retrieved excerpts ride on this turn only: they're picked for this
   // message, and keeping them out of the system prompt leaves its cached
@@ -2542,7 +2551,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
     try {
 
       let inlinedContent = inlineTextAttachments(rawContent, attachments);
-      const images = imagesFromAttachments(attachments);
       const attachmentsJson = JSON.stringify(
         attachments.map((a) => ({
           kind: a.kind,
@@ -2613,7 +2621,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         sessionId,
         trimmed,
         inlinedContent,
-        images,
+        attachments,
       );
       const preToolCalls = [...fetchToolRecords, ...sourceRecords];
 
@@ -2707,14 +2715,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
         };
       });
 
-      // Re-extract images from the original user turn's attachments_json
-      // so the new request reaches the model with the same multimodal
-      // context as the original send.
-      let triggerImages: string[] = [];
+      // Re-read the original user turn's attachments_json so the new
+      // request reaches the model with the same images as the original send.
+      let triggerAttachments: Attachment[] = [];
       if (userMsg.attachments_json) {
         try {
-          const atts = JSON.parse(userMsg.attachments_json) as Attachment[];
-          triggerImages = imagesFromAttachments(atts);
+          triggerAttachments = JSON.parse(userMsg.attachments_json) as Attachment[];
         } catch {
           /* malformed JSON — proceed without images */
         }
@@ -2728,7 +2734,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         sessionId,
         history,
         userMsg.content,
-        triggerImages,
+        triggerAttachments,
       );
 
       const task: QueueTask = {

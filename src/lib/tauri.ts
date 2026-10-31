@@ -139,6 +139,7 @@ export function createSession(args: {
       folder_id: null,
       workspace_root: null,
       retrieval_mode: null,
+      image_scaling_json: null,
       created_at: now,
       updated_at: now,
     });
@@ -171,6 +172,7 @@ export function forkSession(args: {
       folder_id: null,
       workspace_root: null,
       retrieval_mode: null,
+      image_scaling_json: null,
       created_at: now,
       updated_at: now,
     });
@@ -785,6 +787,7 @@ export function createSpace(args: {
       default_params_json: null,
       memory_enabled: true,
       retrieval_mode: "auto",
+      image_scaling_json: null,
       created_at: now,
       updated_at: now,
     });
@@ -861,6 +864,7 @@ export function getSpaceContext(spaceId: string): Promise<SpaceContext> {
         default_params_json: null,
         memory_enabled: true,
         retrieval_mode: "auto",
+        image_scaling_json: null,
         created_at: 0,
         updated_at: 0,
       },
@@ -1100,6 +1104,20 @@ export function setSpaceRetrievalMode(id: string, mode: RetrievalMode): Promise<
 export function setSessionRetrievalMode(id: string, mode: RetrievalMode | null): Promise<void> {
   if (!isTauri) return notInTauri(undefined);
   return invoke("set_session_retrieval_mode", { id, mode });
+}
+
+/** `scaling` is `ImageScaling` JSON; `null` makes the Space inherit the
+ *  app's again. */
+export function setSpaceImageScaling(id: string, scaling: string | null): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("set_space_image_scaling", { id, scaling });
+}
+
+/** `scaling` is `ImageScaling` JSON; `null` makes the chat inherit its
+ *  Space's (or the app's) again. */
+export function setSessionImageScaling(id: string, scaling: string | null): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("set_session_image_scaling", { id, scaling });
 }
 
 export function ragSearch(args: {

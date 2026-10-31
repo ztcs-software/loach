@@ -43,8 +43,23 @@ export interface Session {
   /** How this chat's Library and Space sources reach the model. Null =
    *  inherit (the Space's mode, else `"auto"`). See `src/lib/sources.ts`. */
   retrieval_mode: RetrievalMode | null;
+  /** How this chat's images are scaled before they reach the model, as
+   *  `ImageScaling` JSON. Null = inherit (the Space's, else the app's). See
+   *  `src/lib/imageScaling.ts`. */
+  image_scaling_json: string | null;
   created_at: number;
   updated_at: number;
+}
+
+/** How images are scaled down before they're sent to a model: `px` caps the
+ *  longest side, `percent` shrinks both sides to that share of the original.
+ *  Neither ever enlarges. Off sends the original. Both sizes are kept so
+ *  switching modes doesn't lose the other one. */
+export interface ImageScaling {
+  enabled: boolean;
+  mode: "px" | "percent";
+  px: number;
+  percent: number;
 }
 
 /** How a chat's sources reach the model:
@@ -87,6 +102,9 @@ export interface Space {
   memory_enabled: boolean;
   /** How this Space's sources reach the model. */
   retrieval_mode: RetrievalMode;
+  /** How images are scaled for this Space's chats, as `ImageScaling` JSON.
+   *  Null = inherit the app's. */
+  image_scaling_json: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -594,6 +612,13 @@ export interface Settings {
   /** Embedding model name, or `""` for none — retrieval then ranks by
    *  keyword only. */
   embedding_model: string;
+  /** How images are scaled before they reach a model, as `ImageScaling`
+   *  JSON; `""` means the built-in default (longest side 1024 px). Chats and
+   *  Spaces can override it. See `src/lib/imageScaling.ts`. */
+  image_scaling: string;
+  /** The same for Library images, in chats and Spaces that don't set their
+   *  own; `""` follows `image_scaling`. */
+  library_image_scaling: string;
   /** Slash commands the user ran most recently, newest first, as a JSON
    *  string array (`["model","new"]`). Drives the "Recent" section at the
    *  top of the composer's `/` palette. Never shown in the Settings dialog
@@ -642,6 +667,8 @@ export const DEFAULT_SETTINGS: Settings = {
   lock_on_hide: false,
   embedding_provider: "ollama",
   embedding_model: "",
+  image_scaling: "",
+  library_image_scaling: "",
   recent_commands: "",
 };
 

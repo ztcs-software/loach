@@ -342,6 +342,7 @@ mod tests {
             folder_id: None,
             workspace_root: None,
             retrieval_mode: None,
+            image_scaling_json: None,
             created_at: 0,
             updated_at,
         }

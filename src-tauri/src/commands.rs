@@ -755,6 +755,8 @@ const WRITABLE_SETTING_KEYS: &[&str] = &[
     "recent_commands",
     "embedding_provider",
     "embedding_model",
+    "image_scaling",
+    "library_image_scaling",
 ];
 
 /// Whether `key` is a setting the app is allowed to write. Built-in tool
@@ -3361,6 +3363,36 @@ pub async fn set_session_retrieval_mode(
         check_retrieval_mode(m)?;
     }
     state.db.set_session_retrieval_mode(&id, mode.as_deref()).map_err(err)
+}
+
+fn check_image_scaling(json: Option<String>) -> Result<Option<String>, String> {
+    json.map(|j| {
+        crate::db::normalize_image_scaling(&j).ok_or_else(|| format!("invalid image scaling `{j}`"))
+    })
+    .transpose()
+}
+
+/// `scaling: None` makes the Space inherit the app's image scaling again.
+#[tauri::command]
+pub async fn set_space_image_scaling(
+    state: State<'_, AppState>,
+    id: String,
+    scaling: Option<String>,
+) -> Result<(), String> {
+    let scaling = check_image_scaling(scaling)?;
+    state.db.set_space_image_scaling(&id, scaling.as_deref()).map_err(err)
+}
+
+/// `scaling: None` makes the chat inherit its Space's (or the app's) image
+/// scaling again.
+#[tauri::command]
+pub async fn set_session_image_scaling(
+    state: State<'_, AppState>,
+    id: String,
+    scaling: Option<String>,
+) -> Result<(), String> {
+    let scaling = check_image_scaling(scaling)?;
+    state.db.set_session_image_scaling(&id, scaling.as_deref()).map_err(err)
 }
 
 /// Find the excerpts of `args.docs` most relevant to `args.query`.

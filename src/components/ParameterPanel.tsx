@@ -7,11 +7,15 @@ import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { ImageScalingControl } from "@/components/ImageScalingControl";
 import { useChatStore } from "@/stores/chatStore";
 import { useModelsStore } from "@/stores/modelsStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useSpaceStore } from "@/stores/spaceStore";
+import { useToastStore } from "@/stores/toastStore";
 import { useUIStore } from "@/stores/uiStore";
+import { parseImageScaling, resolveImageScaling } from "@/lib/imageScaling";
+import { setSessionImageScaling } from "@/lib/tauri";
 import {
   DEFAULT_PERSONA_ID,
   PERSONAS,
@@ -20,7 +24,7 @@ import {
 } from "@/lib/personas";
 import { DEFAULT_TONE_ID, TONES, type Tone } from "@/lib/tones";
 import { cn } from "@/lib/utils";
-import { DEFAULT_PARAMS, type GenerationParams, type Session } from "@/types";
+import { DEFAULT_PARAMS, type GenerationParams, type ImageScaling, type Session } from "@/types";
 
 function parseOverrides(json: string | null): Partial<GenerationParams> {
   if (!json) return {};
@@ -29,6 +33,24 @@ function parseOverrides(json: string | null): Partial<GenerationParams> {
   } catch {
     return {};
   }
+}
+
+/** Save a chat's own image scaling, or `null` to inherit again. */
+async function saveImageScaling(sessionId: string, scaling: ImageScaling | null) {
+  const json = scaling ? JSON.stringify(scaling) : null;
+  try {
+    await setSessionImageScaling(sessionId, json);
+  } catch (e) {
+    useToastStore.getState().push({
+      kind: "error",
+      title: "Couldn't change image scaling",
+      body: e instanceof Error ? e.message : String(e),
+    });
+    return;
+  }
+  useChatStore.setState((s) => ({
+    sessions: s.sessions.map((x) => (x.id === sessionId ? { ...x, image_scaling_json: json } : x)),
+  }));
 }
 
 export function ParameterPanel({ session }: { session: Session | undefined }) {
@@ -105,6 +127,13 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
     () => parseOverrides(spaceParamsJson),
     [spaceParamsJson],
   );
+  // What the chat's image scaling falls back to: its Space's, else the app's.
+  const spaceImageScaling = useSpaceStore((s) =>
+    session?.space_id
+      ? s.spaces.find((x) => x.id === session.space_id)?.image_scaling_json ?? null
+      : null,
+  );
+  const appImageScaling = useSettingsStore((s) => s.image_scaling);
 
   // The merge order mirrors `chatStore.readSessionParams` exactly so the
   // sliders (and the Thinking toggle) show the same values the request
@@ -539,6 +568,15 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
             </div>
 
             <div className="h-px bg-foreground/[0.08]" />
+
+            <Section title="Images">
+              <ImageScalingControl
+                value={parseImageScaling(session.image_scaling_json)}
+                inherited={resolveImageScaling(spaceImageScaling, appImageScaling)}
+                inheritFrom={session.space_id ? "the Space's setting" : "the app's setting"}
+                onChange={(next) => void saveImageScaling(session.id, next)}
+              />
+            </Section>
 
             <div>
               <Label className="text-xs font-semibold uppercase tracking-[0.12em] text-foreground/70">

@@ -96,6 +96,11 @@ pub struct Session {
     /// for a chat in a Space, otherwise `"auto"`. See `src/lib/sources.ts`.
     #[serde(default)]
     pub retrieval_mode: Option<String>,
+    /// How images are scaled before they reach the model, as the JSON
+    /// [`normalize_image_scaling`] accepts. Null means "inherit" — the
+    /// Space's, else the app's. See `src/lib/imageScaling.ts`.
+    #[serde(default)]
+    pub image_scaling_json: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -145,6 +150,10 @@ pub struct Space {
     /// those Spaces did, as the 1.6 migration keeps for existing rows.
     #[serde(default = "pre_library_retrieval_mode")]
     pub retrieval_mode: String,
+    /// How images are scaled for the Space's chats, as the JSON
+    /// [`normalize_image_scaling`] accepts. Null means "inherit the app's".
+    #[serde(default)]
+    pub image_scaling_json: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -165,6 +174,29 @@ fn pre_library_retrieval_mode() -> String {
 /// labels up by the value, so anything else breaks it.
 pub fn is_retrieval_mode(mode: &str) -> bool {
     matches!(mode, "auto" | "full" | "retrieval")
+}
+
+/// An image-scaling override (`src/lib/imageScaling.ts`) re-encoded, or
+/// None when `json` isn't one: unparseable, an unknown mode, or a size
+/// outside what the UI offers.
+pub fn normalize_image_scaling(json: &str) -> Option<String> {
+    #[derive(Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct ImageScaling {
+        enabled: bool,
+        mode: String,
+        px: u32,
+        percent: u32,
+    }
+    let s: ImageScaling = serde_json::from_str(json).ok()?;
+    let valid = matches!(s.mode.as_str(), "px" | "percent")
+        && (64..=8192).contains(&s.px)
+        && (1..=100).contains(&s.percent);
+    if valid {
+        serde_json::to_string(&s).ok()
+    } else {
+        None
+    }
 }
 
 /// One free-text fact persisted across chats in a Space. The extractor
@@ -965,6 +997,13 @@ impl Database {
                 "ALTER TABLE space_files ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1;",
             )?;
         }
+        // Image scaling, per chat and per Space (NULL = inherit).
+        if !has_column(&conn, "sessions", "image_scaling_json")? {
+            conn.execute_batch("ALTER TABLE sessions ADD COLUMN image_scaling_json TEXT;")?;
+        }
+        if !has_column(&conn, "spaces", "image_scaling_json")? {
+            conn.execute_batch("ALTER TABLE spaces ADD COLUMN image_scaling_json TEXT;")?;
+        }
 
         // Library: items (texts, files, links) stored once, grouped into
         // datasets (an item can sit in several), and linked — not copied —
@@ -1107,7 +1146,7 @@ impl Database {
     pub fn list_sessions(&self) -> Result<Vec<Session>> {
         self.with_read(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, title, provider, model, system_prompt, params_json, space_id, pinned_at, archived_at, forked_from_session_id, label, folder_id, workspace_root, created_at, updated_at, retrieval_mode
+                "SELECT id, title, provider, model, system_prompt, params_json, space_id, pinned_at, archived_at, forked_from_session_id, label, folder_id, workspace_root, created_at, updated_at, retrieval_mode, image_scaling_json
                  FROM sessions ORDER BY updated_at DESC",
             )?;
             let rows = stmt
@@ -1127,6 +1166,7 @@ impl Database {
                         folder_id: r.get(11)?,
                         workspace_root: r.get(12)?,
                         retrieval_mode: r.get(15)?,
+                        image_scaling_json: r.get(16)?,
                         created_at: r.get(13)?,
                         updated_at: r.get(14)?,
                     })
@@ -1167,6 +1207,7 @@ impl Database {
             folder_id: None,
             workspace_root: None,
             retrieval_mode: None,
+            image_scaling_json: None,
             created_at: now,
             updated_at: now,
         })
@@ -1238,8 +1279,9 @@ impl Database {
         tx.execute(
             "INSERT INTO sessions (id, title, provider, model, system_prompt, params_json,
                                    space_id, pinned_at, archived_at, forked_from_session_id,
-                                   folder_id, workspace_root, retrieval_mode, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, ?8, ?9, ?10, ?11, ?12, ?12)",
+                                   folder_id, workspace_root, retrieval_mode, image_scaling_json,
+                                   created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, ?8, ?9, ?10, ?11, ?12, ?13, ?13)",
             params![
                 new_id,
                 source.title,
@@ -1252,6 +1294,7 @@ impl Database {
                 source.folder_id,
                 source.workspace_root,
                 source.retrieval_mode,
+                source.image_scaling_json,
                 now,
             ],
         )?;
@@ -1319,6 +1362,7 @@ impl Database {
             // try something else against the same project.
             workspace_root: source.workspace_root,
             retrieval_mode: source.retrieval_mode,
+            image_scaling_json: source.image_scaling_json,
             created_at: now,
             updated_at: now,
         })
@@ -1486,7 +1530,7 @@ impl Database {
     pub fn get_session(&self, id: &str) -> Result<Option<Session>> {
         self.with_read(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, title, provider, model, system_prompt, params_json, space_id, pinned_at, archived_at, forked_from_session_id, label, folder_id, workspace_root, created_at, updated_at, retrieval_mode
+                "SELECT id, title, provider, model, system_prompt, params_json, space_id, pinned_at, archived_at, forked_from_session_id, label, folder_id, workspace_root, created_at, updated_at, retrieval_mode, image_scaling_json
                  FROM sessions WHERE id = ?1",
             )?;
             let mut rows = stmt.query(params![id])?;
@@ -1506,6 +1550,7 @@ impl Database {
                     folder_id: r.get(11)?,
                     workspace_root: r.get(12)?,
                     retrieval_mode: r.get(15)?,
+                    image_scaling_json: r.get(16)?,
                     created_at: r.get(13)?,
                     updated_at: r.get(14)?,
                 }))
@@ -2098,7 +2143,7 @@ impl Database {
             let mut stmt = conn.prepare(
                 "SELECT id, name, description, instructions,
                         default_provider, default_model, default_params_json,
-                        memory_enabled, created_at, updated_at, retrieval_mode
+                        memory_enabled, created_at, updated_at, retrieval_mode, image_scaling_json
                  FROM spaces ORDER BY updated_at DESC",
             )?;
             let rows = stmt
@@ -2113,6 +2158,7 @@ impl Database {
                         default_params_json: r.get(6)?,
                         memory_enabled: r.get::<_, i64>(7)? != 0,
                         retrieval_mode: r.get(10)?,
+                        image_scaling_json: r.get(11)?,
                         created_at: r.get(8)?,
                         updated_at: r.get(9)?,
                     })
@@ -2127,7 +2173,7 @@ impl Database {
             let mut stmt = conn.prepare(
                 "SELECT id, name, description, instructions,
                         default_provider, default_model, default_params_json,
-                        memory_enabled, created_at, updated_at, retrieval_mode
+                        memory_enabled, created_at, updated_at, retrieval_mode, image_scaling_json
                  FROM spaces WHERE id = ?1",
             )?;
             let mut rows = stmt.query(params![id])?;
@@ -2142,6 +2188,7 @@ impl Database {
                     default_params_json: r.get(6)?,
                     memory_enabled: r.get::<_, i64>(7)? != 0,
                     retrieval_mode: r.get(10)?,
+                    image_scaling_json: r.get(11)?,
                     created_at: r.get(8)?,
                     updated_at: r.get(9)?,
                 }))
@@ -2175,6 +2222,7 @@ impl Database {
             default_params_json: None,
             memory_enabled: true,
             retrieval_mode: default_retrieval_mode(),
+            image_scaling_json: None,
             created_at: now,
             updated_at: now,
         })
@@ -2330,6 +2378,28 @@ impl Database {
         conn.execute(
             "UPDATE sessions SET retrieval_mode = ?1 WHERE id = ?2",
             params![mode, id],
+        )?;
+        Ok(())
+    }
+
+    /// Set a Space's image scaling, or `None` to inherit the app's.
+    /// Validated by the caller.
+    pub fn set_space_image_scaling(&self, id: &str, json: Option<&str>) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "UPDATE spaces SET image_scaling_json = ?1 WHERE id = ?2",
+            params![json, id],
+        )?;
+        Ok(())
+    }
+
+    /// Set a chat's own image scaling, or `None` to inherit. Leaves
+    /// `updated_at` alone, like the retrieval mode.
+    pub fn set_session_image_scaling(&self, id: &str, json: Option<&str>) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "UPDATE sessions SET image_scaling_json = ?1 WHERE id = ?2",
+            params![json, id],
         )?;
         Ok(())
     }
@@ -3138,13 +3208,15 @@ impl Database {
         // `retrieval_mode` is screened here because a snapshot never passes
         // the setters' `check_retrieval_mode`: an unknown value goes back to
         // inheriting (NULL), and an unknown Space mode below to what a new
-        // Space gets.
+        // Space gets. `image_scaling_json` likewise goes back to inheriting
+        // unless it's one the setters would have taken.
         for s in &d.sessions {
             tx.execute(
                 "INSERT INTO sessions (id, title, provider, model, system_prompt, params_json,
                                        space_id, pinned_at, archived_at, forked_from_session_id,
-                                       label, folder_id, created_at, updated_at, retrieval_mode)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                                       label, folder_id, created_at, updated_at, retrieval_mode,
+                                       image_scaling_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
                 params![
                     s.id,
                     s.title,
@@ -3161,6 +3233,7 @@ impl Database {
                     s.created_at,
                     s.updated_at,
                     s.retrieval_mode.as_deref().filter(|m| is_retrieval_mode(m)),
+                    s.image_scaling_json.as_deref().and_then(normalize_image_scaling),
                 ],
             )?;
         }
@@ -3199,8 +3272,8 @@ impl Database {
                 "INSERT INTO spaces (id, name, description, instructions,
                                      default_provider, default_model,
                                      default_params_json, memory_enabled,
-                                     created_at, updated_at, retrieval_mode)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                                     created_at, updated_at, retrieval_mode, image_scaling_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 params![
                     sp.id,
                     sp.name,
@@ -3217,6 +3290,7 @@ impl Database {
                     } else {
                         default_retrieval_mode()
                     },
+                    sp.image_scaling_json.as_deref().and_then(normalize_image_scaling),
                 ],
             )?;
         }
@@ -4343,6 +4417,65 @@ mod tests {
             db2.get_session(&s.id).unwrap().unwrap().retrieval_mode.as_deref(),
             Some("full")
         );
+    }
+
+    #[test]
+    fn image_scaling_accepts_only_what_the_ui_offers() {
+        let ok = r#"{"enabled":true,"mode":"px","px":1024,"percent":50}"#;
+        assert_eq!(normalize_image_scaling(ok).as_deref(), Some(ok));
+        // Re-encoded, so key order and whitespace don't matter.
+        assert_eq!(
+            normalize_image_scaling(r#"{ "percent": 25, "px": 64, "mode": "percent", "enabled": false }"#)
+                .as_deref(),
+            Some(r#"{"enabled":false,"mode":"percent","px":64,"percent":25}"#)
+        );
+        for bad in [
+            "",
+            "null",
+            r#"{"enabled":true,"mode":"px","px":1024}"#,
+            r#"{"enabled":true,"mode":"zoom","px":1024,"percent":50}"#,
+            r#"{"enabled":true,"mode":"px","px":32,"percent":50}"#,
+            r#"{"enabled":true,"mode":"px","px":9000,"percent":50}"#,
+            r#"{"enabled":true,"mode":"percent","px":1024,"percent":0}"#,
+            r#"{"enabled":true,"mode":"percent","px":1024,"percent":150}"#,
+            r#"{"enabled":true,"mode":"px","px":1024,"percent":50,"extra":1}"#,
+        ] {
+            assert_eq!(normalize_image_scaling(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn image_scaling_round_trips_and_restores_screened() {
+        let (db, _dir) = fresh_db();
+        let sp = db.create_space("Work", "", "").unwrap();
+        let s = db
+            .create_session("t", "ollama", "llama3", None, Some(&sp.id))
+            .unwrap();
+        let json = r#"{"enabled":true,"mode":"percent","px":1024,"percent":40}"#;
+        db.set_space_image_scaling(&sp.id, Some(json)).unwrap();
+        db.set_session_image_scaling(&s.id, Some(json)).unwrap();
+        assert_eq!(db.get_space(&sp.id).unwrap().unwrap().image_scaling_json.as_deref(), Some(json));
+        assert_eq!(db.get_session(&s.id).unwrap().unwrap().image_scaling_json.as_deref(), Some(json));
+        // A fork keeps the chat's own setting.
+        let fork = db.fork_session(&s.id, None).unwrap();
+        assert_eq!(fork.image_scaling_json.as_deref(), Some(json));
+
+        let mut snap = db.snapshot().unwrap();
+        let (db2, _dir2) = fresh_db();
+        db2.restore_snapshot(&snap).expect("restore");
+        assert_eq!(db2.get_space(&sp.id).unwrap().unwrap().image_scaling_json.as_deref(), Some(json));
+
+        // Anything the setters wouldn't take goes back to inheriting.
+        snap.data.spaces[0].image_scaling_json = Some("bogus".into());
+        for s in &mut snap.data.sessions {
+            s.image_scaling_json = Some(r#"{"enabled":true,"mode":"px","px":1,"percent":50}"#.into());
+        }
+        db2.restore_snapshot(&snap).expect("restore again");
+        assert_eq!(db2.get_space(&sp.id).unwrap().unwrap().image_scaling_json, None);
+        assert_eq!(db2.get_session(&s.id).unwrap().unwrap().image_scaling_json, None);
+
+        db.set_session_image_scaling(&s.id, None).unwrap();
+        assert_eq!(db.get_session(&s.id).unwrap().unwrap().image_scaling_json, None);
     }
 
     #[test]

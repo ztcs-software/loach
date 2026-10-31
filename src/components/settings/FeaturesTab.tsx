@@ -6,6 +6,7 @@ import {
   ChevronDown,
   ChevronRight,
   Clock,
+  Image as ImageIcon,
   MemoryStick,
 } from "lucide-react";
 import { KeepAliveSwitch } from "./switches";
@@ -15,6 +16,8 @@ import { SectionTitle } from "./shared";
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
 import { GlobalMemoriesDialog } from "@/components/GlobalMemoriesDialog";
+import { ImageScalingControl } from "@/components/ImageScalingControl";
+import { DEFAULT_IMAGE_SCALING, resolveImageScaling } from "@/lib/imageScaling";
 import { useGlobalMemoryStore } from "@/stores/globalMemoryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useEffect, useState } from "react";
@@ -227,6 +230,31 @@ export function FeaturesTab() {
                       settings.update("ollama_keep_alive", next)
                     }
                   />
+                </div>
+
+                <Separator />
+
+                <div>
+                  <Label className="flex items-center gap-1.5">
+                    <ImageIcon className="h-3.5 w-3.5 text-foreground/60" />
+                    Image scaling
+                  </Label>
+                  <p className="mt-1 text-[11px] text-foreground/50">
+                    How images are scaled down before they're sent to a model.
+                    A full-size photo costs thousands of image tokens, and many
+                    local models read it worse, not better. The original stays
+                    in your chat. Spaces and chats can set their own; Library
+                    images can too, in Settings&nbsp;→&nbsp;Library.
+                  </p>
+                  <div className="mt-3">
+                    <ImageScalingControl
+                      value={resolveImageScaling(settings.image_scaling)}
+                      inherited={DEFAULT_IMAGE_SCALING}
+                      onChange={(next) =>
+                        next && settings.update("image_scaling", JSON.stringify(next))
+                      }
+                    />
+                  </div>
                 </div>
 
     </>

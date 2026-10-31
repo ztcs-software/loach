@@ -13,6 +13,7 @@ import {
   removeSpaceFile,
   removeSpaceMemory,
   setSpaceFileEnabled,
+  setSpaceImageScaling,
   setSpaceRetrievalMode,
   updateSpace,
   updateSpaceMemory,
@@ -24,7 +25,7 @@ import {
   invalidateAllSpaceContext,
   setCachedSpaceContext,
 } from "@/lib/spaceContextCache";
-import type { RetrievalMode, Space, SpaceContext, SpaceFile, SpaceMemory } from "@/types";
+import type { ImageScaling, RetrievalMode, Space, SpaceContext, SpaceFile, SpaceMemory } from "@/types";
 import { useChatStore } from "./chatStore";
 import { useLibraryStore } from "./libraryStore";
 
@@ -96,6 +97,8 @@ interface SpaceState {
   setFileEnabled: (fileId: string, spaceId: string, enabled: boolean) => Promise<void>;
   /** How the Space's sources reach the model. */
   setRetrievalMode: (spaceId: string, mode: RetrievalMode) => Promise<void>;
+  /** How images are scaled for the Space's chats; `null` inherits the app's. */
+  setImageScaling: (spaceId: string, scaling: ImageScaling | null) => Promise<void>;
 
   loadSpaceMemories: (spaceId: string) => Promise<SpaceMemory[]>;
   /** The context a send in the Space reads — instructions, sources and
@@ -399,6 +402,24 @@ export const useSpaceStore = create<SpaceState>((set, get) => ({
     invalidateSpaceContext(spaceId);
     set((s) => ({
       spaces: s.spaces.map((sp) => (sp.id === spaceId ? { ...sp, retrieval_mode: mode } : sp)),
+    }));
+  },
+
+  setImageScaling: async (spaceId, scaling) => {
+    const json = scaling ? JSON.stringify(scaling) : null;
+    try {
+      await setSpaceImageScaling(spaceId, json);
+    } catch (e) {
+      useToastStore.getState().push({
+        kind: "error",
+        title: "Couldn't change image scaling",
+        body: e instanceof Error ? e.message : String(e),
+      });
+      return;
+    }
+    invalidateSpaceContext(spaceId);
+    set((s) => ({
+      spaces: s.spaces.map((sp) => (sp.id === spaceId ? { ...sp, image_scaling_json: json } : sp)),
     }));
   },
 

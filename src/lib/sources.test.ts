@@ -20,6 +20,7 @@ vi.mock("@/lib/tauri", async (importOriginal) => {
 import {
   buildExcerptBlock,
   buildFullTextBlock,
+  chatImageScaling,
   cutText,
   excerptLimit,
   promptLabel,
@@ -34,6 +35,7 @@ import {
   type SourcesReport,
 } from "./sources";
 import { expandSources, useLibraryStore } from "@/stores/libraryStore";
+import { useSettingsStore } from "@/stores/settingsStore";
 
 function meta(id: string, chars: number, extra: Partial<LibraryItemMeta> = {}): LibraryItemMeta {
   return {
@@ -62,6 +64,27 @@ const session = {
   space_id: null,
   retrieval_mode: null,
 } as unknown as Session;
+
+describe("image scaling", () => {
+  const set = (px: number) => JSON.stringify({ enabled: true, mode: "px", px, percent: 50 });
+
+  it("goes chat, then Space, then — for Library images only — Library, then app", () => {
+    useSettingsStore.setState({ image_scaling: set(2048), library_image_scaling: set(512) });
+    const chat = { image_scaling_json: set(768) };
+    const unset = { image_scaling_json: null };
+    const space = { image_scaling_json: set(1536) };
+
+    expect(chatImageScaling(chat, space, true).px).toBe(768);
+    expect(chatImageScaling(unset, space, true).px).toBe(1536);
+    expect(chatImageScaling(unset, unset, true).px).toBe(512);
+    expect(chatImageScaling(unset, null, false).px).toBe(2048);
+
+    // An unset Library follows the app.
+    useSettingsStore.setState({ library_image_scaling: "" });
+    expect(chatImageScaling(unset, null, true).px).toBe(2048);
+    useSettingsStore.setState({ image_scaling: "", library_image_scaling: "" });
+  });
+});
 
 describe("mode selection", () => {
   it("auto gives full text up to half the window, excerpts beyond", () => {

@@ -8,6 +8,7 @@ import {
   imagesFromAttachments,
   inlineTextAttachments,
 } from "@/lib/files";
+import { resolveImageScaling } from "@/lib/imageScaling";
 import { cancelMemoryExtraction } from "@/lib/memory";
 import { getPersona } from "@/lib/personas";
 import { formatProviderError } from "@/lib/providerErrors";
@@ -252,7 +253,6 @@ export const usePrivateChatStore = create<PrivateChatState>((set, get) => ({
     });
 
     const inlinedContent = inlineTextAttachments(rawContent, attachments);
-    const images = imagesFromAttachments(attachments);
 
     const userMsg: PrivateMessage = {
       id: randomId(),
@@ -273,6 +273,16 @@ export const usePrivateChatStore = create<PrivateChatState>((set, get) => ({
       isStreaming: true,
       streamingMessageId: assistantMsg.id,
     }));
+
+    // Taken before the images are scaled, so a Stop or a close while they
+    // are retires this send (see `cancel` / `wipe`). Private Chat has no
+    // per-chat or Space setting: the app's image scaling applies.
+    const myToken = ++pcSendToken;
+    const images = await imagesFromAttachments(
+      attachments,
+      resolveImageScaling(settings.image_scaling),
+    );
+    if (pcSendToken !== myToken) return;
 
     // Build the chat history snapshot from in-memory messages only. The user
     // turn we just appended is the trailing entry with images attached; all
@@ -321,7 +331,6 @@ export const usePrivateChatStore = create<PrivateChatState>((set, get) => ({
       }));
     };
 
-    const myToken = ++pcSendToken;
     // Set once this stream has ended, so a handle that arrives afterwards
     // isn't installed as if it were still running.
     let ended = false;

@@ -4,6 +4,7 @@ import {
   Brain,
   ChevronRight,
   Cpu,
+  Image as ImageIcon,
   Layers,
   Library,
   MessageSquare,
@@ -39,21 +40,25 @@ import { ChatLabelDot, ChatLabelSubmenu } from "@/components/ChatLabelMenu";
 import { ChatSpaceSubmenu } from "@/components/ChatSpaceMenu";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { DefaultModelPicker, DEFAULT_MODEL_LABEL } from "@/components/DefaultModelPicker";
+import { ImageScalingControl } from "@/components/ImageScalingControl";
 import { MemoryList } from "@/components/MemoryList";
 import { MODE_LABELS } from "@/components/library/ChatSources";
 import { SourceModeSwitch, SpaceSourcesTab } from "@/components/library/SpaceSources";
 import { useChatStore } from "@/stores/chatStore";
 import { useSpaceStore, type SpaceTab } from "@/stores/spaceStore";
 import { useLibraryStore } from "@/stores/libraryStore";
+import { useSettingsStore } from "@/stores/settingsStore";
 import { useToastStore } from "@/stores/toastStore";
 import { useUIStore } from "@/stores/uiStore";
 import { deleteChatConfirm } from "@/lib/confirmations";
 import { fileToAttachment, NO_DOCX_TEXT, NO_PDF_TEXT } from "@/lib/files";
+import { parseImageScaling, resolveImageScaling } from "@/lib/imageScaling";
 import { dialogEnter } from "@/lib/shortcuts";
 import { spaceSourceCount } from "@/lib/sources";
 import { cn, relativeDay } from "@/lib/utils";
 import {
   type ChatLabel,
+  type ImageScaling,
   type ProviderId,
   type RetrievalMode,
   type Session,
@@ -92,6 +97,7 @@ export function SpaceView() {
   const doAddFile = useSpaceStore((s) => s.addFile);
   const doRemoveFile = useSpaceStore((s) => s.removeFile);
   const setRetrievalMode = useSpaceStore((s) => s.setRetrievalMode);
+  const setImageScaling = useSpaceStore((s) => s.setImageScaling);
   const storedFiles = useSpaceStore((s) =>
     viewingSpaceId ? s.spaceFiles[viewingSpaceId] : undefined,
   );
@@ -483,6 +489,7 @@ export function SpaceView() {
                     })
                   }
                   onSetMode={(mode) => void setRetrievalMode(space.id, mode)}
+                  onSetImageScaling={(scaling) => void setImageScaling(space.id, scaling)}
                 />
               </TabsContent>
             </Tabs>
@@ -968,7 +975,8 @@ function InstructionsTab({
 // ---------------------------------------------------------------------------
 //
 // Everything that sets how the Space's chats behave, in one place: the default
-// model, memory auto-save and how sources reach the model. They used to be
+// model, memory auto-save, how sources reach the model and how images are
+// scaled. They used to be
 // spread over a Models tab holding a single dropdown, a switch above the
 // Memory list and a selector on the Sources tab; those two tabs now show the
 // setting as a status line linking back here.
@@ -983,16 +991,20 @@ function SettingsTab({
   space,
   onSave,
   onSetMode,
+  onSetImageScaling,
 }: {
   space: {
     default_provider: ProviderId | null;
     default_model: string | null;
     memory_enabled: boolean;
     retrieval_mode: RetrievalMode;
+    image_scaling_json: string | null;
   };
   onSave: (patch: SettingsPatch) => Promise<unknown>;
   onSetMode: (mode: RetrievalMode) => void;
+  onSetImageScaling: (scaling: ImageScaling | null) => void;
 }) {
+  const appImageScaling = useSettingsStore((s) => s.image_scaling);
   return (
     <div className="space-y-4">
       <SettingCard
@@ -1026,6 +1038,19 @@ function SettingsTab({
         description={MODE_LABELS[space.retrieval_mode].hint}
         control={<SourceModeSwitch value={space.retrieval_mode} onChange={onSetMode} />}
       />
+
+      <SettingCard
+        icon={<ImageIcon className="h-4 w-4 text-foreground/55" />}
+        title="Image scaling"
+        description="How images are scaled down before they reach the model in this Space's chats — attached ones, the Space's own and its Library images. On Default, images follow the app's setting and Library images the Library's. A chat can still set its own."
+      >
+        <ImageScalingControl
+          value={parseImageScaling(space.image_scaling_json)}
+          inherited={resolveImageScaling(appImageScaling)}
+          inheritFrom="the app's setting"
+          onChange={onSetImageScaling}
+        />
+      </SettingCard>
     </div>
   );
 }
