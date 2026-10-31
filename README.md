@@ -30,7 +30,7 @@ With local models, including Qwen, Gemma, DeepSeek, GPT-OSS and Mistral, all you
 
 Behind a calm, beautifully crafted UI sits a rich feature set - ready when you need it, out of the way when you don't. 
 
-![Loach UI](docs/images/loach-ui.png)
+![Loach UI: a new chat explains a concept, calls the calculator tool, writes TypeScript and summarizes a PDF](docs/images/loach-demo.webp)
 
 ---
 
