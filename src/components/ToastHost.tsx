@@ -1,5 +1,7 @@
+import { useEffect } from "react";
 import { Brain, X } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useSecurityStore } from "@/stores/securityStore";
 import { useToastStore, type Toast } from "@/stores/toastStore";
 
 /** Renders the global toast stack in the bottom-right of the viewport.
@@ -13,8 +15,17 @@ import { useToastStore, type Toast } from "@/stores/toastStore";
 export function ToastHost() {
   const toasts = useToastStore((s) => s.toasts);
   const dismiss = useToastStore((s) => s.dismiss);
+  const clear = useToastStore((s) => s.clear);
+  const unlocked = useSecurityStore((s) => s.unlocked);
 
-  if (toasts.length === 0) return null;
+  // The stack sits above the lock screen, so a chip left up there showed a
+  // chat's title over the lock and kept its Undo clickable. Locking drops
+  // whatever is queued, and nothing renders until the app is unlocked.
+  useEffect(() => {
+    if (!unlocked) clear();
+  }, [unlocked, clear]);
+
+  if (!unlocked || toasts.length === 0) return null;
 
   return (
     <div className="pointer-events-none fixed bottom-4 right-4 z-[100] flex flex-col items-end gap-2">

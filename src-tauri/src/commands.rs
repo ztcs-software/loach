@@ -3,10 +3,15 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 
+use crate::db::library::{
+    LibraryDataset, LibraryItem, LibraryItemMeta, LibrarySource, LibraryUsage, NewLibraryItem,
+    SourceOwner,
+};
 use crate::db::{
     DatabaseSnapshot, Folder, GlobalMemory, ImportStats, McpServer, Message, MessageHit, Session,
     Snippet, SnippetFillValue, SnippetVariable, Space, SpaceFile, SpaceMemory, StorageStats,
 };
+use crate::rag::{self, indexer::IndexStatus};
 use crate::mcp::{self, McpTestResult};
 use crate::providers::{self, ChatRequest, ModelInfo};
 use crate::secrets;
@@ -215,6 +220,26 @@ pub async fn set_session_folder(
         .map_err(err)
 }
 
+#[derive(Debug, Deserialize)]
+pub struct SetSessionSpaceArgs {
+    pub id: String,
+    /// Space to move the chat into. `None` takes it out of any Space.
+    #[serde(default)]
+    pub space_id: Option<String>,
+}
+
+/// Move a chat into a Space, or out of the one it's in.
+#[tauri::command]
+pub async fn set_session_space(
+    state: State<'_, AppState>,
+    args: SetSessionSpaceArgs,
+) -> Result<(), String> {
+    state
+        .db
+        .set_session_space(&args.id, args.space_id.as_deref())
+        .map_err(err)
+}
+
 // ---------- workspace directory ----------
 
 /// Open the native folder picker and scope this chat's filesystem tools to
@@ -403,56 +428,49 @@ pub async fn export_session(
     id: String,
     format: String,
 ) -> Result<String, String> {
-    let mut session = state
-        .db
-        .get_session(&id)
-        .map_err(err)?
-        .ok_or_else(|| "session not found".to_string())?;
-    // Machine-local, and it names the user's folders — left out, the same
-    // as in a full backup.
-    session.workspace_root = None;
-    let messages = state.db.list_messages(&id).map_err(err)?;
-
-    match format.as_str() {
-        "json" => {
-            let payload = serde_json::json!({
-                "session": session,
-                "messages": messages,
-            });
-            serde_json::to_string_pretty(&payload).map_err(err)
-        }
-        "md" | "markdown" => {
-            let mut out = String::new();
-            out.push_str(&format!("# {}\n\n", session.title));
-            out.push_str(&format!(
-                "_Provider: {} · Model: {}_\n\n",
-                session.provider, session.model
-            ));
-            if let Some(sys) = session.system_prompt.as_deref() {
-                if !sys.is_empty() {
-                    out.push_str("## System prompt\n\n");
-                    out.push_str(sys);
-                    out.push_str("\n\n");
-                }
+    if format != "md" {
+        return Err(format!("unsupported format: {format}"));
+    }
+    // A whole transcript, inlined attachments and all, read and formatted —
+    // blocking work, so on the blocking pool like the other DB-heavy reads.
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || -> Result<String, String> {
+        let session = db
+            .get_session(&id)
+            .map_err(err)?
+            .ok_or_else(|| "session not found".to_string())?;
+        let messages = db.list_messages(&id).map_err(err)?;
+        let mut out = String::new();
+        out.push_str(&format!("# {}\n\n", session.title));
+        out.push_str(&format!(
+            "_Provider: {} · Model: {}_\n\n",
+            session.provider, session.model
+        ));
+        if let Some(sys) = session.system_prompt.as_deref() {
+            if !sys.is_empty() {
+                out.push_str("## System prompt\n\n");
+                out.push_str(sys);
+                out.push_str("\n\n");
             }
-            for m in &messages {
+        }
+        for m in &messages {
             // Hidden imported rows are deliberately folded out of the
             // transcript; a user sharing an export shouldn't unknowingly
             // publish context they believe is tucked away.
             if m.import_hidden {
                 continue;
             }
-                let role = match m.role.as_str() {
-                    "user" => "You",
-                    "assistant" => "Assistant",
-                    _ => "System",
-                };
-                out.push_str(&format!("## {role}\n\n{}\n\n", m.content));
-            }
-            Ok(out)
+            let role = match m.role.as_str() {
+                "user" => "You",
+                "assistant" => "Assistant",
+                _ => "System",
+            };
+            out.push_str(&format!("## {role}\n\n{}\n\n", m.content));
         }
-        _ => Err(format!("unsupported format: {format}")),
-    }
+        Ok(out)
+    })
+    .await
+    .map_err(|e| format!("export task panicked: {e}"))?
 }
 
 // ---------- messages ----------
@@ -701,9 +719,10 @@ pub async fn get_settings(state: State<'_, AppState>) -> Result<HashMap<String, 
 /// adding a new user-facing setting.
 ///
 /// The allowlist is a defence against a compromised renderer planting
-/// arbitrary KV rows. The concrete attack it closes: silently repointing
-/// `openai_base_url` at an attacker host so the stored bearer token gets
-/// shipped on the next chat request. With this gate in place, the only
+/// arbitrary KV rows. It does not stop `openai_base_url` itself from being
+/// rewritten — that key is user-editable — so a snapshot import keeps the
+/// current value while a key is stored (`keep_current_openai_base_url`).
+/// With this gate in place, the only
 /// way to write a setting from the UI is to use a known key — a future
 /// settings consumer that forgets its own validation can't be exploited
 /// via a key the renderer was free to mint. Unknown keys fail loudly so
@@ -734,6 +753,10 @@ const WRITABLE_SETTING_KEYS: &[&str] = &[
     "lock_idle_timeout",
     "lock_on_hide",
     "recent_commands",
+    "embedding_provider",
+    "embedding_model",
+    "image_scaling",
+    "library_image_scaling",
 ];
 
 /// Whether `key` is a setting the app is allowed to write. Built-in tool
@@ -763,6 +786,13 @@ pub async fn set_setting(
     // given for them; switching them back on starts from asking again.
     if key == crate::tools::fs::SETTING_KEY && value != "true" {
         state.approvals.revoke_all();
+    }
+    // A different embedding model (or endpoint) means different vectors.
+    if matches!(
+        key.as_str(),
+        "embedding_provider" | "embedding_model" | "ollama_base_url" | "openai_base_url"
+    ) {
+        state.indexer.wake();
     }
     Ok(())
 }
@@ -1174,6 +1204,48 @@ pub async fn openai_list_models(
         .map_err(err)
 }
 
+/// `openai_list_models` with `api_key` in place of the stored key, so
+/// onboarding can check a key the user just typed *before* it replaces the
+/// stored one. Storing first meant a failed check deleted the key — and with
+/// it a working key the typo had replaced. Same link-local refusal, bearer
+/// rule and 30 s ceiling as `providers::openai::list_models`.
+#[tauri::command]
+pub async fn openai_list_models_with_key(
+    state: State<'_, AppState>,
+    base_url: String,
+    api_key: String,
+) -> Result<Vec<ModelInfo>, String> {
+    #[derive(Deserialize)]
+    struct Models {
+        data: Vec<Model>,
+    }
+    #[derive(Deserialize)]
+    struct Model {
+        id: String,
+    }
+
+    providers::refuse_link_local_host(&base_url).await?;
+    let url = format!("{}/models", base_url.trim_end_matches('/'));
+    let mut req = state.http.get(url).timeout(std::time::Duration::from_secs(30));
+    let key = api_key.trim();
+    if !key.is_empty() && providers::openai::is_safe_for_bearer(&base_url) {
+        req = req.bearer_auth(key);
+    }
+    let resp = req.send().await.and_then(|r| r.error_for_status()).map_err(err)?;
+    let body: Models = resp.json().await.map_err(err)?;
+    Ok(body
+        .data
+        .into_iter()
+        .map(|m| ModelInfo {
+            id: m.id.clone(),
+            label: m.id,
+            provider: "openai".into(),
+            family: None,
+            size: None,
+        })
+        .collect())
+}
+
 // ---------- spaces ----------
 
 #[tauri::command]
@@ -1249,7 +1321,10 @@ pub async fn update_space(
 
 #[tauri::command]
 pub async fn delete_space(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    state.db.delete_space(&id).map_err(err)
+    state.db.delete_space(&id).map_err(err)?;
+    // Its files' chunks went with it (triggers); let the index status catch up.
+    state.indexer.wake();
+    Ok(())
 }
 
 #[tauri::command]
@@ -1276,9 +1351,11 @@ pub async fn add_space_file(
     state: State<'_, AppState>,
     args: AddSpaceFileArgs,
 ) -> Result<SpaceFile, String> {
-    state
-        .db
-        .add_space_file(
+    // Chunks and FTS-indexes the whole document under the writer lock —
+    // blocking work, so on the blocking pool.
+    let db = state.db.clone();
+    let file = tokio::task::spawn_blocking(move || {
+        db.add_space_file(
             &args.space_id,
             &args.name,
             &args.mime,
@@ -1287,7 +1364,12 @@ pub async fn add_space_file(
             args.size,
             args.position,
         )
-        .map_err(err)
+    })
+    .await
+    .map_err(err)?
+    .map_err(err)?;
+    state.indexer.wake();
+    Ok(file)
 }
 
 #[tauri::command]
@@ -1295,7 +1377,10 @@ pub async fn remove_space_file(
     state: State<'_, AppState>,
     file_id: String,
 ) -> Result<(), String> {
-    state.db.remove_space_file(&file_id).map_err(err)
+    state.db.remove_space_file(&file_id).map_err(err)?;
+    // Its chunks went with it (trigger); let the index status catch up.
+    state.indexer.wake();
+    Ok(())
 }
 
 #[derive(Debug, Serialize)]
@@ -1878,20 +1963,26 @@ impl From<McpImportRejection> for String {
     }
 }
 
+/// The name heads the stdio consent dialog, so it gets the dialog's rules:
+/// one short line that reads as what it is.
+const MAX_MCP_NAME_CHARS: usize = 100;
+
+/// `screen_host: false` skips resolving and screening an HTTP server's host,
+/// returning no addresses — for a row saved disabled, which connects to
+/// nothing (see `mcp_save`). Every structural check still runs.
 async fn validate_mcp_input(
     input: &McpServerInput,
+    screen_host: bool,
 ) -> Result<Vec<std::net::SocketAddr>, McpImportRejection> {
     use McpImportRejection::{Rejected, Unscreenable};
     if input.name.trim().is_empty() {
         return Err(Rejected("server name is required".into()));
     }
-    // The name heads the stdio consent dialog, so it gets the dialog's
-    // rules: one short line that reads as what it is.
-    const MAX_NAME_CHARS: usize = 100;
-    if input.name.chars().count() > MAX_NAME_CHARS || input.name.chars().any(unreviewable_char) {
+    if input.name.chars().count() > MAX_MCP_NAME_CHARS || input.name.chars().any(unreviewable_char)
+    {
         return Err(Rejected(format!(
-            "Server name must be a single line of at most {MAX_NAME_CHARS} characters, with no \
-             control or invisible characters."
+            "Server name must be a single line of at most {MAX_MCP_NAME_CHARS} characters, with \
+             no control or invisible characters."
         )));
     }
     validate_allowed_tools(input)?;
@@ -1930,22 +2021,6 @@ async fn validate_mcp_input(
         }
     }
 
-    // Resolve + screen the host: literal IPs are rejected only if link-local,
-    // hostnames are DNS-resolved and every returned address screened the same
-    // way. Returning the addresses lets the caller pin them into a per-request
-    // client at connect time so a malicious DNS server can't flip the answer
-    // from public to link-local between validate and dial.
-    let resolved = crate::tools::fetch_url::resolve_lan_addrs(&parsed)
-        .await
-        .map_err(|e| {
-            let msg = format!("MCP server URL rejected: {e}");
-            match e {
-                // DNS didn't answer, so the host was never actually screened.
-                crate::tools::fetch_url::HostScreenError::Unresolvable(_) => Unscreenable(msg),
-                _ => Rejected(msg),
-            }
-        })?;
-
     // Header k/v validation. We do NOT call out to the network here, so the
     // only protection we can offer is structural: reject names / values
     // that would let an attacker smuggle CRLF-injected headers via a
@@ -1972,7 +2047,26 @@ async fn validate_mcp_input(
         }
     }
 
-    Ok(resolved)
+    if !screen_host {
+        return Ok(Vec::new());
+    }
+    // Resolve + screen the host: literal IPs are rejected only if link-local,
+    // hostnames are DNS-resolved and every returned address screened the same
+    // way. Returning the addresses lets the caller pin them into a per-request
+    // client at connect time so a malicious DNS server can't flip the answer
+    // from public to link-local between validate and dial. Last, after the
+    // structural checks, so a row quarantined over a DNS failure on import
+    // has still had its headers checked.
+    crate::tools::fetch_url::resolve_lan_addrs(&parsed)
+        .await
+        .map_err(|e| {
+            let msg = format!("MCP server URL rejected: {e}");
+            match e {
+                // DNS didn't answer, so the host was never actually screened.
+                crate::tools::fetch_url::HostScreenError::Unresolvable(_) => Unscreenable(msg),
+                _ => Rejected(msg),
+            }
+        })
 }
 
 /// A character the consent dialog can't show faithfully: control
@@ -2004,6 +2098,36 @@ fn unreviewable_char(c: char) -> bool {
                 | '\u{E0000}'..='\u{E007F}'
                 | '\u{E0100}'..='\u{E01EF}'
         )
+}
+
+/// An imported server name brought within the name rule `validate_mcp_input`
+/// enforces: the characters it refuses dropped, cut to
+/// [`MAX_MCP_NAME_CHARS`], never empty and — being a name the user never
+/// typed — not one another row in `taken` already has. `None` when the name
+/// already passes. Names saved before the rule existed (≤1.4 took
+/// "👨‍💻 dev", whose emoji is joined by a ZWJ) would otherwise sink the
+/// whole restore.
+fn sanitize_imported_mcp_name(
+    name: &str,
+    taken: &std::collections::HashSet<String>,
+) -> Option<String> {
+    if !name.trim().is_empty()
+        && name.chars().count() <= MAX_MCP_NAME_CHARS
+        && !name.chars().any(unreviewable_char)
+    {
+        return None;
+    }
+    let kept: String = name.chars().filter(|&c| !unreviewable_char(c)).collect();
+    let base = match kept.trim() {
+        "" => "MCP server",
+        s => s,
+    };
+    (1..).find_map(|n: usize| {
+        let suffix = if n == 1 { String::new() } else { format!(" ({n})") };
+        let head: String = base.chars().take(MAX_MCP_NAME_CHARS - suffix.chars().count()).collect();
+        let candidate = format!("{}{suffix}", head.trim_end());
+        (!taken.contains(&candidate)).then_some(candidate)
+    })
 }
 
 /// Structural checks for a stdio row. There is no host to screen here;
@@ -2249,32 +2373,65 @@ fn stdio_consent_text(draft: &McpServer) -> Result<String, String> {
 async fn confirm_stdio_spawn(app: &AppHandle, draft: &McpServer) -> Result<(), String> {
     let body = stdio_consent_text(draft)?;
     let title = format!("Run MCP server \"{}\"?", draft.name);
+    let answer = show_consent_dialog(app, title, body).await?;
+    if consent_given(&answer) {
+        Ok(())
+    } else {
+        Err("Cancelled — the server was not started.".into())
+    }
+}
 
-    // rfd shows dialogs from the main thread (macOS and GTK require it);
-    // the future it hands back can be awaited anywhere.
+fn consent_buttons() -> rfd::MessageButtons {
+    rfd::MessageButtons::OkCancelCustom(CONSENT_CANCEL.into(), CONSENT_START.into())
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn show_consent_dialog(
+    app: &AppHandle,
+    title: String,
+    body: String,
+) -> Result<rfd::MessageDialogResult, String> {
+    // rfd shows dialogs from the main thread (macOS requires it); the
+    // future it hands back can be awaited anywhere.
     let (tx, rx) = tokio::sync::oneshot::channel();
     app.run_on_main_thread(move || {
         let answer = rfd::AsyncMessageDialog::new()
             .set_level(rfd::MessageLevel::Warning)
             .set_title(title)
             .set_description(body)
-            .set_buttons(rfd::MessageButtons::OkCancelCustom(
-                CONSENT_CANCEL.into(),
-                CONSENT_START.into(),
-            ))
+            .set_buttons(consent_buttons())
             .show();
         let _ = tx.send(answer);
     })
     .map_err(|e| format!("couldn't show the consent dialog: {e}"))?;
-    let answer = rx
+    Ok(rx
         .await
         .map_err(|_| "the consent dialog couldn't be shown".to_string())?
-        .await;
-    if consent_given(&answer) {
-        Ok(())
-    } else {
-        Err("Cancelled — the server was not started.".into())
-    }
+        .await)
+}
+
+/// GTK's async dialog answers only `Ok` / `Cancel`, never `Custom`, and Esc
+/// comes back as `Cancel` too — so "Start server" (the second button) read
+/// as a dismissal and no stdio server could ever be started on Linux. The
+/// blocking dialog maps each button to its label and Esc / close to
+/// `Cancel`. rfd runs GTK dialogs on its own thread, so it's driven from the
+/// blocking pool rather than the main thread.
+#[cfg(target_os = "linux")]
+async fn show_consent_dialog(
+    _app: &AppHandle,
+    title: String,
+    body: String,
+) -> Result<rfd::MessageDialogResult, String> {
+    tokio::task::spawn_blocking(move || {
+        rfd::MessageDialog::new()
+            .set_level(rfd::MessageLevel::Warning)
+            .set_title(title)
+            .set_description(body)
+            .set_buttons(consent_buttons())
+            .show()
+    })
+    .await
+    .map_err(|_| "the consent dialog couldn't be shown".to_string())
 }
 
 /// The consent dialog's buttons. See [`confirm_stdio_spawn`] for the order.
@@ -2360,8 +2517,13 @@ pub async fn mcp_save(
     // We don't pin DNS on save (no network call), but we do still resolve
     // and screen so a save can't smuggle a private-IP-backed hostname into
     // the DB for a later, weaker code path to pick up.
-    validate_mcp_input(&input).await?;
+    //
+    // Except for a row saved disabled: nothing connects to it, and turning it
+    // back on is another save that screens. Asking DNS here only stopped the
+    // user switching off or renaming a server whose host doesn't resolve
+    // from where they are (offline, off the VPN).
     let mut draft = input.to_draft();
+    validate_mcp_input(&input, draft.enabled).await?;
     // "Always allow" was an answer about the program or endpoint it was
     // given for. A save that points the row at a different one starts the
     // list over, so `write_file` allowed for one filesystem server doesn't
@@ -2423,7 +2585,7 @@ pub async fn mcp_test(
     state: State<'_, AppState>,
     input: McpServerInput,
 ) -> Result<McpTestResult, String> {
-    let addrs = validate_mcp_input(&input).await?;
+    let addrs = validate_mcp_input(&input, true).await?;
     let draft = input.to_draft();
     if draft.is_stdio() {
         require_stdio_consent(&app, &state, &draft, true).await?;
@@ -2510,7 +2672,7 @@ pub async fn chat_stream(
                 biased;
                 _ = cancel.notified() => {
                     let _ = app.emit(&channel, crate::stream::StreamEvent::Cancelled);
-                    registry.finish(&request.stream_id);
+                    registry.finish_own(&request.stream_id, &cancel);
                     return;
                 }
                 r = agg_fut => r,
@@ -2612,7 +2774,7 @@ pub async fn chat_stream(
                     biased;
                     _ = cancel.notified() => {
                         let _ = app.emit(&channel, crate::stream::StreamEvent::Cancelled);
-                        registry.finish(&request.stream_id);
+                        registry.finish_own(&request.stream_id, &cancel);
                         return;
                     }
                     r = lookup => r.unwrap_or((None, None)),
@@ -2680,9 +2842,10 @@ pub async fn chat_stream(
         // bare names used by built-ins (`calculate`, `datetime`, …)
         // can't collide with `resolve_qualified`'s first-match scan.
         //
-        // Built-ins are purely local (no network, no DB writes), so we
-        // expose them in Private Chat too — the privacy guarantee is
-        // about data leaving the box, not about hiding local compute.
+        // Built-ins are purely local (no network, no DB writes), so a
+        // private request could take them — but Private Chat sends
+        // `no_tools`: its overlay has nowhere to show a tool call, and a
+        // generated file (the pdf tool) was silently lost.
         if !request.no_tools {
             request.tools.extend(crate::tools::builtin::enabled_builtin_defs(
                 &db,
@@ -2716,7 +2879,7 @@ pub async fn chat_stream(
                         ),
                     },
                 );
-                registry.finish(&request.stream_id);
+                registry.finish_own(&request.stream_id, &cancel);
                 Ok(())
             }
         };
@@ -2745,6 +2908,517 @@ pub async fn chat_cancel_all(state: State<'_, AppState>) -> Result<(), String> {
     if stopped > 0 {
         tracing::info!("stopped {stopped} chat stream(s) left running by a reloaded window");
     }
+    Ok(())
+}
+
+// ---------- library ----------
+//
+// Items (texts, files, links) stored once and linked into Spaces and chats.
+// Every write that adds or changes text wakes the indexer, which embeds the
+// new chunks in the background; keyword search works the moment the write
+// commits. See `db::library` and `rag`.
+
+/// Longest body a Library item keeps, in characters. Matches the frontend's
+/// per-file extraction cap (`MAX_EXTRACTED_CHARS` in `src/lib/files.ts`).
+const LIBRARY_MAX_CHARS: usize = 200_000;
+
+fn embed_model_key(state: &AppState) -> Option<String> {
+    rag::embed::EmbedConfig::from_db(&state.db).map(|c| c.model_key())
+}
+
+/// A Library or dataset title on one line: whitespace runs, newlines
+/// included, collapse to a space — titles label lists, chips and prompt lines.
+fn library_title(title: &str, fallback: &str) -> String {
+    let t = title.split_whitespace().collect::<Vec<_>>().join(" ");
+    if t.is_empty() {
+        fallback.to_string()
+    } else {
+        t
+    }
+}
+
+/// Room past [`LIBRARY_MAX_CHARS`] for the note the frontend appends to a
+/// body it already cut (`[…file truncated…]`), so the model still reads it.
+const LIBRARY_NOTE_ROOM: usize = 1_000;
+
+/// Cut a text body to [`LIBRARY_MAX_CHARS`], saying so at the cut. Returns
+/// whether it was cut.
+fn cap_library_text(mut content: String) -> (String, bool) {
+    if content.char_indices().nth(LIBRARY_MAX_CHARS + LIBRARY_NOTE_ROOM).is_none() {
+        return (content, false);
+    }
+    if let Some((at, _)) = content.char_indices().nth(LIBRARY_MAX_CHARS) {
+        content.truncate(at);
+    }
+    content.push_str("\n\n[…truncated at 200,000 characters]");
+    (content, true)
+}
+
+/// A fetched page's `<title>` on one line and of sane length — it's shown
+/// in lists and labels the page in prompts.
+fn link_title(raw: &str) -> String {
+    let flat = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    match flat.char_indices().nth(200) {
+        Some((at, _)) => format!("{}…", flat[..at].trim_end()),
+        None => flat,
+    }
+}
+
+/// A link's URL without any `user:password@`: the Library keeps the URL as
+/// plain text and exports it, so credentials in it would sit in the database
+/// and every backup. Any other URL is returned exactly as given.
+fn strip_url_credentials(raw: &str) -> String {
+    match reqwest::Url::parse(raw) {
+        Ok(mut url) if !url.username().is_empty() || url.password().is_some() => {
+            let _ = url.set_username("");
+            let _ = url.set_password(None);
+            url.to_string()
+        }
+        _ => raw.to_string(),
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct LibraryList {
+    pub items: Vec<LibraryItemMeta>,
+    pub datasets: Vec<LibraryDataset>,
+}
+
+#[tauri::command]
+pub async fn library_list(state: State<'_, AppState>) -> Result<LibraryList, String> {
+    let key = embed_model_key(&state);
+    Ok(LibraryList {
+        items: state.db.list_library_items(key.as_deref()).map_err(err)?,
+        datasets: state.db.list_library_datasets().map_err(err)?,
+    })
+}
+
+#[tauri::command]
+pub async fn library_get_items(
+    state: State<'_, AppState>,
+    ids: Vec<String>,
+) -> Result<Vec<LibraryItem>, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || db.get_library_items(&ids))
+        .await
+        .map_err(err)?
+        .map_err(err)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateLibraryItemArgs {
+    /// `"text"` or `"file"` — links go through `library_add_link`.
+    pub kind: String,
+    pub title: String,
+    #[serde(default)]
+    pub mime: String,
+    /// `"text"` or `"image"`.
+    pub media: String,
+    pub content: String,
+    #[serde(default)]
+    pub size: i64,
+    #[serde(default)]
+    pub truncated: bool,
+}
+
+#[tauri::command]
+pub async fn library_create_item(
+    state: State<'_, AppState>,
+    args: CreateLibraryItemArgs,
+) -> Result<LibraryItemMeta, String> {
+    if !matches!(args.kind.as_str(), "text" | "file") {
+        return Err(format!("can't create a `{}` item directly", args.kind));
+    }
+    let title = library_title(&args.title, "Untitled");
+    // Images are base64 and stay whole; text is held to the same cap as a
+    // fetched page, whatever the frontend already did.
+    let (content, cut) = if args.media == "text" {
+        cap_library_text(args.content)
+    } else {
+        (args.content, false)
+    };
+    let key = embed_model_key(&state);
+    let db = state.db.clone();
+    let meta = tokio::task::spawn_blocking(move || {
+        db.create_library_item(
+            &NewLibraryItem {
+                kind: &args.kind,
+                title: &title,
+                mime: &args.mime,
+                media: &args.media,
+                content: &content,
+                size: args.size,
+                url: None,
+                fetched_at: None,
+                truncated: args.truncated || cut,
+            },
+            key.as_deref(),
+        )
+    })
+    .await
+    .map_err(err)?
+    .map_err(err)?;
+    state.indexer.wake();
+    Ok(meta)
+}
+
+/// Rename an item. Returns the stored row, so the frontend's copy carries
+/// the server's `updated_at` (its body cache is keyed on it).
+#[tauri::command]
+pub async fn library_rename_item(
+    state: State<'_, AppState>,
+    id: String,
+    title: String,
+) -> Result<LibraryItemMeta, String> {
+    let key = embed_model_key(&state);
+    let db = state.db.clone();
+    // Re-issues every chunk of the item — on the blocking pool, like the
+    // other Library writes.
+    let meta = tokio::task::spawn_blocking(move || {
+        db.rename_library_item(&id, &library_title(&title, "Untitled"), key.as_deref())
+    })
+    .await
+    .map_err(err)?
+    .map_err(err)?;
+    // The title is embedded with every chunk, so a new one means new vectors.
+    state.indexer.wake();
+    Ok(meta)
+}
+
+/// Save an edited text item.
+#[tauri::command]
+pub async fn library_update_text(
+    state: State<'_, AppState>,
+    id: String,
+    title: String,
+    content: String,
+) -> Result<LibraryItemMeta, String> {
+    let title = library_title(&title, "Untitled");
+    let key = embed_model_key(&state);
+    let db = state.db.clone();
+    let meta = tokio::task::spawn_blocking(move || {
+        let size = content.len() as i64;
+        let (content, cut) = cap_library_text(content);
+        // Editing a cut document doesn't bring back what was cut.
+        let was_cut = db
+            .get_library_items(std::slice::from_ref(&id))?
+            .pop()
+            .is_some_and(|i| i.truncated);
+        db.replace_library_content(&id, Some(&title), &content, None, size, cut || was_cut, None, key.as_deref())
+    })
+    .await
+    .map_err(err)?
+    .map_err(err)?;
+    state.indexer.wake();
+    Ok(meta)
+}
+
+/// Fetch a page through the SSRF-guarded fetcher and refuse bodies that
+/// aren't text — a PDF or image link decoded as UTF-8 is noise.
+async fn fetch_for_library(url: &str) -> Result<FetchedPage, String> {
+    let page = fetch_url_tool::fetch_capped(url, LIBRARY_MAX_CHARS).await?;
+    let ct = page.content_type.to_ascii_lowercase();
+    if !is_textual_content_type(&ct) {
+        return Err(format!(
+            "This link serves `{}`, which can't be read as text. Download it and add it under Files instead.",
+            ct.split(';').next().unwrap_or(&ct).trim()
+        ));
+    }
+    if page.text.trim().is_empty() {
+        return Err("The page has no readable text.".to_string());
+    }
+    Ok(page)
+}
+
+/// Whether a (lowercased) `Content-Type` can be read as text. Office Open
+/// XML (`application/vnd.openxmlformats-officedocument.*` — .docx, .xlsx,
+/// .pptx) names XML but is a zip archive, so it's refused like any binary.
+fn is_textual_content_type(ct: &str) -> bool {
+    ct.is_empty()
+        || ct.contains("html")
+        || ct.starts_with("text/")
+        || ct.contains("json")
+        || (ct.contains("xml") && !ct.contains("openxmlformats"))
+}
+
+fn link_mime(page: &FetchedPage) -> String {
+    page.content_type.split(';').next().unwrap_or("").trim().to_string()
+}
+
+/// Add a web page as a Library item: fetched once, stored as a dated
+/// snapshot, refreshed only when the user asks.
+#[tauri::command]
+pub async fn library_add_link(
+    state: State<'_, AppState>,
+    url: String,
+) -> Result<LibraryItemMeta, String> {
+    let url = strip_url_credentials(url.trim());
+    let page = fetch_for_library(&url).await?;
+    let title = page
+        .title
+        .as_deref()
+        .map(link_title)
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| link_title(&page.final_url));
+    let key = embed_model_key(&state);
+    let db = state.db.clone();
+    let now = chrono::Utc::now().timestamp_millis();
+    let meta = tokio::task::spawn_blocking(move || {
+        db.create_library_item(
+            &NewLibraryItem {
+                kind: "link",
+                title: &title,
+                mime: &link_mime(&page),
+                media: "text",
+                content: &page.text,
+                size: page.bytes as i64,
+                url: Some(&url),
+                fetched_at: Some(now),
+                truncated: page.truncated,
+            },
+            key.as_deref(),
+        )
+    })
+    .await
+    .map_err(err)?
+    .map_err(err)?;
+    state.indexer.wake();
+    Ok(meta)
+}
+
+/// Re-fetch a link item and replace its snapshot.
+#[tauri::command]
+pub async fn library_refresh_link(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<LibraryItemMeta, String> {
+    let item = state
+        .db
+        .get_library_items(std::slice::from_ref(&id))
+        .map_err(err)?
+        .pop()
+        .ok_or("library item not found")?;
+    let url = item.url.filter(|_| item.kind == "link").ok_or("not a link")?;
+    let page = fetch_for_library(&url).await?;
+    let key = embed_model_key(&state);
+    let db = state.db.clone();
+    let now = chrono::Utc::now().timestamp_millis();
+    let meta = tokio::task::spawn_blocking(move || {
+        db.replace_library_content(
+            &id,
+            None,
+            &page.text,
+            Some(&link_mime(&page)),
+            page.bytes as i64,
+            page.truncated,
+            Some(now),
+            key.as_deref(),
+        )
+    })
+    .await
+    .map_err(err)?
+    .map_err(err)?;
+    state.indexer.wake();
+    Ok(meta)
+}
+
+#[tauri::command]
+pub async fn library_delete_items(state: State<'_, AppState>, ids: Vec<String>) -> Result<(), String> {
+    state.db.delete_library_items(&ids).map_err(err)?;
+    // Their chunks went with them (trigger); let the index status catch up.
+    state.indexer.wake();
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn library_usage(
+    state: State<'_, AppState>,
+    item_ids: Vec<String>,
+    dataset_ids: Vec<String>,
+) -> Result<LibraryUsage, String> {
+    state.db.library_usage(&item_ids, &dataset_ids).map_err(err)
+}
+
+#[tauri::command]
+pub async fn library_create_dataset(
+    state: State<'_, AppState>,
+    name: String,
+    description: String,
+    item_ids: Vec<String>,
+) -> Result<LibraryDataset, String> {
+    state
+        .db
+        .create_library_dataset(&library_title(&name, "Untitled dataset"), description.trim(), &item_ids)
+        .map_err(err)
+}
+
+#[tauri::command]
+pub async fn library_update_dataset(
+    state: State<'_, AppState>,
+    id: String,
+    name: String,
+    description: String,
+) -> Result<(), String> {
+    state
+        .db
+        .update_library_dataset(&id, &library_title(&name, "Untitled dataset"), description.trim())
+        .map_err(err)
+}
+
+#[tauri::command]
+pub async fn library_set_dataset_items(
+    state: State<'_, AppState>,
+    id: String,
+    item_ids: Vec<String>,
+) -> Result<Vec<String>, String> {
+    state.db.set_library_dataset_items(&id, &item_ids).map_err(err)
+}
+
+#[tauri::command]
+pub async fn library_delete_dataset(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    state.db.delete_library_dataset(&id).map_err(err)
+}
+
+#[tauri::command]
+pub async fn library_list_sources(
+    state: State<'_, AppState>,
+    owner: String,
+    owner_id: String,
+) -> Result<Vec<LibrarySource>, String> {
+    let owner = SourceOwner::parse(&owner).map_err(err)?;
+    state.db.list_library_sources(owner, &owner_id).map_err(err)
+}
+
+#[tauri::command]
+pub async fn library_add_sources(
+    state: State<'_, AppState>,
+    owner: String,
+    owner_id: String,
+    item_ids: Vec<String>,
+    dataset_ids: Vec<String>,
+) -> Result<Vec<LibrarySource>, String> {
+    let owner = SourceOwner::parse(&owner).map_err(err)?;
+    state
+        .db
+        .add_library_sources(owner, &owner_id, &item_ids, &dataset_ids)
+        .map_err(err)
+}
+
+#[tauri::command]
+pub async fn library_remove_source(
+    state: State<'_, AppState>,
+    owner: String,
+    id: String,
+) -> Result<(), String> {
+    let owner = SourceOwner::parse(&owner).map_err(err)?;
+    state.db.remove_library_source(owner, &id).map_err(err)
+}
+
+#[tauri::command]
+pub async fn library_set_source_enabled(
+    state: State<'_, AppState>,
+    owner: String,
+    id: String,
+    enabled: bool,
+) -> Result<(), String> {
+    let owner = SourceOwner::parse(&owner).map_err(err)?;
+    state.db.set_library_source_enabled(owner, &id, enabled).map_err(err)
+}
+
+#[tauri::command]
+pub async fn set_space_file_enabled(
+    state: State<'_, AppState>,
+    file_id: String,
+    enabled: bool,
+) -> Result<(), String> {
+    state.db.set_space_file_enabled(&file_id, enabled).map_err(err)
+}
+
+fn check_retrieval_mode(mode: &str) -> Result<(), String> {
+    if crate::db::is_retrieval_mode(mode) {
+        Ok(())
+    } else {
+        Err(format!("unknown retrieval mode `{mode}`"))
+    }
+}
+
+#[tauri::command]
+pub async fn set_space_retrieval_mode(
+    state: State<'_, AppState>,
+    id: String,
+    mode: String,
+) -> Result<(), String> {
+    check_retrieval_mode(&mode)?;
+    state.db.set_space_retrieval_mode(&id, &mode).map_err(err)
+}
+
+/// `mode: None` makes the chat inherit its Space's mode again.
+#[tauri::command]
+pub async fn set_session_retrieval_mode(
+    state: State<'_, AppState>,
+    id: String,
+    mode: Option<String>,
+) -> Result<(), String> {
+    if let Some(m) = &mode {
+        check_retrieval_mode(m)?;
+    }
+    state.db.set_session_retrieval_mode(&id, mode.as_deref()).map_err(err)
+}
+
+fn check_image_scaling(json: Option<String>) -> Result<Option<String>, String> {
+    json.map(|j| {
+        crate::db::normalize_image_scaling(&j).ok_or_else(|| format!("invalid image scaling `{j}`"))
+    })
+    .transpose()
+}
+
+/// `scaling: None` makes the Space inherit the app's image scaling again.
+#[tauri::command]
+pub async fn set_space_image_scaling(
+    state: State<'_, AppState>,
+    id: String,
+    scaling: Option<String>,
+) -> Result<(), String> {
+    let scaling = check_image_scaling(scaling)?;
+    state.db.set_space_image_scaling(&id, scaling.as_deref()).map_err(err)
+}
+
+/// `scaling: None` makes the chat inherit its Space's (or the app's) image
+/// scaling again.
+#[tauri::command]
+pub async fn set_session_image_scaling(
+    state: State<'_, AppState>,
+    id: String,
+    scaling: Option<String>,
+) -> Result<(), String> {
+    let scaling = check_image_scaling(scaling)?;
+    state.db.set_session_image_scaling(&id, scaling.as_deref()).map_err(err)
+}
+
+/// Find the excerpts of `args.docs` most relevant to `args.query`.
+#[tauri::command]
+pub async fn rag_search(
+    state: State<'_, AppState>,
+    args: rag::SearchArgs,
+) -> Result<rag::SearchResult, String> {
+    rag::search(state.db.clone(), &state.http, &state.indexer, args).await
+}
+
+#[tauri::command]
+pub async fn rag_status(state: State<'_, AppState>) -> Result<IndexStatus, String> {
+    Ok(state.indexer.status())
+}
+
+/// Drop every embedding and re-embed from scratch — after swapping the
+/// model for one with the same name, or to recover from a bad index.
+#[tauri::command]
+pub async fn rag_reindex(state: State<'_, AppState>) -> Result<(), String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || db.clear_rag_embeddings())
+        .await
+        .map_err(err)?
+        .map_err(err)?;
+    state.indexer.wake();
     Ok(())
 }
 
@@ -2910,7 +3584,7 @@ pub async fn save_binary_to_file(
 
 /// Row counts and byte totals for the Settings -> Data storage tile.
 ///
-/// On the blocking pool for the same reason as `export_data_json`: the
+/// On the blocking pool for the same reason as `export_data_to_file`: the
 /// `SUM(LENGTH(...))` scans walk every message and space file, including
 /// their inlined base64 bodies, so on an attachment-heavy database this is
 /// firmly CPU-bound and would otherwise stall a runtime worker.
@@ -2922,21 +3596,61 @@ pub async fn storage_stats(state: State<'_, AppState>) -> Result<StorageStats, S
         .map_err(|e| format!("storage stats task panicked: {e}"))?
 }
 
-/// Serialise every table to a JSON string. Pretty-printed so users can
-/// diff or grep an export manually. The schema tag `"loach/v1"` is the
-/// forward-compat knob — `import_data_with_dialog` rejects anything else.
+/// Open a native save dialog and write every table, as JSON, to the path the
+/// user picks. Returns that path, or `None` if they cancelled. Pretty-printed
+/// so users can diff or grep an export manually. The schema tag
+/// (`db::SNAPSHOT_SCHEMA`) is the forward-compat knob —
+/// `import_data_with_dialog` rejects any tag this build can't read.
+///
+/// The snapshot streams straight into the file. It used to come back to the
+/// renderer as one string and go out again through `save_text_to_file`,
+/// which held several copies of it in the JS heap and then refused anything
+/// over `MAX_SAVE_BYTES` only after all of them had been built.
 #[tauri::command]
-pub async fn export_data_json(state: State<'_, AppState>) -> Result<String, String> {
+pub async fn export_data_to_file(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Option<String>, String> {
+    use std::io::Write as _;
+    use tauri_plugin_dialog::DialogExt;
+
+    let file_name = format!("loach-export-{}.json", chrono::Utc::now().format("%Y-%m-%d"));
+    let path_opt = tauri::async_runtime::spawn_blocking(move || {
+        app.dialog()
+            .file()
+            .set_file_name(&file_name)
+            .add_filter("Loach export", &["json"])
+            .blocking_save_file()
+    })
+    .await
+    .map_err(|e| format!("save dialog task failed: {e}"))?;
+
+    let chosen = match path_opt {
+        Some(fp) => fp,
+        None => return Ok(None),
+    };
+    let path = chosen
+        .into_path()
+        .map_err(|e| format!("invalid path returned from dialog: {e}"))?;
+
     // `snapshot()` reads every table (messages and space files carry inlined
-    // base64 bodies) under the DB lock, and the pretty-print doubles that in
-    // memory — both CPU-bound and both blocking. The import counterpart is
-    // already on the blocking pool for exactly this reason; the export half
-    // wasn't, so a large attachment-heavy database stalled a runtime worker
-    // and queued every other command behind it.
+    // base64 bodies) under the DB lock, and the write that follows is as big
+    // — both blocking, so both on the blocking pool, like the import.
     let db = state.db.clone();
-    tokio::task::spawn_blocking(move || -> Result<String, String> {
+    tokio::task::spawn_blocking(move || -> Result<Option<String>, String> {
         let snap = db.snapshot().map_err(err)?;
-        serde_json::to_string_pretty(&snap).map_err(err)
+        let failed = |e: std::io::Error| format!("couldn't write {}: {e}", path.display());
+        let mut out = std::io::BufWriter::new(std::fs::File::create(&path).map_err(failed)?);
+        let written = serde_json::to_writer_pretty(&mut out, &snap)
+            .map_err(std::io::Error::from)
+            .and_then(|()| out.flush());
+        if let Err(e) = written {
+            drop(out);
+            // A cut-off export reads as a backup until the day it won't import.
+            let _ = std::fs::remove_file(&path);
+            return Err(failed(e));
+        }
+        Ok(Some(path.to_string_lossy().to_string()))
     })
     .await
     .map_err(|e| format!("export task panicked: {e}"))?
@@ -2993,10 +3707,11 @@ pub async fn import_data_with_dialog(
                 .map_err(|e| format!("couldn't read {}: {e}", path.display()))?;
             let snap: DatabaseSnapshot = serde_json::from_str(&text)
                 .map_err(|e| format!("file doesn't look like a Loach export: {e}"))?;
-            if snap.schema != "loach/v1" {
+            if !crate::db::is_supported_snapshot_schema(&snap.schema) {
                 return Err(format!(
-                    "unsupported export schema '{}' — this build expects 'loach/v1'",
-                    snap.schema
+                    "unsupported export schema '{}' — this build reads 'loach/v1' and '{}'",
+                    snap.schema,
+                    crate::db::SNAPSHOT_SCHEMA
                 ));
             }
             Ok(snap)
@@ -3014,7 +3729,18 @@ pub async fn import_data_with_dialog(
     // importing a tampered file.
     let mut quarantined: Vec<String> = Vec::new();
     let mut stdio_parked: Vec<String> = Vec::new();
+    let mut renamed: Vec<String> = Vec::new();
+    let mut taken: std::collections::HashSet<String> =
+        snap.data.mcp_servers.iter().map(|r| r.name.clone()).collect();
     for (idx, row) in snap.data.mcp_servers.iter_mut().enumerate() {
+        // A name the rule refuses is fixed up rather than failing the import:
+        // it's a label, and a backup from before the rule shouldn't cost the
+        // user every chat in it.
+        if let Some(name) = sanitize_imported_mcp_name(&row.name, &taken) {
+            renamed.push(format!("{:?} → {name:?}", row.name));
+            taken.insert(name.clone());
+            row.name = name;
+        }
         let parsed_headers: Option<std::collections::HashMap<String, String>> =
             parse_import_json(idx, &row.name, "headers_json", row.headers_json.as_deref())?;
         let parsed_env: Option<std::collections::HashMap<String, String>> =
@@ -3040,7 +3766,7 @@ pub async fn import_data_with_dialog(
             allowed_tools: parsed_allowed,
             enabled: Some(row.enabled),
         };
-        match validate_mcp_input(&synthetic).await {
+        match validate_mcp_input(&synthetic, true).await {
             Ok(_) => {
                 // A stdio row is a command line nobody has confirmed on
                 // *this* machine, in *this* session — and a snapshot is the
@@ -3104,6 +3830,13 @@ pub async fn import_data_with_dialog(
             quarantined.join(", ")
         );
     }
+    if !renamed.is_empty() {
+        tracing::info!(
+            "import: {} MCP server name(s) didn't fit the name rule and were renamed: {}",
+            renamed.len(),
+            renamed.join(", ")
+        );
+    }
     if !stdio_parked.is_empty() {
         tracing::info!(
             "import: {} stdio MCP server(s) imported disabled pending consent: {}",
@@ -3115,11 +3848,11 @@ pub async fn import_data_with_dialog(
     // Stage 2.5 — filter imported settings through the SAME allowlist
     // `set_setting` enforces. `restore_snapshot` writes settings rows
     // verbatim, which otherwise bypasses the gate entirely: a hand-edited
-    // export could plant arbitrary keys or repoint `openai_base_url` at an
-    // attacker host — the exact attack `set_setting`'s allowlist closes.
-    // (We deliberately do NOT value-screen base URLs: they're freely
-    // user-writable on the normal path — local proxies like LM Studio need
-    // `localhost:1234` — so the import path matches that.)
+    // export could plant arbitrary keys. (We deliberately do NOT
+    // value-screen base URLs: they're freely user-writable on the normal
+    // path — local proxies like LM Studio need `localhost:1234` — so the
+    // import path matches that. Stage 2.6 handles the one URL a stored
+    // secret is sent to.)
     let before = snap.data.settings.len();
     snap.data
         .settings
@@ -3129,6 +3862,23 @@ pub async fn import_data_with_dialog(
         tracing::warn!(
             "import: dropped {dropped} setting(s) not on the writable allowlist"
         );
+    }
+
+    // Stage 2.6 — the allowlist above admits `openai_base_url`, so a backup
+    // could still repoint it. Keep the current URL while a key is stored
+    // (a failed keyring read counts as stored).
+    let key_may_exist =
+        tokio::task::spawn_blocking(|| !matches!(secrets::get_openai_key(), Ok(None)))
+            .await
+            .unwrap_or(true);
+    if key_may_exist {
+        let current = state.db.get_setting(OPENAI_BASE_URL_KEY).map_err(err)?;
+        if keep_current_openai_base_url(&mut snap.data.settings, current) {
+            tracing::warn!(
+                "import: kept the current OpenAI base URL — an API key is stored for it \
+                 and the backup named a different server"
+            );
+        }
     }
 
     // Stage 3 — apply. `restore_snapshot` holds the single DB mutex for
@@ -3147,7 +3897,35 @@ pub async fn import_data_with_dialog(
     crate::mcp::drop_all_sessions();
     // Every chat was replaced, and with them what "this chat" meant.
     state.approvals.revoke_all();
+    // Snapshots don't carry the retrieval index; rebuild it.
+    state.indexer.wake();
     Ok(Some(stats))
+}
+
+const OPENAI_BASE_URL_KEY: &str = "openai_base_url";
+
+/// Replace an imported `openai_base_url` with `current` (the installed value,
+/// `None` when it's the default). The API key never travels in a snapshot, so
+/// the one in the keyring belongs to the server configured here; a backup
+/// naming another server would otherwise have that key sent there on the
+/// next model listing, chat or embedding request, with no click from the
+/// user. Returns whether the snapshot named a different URL.
+fn keep_current_openai_base_url(
+    settings: &mut Vec<(String, String)>,
+    current: Option<String>,
+) -> bool {
+    let imported = settings
+        .iter()
+        .find(|(k, _)| k == OPENAI_BASE_URL_KEY)
+        .map(|(_, v)| v.clone());
+    if imported == current {
+        return false;
+    }
+    settings.retain(|(k, _)| k != OPENAI_BASE_URL_KEY);
+    if let Some(url) = current {
+        settings.push((OPENAI_BASE_URL_KEY.to_string(), url));
+    }
+    true
 }
 
 /// Decode one JSON column of an imported MCP row, naming the row and the
@@ -3207,7 +3985,13 @@ pub async fn wipe_user_data(
     auth: Option<DestructiveAuthArgs>,
 ) -> Result<(), String> {
     check_destructive_auth(auth).await?;
-    state.db.wipe_user_data().map_err(err)?;
+    // Bulk DELETEs, each chunk row through its FTS trigger — on the blocking
+    // pool.
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || db.wipe_user_data())
+        .await
+        .map_err(err)?
+        .map_err(err)?;
     // The wipe deletes every `mcp_servers` row, so the cached tool catalogue
     // is now stale. The webview reloads afterwards but `AppState` doesn't, so
     // without this the next chat send would still advertise the just-erased
@@ -3215,6 +3999,7 @@ pub async fn wipe_user_data(
     crate::mcp::invalidate_tools_cache(&state.mcp_tools_cache).await;
     crate::mcp::drop_all_sessions();
     state.approvals.revoke_all();
+    state.indexer.wake();
     Ok(())
 }
 
@@ -3233,12 +4018,18 @@ pub async fn factory_reset(
     auth: Option<DestructiveAuthArgs>,
 ) -> Result<(), String> {
     check_destructive_auth(auth).await?;
-    state.db.wipe_all().map_err(err)?;
+    // Blocking bulk DELETEs, as in `wipe_user_data`.
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || db.wipe_all())
+        .await
+        .map_err(err)?
+        .map_err(err)?;
     // Same reason as in `wipe_user_data`: the MCP rows are gone, so the
     // in-process tool catalogue has to go with them.
     crate::mcp::invalidate_tools_cache(&state.mcp_tools_cache).await;
     crate::mcp::drop_all_sessions();
     state.approvals.revoke_all();
+    state.indexer.wake();
     // Best-effort: if the user never had a key we silently ignore the
     // NoEntry branch inside `clear_openai_key`. A hard failure here
     // (keyring daemon dead, etc.) shouldn't undo the DB wipe. Both are
@@ -3444,6 +4235,42 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn base_url_rows(settings: &[(String, String)]) -> Vec<&str> {
+        settings
+            .iter()
+            .filter(|(k, _)| k == OPENAI_BASE_URL_KEY)
+            .map(|(_, v)| v.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn import_keeps_the_base_url_a_stored_key_belongs_to() {
+        let row = |v: &str| (OPENAI_BASE_URL_KEY.to_string(), v.to_string());
+        let theme = ("theme".to_string(), "dark".to_string());
+
+        // A backup naming another server: the installed URL stays.
+        let mut s = vec![theme.clone(), row("https://attacker.example/v1")];
+        assert!(keep_current_openai_base_url(&mut s, Some("https://openrouter.ai/api/v1".into())));
+        assert_eq!(base_url_rows(&s), ["https://openrouter.ai/api/v1"]);
+        assert!(s.contains(&theme));
+
+        // Installed URL is the default (no row): the imported one is dropped.
+        let mut s = vec![row("https://attacker.example/v1")];
+        assert!(keep_current_openai_base_url(&mut s, None));
+        assert!(base_url_rows(&s).is_empty());
+
+        // Backup without the row, installed URL custom: restore would wipe it
+        // back to the default, so it's carried over.
+        let mut s = vec![theme.clone()];
+        assert!(keep_current_openai_base_url(&mut s, Some("http://localhost:1234/v1".into())));
+        assert_eq!(base_url_rows(&s), ["http://localhost:1234/v1"]);
+
+        // Same URL: nothing to report.
+        let mut s = vec![row("https://api.openai.com/v1")];
+        assert!(!keep_current_openai_base_url(&mut s, Some("https://api.openai.com/v1".into())));
+        assert_eq!(base_url_rows(&s), ["https://api.openai.com/v1"]);
+    }
+
     fn stdio_input(command: &str, args: &[&str], env: &[(&str, &str)]) -> McpServerInput {
         serde_json::from_value(json!({
             "name": "fs",
@@ -3453,6 +4280,55 @@ mod tests {
             "env": env.iter().copied().collect::<HashMap<_, _>>(),
         }))
         .expect("input")
+    }
+
+    #[test]
+    fn library_text_is_capped_on_char_boundaries() {
+        let (short, cut) = cap_library_text("ż".repeat(10));
+        assert_eq!((short.chars().count(), cut), (10, false));
+        // Regression: the frontend cuts at the same 200k and appends a note;
+        // cutting again at exactly 200k deleted the note, so the model was
+        // never told the document was incomplete.
+        let from_frontend = format!(
+            "{}\n\n[…file truncated at 200,000 chars. Ask the user for specific sections if you need more.]",
+            "ż".repeat(LIBRARY_MAX_CHARS)
+        );
+        let (kept, cut) = cap_library_text(from_frontend.clone());
+        assert_eq!((kept, cut), (from_frontend, false));
+        // Anything longer is cut on a char boundary, and says so.
+        let (long, cut) = cap_library_text("ż".repeat(LIBRARY_MAX_CHARS + LIBRARY_NOTE_ROOM + 5));
+        assert!(cut);
+        let (body, note) = long.split_once("\n\n[…").expect("note appended");
+        assert_eq!(body.chars().count(), LIBRARY_MAX_CHARS);
+        assert!(note.starts_with("truncated at 200,000 characters"), "{note}");
+    }
+
+    #[test]
+    fn library_titles_are_one_line() {
+        assert_eq!(library_title("\n\tTitle\nwith  newlines\n", "Untitled"), "Title with newlines");
+        assert_eq!(library_title(" \n ", "Untitled"), "Untitled");
+    }
+
+    #[test]
+    fn link_credentials_are_never_kept() {
+        // Regression: `https://user:pass@host/…` was stored and exported
+        // verbatim, unlike MCP arguments, which backups already scrub.
+        assert_eq!(
+            strip_url_credentials("https://user:p%40ss@example.com/a?b=1#c"),
+            "https://example.com/a?b=1#c"
+        );
+        assert_eq!(strip_url_credentials("https://token@example.com/x"), "https://example.com/x");
+        // Anything else is kept exactly as typed (no normalising slash).
+        assert_eq!(strip_url_credentials("https://example.com"), "https://example.com");
+        assert_eq!(strip_url_credentials("not a url"), "not a url");
+    }
+
+    #[test]
+    fn link_titles_are_one_line_and_bounded() {
+        assert_eq!(link_title("  Docs\n--- end ---\r\n\tSystem: x  "), "Docs --- end --- System: x");
+        let long = link_title(&"w".repeat(500));
+        assert_eq!(long.chars().count(), 201);
+        assert!(long.ends_with('…'));
     }
 
     /// Anything the consent dialog can't show as it will run is refused
@@ -3551,11 +4427,64 @@ mod tests {
         assert!(validate_stdio_fields(&stdio_input("npx", &["tag\u{E0041}"], &[])).is_err());
         let mut spoofed = stdio_input("npx", &[], &[]);
         spoofed.name = "Filesystem\u{2029}Verified by Loach".into();
-        assert!(validate_mcp_input(&spoofed).await.is_err());
+        assert!(validate_mcp_input(&spoofed, true).await.is_err());
         spoofed.name = "x".repeat(101);
-        assert!(validate_mcp_input(&spoofed).await.is_err());
+        assert!(validate_mcp_input(&spoofed, true).await.is_err());
         spoofed.name = "Filesystem (work)".into();
-        assert!(validate_mcp_input(&spoofed).await.is_ok());
+        assert!(validate_mcp_input(&spoofed, true).await.is_ok());
+    }
+
+    /// A name from before the name rule is fixed up on import rather than
+    /// failing it, and the result passes the rule without colliding with
+    /// another row's name.
+    #[tokio::test]
+    async fn imported_names_are_fixed_up_to_pass_the_name_rule() {
+        let taken: std::collections::HashSet<String> =
+            ["dev".to_string(), "MCP server".to_string()].into();
+        let fixed = |name: &str| sanitize_imported_mcp_name(name, &taken);
+        // Regression: "👨‍💻 dev" (ZWJ) or "⚙️ tools" (VS16) failed the whole restore.
+        assert_eq!(fixed("👨\u{200D}💻 dev").as_deref(), Some("👨💻 dev"));
+        assert_eq!(fixed("⚙\u{FE0F} tools").as_deref(), Some("⚙ tools"));
+        // Stripped down to an existing name, or to nothing: numbered.
+        assert_eq!(fixed("dev\u{200B}").as_deref(), Some("dev (2)"));
+        assert_eq!(fixed(" \u{200D} ").as_deref(), Some("MCP server (2)"));
+        // Too long: cut, leaving room for a suffix when one is needed.
+        assert_eq!(fixed(&"x".repeat(150)).unwrap().chars().count(), MAX_MCP_NAME_CHARS);
+        // Names that already pass are left exactly as they are.
+        assert_eq!(fixed("Filesystem (work)"), None);
+        assert_eq!(fixed("dev"), None);
+
+        let mut input = stdio_input("npx", &[], &[]);
+        for name in ["👨\u{200D}💻 dev", "\u{200B}", &"ż\u{200F}".repeat(80)] {
+            input.name = fixed(name).unwrap();
+            assert!(validate_mcp_input(&input, true).await.is_ok(), "{:?}", input.name);
+        }
+    }
+
+    /// A disabled HTTP row isn't DNS-screened, so it can be switched off or
+    /// renamed while its host doesn't resolve — but it still gets every
+    /// structural check, and an enabled one is still screened.
+    #[tokio::test]
+    async fn disabled_rows_skip_only_the_host_screen() {
+        let mut input: McpServerInput = serde_json::from_value(json!({
+            "name": "vpn-only",
+            "url": "https://mcp.loach-test.invalid/mcp",
+            "enabled": false,
+        }))
+        .unwrap();
+        assert!(validate_mcp_input(&input, false).await.unwrap().is_empty());
+        assert!(matches!(
+            validate_mcp_input(&input, true).await,
+            Err(McpImportRejection::Unscreenable(_))
+        ));
+        input.headers = Some([("Bad Name".to_string(), "x".to_string())].into());
+        assert!(matches!(
+            validate_mcp_input(&input, false).await,
+            Err(McpImportRejection::Rejected(_))
+        ));
+        input.headers = None;
+        input.url = "ftp://example.com".into();
+        assert!(validate_mcp_input(&input, false).await.is_err());
     }
 
     /// Only a click on "Start server" starts anything — not Enter (which
@@ -3575,5 +4504,77 @@ mod tests {
         let long = "x".repeat(CONSENT_MAX_CHARS);
         let err = stdio_consent_text(&stdio_input("npx", &[&long], &[]).to_draft()).unwrap_err();
         assert!(err.contains("too long"), "{err}");
+    }
+
+    /// The consent dialog guards what *would run*: a new enabled row, a new
+    /// command line, and — the import path — enabling a row that was off.
+    /// Renames and switching a row off never ask.
+    #[test]
+    fn save_asks_for_consent_only_when_what_runs_changes() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let db = crate::db::Database::open(&dir.path().join("loach.db")).expect("open");
+        db.migrate().expect("migrate");
+
+        let fresh = stdio_input("npx", &["-y", "server-a"], &[]).to_draft();
+        assert!(save_changes_what_runs(&db, &fresh), "a new enabled row");
+        assert!(!save_changes_what_runs(&db, &McpServer { enabled: false, ..fresh.clone() }));
+
+        // Stored disabled, as a snapshot import parks it.
+        let parked = db
+            .upsert_mcp_server(&McpServer { enabled: false, ..fresh.clone() })
+            .expect("save");
+        assert!(save_changes_what_runs(&db, &McpServer { enabled: true, ..parked.clone() }));
+
+        let running = db
+            .upsert_mcp_server(&McpServer { enabled: true, ..parked.clone() })
+            .expect("enable");
+        assert!(!save_changes_what_runs(&db, &McpServer { name: "renamed".into(), ..running.clone() }));
+        assert!(!save_changes_what_runs(&db, &McpServer { enabled: false, ..running.clone() }));
+        let other = McpServer {
+            args_json: Some(r#"["-y","server-b"]"#.into()),
+            ..running.clone()
+        };
+        assert!(save_changes_what_runs(&db, &other), "a new command line");
+
+        // A row nothing knows about is treated as new.
+        assert!(save_changes_what_runs(&db, &McpServer { id: "gone".into(), ..running }));
+    }
+
+    /// The CRLF-injection guard on MCP headers: names are RFC 7230 tokens,
+    /// values visible ASCII plus space and tab, and neither may break a line.
+    #[test]
+    fn header_names_and_values_cannot_inject_lines() {
+        for ok in ["Authorization", "X-API-Key", "x_custom.v2", "!#$%&'*+-.^_`|~"] {
+            assert!(is_valid_header_name(ok), "{ok:?}");
+        }
+        for bad in ["", "Bad Name", "X-Key:", "X\r\nInjected", "X\nY", "Ключ", "a\tb"] {
+            assert!(!is_valid_header_name(bad), "{bad:?}");
+        }
+        for ok in ["", "Bearer abc.def", "a\tb", "~!@#$%^&*()"] {
+            assert!(is_valid_header_value(ok), "{ok:?}");
+        }
+        for bad in ["x\r\nX-Injected: 1", "x\ny", "x\rx", "nul\0", "żółw", "del\u{7f}"] {
+            assert!(!is_valid_header_value(bad), "{bad:?}");
+        }
+        assert!(is_valid_header_value(&"v".repeat(4096)));
+        assert!(!is_valid_header_value(&"v".repeat(4097)));
+    }
+
+    /// Office Open XML names XML in its type but is a zip archive, so a link
+    /// to a .docx/.xlsx/.pptx is refused like any binary; real XML isn't.
+    #[test]
+    fn office_documents_are_not_textual() {
+        for ok in ["", "text/html; charset=utf-8", "application/json", "application/xml", "application/rss+xml", "text/plain"] {
+            assert!(is_textual_content_type(ok), "{ok:?}");
+        }
+        for bad in [
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            "application/pdf",
+            "image/png",
+        ] {
+            assert!(!is_textual_content_type(bad), "{bad:?}");
+        }
     }
 }

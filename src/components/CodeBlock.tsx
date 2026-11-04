@@ -1,6 +1,11 @@
 import { useMemo, useState } from "react";
-import { Check, Copy, Download, PanelRight } from "lucide-react";
-import { useCanvasStore } from "@/stores/canvasStore";
+import { Check, Copy, Download, Eye, PanelRight } from "lucide-react";
+import {
+  useCanvasStore,
+  isHtmlLanguage,
+  type CanvasView,
+} from "@/stores/canvasStore";
+import { usePrivateChatStore } from "@/stores/privateChatStore";
 import { useMarkdownSource } from "./markdownSource";
 import { saveCodeToFile, defaultFilename } from "@/lib/codeExport";
 import { cn } from "@/lib/utils";
@@ -43,6 +48,11 @@ export function CodeBlock({ className, children, raw, language }: CodeBlockProps
   const [copied, setCopied] = useState(false);
   const openCanvas = useCanvasStore((s) => s.open);
   const openCanvasLive = useCanvasStore((s) => s.openLive);
+  // Private Chat renders replies through this same block, but the canvas
+  // belongs to the regular window and outlives the overlay: a private
+  // snippet (or a running HTML preview) opened there would still be on
+  // screen after Private Chat closes. Offer no canvas while it's open.
+  const privateChatOpen = usePrivateChatStore((s) => s.open);
   const source = useMarkdownSource();
 
   const lineCount = useMemo(() => {
@@ -66,7 +76,7 @@ export function CodeBlock({ className, children, raw, language }: CodeBlockProps
     void saveCodeToFile(raw, language, defaultFilename(language));
   };
 
-  const onOpenCanvas = () => {
+  const onOpenCanvas = (view: CanvasView = "code") => {
     // Bind the canvas live only when this block is the one still streaming —
     // i.e. the last fenced block of a message that's actively generating.
     // Earlier blocks are already complete, so a static snapshot is correct
@@ -81,9 +91,10 @@ export function CodeBlock({ className, children, raw, language }: CodeBlockProps
         messageId: source.messageId,
         code: raw,
         language: language ?? null,
+        view,
       });
     } else {
-      openCanvas({ code: raw, language: language ?? null });
+      openCanvas({ code: raw, language: language ?? null, view });
     }
   };
 
@@ -105,13 +116,24 @@ export function CodeBlock({ className, children, raw, language }: CodeBlockProps
           {language || "text"}
         </span>
         <div className="flex shrink-0 items-center gap-0.5">
-          <ToolbarButton
-            onClick={onOpenCanvas}
-            label="Open in canvas"
-            icon={<PanelRight className="h-3 w-3" />}
-          >
-            Open
-          </ToolbarButton>
+          {!privateChatOpen && isHtmlLanguage(language) && (
+            <ToolbarButton
+              onClick={() => onOpenCanvas("preview")}
+              label="Preview in canvas"
+              icon={<Eye className="h-3 w-3" />}
+            >
+              Preview
+            </ToolbarButton>
+          )}
+          {!privateChatOpen && (
+            <ToolbarButton
+              onClick={() => onOpenCanvas()}
+              label="Open in canvas"
+              icon={<PanelRight className="h-3 w-3" />}
+            >
+              Open
+            </ToolbarButton>
+          )}
           <ToolbarButton
             onClick={onExport}
             label={`Export to ${defaultFilename(language)}`}

@@ -2,22 +2,17 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   Archive,
   Brain,
-  ChevronDown,
   ChevronRight,
-  CircleAlert,
-  CircleCheck,
-  FileText,
-  Folder,
+  Cpu,
   Image as ImageIcon,
+  Layers,
+  Library,
   MessageSquare,
   MoreHorizontal,
   Pencil,
   Pin,
   PinOff,
-  Plus,
-  RefreshCw,
   Trash2,
-  Upload,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -31,10 +26,10 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Field } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Switch } from "@/components/ui/switch";
@@ -42,25 +37,34 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { ChatInput } from "@/components/ChatInput";
 import { ChatLabelDot, ChatLabelSubmenu } from "@/components/ChatLabelMenu";
+import { ChatSpaceSubmenu } from "@/components/ChatSpaceMenu";
 import { useConfirm } from "@/components/ConfirmDialog";
+import { DefaultModelPicker, DEFAULT_MODEL_LABEL } from "@/components/DefaultModelPicker";
+import { ImageScalingControl } from "@/components/ImageScalingControl";
 import { MemoryList } from "@/components/MemoryList";
+import { MODE_LABELS } from "@/components/library/ChatSources";
+import { SourceModeSwitch, SpaceSourcesTab } from "@/components/library/SpaceSources";
 import { useChatStore } from "@/stores/chatStore";
+import { useSpaceStore, type SpaceTab } from "@/stores/spaceStore";
+import { useLibraryStore } from "@/stores/libraryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
-import { useSpaceStore } from "@/stores/spaceStore";
 import { useToastStore } from "@/stores/toastStore";
 import { useUIStore } from "@/stores/uiStore";
-import { fileToAttachment, SPACE_BYTES_CAP } from "@/lib/files";
-import { useProviderModels } from "@/lib/useProviderModels";
+import { deleteChatConfirm } from "@/lib/confirmations";
+import { fileToAttachment, NO_DOCX_TEXT, NO_PDF_TEXT } from "@/lib/files";
+import { parseImageScaling, resolveImageScaling } from "@/lib/imageScaling";
+import { dialogEnter } from "@/lib/shortcuts";
+import { spaceSourceCount } from "@/lib/sources";
 import { cn, relativeDay } from "@/lib/utils";
 import {
   type ChatLabel,
+  type ImageScaling,
   type ProviderId,
+  type RetrievalMode,
   type Session,
   type SpaceFile,
   type SpaceMemory,
 } from "@/types";
-
-type TabId = "chats" | "instructions" | "files" | "memory" | "models";
 
 /** Stable empties for the "not loaded yet" case — a fresh `[]` per render
  *  would churn every memo and effect keyed on these. */
@@ -92,6 +96,8 @@ export function SpaceView() {
   const loadFiles = useSpaceStore((s) => s.loadSpaceFiles);
   const doAddFile = useSpaceStore((s) => s.addFile);
   const doRemoveFile = useSpaceStore((s) => s.removeFile);
+  const setRetrievalMode = useSpaceStore((s) => s.setRetrievalMode);
+  const setImageScaling = useSpaceStore((s) => s.setImageScaling);
   const storedFiles = useSpaceStore((s) =>
     viewingSpaceId ? s.spaceFiles[viewingSpaceId] : undefined,
   );
@@ -115,7 +121,14 @@ export function SpaceView() {
   const space = spaces.find((s) => s.id === viewingSpaceId);
 
   const [editDialogOpen, setEditDialogOpen] = useState(false);
-  const [tab, setTab] = useState<TabId>("chats");
+  // Kept in the store per Space, so a link can open a tab directly (the
+  // composer's "Space sources" chip opens Sources) and coming back from one
+  // of the Space's chats lands on the tab it was left on.
+  const tab = useSpaceStore((s) => (viewingSpaceId ? s.spaceTabs[viewingSpaceId] : undefined)) ?? "chats";
+  const setSpaceTab = useSpaceStore((s) => s.setSpaceTab);
+  const setTab = (t: SpaceTab) => {
+    if (viewingSpaceId) setSpaceTab(viewingSpaceId, t);
+  };
   // Read straight from the store rather than mirroring into local state.
   // The mirror only ever copied `stored*` forward, and its effect was
   // guarded on truthiness — so switching to a space whose rows weren't
@@ -123,6 +136,17 @@ export function SpaceView() {
   // Meta-strip counts on screen until the new load resolved, or forever if
   // it failed.
   const files = storedFiles ?? EMPTY_FILES;
+  // Library items / datasets linked to the Space count as sources too —
+  // counted the way the composer's "Space sources" chip counts them.
+  const libraryLinks = useLibraryStore((s) =>
+    viewingSpaceId ? s.sources[`space:${viewingSpaceId}`] : undefined,
+  );
+  const libraryItems = useLibraryStore((s) => s.items);
+  const datasets = useLibraryStore((s) => s.datasets);
+  const sourceCount = useMemo(
+    () => spaceSourceCount(files, libraryLinks ?? [], datasets, libraryItems),
+    [files, libraryLinks, datasets, libraryItems],
+  );
   const memories = storedMemories ?? EMPTY_MEMORIES;
 
   useEffect(() => {
@@ -160,23 +184,26 @@ export function SpaceView() {
   // defaults) fire-and-forget, so route them through this wrapper to surface
   // failures. EditSpaceDialog uses `doUpdate` directly because it renders its
   // own inline error — toasting here too would double up.
+  /** False when the save failed (a toast already said why). */
   const doUpdateNotify = async (fields: Parameters<typeof doUpdate>[1]) => {
     try {
       await doUpdate(space.id, fields);
+      return true;
     } catch (e) {
       useToastStore.getState().push({
         kind: "error",
-        title: "Couldn't save space",
+        title: "Couldn't save Space",
         body: e instanceof Error ? e.message : String(e),
       });
+      return false;
     }
   };
 
   const handleDeleteSpace = async () => {
     const ok = await confirm({
-      title: `Delete space “${space.name}”?`,
-      body: "Sources and instructions in this space will be removed. Chats inside the space stay, but they lose their space association.",
-      confirmLabel: "Delete space",
+      title: `Delete Space “${space.name}”?`,
+      body: "Its instructions, memories and uploaded files are deleted for good. Library sources stay in your Library, and its chats are kept outside any Space.",
+      confirmLabel: "Delete Space",
       destructive: true,
     });
     if (ok) {
@@ -203,10 +230,8 @@ export function SpaceView() {
   // files, no instructions). Chat count and model are always shown so the
   // user can read the space's posture even when most knobs are at default.
   const hasInstructions = space.instructions.trim().length > 0;
-  const modelLabel =
-    space.default_model && space.default_provider
-      ? trimModelLabel(space.default_model)
-      : "Default model";
+  // The whole model id, as a snippet card shows a pinned model.
+  const pinnedModel = space.default_model && space.default_provider ? space.default_model : null;
 
   return (
     <main className="flex min-w-0 flex-1 flex-col">
@@ -230,7 +255,7 @@ export function SpaceView() {
 
           {/* Title row */}
           <div className="flex items-center gap-3">
-            <Folder className="h-7 w-7 shrink-0 text-foreground/65" strokeWidth={1.75} />
+            <Layers className="h-7 w-7 shrink-0 text-foreground/65" strokeWidth={1.75} />
             <h1 className="flex-1 truncate text-3xl font-semibold tracking-tight text-foreground">
               {space.name}
             </h1>
@@ -257,7 +282,7 @@ export function SpaceView() {
                   className="text-destructive focus:text-destructive"
                 >
                   <Trash2 className="mr-2 h-4 w-4" />
-                  Delete space
+                  Delete Space
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
@@ -281,9 +306,9 @@ export function SpaceView() {
                 {spaceSessions.length}{" "}
                 {spaceSessions.length === 1 ? "chat" : "chats"}
               </MetaChip>
-              {files.length > 0 && (
+              {sourceCount > 0 && (
                 <MetaChip>
-                  {files.length} {files.length === 1 ? "source" : "sources"}
+                  {sourceCount} {sourceCount === 1 ? "source" : "sources"}
                 </MetaChip>
               )}
               {hasInstructions && <MetaChip>Instructions on</MetaChip>}
@@ -293,7 +318,18 @@ export function SpaceView() {
                   {memories.length === 1 ? "memory" : "memories"}
                 </MetaChip>
               )}
-              <MetaChip>{modelLabel}</MetaChip>
+              <MetaChip>
+                {pinnedModel ? (
+                  <span
+                    className="block max-w-[24ch] truncate"
+                    title={`${space.default_provider} · ${pinnedModel}`}
+                  >
+                    {pinnedModel}
+                  </span>
+                ) : (
+                  DEFAULT_MODEL_LABEL
+                )}
+              </MetaChip>
             </div>
           </div>
           </div>
@@ -307,7 +343,7 @@ export function SpaceView() {
 
           {/* Tabs — re-inset to match the title column. */}
           <div className="mt-10 px-4">
-            <Tabs value={tab} onValueChange={(v) => setTab(v as TabId)}>
+            <Tabs value={tab} onValueChange={(v) => setTab(v as SpaceTab)}>
               {/* Centered, auto-width — TabsList default is `inline-flex`,
                   so wrapping in a flex container is enough to centre it
                   without stretching. */}
@@ -317,7 +353,7 @@ export function SpaceView() {
                   <TabsTrigger value="instructions">Instructions</TabsTrigger>
                   <TabsTrigger value="files">Sources</TabsTrigger>
                   <TabsTrigger value="memory">Memory</TabsTrigger>
-                  <TabsTrigger value="models">Models</TabsTrigger>
+                  <TabsTrigger value="settings">Settings</TabsTrigger>
                 </TabsList>
               </div>
 
@@ -347,22 +383,55 @@ export function SpaceView() {
               </TabsContent>
 
               <TabsContent value="files" className="mt-6">
-                <FilesTab
+                <SpaceSourcesTab
+                  space={space}
                   files={files}
-                  onAdd={async (fileList) => {
+                  onUpload={async (fileList) => {
+                    // Each file on its own, as the Library's `prepareFiles`
+                    // reads them: one bad file doesn't stop the rest, and a
+                    // scanned PDF or an empty document — only the shared "no
+                    // text" note — isn't stored as a source.
+                    const failed: string[] = [];
                     for (const f of Array.from(fileList)) {
-                      const att = await fileToAttachment(f);
-                      await doAddFile(
-                        space.id,
-                        att.name,
-                        att.mime,
-                        att.kind,
-                        att.data,
-                        f.size,
-                      );
+                      try {
+                        const att = await fileToAttachment(f);
+                        if (
+                          att.kind === "text" &&
+                          (att.data === NO_PDF_TEXT || att.data === NO_DOCX_TEXT || !att.data.trim())
+                        ) {
+                          failed.push(
+                            `${f.name}: no readable text${att.data === NO_PDF_TEXT ? " — it may be a scanned PDF" : ""}`,
+                          );
+                          continue;
+                        }
+                        await doAddFile(
+                          space.id,
+                          att.name,
+                          att.mime,
+                          att.kind,
+                          att.data,
+                          f.size,
+                        );
+                      } catch (e) {
+                        failed.push(`${f.name}: ${e instanceof Error ? e.message : String(e)}`);
+                      }
                     }
+                    if (failed.length > 0) throw new Error(failed.join("\n"));
                   }}
-                  onRemove={(id) => void doRemoveFile(id, space.id)}
+                  onRemoveFile={async (id) => {
+                    // An upload lives only in this Space, so removing it is a
+                    // delete — unlike unlinking a Library source.
+                    const f = files.find((x) => x.id === id);
+                    const ok = await confirm({
+                      title: `Delete “${f?.name ?? "this file"}”?`,
+                      body:
+                        "Uploads are stored only in this Space, so it will be gone for good." +
+                        (f && f.kind !== "file" ? " Save it to your Library first to keep a copy." : ""),
+                      confirmLabel: "Delete",
+                      destructive: true,
+                    });
+                    if (ok) void doRemoveFile(id, space.id);
+                  }}
                 />
               </TabsContent>
 
@@ -370,14 +439,7 @@ export function SpaceView() {
                 <MemoryTab
                   space={space}
                   memories={memories}
-                  onToggle={(enabled) =>
-                    doUpdateNotify({
-                      name: space.name,
-                      description: space.description,
-                      instructions: space.instructions,
-                      memory_enabled: enabled,
-                    })
-                  }
+                  onOpenSettings={() => setTab("settings")}
                   onAdd={(content) =>
                     doAddMemory({ space_id: space.id, content }).catch((e) => {
                       useToastStore.getState().push({
@@ -415,8 +477,8 @@ export function SpaceView() {
                 />
               </TabsContent>
 
-              <TabsContent value="models" className="mt-6">
-                <ModelsTab
+              <TabsContent value="settings" className="mt-6">
+                <SettingsTab
                   space={space}
                   onSave={(patch) =>
                     doUpdateNotify({
@@ -426,6 +488,8 @@ export function SpaceView() {
                       ...patch,
                     })
                   }
+                  onSetMode={(mode) => void setRetrievalMode(space.id, mode)}
+                  onSetImageScaling={(scaling) => void setImageScaling(space.id, scaling)}
                 />
               </TabsContent>
             </Tabs>
@@ -462,10 +526,29 @@ function EditSpaceDialog({
   initialDescription: string;
   onSave: (next: { name: string; description: string }) => Promise<void>;
 }) {
+  const { confirm } = useConfirm();
   const [name, setName] = useState(initialName);
   const [description, setDescription] = useState(initialDescription);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Escape, the backdrop, ✕ and Cancel all come through here, so none of them
+  // can throw typed text away without asking.
+  const requestClose = async () => {
+    if (
+      (name !== initialName || description !== initialDescription) &&
+      !(await confirm({
+        title: "Discard unsaved changes?",
+        body: "Your edits to this Space haven't been saved.",
+        confirmLabel: "Discard",
+        cancelLabel: "Keep editing",
+        destructive: true,
+      }))
+    ) {
+      return;
+    }
+    onOpenChange(false);
+  };
 
   // Reseed when the dialog opens so a stale draft from a prior open doesn't
   // leak across edits, and so navigating to a different space picks up its
@@ -508,44 +591,44 @@ function EditSpaceDialog({
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-md">
+    <Dialog open={open} onOpenChange={(o) => (o ? onOpenChange(true) : void requestClose())}>
+      <DialogContent className="max-w-lg">
         <DialogHeader>
-          <DialogTitle>Edit Space details</DialogTitle>
+          <DialogTitle>Edit Space</DialogTitle>
           <DialogDescription>
-            Update the name and description for this space.
+            Update the name and description for this Space.
           </DialogDescription>
         </DialogHeader>
 
         <div className="mt-2 space-y-3">
-          <Input
-            id="edit-space-name"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                void handleSave();
-              }
-            }}
-            placeholder="Name your space"
-            maxLength={60}
-            autoFocus
-          />
-          <Textarea
-            id="edit-space-desc"
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-            placeholder="Describe your project, goals, subject…"
-            className="min-h-[88px] rounded-2xl border-foreground/10 bg-foreground/[0.05]"
-          />
+          <Field label="Name">
+            <Input
+              id="edit-space-name"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              onKeyDown={(e) => dialogEnter(e, () => void handleSave(), { ready: !saving && !!name.trim() })}
+              placeholder="e.g. Website redesign"
+              maxLength={60}
+              autoFocus
+            />
+          </Field>
+          <Field label="Description" optional>
+            <Textarea
+              id="edit-space-desc"
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              onKeyDown={(e) => dialogEnter(e, () => void handleSave(), { ready: !saving && !!name.trim() })}
+              placeholder="Describe your project, goals, subject…"
+              className="min-h-[88px] rounded-2xl border-foreground/10 bg-foreground/[0.05]"
+            />
+          </Field>
           {error && <p className="text-xs text-destructive">{error}</p>}
         </div>
 
         <div className="mt-3 flex items-center justify-end gap-2">
           <Button
             variant="outline"
-            onClick={() => onOpenChange(false)}
+            onClick={() => void requestClose()}
             className="rounded-lg"
           >
             Cancel
@@ -596,7 +679,7 @@ function ChatsTab({
       <div className="rounded-2xl border border-dashed border-foreground/10 px-6 py-10 text-center">
         <MessageSquare className="mx-auto mb-3 h-6 w-6 text-foreground/35" />
         <p className="text-sm text-foreground/55">
-          No chats yet — type above to start the first one in this space.
+          No chats yet — type above to start the first one in this Space.
         </p>
       </div>
     );
@@ -613,7 +696,7 @@ function ChatsTab({
   const groups: { label: string; rows: Session[] }[] = [
     { label: "Today", rows: buckets.today },
     { label: "Yesterday", rows: buckets.yesterday },
-    { label: "Earlier this week", rows: buckets.week },
+    { label: "This week", rows: buckets.week },
     { label: "Older", rows: buckets.older },
   ].filter((g) => g.rows.length > 0);
 
@@ -642,12 +725,7 @@ function ChatsTab({
                 onSetLabel={(label) => onSetLabel(s.id, label)}
                 onArchive={() => onArchive(s.id)}
                 onDelete={async () => {
-                  const ok = await confirm({
-                    title: "Delete this chat?",
-                    body: `“${s.title || "Untitled"}” will be removed permanently — all messages and metrics will be gone.`,
-                    confirmLabel: "Delete chat",
-                    destructive: true,
-                  });
+                  const ok = await confirm(deleteChatConfirm(s.title));
                   if (ok) onDelete(s.id);
                 }}
               />
@@ -706,6 +784,8 @@ function ChatRow({
           onChange={(e) => setDraft(e.target.value)}
           onBlur={() => onCommitRename(draft)}
           onKeyDown={(e) => {
+            // The Enter that confirms an IME candidate isn't the rename's.
+            if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
             if (e.key === "Enter") {
               e.preventDefault();
               (e.target as HTMLInputElement).blur();
@@ -733,6 +813,10 @@ function ChatRow({
         tabIndex={0}
         onClick={onOpen}
         onKeyDown={(e) => {
+          // Only the row's own keys: Enter on its ⋯ button (or a menu item,
+          // which bubbles here through the portal) belongs to that control —
+          // a keyboard Delete or Rename used to open the chat as well.
+          if (e.target !== e.currentTarget) return;
           if (e.key === "Enter" || e.key === " ") {
             e.preventDefault();
             onOpen();
@@ -795,6 +879,7 @@ function ChatRow({
               onSelect={onSetLabel}
               iconClassName="mr-2 h-4 w-4"
             />
+            <ChatSpaceSubmenu session={session} iconClassName="mr-2 h-4 w-4" />
             <DropdownMenuItem onSelect={onStartRename}>
               <Pencil className="mr-2 h-4 w-4" />
               Rename
@@ -827,7 +912,8 @@ function InstructionsTab({
   onSave,
 }: {
   space: { id: string; instructions: string };
-  onSave: (instructions: string) => Promise<void>;
+  /** False when the save failed. */
+  onSave: (instructions: string) => Promise<boolean>;
 }) {
   const [val, setVal] = useState(space.instructions);
   useEffect(() => {
@@ -836,274 +922,167 @@ function InstructionsTab({
 
   const dirty = val !== space.instructions;
 
+  // Saved on blur, and again when the tab goes away with edits the blur never
+  // caught — a keyboard shortcut or the app lock leaves without blurring the
+  // field. `sent` keeps a blur followed straight by an unmount (clicking
+  // another tab) from saving the same text twice. It holds a save only
+  // while it's in flight or once it landed: a failed one is forgotten, so
+  // leaving the tab tries it again.
+  const sent = useRef<string | null>(null);
+  const save = (text: string) => {
+    sent.current = text;
+    void onSave(text.trim()).then((ok) => {
+      if (!ok && sent.current === text) sent.current = null;
+    });
+  };
+  const latest = useRef({ val, dirty, save });
+  useEffect(() => {
+    latest.current = { val, dirty, save };
+  });
+  useEffect(
+    () => () => {
+      const l = latest.current;
+      if (l.dirty && l.val !== sent.current) l.save(l.val);
+    },
+    [space.id],
+  );
+
   return (
     <div className="space-y-3">
       <p className="text-xs text-foreground/55">
-        Sent as the system prompt for every chat in this space. Replaces your
+        Sent as the system prompt for every chat in this Space. Replaces your
         global system prompt while a chat lives here.
       </p>
       <Textarea
         value={val}
         onChange={(e) => setVal(e.target.value)}
         onBlur={() => {
-          if (dirty) void onSave(val.trim());
+          if (dirty) save(val);
         }}
         placeholder="e.g. Reply concisely and in the voice of a senior engineer reviewing a PR."
         className="min-h-[200px] rounded-xl border-foreground/10 bg-foreground/[0.03] text-sm leading-relaxed"
       />
       <div className="flex items-center justify-between text-[11px] text-foreground/40">
         <span>{val.length.toLocaleString()} characters</span>
-        {dirty && <span className="text-foreground/55">Unsaved — blur to save</span>}
+        {dirty && <span className="text-foreground/55">Saves when you click away</span>}
       </div>
     </div>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Files tab
+// Settings tab
 // ---------------------------------------------------------------------------
+//
+// Everything that sets how the Space's chats behave, in one place: the default
+// model, memory auto-save, how sources reach the model and how images are
+// scaled. They used to be
+// spread over a Models tab holding a single dropdown, a switch above the
+// Memory list and a selector on the Sources tab; those two tabs now show the
+// setting as a status line linking back here.
 
-function FilesTab({
-  files,
-  onAdd,
-  onRemove,
-}: {
-  files: SpaceFile[];
-  onAdd: (files: FileList) => Promise<void>;
-  onRemove: (fileId: string) => void;
-}) {
-  const inputRef = useRef<HTMLInputElement>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-
-  const totalBytes = files.reduce((acc, f) => acc + f.size, 0);
-  const atCap = totalBytes >= SPACE_BYTES_CAP;
-
-  const handlePick = async (list: FileList) => {
-    setError(null);
-    setBusy(true);
-    try {
-      await onAdd(list);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <div className="space-y-3">
-      <p className="text-xs text-foreground/55">
-        Reference sources available to every chat in this space. Text files are
-        inlined into the system prompt; images attach to vision-capable
-        models. 20&nbsp;MB per file, 200&nbsp;MB total per space.
-      </p>
-
-      {/* Upload row */}
-      <div className="flex items-center justify-between gap-3 rounded-xl border border-dashed border-foreground/15 bg-foreground/[0.02] px-4 py-3">
-        <div className="flex items-center gap-2.5 text-sm text-foreground/55">
-          <Upload className="h-4 w-4" />
-          <span>
-            {atCap
-              ? `Reached the 200 MB space limit`
-              : `${formatSize(totalBytes)} of 200 MB · ${files.length} ${files.length === 1 ? "source" : "sources"}`}
-          </span>
-        </div>
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={() => inputRef.current?.click()}
-          disabled={atCap || busy}
-          className="rounded-lg"
-        >
-          <Plus className="h-3.5 w-3.5" />
-          Add source
-        </Button>
-      </div>
-
-      <input
-        ref={inputRef}
-        type="file"
-        multiple
-        className="hidden"
-        onChange={(e) => {
-          if (e.target.files) void handlePick(e.target.files);
-          e.target.value = "";
-        }}
-      />
-
-      {error && <p className="text-xs text-destructive">{error}</p>}
-
-      {files.length > 0 && (
-        <ul className="divide-y divide-foreground/[0.06] overflow-hidden rounded-xl border border-foreground/10 bg-foreground/[0.02]">
-          {files.map((f) => (
-            <li
-              key={f.id}
-              className="group flex items-center gap-3 px-4 py-3 text-sm transition-colors hover:bg-foreground/[0.04]"
-            >
-              {f.kind === "image" ? (
-                <ImageIcon className="h-4 w-4 shrink-0 text-foreground/45" />
-              ) : (
-                <FileText className="h-4 w-4 shrink-0 text-foreground/45" />
-              )}
-              <span className="min-w-0 flex-1 truncate text-foreground/80">
-                {f.name}
-              </span>
-              <span className="shrink-0 text-[11px] text-foreground/40">
-                {formatSize(f.size)}
-              </span>
-              <button
-                onClick={() => onRemove(f.id)}
-                aria-label={`Remove ${f.name}`}
-                className="shrink-0 rounded-md p-1 text-foreground/40 opacity-0 transition-all hover:bg-foreground/10 hover:text-destructive group-hover:opacity-100"
-              >
-                <Trash2 className="h-3.5 w-3.5" />
-              </button>
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Models tab
-// ---------------------------------------------------------------------------
-
-interface ModelsPatch {
+interface SettingsPatch {
   default_provider?: string | null;
   default_model?: string | null;
-  default_params_json?: string | null;
+  memory_enabled?: boolean | null;
 }
 
-function ModelsTab({
+function SettingsTab({
   space,
   onSave,
+  onSetMode,
+  onSetImageScaling,
 }: {
   space: {
     default_provider: ProviderId | null;
     default_model: string | null;
-    default_params_json: string | null;
+    memory_enabled: boolean;
+    retrieval_mode: RetrievalMode;
+    image_scaling_json: string | null;
   };
-  onSave: (patch: ModelsPatch) => Promise<void>;
+  onSave: (patch: SettingsPatch) => Promise<unknown>;
+  onSetMode: (mode: RetrievalMode) => void;
+  onSetImageScaling: (scaling: ImageScaling | null) => void;
 }) {
-  // Slice the store: only the four fields that drive the model probe.
-  // A full `useSettingsStore()` subscription would re-render this picker
-  // on every keystroke in the global SettingsDialog textareas.
-  const openaiKeySet = useSettingsStore((s) => s.openai_key_set);
-  const { ollamaModels, openaiModels, ollamaUp, loading, refresh } =
-    useProviderModels();
-
-  const hasPick = !!(space.default_model && space.default_provider);
-
-  const pickModel = (provider: ProviderId | null, model: string | null) => {
-    void onSave({ default_provider: provider, default_model: model });
-  };
-
+  const appImageScaling = useSettingsStore((s) => s.image_scaling);
   return (
-    <div className="space-y-3">
-      <p className="text-xs text-foreground/55">
-        Pick a default model for every chat created in this space. Leave
-        blank to inherit your General Settings default; per-chat picks
-        still win once a chat is open.
-      </p>
+    <div className="space-y-4">
+      <SettingCard
+        icon={<Cpu className="h-4 w-4 text-foreground/55" />}
+        title="Default model"
+        description="Used by every chat created in this Space. Leave it on Default model to use your General Settings default; a model picked in a chat still wins for that chat."
+      >
+        <DefaultModelPicker
+          provider={space.default_provider}
+          model={space.default_model}
+          onChange={(provider, model) => void onSave({ default_provider: provider, default_model: model })}
+        />
+      </SettingCard>
 
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <Button
-            variant="outline"
-            className="h-11 w-full justify-between gap-2 rounded-xl border-foreground/10 bg-foreground/[0.02] px-4 text-left font-normal hover:bg-foreground/[0.05]"
-          >
-            {hasPick ? (
-              <span className="flex min-w-0 items-center gap-2">
-                <span className="truncate text-foreground/90">
-                  {space.default_model}
-                </span>
-                <span className="shrink-0 text-[11px] text-foreground/40">
-                  {space.default_provider}
-                </span>
-              </span>
-            ) : (
-              <span className="text-foreground/40">Select a model</span>
-            )}
-            <ChevronDown className="h-4 w-4 opacity-50" />
-          </Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent
-          align="start"
-          className="min-w-[--radix-dropdown-menu-trigger-width]"
-        >
-          <div className="flex items-center justify-between px-2 py-1.5">
-            <DropdownMenuLabel className="p-0">Default model</DropdownMenuLabel>
-            <button
-              onClick={(e) => {
-                e.preventDefault();
-                refresh();
-              }}
-              className="rounded p-1 hover:bg-accent"
-              aria-label="Refresh models"
-            >
-              <RefreshCw className={cn("h-3.5 w-3.5", loading && "animate-spin")} />
-            </button>
+      <SettingCard
+        icon={<Brain className="h-4 w-4 text-foreground/55" />}
+        title="Memory"
+        description={'Auto-saves durable facts from your chats so the assistant remembers them next time. New memories trigger a "Saved to memory" toast. Existing memories stay in the prompt even when this is off.'}
+        control={
+          <Switch
+            checked={space.memory_enabled}
+            onCheckedChange={(v) => void onSave({ memory_enabled: !!v })}
+            aria-label="Save memories automatically"
+          />
+        }
+      />
+
+      <SettingCard
+        icon={<Library className="h-4 w-4 text-foreground/55" />}
+        title="How sources reach the model"
+        description={MODE_LABELS[space.retrieval_mode].hint}
+        control={<SourceModeSwitch value={space.retrieval_mode} onChange={onSetMode} />}
+      />
+
+      <SettingCard
+        icon={<ImageIcon className="h-4 w-4 text-foreground/55" />}
+        title="Image scaling"
+        description="How images are scaled down before they reach the model in this Space's chats — attached ones, the Space's own and its Library images. On Default, images follow the app's setting and Library images the Library's. A chat can still set its own."
+      >
+        <ImageScalingControl
+          value={parseImageScaling(space.image_scaling_json)}
+          inherited={resolveImageScaling(appImageScaling)}
+          inheritFrom="the app's setting"
+          onChange={onSetImageScaling}
+        />
+      </SettingCard>
+    </div>
+  );
+}
+
+/** One setting on the Settings tab: a title and what it does, with its
+ *  control beside them (a switch) or below them (the model picker). */
+function SettingCard({
+  icon,
+  title,
+  description,
+  control,
+  children,
+}: {
+  icon: ReactNode;
+  title: string;
+  description: string;
+  control?: ReactNode;
+  children?: ReactNode;
+}) {
+  return (
+    <div className="rounded-2xl border border-foreground/10 bg-foreground/[0.02] px-4 py-3.5">
+      <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-3">
+        <div className="min-w-0 flex-1 basis-64">
+          <div className="flex items-center gap-2 text-sm font-medium text-foreground/85">
+            {icon}
+            {title}
           </div>
-          {hasPick && (
-            <>
-              <DropdownMenuSeparator />
-              <DropdownMenuItem onSelect={() => pickModel(null, null)}>
-                Clear selection
-              </DropdownMenuItem>
-            </>
-          )}
-          <DropdownMenuSeparator />
-          <DropdownMenuLabel className="flex items-center gap-1.5">
-            {ollamaUp ? (
-              <CircleCheck className="h-3 w-3 text-emerald-500" />
-            ) : (
-              <CircleAlert className="h-3 w-3 text-amber-500" />
-            )}
-            Ollama
-          </DropdownMenuLabel>
-          {ollamaModels.length === 0 && (
-            <DropdownMenuItem disabled>
-              {ollamaUp ? "No models installed" : "Not running"}
-            </DropdownMenuItem>
-          )}
-          {ollamaModels.map((m) => (
-            <DropdownMenuItem
-              key={`ollama:${m.id}`}
-              onSelect={() => pickModel("ollama", m.id)}
-              className={cn(
-                space.default_provider === "ollama" &&
-                  space.default_model === m.id &&
-                  "bg-foreground/[0.06]",
-              )}
-            >
-              {m.label}
-            </DropdownMenuItem>
-          ))}
-          <DropdownMenuSeparator />
-          <DropdownMenuLabel>API</DropdownMenuLabel>
-          {openaiModels.length === 0 && (
-            <DropdownMenuItem disabled>
-              {openaiKeySet ? "No models" : "Not connected"}
-            </DropdownMenuItem>
-          )}
-          {openaiModels.slice(0, 30).map((m) => (
-            <DropdownMenuItem
-              key={`openai:${m.id}`}
-              onSelect={() => pickModel("openai", m.id)}
-              className={cn(
-                space.default_provider === "openai" &&
-                  space.default_model === m.id &&
-                  "bg-foreground/[0.06]",
-              )}
-            >
-              {m.label}
-            </DropdownMenuItem>
-          ))}
-        </DropdownMenuContent>
-      </DropdownMenu>
+          <p className="mt-1 text-xs text-foreground/55">{description}</p>
+        </div>
+        {control}
+      </div>
+      {children && <div className="mt-3">{children}</div>}
     </div>
   );
 }
@@ -1112,14 +1091,15 @@ function ModelsTab({
 // Memory tab
 // ---------------------------------------------------------------------------
 //
-// Surfaces the per-space memory the extractor accumulates plus the on/off
-// toggle. The list itself (add / inline edit / delete / search / source
-// link) is the shared `MemoryList`, also used for global memories.
+// Surfaces the per-space memory the extractor accumulates, with whether
+// auto-save is on — switched on the Settings tab. The list itself (add /
+// inline edit / delete / search / source link) is the shared `MemoryList`,
+// also used for global memories.
 
 function MemoryTab({
   space,
   memories,
-  onToggle,
+  onOpenSettings,
   onAdd,
   onUpdate,
   onRemove,
@@ -1127,7 +1107,7 @@ function MemoryTab({
 }: {
   space: { id: string; memory_enabled: boolean };
   memories: SpaceMemory[];
-  onToggle: (enabled: boolean) => Promise<void>;
+  onOpenSettings: () => void;
   onAdd: (content: string) => Promise<unknown>;
   onUpdate: (id: string, content: string) => Promise<unknown>;
   onRemove: (id: string) => Promise<unknown>;
@@ -1135,24 +1115,20 @@ function MemoryTab({
 }) {
   return (
     <div className="space-y-4">
-      {/* Toggle row — mirrors the on/off chip from the meta strip with a
-          short rationale so users know exactly what flipping it does. */}
-      <div className="flex items-start justify-between gap-4 rounded-2xl border border-foreground/10 bg-foreground/[0.02] px-4 py-3.5">
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2 text-sm font-medium text-foreground/85">
-            <Brain className="h-4 w-4 text-foreground/55" />
-            Memory
-          </div>
-          <p className="mt-1 text-xs text-foreground/55">
-            Auto-saves durable facts from your chats so the assistant remembers
-            them next time. New memories trigger a "Saved to memory" toast.
-            Existing memories stay in the prompt even when this is off.
-          </p>
-        </div>
-        <Switch
-          checked={space.memory_enabled}
-          onCheckedChange={(v) => void onToggle(!!v)}
-        />
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-foreground/10 bg-foreground/[0.02] px-4 py-3 text-xs">
+        <span className="flex min-w-0 items-center gap-2 text-foreground/65">
+          <Brain className="h-4 w-4 shrink-0 text-foreground/55" />
+          {space.memory_enabled
+            ? "Auto-save is on: new facts from this Space's chats are saved here."
+            : "Auto-save is off: these memories still reach the model, but nothing new is saved."}
+        </span>
+        <button
+          type="button"
+          onClick={onOpenSettings}
+          className="shrink-0 text-foreground/55 underline underline-offset-2 transition-colors hover:text-foreground"
+        >
+          Change in Settings
+        </button>
       </div>
 
       <MemoryList
@@ -1160,8 +1136,8 @@ function MemoryTab({
         enabled={space.memory_enabled}
         emptyText={
           space.memory_enabled
-            ? "No memories yet — chat in this space and the extractor will start saving durable facts here."
-            : "Memory is off for this space. Turn it back on to start collecting facts."
+            ? "No memories yet — chat in this Space and the extractor will start saving durable facts here."
+            : "Memory is off for this Space. Turn it on in Settings to start collecting facts."
         }
         onAdd={onAdd}
         onUpdate={onUpdate}
@@ -1189,14 +1165,8 @@ function MetaChip({ children }: { children: ReactNode }) {
   );
 }
 
-function formatSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
 // Drop the `:tag` suffix on Ollama model ids (`llama3.1:8b` → `llama3.1`)
-// for compact display in tab badges and chat-row meta. Falls through for
+// for compact display in chat-row meta. Falls through for
 // OpenAI-style ids (no colon).
 function trimModelLabel(id: string): string {
   if (!id) return "";

@@ -6,6 +6,7 @@ import "highlight.js/styles/github-dark.css";
 import { CodeBlock } from "./CodeBlock";
 import { cn } from "@/lib/utils";
 import { openExternal } from "@/lib/tauri";
+import { closesFence, openingFence, type Fence } from "@/lib/codeBlocks";
 import {
   getMathPlugins,
   hasMath,
@@ -224,13 +225,57 @@ function extractRaw(node: ReactNode): string {
   return "";
 }
 
+// Above this many characters a code block renders unhighlighted, like
+// CodeView's MAX_HIGHLIGHT_CHARS: highlight.js over a block that size holds
+// the main thread for seconds.
+const MAX_HIGHLIGHT_CHARS = 50_000;
+
+interface HastNode {
+  type?: string;
+  tagName?: string;
+  value?: string;
+  properties?: { className?: unknown };
+  children?: HastNode[];
+}
+
+function textLength(node: HastNode): number {
+  if (node.type === "text") return node.value?.length ?? 0;
+  return (node.children ?? []).reduce((n, child) => n + textLength(child), 0);
+}
+
+// `rehypeHighlight` with that cap. It passes over a block whose classes
+// include `no-highlight`, so an oversized block gets that class for the
+// duration of the pass, and loses it again after.
+function rehypeHighlightCapped() {
+  const highlight = rehypeHighlight();
+  return (tree: Parameters<typeof highlight>[0], file: Parameters<typeof highlight>[1]) => {
+    const marked: unknown[][] = [];
+    const visit = (node: HastNode, parent: HastNode | null): void => {
+      const cls = node.properties?.className;
+      if (
+        node.tagName === "code" &&
+        parent?.tagName === "pre" &&
+        Array.isArray(cls) &&
+        textLength(node) > MAX_HIGHLIGHT_CHARS
+      ) {
+        cls.push("no-highlight");
+        marked.push(cls);
+      }
+      for (const child of node.children ?? []) visit(child, node);
+    };
+    visit(tree as HastNode, null);
+    highlight(tree, file);
+    for (const cls of marked) cls.splice(cls.lastIndexOf("no-highlight"), 1);
+  };
+}
+
 // Hoisted out of the render so react-markdown sees a stable `components`
 // reference. Inline `{}` literals create a fresh object every render,
 // which forces react-markdown to re-mount its component map even when
 // nothing else changed — measurable per-token cost on the streaming
 // bubble where this component re-renders thousands of times.
 const MARKDOWN_PLUGINS_REMARK = [remarkGfm];
-const MARKDOWN_PLUGINS_REHYPE = [rehypeTexFallback, rehypeHighlight];
+const MARKDOWN_PLUGINS_REHYPE = [rehypeTexFallback, rehypeHighlightCapped];
 // Same pipeline minus syntax highlighting, used for the still-streaming tail
 // of a message. Re-highlighting a growing block on every animation-frame flush
 // is the dominant per-token render cost (worst case `highlightAuto` runs every
@@ -371,7 +416,7 @@ const MarkdownBody = memo(function MarkdownBody({
     // otherwise treat as a fenced code block, Copy button and all.
     // `rehype-katex` swaps the whole `<pre>` out before either gets a look.
     return highlight
-      ? [rehypeTexFallback, ...math.rehype, rehypeHighlight]
+      ? [rehypeTexFallback, ...math.rehype, rehypeHighlightCapped]
       : [rehypeTexFallback, ...math.rehype];
   }, [math, highlight]);
 
@@ -417,36 +462,58 @@ export const Markdown = memo(function Markdown({
 // line between stacked equations, and cutting there leaves the prefix holding
 // an unclosed `$$` (KaTeX renders the error) while the tail's closing `$$`
 // opens a block of its own that typesets the prose after it.
+//
+// A fence closes only on a line `closesFence` accepts: a ```markdown block
+// quoting "```js" used to end there, and the split landed inside the code.
 export function stableSplit(content: string): number {
+  return topLevelBoundaries(content).at(-1) ?? 0;
+}
+
+/** Offsets just past each top-level blank line in `content` — outside code
+ *  fences and `$$` blocks — in order, its last line excepted. */
+function topLevelBoundaries(content: string): number[] {
   const lines = content.split("\n");
-  let inFence = false;
-  let fenceChar = "";
+  let fence: Fence | null = null;
   let inMath = false;
   let offset = 0;
-  let boundary = 0;
+  const boundaries: number[] = [];
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    const fence = /^\s{0,3}(`{3,}|~{3,})/.exec(line);
     if (fence) {
-      const ch = fence[1][0];
-      if (!inFence) {
-        inFence = true;
-        fenceChar = ch;
-      } else if (ch === fenceChar) {
-        inFence = false;
-      }
-    } else if (!inFence && /^[ \t]*\$\$[ \t]*$/.test(line)) {
-      inMath = !inMath;
+      if (closesFence(line, fence)) fence = null;
+    } else {
+      fence = openingFence(line);
+      if (!fence && /^[ \t]*\$\$[ \t]*$/.test(line)) inMath = !inMath;
     }
     offset += line.length + 1; // +1 for the "\n" that split() consumed
     // A top-level blank line closes the preceding block. Never treat the very
     // last line as a boundary — the tail must keep the trailing block so a
     // message ending in "\n\n" doesn't render an empty tail.
-    if (!inFence && !inMath && line.trim() === "" && i < lines.length - 1) {
-      boundary = offset;
+    if (!fence && !inMath && line.trim() === "" && i < lines.length - 1) {
+      boundaries.push(offset);
     }
   }
-  return boundary;
+  return boundaries;
+}
+
+/** The stable prefix cut into blocks that each render the same on their own
+ *  as inside the whole, so each can be memoised by itself: a new paragraph
+ *  boundary used to re-parse and re-highlight everything before it. Cut only
+ *  where the next line starts flush left and doesn't start a list item — a
+ *  loose list's items and an item's indented paragraphs sit on both sides of
+ *  a blank line (or several) but belong together. */
+export function stableBlocks(prefix: string): string[] {
+  const blocks: string[] = [];
+  let start = 0;
+  for (const at of topLevelBoundaries(prefix)) {
+    const end = prefix.indexOf("\n", at);
+    const next = prefix.slice(at, end === -1 ? undefined : end);
+    if (!/^\S/.test(next) || /^([*+-]|\d{1,9}[.)])(\s|$)/.test(next)) continue;
+    blocks.push(prefix.slice(start, at));
+    start = at;
+  }
+  if (start < prefix.length) blocks.push(prefix.slice(start));
+  return blocks;
 }
 
 // Streaming variant of `Markdown`: only the trailing, still-growing block is
@@ -468,11 +535,14 @@ export const StreamingMarkdown = memo(function StreamingMarkdown({
   const splitAt = useMemo(() => stableSplit(source), [source]);
   const stable = source.slice(0, splitAt);
   const tail = source.slice(splitAt);
+  // Keyed by position: a completed block keeps its index and its text, so
+  // its memoised body skips the re-parse when the prefix grows past it.
+  const blocks = useMemo(() => stableBlocks(stable), [stable]);
   return (
     <div className={cn(PROSE_CLASS, className)}>
-      {stable.length > 0 && (
-        <MarkdownBody content={stable} highlight math={math} />
-      )}
+      {blocks.map((block, i) => (
+        <MarkdownBody key={i} content={block} highlight math={math} />
+      ))}
       <MarkdownBody content={tail} highlight={false} math={math} />
     </div>
   );
@@ -480,5 +550,11 @@ export const StreamingMarkdown = memo(function StreamingMarkdown({
 
 // Exposed for unit tests only (`Markdown.test.ts`). These are the security-
 // sensitive pure helpers behind H5 (TeX fallback must never touch code) and
-// H8 (link scheme allow-list); not part of the public API.
-export const __testing = { texReplace, rehypeTexFallback, shouldOpenExternally };
+// H8 (link scheme allow-list), plus the highlight size cap; not part of the
+// public API.
+export const __testing = {
+  texReplace,
+  rehypeTexFallback,
+  shouldOpenExternally,
+  rehypeHighlightCapped,
+};

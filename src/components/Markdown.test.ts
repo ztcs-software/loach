@@ -8,9 +8,10 @@
 // schemes; javascript:/file:/data:/relative hrefs are refused.
 
 import { describe, it, expect } from "vitest";
-import { __testing, stableSplit } from "./Markdown";
+import { __testing, stableBlocks, stableSplit } from "./Markdown";
 
-const { texReplace, rehypeTexFallback, shouldOpenExternally } = __testing;
+const { texReplace, rehypeTexFallback, shouldOpenExternally, rehypeHighlightCapped } =
+  __testing;
 
 describe("texReplace (prose TeX→Unicode fallback)", () => {
   it("converts known single-token TeX", () => {
@@ -179,6 +180,67 @@ describe("stableSplit (streaming prefix/tail boundary)", () => {
     const [stable, tail] = split("```sh\necho $$\n```\n\nnext para");
     expect(stable).toBe("```sh\necho $$\n```\n\n");
     expect(tail).toBe("next para");
+  });
+
+  it("doesn't close a fence on a line with an info string or a shorter run", () => {
+    // A markdown sample quoting a fenced block: neither "```js" nor the
+    // three-backtick line closes the four-backtick fence around it.
+    const open = "intro\n\n````markdown\n```js\nlet a;\n\n```\n\nmore";
+    const [stable, tail] = split(open);
+    expect(stable).toBe("intro\n\n");
+    expect(tail).toBe(open.slice("intro\n\n".length));
+    // An opener with an info string can't close a ``` block either.
+    expect(split("```md\n```js\n\nx")[0]).toBe("");
+  });
+});
+
+describe("stableBlocks (memoised pieces of the stable prefix)", () => {
+  it("cuts at each top-level blank line, without losing a byte", () => {
+    const prefix = "# Title\n\npara one\n\n```py\na = 1\n\nb = 2\n```\n\n";
+    const blocks = stableBlocks(prefix);
+    expect(blocks).toEqual(["# Title\n\n", "para one\n\n", "```py\na = 1\n\nb = 2\n```\n\n"]);
+    expect(blocks.join("")).toBe(prefix);
+  });
+
+  it("keeps a loose list and an item's indented paragraphs in one block", () => {
+    const prefix = "- one\n\n- two\n\n  more about two\n\n\n1. three\n\nafter\n\n";
+    expect(stableBlocks(prefix)).toEqual([
+      "- one\n\n- two\n\n  more about two\n\n\n1. three\n\n",
+      "after\n\n",
+    ]);
+  });
+
+  it("gives an empty prefix no blocks", () => {
+    expect(stableBlocks("")).toEqual([]);
+  });
+});
+
+describe("rehypeHighlightCapped", () => {
+  const block = (text: string) => {
+    const code = {
+      type: "element",
+      tagName: "code",
+      properties: { className: ["language-js"] },
+      children: [{ type: "text", value: text }],
+    };
+    return { tree: { type: "root", children: [{ type: "element", tagName: "pre", children: [code] }] }, code };
+  };
+
+  it("highlights an ordinary block", () => {
+    const { tree, code } = block("const a = 1;");
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    rehypeHighlightCapped()(tree as any, {} as any);
+    expect(code.properties.className).toEqual(["hljs", "language-js"]);
+    expect(code.children.length).toBeGreaterThan(1);
+  });
+
+  it("leaves a very large block as plain text, classes as they were", () => {
+    const text = "const a = 1;\n".repeat(5000);
+    const { tree, code } = block(text);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    rehypeHighlightCapped()(tree as any, {} as any);
+    expect(code.properties.className).toEqual(["language-js"]);
+    expect(code.children).toEqual([{ type: "text", value: text }]);
   });
 });
 

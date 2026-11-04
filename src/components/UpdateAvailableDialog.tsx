@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { Download, Loader2, RefreshCw, XCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -39,18 +39,22 @@ type State =
   | { kind: "installing"; info: UpdateInfo; progress: DownloadProgress }
   | { kind: "error"; info: UpdateInfo; message: string };
 
+/** One check per launch. Guarding with a flag (rather than subscribing to
+ *  `auto_check_updates`) means flipping the setting on mid-session doesn't
+ *  fire a check behind the open Settings dialog — it takes effect on the
+ *  next launch, which is what the setting's description promises. Module
+ *  state, not a ref: this dialog unmounts on every lock, so a ref re-checked
+ *  after each unlock — bringing back a notice the user had put off, or
+ *  offering a second download over one still running. */
+let launchCheckDone = false;
+
 export function UpdateAvailableDialog() {
   const hydrated = useSettingsStore((s) => s.hydrated);
   const [state, setState] = useState<State>({ kind: "hidden" });
-  // One check per launch. Guarding with a ref (rather than subscribing to
-  // `auto_check_updates`) means flipping the setting on mid-session doesn't
-  // fire a check behind the open Settings dialog — it takes effect on the
-  // next launch, which is what the setting's description promises.
-  const checked = useRef(false);
 
   useEffect(() => {
-    if (!hydrated || checked.current) return;
-    checked.current = true;
+    if (!hydrated || launchCheckDone) return;
+    launchCheckDone = true;
     if (!useSettingsStore.getState().auto_check_updates) return;
 
     void (async () => {
@@ -126,7 +130,7 @@ export function UpdateAvailableDialog() {
         {info.notes && (
           <div className="rounded-xl border border-foreground/10 bg-foreground/[0.03] p-4">
             <div className="mb-2 text-[11px] font-medium uppercase tracking-wider text-foreground/55">
-              What's new
+              Release notes
             </div>
             <div className="max-h-56 overflow-y-auto pr-1 [scrollbar-gutter:stable]">
               <Markdown content={info.notes} className="text-sm" />

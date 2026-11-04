@@ -153,3 +153,40 @@ export function applyFillValues(
     return v !== undefined ? v : match;
   });
 }
+
+/** One `{{…}}` in a snippet body, as the snippet editor reports it. */
+export interface PlaceholderInfo {
+  /** What's between the braces, trimmed. */
+  name: string;
+  /** `builtin` — filled from Settings or the clock; `saved` — one of the
+   *  user's variables; `ask` — asked for when the snippet runs; `invalid` —
+   *  not a variable name (lower case, spaces…), so it's sent as typed. */
+  kind: "builtin" | "saved" | "ask" | "invalid";
+}
+
+/** Any `{{…}}` at all — wider than `PLACEHOLDER_RE`, so names it ignores can
+ *  be pointed out instead of silently going to the model as typed. */
+const ANY_BRACES_RE = /\{\{\s*([^{}\n]*?)\s*\}\}/g;
+
+/**
+ * The placeholders in a snippet body, in order of first appearance, each
+ * classified the way `expandKnownVars` will treat it — so the editor can say
+ * which get filled in and flag `{{topic}}`, which never would be.
+ */
+export function describePlaceholders(prompt: string, globals: SnippetVariable[]): PlaceholderInfo[] {
+  const saved = new Set(globals.map((g) => g.key));
+  const out: PlaceholderInfo[] = [];
+  for (const m of prompt.matchAll(ANY_BRACES_RE)) {
+    const name = m[1];
+    if (!name || out.some((p) => p.name === name)) continue;
+    const kind = !/^[A-Z_][A-Z0-9_]*$/.test(name)
+      ? "invalid"
+      : RESERVED_VAR_KEYS.includes(name)
+        ? "builtin"
+        : saved.has(name)
+          ? "saved"
+          : "ask";
+    out.push({ name, kind });
+  }
+  return out;
+}

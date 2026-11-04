@@ -3,18 +3,20 @@ import {
   Layers,
   MessageSquareText,
   MoreHorizontal,
-  Pencil,
   Plus,
   RefreshCw,
+  Search,
   SquarePen,
   Trash2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useConfirm } from "@/components/ConfirmDialog";
@@ -59,16 +61,21 @@ export function SpacesLibrary() {
     return counts;
   }, [sessions]);
 
+  const [query, setQuery] = useState("");
+  const q = query.trim().toLowerCase();
   const sorted = useMemo(
-    () => [...spaces].sort((a, b) => b.updated_at - a.updated_at),
-    [spaces],
+    () =>
+      [...spaces]
+        .filter((s) => !q || s.name.toLowerCase().includes(q) || s.description.toLowerCase().includes(q))
+        .sort((a, b) => b.updated_at - a.updated_at),
+    [spaces, q],
   );
 
   const handleDelete = async (space: Space) => {
     const ok = await confirm({
-      title: `Delete space “${space.name}”?`,
-      body: "Sources and instructions in this space will be removed. Chats inside the space stay, but they lose their space association.",
-      confirmLabel: "Delete space",
+      title: `Delete Space “${space.name}”?`,
+      body: "Its instructions, memories and uploaded files are deleted for good. Library sources stay in your Library, and its chats are kept outside any Space.",
+      confirmLabel: "Delete Space",
       destructive: true,
     });
     if (ok) void removeSpace(space.id);
@@ -105,7 +112,7 @@ export function SpacesLibrary() {
               className="gap-1.5 rounded-xl"
             >
               <Plus className="h-4 w-4" />
-              New space
+              New Space
             </Button>
           </header>
 
@@ -116,31 +123,40 @@ export function SpacesLibrary() {
           ) : spaces.length === 0 ? (
             <EmptyLibraryState
               icon={<Layers className="h-7 w-7 text-foreground/45" />}
-              title="No spaces yet"
-              description="Create a space for a project, a topic, or a long-running thread of work. Drop in reference sources and Loach will pull from them in every chat inside the space."
+              title="No Spaces yet"
+              description="Create a Space for a project, a topic, or a long-running thread of work. Drop in reference sources and Loach will pull from them in every chat inside the Space."
               cta={
                 <Button
                   onClick={() => setFormOpen(true)}
                   className="gap-1.5 rounded-xl"
                 >
                   <Plus className="h-4 w-4" />
-                  Create your first space
+                  Create your first Space
                 </Button>
               }
             />
           ) : (
-            <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-              {sorted.map((space) => (
-                <SpaceCard
-                  key={space.id}
-                  space={space}
-                  chatCount={chatCounts[space.id] ?? 0}
-                  onOpen={() => setViewingSpace(space.id)}
-                  onNewChat={() => newChatInSpace(space)}
-                  onDelete={() => handleDelete(space)}
-                />
-              ))}
-            </div>
+            <>
+              <SearchField value={query} onChange={setQuery} label="Search Spaces" />
+              {sorted.length === 0 ? (
+                <p className="mt-10 text-center text-sm text-foreground/45">
+                  No Spaces match your search.
+                </p>
+              ) : (
+                <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+                  {sorted.map((space) => (
+                    <SpaceCard
+                      key={space.id}
+                      space={space}
+                      chatCount={chatCounts[space.id] ?? 0}
+                      onOpen={() => setViewingSpace(space.id)}
+                      onNewChat={() => newChatInSpace(space)}
+                      onDelete={() => handleDelete(space)}
+                    />
+                  ))}
+                </div>
+              )}
+            </>
           )}
         </div>
       </ScrollArea>
@@ -161,7 +177,7 @@ function SpaceCard({
 }: {
   space: Space;
   chatCount: number;
-  /** Tile body click + kebab "Open / edit" both use this — drops the user
+  /** Tile body click + kebab "Open" both use this — drops the user
    *  into SpaceView for the space's instructions / files / chat list. */
   onOpen: () => void;
   /** Footer button — creates a fresh chat scoped to this space and lands
@@ -184,9 +200,13 @@ function SpaceCard({
     <article
       role="button"
       tabIndex={0}
-      aria-label={`Open space: ${space.name}`}
+      aria-label={`Open Space: ${space.name}`}
       onClick={onOpen}
       onKeyDown={(e) => {
+        // Only the card's own keys: Enter on its New chat or ⋯ button (or a
+        // menu item, which bubbles here through the portal) belongs to that
+        // control — a keyboard Delete used to open the Space as well.
+        if (e.target !== e.currentTarget) return;
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
           onOpen();
@@ -219,8 +239,12 @@ function SpaceCard({
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" onClick={(e) => e.stopPropagation()}>
             <DropdownMenuItem onSelect={onOpen}>
-              <Pencil className="h-4 w-4" /> Open / edit
+              <Layers className="h-4 w-4" /> Open
             </DropdownMenuItem>
+            <DropdownMenuItem onSelect={onNewChat}>
+              <SquarePen className="h-4 w-4" /> New chat
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
             <DropdownMenuItem
               onSelect={onDelete}
               className="text-destructive focus:text-destructive"
@@ -248,7 +272,7 @@ function SpaceCard({
         <div className="flex min-w-0 items-center gap-2 text-[10.5px] text-foreground/45">
           <span
             className="inline-flex items-center gap-1 truncate"
-            title={`${chatCount} live chat${chatCount === 1 ? "" : "s"} in this space`}
+            title={`${chatCount} live chat${chatCount === 1 ? "" : "s"} in this Space`}
           >
             <MessageSquareText className="h-3 w-3 shrink-0" />
             {chatCount}
@@ -297,6 +321,30 @@ function SpaceCard({
 // Shared empty state — visual mirror of SnippetsLibrary's so the surfaces
 // feel like the same place in two outfits.
 // ---------------------------------------------------------------------------
+
+/** Search box above the grid — SnippetsLibrary's, styled like the Library's. */
+function SearchField({
+  value,
+  onChange,
+  label,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  label: string;
+}) {
+  return (
+    <div className="relative mb-5 ml-auto w-full sm:w-64">
+      <Search className="pointer-events-none absolute left-3.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-foreground/40" />
+      <Input
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={label}
+        aria-label={label}
+        className="h-10 rounded-2xl pl-9"
+      />
+    </div>
+  );
+}
 
 function LibraryLoading() {
   return (

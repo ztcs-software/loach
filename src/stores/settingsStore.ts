@@ -19,6 +19,11 @@ import { useToastStore } from "./toastStore";
 interface SettingsState extends Settings {
   openai_key_set: boolean;
   hydrated: boolean;
+  /** Why the last hydrate couldn't read the settings, or null. The store
+   *  then holds the defaults — `onboarding_completed: false` among them —
+   *  which is no sign of a fresh install: onboarding must not show for it,
+   *  or it writes its prompt and base URLs over the user's real ones. */
+  loadError: string | null;
   hydrate: () => Promise<void>;
   update: <K extends keyof Settings>(key: K, value: Settings[K]) => Promise<void>;
   setOpenAIKey: (key: string) => Promise<void>;
@@ -33,6 +38,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   ...DEFAULT_SETTINGS,
   openai_key_set: false,
   hydrated: false,
+  loadError: null,
 
   hydrate: async () => {
     try {
@@ -59,13 +65,13 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
           (merged as unknown as Record<string, unknown>)[k as string] = v;
         }
       });
-      set({ ...merged, openai_key_set: hasKey, hydrated: true });
+      set({ ...merged, openai_key_set: hasKey, hydrated: true, loadError: null });
       applyTheme(merged.theme);
       applyFontSize(merged.font_size);
       applyBackground(merged.background_style);
     } catch (e) {
       logger.error("settings hydrate failed", e);
-      set({ hydrated: true });
+      set({ hydrated: true, loadError: e instanceof Error ? e.message : String(e) });
     }
   },
 

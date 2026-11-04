@@ -20,8 +20,12 @@ const SpaceView = lazy(() =>
 const SpacesLibrary = lazy(() =>
   import("@/components/SpacesLibrary").then((m) => ({ default: m.SpacesLibrary })),
 );
+const LibraryView = lazy(() =>
+  import("@/components/library/LibraryView").then((m) => ({ default: m.LibraryView })),
+);
 import { ShareDialog } from "@/components/ShareDialog";
 import { SnippetDialog } from "@/components/SnippetDialog";
+import { ItemPreviewDialog, TextEditorDialog } from "@/components/library/LibraryDialogs";
 import { SnippetVariableDialog } from "@/components/SnippetVariableDialog";
 import { SnippetVariableFillDialog } from "@/components/SnippetVariableFillDialog";
 const SnippetsLibrary = lazy(() =>
@@ -52,6 +56,7 @@ const CodeCanvas = lazy(() =>
 function warmLazyChunks() {
   void import("@/components/SpaceView");
   void import("@/components/SpacesLibrary");
+  void import("@/components/library/LibraryView");
   void import("@/components/SnippetsLibrary");
   void import("@/components/ModelsView");
   void import("@/components/ModelsLibrary");
@@ -69,10 +74,13 @@ import { Button } from "@/components/ui/button";
 import { SquarePen } from "lucide-react";
 import { resolveDefaultModelChoice, useChatStore } from "@/stores/chatStore";
 import { useModelsStore } from "@/stores/modelsStore";
+import { useMcpStore } from "@/stores/mcpStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { chatCancelAll, ollamaPreloadModel, ollamaStart } from "@/lib/tauri";
 import { logger } from "@/lib/logger";
+import { restoreMemoryTurns } from "@/lib/memory";
 import { useSnippetStore } from "@/stores/snippetStore";
+import { useLibraryStore } from "@/stores/libraryStore";
 import { useSnippetVarStore } from "@/stores/snippetVarStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useSecurityStore, lockUntilHydrated } from "@/stores/securityStore";
@@ -91,14 +99,20 @@ export default function App() {
   const hydrateChats = useChatStore((s) => s.hydrate);
   const hydrateSpaces = useSpaceStore((s) => s.hydrate);
   const hydrateSnippets = useSnippetStore((s) => s.hydrate);
+  const hydrateLibrary = useLibraryStore((s) => s.hydrate);
   const hydrateSnippetVars = useSnippetVarStore((s) => s.hydrate);
   const hydrateModels = useModelsStore((s) => s.hydrate);
+  const hydrateMcp = useMcpStore((s) => s.hydrate);
   const hydrateSecurity = useSecurityStore((s) => s.hydrate);
   const securityHydrated = useSecurityStore((s) => s.hydrated);
   const securityConfigured = useSecurityStore((s) => s.status.configured);
   const unlocked = useSecurityStore((s) => s.unlocked);
   const backgroundStyle = useSettingsStore((s) => s.background_style);
   const settingsHydrated = useSettingsStore((s) => s.hydrated);
+  // A failed settings read leaves the defaults in place — including
+  // `onboarding_completed: false` — so it must not pass for a fresh install:
+  // onboarding would overwrite the user's stored prompt and URLs.
+  const settingsLoadError = useSettingsStore((s) => s.loadError);
   const onboardingCompleted = useSettingsStore(
     (s) => s.onboarding_completed,
   );
@@ -152,10 +166,37 @@ export default function App() {
     chatCancelAll().catch((e) => logger.warn("couldn't stop leftover chat streams", e));
   }, []);
 
+  // A file dropped where nothing accepts it (the Spaces or Snippets page, a
+  // model's details, "No chat open", the lock screen) reached the webview's
+  // default handling, which opens the file in place of the app — Tauri's
+  // drag-drop is off, so nothing else catches it. Only cancel the default:
+  // the composer's and the Library's own drop handlers still do the work.
+  useEffect(() => {
+    const guard = (e: DragEvent) => {
+      if (e.dataTransfer?.types.includes("Files")) e.preventDefault();
+    };
+    window.addEventListener("dragover", guard);
+    window.addEventListener("drop", guard);
+    return () => {
+      window.removeEventListener("dragover", guard);
+      window.removeEventListener("drop", guard);
+    };
+  }, []);
+
   // Re-lock triggers (idle timeout / minimize). Self-gating: does nothing
   // until a lock is configured AND the user has opted into a trigger, so
   // it costs nothing for the installs that never set a lock up.
   useAutoLock();
+
+  // Locking ends a Private Chat session the way closing it does. The
+  // overlay unmounts behind the lock screen anyway; keeping its transcript
+  // for whoever unlocks contradicted "nothing outlives the session", and its
+  // stream kept running while the regular chat queue was released.
+  useEffect(() => {
+    if (!unlocked && usePrivateChatStore.getState().open) {
+      usePrivateChatStore.getState().wipe();
+    }
+  }, [unlocked]);
 
   // See `warmLazyChunks`. `requestIdleCallback` is missing on the oldest
   // webviews we support (Safari gained it in 17.4), hence the timeout path.
@@ -168,17 +209,24 @@ export default function App() {
     return () => window.clearTimeout(t);
   }, []);
 
+  const phase2Started = useRef(false);
   // Phase 2 — once we're past the lock screen, hydrate the rest of the app.
   // Doing this after unlock keeps the lock surface snappy and avoids
   // shipping any chat data into memory while the user is still proving
   // they're allowed to see it.
   //
-  // The five hydrates are independent — none of their `hydrate()` methods
-  // reads from another store — so we fan them out in parallel. The prior
+  // The hydrates are independent — except `hydrateModels`, whose listing
+  // reads the provider URLs and the key flag from the settings store, so it
+  // waits for settings — and we fan the rest out in parallel. The prior
   // sequential await chain was the dominant chunk of post-unlock latency,
   // since IPC round-trips stack additively. Parallelising collapses them
   // to the slowest single call (typically `hydrateModels`, which is
   // network-bound to Ollama).
+  //
+  // Runs once per launch. Every later unlock (idle lock, lock-now, a macOS
+  // window close) re-mounts the app over stores that are still loaded, and
+  // re-running this used to re-cull empty chats, jump the selection and
+  // repeat auto-launch and preload on each one.
   //
   // The Ollama preload only needs `settings` + `sessions` to resolve the
   // default model choice, so we kick it off as soon as those two land
@@ -195,15 +243,35 @@ export default function App() {
     // the same atomic update that sets the correct `unlocked`, so gating on it
     // closes that window.
     if (!securityHydrated || !unlocked) return;
+    if (phase2Started.current) return;
+    phase2Started.current = true;
 
     const settingsP = hydrateSettings();
     const chatsP = hydrateChats();
-    void hydrateSpaces();
+    const spacesP = hydrateSpaces();
     void hydrateSnippets();
     void hydrateSnippetVars();
+    void hydrateLibrary();
+    // `/tools` and `/list mcp` read the server list from this store, which
+    // used to load only when Settings → MCP mounted — so until then they
+    // reported "No MCP servers" to anyone who had some.
+    void hydrateMcp();
     // `hydrateModels` is network-bound (Ollama /api/tags) — fire-and-forget
-    // so its latency never blocks anything the user sees.
-    void hydrateModels();
+    // so its latency never blocks anything the user sees. It lists from the
+    // configured URLs, so it starts once settings land: started alongside
+    // them, it listed the defaults (localhost Ollama, no OpenAI) and stayed
+    // that way for anyone with a remote server or an API key.
+    void settingsP.then(() => hydrateModels());
+    // Memory-extraction turns still queued when the app last quit. Checked
+    // against the chats and against each scope's memory switch — a Space's
+    // or the global setting — so it waits for all three.
+    void Promise.all([settingsP, chatsP, spacesP])
+      .then(() =>
+        restoreMemoryTurns((id) =>
+          useChatStore.getState().sessions.find((s) => s.id === id),
+        ),
+      )
+      .catch((e) => logger.warn("couldn't restore queued memory turns", e));
 
     // Optional Ollama auto-launch. Starts `ollama serve` if nothing is
     // answering, so a user who lives in Loach doesn't have to keep the
@@ -272,8 +340,10 @@ export default function App() {
     hydrateSpaces,
     hydrateSnippets,
     hydrateSnippetVars,
+    hydrateLibrary,
     hydrateChats,
     hydrateModels,
+    hydrateMcp,
   ]);
 
   // Narrow-window squeeze relief. At the 900 px minimum, the expanded
@@ -309,7 +379,7 @@ export default function App() {
   // chat surface but below the TitleBar so window controls keep
   // working — same pattern as LockScreen.
   const showOnboarding =
-    !showLock && !probing && settingsHydrated && !onboardingCompleted;
+    !showLock && !probing && settingsHydrated && !settingsLoadError && !onboardingCompleted;
 
   return (
     <>
@@ -361,32 +431,42 @@ export default function App() {
             extractor. */}
         <div className="flex min-h-0 flex-1" inert={privateChatOpen}>
           <Sidebar />
+          {/* Every boundary in this slot is keyed by what it shows. They all
+              sit at the same position, so unkeyed React kept one instance
+              across them and a crash's fallback stayed up on the next page,
+              Space, model or chat the user moved to. */}
           {viewingSpaceId ? (
-            <ErrorBoundary name="Space">
+            <ErrorBoundary key={`space:${viewingSpaceId}`} name="Space">
               <Suspense fallback={null}>
                 <SpaceView />
               </Suspense>
             </ErrorBoundary>
           ) : viewingModel ? (
-            <ErrorBoundary name="Model details">
+            <ErrorBoundary key={`model:${viewingModel}`} name="Model details">
               <Suspense fallback={null}>
                 <ModelsView />
               </Suspense>
             </ErrorBoundary>
           ) : sidebarTab === "spaces" ? (
-            <ErrorBoundary name="Spaces library">
+            <ErrorBoundary key="spaces" name="Spaces library">
               <Suspense fallback={null}>
                 <SpacesLibrary />
               </Suspense>
             </ErrorBoundary>
+          ) : sidebarTab === "library" ? (
+            <ErrorBoundary key="library" name="Library">
+              <Suspense fallback={null}>
+                <LibraryView />
+              </Suspense>
+            </ErrorBoundary>
           ) : sidebarTab === "snippets" ? (
-            <ErrorBoundary name="Snippets library">
+            <ErrorBoundary key="snippets" name="Snippets library">
               <Suspense fallback={null}>
                 <SnippetsLibrary />
               </Suspense>
             </ErrorBoundary>
           ) : sidebarTab === "models" ? (
-            <ErrorBoundary name="Models library">
+            <ErrorBoundary key="models" name="Models library">
               <Suspense fallback={null}>
                 <ModelsLibrary />
               </Suspense>
@@ -397,7 +477,7 @@ export default function App() {
                   crash in markdown rendering or a parameter widget doesn't
                   take the whole pair down — the user still has the other
                   half to work with. */}
-              <ErrorBoundary name="Chat">
+              <ErrorBoundary key={`chat:${session?.id ?? ""}`} name="Chat">
                 <main className="relative flex min-w-0 flex-1 flex-col">
                   <ChatHeader session={session} />
                   {!session ? (
@@ -425,7 +505,10 @@ export default function App() {
                   keeps the layout legible. The canvas store survives across
                   this swap, so the user's snippet is still there if they
                   toggle params back. */}
-              <ErrorBoundary name={canvasOpen ? "Code canvas" : "Parameters"}>
+              <ErrorBoundary
+                key={canvasOpen ? "canvas" : `params:${session?.id ?? ""}`}
+                name={canvasOpen ? "Code canvas" : "Parameters"}
+              >
                 {canvasOpen ? (
                   <Suspense fallback={null}>
                     <CodeCanvas />
@@ -454,6 +537,12 @@ export default function App() {
         </ErrorBoundary>
         <ErrorBoundary name="Share message">
           <ShareDialog />
+        </ErrorBoundary>
+        <ErrorBoundary name="Library text editor">
+          <TextEditorDialog />
+        </ErrorBoundary>
+        <ErrorBoundary name="Library preview">
+          <ItemPreviewDialog />
         </ErrorBoundary>
         <ErrorBoundary name="Snippet variable editor">
           <SnippetVariableDialog />
@@ -506,8 +595,8 @@ export default function App() {
         </ErrorBoundary>
       )}
       {/* Global toast host. Mounted unconditionally so messages from any
-          surface (including the lock screen path, in the future) land in a
-          predictable spot. Renders nothing when no toasts are queued. */}
+          surface land in a predictable spot. Renders nothing when no toasts
+          are queued, and nothing while locked (it clears the stack on lock). */}
       <ToastHost />
       </ConfirmDialogHost>
       </SwitchVariantProvider>

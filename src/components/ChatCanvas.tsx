@@ -200,6 +200,7 @@ export function ChatCanvas() {
   };
 
   const scrollerRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
   const stickToBottom = useRef(true);
   // Mirror of the ref into React state — the scroll-to-bottom button needs
   // to re-render when this flips, which a ref alone can't trigger. Kept in
@@ -268,7 +269,12 @@ export function ChatCanvas() {
   }, [sessionId]);
 
   useEffect(() => {
-    const open = () => setSearchOpen(true);
+    // `/find <text>` passes its text as `detail.query` to prefill the finder.
+    const open = (e: Event) => {
+      const query = (e as CustomEvent<{ query?: string } | null>).detail?.query;
+      if (query) setSearchQuery(query);
+      setSearchOpen(true);
+    };
     window.addEventListener("loach:open-chat-search", open);
     return () => window.removeEventListener("loach:open-chat-search", open);
   }, []);
@@ -298,6 +304,9 @@ export function ChatCanvas() {
     if (!id) return;
     const el = messageRefs.current.get(id);
     if (el) {
+      // Off the bottom until the scroll lands, or the content observer below
+      // pulls the view back down when opening the finder mounts older rows.
+      stickToBottom.current = false;
       el.scrollIntoView({
         behavior: prefersReducedMotion() ? "auto" : "smooth",
         block: "center",
@@ -392,6 +401,9 @@ export function ChatCanvas() {
   };
 
   const onSearchKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    // Enter / Esc confirming or cancelling an IME candidate belong to the
+    // IME, not the finder. keyCode 229 too — see ChatInput.
+    if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
     if (e.key === "Escape") {
       e.preventDefault();
       closeSearch();
@@ -433,6 +445,21 @@ export function ChatCanvas() {
     const el = scrollerRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages, isStreaming, waitingHere]);
+
+  // Content also grows with no change to `messages`: KaTeX loads lazily
+  // after a chat with formulas first renders, and typesetting it pushed the
+  // tail below the fold of a view that had already scrolled to the bottom.
+  // Follow those too, while the user hasn't scrolled up.
+  useEffect(() => {
+    const el = scrollerRef.current;
+    const content = contentRef.current;
+    if (!el || !content) return;
+    const observer = new ResizeObserver(() => {
+      if (stickToBottom.current) el.scrollTop = el.scrollHeight;
+    });
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, []);
 
   // Reset the window when switching chats — the new transcript opens at its
   // own tail, not the depth the previous chat happened to be revealed to.
@@ -527,6 +554,9 @@ export function ChatCanvas() {
     setJumpTarget(null);
     const el = messageRefs.current.get(jumpTarget);
     if (!el) return;
+    // As for a search match: the rows this jump may have revealed would
+    // otherwise have the content observer pull the view back to the bottom.
+    stickToBottom.current = false;
     el.scrollIntoView({
       behavior: prefersReducedMotion() ? "auto" : "smooth",
       block: "center",
@@ -600,7 +630,7 @@ export function ChatCanvas() {
           on top of the pinned bar. */}
       <div className="relative min-h-0 flex-1">
         <div ref={scrollerRef} className="h-full overflow-y-auto">
-          <div className="mx-auto w-full max-w-3xl px-4">
+          <div ref={contentRef} className="mx-auto w-full max-w-3xl px-4">
             {hiddenBefore > 0 && (
               <div className="flex justify-center py-4">
                 <Button
@@ -677,6 +707,8 @@ export function ChatCanvas() {
                     canRegenerate={
                       isLast &&
                       m.role === "assistant" &&
+                      // `regenerateLast` passes over an imported reply.
+                      m.import_group == null &&
                       !streamingHere &&
                       !waitingHere
                     }

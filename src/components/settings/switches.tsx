@@ -107,16 +107,3 @@ export function FontSizeSwitch({
     </div>
   );
 }
-
-/* ───────────────────────── Appearance tiles ─────────────────────────
- *
- * Card-style selectors inspired by ChatGPT's appearance picker: each
- * tile shows a miniature mockup of the app rendered with the option's
- * palette, plus a check indicator + label underneath. Selected tile
- * gets a primary-coloured ring so the choice reads at a glance.
- *
- * Kept local to this file — the mini-mockup is bespoke to the Loach
- * layout (sidebar + chat column + input bar) and has no reason to
- * live elsewhere.
- * ─────────────────────────────────────────────────────────────────── */
-

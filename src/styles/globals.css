@@ -300,7 +300,11 @@
      viewport onto WebView2's legacy custom-scrollbar path, where
      `display:none` alone is unreliable — the native bar then renders
      *alongside* Radix's overlay (two scrollbars on hover). An explicit zero
-     width, at higher specificity than the global rule, collapses it. */
+     width, at higher specificity than the global rule, collapses it.
+     Release builds also used to drop Radix's injected <style> outright: an
+     inline <style> in index.html gave the CSP a style nonce, which turns
+     off `'unsafe-inline'` (see the note there). Kept as a static rule so
+     the viewport never depends on that injection. */
   [data-radix-scroll-area-viewport]::-webkit-scrollbar {
     width: 0;
     height: 0;

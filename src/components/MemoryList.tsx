@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Brain, MessageSquare, Plus, Search, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -24,6 +24,7 @@ export function MemoryList({
   onUpdate,
   onRemove,
   onOpenChat,
+  onEditingChange,
 }: {
   memories: MemoryRow[];
   /** Gates manual adds — a disabled scope doesn't accumulate new rows. */
@@ -34,6 +35,9 @@ export function MemoryList({
   onRemove: (id: string) => Promise<unknown>;
   /** Navigate to the chat a memory was extracted from. */
   onOpenChat: (sessionId: string) => void;
+  /** Told when an inline edit opens and closes, so a host dialog can leave
+   *  Escape to the edit (which it cancels) instead of closing on it. */
+  onEditingChange?: (editing: boolean) => void;
 }) {
   const { confirm } = useConfirm();
   const sessions = useChatStore((s) => s.sessions);
@@ -85,6 +89,11 @@ export function MemoryList({
       setAdding(false);
     }
   };
+
+  const editing = editingId !== null;
+  useEffect(() => {
+    onEditingChange?.(editing);
+  }, [editing, onEditingChange]);
 
   const startEdit = (m: MemoryRow) => {
     setEditingId(m.id);
@@ -147,6 +156,8 @@ export function MemoryList({
             placeholder="e.g. Prefers TypeScript over JavaScript."
             disabled={!enabled || adding}
             onKeyDown={(e) => {
+              // The Enter that confirms an IME candidate isn't the add's.
+              if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
                 void handleAdd();
@@ -227,6 +238,7 @@ export function MemoryList({
                           onChange={(e) => setEditVal(e.target.value)}
                           onBlur={() => void commitEdit()}
                           onKeyDown={(e) => {
+                            if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
                             if (e.key === "Enter" && !e.shiftKey) {
                               e.preventDefault();
                               (e.target as HTMLTextAreaElement).blur();

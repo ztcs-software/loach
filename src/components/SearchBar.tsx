@@ -9,6 +9,7 @@ import {
   Search,
   MessageSquare,
   Layers,
+  Library,
   SquareTerminal,
   Quote,
   Check,
@@ -23,14 +24,26 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
 import { logger } from "@/lib/logger";
+import { matches, modalDialogOpen, SHORTCUTS } from "@/lib/shortcuts";
 import { searchMessages } from "@/lib/tauri";
 import { useChatStore } from "@/stores/chatStore";
+import { useLibraryStore } from "@/stores/libraryStore";
+import { useModelsStore } from "@/stores/modelsStore";
 import { usePrivateChatStore } from "@/stores/privateChatStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useSnippetStore } from "@/stores/snippetStore";
+import { useSecurityStore } from "@/stores/securityStore";
 import { useUIStore } from "@/stores/uiStore";
+import { domainOf, mixLabel, typeLabel } from "@/components/library/libraryUi";
 import { expandAndPrimeSnippet } from "@/lib/runSnippet";
-import type { MessageHit, Session, Snippet, Space } from "@/types";
+import type {
+  LibraryDataset,
+  LibraryItemMeta,
+  MessageHit,
+  Session,
+  Snippet,
+  Space,
+} from "@/types";
 
 /**
  * Floating command-palette-style search.
@@ -46,8 +59,9 @@ import type { MessageHit, Session, Snippet, Space } from "@/types";
  *     pill so non-keyboard surfaces share the same path
  *
  * Behaviour while open:
- *   - Empty query → "suggestions" mix of recent chats / spaces / snippets
- *   - Typing filters across all three stores with case-insensitive substring
+ *   - Empty query → "suggestions" mix of recent chats / spaces / snippets /
+ *     Library items and datasets
+ *   - Typing filters across those stores with case-insensitive substring
  *     match on the most-relevant fields, and searches inside chat transcripts
  *     (both prompts and responses) via the backend — see `messageHits`
  *   - An `in:<scope>` token narrows the search to one kind. The token is the
@@ -67,9 +81,11 @@ import type { MessageHit, Session, Snippet, Space } from "@/types";
  *             SnippetsLibrary.runSnippet)
  *   message → select the chat it lives in, then hand ChatCanvas the message
  *             id so it scrolls there and flashes the row
+ *   library → an item opens its preview where the user is; a dataset opens
+ *             its page in the Library
  */
 
-type ResultKind = "chat" | "space" | "snippet" | "message";
+type ResultKind = "chat" | "space" | "snippet" | "message" | "library";
 
 type Result =
   | { kind: "chat"; id: string; label: string; sub?: string; session: Session }
@@ -81,11 +97,19 @@ type Result =
       sub?: string;
       snippet: Snippet;
     }
-  | { kind: "message"; id: string; label: string; sub?: string; hit: MessageHit };
+  | { kind: "message"; id: string; label: string; sub?: string; hit: MessageHit }
+  | {
+      kind: "library";
+      id: string;
+      label: string;
+      sub?: string;
+      /** Set for a dataset; an item result leaves it undefined. */
+      dataset?: LibraryDataset;
+    };
 
 /** What the search is currently pointed at. "everywhere" is the default and
  *  means "no filter"; every other value narrows the list to a single kind. */
-const SCOPES = ["everywhere", "chats", "messages", "spaces", "snippets"] as const;
+const SCOPES = ["everywhere", "chats", "messages", "spaces", "snippets", "library"] as const;
 type Scope = (typeof SCOPES)[number];
 
 /** The one result kind each narrowing scope admits. "everywhere" is absent
@@ -95,13 +119,44 @@ const SCOPE_KIND: Record<Exclude<Scope, "everywhere">, ResultKind> = {
   messages: "message",
   spaces: "space",
   snippets: "snippet",
+  library: "library",
 };
 
 /** The `in:<scope>` filter, matched as a standalone word anywhere in the query
  *  rather than only at the front — `notes in:messages` is as natural to type as
  *  the other order. `in:everywhere` is deliberately not accepted: "everywhere"
  *  is the *absence* of a filter, spelled by deleting the token. */
-const SCOPE_TOKEN = /(^|\s)(in:(?:chats|messages|spaces|snippets))(?=\s|$)/i;
+const SCOPE_TOKEN = /(^|\s)(in:(?:chats|messages|spaces|snippets|library))(?=\s|$)/i;
+
+/** A Library dataset as a result row, sub-lined like its card ("2 texts ·
+ *  1 link"). */
+function datasetResult(
+  d: LibraryDataset,
+  byId: Map<string, LibraryItemMeta>,
+): Result {
+  const members = d.item_ids
+    .map((id) => byId.get(id))
+    .filter((i): i is LibraryItemMeta => !!i);
+  return {
+    kind: "library",
+    id: d.id,
+    label: d.name,
+    sub: `Dataset · ${mixLabel(members)}`,
+    dataset: d,
+  };
+}
+
+/** A Library item as a result row: its type, then the link's site or the
+ *  start of its text. */
+function itemResult(i: LibraryItemMeta): Result {
+  const detail = i.kind === "link" ? domainOf(i.url) : i.preview;
+  return {
+    kind: "library",
+    id: i.id,
+    label: i.title,
+    sub: [typeLabel(i), detail].filter(Boolean).join(" · "),
+  };
+}
 
 interface ParsedQuery {
   scope: Scope;
@@ -132,6 +187,46 @@ function parseQuery(raw: string): ParsedQuery {
   };
 }
 
+/** Where the highlight goes when the list changes under an unchanged query:
+ *  onto the same result if it's still listed, else back to the top. */
+function followActive(
+  prev: readonly Pick<Result, "kind" | "id">[],
+  next: readonly Pick<Result, "kind" | "id">[],
+  index: number,
+): number {
+  const was = prev[index];
+  if (!was) return 0;
+  const at = next.findIndex((r) => r.kind === was.kind && r.id === was.id);
+  return at >= 0 ? at : 0;
+}
+
+/** Cut the name matches down to `room` by sharing it out between their kinds,
+ *  a slot each in turn, rather than first come first served: chats are listed
+ *  first, and a query matching many of them pushed every Library hit off the
+ *  end — and this is the Library's only search. A kind with fewer matches
+ *  than its share leaves the rest to the others. Each kind keeps its order,
+ *  and the kinds keep theirs. */
+function shareRoom<T extends Pick<Result, "kind">>(results: readonly T[], room: number): T[] {
+  const byKind = new Map<ResultKind, T[]>();
+  for (const r of results) {
+    const list = byKind.get(r.kind);
+    if (list) list.push(r);
+    else byKind.set(r.kind, [r]);
+  }
+  const taken = new Map<ResultKind, number>();
+  let left = Math.min(room, results.length);
+  while (left > 0) {
+    for (const [kind, list] of byKind) {
+      const n = taken.get(kind) ?? 0;
+      if (left > 0 && n < list.length) {
+        taken.set(kind, n + 1);
+        left -= 1;
+      }
+    }
+  }
+  return [...byKind].flatMap(([kind, list]) => list.slice(0, taken.get(kind) ?? 0));
+}
+
 const MAX_RESULTS = 20;
 
 /** How many transcript hits the backend is asked for, and how many slots the
@@ -154,6 +249,10 @@ export function SearchBar() {
   const sessions = useChatStore((s) => s.sessions);
   const spaces = useSpaceStore((s) => s.spaces);
   const snippets = useSnippetStore((s) => s.snippets);
+  const libraryItems = useLibraryStore((s) => s.items);
+  const datasets = useLibraryStore((s) => s.datasets);
+  const openPreview = useLibraryStore((s) => s.openPreview);
+  const setViewingDataset = useLibraryStore((s) => s.setViewingDataset);
   const select = useChatStore((s) => s.selectSession);
   const newSession = useChatStore((s) => s.newSession);
   const setViewingSpace = useSpaceStore((s) => s.setViewingSpace);
@@ -197,6 +296,15 @@ export function SearchBar() {
       // regular app behind it — including surfacing persisted chat titles,
       // which is exactly what the TitleBar's disabled search pill prevents.
       if (usePrivateChatStore.getState().open) return;
+      // Nor before the security probe has said whether the app is locked:
+      // App shows only its background until then, and the palette opened on
+      // top of it, chat titles and all.
+      const sec = useSecurityStore.getState();
+      if (!sec.hydrated || (sec.status.configured && !sec.unlocked)) return;
+      // Nor over another dialog (Settings, a confirm): the palette's
+      // navigation would land behind it. Pressing it again with the palette
+      // already open still just refocuses the input.
+      if (!panelRef.current && modalDialogOpen()) return;
       // Only capture a restore target while the palette is closed. Pressing
       // Ctrl+K again with it already open used to overwrite the target with
       // whatever had focus inside the palette — the input, or an item of the
@@ -220,8 +328,11 @@ export function SearchBar() {
         inputRef.current?.select();
       }, 0);
     };
+    // Through `matches`, like every other shortcut, so it works on layouts
+    // without Latin letters too.
+    const spec = SHORTCUTS.find((s) => s.action === "global-search")!;
     const onKey = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+      if (matches(spec, e)) {
         e.preventDefault();
         focus();
       }
@@ -276,6 +387,7 @@ export function SearchBar() {
     // to the keys `SCOPE_KIND` actually has.
     const allows = (kind: ResultKind) =>
       scope === "everywhere" ? true : SCOPE_KIND[scope] === kind;
+    const itemsById = new Map(libraryItems.map((i) => [i.id, i]));
 
     // Empty query → "suggestions": a small mixed slice of recent items. Under
     // a narrowed scope one kind has the list to itself, so it gets to show
@@ -329,6 +441,14 @@ export function SearchBar() {
           });
         }
       }
+      if (allows("library")) {
+        // Both lists arrive most recently updated first.
+        const recent = [
+          ...datasets.map((d) => datasetResult(d, itemsById)),
+          ...libraryItems.map(itemResult),
+        ];
+        out.push(...recent.slice(0, room.other));
+      }
       return out;
     }
 
@@ -381,6 +501,25 @@ export function SearchBar() {
       }
     }
 
+    // The Library's only search — its page has no box of its own: datasets
+    // by name and description, items by title, opening text and link.
+    if (allows("library")) {
+      for (const d of datasets) {
+        if (d.name.toLowerCase().includes(q) || d.description.toLowerCase().includes(q)) {
+          matches.push(datasetResult(d, itemsById));
+        }
+      }
+      for (const i of libraryItems) {
+        if (
+          i.title.toLowerCase().includes(q) ||
+          i.preview.toLowerCase().includes(q) ||
+          (i.url ?? "").toLowerCase().includes(q)
+        ) {
+          matches.push(itemResult(i));
+        }
+      }
+    }
+
     // Transcript hits go last: a chat whose *title* matches is a stronger
     // signal than a phrase buried in one of its turns. They still get a
     // guaranteed block of slots at the bottom, so a query that also matches
@@ -398,15 +537,23 @@ export function SearchBar() {
       : [];
 
     return [
-      ...matches.slice(0, MAX_RESULTS - Math.min(messages.length, messageRoom)),
+      ...shareRoom(matches, MAX_RESULTS - Math.min(messages.length, messageRoom)),
       ...messages.slice(0, messageRoom),
     ];
-  }, [terms, scope, sessions, spaces, snippets, recentSessionIds, messageHits]);
+  }, [terms, scope, sessions, spaces, snippets, libraryItems, datasets, recentSessionIds, messageHits]);
 
-  // Keep the active row valid whenever the result set changes.
+  // Keep the active row valid whenever the result set changes: back to the
+  // top for a new query, but on the same result when the list changes under
+  // the same one — transcript hits arrive after the debounce, and resetting
+  // then moved the highlight off the row the user had already arrowed to.
+  const shown = useRef({ query, results });
   useEffect(() => {
-    setActiveIndex(0);
-  }, [query, results.length]);
+    const prev = shown.current;
+    shown.current = { query, results };
+    setActiveIndex((i) =>
+      prev.query === query ? followActive(prev.results, results, i) : 0,
+    );
+  }, [query, results]);
 
   // Options are no longer focusable (see the listbox markup below), so the
   // browser won't scroll them into view the way it did when each row was a
@@ -462,6 +609,8 @@ export function SearchBar() {
     // open Radix owns Escape and Tab — handling them again here would close
     // the menu and wipe the query on a single keystroke.
     if (scopeMenuOpen) return;
+    // The input's IME keys bubble up here too.
+    if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
     if (e.key === "Escape") {
       e.preventDefault();
       if (query) setQuery("");
@@ -502,14 +651,19 @@ export function SearchBar() {
   const commit = async (r: Result) => {
     close();
 
+    // Every route below but an item preview leaves a model's page too: App
+    // shows that page ahead of the sidebar tab, so it stayed on screen over
+    // the chat that had just been picked.
     if (r.kind === "chat") {
       setViewingSpace(null);
+      useModelsStore.getState().setViewingModel(null);
       setSidebarTab("chats");
       await select(r.id);
       return;
     }
 
     if (r.kind === "space") {
+      useModelsStore.getState().setViewingModel(null);
       setSidebarTab("spaces");
       setViewingSpace(r.id);
       return;
@@ -517,6 +671,7 @@ export function SearchBar() {
 
     if (r.kind === "message") {
       setViewingSpace(null);
+      useModelsStore.getState().setViewingModel(null);
       setSidebarTab("chats");
       // Park the target BEFORE selecting, so it's already waiting whichever
       // way the race goes — ChatCanvas picks it up as soon as the row is in
@@ -527,18 +682,37 @@ export function SearchBar() {
       return;
     }
 
-    // snippet — same handler as the sidebar's "Run" action.
-    setViewingSpace(null);
-    setSidebarTab("chats");
-    await newSession({
-      spaceId: null,
-      provider: r.snippet.provider ?? undefined,
-      model: r.snippet.model ?? undefined,
+    if (r.kind === "library") {
+      if (r.dataset) {
+        // Same route as a dataset chip in the composer.
+        setViewingDataset(r.id);
+        setViewingSpace(null);
+        useModelsStore.getState().setViewingModel(null);
+        setSidebarTab("library");
+      } else {
+        openPreview(r.id);
+      }
+      return;
+    }
+
+    // snippet — same handler as the Snippets page's "Run" action: the chat
+    // is created once the variables are filled, not before.
+    await expandAndPrimeSnippet(r.snippet, async () => {
+      setViewingSpace(null);
+      useModelsStore.getState().setViewingModel(null);
+      setSidebarTab("chats");
+      await newSession({
+        spaceId: null,
+        provider: r.snippet.provider ?? undefined,
+        model: r.snippet.model ?? undefined,
+      });
     });
-    await expandAndPrimeSnippet(r.snippet);
   };
 
   const onKeyDown = (e: ReactKeyboardEvent<HTMLInputElement>) => {
+    // Keys confirming or cancelling an IME candidate belong to the IME: Enter
+    // opened a result, Esc wiped the query. keyCode 229 too — see ChatInput.
+    if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
     if (e.key === "ArrowDown") {
       e.preventDefault();
       setActiveIndex((i) =>
@@ -658,13 +832,13 @@ export function SearchBar() {
                   if (mirrorRef.current)
                     mirrorRef.current.scrollLeft = e.currentTarget.scrollLeft;
                 }}
-                placeholder="Search chats, messages, spaces, snippets…"
+                placeholder="Search chats, messages, Spaces, snippets, Library…"
                 spellCheck={false}
                 // Combobox-over-listbox: ↑/↓ already moved a visual highlight
                 // that existed only as a background colour. `aria-activedescendant`
                 // is what turns that into something announceable, and keeps
                 // real focus in the input so typing never breaks.
-                aria-label="Search chats, messages, spaces, snippets"
+                aria-label="Search chats, messages, Spaces, snippets and the Library"
                 role="combobox"
                 aria-expanded={results.length > 0}
                 aria-controls="search-results"
@@ -749,7 +923,7 @@ export function SearchBar() {
           {results.length === 0 ? (
             <div className="px-4 py-6 text-center text-xs text-foreground/45">
               {!query.trim()
-                ? "Nothing yet — start a chat, create a space, or save a snippet."
+                ? "Nothing yet — start a chat, create a Space, or save a snippet."
                 : searching
                   ? "Searching…"
                   : !terms
@@ -820,7 +994,8 @@ function ResultIcon({ kind }: { kind: ResultKind }) {
   if (kind === "chat") return <MessageSquare className={cls} />;
   if (kind === "space") return <Layers className={cls} />;
   if (kind === "message") return <Quote className={cls} />;
+  if (kind === "library") return <Library className={cls} />;
   return <SquareTerminal className={cls} />;
 }
 
-export const __testing = { parseQuery };
+export const __testing = { parseQuery, followActive, shareRoom };

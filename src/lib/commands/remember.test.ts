@@ -66,3 +66,36 @@ describe("/remember in a Space", () => {
     );
   });
 });
+
+// On a Space's page the composer starts a new chat, so commands typed there
+// must not reach the chat left open behind the page — `/clear` used to wipe
+// it — and memory commands belong to the Space being viewed.
+describe("commands on a Space's page", () => {
+  beforeEach(() => {
+    addSpaceMemory.mockClear();
+    useSpaceStore.setState({
+      spaces: [
+        { id: "space-1", name: "Work", memory_enabled: true } as Space,
+        { id: "space-2", name: "Home", memory_enabled: true } as Space,
+      ],
+      viewingSpaceId: "space-2",
+      activeSpaceId: "space-2",
+    });
+    useChatStore.setState({
+      sessions: [{ id: "chat-1", space_id: "space-1", title: "Old" } as Session],
+      activeSessionId: "chat-1",
+    });
+  });
+
+  it("leaves the chat behind the page alone", async () => {
+    const remove = vi.spyOn(useChatStore.getState(), "remove");
+    const outcome = await dispatch("/delete", deps);
+    expect(outcome).toMatchObject({ kind: "handled", result: { kind: "toast", tone: "error" } });
+    expect(remove).not.toHaveBeenCalled();
+  });
+
+  it("remembers into the Space being viewed", async () => {
+    await dispatch("/remember Prefers tabs", deps);
+    expect(addSpaceMemory).toHaveBeenCalledWith(expect.objectContaining({ space_id: "space-2" }));
+  });
+});

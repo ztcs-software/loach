@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import {
   Dialog,
   DialogContent,
@@ -9,6 +9,7 @@ import {
 import { MemoryList } from "@/components/MemoryList";
 import { useChatStore } from "@/stores/chatStore";
 import { useGlobalMemoryStore } from "@/stores/globalMemoryStore";
+import { useModelsStore } from "@/stores/modelsStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useToastStore } from "@/stores/toastStore";
@@ -30,6 +31,9 @@ export function GlobalMemoriesDialog({
   const updateMemory = useGlobalMemoryStore((s) => s.updateMemory);
   const removeMemory = useGlobalMemoryStore((s) => s.removeMemory);
   const enabled = useSettingsStore((s) => s.global_memory_enabled);
+  // Radix hears Escape on the document before the edit field does, so Esc
+  // while editing a memory closed the whole dialog instead of the edit.
+  const [editingMemory, setEditingMemory] = useState(false);
 
   useEffect(() => {
     if (open && memories === null) {
@@ -38,18 +42,24 @@ export function GlobalMemoriesDialog({
   }, [open, memories, load]);
 
   const openChat = (sessionId: string) => {
-    // Leave both dialogs and any Space view behind so the chat is actually
-    // visible when the selection lands.
+    // Leave both dialogs and any Space or model view behind so the chat is
+    // actually visible when the selection lands.
     onOpenChange(false);
     useUIStore.getState().setSettingsOpen(false);
     useSpaceStore.getState().setViewingSpace(null);
+    useModelsStore.getState().setViewingModel(null);
     useUIStore.getState().setSidebarTab("chats");
     void useChatStore.getState().selectSession(sessionId);
   };
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-2xl !rounded-3xl">
+      <DialogContent
+        className="max-w-2xl !rounded-3xl"
+        onEscapeKeyDown={(e) => {
+          if (editingMemory) e.preventDefault();
+        }}
+      >
         <DialogHeader>
           <DialogTitle>Global memories</DialogTitle>
           <DialogDescription>
@@ -63,7 +73,7 @@ export function GlobalMemoriesDialog({
             enabled={enabled}
             emptyText={
               enabled
-                ? "No global memories yet — chat outside a space and the extractor will start saving durable facts here."
+                ? "No global memories yet — chat outside a Space and the extractor will start saving durable facts here."
                 : "Global memory is off. Turn it on to start collecting facts."
             }
             onAdd={(content) =>
@@ -84,6 +94,7 @@ export function GlobalMemoriesDialog({
               removeMemory(id).catch((e) => notify("remove memory", e))
             }
             onOpenChat={openChat}
+            onEditingChange={setEditingMemory}
           />
         </div>
       </DialogContent>

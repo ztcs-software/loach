@@ -213,6 +213,18 @@ const UNITS: &[Unit] = &[
     Unit { name: "kelvin", category: Category::Temperature, factor: 0.0 },
 ];
 
+/// Spellings whose case is the prefix — `M` mega, `m` milli — matched before
+/// case is folded, which read `ML` as `mL` and `mPa` as `MPa`, 10⁹ off. The
+/// all-lower and all-upper spellings carry no such signal and still fold.
+const CASED_UNITS: &[Unit] = &[
+    Unit { name: "Mm", category: Category::Length, factor: 1.0e6 },
+    Unit { name: "Mg", category: Category::Mass, factor: 1_000.0 },
+    Unit { name: "ML", category: Category::Volume, factor: 1.0e6 },
+    Unit { name: "Ml", category: Category::Volume, factor: 1.0e6 },
+    Unit { name: "Ms", category: Category::Time, factor: 1.0e6 },
+    Unit { name: "mPa", category: Category::Pressure, factor: 1.0e-3 },
+];
+
 pub fn tool_description() -> &'static str {
     "Convert a numeric value from one unit to another. Use this rather \
      than guessing a conversion factor — your answer will drift for \
@@ -226,8 +238,11 @@ pub fn tool_description() -> &'static str {
      area (m2, cm2, km2, ft2, in2, yd2, mi2, acre, hectare), \
      energy (J, kJ, cal, kcal, Wh, kWh, BTU), \
      pressure (Pa, kPa, MPa, bar, psi, atm, mmHg, torr), \
-     temperature (C, F, K). Names are case-insensitive. Both units must \
-     belong to the same category."
+     temperature (C, F, K — `°C` works too). Names are case-insensitive, \
+     except a capital `M` for mega against a small `m` for milli (`ML` is \
+     megalitres, `mL` millilitres; `MPa` and `mPa`), and `Cal`: the food \
+     Calorie, a kcal, where `cal` is the small calorie. Plurals (`kilograms`, `hours`) work. Both units must belong to \
+     the same category."
 }
 
 pub fn input_schema() -> Value {
@@ -290,15 +305,39 @@ pub fn dispatch(args: &Value) -> McpCallResult {
         return err("conversion result is out of range (overflowed)");
     }
     McpCallResult {
-        content_text: format_number(result),
+        content_text: super::calculate::format_number(result),
         is_error: false,
         ..Default::default()
     }
 }
 
 fn find_unit(name: &str) -> Option<&'static Unit> {
-    let needle = name.trim().to_ascii_lowercase();
-    UNITS.iter().find(|u| u.name == needle)
+    let name = name.trim();
+    // The degree sign names the same scales as the bare letters: `°C`, or
+    // the one-character `℃` / `℉`.
+    let scale = match name {
+        "℃" => Some("C"),
+        "℉" => Some("F"),
+        _ => name.strip_prefix('°'),
+    };
+    if let Some(scale) = scale {
+        return find_unit(scale).filter(|u| u.category == Category::Temperature);
+    }
+    // `Cal` is the food Calorie, a kilocalorie: only the capital tells it
+    // from the `cal` a thousand times smaller, so it's matched before case
+    // is folded.
+    if matches!(name, "Cal" | "Cals") {
+        return find_unit("kcal");
+    }
+    if let Some(u) = CASED_UNITS.iter().find(|u| u.name == name) {
+        return Some(u);
+    }
+    let needle = name.to_ascii_lowercase();
+    UNITS.iter().find(|u| u.name == needle).or_else(|| {
+        // Regular plurals — `kilograms`, `hours`, `mins` — of any name.
+        let singular = needle.strip_suffix('s')?;
+        UNITS.iter().find(|u| u.name == singular)
+    })
 }
 
 /// Affine temperature conversion, routed through Kelvin so each pair is
@@ -310,31 +349,15 @@ fn convert_temperature(value: f64, from: &str, to: &str) -> Result<f64, String> 
         "k" | "kelvin" => value,
         other => return Err(format!("unknown temperature unit `{other}`")),
     };
+    if kelvin < 0.0 {
+        return Err(format!("{value} {from} is below absolute zero (0 K)"));
+    }
     Ok(match to {
         "c" | "celsius" => kelvin - 273.15,
         "f" | "fahrenheit" => kelvin * 9.0 / 5.0 - 459.67,
         "k" | "kelvin" => kelvin,
         other => return Err(format!("unknown temperature unit `{other}`")),
     })
-}
-
-/// Same trick as `calculate::format_result`: integer-valued floats become
-/// `N`, otherwise trim trailing zeros from a 12-digit display so the
-/// output reads cleanly.
-fn format_number(v: f64) -> String {
-    if v.fract() == 0.0 && v.abs() < 1e15 {
-        return format!("{}", v as i64);
-    }
-    let s = format!("{v:.12}");
-    let trimmed = s.trim_end_matches('0').trim_end_matches('.');
-    // `v` is non-zero here (an exact zero took the integer branch above), so
-    // a result that rounds away at 12 decimals — 0.0001 mg in tonnes, say —
-    // must not be reported as a flat "0"/"-0". Surface those in scientific
-    // notation, the same guard `calculate::format_result` already carries.
-    if trimmed.is_empty() || trimmed == "-" || trimmed == "0" || trimmed == "-0" {
-        return format!("{v:e}");
-    }
-    trimmed.to_string()
 }
 
 fn err(msg: impl Into<String>) -> McpCallResult {
@@ -407,5 +430,93 @@ mod tests {
         let r = dispatch(&json!({"value": 1.0, "from": "furlong", "to": "ft"}));
         assert!(!r.is_error);
         assert_eq!(r.content_text, "660");
+    }
+
+    fn convert(value: f64, from: &str, to: &str) -> McpCallResult {
+        dispatch(&json!({"value": value, "from": from, "to": to}))
+    }
+
+    /// Folding case read the food `Cal` as the small `cal`, 1000× off.
+    #[test]
+    fn capital_cal_is_the_food_calorie() {
+        assert_eq!(convert(1.0, "Cal", "kcal").content_text, "1");
+        assert_eq!(convert(2.0, "Cals", "kJ").content_text, "8.368");
+        assert_eq!(convert(1000.0, "cal", "kcal").content_text, "1");
+        assert_eq!(convert(1.0, "CAL", "J").content_text, "4.184");
+    }
+
+    /// Folding case read `ML` as `mL` and `mPa` as `MPa`, 10⁹ off.
+    #[test]
+    fn case_tells_mega_from_milli() {
+        for (from, to, want) in [
+            ("ML", "L", "1000000"),
+            ("Ml", "L", "1000000"),
+            ("mL", "L", "0.001"),
+            ("ml", "L", "0.001"),
+            ("MPa", "Pa", "1000000"),
+            ("mPa", "Pa", "0.001"),
+            ("Mg", "kg", "1000"),
+            ("mg", "g", "0.001"),
+            ("Mm", "km", "1000"),
+            ("Ms", "s", "1000000"),
+            ("MS", "s", "0.001"),
+            // No case signal: still folded onto the table's spelling.
+            ("mpa", "kPa", "1000"),
+            ("MM", "m", "0.001"),
+        ] {
+            let r = convert(1.0, from, to);
+            assert!(!r.is_error, "{from} → {to}: {}", r.content_text);
+            assert_eq!(r.content_text, want, "{from} → {to}");
+        }
+    }
+
+    #[test]
+    fn degree_signs_name_temperature_scales() {
+        for (from, to) in [("°C", "°F"), ("℃", "℉"), ("° C", "F")] {
+            let r = convert(100.0, from, to);
+            assert!(!r.is_error, "{from} → {to}: {}", r.content_text);
+            assert_eq!(r.content_text, "212", "{from} → {to}");
+        }
+        assert!(convert(1.0, "°m", "m").is_error, "the degree sign is for temperatures only");
+    }
+
+    #[test]
+    fn regular_plurals_are_accepted() {
+        for (from, to, want) in [
+            ("kilograms", "grams", "1000"),
+            ("hours", "minutes", "60"),
+            ("mins", "secs", "60"),
+            ("Miles", "yards", "1760"),
+        ] {
+            let r = convert(1.0, from, to);
+            assert!(!r.is_error, "{from} → {to}: {}", r.content_text);
+            assert_eq!(r.content_text, want, "{from} → {to}");
+        }
+    }
+
+    #[test]
+    fn temperatures_below_absolute_zero_are_refused() {
+        for (value, from) in [(-273.16, "C"), (-460.0, "F"), (-1.0, "K")] {
+            let r = convert(value, from, "K");
+            assert!(r.is_error, "{value} {from}: {}", r.content_text);
+            assert!(r.content_text.contains("absolute zero"), "{}", r.content_text);
+        }
+        assert_eq!(convert(-273.15, "C", "K").content_text, "0");
+    }
+
+    /// 12 significant digits, as `calculate` prints: a tiny result keeps its
+    /// digits and a huge one doesn't print f64 noise past them.
+    #[test]
+    fn results_keep_twelve_significant_digits() {
+        for (value, from, to, want) in [
+            (5.1, "mg", "t", "5.1e-9"),
+            (1.0, "ly", "km", "9.46073047258e12"),
+            (1.0, "pc", "m", "3.08567758149e16"),
+            (1.0, "m", "ft", "3.28083989501"),
+        ] {
+            let r = dispatch(&json!({"value": value, "from": from, "to": to}));
+            assert!(!r.is_error, "{}", r.content_text);
+            assert_eq!(r.content_text, want, "{value} {from} → {to}");
+        }
     }
 }

@@ -218,6 +218,49 @@ mod tests {
         assert!(r.content_text.contains("host_count: 2"));
     }
 
+    fn subnet_info(cidr: &str) -> String {
+        let r = dispatch(&json!({"op": "subnet_info", "cidr": cidr}));
+        assert!(!r.is_error, "{cidr}: {}", r.content_text);
+        r.content_text
+    }
+
+    #[test]
+    fn subnet_info_ipv4_whole_space() {
+        assert_eq!(
+            subnet_info("0.0.0.0/0"),
+            "network: 0.0.0.0\nbroadcast: 255.255.255.255\nprefix_len: 0\nnetmask: 0.0.0.0\n\
+             first_host: 0.0.0.1\nlast_host: 255.255.255.254\nhost_count: 4294967294"
+        );
+    }
+
+    /// 2^128 addresses don't fit the counter: the count saturates and says so.
+    #[test]
+    fn subnet_info_ipv6_whole_space_flags_the_saturated_count() {
+        let out = subnet_info("::/0");
+        assert!(out.contains("network: ::\n"), "{out}");
+        assert!(out.contains("first_host: ::\n"), "{out}");
+        assert!(out.contains("last_host: ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff\n"), "{out}");
+        assert!(
+            out.ends_with(&format!("host_count: {} (floor — 2^128 exceeds the counter)", u128::MAX)),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn subnet_info_single_addresses() {
+        assert_eq!(
+            subnet_info("10.1.2.3/32"),
+            "network: 10.1.2.3\nbroadcast: 10.1.2.3\nprefix_len: 32\nnetmask: 255.255.255.255\n\
+             first_host: 10.1.2.3\nlast_host: 10.1.2.3\nhost_count: 1"
+        );
+        assert_eq!(
+            subnet_info("2001:db8::5/128"),
+            "network: 2001:db8::5\nprefix_len: 128\n\
+             netmask: ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff\n\
+             first_host: 2001:db8::5\nlast_host: 2001:db8::5\nhost_count: 1"
+        );
+    }
+
     #[test]
     fn ipv6_in_cidr() {
         let r = dispatch(&json!({

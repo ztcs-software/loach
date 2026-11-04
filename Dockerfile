@@ -47,13 +47,13 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
  && apt-get install -y --no-install-recommends nodejs \
  && rm -rf /var/lib/apt/lists/*
 
-# Pinned to the toolchain CI uses (dtolnay/rust-toolchain@1.88.0) rather than
+# Pinned to the toolchain CI uses (dtolnay/rust-toolchain 1.90.0) rather than
 # `stable`, for the same reason CI pins it: a surprise rustc release shouldn't
 # be able to break a build that worked yesterday. Minimal profile — the build
 # image has no use for rustfmt/clippy. Keep in step with `rust-version` in
 # src-tauri/Cargo.toml.
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-      | sh -s -- -y --default-toolchain 1.88.0 --profile minimal
+      | sh -s -- -y --default-toolchain 1.90.0 --profile minimal
 
 WORKDIR /src
 

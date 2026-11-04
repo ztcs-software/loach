@@ -20,7 +20,7 @@ import {
   afterEach,
   type Mock,
 } from "vitest";
-import { IDLE_MS, startAutoLock } from "./autoLock";
+import { IDLE_MS, noteActivity, startAutoLock, startLockOnClose } from "./autoLock";
 
 type Handler = () => void;
 
@@ -98,6 +98,21 @@ describe("startAutoLock — idle", () => {
     expect(lock).toHaveBeenCalled();
   });
 
+  // Activity inside the HTML preview's frame never reaches this window's
+  // listeners; the frame reports it and `noteActivity` stands in for it.
+  it("pushes the deadline out on activity reported from the preview", () => {
+    const stop = startAutoLock({ idleMs: IDLE_MS["1m"], onHide: false, lock });
+
+    vi.advanceTimersByTime(45_000);
+    noteActivity();
+    vi.advanceTimersByTime(45_000);
+    expect(lock).not.toHaveBeenCalled();
+
+    vi.advanceTimersByTime(30_000);
+    expect(lock).toHaveBeenCalled();
+    stop();
+  });
+
   it("stays disarmed when the timeout is off", () => {
     const stop = startAutoLock({ idleMs: IDLE_MS.off, onHide: false, lock });
 
@@ -145,5 +160,57 @@ describe("startAutoLock — teardown", () => {
     expect(doc.total()).toBe(0);
     vi.advanceTimersByTime(10 * 60_000);
     expect(lock).not.toHaveBeenCalled();
+  });
+});
+
+// Closing the window on macOS only hides it; that has to lock, as quitting
+// and relaunching would — but only while there's an unlocked lock to engage.
+describe("startLockOnClose", () => {
+  /** A stand-in for `onWindowCloseHidden`: records the callback, and
+   *  resolves its unlisten on the next microtask, as the Tauri one does. */
+  function fakeListen() {
+    const state = { cb: null as null | (() => void), unlistened: false };
+    const listen = vi.fn(async (cb: () => void) => {
+      state.cb = cb;
+      return () => {
+        state.unlistened = true;
+      };
+    });
+    return { listen, state };
+  }
+
+  it("locks on close while a lock is configured and unlocked", async () => {
+    const { listen, state } = fakeListen();
+    const stop = startLockOnClose({ configured: true, unlocked: true, lock, listen });
+    await Promise.resolve();
+
+    state.cb!();
+    expect(lock).toHaveBeenCalledTimes(1);
+
+    stop();
+    expect(state.unlistened).toBe(true);
+  });
+
+  it("doesn't listen without a lock, or while already locked", () => {
+    for (const [configured, unlocked] of [
+      [false, true],
+      [true, false],
+      [false, false],
+    ]) {
+      const { listen } = fakeListen();
+      startLockOnClose({ configured, unlocked, lock, listen })();
+      expect(listen).not.toHaveBeenCalled();
+    }
+    expect(lock).not.toHaveBeenCalled();
+  });
+
+  it("drops a subscription that lands after the teardown", async () => {
+    const { listen, state } = fakeListen();
+    const stop = startLockOnClose({ configured: true, unlocked: true, lock, listen });
+    stop();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(state.unlistened).toBe(true);
   });
 });

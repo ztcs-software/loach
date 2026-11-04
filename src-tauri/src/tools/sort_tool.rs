@@ -25,8 +25,9 @@ pub fn tool_description() -> &'static str {
      `numeric` (parses each line as a number and sorts numerically — lines \
      that don't parse sort after the numbers in their original order). \
      Flags: `reverse` (descending order), `unique` (collapse adjacent \
-     duplicates after sort, like `sort -u`), `case_sensitive` (default true; \
-     when false, lexical and natural compare case-insensitively)."
+     duplicates after sort, like `sort -u`; ignoring case when \
+     `case_sensitive` is false, like `sort -fu`), `case_sensitive` (default \
+     true; when false, lexical and natural compare case-insensitively)."
 }
 
 pub fn input_schema() -> Value {
@@ -70,11 +71,11 @@ pub fn dispatch(args: &Value) -> McpCallResult {
             if case_sensitive {
                 lines.sort();
             } else {
-                // `sort_by_key` lowercases each line once and caches the key
-                // — `sort_by` would re-lowercase both sides on every
-                // comparison (O(n log n) extra allocations). Same observable
-                // ordering either way.
-                lines.sort_by_key(|a| a.to_lowercase());
+                // `sort_by_cached_key` lowercases each line once and caches
+                // the key — `sort_by_key` and `sort_by` would re-lowercase
+                // both sides on every comparison (O(n log n) extra
+                // allocations). Same observable ordering either way.
+                lines.sort_by_cached_key(|a| a.to_lowercase());
             }
         }
         "natural" => {
@@ -103,6 +104,9 @@ pub fn dispatch(args: &Value) -> McpCallResult {
                 })
                 .collect();
             decorated.sort_by(|a, b| match (a.1, b.1) {
+                // `reverse` flips the numbers alone: reversing the whole list
+                // put the unparseable lines first, against the description.
+                (Some(x), Some(y)) if reverse => y.total_cmp(&x),
                 (Some(x), Some(y)) => x.total_cmp(&y),
                 (Some(_), None) => std::cmp::Ordering::Less,
                 (None, Some(_)) => std::cmp::Ordering::Greater,
@@ -112,11 +116,17 @@ pub fn dispatch(args: &Value) -> McpCallResult {
         }
         other => return err(format!("unknown mode `{other}`")),
     }
-    if reverse {
+    if reverse && mode != "numeric" {
         lines.reverse();
     }
     if unique {
-        lines.dedup();
+        // Case-insensitive sorts put `Apple` next to `apple`; collapse
+        // those too, as `sort -fu` does, rather than keep both.
+        if !case_sensitive && mode != "numeric" {
+            lines.dedup_by(|a, b| a.to_lowercase() == b.to_lowercase());
+        } else {
+            lines.dedup();
+        }
     }
     McpCallResult {
         content_text: lines.join("\n"),
@@ -208,5 +218,28 @@ mod tests {
     fn rejects_unknown_mode() {
         let r = dispatch(&json!({"input": "a\nb", "mode": "alphabet"}));
         assert!(r.is_error);
+    }
+
+    #[test]
+    fn case_insensitive_unique_collapses_case_variants() {
+        for mode in ["lexical", "natural"] {
+            let r = dispatch(&json!({
+                "input": "banana\nApple\napple\nAPPLE",
+                "mode": mode,
+                "unique": true,
+                "case_sensitive": false,
+            }));
+            assert!(!r.is_error);
+            assert_eq!(r.content_text, "Apple\nbanana", "{mode}");
+        }
+    }
+
+    /// Lines that don't parse stay after the numbers, in input order, when
+    /// the numbers are reversed too.
+    #[test]
+    fn reverse_numeric_keeps_unparseable_lines_last() {
+        let r = dispatch(&json!({"input": "x\n2\ny\n10\n1", "mode": "numeric", "reverse": true}));
+        assert!(!r.is_error);
+        assert_eq!(r.content_text, "10\n2\n1\nx\ny");
     }
 }

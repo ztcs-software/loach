@@ -5,6 +5,8 @@ mod mcp;
 mod ollama_launch;
 mod preload;
 mod providers;
+mod rag;
+mod sandbox;
 mod secrets;
 mod security;
 mod sse;
@@ -18,6 +20,7 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Manager,
 };
+#[cfg(not(target_os = "linux"))]
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 
 use crate::db::Database;
@@ -38,6 +41,28 @@ fn fatal_setup_error(app: &tauri::AppHandle, what: &str, err: impl std::fmt::Dis
     // the dialog can't be shown (very headless CI, broken display) this
     // returns immediately — we still exit afterwards so the app doesn't
     // limp on with broken state.
+    //
+    // Not on Linux: `setup` runs inside tao's event loop, which holds GLib's
+    // default main context for as long as it runs, and rfd's GTK dialog is
+    // created from an idle callback on that context — so with this thread
+    // blocked waiting for it (here, or on any other thread we joined) it never
+    // appeared and the window hung blank. `gtk_dialog_run` spins a nested
+    // loop on this thread instead, which owns the context.
+    #[cfg(target_os = "linux")]
+    {
+        use gtk::prelude::*;
+        let _ = app; // the plugin's dialog is the one path that needs it
+        let dialog = gtk::MessageDialog::new(
+            None::<&gtk::Window>,
+            gtk::DialogFlags::MODAL,
+            gtk::MessageType::Error,
+            gtk::ButtonsType::Ok,
+            &body,
+        );
+        dialog.set_title("Loach failed to start");
+        dialog.run();
+    }
+    #[cfg(not(target_os = "linux"))]
     let _ = app
         .dialog()
         .message(&body)
@@ -62,6 +87,9 @@ pub struct AppState {
     /// test-then-save asks once. Deliberately not persisted: a fresh
     /// process re-asks before anything runs.
     pub stdio_approved: parking_lot::Mutex<std::collections::HashSet<String>>,
+    /// Background worker keeping the Library / Space-source retrieval index
+    /// chunked and embedded. Woken by anything that can create work.
+    pub indexer: Arc<rag::indexer::Indexer>,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -86,10 +114,23 @@ pub fn run() {
         .init();
 
     tauri::Builder::default()
+        // First, as the plugin requires. A second launch (Start menu while
+        // hidden to the tray, a desktop file, a double click on the app)
+        // brings the running window back and exits, instead of a second
+        // process sharing loach.db, running its own indexer and MCP servers,
+        // and overwriting edits made in the other window.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.show();
+                let _ = w.unminimize();
+                let _ = w.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .register_uri_scheme_protocol(sandbox::SCHEME, |_ctx, request| sandbox::handle(&request))
         .setup(|app| {
             // Replace the prior `.expect(...)` chain with explicit user-
             // facing error dialogs. The old behaviour silent-crashed the
@@ -116,6 +157,8 @@ pub fn run() {
                     e,
                 );
             }
+
+            security::init_marker(&data_dir);
 
             let db_path = data_dir.join("loach.db");
             let db = match Database::open(&db_path) {
@@ -183,6 +226,7 @@ pub fn run() {
             let db = Arc::new(db);
             let preload_db = db.clone();
             let preload_http = http.clone();
+            let indexer = rag::indexer::Indexer::spawn(handle.clone(), db.clone(), http.clone());
 
             let state = AppState {
                 db,
@@ -191,6 +235,7 @@ pub fn run() {
                 mcp_tools_cache: crate::mcp::new_tools_cache(),
                 approvals: crate::stream::ApprovalRegistry::new(),
                 stdio_approved: Default::default(),
+                indexer,
             };
             app.manage(state);
 
@@ -211,8 +256,11 @@ pub fn run() {
 
             // macOS menu-bar icons render as template images — single-channel
             // masks taken from the alpha channel — so they auto-invert in
-            // light vs. dark menu bars. The flag is a no-op on Windows /
-            // Linux, but we still gate it so the intent reads clearly.
+            // light vs. dark menu bars. That rules out the app icon there: it
+            // is an opaque rounded square, so its mask is a solid blob. macOS
+            // gets `icons/tray-template.png` instead, the fish line art in
+            // black on transparent. It is 36 px tall because tray-icon draws
+            // the image 18 pt tall, so it maps 2:1 onto a Retina menu bar.
             let _tray = {
                 let builder = TrayIconBuilder::with_id("loach-tray")
                     .menu(&menu)
@@ -223,12 +271,15 @@ pub fn run() {
                 // ships without the icon degrades to an icon-less tray instead
                 // of panicking the whole `setup` (which would bypass the
                 // friendly `fatal_setup_error` dialog the rest of setup uses).
+                #[cfg(not(target_os = "macos"))]
                 let builder = match app.default_window_icon() {
                     Some(icon) => builder.icon(icon.clone()),
                     None => builder,
                 };
                 #[cfg(target_os = "macos")]
-                let builder = builder.icon_as_template(true);
+                let builder = builder
+                    .icon(tauri::include_image!("icons/tray-template.png"))
+                    .icon_as_template(true);
                 builder
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => {
@@ -268,6 +319,45 @@ pub fn run() {
                 .build(app)?
             };
 
+            // macOS: closing the window (red button, ⌘W) hides it and Loach
+            // stays in the Dock, like other Mac apps; the Dock icon (the
+            // `Reopen` arm below) or the tray brings it back. ⌘Q and the
+            // tray's Quit still quit — they end the app without a close
+            // request. Windows and Linux keep close-means-quit.
+            #[cfg(target_os = "macos")]
+            {
+                use tauri::Emitter;
+                if let Some(window) = app.get_webview_window("main") {
+                    let w = window.clone();
+                    window.on_window_event(move |event| {
+                        if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                            api.prevent_close();
+                            // Closing used to quit, and every launch meets the
+                            // app lock; the renderer locks on this when one is
+                            // set (`useAutoLock`), so a close still locks.
+                            let _ = w.emit("window://close-hidden", ());
+                            // Hiding in the same breath left the renderer no
+                            // frame to paint the lock screen in, so a Dock
+                            // reopen could flash the unlocked chat first. Give
+                            // it a moment, then hide.
+                            let fullscreen = w.is_fullscreen().unwrap_or(false);
+                            let w = w.clone();
+                            tauri::async_runtime::spawn(async move {
+                                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                                if fullscreen {
+                                    // Hiding a full-screen window leaves its
+                                    // Space behind, empty and black. Hiding
+                                    // the app (⌘H) steps out of it properly.
+                                    let _ = w.app_handle().hide();
+                                } else {
+                                    let _ = w.hide();
+                                }
+                            });
+                        }
+                    });
+                }
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -283,6 +373,7 @@ pub fn run() {
             commands::update_session_params,
             commands::update_session_label,
             commands::set_session_folder,
+            commands::set_session_space,
             commands::pick_session_workspace,
             commands::clear_session_workspace,
             commands::open_session_workspace,
@@ -318,6 +409,7 @@ pub fn run() {
             commands::ollama_probe,
             commands::ollama_start,
             commands::openai_list_models,
+            commands::openai_list_models_with_key,
             commands::chat_stream,
             commands::chat_cancel,
             commands::chat_cancel_all,
@@ -356,6 +448,31 @@ pub fn run() {
             commands::list_snippet_fill_values,
             commands::upsert_snippet_fill_values,
             commands::fetch_url,
+            commands::library_list,
+            commands::library_get_items,
+            commands::library_create_item,
+            commands::library_rename_item,
+            commands::library_update_text,
+            commands::library_add_link,
+            commands::library_refresh_link,
+            commands::library_delete_items,
+            commands::library_usage,
+            commands::library_create_dataset,
+            commands::library_update_dataset,
+            commands::library_set_dataset_items,
+            commands::library_delete_dataset,
+            commands::library_list_sources,
+            commands::library_add_sources,
+            commands::library_remove_source,
+            commands::library_set_source_enabled,
+            commands::set_space_file_enabled,
+            commands::set_space_retrieval_mode,
+            commands::set_session_retrieval_mode,
+            commands::set_space_image_scaling,
+            commands::set_session_image_scaling,
+            commands::rag_search,
+            commands::rag_status,
+            commands::rag_reindex,
             commands::mcp_list,
             commands::mcp_save,
             commands::mcp_delete,
@@ -363,7 +480,7 @@ pub fn run() {
             commands::mcp_tools,
             commands::tool_approval_respond,
             commands::storage_stats,
-            commands::export_data_json,
+            commands::export_data_to_file,
             commands::import_data_with_dialog,
             commands::save_text_to_file,
             commands::save_binary_to_file,
@@ -376,13 +493,44 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building Loach")
-        .run(|_app, event| {
-            if let tauri::RunEvent::Exit = event {
-                // Pooled stdio MCP servers are our child processes. Kill
-                // them now rather than rely on each one noticing its stdin
-                // closing once we're gone.
+        .run(|_app, event| match event {
+            tauri::RunEvent::Exit => {
+                // Pooled stdio MCP servers are our child processes. Dropping
+                // the sessions closes their stdin; `kill_all_now` then gives
+                // them a shared second to exit on their own and kills
+                // whatever is left, rather than relying on each one noticing
+                // once we're gone.
                 crate::mcp::drop_all_sessions();
                 crate::mcp::stdio::kill_all_now();
             }
+            // A Dock click while the window is hidden to the tray. macOS
+            // brings back minimized windows itself, but not hidden ones, so
+            // without this the click did nothing.
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Reopen {
+                has_visible_windows: false,
+                ..
+            } => {
+                if let Some(w) = _app.get_webview_window("main") {
+                    let _ = w.show();
+                    let _ = w.set_focus();
+                }
+            }
+            _ => {}
         });
+}
+
+#[cfg(test)]
+mod tests {
+    /// macOS draws the tray icon as a template, from the alpha channel alone
+    /// and 18 pt tall, so the file must stay black on transparent and 36 px
+    /// (2x) tall. Off macOS this is also the only place the `include_image!`
+    /// path is compiled.
+    #[test]
+    fn tray_template_is_a_retina_menu_bar_template() {
+        let icon = tauri::include_image!("icons/tray-template.png");
+        assert_eq!(icon.height(), 36);
+        assert!(icon.rgba().chunks(4).all(|px| px[..3] == [0, 0, 0]));
+        assert!(icon.rgba().chunks(4).any(|px| px[3] == 255));
+    }
 }

@@ -1,4 +1,5 @@
-import type { Attachment } from "@/types";
+import type { Attachment, ImageScaling } from "@/types";
+import { scaledSize } from "@/lib/imageScaling";
 import { saveBinaryToFile, saveTextToFile } from "@/lib/tauri";
 
 const MAX_FILE_BYTES = 20 * 1024 * 1024; // 20 MB
@@ -16,6 +17,12 @@ export const SPACE_BYTES_CAP = 200 * 1024 * 1024; // 200 MB total per space
  * so the model knows the slice is partial.
  */
 const MAX_EXTRACTED_CHARS = 200_000;
+
+/** Stand-ins for a document with no text layer — a note to the model on an
+ *  attachment, but nothing worth storing as a Library item. */
+export const NO_PDF_TEXT =
+  "[PDF contained no extractable text — it may be a scanned image. Try attaching it as an image instead for a vision-capable model.]";
+export const NO_DOCX_TEXT = "[DOCX contained no extractable text.]";
 
 /**
  * Combined inline-content ceiling for a single outgoing user message.
@@ -74,6 +81,29 @@ export class FileTooLargeError extends Error {
   }
 }
 
+/** `s` cut to at most `max` UTF-16 units, never between the two halves of an
+ *  emoji (a surrogate pair): a lone surrogate fails the IPC's JSON decode,
+ *  and with it the whole request — every send, for a source cut that way. */
+export function cutText(s: string, max: number): string {
+  const cut = s.slice(0, max);
+  return /[\uD800-\uDBFF]$/.test(cut) ? cut.slice(0, -1) : cut;
+}
+
+/** A title or URL made safe for one prompt line: whitespace runs (newlines
+ *  included) collapse to a space and backticks go, so a page title can't
+ *  close its label or start lines of its own outside the fence. */
+export function promptLabel(s: string, max = 160): string {
+  const flat = s.replace(/\s+/g, " ").replace(/`/g, "'").trim();
+  return flat.length > max ? `${cutText(flat, max).trimEnd()}…` : flat;
+}
+
+/** A code fence long enough not to be closed by anything inside `text`. */
+export function fenceFor(text: string): string {
+  let longest = 0;
+  for (const m of text.matchAll(/`{3,}/g)) longest = Math.max(longest, m[0].length);
+  return "`".repeat(Math.max(3, longest + 1));
+}
+
 function extOf(name: string): string {
   const i = name.lastIndexOf(".");
   return i >= 0 ? name.slice(i + 1).toLowerCase() : "";
@@ -108,6 +138,40 @@ function blobToBase64(blob: Blob): Promise<string> {
     };
     reader.readAsDataURL(blob);
   });
+}
+
+/**
+ * `base64` (an image of type `mime`) scaled down as `scaling` says (see
+ * `src/lib/imageScaling.ts`), as base64 — JPEG stays JPEG, anything else
+ * becomes PNG so transparency survives. An image scaling is off for, one
+ * that already fits, or one that can't be decoded here comes back
+ * unchanged: sending the original beats sending nothing.
+ */
+export async function fitImageForModel(
+  base64: string,
+  mime: string,
+  scaling: ImageScaling,
+): Promise<string> {
+  if (!scaling.enabled) return base64;
+  try {
+    const img = new Image();
+    img.src = `data:${safeImageMime(mime)};base64,${base64}`;
+    await img.decode();
+    const { width, height } = scaledSize(img.naturalWidth, img.naturalHeight, scaling);
+    if (width === img.naturalWidth && height === img.naturalHeight) return base64;
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return base64;
+    ctx.imageSmoothingQuality = "high";
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    const type = safeImageMime(mime) === "image/jpeg" ? "image/jpeg" : "image/png";
+    const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, type, 0.9));
+    return blob ? await blobToBase64(blob) : base64;
+  } catch {
+    return base64;
+  }
 }
 
 /** Lazy-loaded to keep the initial bundle small.
@@ -151,43 +215,59 @@ async function extractPdfText(buf: ArrayBuffer): Promise<ExtractionResult> {
   const pdfjs = await getPdfjs();
   // `data` is cloned internally; pass a fresh Uint8Array to avoid
   // "ArrayBuffer detached" when the same buffer is reused.
-  const doc = await pdfjs.getDocument({ data: new Uint8Array(buf) }).promise;
-  const totalPages = doc.numPages;
+  const loadingTask = pdfjs.getDocument({ data: new Uint8Array(buf) });
   const pages: string[] = [];
-  let charsAccum = 0;
+  let totalPages = 0;
   let pagesExtracted = 0;
-  // Stop extracting once the running char count crosses the cap. We still
-  // pay the cost of decoding the page that pushes us over (so the loop
-  // can't infinitely-loop on a degenerate page), but we don't keep going
-  // past it.
-  for (let i = 1; i <= totalPages; i++) {
-    if (charsAccum >= MAX_EXTRACTED_CHARS) break;
-    const page = await doc.getPage(i);
-    try {
-      const textContent = await page.getTextContent();
-      // Each item either exposes a `str` (TextItem) or is a marker (TextMarkedContent).
-      const pageText = textContent.items
-        .map((it) => ("str" in it ? it.str : ""))
-        .join(" ")
-        .replace(/\s+\n/g, "\n")
-        .replace(/[ \t]{2,}/g, " ")
-        .trim();
-      if (pageText) {
-        pages.push(`# Page ${i}\n${pageText}`);
-        charsAccum += pageText.length + 16; // +overhead for the "# Page N\n" header
-      }
+  // Destroyed however this ends: a password-protected file rejects the
+  // `promise` below, and the worker and document it had set up stayed
+  // alive for good.
+  try {
+    const doc = await loadingTask.promise;
+    totalPages = doc.numPages;
+    let charsAccum = 0;
+    // Stop extracting once the running char count crosses the cap. We still
+    // pay the cost of decoding the page that pushes us over (so the loop
+    // can't infinitely-loop on a degenerate page), but we don't keep going
+    // past it.
+    for (let i = 1; i <= totalPages; i++) {
+      if (charsAccum >= MAX_EXTRACTED_CHARS) break;
+      // A page that can't be read is skipped, not the whole document.
       pagesExtracted = i;
-    } finally {
-      // Release the per-page render cache before moving on. Without this
-      // `doc.cleanup()` at the end is the only opportunity to free per-
-      // page state, so a 1 000-page PDF can spike memory linearly until
-      // the loop finishes. `page.cleanup()` doesn't invalidate the
-      // already-extracted text since we copied it into `pageText` above.
-      page.cleanup();
+      let page;
+      try {
+        page = await doc.getPage(i);
+      } catch {
+        continue;
+      }
+      try {
+        const textContent = await page.getTextContent();
+        // Each item either exposes a `str` (TextItem) or is a marker (TextMarkedContent).
+        const pageText = textContent.items
+          .map((it) => ("str" in it ? it.str : ""))
+          .join(" ")
+          .replace(/\s+\n/g, "\n")
+          .replace(/[ \t]{2,}/g, " ")
+          .trim();
+        if (pageText) {
+          pages.push(`# Page ${i}\n${pageText}`);
+          charsAccum += pageText.length + 16; // +overhead for the "# Page N\n" header
+        }
+      } catch {
+        // Skipped, as above.
+      } finally {
+        // Release the per-page render cache before moving on. Without this
+        // `doc.cleanup()` at the end is the only opportunity to free per-
+        // page state, so a 1 000-page PDF can spike memory linearly until
+        // the loop finishes. `page.cleanup()` doesn't invalidate the
+        // already-extracted text since we copied it into `pageText` above.
+        page.cleanup();
+      }
     }
+    await doc.cleanup();
+  } finally {
+    await loadingTask.destroy();
   }
-  await doc.cleanup();
-  await doc.loadingTask.destroy();
 
   let text = pages.join("\n\n");
   let truncated = pagesExtracted < totalPages;
@@ -218,6 +298,46 @@ async function extractDocxText(buf: ArrayBuffer): Promise<ExtractionResult> {
     raw.slice(0, MAX_EXTRACTED_CHARS) +
     `\n\n[…document truncated at ${MAX_EXTRACTED_CHARS.toLocaleString()} chars of ${raw.length.toLocaleString()} total. Ask the user for specific later sections if you need them.]`;
   return { text, truncated: true };
+}
+
+/** UI languages whose legacy ("ANSI") Windows text files are Windows-1250,
+ *  the Central European code page, rather than Windows-1252. */
+const CENTRAL_EUROPEAN_LANGS = new Set(["pl", "cs", "sk", "hu", "hr", "sl", "ro"]);
+
+/**
+ * A text file's bytes as a string. `File.text()` reads everything as UTF-8,
+ * so a UTF-16 file (Notepad's "Unicode", Windows PowerShell's `>`) arrived
+ * as NUL-ridden noise, and a legacy ANSI one lost every accented letter to
+ * U+FFFD. Tried in order: a byte-order mark; UTF-16 without one, told by the
+ * NUL byte every ASCII character carries; strict UTF-8; else the ANSI code
+ * page the UI language (`locale`, e.g. `navigator.language`) suggests.
+ */
+export function decodeTextBytes(bytes: Uint8Array, locale: string): string {
+  const [b0, b1, b2] = bytes;
+  if (b0 === 0xef && b1 === 0xbb && b2 === 0xbf) return new TextDecoder("utf-8").decode(bytes);
+  if (b0 === 0xff && b1 === 0xfe) return new TextDecoder("utf-16le").decode(bytes);
+  if (b0 === 0xfe && b1 === 0xff) return new TextDecoder("utf-16be").decode(bytes);
+
+  const pairs = Math.floor(Math.min(bytes.length, 4096) / 2);
+  let evenNuls = 0;
+  let oddNuls = 0;
+  for (let i = 0; i < pairs * 2; i += 2) {
+    if (bytes[i] === 0) evenNuls++;
+    if (bytes[i + 1] === 0) oddNuls++;
+  }
+  if (pairs > 0 && oddNuls > pairs * 0.3 && evenNuls < pairs * 0.05) {
+    return new TextDecoder("utf-16le").decode(bytes);
+  }
+  if (pairs > 0 && evenNuls > pairs * 0.3 && oddNuls < pairs * 0.05) {
+    return new TextDecoder("utf-16be").decode(bytes);
+  }
+
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    const lang = locale.toLowerCase().split(/[-_]/)[0];
+    return new TextDecoder(CENTRAL_EUROPEAN_LANGS.has(lang) ? "windows-1250" : "windows-1252").decode(bytes);
+  }
 }
 
 export async function fileToAttachment(file: File): Promise<Attachment> {
@@ -252,9 +372,7 @@ export async function fileToAttachment(file: File): Promise<Attachment> {
       kind: "text",
       name: file.name,
       mime: PDF_MIME,
-      data:
-        text ||
-        "[PDF contained no extractable text — it may be a scanned image. Try attaching it as an image instead for a vision-capable model.]",
+      data: text || NO_PDF_TEXT,
       bytes,
       truncated: truncated || undefined,
     };
@@ -273,7 +391,7 @@ export async function fileToAttachment(file: File): Promise<Attachment> {
       kind: "text",
       name: file.name,
       mime: DOCX_MIME,
-      data: text || "[DOCX contained no extractable text.]",
+      data: text || NO_DOCX_TEXT,
       bytes,
       truncated: truncated || undefined,
     };
@@ -281,7 +399,7 @@ export async function fileToAttachment(file: File): Promise<Attachment> {
 
   // Text / code files — read as plain text so they can be inlined into the prompt
   if (TEXT_EXTENSIONS.has(ext) || TEXT_EXTENSIONS.has(file.name.toLowerCase()) || mime.startsWith("text/")) {
-    let text = await file.text();
+    let text = decodeTextBytes(new Uint8Array(await file.arrayBuffer()), navigator.language);
     let truncated = false;
     if (text.length > MAX_EXTRACTED_CHARS) {
       text =
@@ -332,14 +450,20 @@ export function inlineTextAttachments(
   let out = content;
   const skippedNames: string[] = [];
   for (const a of texts) {
+    // The name made safe for its line and the fence longer than any run of
+    // backticks in the body: a file holding ``` (any Markdown with code in
+    // it) closed a fixed fence early, and the rest of it read as the user's
+    // own words.
+    const name = promptLabel(a.name);
     const label =
       a.mime === "application/pdf"
-        ? `Attached PDF: \`${a.name}\` (text extracted)`
+        ? `Attached PDF: \`${name}\` (text extracted)`
         : a.mime.includes("wordprocessingml")
-          ? `Attached Word document: \`${a.name}\` (text extracted)`
-          : `Attached file: \`${a.name}\``;
-    const header = `\n\n---\n${label}\n\`\`\`\n`;
-    const footer = "\n```";
+          ? `Attached Word document: \`${name}\` (text extracted)`
+          : `Attached file: \`${name}\``;
+    const fence = fenceFor(a.data);
+    const header = `\n\n---\n${label}\n${fence}\n`;
+    const footer = `\n${fence}`;
     const wrapCost = header.length + footer.length;
     const remaining = MAX_INLINED_CHARS_PER_MESSAGE - out.length - wrapCost;
 
@@ -353,7 +477,8 @@ export function inlineTextAttachments(
     let body = a.data;
     let clippedHere = false;
     if (body.length > remaining) {
-      body = body.slice(0, remaining);
+      // `cutText`: half an emoji at the cut failed the whole send's IPC.
+      body = cutText(body, remaining);
       clippedHere = true;
     }
     out += header + body;
@@ -376,8 +501,14 @@ export function inlineTextAttachments(
   return out;
 }
 
-export function imagesFromAttachments(attachments: Attachment[]): string[] {
-  return attachments.filter((a) => a.kind === "image").map((a) => a.data);
+/** The images among `attachments`, as base64 scaled for a model. */
+export function imagesFromAttachments(
+  attachments: Attachment[],
+  scaling: ImageScaling,
+): Promise<string[]> {
+  return Promise.all(
+    attachments.filter((a) => a.kind === "image").map((a) => fitImageForModel(a.data, a.mime, scaling)),
+  );
 }
 
 /**

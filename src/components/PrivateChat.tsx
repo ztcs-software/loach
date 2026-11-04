@@ -30,6 +30,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Slider } from "@/components/ui/slider";
+import { ErrorBoundary } from "./ErrorBoundary";
 import { FileChip } from "./FileChip";
 import { ChipDivider, PersonaChip, ToneChip } from "./ComposerChip";
 import { Markdown, StreamingMarkdown } from "./Markdown";
@@ -114,13 +115,18 @@ export function PrivateChat() {
     >
       <div className="dark flex h-[90vh] w-[90vw] max-w-[1280px] flex-col overflow-hidden rounded-2xl border border-white/10 bg-zinc-900 text-zinc-100 shadow-2xl">
         <PrivateChatHeader />
-        <div className="flex min-h-0 flex-1">
-          <div className="flex min-w-0 flex-1 flex-col">
-            <PrivateChatBody />
-            <PrivateChatComposer />
+        {/* Its own boundary: a render crash in a reply or the composer would
+            otherwise reach the root and take the whole app down with it. The
+            header stays outside it, so the X still closes and wipes. */}
+        <ErrorBoundary name="Private Chat">
+          <div className="flex min-h-0 flex-1">
+            <div className="flex min-w-0 flex-1 flex-col">
+              <PrivateChatBody />
+              <PrivateChatComposer />
+            </div>
+            {paramsOpen && <PrivateParamsPanel />}
           </div>
-          {paramsOpen && <PrivateParamsPanel />}
-        </div>
+        </ErrorBoundary>
       </div>
     </div>
   );
@@ -175,6 +181,41 @@ function PrivateChatHeader() {
 // Model picker — Ollama only
 // ---------------------------------------------------------------------------
 
+/** An Ollama cloud model (`gpt-oss:120b-cloud`, `glm-4.6:cloud`): listed
+ *  beside the installed ones, but Ollama runs it on ollama.com. */
+function isCloudModel(id: string): boolean {
+  return /:(?:.+-)?cloud$/i.test(id);
+}
+
+/** An embedding-only model (EmbeddingGemma, nomic-embed-text, …), which
+ *  can't chat: its `/api/show` capabilities lack "completion" — or, before
+ *  they're known (or when they came back empty), its name says "embed". */
+function isEmbeddingModel(id: string, capabilities: string[] | undefined): boolean {
+  if (capabilities && capabilities.length > 0) return !capabilities.includes("completion");
+  return /embed/i.test(id);
+}
+
+/** Does this base URL name this machine? Mirrors the backend's
+ *  `ollama_launch::is_loopback_host`, so `0.0.0.0` counts as local. */
+function isLoopbackUrl(baseUrl: string): boolean {
+  let host: string;
+  try {
+    host = new URL(baseUrl).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  // `hostname` keeps the brackets on IPv6 literals and normalises them, so
+  // any spelling of ::1 arrives as `[::1]`.
+  return (
+    host === "localhost" ||
+    host === "ip6-localhost" ||
+    host === "0.0.0.0" ||
+    host === "[::1]" ||
+    host === "[::]" ||
+    /^127\.\d+\.\d+\.\d+$/.test(host)
+  );
+}
+
 function ModelPicker() {
   const model = usePrivateChatStore((s) => s.model);
   const setModel = usePrivateChatStore((s) => s.setModel);
@@ -194,22 +235,30 @@ function ModelPicker() {
         if (id !== reqId.current) return;
         setUp(probe);
         if (probe) {
-          const m = await ollamaListModels(ollamaBaseUrl).catch(() => []);
+          // Cloud tags are left out: Ollama forwards them to ollama.com, and
+          // nothing typed here should leave the Ollama server.
+          const m = (await ollamaListModels(ollamaBaseUrl).catch(() => [])).filter(
+            (x) => !isCloudModel(x.id),
+          );
           if (id !== reqId.current) return;
           setModels(m);
           // Auto-pick a default model if none chosen yet — the user shouldn't
           // have to open the dropdown just to send their first message. Prefer
           // their most-recent Ollama model from regular sessions, falling
-          // back to the first installed one.
+          // back to the first installed one that can chat: the list is newest
+          // first, so after pulling an embedding model for the Library that
+          // was the pick, and the first send failed.
           const current = usePrivateChatStore.getState().model;
           if (!current && m.length > 0) {
             const sessions = useChatStore.getState().sessions;
             const recent = sessions
               .filter((s) => s.provider === "ollama" && s.model)
               .sort((a, b) => b.updated_at - a.updated_at)[0]?.model;
+            const caps = useModelsStore.getState().modelCapabilities;
+            const chat = m.filter((x) => !isEmbeddingModel(x.id, caps[x.id]));
             const preferred =
-              recent && m.find((x) => x.id === recent) ? recent : m[0].id;
-            setModel(preferred);
+              recent && chat.find((x) => x.id === recent) ? recent : chat[0]?.id;
+            if (preferred) setModel(preferred);
           }
         } else {
           setModels([]);
@@ -352,6 +401,7 @@ function PrivateChatBody() {
   const messages = usePrivateChatStore((s) => s.messages);
   const isStreaming = usePrivateChatStore((s) => s.isStreaming);
   const streamingId = usePrivateChatStore((s) => s.streamingMessageId);
+  const ollamaBaseUrl = useSettingsStore((s) => s.ollama_base_url);
   const scrollerRef = useRef<HTMLDivElement>(null);
   const stickToBottom = useRef(true);
 
@@ -393,7 +443,11 @@ function PrivateChatBody() {
             <br />
             All messages are removed immediately when you close the chat.
             <br />
-            Only local Ollama models can be used here.
+            {/* Sends go to whatever Ollama server is configured, so "local"
+                is only true when that's this machine. */}
+            {isLoopbackUrl(ollamaBaseUrl)
+              ? "Only local Ollama models can be used here."
+              : `Only Ollama models can be used here, and messages go to the Ollama server at ${ollamaBaseUrl}.`}
           </p>
         </div>
       </div>
@@ -885,8 +939,9 @@ function SliderRow({
       stopIdx = i;
     }
   }
-  const displayValue = stops[stopIdx];
-  const displayText = format ? format(displayValue) : String(displayValue);
+  // The readout is the real value — a Modelfile's num_ctx 2048 sits below
+  // the first stop — while the thumb can only sit on the nearest stop.
+  const displayText = format ? format(value) : String(value);
 
   return (
     <div>
@@ -1141,7 +1196,9 @@ function PrivateChatComposer() {
               if (
                 e.key === "Enter" &&
                 !e.shiftKey &&
-                !e.nativeEvent.isComposing
+                !e.nativeEvent.isComposing &&
+                // WebKit's IME-confirming Enter arrives after compositionend.
+                e.nativeEvent.keyCode !== 229
               ) {
                 e.preventDefault();
                 void submit();
@@ -1210,3 +1267,5 @@ function PrivateChatComposer() {
     </div>
   );
 }
+
+export const __testing = { isCloudModel, isEmbeddingModel, isLoopbackUrl };

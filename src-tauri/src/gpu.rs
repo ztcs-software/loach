@@ -206,6 +206,12 @@ fn amdgpu_sysfs() -> Option<GpuInfo> {
         .filter_map(|e| {
             let total = e.path().join("device/mem_info_vram_total");
             let bytes: u64 = std::fs::read_to_string(&total).ok()?.trim().parse().ok()?;
+            // The Linux side of `is_unified_memory`: a Ryzen APU reports its
+            // 2–4 GB UMA carve-out here as VRAM, exactly as it does to DXGI.
+            let metrics = std::fs::read(e.path().join("device/gpu_metrics")).unwrap_or_default();
+            if is_apu_metrics(&metrics) {
+                return None;
+            }
             // No reliable model string here; the vendor name is honest and
             // enough for a "based on N GB VRAM" line.
             Some(GpuInfo {
@@ -214,6 +220,17 @@ fn amdgpu_sysfs() -> Option<GpuInfo> {
             })
         })
         .max_by_key(|g| g.vram_bytes)
+}
+
+/// Whether an amdgpu `gpu_metrics` blob comes from an APU. Its header is
+/// `structure_size: u16, format_revision: u8, content_revision: u8`, and the
+/// format revision names the layout: 1 is the discrete one, 2 and 3 the APU
+/// ones, which carry per-CPU-core fields. Anything else — no file (older
+/// ASICs, a driver without it), a short read, a revision this predates —
+/// counts as discrete, which is the behaviour that shipped before.
+#[cfg(any(target_os = "linux", test))]
+fn is_apu_metrics(metrics: &[u8]) -> bool {
+    matches!(metrics.get(2), Some(2 | 3))
 }
 
 /// macOS: unified memory. See the module docs — reporting VRAM separately here
@@ -226,6 +243,19 @@ fn detect_impl() -> Option<GpuInfo> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only the APU layouts read as integrated; everything unreadable stays
+    /// discrete.
+    #[test]
+    fn apu_metrics_are_told_apart_by_format_revision() {
+        // structure_size (LE), format_revision, content_revision, …
+        assert!(is_apu_metrics(&[0x60, 0x00, 2, 1, 0, 0]), "v2.x, an APU");
+        assert!(is_apu_metrics(&[0x00, 0x01, 3, 0]), "v3.x, an APU");
+        assert!(!is_apu_metrics(&[0x78, 0x00, 1, 3, 0, 0]), "v1.x, a discrete card");
+        assert!(!is_apu_metrics(&[]), "no gpu_metrics file");
+        assert!(!is_apu_metrics(&[0x60, 0x00]), "short read");
+        assert!(!is_apu_metrics(&[0x60, 0x00, 4, 0]), "a revision this predates");
+    }
 
     /// `detect()` is hardware-dependent, so this asserts the invariants rather
     /// than a value: on a machine with no readable GPU it passes trivially, and

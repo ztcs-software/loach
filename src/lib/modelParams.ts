@@ -23,10 +23,18 @@ const KEY_MAP: Record<string, keyof GenerationParams> = {
   seed: "seed",
 };
 
+/** Fields the backend reads as `Option<u32>` (`GenerationParams` in
+ *  `src-tauri/src/providers/mod.rs`). A Modelfile may hold a sentinel such as
+ *  `num_predict -1` ("no limit"), which can't deserialize into one — and then
+ *  the whole `chat_stream` request failed, so every send did. The sentinels
+ *  all mean "use the default", which leaving the field out already does. */
+const U32_FIELDS = new Set<keyof GenerationParams>(["top_k", "max_tokens", "num_ctx", "num_gpu"]);
+
 /**
  * Parse the multiline `parameters` block from `ollama_show_model` into a
  * sparse `GenerationParams` patch. Returns `{}` for empty / null inputs so
- * callers can spread it unconditionally.
+ * callers can spread it unconditionally. Values the backend's types can't
+ * hold are left out.
  *
  * Format Ollama emits (one per line):
  *
@@ -58,10 +66,12 @@ export function parseModelParameters(
 
     if (target === "seed") {
       const n = parseInt(value, 10);
-      if (Number.isFinite(n)) out.seed = n;
+      // `i64` on the backend; past 2^53 the number no longer reaches it intact.
+      if (Number.isSafeInteger(n)) out.seed = n;
       continue;
     }
     const n = parseFloat(value);
+    if (U32_FIELDS.has(target) && !(Number.isInteger(n) && n >= 0 && n <= 0xffff_ffff)) continue;
     if (Number.isFinite(n)) {
       // The numeric fields all share `number` as their type, so the cast
       // here is the narrowest indirection that keeps TS happy without

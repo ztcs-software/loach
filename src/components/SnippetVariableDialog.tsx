@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { useConfirm } from "@/components/ConfirmDialog";
+import { Field } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import {
   Dialog,
@@ -10,6 +12,7 @@ import {
 } from "@/components/ui/dialog";
 import { useSnippetVarStore } from "@/stores/snippetVarStore";
 import { RESERVED_VAR_KEYS } from "@/lib/snippetVars";
+import { dialogEnter } from "@/lib/shortcuts";
 
 /**
  * Create / edit modal for a user-defined snippet variable. Mirrors
@@ -19,6 +22,7 @@ import { RESERVED_VAR_KEYS } from "@/lib/snippetVars";
  * the inline check keeps the save button honest before the round-trip.
  */
 export function SnippetVariableDialog() {
+  const { confirm } = useConfirm();
   const target = useSnippetVarStore((s) => s.dialogTarget);
   const close = useSnippetVarStore((s) => s.closeDialog);
   const create = useSnippetVarStore((s) => s.create);
@@ -71,6 +75,33 @@ export function SnippetVariableDialog() {
     return null;
   })();
 
+  const canSave = !saving && !!key.trim() && !inlineKeyError;
+
+  // What the fields held when the dialog opened — closing with anything else
+  // asks first.
+  const baseline = editing
+    ? { key: editing.key, value: editing.value, description: editing.description ?? "" }
+    : { key: "", value: "", description: "" };
+  const dirty = key !== baseline.key || value !== baseline.value || description !== baseline.description;
+
+  // Escape, the backdrop, ✕ and Cancel all come through here, so none of them
+  // can throw a typed value away without asking.
+  const requestClose = async () => {
+    if (
+      dirty &&
+      !(await confirm({
+        title: "Discard unsaved changes?",
+        body: isEditMode ? "Your edits to this variable haven't been saved." : "This variable hasn't been saved yet.",
+        confirmLabel: "Discard",
+        cancelLabel: "Keep editing",
+        destructive: true,
+      }))
+    ) {
+      return;
+    }
+    close();
+  };
+
   const handleSave = async () => {
     const k = key.trim().toUpperCase();
     const v = value;
@@ -100,8 +131,8 @@ export function SnippetVariableDialog() {
   };
 
   return (
-    <Dialog open={!!target} onOpenChange={(o) => !o && close()}>
-      <DialogContent className="max-w-md">
+    <Dialog open={!!target} onOpenChange={(o) => !o && void requestClose()}>
+      <DialogContent className="max-w-lg">
         <DialogHeader>
           <DialogTitle>
             {isEditMode ? "Edit variable" : "New variable"}
@@ -113,13 +144,11 @@ export function SnippetVariableDialog() {
         </DialogHeader>
 
         <div className="mt-2 space-y-3">
-          <label className="block space-y-1.5">
-            <span className="text-[11px] font-medium text-foreground/65">
-              Key
-            </span>
+          <Field label="Key">
             <Input
               value={key}
               onChange={(e) => setKey(e.target.value.toUpperCase())}
+              onKeyDown={(e) => dialogEnter(e, () => void handleSave(), { ready: canSave })}
               placeholder="COMPANY"
               maxLength={64}
               autoFocus
@@ -130,44 +159,39 @@ export function SnippetVariableDialog() {
                 {inlineKeyError}
               </span>
             )}
-          </label>
+          </Field>
 
-          <label className="block space-y-1.5">
-            <span className="text-[11px] font-medium text-foreground/65">
-              Value
-            </span>
+          <Field label="Value">
             <Input
               value={value}
               onChange={(e) => setValue(e.target.value)}
+              onKeyDown={(e) => dialogEnter(e, () => void handleSave(), { ready: canSave })}
               placeholder="Acme Corp"
             />
-          </label>
+          </Field>
 
-          <label className="block space-y-1.5">
-            <span className="text-[11px] font-medium text-foreground/65">
-              Description{" "}
-              <span className="font-normal text-foreground/45">(optional)</span>
-            </span>
+          <Field label="Description" optional>
             <Input
               value={description}
               onChange={(e) => setDescription(e.target.value)}
+              onKeyDown={(e) => dialogEnter(e, () => void handleSave(), { ready: canSave })}
               placeholder="What this variable is for"
             />
-          </label>
+          </Field>
 
           {error && <p className="text-xs text-destructive">{error}</p>}
         </div>
 
         <div className="mt-3 flex items-center justify-end gap-2">
-          <Button variant="outline" onClick={close} className="rounded-lg">
+          <Button variant="outline" onClick={() => void requestClose()} className="rounded-lg">
             Cancel
           </Button>
           <Button
             onClick={handleSave}
-            disabled={saving || !key.trim() || !!inlineKeyError}
+            disabled={!canSave}
             className="rounded-lg"
           >
-            {saving ? (isEditMode ? "Saving…" : "Creating…") : "Save"}
+            {isEditMode ? (saving ? "Saving…" : "Save") : saving ? "Creating…" : "Create"}
           </Button>
         </div>
       </DialogContent>

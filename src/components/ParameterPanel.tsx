@@ -7,11 +7,15 @@ import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { ImageScalingControl } from "@/components/ImageScalingControl";
 import { useChatStore } from "@/stores/chatStore";
 import { useModelsStore } from "@/stores/modelsStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useSpaceStore } from "@/stores/spaceStore";
+import { useToastStore } from "@/stores/toastStore";
 import { useUIStore } from "@/stores/uiStore";
+import { parseImageScaling, resolveImageScaling } from "@/lib/imageScaling";
+import { setSessionImageScaling } from "@/lib/tauri";
 import {
   DEFAULT_PERSONA_ID,
   PERSONAS,
@@ -20,7 +24,7 @@ import {
 } from "@/lib/personas";
 import { DEFAULT_TONE_ID, TONES, type Tone } from "@/lib/tones";
 import { cn } from "@/lib/utils";
-import { DEFAULT_PARAMS, type GenerationParams, type Session } from "@/types";
+import { DEFAULT_PARAMS, type GenerationParams, type ImageScaling, type Session } from "@/types";
 
 function parseOverrides(json: string | null): Partial<GenerationParams> {
   if (!json) return {};
@@ -29,6 +33,24 @@ function parseOverrides(json: string | null): Partial<GenerationParams> {
   } catch {
     return {};
   }
+}
+
+/** Save a chat's own image scaling, or `null` to inherit again. */
+async function saveImageScaling(sessionId: string, scaling: ImageScaling | null) {
+  const json = scaling ? JSON.stringify(scaling) : null;
+  try {
+    await setSessionImageScaling(sessionId, json);
+  } catch (e) {
+    useToastStore.getState().push({
+      kind: "error",
+      title: "Couldn't change image scaling",
+      body: e instanceof Error ? e.message : String(e),
+    });
+    return;
+  }
+  useChatStore.setState((s) => ({
+    sessions: s.sessions.map((x) => (x.id === sessionId ? { ...x, image_scaling_json: json } : x)),
+  }));
 }
 
 export function ParameterPanel({ session }: { session: Session | undefined }) {
@@ -105,6 +127,13 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
     () => parseOverrides(spaceParamsJson),
     [spaceParamsJson],
   );
+  // What the chat's image scaling falls back to: its Space's, else the app's.
+  const spaceImageScaling = useSpaceStore((s) =>
+    session?.space_id
+      ? s.spaces.find((x) => x.id === session.space_id)?.image_scaling_json ?? null
+      : null,
+  );
+  const appImageScaling = useSettingsStore((s) => s.image_scaling);
 
   // The merge order mirrors `chatStore.readSessionParams` exactly so the
   // sliders (and the Thinking toggle) show the same values the request
@@ -131,6 +160,10 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
       session?.provider,
     ],
   );
+
+  // The GPU layer count this chat falls back to without one of its own: the
+  // Space's, else the Modelfile's, else none (Ollama auto-detects).
+  const inheritedNumGpu = spaceLayer.num_gpu ?? modelDefaults?.num_gpu;
 
   // Only the keys the user has actually touched in this panel session are held
   // locally; every other value is read live off `initial`. Holding a full
@@ -370,7 +403,7 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
               <Section title="Sampling">
                 <SliderRow
                   label="Temperature"
-                  value={Math.min(params.temperature ?? 0.7, 1)}
+                  value={params.temperature ?? 0.7}
                   min={0}
                   max={1}
                   step={0.05}
@@ -422,10 +455,9 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
                 format={formatK}
                 hint={
                   isOpenAI
-                    ? "How much conversation history the model can see at once. Ignored by OpenAI providers — the server decides."
+                    ? "How much conversation history the model can see at once. Not sent to OpenAI providers — the server decides — but Loach sizes Library sources and the context bar by it, so set it to your model's window."
                     : "How much conversation history the model can see at once. Larger windows remember more but use more VRAM."
                 }
-                dimmed={isOpenAI}
               />
               {isAdvanced && (
                 <SliderRow
@@ -478,8 +510,14 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
               {isAdvanced && (
                 <GpuLayersRow
                   value={params.num_gpu ?? null}
+                  inherited={inheritedNumGpu ?? null}
+                  // Clearing lands on what the chat inherits. A cleared key is
+                  // just dropped from the saved override, so the Space's or
+                  // Modelfile's count was still sent while this read "auto" —
+                  // and the request can't carry "auto" over it (`num_gpu` is
+                  // unsigned on the Rust side, so no -1).
                   onChange={(num_gpu) =>
-                    update({ num_gpu: num_gpu ?? undefined })
+                    update({ num_gpu: num_gpu ?? inheritedNumGpu })
                   }
                   isOpenAI={isOpenAI}
                 />
@@ -493,9 +531,9 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
                     ? true
                     : (params.low_vram ?? false)
                 }
-                onChange={(next) =>
-                  update({ low_vram: next ? true : undefined })
-                }
+                // An explicit false: dropping the key let a Space's
+                // `low_vram: true` through while the switch read off.
+                onChange={(next) => update({ low_vram: next })}
                 isOpenAI={isOpenAI}
                 pinnedByGlobal={lowVramGlobal && !isOpenAI}
               />
@@ -530,6 +568,15 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
             </div>
 
             <div className="h-px bg-foreground/[0.08]" />
+
+            <Section title="Images">
+              <ImageScalingControl
+                value={parseImageScaling(session.image_scaling_json)}
+                inherited={resolveImageScaling(spaceImageScaling, appImageScaling)}
+                inheritFrom={session.space_id ? "the Space's setting" : "the app's setting"}
+                onChange={(next) => void saveImageScaling(session.id, next)}
+              />
+            </Section>
 
             <div>
               <Label className="text-xs font-semibold uppercase tracking-[0.12em] text-foreground/70">
@@ -785,7 +832,10 @@ function SliderRow({
   // Live slider position: the in-flight drag value while dragging, else derived
   // from props (`stopIdx` for stops, the raw `value` for continuous).
   const pos = drag ?? (usingStops ? stopIdx : value);
-  const displayValue = usingStops ? stops![pos] : pos;
+  // The readout is the real value, not where the thumb can land: a
+  // Modelfile's num_ctx 2048 sits below the first stop, and a temperature of
+  // 1.2 past the slider's end. The thumb clamps; the number doesn't.
+  const displayValue = usingStops ? (drag === null ? value : stops![pos]) : pos;
   const displayText = format
     ? format(displayValue)
     : displayValue.toFixed(precision);
@@ -818,7 +868,7 @@ function SliderRow({
         <Slider
           thumbLabel={label}
           thumbValueText={displayText}
-          value={[pos]}
+          value={[Math.min(max, Math.max(min, pos))]}
           min={min}
           max={max}
           step={step}
@@ -843,7 +893,8 @@ function SliderRow({
  *
  *   - **Auto** (`value === null`) — the field is blank, Ollama auto-detects
  *     based on available VRAM. The default for every chat unless either
- *     the user overrides it or the model's Modelfile lists `num_gpu`.
+ *     the user overrides it or the model's Modelfile (or the Space) lists
+ *     `num_gpu` — clearing the field then lands on that `inherited` count.
  *   - **CPU only** (`value === 0`) — useful for testing CPU paths or when
  *     even one layer on GPU OOMs the system.
  *   - **Custom** (`value > 0`) — user explicitly picks how many layers
@@ -855,10 +906,12 @@ function SliderRow({
  */
 function GpuLayersRow({
   value,
+  inherited,
   onChange,
   isOpenAI,
 }: {
   value: number | null;
+  inherited: number | null;
   onChange: (v: number | null) => void;
   isOpenAI: boolean;
 }) {
@@ -909,6 +962,8 @@ function GpuLayersRow({
           onChange={(e) => setDraft(e.target.value)}
           onBlur={() => commit(draft)}
           onKeyDown={(e) => {
+            // The Enter that confirms an IME candidate isn't a commit.
+            if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
             if (e.key === "Enter") {
               e.preventDefault();
               commit(draft);
@@ -918,7 +973,7 @@ function GpuLayersRow({
           disabled={isOpenAI}
           className="h-8 border-foreground/10 bg-foreground/[0.04] text-sm tabular-nums focus-visible:border-foreground/25"
         />
-        {value !== null && !isOpenAI && (
+        {value !== null && value !== inherited && !isOpenAI && (
           <Button
             type="button"
             variant="ghost"
@@ -928,7 +983,7 @@ function GpuLayersRow({
               setDraft("");
               onChange(null);
             }}
-            title="Clear (let Ollama auto-detect)"
+            title={inherited === null ? "Clear (let Ollama auto-detect)" : "Clear (use the model's default)"}
           >
             <X className="h-4 w-4" />
           </Button>
@@ -937,7 +992,9 @@ function GpuLayersRow({
       <p className="mt-1.5 text-[10.5px] leading-snug text-foreground/50">
         {isOpenAI
           ? "Ignored by OpenAI providers — server-side decision."
-          : "How many model layers to offload to the GPU. 0 = CPU only; leave blank for Ollama's auto-detect."}
+          : inherited === null
+            ? "How many model layers to offload to the GPU. 0 = CPU only; leave blank for Ollama's auto-detect."
+            : `How many model layers to offload to the GPU. 0 = CPU only; leave blank for the model's default (${inherited}).`}
       </p>
     </div>
   );
@@ -947,8 +1004,8 @@ function GpuLayersRow({
  * Low-VRAM toggle. Sends `low_vram: true` to Ollama, which trades
  * throughput for footprint (smaller batches, leaner KV cache). Off by
  * default — only flip when you're hitting OOMs and `num_gpu` alone
- * isn't enough. We persist `undefined` instead of `false` so a session
- * that hasn't touched the toggle reads as "no override".
+ * isn't enough. Turning it off persists `false`, not `undefined`, so it
+ * still wins over a Space that pins it on.
  *
  * `pinnedByGlobal` reflects the Settings → Features master switch. When
  * true, the per-chat toggle is forced on and disabled — flipping it
@@ -1015,7 +1072,12 @@ function SeedRow({
       return;
     }
     const n = Number(trimmed);
-    if (Number.isFinite(n) && Number.isInteger(n)) onChange(n);
+    // The request carries the seed as an i64, and a JS number is exact only
+    // to 2^53: past that every send failed. Anything else that isn't a whole
+    // number goes back to what's in effect rather than staying on screen
+    // while the seed is random.
+    if (Number.isSafeInteger(n)) onChange(n);
+    else setDraft(value === null ? "" : String(value));
   };
 
   return (
@@ -1039,6 +1101,8 @@ function SeedRow({
           onChange={(e) => setDraft(e.target.value)}
           onBlur={() => commit(draft)}
           onKeyDown={(e) => {
+            // The Enter that confirms an IME candidate isn't a commit.
+            if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
             if (e.key === "Enter") {
               e.preventDefault();
               commit(draft);

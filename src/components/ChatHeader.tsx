@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { deleteChatConfirm } from "@/lib/confirmations";
 import { logger } from "@/lib/logger";
 import {
   Archive,
   ArchiveRestore,
   Check,
   ChevronDown,
+  ChevronRight,
   CircleAlert,
   CircleCheck,
   ClipboardPaste,
@@ -43,8 +45,9 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { ChatLabelSubmenu } from "@/components/ChatLabelMenu";
+import { ChatSpaceSubmenu } from "@/components/ChatSpaceMenu";
 import { useConfirm } from "@/components/ConfirmDialog";
-import { useChatStore } from "@/stores/chatStore";
+import { isPreparingSend, useChatStore } from "@/stores/chatStore";
 import { useModelsStore } from "@/stores/modelsStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useToastStore } from "@/stores/toastStore";
@@ -112,6 +115,10 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
   const consumePendingOpenExport = useUIStore(
     (s) => s.consumePendingOpenExport,
   );
+  const pendingOpenImport = useUIStore((s) => s.pendingOpenImport);
+  const consumePendingOpenImport = useUIStore(
+    (s) => s.consumePendingOpenImport,
+  );
   useEffect(() => {
     if (!pendingOpenModelPicker) return;
     if (!session) return;
@@ -128,7 +135,16 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
   const [exportOpen, setExportOpen] = useState(false);
   const [exportMode, setExportMode] = useState<"full" | "compacted">("full");
   const [fullText, setFullText] = useState<string | null>(null);
-  const [compactedText, setCompactedText] = useState<string | null>(null);
+  // Keyed by chat: a compaction is a model round-trip that can outlive the
+  // dialog, and its result used to land in — and stay cached for — whichever
+  // chat's export was open by the time it finished.
+  const [compacted, setCompacted] = useState<{ sessionId: string; text: string } | null>(
+    null,
+  );
+  const compactedText =
+    compacted && compacted.sessionId === session?.id ? compacted.text : null;
+  const currentSessionId = useRef(session?.id);
+  currentSessionId.current = session?.id;
   const [exportError, setExportError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const exportText = exportMode === "full" ? fullText : compactedText;
@@ -208,6 +224,11 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
 
   const handleFork = async () => {
     if (!session) return;
+    // The fork copies what's on disk, and a reply's row stays empty until its
+    // stream finishes — so a fork taken mid-reply (or as a send starts one)
+    // got an empty answer. The menu item is disabled while streaming; this
+    // covers the send that's still being prepared, which isn't reactive.
+    if (isPreparingSend(session.id)) return;
     try {
       await forkChat(session.id);
     } catch (e) {
@@ -222,12 +243,7 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
 
   const handleDelete = async () => {
     if (!session) return;
-    const ok = await confirm({
-      title: "Delete this chat?",
-      body: `“${session.title || "Untitled"}” will be removed permanently — all messages and metrics will be gone.`,
-      confirmLabel: "Delete chat",
-      destructive: true,
-    });
+    const ok = await confirm(deleteChatConfirm(session.title));
     if (ok) void removeSession(session.id);
   };
 
@@ -236,7 +252,7 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
     setExportOpen(true);
     setExportMode("full");
     setFullText(null);
-    setCompactedText(null);
+    setCompacted(null);
     setExportError(null);
     setCopied(false);
     try {
@@ -270,10 +286,13 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
     // Already summarized once this dialog session — reuse the cached text
     // rather than spending another model round-trip.
     if (compactedText !== null || !session) return;
+    const sessionId = session.id;
     try {
-      const md = await exportCompactedContext(session.id);
-      setCompactedText(md);
+      const md = await exportCompactedContext(sessionId);
+      if (currentSessionId.current !== sessionId) return;
+      setCompacted({ sessionId, text: md });
     } catch (e) {
+      if (currentSessionId.current !== sessionId) return;
       setExportError(e instanceof Error ? e.message : String(e));
     }
   };
@@ -285,6 +304,15 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
     setImportError(null);
     setImportHidden(false);
   };
+
+  // `/import` counterpart of the `/export` one-shot above.
+  useEffect(() => {
+    if (!pendingOpenImport || !session) return;
+    consumePendingOpenImport();
+    openImport();
+    // openImport is recreated each render; deps kept minimal for this one-shot.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingOpenImport, session]);
 
   const doImport = async () => {
     if (!session) return;
@@ -406,13 +434,14 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
                 <button
                   type="button"
                   onClick={navigateToSpace}
-                  title={`Open space "${spaceName}"`}
+                  title={`Open Space "${spaceName}"`}
                   className="flex min-w-0 max-w-[180px] shrink items-center gap-1 rounded-md px-1.5 py-0.5 text-foreground/60 hover:bg-foreground/10 hover:text-foreground"
                 >
                   <Layers className="h-3.5 w-3.5 shrink-0" />
                   <span className="truncate">{spaceName}</span>
                 </button>
-                <span className="shrink-0 text-foreground/30">/</span>
+                {/* Same chevron as the Space and dataset pages' breadcrumbs. */}
+                <ChevronRight aria-hidden className="h-3 w-3 shrink-0 text-foreground/35" />
               </>
             )}
             <span className="flex min-w-0 items-center gap-1.5 font-medium text-foreground/85">
@@ -505,7 +534,10 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
                 {openaiKeySet ? "No models" : "Not connected"}
               </DropdownMenuItem>
             )}
-            {openaiModels.slice(0, 30).map((m) => (
+            {/* All of them: the menu scrolls, and typing a model's first
+                letters jumps to it. A cap at 30 left OpenRouter's and
+                OpenAI's later models with no way in. */}
+            {openaiModels.map((m) => (
               <DropdownMenuItem key={`openai:${m.id}`} onSelect={() => select("openai", m.id)}>
                 {m.label}
               </DropdownMenuItem>
@@ -582,11 +614,16 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
               }}
               iconClassName="mr-2 h-4 w-4"
             />
+            {session && <ChatSpaceSubmenu session={session} iconClassName="mr-2 h-4 w-4" />}
             <DropdownMenuItem onSelect={startRename}>
               <Pencil className="mr-2 h-4 w-4" />
               Rename
             </DropdownMenuItem>
-            <DropdownMenuItem onSelect={() => void handleFork()}>
+            <DropdownMenuItem
+              onSelect={() => void handleFork()}
+              disabled={streamingHere}
+              title={streamingHere ? "Wait for the reply to finish" : undefined}
+            >
               <GitFork className="mr-2 h-4 w-4" />
               Fork this chat
             </DropdownMenuItem>
@@ -657,6 +694,8 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
               value={renameDraft}
               onChange={(e) => setRenameDraft(e.target.value)}
               onKeyDown={(e) => {
+                // The Enter that confirms an IME candidate isn't the rename's.
+                if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
                 if (e.key === "Enter") {
                   e.preventDefault();
                   commitRename();

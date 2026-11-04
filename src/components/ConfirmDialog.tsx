@@ -1,5 +1,6 @@
-import { createContext, useCallback, useContext, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
+import { useSecurityStore } from "@/stores/securityStore";
 import {
   Dialog,
   DialogContent,
@@ -21,10 +22,11 @@ import { Button } from "@/components/ui/button";
  *     const ok = await confirm({ title: "Delete?", body: "…" });
  *     if (ok) ...
  *
- * Mount `<ConfirmDialogHost />` ONCE at the app root (inside the unlocked
- * branch — destructive confirms aren't meaningful while the lock screen
- * is up). Anywhere below it, `useConfirm()` returns the imperative
- * `confirm` / `prompt` API.
+ * Mount `<ConfirmDialogHost />` ONCE at the app root. It wraps the lock
+ * screen too, so it dismisses whatever it shows the moment the app locks
+ * and refuses new requests while locked — destructive confirms aren't
+ * meaningful behind the lock screen. Anywhere below it, `useConfirm()`
+ * returns the imperative `confirm` / `prompt` API.
  *
  * Visual layer reuses the existing `glass-panel` Dialog primitive so the
  * confirm modal blends with the rest of the app's chrome.
@@ -122,6 +124,10 @@ export function ConfirmDialogHost({ children }: { children: ReactNode }) {
     (req: ConfirmRequest) =>
       new Promise<boolean>((resolve) => {
         settlePending();
+        if (!useSecurityStore.getState().unlocked) {
+          resolve(false);
+          return;
+        }
         setActive({ kind: "confirm", ...req, resolve });
       }),
     [settlePending],
@@ -131,11 +137,32 @@ export function ConfirmDialogHost({ children }: { children: ReactNode }) {
     (req: PromptRequest) =>
       new Promise<string | null>((resolve) => {
         settlePending();
+        if (!useSecurityStore.getState().unlocked) {
+          resolve(null);
+          return;
+        }
         setPromptValue(req.defaultValue ?? "");
         setActive({ kind: "prompt", ...req, resolve });
       }),
     [settlePending],
   );
+
+  // Locking dismisses whatever is on screen. This host stays mounted over
+  // the lock screen, and a confirm left open there kept its focus trap: the
+  // PIN typed on the lock screen went to the dialog's auto-focused button,
+  // so the Enter meant to unlock confirmed a delete instead.
+  const unlocked = useSecurityStore((s) => s.unlocked);
+  useEffect(() => {
+    if (unlocked) return;
+    settlePending();
+    setActive(null);
+    setPromptValue("");
+  }, [unlocked, settlePending]);
+
+  // Stable across host renders: a fresh object here re-rendered every
+  // `useConfirm()` consumer — memo'd sidebar rows included — on each App
+  // render and each prompt open, close or keystroke.
+  const ctx = useMemo(() => ({ confirm, prompt }), [confirm, prompt]);
 
   const closeWith = (value: boolean | string | null) => {
     const current = activeRef.current;
@@ -150,7 +177,7 @@ export function ConfirmDialogHost({ children }: { children: ReactNode }) {
   };
 
   return (
-    <ConfirmContext.Provider value={{ confirm, prompt }}>
+    <ConfirmContext.Provider value={ctx}>
       {children}
       <Dialog
         open={active !== null}
@@ -177,6 +204,8 @@ export function ConfirmDialogHost({ children }: { children: ReactNode }) {
               placeholder={active.placeholder}
               onChange={(e) => setPromptValue(e.target.value)}
               onKeyDown={(e) => {
+                // The Enter that confirms an IME candidate isn't the prompt's.
+                if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
                 if (e.key === "Enter") {
                   e.preventDefault();
                   closeWith(promptValue);

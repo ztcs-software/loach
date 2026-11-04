@@ -50,11 +50,13 @@ const EMPTY_STATUS: LockStatus = {
 };
 
 /** How long `hydrate` waits for the status probe before failing open. The
- *  probe is a single keyring read — normally milliseconds — so this only
- *  exists for a WEDGED call that never settles (a rejected one already takes
- *  the catch below). `hydrated` gates the entire UI in App.tsx, so a hung
- *  probe without a timeout would strand the user on the probing screen
- *  forever. */
+ *  probe reads a marker file the backend keeps beside the database, so it
+ *  never waits on the keyring once a lock has been set up on this version;
+ *  only a missing marker (first launch after updating, or a fresh install)
+ *  sends it to the keyring. This only exists for a WEDGED call that never
+ *  settles (a rejected one already takes the catch below). `hydrated` gates
+ *  the entire UI in App.tsx, so a hung probe without a timeout would strand
+ *  the user on the probing screen forever. */
 const PROBE_TIMEOUT_MS = 5000;
 
 export const useSecurityStore = create<SecurityState>((set, get) => ({
@@ -72,9 +74,19 @@ export const useSecurityStore = create<SecurityState>((set, get) => ({
     const timedOut = new Promise<"timed-out">((resolve) => {
       timer = setTimeout(() => resolve("timed-out"), PROBE_TIMEOUT_MS);
     });
+    const probe = securityStatus();
     try {
-      const status = await Promise.race([securityStatus(), timedOut]);
+      const status = await Promise.race([probe, timedOut]);
       if (status === "timed-out") {
+        // The probe can still be waiting on a keychain prompt. If it finds a
+        // lock after we gave up, put the lock screen up then rather than
+        // leaving the app open for the rest of the session.
+        probe.then(
+          (late) => {
+            if (late.configured) set({ status: late, unlocked: false });
+          },
+          () => {},
+        );
         throw new Error(
           `security status probe still pending after ${PROBE_TIMEOUT_MS}ms`,
         );

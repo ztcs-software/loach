@@ -41,12 +41,15 @@ import type {
   ToolCallRecord,
 } from "@/types";
 import { cn } from "@/lib/utils";
-import { safeImageMime, stripInlinedAttachments } from "@/lib/files";
-import { Bookmark } from "lucide-react";
+import { NO_DOCX_TEXT, NO_PDF_TEXT, safeImageMime, stripInlinedAttachments } from "@/lib/files";
+import { Bookmark, BookmarkPlus } from "lucide-react";
 import { useChatStore } from "@/stores/chatStore";
 import { useShareStore } from "@/stores/shareStore";
 import { useSnippetStore } from "@/stores/snippetStore";
 import { useToastStore } from "@/stores/toastStore";
+import { useLibraryStore } from "@/stores/libraryStore";
+import { SOURCES_TOOL } from "@/lib/sources";
+import { SourcesUsedChip } from "./library/SourcesUsedChip";
 
 interface MessageProps {
   message: ChatMessage;
@@ -91,6 +94,16 @@ function parseAttachments(json: string | null): Attachment[] {
   } catch {
     return [];
   }
+}
+
+/** A Library title for a saved reply: its first heading or line, trimmed. */
+function replyTitle(content: string): string {
+  const line =
+    content
+      .split("\n")
+      .map((l) => l.replace(/^#+\s*/, "").replace(/[*_`]/g, "").trim())
+      .find((l) => l.length > 0) ?? "Saved reply";
+  return line.length > 70 ? `${line.slice(0, 70).trimEnd()}…` : line;
 }
 
 function parseToolCalls(json: string | null): ToolCallRecord[] {
@@ -140,7 +153,10 @@ function ApprovalCard({ call }: { call: ToolCallRecord }) {
   const [sent, setSent] = useState(false);
   const decide = (decision: ToolApprovalDecision) => {
     setSent(true);
-    void respond(call.id, decision);
+    // A failed send is toasted and the card restored by the store, so re-arm
+    // the buttons once it settles. On success the card goes away, and a late
+    // click on an answered call is dropped by the store.
+    void respond(call.id, decision).finally(() => setSent(false));
   };
   const tool = rawToolName(call.tool);
   // Workspace file tools get a readable preview — the file, the diff, the
@@ -633,10 +649,46 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
     [message.metrics_json],
   );
   const showMetrics = metrics ?? persistedMetrics;
-  const toolCalls = useMemo(
+  const allToolCalls = useMemo(
     () => (!isUser ? parseToolCalls(message.tool_calls_json) : []),
     [isUser, message.tool_calls_json],
   );
+  // The Library sources record renders as its own chip, not as a tool call.
+  const sourcesRecord = allToolCalls.find((c) => c.tool === SOURCES_TOOL) ?? null;
+  const toolCalls = useMemo(
+    () => allToolCalls.filter((c) => c.tool !== SOURCES_TOOL),
+    [allToolCalls],
+  );
+  const saveToLibrary = useLibraryStore((s) => s.saveToLibrary);
+  const saveAttachmentsToLibrary = async () => {
+    const unreadable: string[] = [];
+    for (const a of attachments) {
+      if (a.kind === "file") continue;
+      // As in the Library's own upload (`prepareFiles`): a scanned PDF or an
+      // empty document is only the shared "no text" note — stored, it'd be a
+      // source with nothing in it, and the next one would look like a duplicate.
+      if (a.kind === "text" && (a.data === NO_PDF_TEXT || a.data === NO_DOCX_TEXT || !a.data.trim())) {
+        unreadable.push(a.name);
+        continue;
+      }
+      await saveToLibrary({
+        kind: "file",
+        title: a.name,
+        mime: a.mime,
+        media: a.kind === "image" ? "image" : "text",
+        content: a.data,
+        size: a.kind === "image" ? Math.round((a.data.length * 3) / 4) : new TextEncoder().encode(a.data).length,
+        truncated: a.truncated,
+      });
+    }
+    if (unreadable.length > 0) {
+      useToastStore.getState().push({
+        kind: "error",
+        title: unreadable.length === 1 ? `Couldn't save ${unreadable[0]}` : `Couldn't save ${unreadable.length} files`,
+        body: "No readable text — it may be a scanned PDF. Add its pages as images, or a text version, instead.",
+      });
+    }
+  };
   const attachments = useMemo(
     () => parseAttachments(message.attachments_json),
     [message.attachments_json],
@@ -843,6 +895,7 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
             isStreaming={isStreaming && message.content.length === 0}
           />
         )}
+        {!isUser && sourcesRecord && <SourcesUsedChip record={sourcesRecord} />}
         {!isUser && toolCalls.length > 0 && (
           <ToolCallsBlock calls={toolCalls} interactive={!!isStreaming} />
         )}
@@ -976,6 +1029,15 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
                   <Bookmark className="h-4 w-4 text-foreground/60" />
                   Save as Snippet
                 </DropdownMenuItem>
+                {attachments.some((a) => a.kind !== "file") && (
+                  <DropdownMenuItem
+                    onSelect={() => void saveAttachmentsToLibrary()}
+                    className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
+                  >
+                    <BookmarkPlus className="h-4 w-4 text-foreground/60" />
+                    Save {attachments.filter((a) => a.kind !== "file").length === 1 ? "attachment" : "attachments"} to Library
+                  </DropdownMenuItem>
+                )}
               </DropdownMenuContent>
             </DropdownMenu>
           </div>
@@ -1042,6 +1104,22 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
                   <Share2 className="h-4 w-4 text-foreground/60" />
                   Share
                 </DropdownMenuItem>
+                <DropdownMenuItem
+                  onSelect={() =>
+                    void saveToLibrary({
+                      kind: "text",
+                      title: replyTitle(message.content),
+                      mime: "text/markdown",
+                      media: "text",
+                      content: message.content,
+                      size: new TextEncoder().encode(message.content).length,
+                    })
+                  }
+                  className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
+                >
+                  <BookmarkPlus className="h-4 w-4 text-foreground/60" />
+                  Save to Library
+                </DropdownMenuItem>
                 {/* Not offered for hidden imported rows: they render inside a
                     collapsed card, so a pin chip for one would scroll nowhere
                     when the card is shut. */}
@@ -1072,10 +1150,14 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
                     Regenerate
                   </DropdownMenuItem>
                 )}
+                {/* Not while this reply streams: its row on disk stays empty
+                    until the stream finishes, and that's what a fork copies. */}
                 <DropdownMenuItem
                   onSelect={() =>
                     void forkChat(message.session_id, message.id)
                   }
+                  disabled={isStreaming}
+                  title={isStreaming ? "Wait for the reply to finish" : undefined}
                   className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
                 >
                   <GitFork className="h-4 w-4 text-foreground/60" />

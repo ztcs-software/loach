@@ -18,7 +18,8 @@ pub fn tool_description() -> &'static str {
      (returning the bytes as hex if the result isn't valid UTF-8). Modes: \
      `encode` (default), `decode`. Alphabets: `standard` (default, RFC 4648 \
      §4 with `+` and `/`) or `url_safe` (RFC 4648 §5 with `-` and `_`). \
-     Padding (`=`) is added on encode and accepted-but-not-required on decode."
+     Padding (`=`) is added on encode and accepted-but-not-required on decode; \
+     whitespace and line breaks in the input are ignored on decode."
 }
 
 pub fn input_schema() -> Value {
@@ -70,20 +71,9 @@ pub fn dispatch(args: &Value) -> McpCallResult {
             ..Default::default()
         },
         "decode" => {
-            // Be permissive about missing padding — match the convention
-            // most user-facing base64 tools (incl. `python -m base64`) use.
-            let decoded = match engine.decode(input.trim()) {
+            let decoded = match decode_lenient(input, alphabet == "url_safe") {
                 Ok(bytes) => bytes,
-                Err(_) => {
-                    let lenient = match alphabet {
-                        "url_safe" => &base64::engine::general_purpose::URL_SAFE_NO_PAD,
-                        _ => &base64::engine::general_purpose::STANDARD_NO_PAD,
-                    };
-                    match lenient.decode(input.trim()) {
-                        Ok(b) => b,
-                        Err(e) => return err(format!("invalid base64 input: {e}")),
-                    }
-                }
+                Err(e) => return err(format!("invalid base64 input: {e}")),
             };
             McpCallResult {
                 content_text: match String::from_utf8(decoded.clone()) {
@@ -98,6 +88,22 @@ pub fn dispatch(args: &Value) -> McpCallResult {
         }
         other => err(format!("unknown op `{other}` — use encode or decode")),
     }
+}
+
+/// Decode base64 the way it gets pasted. Padding is optional — the
+/// convention most user-facing base64 tools (incl. `python -m base64`)
+/// use — and whitespace anywhere is dropped first: PEM bodies wrap every 64
+/// columns and MIME parts every 76, and trimming only the ends refused them.
+/// Shared with `hash`'s base64 input.
+pub fn decode_lenient(input: &str, url_safe: bool) -> Result<Vec<u8>, base64::DecodeError> {
+    use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
+    let cleaned: String = input.chars().filter(|c| !c.is_ascii_whitespace()).collect();
+    let (padded, unpadded) = if url_safe {
+        (&URL_SAFE, &URL_SAFE_NO_PAD)
+    } else {
+        (&STANDARD, &STANDARD_NO_PAD)
+    };
+    padded.decode(&cleaned).or_else(|_| unpadded.decode(&cleaned))
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -158,5 +164,13 @@ mod tests {
     fn rejects_garbage_input() {
         let r = dispatch(&json!({"input": "@@@@", "op": "decode"}));
         assert!(r.is_error);
+    }
+
+    /// PEM and MIME wrap base64 into fixed-width lines.
+    #[test]
+    fn decode_ignores_line_breaks_inside_the_input() {
+        let r = dispatch(&json!({"input": "aGVs\r\nbG8g\n d29y bGQ=\n", "op": "decode"}));
+        assert!(!r.is_error, "{}", r.content_text);
+        assert_eq!(r.content_text, "hello world");
     }
 }

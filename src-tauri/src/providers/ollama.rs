@@ -199,7 +199,7 @@ async fn drive_progress_stream(
         biased;
         _ = cancel.notified() => {
             let _ = app.emit(&channel, AdminEvent::Cancelled);
-            registry.finish(&stream_id);
+            registry.finish_own(&stream_id, &cancel);
             return Ok(());
         }
         r = http.post(&url).json(&body).send() => r,
@@ -213,21 +213,21 @@ async fn drive_progress_stream(
                     message: format!("Ollama request failed: {e}"),
                 },
             );
-            registry.finish(&stream_id);
+            registry.finish_own(&stream_id, &cancel);
             return Err(e.into());
         }
     };
 
     if !resp.status().is_success() {
         let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
+        let text = super::error_body(resp).await;
         let _ = app.emit(
             &channel,
             AdminEvent::Error {
                 message: format!("Ollama HTTP {status}: {text}"),
             },
         );
-        registry.finish(&stream_id);
+        registry.finish_own(&stream_id, &cancel);
         return Err(anyhow!("ollama http error"));
     }
 
@@ -248,7 +248,7 @@ async fn drive_progress_stream(
                 // to notice the client gave up and abort the download.
                 drop(byte_stream);
                 let _ = app.emit(&channel, AdminEvent::Cancelled);
-                registry.finish(&stream_id);
+                registry.finish_own(&stream_id, &cancel);
                 return Ok(());
             }
             maybe = byte_stream.next() => {
@@ -268,7 +268,7 @@ async fn drive_progress_stream(
                                     ),
                                 },
                             );
-                            registry.finish(&stream_id);
+                            registry.finish_own(&stream_id, &cancel);
                             return Err(anyhow!("ollama admin stream frame too large"));
                         }
                         while let Some(pos) = buf.iter().position(|b| *b == b'\n') {
@@ -282,7 +282,7 @@ async fn drive_progress_stream(
                                             &channel,
                                             AdminEvent::Error { message: err },
                                         );
-                                        registry.finish(&stream_id);
+                                        registry.finish_own(&stream_id, &cancel);
                                         return Ok(());
                                     }
                                     let status = parsed.status.unwrap_or_else(|| "working".into());
@@ -298,7 +298,7 @@ async fn drive_progress_stream(
                                     );
                                     if done_now {
                                         let _ = app.emit(&channel, AdminEvent::Done);
-                                        registry.finish(&stream_id);
+                                        registry.finish_own(&stream_id, &cancel);
                                         return Ok(());
                                     }
                                 }
@@ -313,7 +313,7 @@ async fn drive_progress_stream(
                             &channel,
                             AdminEvent::Error { message: format!("stream error: {e}") },
                         );
-                        registry.finish(&stream_id);
+                        registry.finish_own(&stream_id, &cancel);
                         return Err(e.into());
                     }
                     None => {
@@ -321,7 +321,7 @@ async fn drive_progress_stream(
                         // treat EOF as a successful completion so callers don't
                         // hang forever on a silently-closed connection.
                         let _ = app.emit(&channel, AdminEvent::Done);
-                        registry.finish(&stream_id);
+                        registry.finish_own(&stream_id, &cancel);
                         return Ok(());
                     }
                 }
@@ -347,7 +347,7 @@ pub async fn pull_model(
             &admin_channel(&stream_id),
             AdminEvent::Error { message: e },
         );
-        registry.finish(&stream_id);
+        registry.finish_own(&stream_id, &cancel);
         return Ok(());
     }
     let url = format!("{}/api/pull", base_url.trim_end_matches('/'));
@@ -370,19 +370,133 @@ pub async fn create_model(
             &admin_channel(&stream_id),
             AdminEvent::Error { message: e },
         );
-        registry.finish(&stream_id);
+        registry.finish_own(&stream_id, &cancel);
         return Ok(());
     }
     let url = format!("{}/api/create", base_url.trim_end_matches('/'));
-    // Ollama 0.3+ supports `modelfile` as a field on `/api/create` so we
-    // don't need to write a temp file. `stream: true` keeps the NDJSON
-    // progress frames flowing.
-    let body = serde_json::json!({
-        "name": name,
-        "modelfile": modelfile,
-        "stream": true,
-    });
+    // Ollama 0.5.5 replaced `/api/create`'s raw `modelfile` field with
+    // structured ones (`from`, `system`, `template`, `parameters`) and
+    // rejects a request without `from`. Send both: current servers read the
+    // structured fields, older ones ignore them and read `modelfile`.
+    // `stream: true` keeps the NDJSON progress frames flowing.
+    let mut body = match create_fields(modelfile) {
+        Ok(fields) => Value::Object(fields),
+        Err(e) => {
+            let _ = app.emit(
+                &admin_channel(&stream_id),
+                AdminEvent::Error {
+                    message: format!("Couldn't read the Modelfile: {e}"),
+                },
+            );
+            registry.finish_own(&stream_id, &cancel);
+            return Ok(());
+        }
+    };
+    body["model"] = json!(name);
+    body["name"] = json!(name);
+    body["modelfile"] = json!(modelfile);
+    body["stream"] = json!(true);
     drive_progress_stream(app, registry, stream_id, url, body, http, cancel).await
+}
+
+/// Split the Models editor's Modelfile into `/api/create`'s structured
+/// fields. Covers the directives `buildModelfile` (src/lib/modelfile.ts)
+/// emits: FROM; SYSTEM and TEMPLATE, `"""`-quoted and possibly multi-line;
+/// and PARAMETER, numeric except `stop`, whose quoted values collect into a
+/// list.
+fn create_fields(modelfile: &str) -> std::result::Result<serde_json::Map<String, Value>, String> {
+    let mut out = serde_json::Map::new();
+    let mut params = serde_json::Map::new();
+    let mut stops: Vec<Value> = Vec::new();
+    let mut rest = modelfile;
+    loop {
+        rest = rest.trim_start();
+        if rest.is_empty() {
+            break;
+        }
+        let split = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let (directive, after) = rest.split_at(split);
+        match directive.to_ascii_uppercase().as_str() {
+            "FROM" => {
+                let (line, next) = take_line(after);
+                out.insert("from".into(), json!(line.trim()));
+                rest = next;
+            }
+            d @ ("SYSTEM" | "TEMPLATE") => {
+                let after = after.trim_start_matches([' ', '\t']);
+                let (value, next) = match after.strip_prefix("\"\"\"") {
+                    Some(block) => {
+                        let end = block
+                            .find("\"\"\"")
+                            .ok_or_else(|| format!("{d} block has no closing \"\"\""))?;
+                        (&block[..end], &block[end + 3..])
+                    }
+                    None => {
+                        let (line, next) = take_line(after);
+                        (line.trim(), next)
+                    }
+                };
+                out.insert(d.to_ascii_lowercase(), json!(value));
+                rest = next;
+            }
+            "PARAMETER" => {
+                let (line, next) = take_line(after);
+                rest = next;
+                let line = line.trim();
+                let (key, value) = line
+                    .split_once(char::is_whitespace)
+                    .ok_or_else(|| format!("PARAMETER `{line}` has no value"))?;
+                let value = value.trim();
+                if key == "stop" {
+                    stops.push(json!(unquote(value)));
+                } else if let Ok(n) = value.parse::<i64>() {
+                    params.insert(key.into(), json!(n));
+                } else if let Ok(f) = value.parse::<f64>() {
+                    params.insert(key.into(), json!(f));
+                } else {
+                    return Err(format!("PARAMETER {key} isn't a number: {value}"));
+                }
+            }
+            other => return Err(format!("unsupported directive `{other}`")),
+        }
+    }
+    if !out.contains_key("from") {
+        return Err("no FROM line".into());
+    }
+    if !stops.is_empty() {
+        params.insert("stop".into(), Value::Array(stops));
+    }
+    if !params.is_empty() {
+        out.insert("parameters".into(), Value::Object(params));
+    }
+    Ok(out)
+}
+
+fn take_line(s: &str) -> (&str, &str) {
+    match s.find('\n') {
+        Some(i) => (&s[..i], &s[i + 1..]),
+        None => (s, ""),
+    }
+}
+
+/// `"a\"b"` → `a"b`: reverses the quoting `buildModelfile` applies to `stop`.
+fn unquote(v: &str) -> String {
+    let inner = v
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .unwrap_or(v);
+    let mut out = String::with_capacity(inner.len());
+    let mut chars = inner.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            if let Some(escaped) = chars.next() {
+                out.push(escaped);
+                continue;
+            }
+        }
+        out.push(c);
+    }
+    out
 }
 
 #[derive(Debug, Deserialize)]
@@ -543,6 +657,12 @@ struct OllamaChunk {
     /// builds that don't report it.
     #[serde(default)]
     eval_duration: Option<u64>,
+    /// What went wrong when Ollama fails mid-reply (the runner crashed or
+    /// ran out of memory): it writes one last `{"error":"…"}` line and
+    /// closes the stream without a `done: true`. Read as an empty chunk,
+    /// that cut-off reply ended as a normal completion.
+    #[serde(default)]
+    error: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -613,7 +733,7 @@ pub async fn chat_stream(
     // there) while allowing loopback, RFC 1918, CGNAT, and public IPs.
     if let Err(e) = super::refuse_link_local_host(&req.base_url).await {
         let _ = app.emit(&channel, StreamEvent::Error { message: e });
-        registry.finish(&req.stream_id);
+        registry.finish_own(&req.stream_id, &cancel);
         return Ok(());
     }
 
@@ -693,6 +813,9 @@ pub async fn chat_stream(
             body["tools"] = tools.clone();
         }
 
+        // What the model says this turn, kept for the history should the
+        // turn end in tool calls.
+        let mut turn_text = String::new();
         let outcome = match run_one_turn(
             &app,
             &http,
@@ -704,6 +827,7 @@ pub async fn chat_stream(
             &mut reported_tokens,
             &mut reported_eval_ns,
             &mut think_already_drop,
+            &mut turn_text,
             &req.stream_id,
             &registry,
         )
@@ -726,7 +850,7 @@ pub async fn chat_stream(
                     tool_ctx.approval_wait(),
                 );
                 let _ = app.emit(&channel, StreamEvent::Done);
-                registry.finish(&req.stream_id);
+                registry.finish_own(&req.stream_id, &cancel);
                 return Ok(());
             }
             // Asked for tools on the last round anyway: nothing would read
@@ -734,13 +858,16 @@ pub async fn chat_stream(
             TurnOutcome::Tools(_) if turn + 1 == MAX_TOOL_TURNS => break,
             TurnOutcome::Tools(calls) => {
                 // Append the assistant turn including the tool_calls block,
-                // so subsequent /api/chat calls see the full conversation.
-                // We use `Value::Null` for content (rather than "") because
-                // strict OpenAI-compat gateways reject empty strings here;
-                // recent Ollama accepts both, so Null is the safer choice.
+                // so subsequent /api/chat calls see the full conversation —
+                // the text the model streamed before its calls included, or
+                // it saw no trace of that preamble and said it all again.
+                // We use `Value::Null` for content (rather than "") when it
+                // said nothing, because strict OpenAI-compat gateways reject
+                // empty strings here; recent Ollama accepts both, so Null is
+                // the safer choice.
                 messages.push(json!({
                     "role": "assistant",
-                    "content": Value::Null,
+                    "content": if turn_text.is_empty() { Value::Null } else { json!(turn_text) },
                     "tool_calls": calls
                         .iter()
                         .map(serialise_tool_call)
@@ -801,7 +928,7 @@ pub async fn chat_stream(
                     .await
                     else {
                         let _ = app.emit(&channel, StreamEvent::Cancelled);
-                        registry.finish(&req.stream_id);
+                        registry.finish_own(&req.stream_id, &cancel);
                         return Ok(());
                     };
 
@@ -835,7 +962,7 @@ pub async fn chat_stream(
             ),
         },
     );
-    registry.finish(&req.stream_id);
+    registry.finish_own(&req.stream_id, &cancel);
     Ok(())
 }
 
@@ -855,6 +982,7 @@ async fn run_one_turn(
     reported_tokens: &mut Option<u32>,
     reported_eval_ns: &mut Option<u64>,
     think_already_drop: &mut bool,
+    turn_text: &mut String,
     stream_id: &str,
     registry: &StreamRegistry,
 ) -> Result<Option<TurnOutcome>> {
@@ -870,7 +998,7 @@ async fn run_one_turn(
         biased;
         _ = cancel.notified() => {
             let _ = app.emit(channel, StreamEvent::Cancelled);
-            registry.finish(stream_id);
+            registry.finish_own(stream_id, cancel);
             return Ok(None);
         }
         r = http.post(&url).json(body).send() => r,
@@ -884,7 +1012,7 @@ async fn run_one_turn(
                     message: format!("Ollama request failed: {e}"),
                 },
             );
-            registry.finish(stream_id);
+            registry.finish_own(stream_id, cancel);
             return Err(e.into());
         }
     };
@@ -897,7 +1025,7 @@ async fn run_one_turn(
     // once before giving up.
     if !resp.status().is_success() && body.get("think").is_some() {
         let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
+        let text = super::error_body(resp).await;
         if text.contains("does not support thinking") {
             if let Some(obj) = body.as_object_mut() {
                 obj.remove("think");
@@ -912,7 +1040,7 @@ async fn run_one_turn(
                 biased;
                 _ = cancel.notified() => {
                     let _ = app.emit(channel, StreamEvent::Cancelled);
-                    registry.finish(stream_id);
+                    registry.finish_own(stream_id, cancel);
                     return Ok(None);
                 }
                 r = http.post(&url).json(body).send() => r,
@@ -926,7 +1054,7 @@ async fn run_one_turn(
                             message: format!("Ollama request failed: {e}"),
                         },
                     );
-                    registry.finish(stream_id);
+                    registry.finish_own(stream_id, cancel);
                     return Err(e.into());
                 }
             };
@@ -937,21 +1065,21 @@ async fn run_one_turn(
                     message: format!("Ollama HTTP {status}: {text}"),
                 },
             );
-            registry.finish(stream_id);
+            registry.finish_own(stream_id, cancel);
             return Err(anyhow!("ollama http error"));
         }
     }
 
     if !resp.status().is_success() {
         let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
+        let text = super::error_body(resp).await;
         let _ = app.emit(
             channel,
             StreamEvent::Error {
                 message: format!("Ollama HTTP {status}: {text}"),
             },
         );
-        registry.finish(stream_id);
+        registry.finish_own(stream_id, cancel);
         return Err(anyhow!("ollama http error"));
     }
 
@@ -975,7 +1103,7 @@ async fn run_one_turn(
             _ = cancel.notified() => {
                 drop(byte_stream);
                 let _ = app.emit(channel, StreamEvent::Cancelled);
-                registry.finish(stream_id);
+                registry.finish_own(stream_id, cancel);
                 return Ok(None);
             }
             maybe = byte_stream.next() => {
@@ -992,19 +1120,24 @@ async fn run_one_turn(
                                     ),
                                 },
                             );
-                            registry.finish(stream_id);
+                            registry.finish_own(stream_id, cancel);
                             return Err(anyhow!("ollama chat stream frame too large"));
                         }
 
                         let mut pending_token = String::new();
                         let mut pending_think = String::new();
                         let mut finished = false;
+                        let mut stream_error: Option<String> = None;
                         while let Some(pos) = buf.iter().position(|b| *b == b'\n') {
                             let line: Vec<u8> = buf.drain(..=pos).collect();
                             let line = &line[..line.len() - 1];
                             if line.is_empty() { continue; }
                             match serde_json::from_slice::<OllamaChunk>(line) {
                                 Ok(parsed) => {
+                                    if let Some(e) = parsed.error {
+                                        stream_error = Some(e);
+                                        break;
+                                    }
                                     if let Some(n) = parsed.eval_count {
                                         turn_eval = Some(n);
                                     }
@@ -1021,6 +1154,7 @@ async fn run_one_turn(
                                             if !delta.is_empty() {
                                                 *total_tokens += 1;
                                                 pending_token.push_str(&delta);
+                                                turn_text.push_str(&delta);
                                             }
                                         }
                                         if !msg.tool_calls.is_empty() {
@@ -1066,6 +1200,16 @@ async fn run_one_turn(
                                 StreamEvent::Token { delta: pending_token },
                             );
                         }
+                        // The text so far went out above; the reply ends
+                        // here as an error, not Done.
+                        if let Some(e) = stream_error {
+                            let _ = app.emit(
+                                channel,
+                                StreamEvent::Error { message: format!("Ollama stopped mid-reply: {e}") },
+                            );
+                            registry.finish_own(stream_id, cancel);
+                            return Err(anyhow!("ollama stream error: {e}"));
+                        }
                         if finished {
                             // Fold this turn's reported count (if any)
                             // into the session total. Done here, not
@@ -1089,7 +1233,7 @@ async fn run_one_turn(
                             channel,
                             StreamEvent::Error { message: format!("stream error: {e}") },
                         );
-                        registry.finish(stream_id);
+                        registry.finish_own(stream_id, cancel);
                         return Err(e.into());
                     }
                     None => {
@@ -1315,6 +1459,47 @@ fn normalise_args(v: &Value) -> Value {
 mod tests {
     use super::*;
 
+    // --- create_fields --------------------------------------------------------
+    // Ollama 0.5.5+ rejects `/api/create` without the structured fields, so
+    // the editor's Modelfile has to come apart cleanly.
+
+    #[test]
+    fn create_fields_splits_the_editors_modelfile() {
+        let modelfile = "FROM llama3.1:8b\n\n\
+            SYSTEM \"\"\"You are terse.\nAnswer in one line.\"\"\"\n\n\
+            TEMPLATE \"\"\"{{ .Prompt }}\"\"\"\n\n\
+            PARAMETER temperature 0.7\n\
+            PARAMETER num_ctx 32768\n\
+            PARAMETER stop \"<|end|>\"\n\
+            PARAMETER stop \"say \\\"hi\\\" \\\\ bye\"\n";
+        let fields = create_fields(modelfile).expect("parses");
+        assert_eq!(fields["from"], "llama3.1:8b");
+        assert_eq!(fields["system"], "You are terse.\nAnswer in one line.");
+        assert_eq!(fields["template"], "{{ .Prompt }}");
+        assert_eq!(
+            fields["parameters"],
+            json!({
+                "temperature": 0.7,
+                "num_ctx": 32768,
+                "stop": ["<|end|>", "say \"hi\" \\ bye"],
+            })
+        );
+    }
+
+    #[test]
+    fn create_fields_omits_what_the_form_left_empty() {
+        let fields = create_fields("FROM qwen3:8b\n").expect("parses");
+        assert_eq!(Value::Object(fields), json!({ "from": "qwen3:8b" }));
+    }
+
+    #[test]
+    fn create_fields_refuses_what_it_cant_send() {
+        assert!(create_fields("PARAMETER temperature 0.7\n").is_err());
+        assert!(create_fields("FROM m\nSYSTEM \"\"\"never closed\n").is_err());
+        assert!(create_fields("FROM m\nADAPTER ./lora.gguf\n").is_err());
+        assert!(create_fields("FROM m\nPARAMETER temperature warm\n").is_err());
+    }
+
     // --- normalise_args -------------------------------------------------------
     // Ollama mainline hands `arguments` as a parsed object, but some builds
     // and the OpenAI-compat passes hand a stringified JSON. The dispatcher
@@ -1373,6 +1558,19 @@ mod tests {
             serialise_tool_call(&call),
             json!({ "function": { "name": "", "arguments": {} } })
         );
+    }
+
+    // --- OllamaChunk ------------------------------------------------------------
+
+    #[test]
+    fn a_mid_stream_error_line_is_read_as_an_error() {
+        // What Ollama writes when the runner dies mid-reply: no `done`, no
+        // message — it used to parse as an empty chunk and end as Done.
+        let chunk: OllamaChunk =
+            serde_json::from_str(r#"{"error":"llama runner process has terminated"}"#)
+                .expect("parses");
+        assert_eq!(chunk.error.as_deref(), Some("llama runner process has terminated"));
+        assert!(!chunk.done);
     }
 }
 

@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Loach",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "identifier": "dev.loach.app",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -27,11 +27,12 @@
         "visible": true,
         "shadow": true,
         "dragDropEnabled": false,
-        "backgroundColor": "#06070f"
+        "backgroundColor": "#06070f",
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --force-webrtc-ip-handling-policy=disable_non_proxied_udp"
       }
     ],
     "security": {
-      "csp": "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src ipc: http://ipc.localhost"
+      "csp": "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src ipc: http://ipc.localhost; frame-src loach-sandbox: http://loach-sandbox.localhost"
     }
   },
   "bundle": {
@@ -54,6 +55,9 @@
     }
   },
   "plugins": {
+    "shell": {
+      "open": "((https?://\\w+)|(mailto:\\w+)).+"
+    },
     "updater": {
       "endpoints": [
         "https://github.com/ztcs-software/loach/releases/latest/download/latest.json"

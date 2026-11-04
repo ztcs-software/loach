@@ -1,5 +1,7 @@
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
+import { useConfirm } from "@/components/ConfirmDialog";
+import { Field } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import {
@@ -10,8 +12,10 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { useSpaceStore } from "@/stores/spaceStore";
+import { dialogEnter } from "@/lib/shortcuts";
 
 export function SpaceForm() {
+  const { confirm } = useConfirm();
   const open = useSpaceStore((s) => s.spaceFormOpen);
   const setOpen = useSpaceStore((s) => s.setSpaceFormOpen);
   const doCreate = useSpaceStore((s) => s.createSpace);
@@ -28,10 +32,26 @@ export function SpaceForm() {
     setError(null);
   };
 
-  const handleCancel = () => {
+  // Escape, the backdrop, ✕ and Cancel all come through here, so none of them
+  // can throw typed text away without asking.
+  const handleCancel = async () => {
+    if (
+      (name.trim() || description.trim()) &&
+      !(await confirm({
+        title: "Discard unsaved changes?",
+        body: "This Space hasn't been created yet.",
+        confirmLabel: "Discard",
+        cancelLabel: "Keep editing",
+        destructive: true,
+      }))
+    ) {
+      return;
+    }
     setOpen(false);
     reset();
   };
+
+  const canCreate = !saving && !!name.trim();
 
   const handleCreate = async () => {
     if (!name.trim()) {
@@ -53,54 +73,54 @@ export function SpaceForm() {
   };
 
   return (
-    <Dialog open={open} onOpenChange={(o) => (o ? setOpen(true) : handleCancel())}>
-      <DialogContent className="max-w-md">
+    <Dialog open={open} onOpenChange={(o) => (o ? setOpen(true) : void handleCancel())}>
+      <DialogContent className="max-w-lg">
         <DialogHeader>
-          <DialogTitle>Create a new Space</DialogTitle>
+          <DialogTitle>New Space</DialogTitle>
           <DialogDescription>
             Spaces let you group chats with shared instructions and sources.
           </DialogDescription>
         </DialogHeader>
 
         <div className="mt-2 space-y-3">
-          <Input
-            id="space-name"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                void handleCreate();
-              }
-            }}
-            placeholder="Name your space"
-            maxLength={60}
-            autoFocus
-          />
-          <Textarea
-            id="space-desc"
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-            placeholder="Describe your project, goals, subject…"
-            className="min-h-[88px] rounded-2xl border-foreground/10 bg-foreground/[0.05]"
-          />
+          <Field label="Name">
+            <Input
+              id="space-name"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              onKeyDown={(e) => dialogEnter(e, () => void handleCreate(), { ready: canCreate })}
+              placeholder="e.g. Website redesign"
+              maxLength={60}
+              autoFocus
+            />
+          </Field>
+          <Field label="Description" optional>
+            <Textarea
+              id="space-desc"
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              onKeyDown={(e) => dialogEnter(e, () => void handleCreate(), { ready: canCreate })}
+              placeholder="Describe your project, goals, subject…"
+              className="min-h-[88px] rounded-2xl border-foreground/10 bg-foreground/[0.05]"
+            />
+          </Field>
           {error && <p className="text-xs text-destructive">{error}</p>}
         </div>
 
         <div className="mt-3 flex items-center justify-end gap-2">
           <Button
             variant="outline"
-            onClick={handleCancel}
+            onClick={() => void handleCancel()}
             className="rounded-lg"
           >
             Cancel
           </Button>
           <Button
             onClick={handleCreate}
-            disabled={saving || !name.trim()}
+            disabled={!canCreate}
             className="rounded-lg"
           >
-            {saving ? "Creating…" : "Save"}
+            {saving ? "Creating…" : "Create"}
           </Button>
         </div>
       </DialogContent>

@@ -10,6 +10,7 @@
 // ever tells a new user.
 
 import { useMemo } from "react";
+import { fullOllamaTag } from "@/lib/modelChoice";
 import { useModelsStore, type AdminProgress } from "@/stores/modelsStore";
 import type { ModelInfo } from "@/types";
 
@@ -49,10 +50,12 @@ function findBlockingPull(
   model: string | null | undefined,
 ): AdminProgress | null {
   if (!model || provider !== "ollama") return null;
-  if (installed.some((m) => m.id === model)) return null;
+  // `llama3` and `llama3:latest` are one model, however each was typed.
+  const tag = fullOllamaTag(model);
+  if (installed.some((m) => fullOllamaTag(m.id) === tag)) return null;
   return (
     Object.values(runs).find(
-      (r) => r.kind === "pull" && r.target === model && r.finished === null,
+      (r) => r.kind === "pull" && fullOllamaTag(r.target) === tag && r.finished === null,
     ) ?? null
   );
 }

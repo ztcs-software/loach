@@ -37,11 +37,18 @@ function parseSnippetAttachments(json: string | null): Attachment[] {
  * fill-blanks dialog first and primes after the user submits. Cancelling
  * the dialog is a no-op — the composer stays as it was.
  *
+ * @param beforePrime Runs once the prompt is final, right before priming —
+ *          where a caller that runs the snippet in a fresh chat creates it
+ *          and navigates there. Never runs on a cancelled fill, so cancelling
+ *          leaves the user where they were, with no empty chat behind.
  * @returns A promise that resolves once the composer has been primed (or
  *          the user cancelled the fill dialog).
  */
-export function expandAndPrimeSnippet(snippet: Snippet): Promise<void> {
-  return new Promise((resolve) => {
+export function expandAndPrimeSnippet(
+  snippet: Snippet,
+  beforePrime?: () => Promise<void>,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
     const globals = useSnippetVarStore.getState().variables;
     const userName = useSettingsStore.getState().user_name ?? "";
     const { resolved, unresolved } = expandKnownVars(
@@ -57,12 +64,14 @@ export function expandAndPrimeSnippet(snippet: Snippet): Promise<void> {
     const attachments = parseSnippetAttachments(snippet.attachments_json);
 
     const prime = (text: string) => {
-      useUIStore.getState().primeComposer(text, attachments);
+      (beforePrime ? beforePrime() : Promise.resolve()).then(() => {
+        useUIStore.getState().primeComposer(text, attachments);
+        resolve();
+      }, reject);
     };
 
     if (unresolved.length === 0) {
       prime(resolved);
-      resolve();
       return;
     }
 
@@ -84,7 +93,6 @@ export function expandAndPrimeSnippet(snippet: Snippet): Promise<void> {
           void useSnippetVarStore
             .getState()
             .saveFillValues(snippet.id, values);
-          resolve();
         },
         onCancel: () => resolve(),
       });

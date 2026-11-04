@@ -10,7 +10,7 @@ import { useSecurityStore } from "@/stores/securityStore";
 import topBarLogo from "@/assets/loach-icon.png";
 
 // Detect macOS so we can label the Ctrl/Cmd+K shortcut with the right
-// modifier. The keybinding itself accepts either (see SearchBar) — this
+// modifier. The keybinding itself is SearchBar's (`primaryMod`) — this
 // is purely visual.
 const isMac =
   typeof navigator !== "undefined" &&
@@ -19,8 +19,16 @@ const isMac =
       .userAgentData?.platform || navigator.platform,
   );
 
+// On macOS the window keeps its system title bar in overlay mode
+// (src-tauri/tauri.macos.conf.json), so macOS draws its own close /
+// minimise / full-screen buttons over the left end of this bar. We leave
+// them room and drop our own. Tauri only: a Mac browser previewing the
+// frontend has no such buttons.
+const nativeControls = isTauri && isMac;
+
 export function TitleBar() {
   const [isMaximized, setIsMaximized] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
   const sidebarOpen = useUIStore((s) => s.sidebarOpen);
   const toggleSidebar = useUIStore((s) => s.toggleSidebar);
   // Mirror App.tsx's onboarding gate so the sidebar-toggle and search
@@ -28,7 +36,8 @@ export function TitleBar() {
   // the user's attention and lets them dismiss with X.
   const settingsHydrated = useSettingsStore((s) => s.hydrated);
   const onboardingCompleted = useSettingsStore((s) => s.onboarding_completed);
-  const onboardingActive = settingsHydrated && !onboardingCompleted;
+  const settingsLoadError = useSettingsStore((s) => s.loadError);
+  const onboardingActive = settingsHydrated && !settingsLoadError && !onboardingCompleted;
   // Mirror App.tsx's lock gate (`showLock`). While the lock screen owns
   // the surface, the sidebar toggle / search pill / Private Chat button
   // are HIDDEN rather than disabled: the surfaces they operate don't
@@ -58,9 +67,13 @@ export function TitleBar() {
         const w = getCurrentWindow();
         const max = await w.isMaximized().catch(() => false);
         if (!cancelled) setIsMaximized(max);
+        // macOS hides its buttons in full screen; the bar takes the room back.
+        const full = nativeControls && (await w.isFullscreen().catch(() => false));
+        if (!cancelled) setIsFullscreen(full);
         const u = await w.onResized(async () => {
           try {
             setIsMaximized(await w.isMaximized());
+            if (nativeControls) setIsFullscreen(await w.isFullscreen());
           } catch {
             /* ignore */
           }
@@ -109,7 +122,12 @@ export function TitleBar() {
   return (
     <div
       data-tauri-drag-region
-      className="relative z-[70] flex h-9 items-center gap-2 border-b border-foreground/8 bg-foreground/[0.03] pl-1.5 pr-0 select-none backdrop-blur-2xl"
+      className={cn(
+        "relative z-[70] flex h-9 items-center gap-2 border-b border-foreground/8 bg-foreground/[0.03] pr-0 select-none backdrop-blur-2xl",
+        // 76px: the native buttons sit at x = 14 and span 54px
+        // (`trafficLightPosition` in tauri.macos.conf.json), plus a gap.
+        nativeControls && !isFullscreen ? "pl-[76px]" : "pl-1.5",
+      )}
     >
       {/* Sidebar collapse/expand toggle. Lives at the leftmost slot of the
           window's title bar so the user always knows where to find it,
@@ -188,7 +206,7 @@ export function TitleBar() {
           >
             <Search className="h-3.5 w-3.5 shrink-0" />
             <span className="min-w-0 flex-1 truncate text-left text-xs">
-              Search chats, messages, spaces…
+              Search chats, messages, Spaces…
             </span>
             <kbd className="rounded border border-foreground/10 bg-foreground/[0.05] px-1 py-px font-mono text-[10px] tracking-wider text-foreground/40">
               {isMac ? "⌘K" : "Ctrl K"}
@@ -224,28 +242,30 @@ export function TitleBar() {
           </button>
         </div>
       )}
-      <div className="flex shrink-0 items-center">
-        <TitleButton onClick={minimize} ariaLabel="Minimize">
-          <Minus className="h-3.5 w-3.5" />
-        </TitleButton>
-        <TitleButton
-          onClick={toggleMax}
-          ariaLabel={isMaximized ? "Restore" : "Maximize"}
-        >
-          {isMaximized ? (
-            <Copy className="h-3.5 w-3.5 rotate-180" />
-          ) : (
-            <Square className="h-3 w-3" />
-          )}
-        </TitleButton>
-        <TitleButton
-          onClick={close}
-          ariaLabel="Close"
-          className="hover:bg-destructive hover:text-destructive-foreground"
-        >
-          <X className="h-3.5 w-3.5" />
-        </TitleButton>
-      </div>
+      {!nativeControls && (
+        <div className="flex shrink-0 items-center">
+          <TitleButton onClick={minimize} ariaLabel="Minimize">
+            <Minus className="h-3.5 w-3.5" />
+          </TitleButton>
+          <TitleButton
+            onClick={toggleMax}
+            ariaLabel={isMaximized ? "Restore" : "Maximize"}
+          >
+            {isMaximized ? (
+              <Copy className="h-3.5 w-3.5 rotate-180" />
+            ) : (
+              <Square className="h-3 w-3" />
+            )}
+          </TitleButton>
+          <TitleButton
+            onClick={close}
+            ariaLabel="Close"
+            className="hover:bg-destructive hover:text-destructive-foreground"
+          >
+            <X className="h-3.5 w-3.5" />
+          </TitleButton>
+        </div>
+      )}
     </div>
   );
 }

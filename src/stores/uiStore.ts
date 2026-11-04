@@ -3,7 +3,7 @@ import type { Attachment } from "@/types";
 
 /** Which section of the sidebar's right column is visible. Swapped by the
  *  narrow icon rail on the far left. */
-export type SidebarTab = "chats" | "spaces" | "snippets" | "models";
+export type SidebarTab = "chats" | "spaces" | "library" | "snippets" | "models";
 
 /** Deep-link target when opening the Settings dialog. "archive" is the new
  *  home for the chat archive (previously a dedicated full-page view). */
@@ -12,6 +12,7 @@ export type SettingsTab =
   | "providers"
   | "features"
   | "tools"
+  | "library"
   | "appearance"
   | "mcp"
   | "archive"
@@ -78,6 +79,9 @@ interface UIState {
    *  Set by the `/export` slash command, which can't reach the dialog's
    *  local state directly. Mirrors `pendingOpenModelPicker`. */
   pendingOpenExport: boolean;
+  /** One-shot flag for the ChatHeader's "Import context" dialog, set by the
+   *  `/import` slash command. Mirrors `pendingOpenExport`. */
+  pendingOpenImport: boolean;
   /** One-shot: a message the transcript should scroll to and flash as soon as
    *  it's mounted. Set by the Cmd/Ctrl-K palette when the user picks a message
    *  result, consumed by ChatCanvas. It can't be a plain call because the
@@ -96,7 +100,6 @@ interface UIState {
   setSidebarTab: (tab: SidebarTab) => void;
   /** Record that a chat was opened. Called by `chatStore.selectSession`. */
   noteSessionVisit: (sessionId: string) => void;
-  setComposerDraft: (text: string) => void;
   insertComposerDraft: (text: string) => void;
   /** One-shot: seed both text and attachments into the composer. Used by
    *  Snippets' "Run" action. */
@@ -109,6 +112,8 @@ interface UIState {
   consumePendingOpenModelPicker: () => boolean;
   setPendingOpenExport: (v: boolean) => void;
   consumePendingOpenExport: () => boolean;
+  setPendingOpenImport: (v: boolean) => void;
+  consumePendingOpenImport: () => boolean;
   setPendingJumpMessage: (messageId: string | null) => void;
   consumePendingJumpMessage: () => string | null;
 }
@@ -131,6 +136,7 @@ export const useUIStore = create<UIState>((set, get) => ({
   toneIdBySession: {},
   pendingOpenModelPicker: false,
   pendingOpenExport: false,
+  pendingOpenImport: false,
   toggleSidebar: () =>
     set((s) => ({ sidebarOpen: !s.sidebarOpen, sidebarAutoCollapsed: false })),
   toggleParams: () => set((s) => ({ paramsOpen: !s.paramsOpen })),
@@ -153,7 +159,6 @@ export const useUIStore = create<UIState>((set, get) => ({
         ].slice(0, 10),
       };
     }),
-  setComposerDraft: (composerDraft) => set({ composerDraft }),
   insertComposerDraft: (text) =>
     set((s) => ({
       composerDraft: text,
@@ -190,6 +195,12 @@ export const useUIStore = create<UIState>((set, get) => ({
   consumePendingOpenExport: (): boolean => {
     const v = get().pendingOpenExport;
     if (v) set({ pendingOpenExport: false });
+    return v;
+  },
+  setPendingOpenImport: (v) => set({ pendingOpenImport: v }),
+  consumePendingOpenImport: (): boolean => {
+    const v = get().pendingOpenImport;
+    if (v) set({ pendingOpenImport: false });
     return v;
   },
   setPendingJumpMessage: (pendingJumpMessageId) => set({ pendingJumpMessageId }),

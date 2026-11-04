@@ -1,6 +1,6 @@
 // Helpers for picking a model during onboarding.
 //
-// Two related jobs live here, both pure so they can be unit-tested without a
+// Three related jobs live here, all pure so they can be unit-tested without a
 // Tauri runtime:
 //
 //   1. Sizing a local Ollama catalog entry against the host, so the wizard can
@@ -11,6 +11,7 @@
 //      happened to return first (`/v1/models` on api.openai.com is not sorted
 //      in any useful order, and its first entry is routinely an embedding or
 //      audio model).
+//   3. Comparing a typed Ollama tag with the ones being pulled or installed.
 
 import type { ModelInfo } from "@/types";
 
@@ -236,6 +237,15 @@ export function rankChatModels(models: ModelInfo[]): ModelInfo[] {
     (NON_CHAT_PATTERN.test(m.id) ? rest : chat).push(m);
   }
   return [...chat, ...rest];
+}
+
+/** An Ollama tag as the daemon lists it: a bare name means its `:latest`, so
+ *  `llama3` and `llama3:latest` compare equal — one is already installed, or
+ *  already downloading, when the other is. Only the last path segment counts:
+ *  a registry host's `:port` isn't a tag. */
+export function fullOllamaTag(tag: string): string {
+  const t = tag.trim();
+  return t.slice(t.lastIndexOf("/") + 1).includes(":") ? t : `${t}:latest`;
 }
 
 /** Format a GB figure for display: one decimal under 10 GB, whole numbers

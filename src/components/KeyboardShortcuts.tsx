@@ -8,7 +8,13 @@ import { useModelsStore } from "@/stores/modelsStore";
 import { usePrivateChatStore } from "@/stores/privateChatStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useSecurityStore } from "@/stores/securityStore";
-import { matches, SHORTCUTS, type ShortcutAction } from "@/lib/shortcuts";
+import { deleteChatConfirm } from "@/lib/confirmations";
+import {
+  matches,
+  modalDialogOpen,
+  SHORTCUTS,
+  type ShortcutAction,
+} from "@/lib/shortcuts";
 
 /**
  * App-wide keyboard shortcut handler. Mounts once near the root and owns a
@@ -19,11 +25,13 @@ import { matches, SHORTCUTS, type ShortcutAction } from "@/lib/shortcuts";
  *
  * Gated surfaces — shortcuts are suppressed when any of these own the
  * screen, mirroring the same gates `TitleBar` uses:
+ *   - the security probe still pending (App renders only the background)
  *   - lock screen (security configured + still locked)
  *   - onboarding (not yet completed)
  *   - private chat (owns the whole UI below the title bar)
+ *   - a modal dialog, the Ctrl/Cmd+K palette included
  *
- * `lock-now` is the one exception: it runs through the last two, since the
+ * `lock-now` is the one exception: it runs through the last three, since the
  * point of a panic key is that it works wherever you are.
  *
  * The Cmd/Ctrl-K palette has its OWN listener inside `SearchBar` that
@@ -32,6 +40,17 @@ import { matches, SHORTCUTS, type ShortcutAction } from "@/lib/shortcuts";
  * we just dispatch via the global handler instead of re-implementing the
  * overlay.
  */
+
+/** Is the chat view what's on screen? A Space's page, a model's page or
+ *  another sidebar tab (Library, say) hides the open chat. */
+function chatOnScreen(): boolean {
+  return (
+    !useSpaceStore.getState().viewingSpaceId &&
+    !useModelsStore.getState().viewingModel &&
+    useUIStore.getState().sidebarTab === "chats"
+  );
+}
+
 export function KeyboardShortcuts() {
   const { confirm } = useConfirm();
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
@@ -55,14 +74,29 @@ export function KeyboardShortcuts() {
       const settings = useSettingsStore.getState();
       const priv = usePrivateChatStore.getState();
       const onboardingActive =
-        settings.hydrated && !settings.onboarding_completed;
+        settings.hydrated && !settings.loadError && !settings.onboarding_completed;
+      // Until the security probe lands the lock isn't known: a configured
+      // lock still reads as unlocked, and Ctrl+N made a chat behind the blank
+      // screen App shows meanwhile. Nothing to lock yet either.
+      const probing = !sec.hydrated;
       const locked = sec.status.configured && !sec.unlocked;
       // `lock-now` deliberately survives the onboarding / private-chat gates:
       // a panic key that goes dead on the most sensitive surface in the app
       // (an off-the-record chat) is worse than not shipping one. It stays
       // gated on `locked` because re-locking a locked app does nothing.
+      //
+      // The rest wait for an open dialog to close: they acted on the app
+      // behind it — Ctrl+Shift+Backspace under the Ctrl+K palette opened the
+      // delete confirm beneath it, with focus on its Delete button for the
+      // next Enter.
       const panic = spec.action === "lock-now";
-      if (locked || ((onboardingActive || priv.open) && !panic)) return;
+      if (
+        probing ||
+        locked ||
+        ((onboardingActive || priv.open || modalDialogOpen()) && !panic)
+      ) {
+        return;
+      }
 
       e.preventDefault();
       e.stopPropagation();
@@ -108,27 +142,27 @@ export function KeyboardShortcuts() {
 
         case "toggle-params": {
           // Right slot is mutually exclusive with the code canvas. The
-          // params panel itself only renders when a session exists, so
-          // we no-op otherwise to avoid toggling a flag the user can't
-          // see take effect.
+          // params panel itself only renders beside an open chat, so we
+          // no-op otherwise to avoid toggling a flag the user can't see take
+          // effect — on a Space's, the Library's or a model's page it opened
+          // nothing, yet collapsed the sidebar on a narrow window to make
+          // room for it.
           const chat = useChatStore.getState();
-          if (!chat.activeSessionId) return;
+          if (!chat.activeSessionId || !chatOnScreen()) return;
           useUIStore.getState().toggleParams();
           return;
         }
 
         case "delete-current-chat": {
           const chat = useChatStore.getState();
-          const id = chat.activeSessionId;
+          // Only a chat that's on screen. A Space's page, a model's page or
+          // another sidebar tab (Library, say) hides the open chat, and the
+          // shortcut used to delete it from behind them.
+          const id = chatOnScreen() ? chat.activeSessionId : null;
           if (!id) return;
           const session = chat.sessions.find((s) => s.id === id);
           if (!session) return;
-          const ok = await confirm({
-            title: "Delete this chat?",
-            body: `“${session.title || "Untitled"}” will be removed permanently — all messages and metrics will be gone.`,
-            confirmLabel: "Delete chat",
-            destructive: true,
-          });
+          const ok = await confirm(deleteChatConfirm(session.title));
           if (ok) void chat.remove(id);
           return;
         }

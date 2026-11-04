@@ -30,6 +30,8 @@ const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+pub mod library;
+
 /// Pragmas applied to BOTH the writer connection and every pooled reader.
 /// Skipped: `journal_mode = WAL` (persisted in the file header — only the
 /// writer needs to set it, readers inherit) and `foreign_keys` (only
@@ -89,6 +91,16 @@ pub struct Session {
     /// export shouldn't hand their path to your model.
     #[serde(default)]
     pub workspace_root: Option<String>,
+    /// How this chat's Library and Space sources reach the model: `"auto"`,
+    /// `"full"` or `"retrieval"`. Null means "inherit" — the Space's mode
+    /// for a chat in a Space, otherwise `"auto"`. See `src/lib/sources.ts`.
+    #[serde(default)]
+    pub retrieval_mode: Option<String>,
+    /// How images are scaled before they reach the model, as the JSON
+    /// [`normalize_image_scaling`] accepts. Null means "inherit" — the
+    /// Space's, else the app's. See `src/lib/imageScaling.ts`.
+    #[serde(default)]
+    pub image_scaling_json: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -132,12 +144,59 @@ pub struct Space {
     /// on (matching the behaviour an existing user would see post-migration).
     #[serde(default = "default_true")]
     pub memory_enabled: bool,
+    /// How the Space's sources reach the model: `"auto"` (full text while
+    /// they fit, retrieved excerpts once they don't), `"full"` or
+    /// `"retrieval"`. Defaults to `"full"` on exports that predate it — what
+    /// those Spaces did, as the 1.6 migration keeps for existing rows.
+    #[serde(default = "pre_library_retrieval_mode")]
+    pub retrieval_mode: String,
+    /// How images are scaled for the Space's chats, as the JSON
+    /// [`normalize_image_scaling`] accepts. Null means "inherit the app's".
+    #[serde(default)]
+    pub image_scaling_json: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_retrieval_mode() -> String {
+    "auto".to_string()
+}
+
+fn pre_library_retrieval_mode() -> String {
+    "full".to_string()
+}
+
+/// The values a `retrieval_mode` column may hold. The Space page looks its
+/// labels up by the value, so anything else breaks it.
+pub fn is_retrieval_mode(mode: &str) -> bool {
+    matches!(mode, "auto" | "full" | "retrieval")
+}
+
+/// An image-scaling override (`src/lib/imageScaling.ts`) re-encoded, or
+/// None when `json` isn't one: unparseable, an unknown mode, or a size
+/// outside what the UI offers.
+pub fn normalize_image_scaling(json: &str) -> Option<String> {
+    #[derive(Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct ImageScaling {
+        enabled: bool,
+        mode: String,
+        px: u32,
+        percent: u32,
+    }
+    let s: ImageScaling = serde_json::from_str(json).ok()?;
+    let valid = matches!(s.mode.as_str(), "px" | "percent")
+        && (64..=8192).contains(&s.px)
+        && (1..=100).contains(&s.percent);
+    if valid {
+        serde_json::to_string(&s).ok()
+    } else {
+        None
+    }
 }
 
 /// One free-text fact persisted across chats in a Space. The extractor
@@ -182,6 +241,10 @@ pub struct SpaceFile {
     pub data: String,
     pub size: i64,
     pub position: i32,
+    /// `false` keeps the source in the Space but out of every chat's
+    /// context. Defaults to on for exports that predate the toggle.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
     pub created_at: i64,
 }
 
@@ -429,12 +492,18 @@ pub struct StorageStats {
     pub space_files: i64,
     pub snippets: i64,
     pub mcp_servers: i64,
+    #[serde(default)]
+    pub library_items: i64,
 
     /// Logical text bytes, by area. These ignore page overhead and indexes,
     /// so they sum to less than `db_bytes`.
     pub message_bytes: i64,
     pub attachment_bytes: i64,
     pub space_bytes: i64,
+    /// Library item bodies plus the retrieval index built over them and
+    /// over Space sources (chunk text + embeddings).
+    #[serde(default)]
+    pub library_bytes: i64,
     pub other_bytes: i64,
 }
 
@@ -519,11 +588,6 @@ impl Database {
             read_pool,
             path: path.to_path_buf(),
         })
-    }
-
-    /// Path to the SQLite file backing this handle.
-    pub fn path(&self) -> &Path {
-        &self.path
     }
 
     /// Run a read-only closure against a pooled connection. Use this for
@@ -910,6 +974,170 @@ impl Database {
             "#,
         )?;
 
+        // Library (v1.6): how sources reach the model, per Space and per chat
+        // (NULL on a chat = inherit), and the per-source on/off switch for a
+        // Space's own uploads. Spaces that exist when the column arrives get
+        // "full" — what every Space did before 1.6: inline every file, at any
+        // size. "auto" (the default for new Spaces) would switch an existing
+        // Space whose files pass half the window to excerpts without the user
+        // ever choosing it. Uploads land enabled.
+        if !has_column(&conn, "spaces", "retrieval_mode")? {
+            conn.execute_batch(
+                "BEGIN;
+                 ALTER TABLE spaces ADD COLUMN retrieval_mode TEXT NOT NULL DEFAULT 'auto';
+                 UPDATE spaces SET retrieval_mode = 'full';
+                 COMMIT;",
+            )?;
+        }
+        if !has_column(&conn, "sessions", "retrieval_mode")? {
+            conn.execute_batch("ALTER TABLE sessions ADD COLUMN retrieval_mode TEXT;")?;
+        }
+        if !has_column(&conn, "space_files", "enabled")? {
+            conn.execute_batch(
+                "ALTER TABLE space_files ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1;",
+            )?;
+        }
+        // Image scaling, per chat and per Space (NULL = inherit).
+        if !has_column(&conn, "sessions", "image_scaling_json")? {
+            conn.execute_batch("ALTER TABLE sessions ADD COLUMN image_scaling_json TEXT;")?;
+        }
+        if !has_column(&conn, "spaces", "image_scaling_json")? {
+            conn.execute_batch("ALTER TABLE spaces ADD COLUMN image_scaling_json TEXT;")?;
+        }
+
+        // Library: items (texts, files, links) stored once, grouped into
+        // datasets (an item can sit in several), and linked — not copied —
+        // into Spaces and chats. A link row points at exactly one of an item
+        // or a dataset; the partial unique indexes stop the same thing being
+        // linked twice to one owner.
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS library_items (
+                id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                title TEXT NOT NULL,
+                mime TEXT NOT NULL DEFAULT '',
+                media TEXT NOT NULL DEFAULT 'text',
+                content TEXT NOT NULL,
+                size INTEGER NOT NULL DEFAULT 0,
+                url TEXT,
+                fetched_at INTEGER,
+                content_hash TEXT NOT NULL DEFAULT '',
+                truncated INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_library_items_hash
+                ON library_items(content_hash);
+            CREATE TABLE IF NOT EXISTS library_datasets (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS library_dataset_items (
+                dataset_id TEXT NOT NULL REFERENCES library_datasets(id) ON DELETE CASCADE,
+                item_id TEXT NOT NULL REFERENCES library_items(id) ON DELETE CASCADE,
+                position INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (dataset_id, item_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_library_dataset_items_item
+                ON library_dataset_items(item_id);
+            CREATE TABLE IF NOT EXISTS space_library_sources (
+                id TEXT PRIMARY KEY,
+                owner_id TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
+                item_id TEXT REFERENCES library_items(id) ON DELETE CASCADE,
+                dataset_id TEXT REFERENCES library_datasets(id) ON DELETE CASCADE,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                position INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_space_library_sources_item
+                ON space_library_sources(owner_id, item_id) WHERE item_id IS NOT NULL;
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_space_library_sources_dataset
+                ON space_library_sources(owner_id, dataset_id) WHERE dataset_id IS NOT NULL;
+            CREATE TABLE IF NOT EXISTS session_library_sources (
+                id TEXT PRIMARY KEY,
+                owner_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                item_id TEXT REFERENCES library_items(id) ON DELETE CASCADE,
+                dataset_id TEXT REFERENCES library_datasets(id) ON DELETE CASCADE,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                position INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_session_library_sources_item
+                ON session_library_sources(owner_id, item_id) WHERE item_id IS NOT NULL;
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_session_library_sources_dataset
+                ON session_library_sources(owner_id, dataset_id) WHERE dataset_id IS NOT NULL;
+            "#,
+        )?;
+
+        // Retrieval index over every text source — Library items
+        // (`doc_kind = 'library'`) and a Space's own uploads
+        // (`'space_file'`). Derived data: never exported, rebuilt by the
+        // indexer from the documents themselves. `rag_chunks_fts` is an
+        // external-content FTS5 index kept in step by triggers; `embedding`
+        // is a unit-length f32 vector (little-endian) from `embed_model`,
+        // NULL until the background indexer gets to it. The polymorphic
+        // `doc_id` can't carry a cascading FK, so the two delete triggers do
+        // that job — they also fire for rows removed by a Space's cascade.
+        //
+        // Ids are AUTOINCREMENT so a deleted chunk's id is never handed to a
+        // new one: the indexer stores vectors by id after a slow request, and
+        // a reused id would put an old text's vector on a new text. Pre-1.6
+        // development builds created the table without it; being derived
+        // data, that table is dropped and rebuilt (the indexer re-chunks
+        // every document on its first pass).
+        let legacy_rag: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master
+              WHERE type = 'table' AND name = 'rag_chunks' AND sql NOT LIKE '%AUTOINCREMENT%'",
+            [],
+            |r| r.get(0),
+        )?;
+        if legacy_rag > 0 {
+            conn.execute_batch("DROP TABLE IF EXISTS rag_chunks_fts; DROP TABLE rag_chunks;")?;
+        }
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS rag_chunks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                doc_kind TEXT NOT NULL,
+                doc_id TEXT NOT NULL,
+                seq INTEGER NOT NULL,
+                text TEXT NOT NULL,
+                embedding BLOB,
+                embed_model TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_rag_chunks_doc
+                ON rag_chunks(doc_kind, doc_id, seq);
+            -- Covers the per-document "embedded with this model" counts,
+            -- which otherwise read each row past its embedding BLOB to
+            -- reach `embed_model`.
+            CREATE INDEX IF NOT EXISTS idx_rag_chunks_doc_model
+                ON rag_chunks(doc_kind, doc_id, embed_model);
+            CREATE VIRTUAL TABLE IF NOT EXISTS rag_chunks_fts USING fts5(
+                text,
+                content = 'rag_chunks',
+                content_rowid = 'id',
+                tokenize = 'unicode61 remove_diacritics 2'
+            );
+            CREATE TRIGGER IF NOT EXISTS rag_chunks_ai AFTER INSERT ON rag_chunks BEGIN
+                INSERT INTO rag_chunks_fts(rowid, text) VALUES (new.id, new.text);
+            END;
+            CREATE TRIGGER IF NOT EXISTS rag_chunks_ad AFTER DELETE ON rag_chunks BEGIN
+                INSERT INTO rag_chunks_fts(rag_chunks_fts, rowid, text)
+                    VALUES ('delete', old.id, old.text);
+            END;
+            CREATE TRIGGER IF NOT EXISTS library_items_rag_ad AFTER DELETE ON library_items BEGIN
+                DELETE FROM rag_chunks WHERE doc_kind = 'library' AND doc_id = old.id;
+            END;
+            CREATE TRIGGER IF NOT EXISTS space_files_rag_ad AFTER DELETE ON space_files BEGIN
+                DELETE FROM rag_chunks WHERE doc_kind = 'space_file' AND doc_id = old.id;
+            END;
+            "#,
+        )?;
+
         Ok(())
     }
 
@@ -918,7 +1146,7 @@ impl Database {
     pub fn list_sessions(&self) -> Result<Vec<Session>> {
         self.with_read(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, title, provider, model, system_prompt, params_json, space_id, pinned_at, archived_at, forked_from_session_id, label, folder_id, workspace_root, created_at, updated_at
+                "SELECT id, title, provider, model, system_prompt, params_json, space_id, pinned_at, archived_at, forked_from_session_id, label, folder_id, workspace_root, created_at, updated_at, retrieval_mode, image_scaling_json
                  FROM sessions ORDER BY updated_at DESC",
             )?;
             let rows = stmt
@@ -937,6 +1165,8 @@ impl Database {
                         label: r.get(10)?,
                         folder_id: r.get(11)?,
                         workspace_root: r.get(12)?,
+                        retrieval_mode: r.get(15)?,
+                        image_scaling_json: r.get(16)?,
                         created_at: r.get(13)?,
                         updated_at: r.get(14)?,
                     })
@@ -976,6 +1206,8 @@ impl Database {
             label: None,
             folder_id: None,
             workspace_root: None,
+            retrieval_mode: None,
+            image_scaling_json: None,
             created_at: now,
             updated_at: now,
         })
@@ -984,7 +1216,9 @@ impl Database {
     /// Create a new session as a fork of `source_id`, copying the source's
     /// title / provider / model / system prompt / params / space verbatim,
     /// and duplicating its messages up to (and including) `up_to_message_id`
-    /// — or every message in the source when that arg is None.
+    /// — or every message in the source when that arg is None. The one
+    /// exception to "verbatim" is a compaction summary that covers turns
+    /// after the cut (see below).
     ///
     /// Message copies get fresh ids and a fresh session_id but keep the
     /// source's `created_at` so transcript ordering matches the original.
@@ -1017,6 +1251,18 @@ impl Database {
             }
         };
         let to_copy = &messages[..take_until_idx];
+        // A compaction summary in the prompt stands in for every compacted
+        // turn. When the cut falls before the last of them, the fork would
+        // inherit a summary of turns it doesn't contain — so it drops the
+        // summary and sends the turns it does copy in full again.
+        let drop_summary = messages[take_until_idx..]
+            .iter()
+            .any(|m| m.compacted_at.is_some());
+        let system_prompt = if drop_summary {
+            source.system_prompt.as_deref().map(strip_summary_block)
+        } else {
+            source.system_prompt.clone()
+        };
 
         let new_id = Uuid::new_v4().to_string();
         let now = Utc::now().timestamp_millis();
@@ -1033,21 +1279,32 @@ impl Database {
         tx.execute(
             "INSERT INTO sessions (id, title, provider, model, system_prompt, params_json,
                                    space_id, pinned_at, archived_at, forked_from_session_id,
-                                   folder_id, workspace_root, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, ?8, ?9, ?10, ?11, ?11)",
+                                   folder_id, workspace_root, retrieval_mode, image_scaling_json,
+                                   created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, ?8, ?9, ?10, ?11, ?12, ?13, ?13)",
             params![
                 new_id,
                 source.title,
                 source.provider,
                 source.model,
-                source.system_prompt,
+                system_prompt,
                 source.params_json,
                 source.space_id,
                 source.id,
                 source.folder_id,
                 source.workspace_root,
+                source.retrieval_mode,
+                source.image_scaling_json,
                 now,
             ],
+        )?;
+        // The chat's Library sources come along too: a branch continues the
+        // same conversation, so it should be looking at the same material.
+        tx.execute(
+            "INSERT INTO session_library_sources (id, owner_id, item_id, dataset_id, enabled, position, created_at)
+             SELECT lower(hex(randomblob(16))), ?1, item_id, dataset_id, enabled, position, ?2
+             FROM session_library_sources WHERE owner_id = ?3",
+            params![new_id, now, source.id],
         )?;
 
         // One prepare for the whole copy — forking a long chat replays every
@@ -1069,7 +1326,7 @@ impl Database {
                     m.attachments_json,
                     m.metrics_json,
                     m.tool_calls_json,
-                    m.compacted_at,
+                    if drop_summary { None } else { m.compacted_at },
                     m.created_at,
                     m.import_group,
                     m.import_hidden,
@@ -1085,7 +1342,7 @@ impl Database {
             title: source.title,
             provider: source.provider,
             model: source.model,
-            system_prompt: source.system_prompt,
+            system_prompt,
             params_json: source.params_json,
             space_id: source.space_id,
             pinned_at: None,
@@ -1104,6 +1361,8 @@ impl Database {
             // of work, and the whole point of branching a coding chat is to
             // try something else against the same project.
             workspace_root: source.workspace_root,
+            retrieval_mode: source.retrieval_mode,
+            image_scaling_json: source.image_scaling_json,
             created_at: now,
             updated_at: now,
         })
@@ -1170,15 +1429,23 @@ impl Database {
     pub fn pin_session(&self, id: &str, pinned: bool) -> Result<()> {
         let conn = self.conn.lock();
         let now = Utc::now().timestamp_millis();
-        let pinned_at: Option<i64> = if pinned { Some(now) } else { None };
-        // Bump `updated_at` too so the sidebar's `ORDER BY updated_at DESC`
-        // surfaces the just-pinned chat to the top. Without this, pinning
-        // a buried chat leaves it visually unchanged even though the
-        // pinned-icon flipped on.
-        conn.execute(
-            "UPDATE sessions SET pinned_at = ?1, updated_at = ?2 WHERE id = ?3",
-            params![pinned_at, now, id],
-        )?;
+        // Pinning bumps `updated_at` too so the sidebar's `ORDER BY
+        // updated_at DESC` surfaces the just-pinned chat to the top. Without
+        // this, pinning a buried chat leaves it visually unchanged even
+        // though the pinned-icon flipped on. Unpinning leaves it alone — the
+        // chat drops back to its own date group instead of jumping to
+        // "Today".
+        if pinned {
+            conn.execute(
+                "UPDATE sessions SET pinned_at = ?1, updated_at = ?1 WHERE id = ?2",
+                params![now, id],
+            )?;
+        } else {
+            conn.execute(
+                "UPDATE sessions SET pinned_at = NULL WHERE id = ?1",
+                params![id],
+            )?;
+        }
         Ok(())
     }
 
@@ -1223,6 +1490,19 @@ impl Database {
         Ok(())
     }
 
+    /// Move the chat into the Space `space_id`, or out of any Space with
+    /// `None`. Like `set_session_folder` this leaves `updated_at` alone —
+    /// moving a chat isn't new activity in it. An unknown Space id fails on
+    /// the foreign key instead of leaving the chat pointing at nothing.
+    pub fn set_session_space(&self, id: &str, space_id: Option<&str>) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "UPDATE sessions SET space_id = ?1 WHERE id = ?2",
+            params![space_id, id],
+        )?;
+        Ok(())
+    }
+
     pub fn archive_session(&self, id: &str, archived: bool) -> Result<()> {
         let conn = self.conn.lock();
         let now = Utc::now().timestamp_millis();
@@ -1250,7 +1530,7 @@ impl Database {
     pub fn get_session(&self, id: &str) -> Result<Option<Session>> {
         self.with_read(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, title, provider, model, system_prompt, params_json, space_id, pinned_at, archived_at, forked_from_session_id, label, folder_id, workspace_root, created_at, updated_at
+                "SELECT id, title, provider, model, system_prompt, params_json, space_id, pinned_at, archived_at, forked_from_session_id, label, folder_id, workspace_root, created_at, updated_at, retrieval_mode, image_scaling_json
                  FROM sessions WHERE id = ?1",
             )?;
             let mut rows = stmt.query(params![id])?;
@@ -1269,6 +1549,8 @@ impl Database {
                     label: r.get(10)?,
                     folder_id: r.get(11)?,
                     workspace_root: r.get(12)?,
+                    retrieval_mode: r.get(15)?,
+                    image_scaling_json: r.get(16)?,
                     created_at: r.get(13)?,
                     updated_at: r.get(14)?,
                 }))
@@ -1514,9 +1796,16 @@ impl Database {
                 space_files: scalar("SELECT COUNT(*) FROM space_files")?,
                 snippets: scalar("SELECT COUNT(*) FROM snippets")?,
                 mcp_servers: scalar("SELECT COUNT(*) FROM mcp_servers")?,
+                library_items: scalar("SELECT COUNT(*) FROM library_items")?,
 
+                // The transcript as stored: the reply text plus its reasoning,
+                // tool-call records (results included) and per-turn metrics.
                 message_bytes: scalar(
-                    "SELECT COALESCE(SUM(LENGTH(CAST(content AS BLOB))), 0) FROM messages",
+                    "SELECT COALESCE(SUM(LENGTH(CAST(content AS BLOB))
+                                       + LENGTH(CAST(COALESCE(thinking, '') AS BLOB))
+                                       + LENGTH(CAST(COALESCE(tool_calls_json, '') AS BLOB))
+                                       + LENGTH(CAST(COALESCE(metrics_json, '') AS BLOB))), 0)
+                     FROM messages",
                 )?,
                 // Attachments are inlined as base64 into the owning row —
                 // there's no separate file store — so they're the bucket
@@ -1533,6 +1822,12 @@ impl Database {
                 )? + scalar(
                     "SELECT COALESCE(SUM(LENGTH(CAST(description AS BLOB))
                                        + LENGTH(CAST(instructions AS BLOB))), 0) FROM spaces",
+                )?,
+                library_bytes: scalar(
+                    "SELECT COALESCE(SUM(LENGTH(CAST(content AS BLOB))), 0) FROM library_items",
+                )? + scalar(
+                    "SELECT COALESCE(SUM(LENGTH(CAST(text AS BLOB))
+                                       + COALESCE(LENGTH(embedding), 0)), 0) FROM rag_chunks",
                 )?,
                 // Everything else worth counting: prompt text, settings, and
                 // the per-chat metadata. Deliberately not exhaustive over
@@ -1848,7 +2143,7 @@ impl Database {
             let mut stmt = conn.prepare(
                 "SELECT id, name, description, instructions,
                         default_provider, default_model, default_params_json,
-                        memory_enabled, created_at, updated_at
+                        memory_enabled, created_at, updated_at, retrieval_mode, image_scaling_json
                  FROM spaces ORDER BY updated_at DESC",
             )?;
             let rows = stmt
@@ -1862,6 +2157,8 @@ impl Database {
                         default_model: r.get(5)?,
                         default_params_json: r.get(6)?,
                         memory_enabled: r.get::<_, i64>(7)? != 0,
+                        retrieval_mode: r.get(10)?,
+                        image_scaling_json: r.get(11)?,
                         created_at: r.get(8)?,
                         updated_at: r.get(9)?,
                     })
@@ -1876,7 +2173,7 @@ impl Database {
             let mut stmt = conn.prepare(
                 "SELECT id, name, description, instructions,
                         default_provider, default_model, default_params_json,
-                        memory_enabled, created_at, updated_at
+                        memory_enabled, created_at, updated_at, retrieval_mode, image_scaling_json
                  FROM spaces WHERE id = ?1",
             )?;
             let mut rows = stmt.query(params![id])?;
@@ -1890,6 +2187,8 @@ impl Database {
                     default_model: r.get(5)?,
                     default_params_json: r.get(6)?,
                     memory_enabled: r.get::<_, i64>(7)? != 0,
+                    retrieval_mode: r.get(10)?,
+                    image_scaling_json: r.get(11)?,
                     created_at: r.get(8)?,
                     updated_at: r.get(9)?,
                 }))
@@ -1922,6 +2221,8 @@ impl Database {
             default_model: None,
             default_params_json: None,
             memory_enabled: true,
+            retrieval_mode: default_retrieval_mode(),
+            image_scaling_json: None,
             created_at: now,
             updated_at: now,
         })
@@ -1981,7 +2282,7 @@ impl Database {
     pub fn list_space_files(&self, space_id: &str) -> Result<Vec<SpaceFile>> {
         self.with_read(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, space_id, name, mime, kind, data, size, position, created_at
+                "SELECT id, space_id, name, mime, kind, data, size, position, created_at, enabled
                  FROM space_files WHERE space_id = ?1 ORDER BY position ASC",
             )?;
             let rows = stmt
@@ -1995,6 +2296,7 @@ impl Database {
                         data: r.get(5)?,
                         size: r.get(6)?,
                         position: r.get(7)?,
+                        enabled: r.get::<_, i64>(9)? != 0,
                         created_at: r.get(8)?,
                     })
                 })?
@@ -2019,12 +2321,19 @@ impl Database {
     ) -> Result<SpaceFile> {
         let id = Uuid::new_v4().to_string();
         let now = Utc::now().timestamp_millis();
-        let conn = self.conn.lock();
-        conn.execute(
+        let mut conn = self.conn.lock();
+        // Row and retrieval chunks in one transaction, so a text source is
+        // keyword-searchable the moment it exists.
+        let tx = conn.transaction()?;
+        tx.execute(
             "INSERT INTO space_files (id, space_id, name, mime, kind, data, size, position, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![id, space_id, name, mime, kind, data, size, position, now],
         )?;
+        if kind == "text" {
+            library::replace_chunks(&tx, library::DOC_SPACE_FILE, &id, data)?;
+        }
+        tx.commit()?;
         Ok(SpaceFile {
             id,
             space_id: space_id.to_string(),
@@ -2034,8 +2343,65 @@ impl Database {
             data: data.to_string(),
             size,
             position,
+            enabled: true,
             created_at: now,
         })
+    }
+
+    /// Switch one of a Space's own uploads in or out of its chats' context
+    /// without removing it.
+    pub fn set_space_file_enabled(&self, file_id: &str, enabled: bool) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "UPDATE space_files SET enabled = ?1 WHERE id = ?2",
+            params![enabled as i64, file_id],
+        )?;
+        Ok(())
+    }
+
+    /// Set how a Space's sources reach the model (`auto` / `full` /
+    /// `retrieval`). Validated by the caller.
+    pub fn set_space_retrieval_mode(&self, id: &str, mode: &str) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "UPDATE spaces SET retrieval_mode = ?1 WHERE id = ?2",
+            params![mode, id],
+        )?;
+        Ok(())
+    }
+
+    /// Set a chat's own retrieval mode, or `None` to inherit its Space's.
+    /// Leaves `updated_at` alone, like the label: it's a setting, not
+    /// activity.
+    pub fn set_session_retrieval_mode(&self, id: &str, mode: Option<&str>) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "UPDATE sessions SET retrieval_mode = ?1 WHERE id = ?2",
+            params![mode, id],
+        )?;
+        Ok(())
+    }
+
+    /// Set a Space's image scaling, or `None` to inherit the app's.
+    /// Validated by the caller.
+    pub fn set_space_image_scaling(&self, id: &str, json: Option<&str>) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "UPDATE spaces SET image_scaling_json = ?1 WHERE id = ?2",
+            params![json, id],
+        )?;
+        Ok(())
+    }
+
+    /// Set a chat's own image scaling, or `None` to inherit. Leaves
+    /// `updated_at` alone, like the retrieval mode.
+    pub fn set_session_image_scaling(&self, id: &str, json: Option<&str>) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "UPDATE sessions SET image_scaling_json = ?1 WHERE id = ?2",
+            params![json, id],
+        )?;
+        Ok(())
     }
 
     pub fn remove_space_file(&self, file_id: &str) -> Result<()> {
@@ -2656,7 +3022,7 @@ impl Database {
     pub fn all_space_files(&self) -> Result<Vec<SpaceFile>> {
         let conn = self.read_pool.get().context("acquire read connection")?;
         let mut stmt = conn.prepare(
-            "SELECT id, space_id, name, mime, kind, data, size, position, created_at
+            "SELECT id, space_id, name, mime, kind, data, size, position, created_at, enabled
              FROM space_files ORDER BY space_id, position",
         )?;
         let rows = stmt
@@ -2670,6 +3036,7 @@ impl Database {
                     data: r.get(5)?,
                     size: r.get(6)?,
                     position: r.get(7)?,
+                    enabled: r.get::<_, i64>(9)? != 0,
                     created_at: r.get(8)?,
                 })
             })?
@@ -2696,8 +3063,8 @@ impl Database {
         // eleven separate reads, and with the lock released between them a
         // streaming flush or a session create could commit halfway through —
         // producing a file whose `messages` reference a session absent from
-        // `sessions`. FK enforcement is off during restore, so those orphans
-        // then import silently as rows nothing displays.
+        // `sessions`. A restore drops such orphans (`clear_dangling_refs`), so
+        // they'd be silently lost on the way back in.
         //
         // Every read below goes through the pool, and no pooled read takes
         // this lock, so holding it here freezes the database without
@@ -2718,6 +3085,9 @@ impl Database {
                 // `postgresql://user:pass@host/db` as its one argument) or
                 // after a `--token` doesn't.
                 s.args_json = s.args_json.as_deref().and_then(redact_args_json);
+                // An HTTP server's URL can carry its credentials too: a token
+                // as the userinfo or as a query parameter.
+                s.url = redact_http_url(&s.url);
                 s
             })
             .collect();
@@ -2736,7 +3106,7 @@ impl Database {
             })
             .collect();
         Ok(DatabaseSnapshot {
-            schema: "loach/v1".to_string(),
+            schema: SNAPSHOT_SCHEMA.to_string(),
             exported_at: Utc::now().timestamp_millis(),
             loach_version: env!("CARGO_PKG_VERSION").to_string(),
             data: SnapshotData {
@@ -2752,6 +3122,10 @@ impl Database {
                 snippet_fill_values: self.all_snippet_fill_values()?,
                 mcp_servers,
                 settings: self.all_settings()?,
+                library_items: self.all_library_items()?,
+                library_datasets: self.list_library_datasets()?,
+                space_library_sources: self.all_library_sources(library::SourceOwner::Space)?,
+                session_library_sources: self.all_library_sources(library::SourceOwner::Session)?,
             },
         })
     }
@@ -2760,7 +3134,8 @@ impl Database {
     /// row-count breakdown for the UI to display ("Imported 12 chats, 145
     /// messages, …"). FK enforcement is disabled for the duration so a
     /// snapshot that's missing e.g. a referenced space_id for a session
-    /// still imports cleanly (the orphan FK becomes NULL at next write).
+    /// still imports; `clear_dangling_refs` then settles every such
+    /// reference before the commit, the way the FK's own action would have.
     ///
     /// `PRAGMA foreign_keys = ON` is restored on every exit path — including
     /// errors mid-import — so a bad snapshot can't leave the shared
@@ -2788,6 +3163,12 @@ impl Database {
         // toggled back on mid-transaction. `snippet_variables` is independent.
         tx.execute_batch(
             r#"
+            DELETE FROM rag_chunks;
+            DELETE FROM session_library_sources;
+            DELETE FROM space_library_sources;
+            DELETE FROM library_dataset_items;
+            DELETE FROM library_datasets;
+            DELETE FROM library_items;
             DELETE FROM messages;
             DELETE FROM space_files;
             DELETE FROM space_memories;
@@ -2823,12 +3204,19 @@ impl Database {
         // of that, and it also means a hand-edited snapshot can't grant a
         // model access to a path the user never picked. Don't "complete" this
         // list.
+        //
+        // `retrieval_mode` is screened here because a snapshot never passes
+        // the setters' `check_retrieval_mode`: an unknown value goes back to
+        // inheriting (NULL), and an unknown Space mode below to what a new
+        // Space gets. `image_scaling_json` likewise goes back to inheriting
+        // unless it's one the setters would have taken.
         for s in &d.sessions {
             tx.execute(
                 "INSERT INTO sessions (id, title, provider, model, system_prompt, params_json,
                                        space_id, pinned_at, archived_at, forked_from_session_id,
-                                       label, folder_id, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                                       label, folder_id, created_at, updated_at, retrieval_mode,
+                                       image_scaling_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
                 params![
                     s.id,
                     s.title,
@@ -2844,6 +3232,8 @@ impl Database {
                     s.folder_id,
                     s.created_at,
                     s.updated_at,
+                    s.retrieval_mode.as_deref().filter(|m| is_retrieval_mode(m)),
+                    s.image_scaling_json.as_deref().and_then(normalize_image_scaling),
                 ],
             )?;
         }
@@ -2882,8 +3272,8 @@ impl Database {
                 "INSERT INTO spaces (id, name, description, instructions,
                                      default_provider, default_model,
                                      default_params_json, memory_enabled,
-                                     created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                                     created_at, updated_at, retrieval_mode, image_scaling_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 params![
                     sp.id,
                     sp.name,
@@ -2895,6 +3285,12 @@ impl Database {
                     if sp.memory_enabled { 1_i64 } else { 0_i64 },
                     sp.created_at,
                     sp.updated_at,
+                    if is_retrieval_mode(&sp.retrieval_mode) {
+                        sp.retrieval_mode.clone()
+                    } else {
+                        default_retrieval_mode()
+                    },
+                    sp.image_scaling_json.as_deref().and_then(normalize_image_scaling),
                 ],
             )?;
         }
@@ -2934,8 +3330,8 @@ impl Database {
 
         for f in &d.space_files {
             tx.execute(
-                "INSERT INTO space_files (id, space_id, name, mime, kind, data, size, position, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                "INSERT INTO space_files (id, space_id, name, mime, kind, data, size, position, created_at, enabled)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 params![
                     f.id,
                     f.space_id,
@@ -2946,6 +3342,7 @@ impl Database {
                     f.size,
                     f.position,
                     f.created_at,
+                    f.enabled as i64,
                 ],
             )?;
         }
@@ -3002,8 +3399,9 @@ impl Database {
 
         for f in &d.snippet_fill_values {
             // `snippet_id` references `snippets(id)`. FK is OFF for this
-            // transaction so an orphaned row imports cleanly — but with the
-            // snippets table populated above, the common case lines up.
+            // transaction so an orphaned row inserts cleanly (and is dropped
+            // by `clear_dangling_refs`) — but with the snippets table
+            // populated above, the common case lines up.
             tx.execute(
                 "INSERT INTO snippet_fill_values (snippet_id, key, value, updated_at)
                  VALUES (?1, ?2, ?3, ?4)
@@ -3021,6 +3419,19 @@ impl Database {
             )?;
         }
 
+        // Library rows. The retrieval index (`rag_chunks`) isn't part of a
+        // snapshot — the indexer rebuilds it from these bodies after the
+        // restore, so an export never carries embeddings from a model the
+        // importing machine may not even have.
+        library::restore_library(&tx, d)?;
+
+        let dropped = clear_dangling_refs(&tx)?;
+        if dropped > 0 {
+            tracing::warn!(
+                "restore: dropped {dropped} row(s) whose chat, Space or other parent the snapshot didn't carry"
+            );
+        }
+
         let stats = ImportStats {
             sessions: d.sessions.len(),
             folders: d.folders.len(),
@@ -3034,6 +3445,8 @@ impl Database {
             snippet_fill_values: d.snippet_fill_values.len(),
             mcp_servers: d.mcp_servers.len(),
             settings: d.settings.len(),
+            library_items: d.library_items.len(),
+            library_datasets: d.library_datasets.len(),
         };
 
         tx.commit()?;
@@ -3092,6 +3505,12 @@ impl Database {
         // resurfaced on the next snippet run.
         tx.execute_batch(
             r#"
+            DELETE FROM rag_chunks;
+            DELETE FROM session_library_sources;
+            DELETE FROM space_library_sources;
+            DELETE FROM library_dataset_items;
+            DELETE FROM library_datasets;
+            DELETE FROM library_items;
             DELETE FROM messages;
             DELETE FROM space_files;
             DELETE FROM space_memories;
@@ -3133,6 +3552,12 @@ impl Database {
         // does land back at zero rows.
         tx.execute_batch(
             r#"
+            DELETE FROM rag_chunks;
+            DELETE FROM session_library_sources;
+            DELETE FROM space_library_sources;
+            DELETE FROM library_dataset_items;
+            DELETE FROM library_datasets;
+            DELETE FROM library_items;
             DELETE FROM messages;
             DELETE FROM space_files;
             DELETE FROM space_memories;
@@ -3150,6 +3575,52 @@ impl Database {
         tx.commit()?;
         Ok(())
     }
+}
+
+/// Settle the references a restore left dangling — FK enforcement is off
+/// for it, so a snapshot naming a Space, folder or chat it doesn't carry
+/// (hand-edited, or trimmed) inserts cleanly and nothing would otherwise
+/// fix it: a chat pointing at a missing Space sits in no list at all. Does
+/// what each FK's own action would have done had the parent been deleted:
+/// the optional pointers on `sessions` go NULL (`ON DELETE SET NULL`), and
+/// every row whose required parent is missing — which nothing can display
+/// or ever cascade away — is dropped (`ON DELETE CASCADE`). Returns how many
+/// rows were dropped.
+fn clear_dangling_refs(tx: &Connection) -> Result<usize> {
+    tx.execute_batch(
+        "UPDATE sessions SET space_id = NULL
+          WHERE space_id IS NOT NULL AND space_id NOT IN (SELECT id FROM spaces);
+         UPDATE sessions SET folder_id = NULL
+          WHERE folder_id IS NOT NULL AND folder_id NOT IN (SELECT id FROM folders);
+         UPDATE sessions SET forked_from_session_id = NULL
+          WHERE forked_from_session_id IS NOT NULL
+            AND forked_from_session_id NOT IN (SELECT id FROM sessions);",
+    )?;
+    // What's left are the children of a missing required parent. No table
+    // here is WITHOUT ROWID, so every violation names its row. A row with two
+    // dangling references is listed twice; the second DELETE finds nothing.
+    let orphans: Vec<(String, i64)> = tx
+        .prepare("PRAGMA foreign_key_check")?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<Result<_, _>>()?;
+    let mut dropped = 0;
+    for (table, rowid) in &orphans {
+        dropped +=
+            tx.execute(&format!("DELETE FROM \"{table}\" WHERE rowid = ?1"), params![rowid])?;
+    }
+    Ok(dropped)
+}
+
+/// The wire-format tag every export is written with. v2 (1.6) added the
+/// Library tables, `retrieval_mode` and `space_files.enabled`: a 1.5 build
+/// accepts only v1, so the bump makes it refuse a 1.6 export instead of
+/// wiping everything and restoring it without the Library.
+pub const SNAPSHOT_SCHEMA: &str = "loach/v2";
+
+/// Whether this build can restore an export tagged `schema`. v1 exports
+/// load with the 1.6 fields at their serde defaults.
+pub fn is_supported_snapshot_schema(schema: &str) -> bool {
+    matches!(schema, "loach/v1" | SNAPSHOT_SCHEMA)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -3191,6 +3662,19 @@ pub struct SnapshotData {
     /// Key/value settings as stored in the `settings` table. A plain list
     /// (not a map) so round-trip order is stable.
     pub settings: Vec<(String, String)>,
+    /// Library items with their full bodies. Empty on exports that predate
+    /// the Library.
+    #[serde(default)]
+    pub library_items: Vec<library::LibraryItem>,
+    /// Datasets, each carrying its ordered member ids.
+    #[serde(default)]
+    pub library_datasets: Vec<library::LibraryDataset>,
+    /// Library items / datasets linked into Spaces.
+    #[serde(default)]
+    pub space_library_sources: Vec<library::LibrarySource>,
+    /// Library items / datasets linked into chats.
+    #[serde(default)]
+    pub session_library_sources: Vec<library::LibrarySource>,
 }
 
 /// Row-count breakdown returned after a successful import.
@@ -3208,6 +3692,8 @@ pub struct ImportStats {
     pub snippet_fill_values: usize,
     pub mcp_servers: usize,
     pub settings: usize,
+    pub library_items: usize,
+    pub library_datasets: usize,
 }
 
 /// How much text `search_messages` keeps around a hit, in characters: the
@@ -3302,20 +3788,27 @@ fn build_snippet(text: &str, needle: &str) -> Option<String> {
 /// Stands in for a secret [`redact_args_json`] leaves out of an export.
 const REDACTED: &str = "REDACTED";
 
-/// A stdio server's `args_json` as it goes into an export: a password in a
-/// URL (`scheme://user:pass@host`) and the value of a flag whose name says
-/// it holds a credential (`--token x`, `--api-key=x`) are replaced with
-/// [`REDACTED`]; everything else is kept as typed. A value that doesn't
-/// parse as a list of strings is dropped whole — it's not a shape Loach
-/// writes, so nothing in it can be told apart from a secret.
+/// Whether a flag, environment variable, header or query parameter called
+/// `name` holds a credential. `auth` only counts as a whole word (`--auth`,
+/// `--basic-auth`), so `--author` and `--authority` keep their values.
+fn is_secret_name(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    ["token", "secret", "password", "passwd", "apikey", "api-key", "api_key", "authorization"]
+        .iter()
+        .any(|w| n.contains(w))
+        || n.split(['-', '_', '.']).any(|word| word == "auth")
+}
+
+/// A stdio server's `args_json` as it goes into an export: the value of a
+/// flag whose name says it holds a credential (`--token x`, `--api-key=x`),
+/// of such an environment assignment or header (`-e GITHUB_TOKEN=x`,
+/// `--header "Authorization: Bearer x"`), and a URL's credentials (see
+/// [`redact_url_credentials`]) are replaced with [`REDACTED`]; everything
+/// else is kept as typed. A value that doesn't parse as a list of strings is
+/// dropped whole — it's not a shape Loach writes, so nothing in it can be
+/// told apart from a secret.
 fn redact_args_json(json: &str) -> Option<String> {
     let args: Vec<String> = serde_json::from_str(json).ok()?;
-    let secret_flag = |name: &str| {
-        let n = name.to_ascii_lowercase();
-        ["token", "secret", "password", "passwd", "apikey", "api-key", "api_key", "auth"]
-            .iter()
-            .any(|w| n.contains(w))
-    };
     let mut out = Vec::with_capacity(args.len());
     let mut value_is_secret = false;
     for arg in args {
@@ -3326,23 +3819,51 @@ fn redact_args_json(json: &str) -> Option<String> {
         if let Some(flag) = arg.strip_prefix('-') {
             let flag = flag.trim_start_matches('-');
             match flag.split_once('=') {
-                Some((name, _)) if secret_flag(name) => {
-                    let keep = arg.len() - flag.len() + name.len() + 1;
-                    out.push(format!("{}{REDACTED}", &arg[..keep]));
+                Some((name, value)) => {
+                    let keep = &arg[..arg.len() - flag.len() + name.len() + 1];
+                    if is_secret_name(name) {
+                        out.push(format!("{keep}{REDACTED}"));
+                    } else {
+                        // `--env=GITHUB_TOKEN=x`, `--header=Authorization: …`
+                        out.push(format!("{keep}{}", redact_arg_value(value)));
+                    }
                     continue;
                 }
-                None if secret_flag(flag) => value_is_secret = true,
-                _ => {}
+                None if is_secret_name(flag) => value_is_secret = true,
+                None => {}
             }
         }
-        out.push(redact_url_password(&arg));
+        out.push(redact_arg_value(&arg));
     }
     serde_json::to_string(&out).ok()
 }
 
-/// `text` with the password of any `scheme://user:pass@host` in it
-/// replaced by [`REDACTED`].
-fn redact_url_password(text: &str) -> String {
+/// One argument, or a flag's inline value, as it goes into an export. An
+/// environment assignment (`GITHUB_TOKEN=x`, as `docker run -e` takes it) or
+/// a header (`Authorization: Bearer x`, as `--header` takes it) whose name
+/// says it holds a credential keeps only its name; a URL in it loses its
+/// credentials.
+fn redact_arg_value(arg: &str) -> String {
+    let is_name = |s: &str| {
+        !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    };
+    for sep in ['=', ':'] {
+        if let Some((name, value)) = arg.split_once(sep) {
+            if is_name(name) && is_secret_name(name) {
+                let keep = arg.len() - value.trim_start().len();
+                return format!("{}{REDACTED}", &arg[..keep]);
+            }
+        }
+    }
+    redact_url_credentials(arg)
+}
+
+/// `text` with the credentials of any URL in it replaced by [`REDACTED`]:
+/// the password of `scheme://user:pass@host`, a bare userinfo whole (it's
+/// as likely a token, as in `https://ghp_x@github.com`, as a user name), and
+/// the value of a query parameter whose name says it holds a credential
+/// (`?api_key=x`).
+fn redact_url_credentials(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(at) = rest.find("://") {
@@ -3353,18 +3874,96 @@ fn redact_url_password(text: &str) -> String {
         let authority_end = tail.find(['/', '?', '#']).unwrap_or(tail.len());
         match tail[..authority_end].rfind('@') {
             Some(at_sign) => {
-                let userinfo = &tail[..at_sign];
-                match userinfo.split_once(':') {
-                    Some((user, _)) => {
-                        out.push_str(user);
-                        out.push(':');
-                        out.push_str(REDACTED);
-                    }
-                    None => out.push_str(userinfo),
+                if let Some((user, _)) = tail[..at_sign].split_once(':') {
+                    out.push_str(user);
+                    out.push(':');
                 }
+                out.push_str(REDACTED);
                 rest = &tail[at_sign..];
             }
             None => rest = tail,
+        }
+    }
+    out.push_str(rest);
+
+    let text = out;
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text.as_str();
+    while let Some(i) = rest.find(['?', '&']) {
+        let (head, tail) = rest.split_at(i + 1);
+        out.push_str(head);
+        let end = tail
+            .find(|c: char| c == '&' || c == '#' || c.is_whitespace())
+            .unwrap_or(tail.len());
+        rest = match tail[..end].split_once('=') {
+            Some((name, value)) if !value.is_empty() && is_secret_name(name) => {
+                out.push_str(name);
+                out.push('=');
+                out.push_str(REDACTED);
+                &tail[end..]
+            }
+            _ => tail,
+        };
+    }
+    out.push_str(rest);
+    out
+}
+
+/// An HTTP server's `url` as it goes into an export: the whole userinfo
+/// (`user:pass@`, or a bare token as in `https://ghp_x@github.com`) and the
+/// value of every query parameter are replaced with [`REDACTED`]. Scheme,
+/// host, path and parameter names stay, so the row still names its endpoint
+/// and passes `validate_mcp_input` on the way back in.
+fn redact_http_url(url: &str) -> String {
+    let mut out = String::with_capacity(url.len());
+    let mut rest = url;
+    if let Some(at) = rest.find("://") {
+        let (head, tail) = rest.split_at(at + 3);
+        out.push_str(head);
+        let authority_end = tail.find(['/', '?', '#']).unwrap_or(tail.len());
+        rest = match tail[..authority_end].rfind('@') {
+            Some(at_sign) => {
+                out.push_str(REDACTED);
+                &tail[at_sign..]
+            }
+            None => tail,
+        };
+    }
+    let (rest, fragment) = rest.split_at(rest.find('#').unwrap_or(rest.len()));
+    match rest.split_once('?') {
+        Some((path, query)) => {
+            out.push_str(path);
+            out.push('?');
+            let params: Vec<String> = query
+                .split('&')
+                .map(|p| match p.split_once('=') {
+                    Some((name, value)) if !value.is_empty() => format!("{name}={REDACTED}"),
+                    _ => p.to_string(),
+                })
+                .collect();
+            out.push_str(&params.join("&"));
+        }
+        None => out.push_str(rest),
+    }
+    out.push_str(fragment);
+    out
+}
+
+/// `prompt` without the summary block the Compact button parks in a chat's
+/// system prompt — the twin of `stripSummaryBlock` in
+/// `src/lib/contextUsage.ts`, whose markers these must match.
+fn strip_summary_block(prompt: &str) -> String {
+    const START: &str = "[Loach: earlier conversation summary]";
+    const END: &str = "[End of Loach summary]";
+    let mut out = String::with_capacity(prompt.len());
+    let mut rest = prompt;
+    while let Some(start) = rest.find(START) {
+        let Some(end) = rest[start..].find(END) else { break };
+        out.push_str(&rest[..start]);
+        rest = &rest[start + end + END.len()..];
+        // The block is followed by a blank line before the user's own text.
+        for _ in 0..2 {
+            rest = rest.strip_prefix('\n').unwrap_or(rest);
         }
     }
     out.push_str(rest);
@@ -3580,6 +4179,128 @@ mod tests {
         assert_eq!(redact_args_json("not json"), None);
     }
 
+    /// The other places a stdio command line carries a credential — a token
+    /// as the whole URL userinfo, an env assignment for `docker run -e`, an
+    /// auth header, a key in the query — lose it too, while flags that only
+    /// contain "auth" in a longer word keep their values.
+    #[test]
+    fn exported_arguments_lose_tokens_in_env_headers_and_queries() {
+        let args = serde_json::to_string(&[
+            "https://ghp_abc@github.com/org/repo",
+            "-e",
+            "GITHUB_TOKEN=ghp_abc",
+            "-e",
+            "GITHUB_PERSONAL_ACCESS_TOKEN",
+            "--env=OPENAI_API_KEY=sk-123",
+            "--header",
+            "Authorization: Bearer abc",
+            "--header=X-Api-Key: abc",
+            "-H",
+            "X-Request-Id: 42",
+            "https://mcp.example.com/sse?api_key=sk-123&region=eu",
+            "--author",
+            "Jane",
+            "--authority=ca.example.com",
+            "--auth",
+            "hunter2",
+        ])
+        .unwrap();
+        let out: Vec<String> =
+            serde_json::from_str(&redact_args_json(&args).expect("a list of strings")).unwrap();
+        assert_eq!(
+            out,
+            [
+                "https://REDACTED@github.com/org/repo",
+                "-e",
+                "GITHUB_TOKEN=REDACTED",
+                "-e",
+                "GITHUB_PERSONAL_ACCESS_TOKEN",
+                "--env=OPENAI_API_KEY=REDACTED",
+                "--header",
+                "Authorization: REDACTED",
+                "--header=X-Api-Key: REDACTED",
+                "-H",
+                "X-Request-Id: 42",
+                "https://mcp.example.com/sse?api_key=REDACTED&region=eu",
+                "--author",
+                "Jane",
+                "--authority=ca.example.com",
+                "--auth",
+                "REDACTED",
+            ]
+        );
+    }
+
+    /// An HTTP server's URL loses its userinfo (a bare token included) and
+    /// its query values in an export, but keeps everything that says which
+    /// endpoint it is — and still parses, so the row imports again.
+    #[test]
+    fn exported_http_urls_lose_their_credentials() {
+        for (url, want) in [
+            ("https://ghp_abc@github.com/mcp", "https://REDACTED@github.com/mcp"),
+            ("https://me:hunter2@host.local:8443/mcp", "https://REDACTED@host.local:8443/mcp"),
+            (
+                "https://mcp.example.com/sse?api_key=sk-123&region=eu&flag",
+                "https://mcp.example.com/sse?api_key=REDACTED&region=REDACTED&flag",
+            ),
+            ("http://localhost:3000/mcp", "http://localhost:3000/mcp"),
+            ("https://example.com/a@b?k=", "https://example.com/a@b?k="),
+            ("", ""),
+        ] {
+            let out = redact_http_url(url);
+            assert_eq!(out, want, "{url}");
+            if !url.is_empty() {
+                reqwest::Url::parse(&out).expect("a redacted URL still parses");
+            }
+        }
+
+        let (db, _dir) = fresh_db();
+        let mut row = mcp_draft("gh", "http");
+        row.url = "https://ghp_abc@api.example.com/mcp?token=t0k".into();
+        db.upsert_mcp_server(&row).expect("insert");
+        let snap = db.snapshot().expect("snapshot");
+        assert_eq!(
+            snap.data.mcp_servers[0].url,
+            "https://REDACTED@api.example.com/mcp?token=REDACTED"
+        );
+    }
+
+    /// Forking above the end of a compacted range: the summary covers turns
+    /// the fork doesn't get, so the fork drops it and un-hides the turns it
+    /// did copy. Forking below the range keeps both.
+    #[test]
+    fn fork_before_the_compacted_range_drops_the_summary() {
+        let (db, _dir) = fresh_db();
+        let s = db.create_session("c", "ollama", "llama3", None, None).unwrap();
+        let ids: Vec<String> = (0..6)
+            .map(|i| {
+                let role = if i % 2 == 0 { "user" } else { "assistant" };
+                db.append_message(&s.id, role, &format!("m{i}"), None).unwrap().id
+            })
+            .collect();
+        db.mark_messages_compacted(&s.id, &ids[..4]).unwrap();
+        db.update_session_system_prompt(
+            &s.id,
+            "[Loach: earlier conversation summary]\n- m0..m3\n[End of Loach summary]\n\nBe terse.",
+        )
+        .unwrap();
+
+        let early = db.fork_session(&s.id, Some(&ids[1])).unwrap();
+        assert_eq!(early.system_prompt.as_deref(), Some("Be terse."));
+        let copied = db.list_messages(&early.id).unwrap();
+        assert_eq!(copied.len(), 2);
+        assert!(copied.iter().all(|m| m.compacted_at.is_none()), "copies stayed hidden");
+        assert_eq!(
+            db.get_session(&early.id).unwrap().unwrap().system_prompt.as_deref(),
+            Some("Be terse.")
+        );
+
+        let late = db.fork_session(&s.id, Some(&ids[4])).unwrap();
+        assert!(late.system_prompt.unwrap().starts_with("[Loach: earlier conversation summary]"));
+        let copied = db.list_messages(&late.id).unwrap();
+        assert_eq!(copied.iter().filter(|m| m.compacted_at.is_some()).count(), 4);
+    }
+
     /// A workspace root is local to this machine, so it must not travel in
     /// a snapshot — neither out (someone else's model learning your paths)
     /// nor back in (a hand-edited export granting a directory nobody picked).
@@ -3612,6 +4333,149 @@ mod tests {
             None,
             "a hand-edited snapshot granted a workspace root"
         );
+    }
+
+    /// Exports carry the v2 tag (so a 1.5 build, which reads only v1,
+    /// refuses them instead of restoring them without the Library); this
+    /// build still reads v1.
+    #[test]
+    fn snapshots_are_tagged_v2_and_v1_still_restores() {
+        let (db, _dir) = fresh_db();
+        assert_eq!(db.snapshot().expect("snapshot").schema, "loach/v2");
+        assert!(is_supported_snapshot_schema("loach/v1"));
+        assert!(is_supported_snapshot_schema("loach/v2"));
+        assert!(!is_supported_snapshot_schema("loach/v3"));
+        assert!(!is_supported_snapshot_schema(""));
+    }
+
+    /// A snapshot that names a Space, folder or fork source it doesn't carry
+    /// restores with those pointers cleared, and rows whose required parent
+    /// is missing are dropped — FK enforcement is off for the restore, so
+    /// nothing else would settle them.
+    #[test]
+    fn restore_settles_references_the_snapshot_does_not_carry() {
+        let (db, _dir) = fresh_db();
+        let sp = db.create_space("Work", "", "").unwrap();
+        let f = db.create_folder("Research").unwrap();
+        let src = db
+            .create_session("src", "ollama", "llama3", None, Some(&sp.id))
+            .unwrap();
+        db.set_session_folder(&src.id, Some(&f.id)).unwrap();
+        db.append_message(&src.id, "user", "hi", None).unwrap();
+        let fork = db.fork_session(&src.id, None).unwrap();
+        db.add_space_file(&sp.id, "f.txt", "text/plain", "text", "x", 1, 0)
+            .unwrap();
+
+        let mut snap = db.snapshot().unwrap();
+        // Trim the parents out, as a hand-edited export might.
+        snap.data.spaces.clear();
+        snap.data.folders.clear();
+        snap.data.sessions.retain(|s| s.id != src.id);
+
+        let (db2, _dir2) = fresh_db();
+        db2.restore_snapshot(&snap).expect("restore");
+        let kept = db2.get_session(&fork.id).unwrap().expect("the fork is kept");
+        assert_eq!(kept.space_id, None);
+        assert_eq!(kept.folder_id, None);
+        assert_eq!(kept.forked_from_session_id, None);
+        assert_eq!(db2.list_messages(&fork.id).unwrap().len(), 1);
+        assert!(db2.list_messages(&src.id).unwrap().is_empty(), "orphan messages dropped");
+        assert!(db2.all_space_files().unwrap().is_empty(), "orphan files dropped");
+        let violations: i64 = db2
+            .conn
+            .lock()
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(violations, 0);
+    }
+
+    /// The setters refuse an unknown `retrieval_mode`, but a snapshot never
+    /// passes them; restore falls back instead of storing a value the Space
+    /// page can't label.
+    #[test]
+    fn restore_replaces_unknown_retrieval_modes() {
+        let (db, _dir) = fresh_db();
+        let sp = db.create_space("Work", "", "").unwrap();
+        let s = db
+            .create_session("t", "ollama", "llama3", None, Some(&sp.id))
+            .unwrap();
+        let mut snap = db.snapshot().unwrap();
+        snap.data.spaces[0].retrieval_mode = "bogus".into();
+        snap.data.sessions[0].retrieval_mode = Some("bogus".into());
+
+        let (db2, _dir2) = fresh_db();
+        db2.restore_snapshot(&snap).expect("restore");
+        assert_eq!(db2.get_space(&sp.id).unwrap().unwrap().retrieval_mode, "auto");
+        assert_eq!(db2.get_session(&s.id).unwrap().unwrap().retrieval_mode, None);
+
+        // Known values pass through untouched.
+        snap.data.spaces[0].retrieval_mode = "retrieval".into();
+        snap.data.sessions[0].retrieval_mode = Some("full".into());
+        db2.restore_snapshot(&snap).expect("restore again");
+        assert_eq!(db2.get_space(&sp.id).unwrap().unwrap().retrieval_mode, "retrieval");
+        assert_eq!(
+            db2.get_session(&s.id).unwrap().unwrap().retrieval_mode.as_deref(),
+            Some("full")
+        );
+    }
+
+    #[test]
+    fn image_scaling_accepts_only_what_the_ui_offers() {
+        let ok = r#"{"enabled":true,"mode":"px","px":1024,"percent":50}"#;
+        assert_eq!(normalize_image_scaling(ok).as_deref(), Some(ok));
+        // Re-encoded, so key order and whitespace don't matter.
+        assert_eq!(
+            normalize_image_scaling(r#"{ "percent": 25, "px": 64, "mode": "percent", "enabled": false }"#)
+                .as_deref(),
+            Some(r#"{"enabled":false,"mode":"percent","px":64,"percent":25}"#)
+        );
+        for bad in [
+            "",
+            "null",
+            r#"{"enabled":true,"mode":"px","px":1024}"#,
+            r#"{"enabled":true,"mode":"zoom","px":1024,"percent":50}"#,
+            r#"{"enabled":true,"mode":"px","px":32,"percent":50}"#,
+            r#"{"enabled":true,"mode":"px","px":9000,"percent":50}"#,
+            r#"{"enabled":true,"mode":"percent","px":1024,"percent":0}"#,
+            r#"{"enabled":true,"mode":"percent","px":1024,"percent":150}"#,
+            r#"{"enabled":true,"mode":"px","px":1024,"percent":50,"extra":1}"#,
+        ] {
+            assert_eq!(normalize_image_scaling(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn image_scaling_round_trips_and_restores_screened() {
+        let (db, _dir) = fresh_db();
+        let sp = db.create_space("Work", "", "").unwrap();
+        let s = db
+            .create_session("t", "ollama", "llama3", None, Some(&sp.id))
+            .unwrap();
+        let json = r#"{"enabled":true,"mode":"percent","px":1024,"percent":40}"#;
+        db.set_space_image_scaling(&sp.id, Some(json)).unwrap();
+        db.set_session_image_scaling(&s.id, Some(json)).unwrap();
+        assert_eq!(db.get_space(&sp.id).unwrap().unwrap().image_scaling_json.as_deref(), Some(json));
+        assert_eq!(db.get_session(&s.id).unwrap().unwrap().image_scaling_json.as_deref(), Some(json));
+        // A fork keeps the chat's own setting.
+        let fork = db.fork_session(&s.id, None).unwrap();
+        assert_eq!(fork.image_scaling_json.as_deref(), Some(json));
+
+        let mut snap = db.snapshot().unwrap();
+        let (db2, _dir2) = fresh_db();
+        db2.restore_snapshot(&snap).expect("restore");
+        assert_eq!(db2.get_space(&sp.id).unwrap().unwrap().image_scaling_json.as_deref(), Some(json));
+
+        // Anything the setters wouldn't take goes back to inheriting.
+        snap.data.spaces[0].image_scaling_json = Some("bogus".into());
+        for s in &mut snap.data.sessions {
+            s.image_scaling_json = Some(r#"{"enabled":true,"mode":"px","px":1,"percent":50}"#.into());
+        }
+        db2.restore_snapshot(&snap).expect("restore again");
+        assert_eq!(db2.get_space(&sp.id).unwrap().unwrap().image_scaling_json, None);
+        assert_eq!(db2.get_session(&s.id).unwrap().unwrap().image_scaling_json, None);
+
+        db.set_session_image_scaling(&s.id, None).unwrap();
+        assert_eq!(db.get_session(&s.id).unwrap().unwrap().image_scaling_json, None);
     }
 
     #[test]
@@ -3658,16 +4522,20 @@ mod tests {
         // 5 chars, 10 octets in UTF-8 — the gap a character count would miss.
         db.append_message(&s.id, "user", "źdźbło", Some("[\"att\"]"))
             .expect("message");
+        // Reasoning, tool calls and metrics are part of the transcript too.
+        let reply = db.append_message(&s.id, "assistant", "ok", None).expect("reply");
+        db.update_message(&reply.id, &s.id, "ok", Some("hmm"), Some("{}"), Some("[]"), None)
+            .expect("finish reply");
         let sp = db.create_space("s", "", "").expect("space");
         db.add_space_file(&sp.id, "f.txt", "text/plain", "text", "0123456789", 10, 0)
             .expect("file");
 
         let st = db.storage_stats().expect("stats");
         assert_eq!(st.sessions, 1);
-        assert_eq!(st.messages, 1);
+        assert_eq!(st.messages, 2);
         assert_eq!(st.spaces, 1);
         assert_eq!(st.space_files, 1);
-        assert_eq!(st.message_bytes, "źdźbło".len() as i64);
+        assert_eq!(st.message_bytes, ("źdźbło".len() + "ok".len() + "hmm{}[]".len()) as i64);
         assert_eq!(st.attachment_bytes, 7);
         assert_eq!(st.space_bytes, 10);
         // Session title + the two NULL-coalesced columns.
@@ -3803,6 +4671,53 @@ mod tests {
         db.migrate().expect("third migrate");
     }
 
+    /// Spaces from before 1.6 keep inlining every file, as they always did;
+    /// only Spaces created afterwards start on "auto", which may switch to
+    /// excerpts. Imports of pre-1.6 exports get the same treatment.
+    #[test]
+    fn pre_library_spaces_keep_full_text() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("loach.db");
+
+        {
+            let db = Database::open(&path).expect("open");
+            db.migrate().expect("initial migrate");
+            // Rebuild `spaces` as 1.5 left it (no `retrieval_mode`) with one
+            // Space in it. (SQLite predating DROP COLUMN is why this goes the
+            // long way round.)
+            let conn = db.conn.lock();
+            conn.execute_batch(
+                r#"
+                DROP TABLE spaces;
+                CREATE TABLE spaces (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    description TEXT NOT NULL DEFAULT '',
+                    instructions TEXT NOT NULL DEFAULT '',
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
+                INSERT INTO spaces (id, name, created_at, updated_at) VALUES ('old', 'Notes', 0, 0);
+                "#,
+            )
+            .expect("simulate a 1.5 database");
+        }
+
+        let db = Database::open(&path).expect("reopen");
+        db.migrate().expect("migrate a 1.5 database");
+        let old = db.get_space("old").expect("read").expect("kept");
+        assert_eq!(old.retrieval_mode, "full");
+        let new = db.create_space("Fresh", "", "").expect("create");
+        assert_eq!(new.retrieval_mode, "auto");
+
+        let imported: Space = serde_json::from_value(serde_json::json!({
+            "id": "s", "name": "Notes", "description": "", "instructions": "",
+            "created_at": 0, "updated_at": 0,
+        }))
+        .expect("pre-1.6 export row");
+        assert_eq!(imported.retrieval_mode, "full");
+    }
+
     /// A migration interrupted part-way through must be finishable on the
     /// next launch, not fatal forever.
     ///
@@ -3898,6 +4813,34 @@ mod tests {
         assert_eq!(db.get_session(&s.id).unwrap().unwrap().label, None);
     }
 
+    /// Pinning lifts a chat to the top of the list; unpinning must not, or
+    /// a month-old chat would land in "Today" just for being unpinned.
+    #[test]
+    fn unpinning_leaves_updated_at_alone() {
+        let (db, _dir) = fresh_db();
+        let s = db
+            .create_session("t", "ollama", "llama3", None, None)
+            .expect("create");
+        db.conn
+            .lock()
+            .execute("UPDATE sessions SET updated_at = 1 WHERE id = ?1", params![s.id])
+            .unwrap();
+
+        db.pin_session(&s.id, true).expect("pin");
+        let pinned = db.get_session(&s.id).unwrap().unwrap();
+        assert!(pinned.pinned_at.is_some());
+        assert!(pinned.updated_at > 1, "pinning surfaces the chat");
+
+        db.conn
+            .lock()
+            .execute("UPDATE sessions SET updated_at = 1 WHERE id = ?1", params![s.id])
+            .unwrap();
+        db.pin_session(&s.id, false).expect("unpin");
+        let unpinned = db.get_session(&s.id).unwrap().unwrap();
+        assert_eq!(unpinned.pinned_at, None);
+        assert_eq!(unpinned.updated_at, 1, "unpinning must not re-sort the chat");
+    }
+
     #[test]
     fn deleting_folder_releases_its_chats_instead_of_deleting_them() {
         let (db, _dir) = fresh_db();
@@ -3923,6 +4866,33 @@ mod tests {
         let after = db.list_sessions().unwrap();
         assert_eq!(after.len(), 1, "the chat survives its folder");
         assert_eq!(after[0].folder_id, None);
+    }
+
+    #[test]
+    fn moving_a_chat_between_spaces_keeps_its_place_in_the_list() {
+        let (db, _dir) = fresh_db();
+        let s = db
+            .create_session("t", "ollama", "llama3", None, None)
+            .expect("create");
+        let sp = db.create_space("Work", "", "").expect("space");
+
+        db.set_session_space(&s.id, Some(&sp.id)).expect("move in");
+        let listed = db.list_sessions().unwrap();
+        assert_eq!(listed[0].space_id.as_deref(), Some(sp.id.as_str()));
+        assert_eq!(
+            listed[0].updated_at, s.updated_at,
+            "moving a chat must not re-sort the list the way pinning does",
+        );
+
+        // A Space that doesn't exist is refused, not stored as a dangling id.
+        assert!(db.set_session_space(&s.id, Some("no-such-space")).is_err());
+        assert_eq!(
+            db.get_session(&s.id).unwrap().unwrap().space_id.as_deref(),
+            Some(sp.id.as_str()),
+        );
+
+        db.set_session_space(&s.id, None).expect("move out");
+        assert_eq!(db.get_session(&s.id).unwrap().unwrap().space_id, None);
     }
 
     #[test]

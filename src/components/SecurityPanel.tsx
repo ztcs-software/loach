@@ -57,6 +57,7 @@ export function SecurityPanel() {
         // Whether we're replacing an existing lock — controls whether the
         // wizard demands the user's CURRENT credentials before overwriting.
         replacing={status.configured}
+        hasHint={status.configured && status.has_hint}
         configuredMethod={status.method}
         configuredPinLength={(status.pin_length as PinLength) ?? 4}
         onCancel={() => setMode("idle")}
@@ -442,6 +443,7 @@ function SetupWizard({
   initialMethod,
   initialPinLength,
   replacing,
+  hasHint,
   configuredMethod,
   configuredPinLength,
   onCancel,
@@ -452,6 +454,8 @@ function SetupWizard({
   /** True when a lock is already configured — the wizard is being used to
    *  replace it. We then demand the user's CURRENT credentials too. */
   replacing: boolean;
+  /** The lock being replaced has a hint, which the field starts with. */
+  hasHint: boolean;
   configuredMethod?: LockMethod | null;
   configuredPinLength?: PinLength;
   onCancel: () => void;
@@ -486,6 +490,26 @@ function SetupWizard({
     replacing &&
     (configuredMethod === "password" || configuredMethod === "both");
   const currentPinLen = configuredPinLength ?? 4;
+
+  // Setup stores whatever the hint field holds, so changing the lock with it
+  // empty deleted the existing hint. Start from that hint instead, so it's
+  // kept unless the user edits it.
+  useEffect(() => {
+    if (!hasHint) return;
+    let live = true;
+    useSecurityStore
+      .getState()
+      .getHint()
+      .then((h) => {
+        if (live && h) setHint((typed) => typed || h);
+      })
+      .catch(() => {
+        if (live) setError("Couldn't read the current hint — type it again to keep it.");
+      });
+    return () => {
+      live = false;
+    };
+  }, [hasHint]);
 
   // Reset PIN inputs when length changes — otherwise "1234" lingering from a
   // 4-digit choice would show up under a 6-digit selection.

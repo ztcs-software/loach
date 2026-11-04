@@ -5,8 +5,20 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { useModelsStore } from "@/stores/modelsStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useGlobalMemoryStore } from "@/stores/globalMemoryStore";
+import { useLibraryStore } from "@/stores/libraryStore";
 import { selectMemoriesForPrompt } from "@/lib/memoryRules";
-import { DEFAULT_PARAMS, type GenerationParams, type Message } from "@/types";
+import { estimateChatSources } from "@/lib/sources";
+import {
+  DEFAULT_PARAMS,
+  OPENAI_COMPAT_NUM_CTX,
+  type GenerationParams,
+  type Message,
+  type SpaceFile,
+} from "@/types";
+
+/** Stands in for an OpenAI-compatible model's (absent) Modelfile defaults.
+ *  Module-level so the store selector returns the same object each time. */
+const OPENAI_COMPAT_DEFAULTS: Partial<GenerationParams> = { num_ctx: OPENAI_COMPAT_NUM_CTX };
 import {
   baseSystemPrompt,
   computeContextUsage,
@@ -17,6 +29,7 @@ import { cn } from "@/lib/utils";
 // Stable empty array so the messages selector's no-messages branch keeps a
 // constant reference (a fresh `[]` would re-fire the selector every render).
 const EMPTY_MESSAGES: Message[] = [];
+const EMPTY_FILES: SpaceFile[] = [];
 
 /**
  * Layer the same set of GenerationParams the chat send path uses, just
@@ -65,10 +78,13 @@ export function ContextUsageBar() {
       : EMPTY_MESSAGES,
   );
   const globalSystemPrompt = useSettingsStore((s) => s.global_system_prompt);
+  const isOllama = session?.provider === "ollama";
   const modelDefaults = useModelsStore((s) =>
-    session?.provider === "ollama" && session.model
+    isOllama && session?.model
       ? s.modelDefaults[session.model]
-      : undefined,
+      : session && !isOllama
+        ? OPENAI_COMPAT_DEFAULTS
+        : undefined,
   );
   const space = useSpaceStore((s) =>
     session?.space_id ? s.spaces.find((x) => x.id === session.space_id) : null,
@@ -96,6 +112,26 @@ export function ContextUsageBar() {
     ];
     return rows.length > 0 ? rows.map((m) => `- ${m.content}`).join("\n") : null;
   }, [globalMemoryOn, globalMemories, spaceMemories]);
+  // Sources: the Space's own uploads and the Library items linked to the
+  // Space or to this chat. Loaded here if nothing else has yet, so the bar
+  // counts them from the first render of a chat.
+  const spaceFiles = useSpaceStore((s) =>
+    session?.space_id ? s.spaceFiles[session.space_id] : undefined,
+  );
+  const loadSpaceFiles = useSpaceStore((s) => s.loadSpaceFiles);
+  const libraryItems = useLibraryStore((s) => s.items);
+  const libraryDatasets = useLibraryStore((s) => s.datasets);
+  const librarySources = useLibraryStore((s) => s.sources);
+  const ensureSources = useLibraryStore((s) => s.ensureSources);
+  const spaceId = session?.space_id ?? null;
+  const sessionId = session?.id ?? null;
+  useEffect(() => {
+    if (spaceId && !useSpaceStore.getState().spaceFiles[spaceId]) {
+      void loadSpaceFiles(spaceId).catch(() => undefined);
+    }
+    if (spaceId) void ensureSources("space", spaceId).catch(() => undefined);
+    if (sessionId) void ensureSources("session", sessionId).catch(() => undefined);
+  }, [spaceId, sessionId, loadSpaceFiles, ensureSources]);
   const compactingSessionId = useChatStore((s) => s.compactingSessionId);
   const compactContext = useChatStore((s) => s.compactContext);
   const setSessionParams = useChatStore((s) => s.setSessionParams);
@@ -136,18 +172,34 @@ export function ContextUsageBar() {
     [session?.params_json, modelDefaults, space?.default_params_json],
   );
 
-  // The system prompt the request will actually send is the per-session
-  // value when set, otherwise the global default, with any compaction
-  // summary in front — the same pick the send makes. Space-level prompt
-  // augmentation happens server-side via getSpaceContext; we don't
-  // include it in the estimate because the user can't see it from here
-  // and double-counting it would mislead. The bar is a hint, not a
-  // billing tool — close enough for sizing decisions. The one backend-
-  // appended layer that can be big is the workspace's LOACHFILE.md, so
-  // that is counted from the store's last read of it.
+  // The system prompt the request will actually send is the Space's
+  // instructions in a Space, else the per-session value when set, otherwise
+  // the global default, with any compaction summary in front — the same
+  // pick the send makes. Sources (Space uploads, Library items) are counted
+  // separately below at what the send will spend on them. The bar is a
+  // hint, not a billing tool — close enough for sizing decisions. The one
+  // backend-appended layer that can be big is the workspace's LOACHFILE.md,
+  // so that is counted from the store's last read of it.
   const effectiveSystemPrompt = baseSystemPrompt(
     session?.system_prompt ?? null,
     globalSystemPrompt,
+    // In a Space its instructions replace the per-chat prompt, as on send.
+    space?.instructions.trim() ?? "",
+  );
+  const sources = useMemo(
+    () =>
+      session
+        ? estimateChatSources({
+            session,
+            spaceFiles: spaceFiles ?? EMPTY_FILES,
+            spaceMode: space?.retrieval_mode,
+            numCtx: params.num_ctx ?? DEFAULT_PARAMS.num_ctx ?? 8192,
+          })
+        : { tokens: 0, mode: null, count: 0 },
+    // The library selectors are listed so the estimate follows edits to
+    // the items, datasets and links it reads from the store.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [session, spaceFiles, space?.retrieval_mode, params.num_ctx, libraryItems, libraryDatasets, librarySources],
   );
 
   // Defer the recompute: `messages` changes identity on every streaming flush
@@ -164,8 +216,9 @@ export function ContextUsageBar() {
         params,
         projectInstructions,
         memoryText,
+        sources.tokens,
       ),
-    [deferredMessages, effectiveSystemPrompt, params, projectInstructions, memoryText],
+    [deferredMessages, effectiveSystemPrompt, params, projectInstructions, memoryText, sources.tokens],
   );
 
   // Don't show the bar before the user has any conversation to measure —
@@ -254,9 +307,17 @@ export function ContextUsageBar() {
         <ContextUsagePopover
           popoverRef={popoverRef}
           usage={usage}
+          sourcesLabel={
+            sources.count > 0
+              ? `Sources (${sources.count}${sources.mode === "retrieval" ? ", excerpts" : ""})`
+              : null
+          }
           compacting={isCompacting}
           onCompact={() => void compactContext(session.id)}
           expandedSize={usage.total * 2}
+          // OpenAI-compatible servers ignore `num_ctx`: "expanding" there
+          // would only change Loach's own estimate, not the model's window.
+          canExpand={isOllama}
           onExpand={() => {
             // Merge into the EXISTING per-chat override, not the merged
             // stack. `params` is DEFAULT_PARAMS + model defaults + space
@@ -290,8 +351,12 @@ export function ContextUsageBar() {
 
 interface PopoverProps {
   usage: ReturnType<typeof computeContextUsage>;
+  /** Row label for the sources line, or null when the chat has none. */
+  sourcesLabel: string | null;
   compacting: boolean;
   onCompact: () => void;
+  /** False for OpenAI-compatible chats, whose servers ignore `num_ctx`. */
+  canExpand: boolean;
   onExpand: () => void;
   expandedSize: number;
   onClose: () => void;
@@ -300,8 +365,10 @@ interface PopoverProps {
 
 const ContextUsagePopover = ({
   usage,
+  sourcesLabel,
   compacting,
   onCompact,
+  canExpand,
   onExpand,
   expandedSize,
   onClose,
@@ -376,6 +443,9 @@ const ContextUsagePopover = ({
         {usage.memoriesTokens > 0 && (
           <Row label="Memories" value={formatTokens(usage.memoriesTokens)} />
         )}
+        {sourcesLabel && (
+          <Row label={sourcesLabel} value={formatTokens(usage.sourcesTokens)} />
+        )}
         <Row
           label={`Messages (${usage.messageCount})`}
           value={formatTokens(usage.messagesTokens)}
@@ -429,27 +499,31 @@ const ContextUsagePopover = ({
             : "Not enough history yet — keep chatting and try again when usage climbs."}
       </p>
 
-      <div className="my-3 h-px bg-foreground/10" />
+      {canExpand && (
+        <>
+          <div className="my-3 h-px bg-foreground/10" />
 
-      <button
-        type="button"
-        onClick={onExpand}
-        disabled={compacting}
-        className={cn(
-          "flex w-full items-center justify-center gap-2 rounded-full px-3 py-2 text-[12px] font-medium transition-colors",
-          "bg-foreground/[0.08] text-foreground/85",
-          "hover:bg-foreground/[0.14] hover:text-foreground",
-          "disabled:opacity-50 disabled:cursor-not-allowed",
-          "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40",
-        )}
-      >
-        <Maximize2 className="h-3.5 w-3.5" />
-        Expand context window
-      </button>
-      <p className="mt-1.5 text-[10.5px] leading-relaxed text-foreground/45">
-        Doubles the window from {formatTokens(usage.total)} to{" "}
-        {formatTokens(expandedSize)} tokens.
-      </p>
+          <button
+            type="button"
+            onClick={onExpand}
+            disabled={compacting}
+            className={cn(
+              "flex w-full items-center justify-center gap-2 rounded-full px-3 py-2 text-[12px] font-medium transition-colors",
+              "bg-foreground/[0.08] text-foreground/85",
+              "hover:bg-foreground/[0.14] hover:text-foreground",
+              "disabled:opacity-50 disabled:cursor-not-allowed",
+              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40",
+            )}
+          >
+            <Maximize2 className="h-3.5 w-3.5" />
+            Expand context window
+          </button>
+          <p className="mt-1.5 text-[10.5px] leading-relaxed text-foreground/45">
+            Doubles the window from {formatTokens(usage.total)} to{" "}
+            {formatTokens(expandedSize)} tokens.
+          </p>
+        </>
+      )}
     </div>
   );
 };

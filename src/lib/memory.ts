@@ -1,4 +1,5 @@
-import { makeRequestId, startChatStream } from "@/lib/tauri";
+import { listMessages, makeRequestId, startChatStream } from "@/lib/tauri";
+import { stripInlinedAttachments } from "@/lib/files";
 import { logger } from "@/lib/logger";
 import {
   MAX_MEMORY_CHARS,
@@ -6,6 +7,7 @@ import {
   clip,
   describesRequest,
   isDuplicate,
+  looksLikeSecret,
   normalize,
   parseExtractionJson,
   selectMemoriesForPrompt,
@@ -14,11 +16,11 @@ import { useGlobalMemoryStore } from "@/stores/globalMemoryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useToastStore } from "@/stores/toastStore";
-import type { MemoryRow, ProviderId } from "@/types";
+import type { MemoryRow, Message, ProviderId, Session } from "@/types";
 
 /** Where an extraction run reads and writes: one Space's memory, or the
- *  global list. Decided by the chat store from the finished session —
- *  Space chats go to their Space, space-less chats go global. */
+ *  global list. Decided by the chat store when the message is sent — Space
+ *  chats go to their Space, space-less chats go global. */
 export type MemoryScope =
   | { kind: "space"; spaceId: string }
   | { kind: "global" };
@@ -27,6 +29,7 @@ export type MemoryScope =
 export interface MemoryTurn {
   userText: string;
   assistantText: string;
+  userMessageId: string;
   assistantMessageId: string;
 }
 
@@ -39,12 +42,17 @@ export interface MemoryExtractionArgs {
   turn: MemoryTurn;
 }
 
+/** One chat's turns waiting for a run, with where that run saves. */
+interface PendingRun extends Omit<MemoryExtractionArgs, "turn"> {
+  turns: MemoryTurn[];
+}
+
 /**
- * Most turns one extraction run reads. Turns that couldn't be extracted
- * when they finished (chat still busy, or the run was aborted by the next
- * send) are parked in `pendingTurns` and folded into the next run for the
- * same chat, so a fast back-and-forth no longer loses every fact but the
- * last one. Small so the prompt stays within tiny local contexts.
+ * Most turns one extraction run reads. Every finished turn is parked in
+ * `pendingTurns` until nothing else wants the model, and a chat's parked
+ * turns are read together — so a fast back-and-forth, or a run aborted by
+ * the next send, no longer loses every fact but the last one. Small so the
+ * prompt stays within tiny local contexts.
  */
 const MAX_TURNS_PER_RUN = 3;
 
@@ -77,30 +85,150 @@ const TURN_CHAR_BUDGET = 8_000;
  *  undo — long enough to read the fact and decide. */
 const UNDO_TOAST_MS = 7000;
 
-/** Turns awaiting extraction, keyed by session id. See MAX_TURNS_PER_RUN. */
-const pendingTurns = new Map<string, MemoryTurn[]>();
+/** Turns awaiting extraction, keyed by chat and scope — a chat moved to
+ *  another Space between two replies files each reply's facts where it was
+ *  sent. In parking order, so the chat that has waited longest runs first. */
+const pendingTurns = new Map<string, PendingRun>();
 
-/** Park a finished turn for the next extraction run in its chat. Called
- *  instead of `extractMemories` while the chat still has work queued. Keeps
- *  only the newest turns so the next run's prompt stays bounded. */
-export function deferMemoryTurn(args: MemoryExtractionArgs): void {
-  const list = [...(pendingTurns.get(args.sessionId) ?? []), args.turn];
-  pendingTurns.set(args.sessionId, list.slice(-(MAX_TURNS_PER_RUN - 1)));
+const runKey = (run: { sessionId: string; scope: MemoryScope }) =>
+  `${run.sessionId}:${run.scope.kind === "space" ? run.scope.spaceId : "global"}`;
+
+/** The run taken off the queue and not yet answered, so `dropMemoryTurns`
+ *  reaches the turns it is reading as well as the parked ones. */
+let extracting: PendingRun | null = null;
+
+/** Bumped by `cancelMemoryExtraction`. A run that started before the bump
+ *  saves nothing, and the queue behind it waits for the next idle moment. */
+let cancelEpoch = 0;
+
+/** One pass over the queue at a time: two would compete for the model. */
+let draining = false;
+
+/** localStorage key mirroring the queue, so a restart doesn't lose the turns
+ *  waiting in it. References only — the chat, the turn's two messages and the
+ *  scope picked at send time; the words are read back from the database by
+ *  `restoreMemoryTurns`, never stored here. */
+const QUEUE_KEY = "loach:memory-queue";
+
+interface QueuedTurnRef {
+  sessionId: string;
+  scope: MemoryScope;
+  userMessageId: string;
+  assistantMessageId: string;
+}
+
+/** Rewrite the stored queue after any change to it: the run being read
+ *  first (it was queued longest), then the parked ones in order. */
+function saveQueue(): void {
+  const runs = extracting ? [extracting, ...pendingTurns.values()] : [...pendingTurns.values()];
+  const refs: QueuedTurnRef[] = runs.flatMap(({ sessionId, scope, turns }) =>
+    turns.map((t) => ({
+      sessionId,
+      scope,
+      userMessageId: t.userMessageId,
+      assistantMessageId: t.assistantMessageId,
+    })),
+  );
+  try {
+    if (refs.length > 0) localStorage.setItem(QUEUE_KEY, JSON.stringify(refs));
+    else localStorage.removeItem(QUEUE_KEY);
+  } catch {
+    // No storage: the queue still runs this launch, only a restart loses it.
+  }
+}
+
+/** Park a finished turn until `extractMemories` next runs. Keeps only the
+ *  newest turns of each chat so a run's prompt stays bounded. */
+export function queueMemoryTurn({ turn, ...run }: MemoryExtractionArgs): void {
+  const key = runKey(run);
+  const turns = [...(pendingTurns.get(key)?.turns ?? []), turn];
+  pendingTurns.set(key, { ...run, turns: turns.slice(-MAX_TURNS_PER_RUN) });
+  saveQueue();
+}
+
+/**
+ * Re-park the turns that were waiting when the app last quit, reading their
+ * text back from the database. A turn whose chat or messages are gone, or
+ * whose scope has memory switched off now, is dropped. Runs once chats,
+ * Spaces and settings have loaded; the turns then wait, like any parked
+ * turn, for a reply to end with the model idle. `findSession` reads the chat
+ * store, which imports this module.
+ */
+export async function restoreMemoryTurns(
+  findSession: (id: string) => Session | undefined,
+): Promise<void> {
+  let saved: unknown;
+  try {
+    saved = JSON.parse(localStorage.getItem(QUEUE_KEY) ?? "[]");
+  } catch {
+    return;
+  }
+  if (!Array.isArray(saved)) return;
+  const refs = (saved as QueuedTurnRef[]).filter(
+    (r) => findSession(r.sessionId) && rememberingIn(r.scope),
+  );
+  const transcripts = new Map<string, Message[]>();
+  await Promise.all(
+    [...new Set(refs.map((r) => r.sessionId))].map(async (id) => {
+      try {
+        transcripts.set(id, await listMessages(id));
+      } catch (e) {
+        logger.warn("couldn't read a chat's queued memory turns", e);
+      }
+    }),
+  );
+
+  const settings = useSettingsStore.getState();
+  const restored = new Map<string, PendingRun>();
+  for (const ref of refs) {
+    // Looked up again: the chat may have been deleted during the reads.
+    const session = findSession(ref.sessionId);
+    const messages = transcripts.get(ref.sessionId) ?? [];
+    const user = messages.find((m) => m.id === ref.userMessageId);
+    const reply = messages.find((m) => m.id === ref.assistantMessageId);
+    if (!session || !user || !reply) continue;
+    const run = {
+      scope: ref.scope,
+      sessionId: ref.sessionId,
+      provider: session.provider,
+      model: session.model,
+      baseUrl: session.provider === "ollama" ? settings.ollama_base_url : settings.openai_base_url,
+    };
+    const key = runKey(run);
+    const turn: MemoryTurn = {
+      // As `finishTask` reads it: what the user typed, not what was inlined.
+      userText: stripInlinedAttachments(user.content),
+      assistantText: reply.content,
+      userMessageId: user.id,
+      assistantMessageId: reply.id,
+    };
+    restored.set(key, { ...run, turns: [...(restored.get(key)?.turns ?? []), turn] });
+  }
+  // Ahead of anything parked since launch: these have waited longer.
+  for (const [key, run] of pendingTurns) {
+    restored.set(key, { ...run, turns: [...(restored.get(key)?.turns ?? []), ...run.turns] });
+  }
+  pendingTurns.clear();
+  for (const [key, run] of restored) {
+    pendingTurns.set(key, { ...run, turns: run.turns.slice(-MAX_TURNS_PER_RUN) });
+  }
+  saveQueue();
 }
 
 /** Forget turns parked for a chat: all of them when the chat is deleted,
  *  or the one whose reply is being replaced by Regenerate. A parked turn is
- *  read by a later run, and those words are no longer in the chat. */
+ *  read by a later run, and those words are no longer in the chat. A run
+ *  already reading one saves nothing (see `extractRun`). */
 export function dropMemoryTurns(sessionId: string, assistantMessageId?: string): void {
-  if (assistantMessageId === undefined) {
-    pendingTurns.delete(sessionId);
-    return;
+  const kept = (t: MemoryTurn) =>
+    assistantMessageId !== undefined && t.assistantMessageId !== assistantMessageId;
+  for (const [key, run] of pendingTurns) {
+    if (run.sessionId !== sessionId) continue;
+    run.turns = run.turns.filter(kept);
+    if (run.turns.length === 0) pendingTurns.delete(key);
   }
-  const left = (pendingTurns.get(sessionId) ?? []).filter(
-    (t) => t.assistantMessageId !== assistantMessageId,
-  );
-  if (left.length > 0) pendingTurns.set(sessionId, left);
-  else pendingTurns.delete(sessionId);
+  if (extracting?.sessionId === sessionId) extracting.turns = extracting.turns.filter(kept);
+  saveQueue();
 }
 
 /** Store-agnostic view of one memory scope's CRUD, so the extractor body
@@ -118,6 +246,15 @@ interface MemoryOps {
   update: (id: string, content: string) => Promise<boolean>;
   /** `false` when the row was already gone. */
   remove: (id: string) => Promise<boolean>;
+}
+
+/** Whether `scope` still has memory switched on — its Space's toggle, or
+ *  the global setting. The chat store checks it when a reply ends; a run
+ *  reads it again when it starts and before it writes, since the user can
+ *  switch memory off while a turn waits or the model reads it. */
+function rememberingIn(scope: MemoryScope): boolean {
+  if (scope.kind === "global") return useSettingsStore.getState().global_memory_enabled;
+  return !!useSpaceStore.getState().spaces.find((s) => s.id === scope.spaceId)?.memory_enabled;
 }
 
 function opsFor(scope: MemoryScope): MemoryOps {
@@ -157,8 +294,39 @@ function opsFor(scope: MemoryScope): MemoryOps {
 }
 
 /**
- * One end-to-end run of the memory extractor for a finished assistant turn
- * (plus any turns parked for this chat by `deferMemoryTurn`).
+ * Extract every parked turn, one chat (and scope) at a time, longest-waiting
+ * first. The chat store calls this whenever a reply ends with nothing else
+ * waiting for the model — in whichever chat — so turns a send elsewhere cut
+ * short no longer wait for their own chat's next reply. A
+ * `cancelMemoryExtraction` stops the pass; what it hadn't reached stays
+ * parked for the next one.
+ */
+export async function extractMemories(): Promise<void> {
+  if (draining) return;
+  draining = true;
+  const epoch = cancelEpoch;
+  try {
+    while (epoch === cancelEpoch) {
+      const next = pendingTurns.entries().next();
+      if (next.done) break;
+      const [key, run] = next.value;
+      pendingTurns.delete(key);
+      extracting = run;
+      try {
+        await extractRun(run, epoch);
+      } finally {
+        extracting = null;
+        // Its turns are read, dropped or parked again by now.
+        saveQueue();
+      }
+    }
+  } finally {
+    draining = false;
+  }
+}
+
+/**
+ * One end-to-end run of the memory extractor over one chat's parked turns.
  *
  * Flow:
  *   1. Build a tight extractor prompt that numbers the existing memories so
@@ -177,14 +345,9 @@ function opsFor(scope: MemoryScope): MemoryOps {
  * Errors are caught at the boundary — extraction is best-effort and must
  * never disrupt the user's chat flow.
  */
-export async function extractMemories(args: MemoryExtractionArgs): Promise<void> {
-  const { scope, sessionId, provider, model, baseUrl } = args;
-  if (!model) return;
-
-  const turns = [...(pendingTurns.get(sessionId) ?? []), args.turn].slice(
-    -MAX_TURNS_PER_RUN,
-  );
-  pendingTurns.delete(sessionId);
+async function extractRun(run: PendingRun, epoch: number): Promise<void> {
+  const { scope, sessionId, provider, model, baseUrl } = run;
+  if (!model || !rememberingIn(scope)) return;
 
   const ops = opsFor(scope);
   // Pull the latest cached memories — a stale cache would cause us to
@@ -223,6 +386,10 @@ export async function extractMemories(args: MemoryExtractionArgs): Promise<void>
     [...usersOwn, ...alreadyKnown],
   );
 
+  // Read after the awaits above: a turn dropped meanwhile never reaches the
+  // prompt.
+  const turns = run.turns;
+  if (turns.length === 0) return;
   const perSide = Math.floor(TURN_CHAR_BUDGET / turns.length);
   const turnPrompt =
     turns
@@ -239,29 +406,41 @@ export async function extractMemories(args: MemoryExtractionArgs): Promise<void>
 
   let raw: string | null;
   try {
-    raw = await runOneShotStream({
-      provider,
-      model,
-      baseUrl,
-      systemPrompt,
-      userMessage: turnPrompt,
-    });
+    raw = await runOneShotStream(
+      {
+        provider,
+        model,
+        baseUrl,
+        systemPrompt,
+        userMessage: turnPrompt,
+      },
+      epoch,
+    );
   } catch (e) {
     logger.warn("memory extraction stream failed", e);
     return;
   }
-  if (raw === null) {
-    // Aborted by a new user send. Park the turns again so the run that
-    // follows the next reply in this chat picks them up.
-    pendingTurns.set(sessionId, turns.slice(-(MAX_TURNS_PER_RUN - 1)));
+  if (raw === null || run.turns.length < turns.length) {
+    // Aborted by a new user send — or one of these turns was dropped while
+    // the model read it (Regenerate replaced its reply, or the chat was
+    // deleted), and nothing from a prompt that held those words may be
+    // saved. Park what's still in the chat, ahead of anything parked since,
+    // for the next run.
+    const key = runKey(run);
+    const newer = pendingTurns.get(key);
+    const left = [...run.turns, ...(newer?.turns ?? [])].slice(-MAX_TURNS_PER_RUN);
+    if (left.length > 0) pendingTurns.set(key, { ...run, ...newer, turns: left });
     return;
   }
 
   const parsed = parseExtractionJson(raw);
   if (!parsed) return;
+  // Memory switched off while the model read the turns: nothing from them
+  // may be added, rewritten or removed.
+  if (!rememberingIn(scope)) return;
 
   const byNumber = (n: number): MemoryRow | undefined => editable[n - 1];
-  const latestMessageId = args.turn.assistantMessageId;
+  const latestMessageId = turns[turns.length - 1].assistantMessageId;
 
   // Toasts go out once everything is applied, additions first: the toast
   // stack evicts its oldest entries, so the removals and rewrites — whose
@@ -298,6 +477,7 @@ export async function extractMemories(args: MemoryExtractionArgs): Promise<void>
     const content = u.content.trim();
     if (!content || content.length > MAX_MEMORY_CHARS) continue;
     if (content === row.content) continue;
+    if (looksLikeSecret(content)) continue;
     try {
       if (!(await ops.update(row.id, content))) continue;
       updatedContent.set(row.id, content);
@@ -320,6 +500,8 @@ export async function extractMemories(args: MemoryExtractionArgs): Promise<void>
     const trimmed = candidate.trim();
     if (!trimmed) continue;
     if (trimmed.length > MAX_MEMORY_CHARS) continue;
+    // On the raw text: `normalize` strips the `-` and `_` a key is made of.
+    if (looksLikeSecret(trimmed)) continue;
 
     const norm = normalize(trimmed);
     if (!norm) continue;
@@ -350,10 +532,12 @@ let memoryStopFn: (() => Promise<void>) | null = null;
 /** Abort any in-flight memory extraction. Called when the user sends a new
  *  message so the extractor — a second full generation against the same model
  *  — doesn't keep hogging the generation slot and inflating the new turn's
- *  time-to-first-token. No-op when nothing is running. Best-effort: the Rust
- *  stream is told to cancel and the extractor re-parks its turns for the next
- *  run (its partial output is never parsed). */
+ *  time-to-first-token. Best-effort: the Rust stream is told to cancel and
+ *  the extractor re-parks its turns for the next run (its partial output is
+ *  never parsed). Also stops a pass between runs, or a run whose stream
+ *  hasn't connected yet, from starting a generation. */
 export function cancelMemoryExtraction(): void {
+  cancelEpoch++;
   const stop = memoryStopFn;
   memoryStopFn = null;
   if (stop) void stop().catch(() => {});
@@ -371,14 +555,19 @@ export function cancelMemoryExtraction(): void {
  * prompt + tight max_tokens. A new user send aborts it via
  * `cancelMemoryExtraction` so it never delays the visible turn.
  */
-async function runOneShotStream(args: {
-  provider: ProviderId;
-  model: string;
-  baseUrl: string;
-  systemPrompt: string;
-  userMessage: string;
-}): Promise<string | null> {
+async function runOneShotStream(
+  args: {
+    provider: ProviderId;
+    model: string;
+    baseUrl: string;
+    systemPrompt: string;
+    userMessage: string;
+  },
+  epoch: number,
+): Promise<string | null> {
   const { provider, model, baseUrl, systemPrompt, userMessage } = args;
+  // A send landed while this run read the memory list.
+  if (epoch !== cancelEpoch) return null;
   const streamId = makeRequestId();
 
   return new Promise<string | null>((resolve, reject) => {
@@ -387,15 +576,16 @@ async function runOneShotStream(args: {
     // This run's own stop handle. Kept separately from the module-global
     // `memoryStopFn` so cleanup can tell "my handle" from "a newer run's".
     let stopFn: (() => Promise<unknown>) | null = null;
-    // `timedOut` covers the race where `startChatStream`'s setup takes
-    // longer than the wall-clock budget: the timer fires first, but
-    // `unlistenFn` is still null because the `.then` hasn't run. Without
-    // this flag we'd silently leak the listener once the .then finally
-    // installs it. We also use it to short-circuit the .then so we don't
-    // hand a now-useless handle back into the world.
-    let timedOut = false;
+    // `settled` covers the races where the run ends before
+    // `startChatStream` resolves: the timer fires first, or the stream's own
+    // done / error / cancelled arrives first — either way `unlistenFn` is
+    // still null because the `.then` hasn't run. Without this flag the
+    // `.then` installed the listener and the module-global stop handle of a
+    // run that was already over, and nothing would ever remove them.
+    let settled = false;
 
     const cleanup = () => {
+      settled = true;
       try {
         unlistenFn?.();
       } catch {
@@ -413,7 +603,6 @@ async function runOneShotStream(args: {
     // Hard ceiling on extractor wall-clock. If a model goes off the rails
     // and never emits `done`, we'd otherwise leak a listener.
     const timeoutId = window.setTimeout(() => {
-      timedOut = true;
       // Stop the backend generation, don't just drop the listener: the model
       // would otherwise keep burning a generation slot with nobody reading
       // it, competing with the user's next visible turn — and since cleanup
@@ -454,7 +643,10 @@ async function runOneShotStream(args: {
         } else if (ev.kind === "done") {
           window.clearTimeout(timeoutId);
           cleanup();
-          resolve(buffer);
+          // A send that landed while the stream connected had no stop handle
+          // to call, so this run may have finished anyway: its output is
+          // still never used.
+          resolve(epoch === cancelEpoch ? buffer : null);
         } else if (ev.kind === "error") {
           window.clearTimeout(timeoutId);
           cleanup();
@@ -470,20 +662,34 @@ async function runOneShotStream(args: {
       },
     )
       .then((handle) => {
-        // The timer may have already fired and rejected the promise. If
-        // it has, the handle's unlisten is the only thing keeping the
+        // The run may already be over — timed out, or its stream ended. If
+        // it is, the handle's unlisten is the only thing keeping the
         // Rust-side event listener alive — call it immediately rather
         // than stashing it.
-        if (timedOut) {
+        if (settled) {
           try {
             handle.unlisten();
           } catch {
             /* ignore */
           }
-          // Stop the generation too — the timer already gave up on reading
-          // it, so leaving it running would strand the model exactly as the
-          // timeout path above describes.
+          // Stop the generation too — after a timeout nobody reads it any
+          // more, so leaving it running would strand the model exactly as
+          // the timeout path above describes. (A stream that ended on its
+          // own just ignores the stop.)
           void handle.stop().catch(() => {});
+          return;
+        }
+        if (epoch !== cancelEpoch) {
+          // A send landed while this stream connected, before there was a
+          // stop handle for `cancelMemoryExtraction` to call.
+          window.clearTimeout(timeoutId);
+          try {
+            handle.unlisten();
+          } catch {
+            /* ignore */
+          }
+          void handle.stop().catch(() => {});
+          resolve(null);
           return;
         }
         unlistenFn = handle.unlisten;

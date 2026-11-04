@@ -1,11 +1,8 @@
-import { useEffect, useState } from "react";
-import {
-  ChevronDown,
-  CircleAlert,
-  CircleCheck,
-  RefreshCw,
-} from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { useConfirm } from "@/components/ConfirmDialog";
+import { DefaultModelPicker } from "@/components/DefaultModelPicker";
+import { Field } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import {
@@ -15,17 +12,10 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 import { useSnippetStore } from "@/stores/snippetStore";
-import { useSettingsStore } from "@/stores/settingsStore";
-import { useProviderModels } from "@/lib/useProviderModels";
+import { useSnippetVarStore } from "@/stores/snippetVarStore";
+import { describePlaceholders, type PlaceholderInfo } from "@/lib/snippetVars";
+import { dialogEnter } from "@/lib/shortcuts";
 import type { ProviderId } from "@/types";
 
 /**
@@ -37,6 +27,7 @@ import type { ProviderId } from "@/types";
  * compat but the UI surface is removed per product decision.
  */
 export function SnippetDialog() {
+  const { confirm } = useConfirm();
   const target = useSnippetStore((s) => s.dialogTarget);
   const close = useSnippetStore((s) => s.closeDialog);
   const create = useSnippetStore((s) => s.create);
@@ -53,16 +44,58 @@ export function SnippetDialog() {
       : null;
   const isEditMode = !!editing;
 
-  const [title, setTitle] = useState("");
-  const [prompt, setPrompt] = useState("");
-  const [provider, setProvider] = useState<ProviderId | null>(null);
-  const [model, setModel] = useState<string | null>(null);
+  // A draft kept for this target — the dialog was unmounted by the app lock
+  // while it was open (see `draft`).
+  const keptDraft = () => {
+    const d = useSnippetStore.getState().draft;
+    return d && d.target === target ? d : null;
+  };
+  const [title, setTitle] = useState(() => keptDraft()?.title ?? "");
+  const [prompt, setPrompt] = useState(() => keptDraft()?.prompt ?? "");
+  const [provider, setProvider] = useState<ProviderId | null>(() => keptDraft()?.provider ?? null);
+  const [model, setModel] = useState<string | null>(() => keptDraft()?.model ?? null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const promptRef = useRef<HTMLTextAreaElement>(null);
+
+  // What the fields held when the dialog opened — closing with anything else
+  // asks first.
+  const baseline = editing
+    ? editing
+    : { title: "", prompt: isSeed ? (target as { seedPrompt: string }).seedPrompt : "", provider: null, model: null };
+  const dirty =
+    title !== baseline.title ||
+    prompt !== baseline.prompt ||
+    provider !== baseline.provider ||
+    model !== baseline.model;
+
+  // Escape, the backdrop, ✕ and Cancel all come through here, so none of them
+  // can throw a typed prompt away without asking.
+  const requestClose = async () => {
+    if (
+      dirty &&
+      !(await confirm({
+        title: "Discard unsaved changes?",
+        body: isEditMode ? "Your edits to this snippet haven't been saved." : "This snippet hasn't been saved yet.",
+        confirmLabel: "Discard",
+        cancelLabel: "Keep editing",
+        destructive: true,
+      }))
+    ) {
+      return;
+    }
+    close();
+  };
 
   useEffect(() => {
     if (!target) return;
-    if (target === "new") {
+    const kept = keptDraft();
+    if (kept) {
+      setTitle(kept.title);
+      setPrompt(kept.prompt);
+      setProvider(kept.provider);
+      setModel(kept.model);
+    } else if (target === "new") {
       setTitle("");
       setPrompt("");
       setProvider(null);
@@ -79,7 +112,17 @@ export function SnippetDialog() {
       setModel(editing.model);
     }
     setError(null);
+    // Re-seed only when a different snippet opens.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [target, isSeed, editing]);
+
+  // Keep the store's copy of the draft current, so it outlives an unmount.
+  useEffect(() => {
+    if (!target) return;
+    useSnippetStore.setState({ draft: { target, title, prompt, provider, model } });
+  }, [target, title, prompt, provider, model]);
+
+  const canSave = !saving && !!title.trim() && !!prompt.trim();
 
   const handleSave = async () => {
     const t = title.trim();
@@ -109,7 +152,7 @@ export function SnippetDialog() {
   };
 
   return (
-    <Dialog open={!!target} onOpenChange={(o) => !o && close()}>
+    <Dialog open={!!target} onOpenChange={(o) => !o && void requestClose()}>
       <DialogContent className="max-w-lg">
         <DialogHeader>
           <DialogTitle>
@@ -122,50 +165,48 @@ export function SnippetDialog() {
         </DialogHeader>
 
         <div className="mt-2 space-y-3">
-          <Input
-            id="snippet-title"
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-            placeholder="Title — e.g. Code review checklist"
-            maxLength={80}
-            autoFocus
-          />
-          <Textarea
-            id="snippet-prompt"
-            value={prompt}
-            onChange={(e) => setPrompt(e.target.value)}
-            placeholder="Review the following code and flag any bugs, smells, or performance issues…"
-            className="min-h-[120px] rounded-2xl border-foreground/10 bg-foreground/[0.05]"
-          />
-          <ModelPicker
-            provider={provider}
-            model={model}
-            onClear={() => {
-              setProvider(null);
-              setModel(null);
-            }}
-            onSelect={(p, m) => {
-              setProvider(p);
-              setModel(m);
-            }}
-          />
+          <Field label="Title">
+            <Input
+              id="snippet-title"
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              onKeyDown={(e) => dialogEnter(e, () => void handleSave(), { ready: canSave, next: promptRef.current })}
+              placeholder="e.g. Code review checklist"
+              maxLength={80}
+              autoFocus
+            />
+          </Field>
+          <Field label="Prompt">
+            <Textarea
+              ref={promptRef}
+              id="snippet-prompt"
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+              onKeyDown={(e) => dialogEnter(e, () => void handleSave(), { ready: canSave })}
+              placeholder="Review the following code and flag any bugs, smells, or performance issues…"
+              className="min-h-[120px] rounded-2xl border-foreground/10 bg-foreground/[0.05]"
+            />
+          </Field>
+          <PlaceholderSummary prompt={prompt} />
+          <Field label="Model" optional>
+            <DefaultModelPicker
+              provider={provider}
+              model={model}
+              onChange={(p, m) => {
+                setProvider(p);
+                setModel(m);
+              }}
+            />
+          </Field>
           {error && <p className="text-xs text-destructive">{error}</p>}
         </div>
 
         <div className="mt-3 flex items-center justify-end gap-2">
-          <Button variant="outline" onClick={close} className="rounded-lg">
+          <Button variant="outline" onClick={() => void requestClose()} className="rounded-lg">
             Cancel
           </Button>
-          <Button
-            onClick={handleSave}
-            disabled={saving || !title.trim() || !prompt.trim()}
-            className="rounded-lg"
-          >
-            {saving
-              ? isEditMode
-                ? "Saving…"
-                : "Creating…"
-              : "Save"}
+          <Button onClick={handleSave} disabled={!canSave} className="rounded-lg">
+            {isEditMode ? (saving ? "Saving…" : "Save") : saving ? "Creating…" : "Create"}
           </Button>
         </div>
       </DialogContent>
@@ -173,110 +214,54 @@ export function SnippetDialog() {
   );
 }
 
+const KIND_LABEL: Record<Exclude<PlaceholderInfo["kind"], "invalid">, string> = {
+  builtin: "built-in",
+  saved: "saved value",
+  ask: "asked when run",
+};
+
 /**
- * Thin wrapper around the same model-list fetching logic the ChatHeader uses.
- * Kept inline here because it's only ever used inside SnippetDialog; if a
- * third surface needs it we can lift it into its own component.
+ * What the prompt's `{{…}}` placeholders will do when the snippet runs, under
+ * the prompt field. Nothing in the editor used to say which ones get filled
+ * in, and a lower-case `{{topic}}` was silently sent to the model as typed.
  */
-function ModelPicker({
-  provider,
-  model,
-  onSelect,
-  onClear,
-}: {
-  provider: ProviderId | null;
-  model: string | null;
-  onSelect: (provider: ProviderId, model: string) => void;
-  onClear: () => void;
-}) {
-  // Slice the store: this picker only needs the four fields that gate
-  // model loading. Subscribing to the whole settings object would
-  // re-render the dialog on every keystroke in the global SettingsDialog
-  // textareas.
-  const openaiKeySet = useSettingsStore((s) => s.openai_key_set);
-  const { ollamaModels, openaiModels, ollamaUp, loading, refresh } =
-    useProviderModels();
+function PlaceholderSummary({ prompt }: { prompt: string }) {
+  const variables = useSnippetVarStore((s) => s.variables);
+  const found = useMemo(() => describePlaceholders(prompt, variables), [prompt, variables]);
+  const invalid = found.filter((p) => p.kind === "invalid");
+  const valid = found.filter((p) => p.kind !== "invalid");
 
-  const label =
-    provider && model ? `${model} · ${provider}` : "No default model";
-
+  if (found.length === 0) {
+    return (
+      <p className="text-[11px] text-foreground/45">
+        Add a <span className="font-mono">{"{{NAME}}"}</span> placeholder to be asked for a value
+        each time the snippet runs.
+      </p>
+    );
+  }
   return (
-    <div className="flex items-center gap-2">
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <Button
-            variant="ghost"
-            className="h-10 flex-1 justify-between rounded-2xl border border-foreground/10 bg-foreground/[0.05] px-4 text-left text-foreground/85 hover:bg-foreground/10 hover:text-foreground"
-          >
-            <span className="truncate">{label}</span>
-            <ChevronDown className="h-4 w-4 opacity-60" />
-          </Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="start" className="min-w-[280px]">
-          <div className="flex items-center justify-between px-2 py-1.5">
-            <DropdownMenuLabel className="p-0">Models</DropdownMenuLabel>
-            <button
-              className="rounded p-1 hover:bg-accent"
-              onClick={(e) => {
-                e.preventDefault();
-                refresh();
-              }}
-              aria-label="Refresh models"
+    <div className="space-y-1.5 text-[11px]">
+      {valid.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1.5">
+          {valid.map((p) => (
+            <span
+              key={p.name}
+              className="inline-flex items-center gap-1 rounded-md bg-foreground/[0.06] px-1.5 py-0.5 text-foreground/70"
             >
-              <RefreshCw
-                className={loading ? "h-3.5 w-3.5 animate-spin" : "h-3.5 w-3.5"}
-              />
-            </button>
-          </div>
-          <DropdownMenuSeparator />
-          <DropdownMenuLabel className="flex items-center gap-1.5">
-            {ollamaUp ? (
-              <CircleCheck className="h-3 w-3 text-emerald-500" />
-            ) : (
-              <CircleAlert className="h-3 w-3 text-amber-500" />
-            )}
-            Ollama
-          </DropdownMenuLabel>
-          {ollamaModels.length === 0 && (
-            <DropdownMenuItem disabled>
-              {ollamaUp ? "No models installed" : "Not running"}
-            </DropdownMenuItem>
-          )}
-          {ollamaModels.map((m) => (
-            <DropdownMenuItem
-              key={`ollama:${m.id}`}
-              onSelect={() => onSelect("ollama", m.id)}
-            >
-              {m.label}
-            </DropdownMenuItem>
+              <span className="font-mono">{`{{${p.name}}}`}</span>
+              <span className="text-foreground/45">
+                {KIND_LABEL[p.kind as Exclude<PlaceholderInfo["kind"], "invalid">]}
+              </span>
+            </span>
           ))}
-          <DropdownMenuSeparator />
-          <DropdownMenuLabel>API</DropdownMenuLabel>
-          {openaiModels.length === 0 && (
-            <DropdownMenuItem disabled>
-              {openaiKeySet ? "No models" : "Not connected"}
-            </DropdownMenuItem>
-          )}
-          {openaiModels.slice(0, 30).map((m) => (
-            <DropdownMenuItem
-              key={`openai:${m.id}`}
-              onSelect={() => onSelect("openai", m.id)}
-            >
-              {m.label}
-            </DropdownMenuItem>
-          ))}
-        </DropdownMenuContent>
-      </DropdownMenu>
-      {provider && model && (
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          onClick={onClear}
-          className="h-9 shrink-0 rounded-lg px-3 text-foreground/65 hover:bg-foreground/10 hover:text-foreground"
-        >
-          Clear
-        </Button>
+        </div>
+      )}
+      {invalid.length > 0 && (
+        <p className="text-amber-700 dark:text-amber-300">
+          <span className="font-mono">{invalid.map((p) => `{{${p.name}}}`).join(", ")}</span>{" "}
+          won't be filled in — variable names use
+          capital letters, digits and _, like <span className="font-mono">{"{{TOPIC}}"}</span>.
+        </p>
       )}
     </div>
   );

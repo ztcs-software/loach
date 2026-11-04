@@ -3,6 +3,7 @@ pub mod openai;
 
 use std::time::Duration;
 
+use futures_util::{FutureExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
@@ -102,7 +103,9 @@ pub(super) struct ToolOutcome {
 /// Returns `None` when the stream was cancelled while waiting — for an
 /// answer or for the tool — in which case nothing has been emitted for
 /// this call beyond `ToolCall`, and the caller emits `Cancelled` and
-/// returns exactly as it did before.
+/// returns exactly as it did before. The one exception is a workspace tool
+/// that changes files: once dispatched it runs to the end whatever Stop
+/// does, so its `ToolResult` goes out first and the change is on record.
 pub(super) async fn execute_tool_call(
     ctx: &ToolCallCtx<'_>,
     call_id: &str,
@@ -238,26 +241,37 @@ pub(super) async fn execute_tool_call(
         args,
         ctx.workspace_root,
     );
-    let (content, is_error, attachments) = select! {
-        biased;
-        _ = ctx.cancel.notified() => return None,
-        r = dispatch => match r {
-            Ok(r) => (r.content_text, r.is_error, r.attachments),
-            Err(e) => {
-                // The whole error, a stdio server's stderr tail included,
-                // goes to the log. The model — and the transcript, and so
-                // exports — get it cut before the stderr, which can quote
-                // anything the server printed, a key in a URL included.
-                // Settings → MCP → Test connection shows it in full.
-                let full = format!("{e:#}");
-                tracing::warn!("tool `{}` failed: {full}", tool_def.qualified_name);
-                (
-                    format!("tool call failed: {}", crate::mcp::stdio::without_stderr(&full)),
-                    true,
-                    Vec::new(),
-                )
-            }
-        },
+    // A write, edit, move or delete isn't raced against Stop: its blocking
+    // task can't be stopped once started (see `dispatch_builtin_guarded`),
+    // so dropping it here only lost the record of a change that still
+    // landed on disk. It finishes, its result goes out like any other, and
+    // a Stop pressed meanwhile — a stored permit — is honoured right after.
+    let mutates = builtin && crate::tools::fs::requires_approval(tool_name);
+    let outcome = if mutates {
+        dispatch.await
+    } else {
+        select! {
+            biased;
+            _ = ctx.cancel.notified() => return None,
+            r = dispatch => r,
+        }
+    };
+    let (content, is_error, attachments) = match outcome {
+        Ok(r) => (r.content_text, r.is_error, r.attachments),
+        Err(e) => {
+            // The whole error, a stdio server's stderr tail included,
+            // goes to the log. The model — and the transcript, and so
+            // exports — get it cut before the stderr, which can quote
+            // anything the server printed, a key in a URL included.
+            // Settings → MCP → Test connection shows it in full.
+            let full = format!("{e:#}");
+            tracing::warn!("tool `{}` failed: {full}", tool_def.qualified_name);
+            (
+                format!("tool call failed: {}", crate::mcp::stdio::without_stderr(&full)),
+                true,
+                Vec::new(),
+            )
+        }
     };
 
     // Cap what we feed back to the model. The UI gets the original
@@ -275,6 +289,9 @@ pub(super) async fn execute_tool_call(
             timed_out: false,
         },
     );
+    if mutates && ctx.cancel.notified().now_or_never().is_some() {
+        return None;
+    }
     Some(ToolOutcome { for_model })
 }
 
@@ -303,6 +320,45 @@ pub(super) fn cap_tool_text(s: &str, max_bytes: usize) -> String {
         max_bytes,
         s.len()
     )
+}
+
+/// Most of a failed response's body that goes into an error message. The
+/// message lands in a `StreamEvent::Error`, which the transcript keeps, and a
+/// base URL pointed at the wrong thing answers with a whole HTML page. A
+/// provider's own error JSON is far shorter.
+const MAX_ERROR_BODY_BYTES: usize = 4 * 1024;
+
+/// How long reading that body may take. The shared client carries no
+/// timeout (generations run long), so a server that sent its status and then
+/// trickled the body held the turn open with it.
+const ERROR_BODY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The start of a failed response's body, for an error message: at most
+/// [`MAX_ERROR_BODY_BYTES`] of it, read for at most [`ERROR_BODY_TIMEOUT`].
+pub(super) async fn error_body(resp: reqwest::Response) -> String {
+    let mut stream = resp.bytes_stream();
+    let mut raw: Vec<u8> = Vec::new();
+    let _ = tokio::time::timeout(ERROR_BODY_TIMEOUT, async {
+        while raw.len() <= MAX_ERROR_BODY_BYTES {
+            match stream.next().await {
+                Some(Ok(chunk)) => raw.extend_from_slice(&chunk),
+                _ => break,
+            }
+        }
+    })
+    .await;
+    clip_error_body(&raw)
+}
+
+/// `raw` as trimmed text, cut at [`MAX_ERROR_BODY_BYTES`] with a `…` to say so.
+fn clip_error_body(raw: &[u8]) -> String {
+    let text = String::from_utf8_lossy(&raw[..raw.len().min(MAX_ERROR_BODY_BYTES)]);
+    if raw.len() > MAX_ERROR_BODY_BYTES {
+        // The cut can split a multi-byte character; drop what's left of it.
+        format!("{}…", text.trim_end_matches('\u{FFFD}').trim())
+    } else {
+        text.trim().to_string()
+    }
 }
 
 /// Soft ceiling on the serialized `messages` array we'll ship to the
@@ -337,42 +393,57 @@ fn messages_payload_size(messages: &[Value]) -> usize {
 /// had said. The stub keeps the tool call's place in the transcript so
 /// the model still sees the call→reply rhythm.
 ///
-/// `search_from` advances each iteration so we never re-stub the same
-/// slot (the stub text itself is >64 bytes, which would otherwise still
-/// satisfy `is_substantive_tool_msg` and trap the loop spinning forever
-/// in the rare case where one stub alone isn't enough to get back under
-/// the cap — e.g. three multi-MB tool results in a row).
+/// Nor the results of the turn that just ran — the tool messages after the
+/// last other one, which the model is about to read. Images and inlined
+/// files count toward the cap too, and once they alone filled it, every
+/// result was stubbed, the newest included: the model never saw what it
+/// asked for, asked again, and ran into the turn cap.
+///
+/// One pass, oldest first, each slot visited once: the stub text itself
+/// is >64 bytes and still satisfies `is_substantive_tool_msg`, so
+/// re-searching from the start would find the same slot forever when one
+/// stub alone isn't enough (e.g. three multi-MB tool results in a row). The
+/// size is serialised once and then adjusted per stub, not re-serialised
+/// each time.
 pub(super) fn bound_messages_payload(messages: &mut [Value]) {
-    let mut search_from: usize = 0;
-    while messages_payload_size(messages) > SOFT_MESSAGES_CAP_BYTES {
-        let mut found_idx: Option<usize> = None;
-        for i in search_from..messages.len() {
-            if is_substantive_tool_msg(&messages[i]) {
-                found_idx = Some(i);
-                break;
-            }
+    let mut size = messages_payload_size(messages);
+    if size <= SOFT_MESSAGES_CAP_BYTES {
+        return;
+    }
+    let current_turn = messages
+        .iter()
+        .rposition(|m| m.get("role").and_then(Value::as_str) != Some("tool"))
+        .map_or(0, |i| i + 1);
+    for m in &mut messages[..current_turn] {
+        if size <= SOFT_MESSAGES_CAP_BYTES {
+            return;
         }
-        match found_idx {
-            Some(i) => {
-                stub_tool_message(&mut messages[i]);
-                search_from = i + 1;
-            }
-            None => {
-                // Nothing left to drop — the system / user / assistant
-                // turns alone exceed the cap, or every tool message is
-                // already either short or stubbed. Bail rather than
-                // spinning; let the provider's own context-length error
-                // surface to the user if it doesn't fit.
-                tracing::warn!(
-                    "messages payload {} bytes exceeds cap of {} bytes after \
-                     dropping every tool result — sending as-is",
-                    messages_payload_size(messages),
-                    SOFT_MESSAGES_CAP_BYTES
-                );
-                break;
-            }
+        if is_substantive_tool_msg(m) {
+            let before = content_size(m);
+            stub_tool_message(m);
+            size = size - before + content_size(m);
         }
     }
+    if size > SOFT_MESSAGES_CAP_BYTES {
+        // Nothing left to drop — the system / user / assistant turns and
+        // this turn's results alone exceed the cap, or every earlier tool
+        // message is already either short or stubbed. Let the provider's
+        // own context-length error surface to the user if it doesn't fit.
+        tracing::warn!(
+            "messages payload {size} bytes exceeds cap of {} bytes after \
+             dropping every earlier tool result — sending as-is",
+            SOFT_MESSAGES_CAP_BYTES
+        );
+    }
+}
+
+/// Serialised size of a message's `content`, the only part a stub changes.
+/// Compact JSON writes a value the same way wherever it sits, so the
+/// difference before and after is exactly what the whole array changes by.
+fn content_size(m: &Value) -> usize {
+    m.get("content")
+        .and_then(|c| serde_json::to_vec(c).ok())
+        .map_or(0, |v| v.len())
 }
 
 fn is_substantive_tool_msg(m: &Value) -> bool {
@@ -418,7 +489,7 @@ fn stub_tool_message(m: &mut Value) {
 /// during connect. If DNS resolution itself fails we let the request
 /// proceed — `reqwest::send` will surface a more accurate error than we
 /// could synthesize here.
-pub(super) async fn refuse_link_local_host(base_url: &str) -> Result<(), String> {
+pub(crate) async fn refuse_link_local_host(base_url: &str) -> Result<(), String> {
     use std::net::IpAddr;
     let url = reqwest::Url::parse(base_url)
         .map_err(|e| format!("could not parse base URL: {e}"))?;
@@ -558,8 +629,8 @@ mod tests {
         // used `iter_mut().find(...)` and re-found the same just-stubbed
         // slot on every iteration — spinning forever because the stub
         // text itself is >64 bytes and `is_substantive_tool_msg` still
-        // matched it. With `search_from` advancing per iteration, each
-        // slot is visited at most once and the loop terminates.
+        // matched it. With a single forward pass, each slot is visited at
+        // most once and the loop terminates.
         let big = "y".repeat(SOFT_MESSAGES_CAP_BYTES / 2);
         let mut msgs = vec![
             json!({ "role": "user", "content": "go" }),
@@ -619,6 +690,47 @@ mod tests {
     }
 
     #[test]
+    fn clip_error_body_trims_and_cuts_on_a_char_boundary() {
+        assert_eq!(clip_error_body(b"  {\"error\":\"model not found\"}\n"), r#"{"error":"model not found"}"#);
+        // "é" is two bytes; one straddling the cut leaves no stray half.
+        let mut raw = vec![b'x'; MAX_ERROR_BODY_BYTES - 1];
+        raw.extend_from_slice("é tail".as_bytes());
+        let out = clip_error_body(&raw);
+        assert!(out.ends_with("x…"), "{}", &out[out.len() - 8..]);
+        assert_eq!(out.len(), MAX_ERROR_BODY_BYTES - 1 + '…'.len_utf8());
+    }
+
+    /// A base URL aimed at a web server answers with a page, not an error
+    /// object. Only its start reaches the message — and the transcript.
+    #[tokio::test]
+    async fn error_body_reads_only_the_start_of_a_large_page() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        tokio::spawn(async move {
+            let Ok((mut conn, _)) = listener.accept().await else { return };
+            let mut request = [0u8; 4096];
+            let _ = conn.read(&mut request).await;
+            let page = format!("<html>{}</html>", "x".repeat(1024 * 1024));
+            let head = format!(
+                "HTTP/1.1 502 Bad Gateway\r\ncontent-type: text/html\r\ncontent-length: {}\r\n\r\n",
+                page.len()
+            );
+            let _ = conn.write_all(head.as_bytes()).await;
+            let _ = conn.write_all(page.as_bytes()).await;
+        });
+        let resp = reqwest::Client::new()
+            .get(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+            .send()
+            .await
+            .expect("send");
+        let body = error_body(resp).await;
+        assert!(body.starts_with("<html>xxx"), "{}", &body[..20]);
+        assert!(body.ends_with('…'));
+        assert!(body.len() <= MAX_ERROR_BODY_BYTES + '…'.len_utf8());
+    }
+
+    #[test]
     fn bound_messages_payload_leaves_short_tool_messages_alone() {
         // Even when the array is over the cap, short tool messages stay —
         // dropping a 30-byte content for a 30-byte stub buys nothing and
@@ -630,6 +742,31 @@ mod tests {
         ];
         bound_messages_payload(&mut msgs);
         assert_eq!(msgs[1], short_tool);
+    }
+
+    #[test]
+    fn bound_messages_payload_never_stubs_the_results_the_model_is_about_to_read() {
+        // An attached image alone fills the cap. Earlier results go, but the
+        // ones this turn produced stay: stubbing them too had the model ask
+        // for the same thing again until it hit the turn cap.
+        let image = "i".repeat(SOFT_MESSAGES_CAP_BYTES);
+        let result = "r".repeat(1024);
+        let mut msgs = vec![
+            json!({ "role": "user", "content": image }),
+            json!({ "role": "assistant", "content": null, "tool_calls": [] }),
+            json!({ "role": "tool", "tool_call_id": "1", "content": result.clone() }),
+            json!({ "role": "assistant", "content": null, "tool_calls": [] }),
+            json!({ "role": "tool", "tool_call_id": "2", "content": result.clone() }),
+            json!({ "role": "tool", "tool_call_id": "3", "content": result.clone() }),
+        ];
+        bound_messages_payload(&mut msgs);
+        assert!(
+            msgs[2]["content"].as_str().unwrap().contains("dropped to keep the conversation"),
+            "an earlier turn's result is stubbed: {:?}",
+            msgs[2]
+        );
+        assert_eq!(msgs[4]["content"], result.as_str());
+        assert_eq!(msgs[5]["content"], result.as_str());
     }
 }
 
@@ -669,9 +806,11 @@ pub struct GenerationParams {
     /// Reasoning toggle for thinking-capable models (Qwen3, DeepSeek-R1,
     /// GPT-OSS, …). `Some(true)` forces a chain-of-thought before the
     /// reply; `Some(false)` suppresses it; `None` lets Ollama use the
-    /// model's own default. Models without thinking capability ignore the
-    /// flag — Ollama returns an error for them, but the frontend gates the
-    /// toggle on the model's `capabilities` so we never send it for those.
+    /// model's own default. Ollama answers the flag with an error for a
+    /// model that can't think, so it should only be set for models whose
+    /// `capabilities` include `thinking` — and when one slips through (an
+    /// older build that doesn't report capabilities), the Ollama provider
+    /// drops it and retries.
     #[serde(default)]
     pub think: Option<bool>,
     /// Number of model layers to offload to the GPU (Ollama `num_gpu`).

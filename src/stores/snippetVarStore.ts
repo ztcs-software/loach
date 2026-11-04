@@ -38,6 +38,10 @@ interface SnippetVarState {
   fillValuesBySnippet: Record<string, Record<string, string>>;
   dialogTarget: VarDialogTarget;
   pendingFill: PendingFill | null;
+  /** The fill dialog's typed values for `pendingFill`. Kept here, not in the
+   *  dialog: the app lock unmounts the dialog, and what was typed must still
+   *  be there when it comes back. Dropped with the request. */
+  fillDraft: { fill: PendingFill; values: Record<string, string> } | null;
 
   setPendingFill: (fill: PendingFill | null) => void;
 
@@ -76,8 +80,9 @@ export const useSnippetVarStore = create<SnippetVarState>((set, get) => ({
   fillValuesBySnippet: {},
   dialogTarget: null,
   pendingFill: null,
+  fillDraft: null,
 
-  setPendingFill: (pendingFill) => set({ pendingFill }),
+  setPendingFill: (pendingFill) => set({ pendingFill, fillDraft: null }),
 
   hydrate: async () => {
     try {

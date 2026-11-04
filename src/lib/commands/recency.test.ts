@@ -100,6 +100,16 @@ describe("orderByRecency", () => {
     expect(out.every((e) => e.groupOverride === undefined)).toBe(true);
   });
 
+  it("leaves the bare row heading an argument list where it is", () => {
+    const args = [
+      entry("model", "Model & persona"),
+      entry("model", "Model & persona", "llama3"),
+    ];
+    const out = orderByRecency(args, ["model"]);
+    expect(out).toEqual(args);
+    expect(out.every((e) => e.groupOverride === undefined)).toBe(true);
+  });
+
   it("no-ops on an empty history or a single row", () => {
     expect(orderByRecency(base, [])).toBe(base);
     const one = [entry("new", "Chat")];

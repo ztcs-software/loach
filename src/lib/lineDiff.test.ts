@@ -152,4 +152,24 @@ describe("splitHidden", () => {
       "}",
     ]);
   });
+
+  // Invisible in the card, yet each changes what the file says: the tag
+  // block and variation selectors can carry a whole hidden message, a Hangul
+  // filler or the Mongolian vowel separator reads as a blank yet is a valid
+  // identifier character, and joiners, the soft hyphen and the invisible
+  // math operators vanish mid-word.
+  it("sets apart the other invisible characters too", () => {
+    const hidden = [
+      0xe0041, 0xe007f, 0x3164, 0x115f, 0x1160, 0xffa0, 0x00ad, 0x200c, 0x200d, 0x180e,
+      0x2061, 0x2064, 0xfe0f, 0xe0100,
+    ];
+    for (const cp of hidden) {
+      const tag = `U+${cp.toString(16).toUpperCase().padStart(4, "0")}`;
+      expect(splitHidden(`a${String.fromCodePoint(cp)}b`)).toEqual(["a", { hidden: tag }, "b"]);
+    }
+  });
+
+  it("keeps an astral character that isn't hidden whole", () => {
+    expect(splitHidden("ok 🦀")).toEqual(["ok 🦀"]);
+  });
 });

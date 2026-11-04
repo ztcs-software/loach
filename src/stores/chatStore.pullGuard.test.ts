@@ -101,4 +101,16 @@ describe("sendUserMessage model-download guard", () => {
     setup({ provider: "openai", model: "llama3:8b" });
     expect(await sendError()).not.toMatch(/still downloading/);
   });
+
+  // Ollama lists a bare tag as `<name>:latest`, and a pull's target is
+  // spelled however it was typed.
+  it("reads a bare tag and its :latest as one model", async () => {
+    setup({ model: "llama3" }, [installed("llama3:latest")]);
+    useModelsStore.setState({ runs: { "run-1": livePull("llama3") } } as never);
+    expect(await sendError()).not.toMatch(/still downloading/);
+
+    setup({ model: "llama3:latest" });
+    useModelsStore.setState({ runs: { "run-1": livePull("llama3") } } as never);
+    expect(await sendError()).toMatch(/still downloading/);
+  });
 });

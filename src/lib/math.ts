@@ -128,11 +128,15 @@ const INLINE_CODE_RE = new RegExp(
   String.raw`(\x60+)${NO_BLANK}*?\1(?!\x60)`,
   "g",
 );
-/** An opening or closing fence, with its indent and backtick/tilde run.
- *  Any indent is allowed: a fence nested in a list item sits well past the
- *  three columns CommonMark allows *relative to its container*, and matching
- *  only 0–3 left those blocks exposed to the rewrite. */
-const FENCE_RE = /^([ \t]*)(`{3,}|~{3,})/;
+/** An opening or closing fence, with its indent, an optional list-item
+ *  marker, and its backtick/tilde run. Any indent is allowed: a fence nested
+ *  in a list item sits well past the three columns CommonMark allows
+ *  *relative to its container*, and matching only 0–3 left those blocks
+ *  exposed to the rewrite. The marker is for a fence opening on the item's
+ *  own line (`1. ```bash`) — missed, its body was rewritten as prose and its
+ *  indented closer taken for an opener, inverting code and prose for the
+ *  rest of the message. Only an opener may carry one. */
+const FENCE_RE = /^([ \t]*)((?:[-*+]|\d{1,9}[.)])[ \t]+)?(`{3,}|~{3,})/;
 /** A list-item marker. Its content column is where an indented code block
  *  inside the item starts counting from. */
 const LIST_ITEM_RE = /^[ \t]*(?:[-*+]|\d{1,9}[.)])[ \t]+/;
@@ -223,8 +227,9 @@ export function normalizeMath(src: string): string {
       // so a shorter ``` inside a ```` block stays content.
       if (
         fence &&
-        fence[2][0] === fenceChar &&
-        fence[2].length >= fenceLen &&
+        !fence[2] &&
+        fence[3][0] === fenceChar &&
+        fence[3].length >= fenceLen &&
         indentWidth(fence[1]) <= fenceIndent + 3
       ) {
         inFence = false;
@@ -250,9 +255,12 @@ export function normalizeMath(src: string): string {
     if (fence) {
       flush();
       inFence = true;
-      fenceChar = fence[2][0];
-      fenceLen = fence[2].length;
-      fenceIndent = indentWidth(fence[1]);
+      fenceChar = fence[3][0];
+      fenceLen = fence[3].length;
+      // Behind a list marker the fence sits at the item's content column,
+      // and so does its closer.
+      fenceIndent = columnWidth(fence[1] + (fence[2] ?? ""));
+      if (fence[2]) codeIndent = fenceIndent + 4;
       out.push(line);
       inIndentedCode = false;
       prevBlank = false;

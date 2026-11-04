@@ -2,7 +2,9 @@ import { useEffect, useState } from "react";
 import { ChevronDown, ChevronRight, Pencil, Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useConfirm } from "@/components/ConfirmDialog";
+import { useSettingsStore } from "@/stores/settingsStore";
 import { useSnippetVarStore } from "@/stores/snippetVarStore";
+import { temporalVars } from "@/lib/temporal";
 import { cn } from "@/lib/utils";
 import type { SnippetVariable } from "@/types";
 
@@ -161,8 +163,48 @@ export function SnippetVariablesPanel() {
               ))}
             </ul>
           )}
+          <BuiltInVariables />
         </div>
       )}
     </section>
+  );
+}
+
+/**
+ * The variables Loach fills in itself, with what they'd be right now. They
+ * work in every snippet but weren't listed anywhere — the only way to learn
+ * of `{{CURRENT_DATE}}` was to try to create a variable by that name.
+ */
+function BuiltInVariables() {
+  const userName = useSettingsStore((s) => s.user_name) ?? "";
+  const now = temporalVars();
+  const rows: [string, string][] = [
+    ["USER_NAME", userName],
+    ["CURRENT_DATE", now.CURRENT_DATE],
+    ["CURRENT_TIME", now.CURRENT_TIME],
+    ["CURRENT_WEEKDAY", now.CURRENT_WEEKDAY],
+    ["CURRENT_DATETIME", now.CURRENT_DATETIME],
+    ["CURRENT_TIMEZONE", now.CURRENT_TIMEZONE],
+  ];
+  return (
+    <div className="mt-3 border-t border-foreground/[0.05] pt-3">
+      <h3 className="mb-1 text-[11px] font-medium text-foreground/55">
+        Built in — filled in automatically
+      </h3>
+      <ul className="divide-y divide-foreground/[0.05]">
+        {rows.map(([key, value]) => (
+          <li key={key} className="flex items-center gap-3 py-1.5 text-[13px]">
+            <span className="shrink-0 rounded-md bg-foreground/[0.06] px-1.5 py-0.5 font-mono text-[11px] text-foreground/75">
+              {`{{${key}}}`}
+            </span>
+            <span className="min-w-0 flex-1 truncate text-foreground/60">
+              {value || (
+                <span className="italic text-foreground/40">(not set — add your name in Settings → General)</span>
+              )}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }

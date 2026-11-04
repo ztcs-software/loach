@@ -13,7 +13,7 @@ use super::{resolve_qualified, ChatRequest, ModelInfo};
 use crate::db::Database;
 use crate::mcp::McpToolDef;
 use crate::secrets;
-use crate::sse::find_frame_end;
+use crate::sse::{find_frame_end, frame_lines};
 use crate::stream::{event_channel, StreamEvent, StreamRegistry};
 
 /// Per-frame ceiling on the SSE buffer between blank-line delimiters. Mirrors
@@ -50,6 +50,12 @@ const MAX_TOOL_CALLS: usize = 256;
 /// the accumulation bounded.
 const MAX_TOOL_CALL_BYTES: usize = 4 * 1024 * 1024;
 
+/// How long a reply may run on past its `finish_reason` for the `usage`
+/// frame, which `include_usage` servers send after the finish chunk and
+/// before `[DONE]`. Only a server that skips `[DONE]` *and* holds the
+/// connection open waits this out; the rest end on `[DONE]` or the close.
+const USAGE_GRACE: Duration = Duration::from_secs(2);
+
 #[derive(Debug, Deserialize)]
 struct ModelsResponse {
     data: Vec<OpenAIModel>,
@@ -78,7 +84,14 @@ pub async fn list_models(http: &Client, base_url: &str) -> Result<Vec<ModelInfo>
     // `openai_base_url` — would ship the key in cleartext on every
     // model-list refresh, the exact leak the chat path already prevents.
     // Off the runtime — blocking OS-keyring read (see chat_stream's note).
-    if let Some(key) = tokio::task::spawn_blocking(secrets::get_openai_key).await?? {
+    // A keyring that can't be read counts as no key, as it does there: on
+    // Linux without a Secret Service, failing here kept a keyless LM Studio
+    // from listing its models while chatting with it worked.
+    let key = tokio::task::spawn_blocking(|| secrets::get_openai_key().ok().flatten())
+        .await
+        .ok()
+        .flatten();
+    if let Some(key) = key {
         if !key.is_empty() && is_safe_for_bearer(base_url) {
             req = req.bearer_auth(key);
         }
@@ -104,8 +117,10 @@ struct Choice {
     delta: Option<DeltaMsg>,
     /// Present on the terminator frame for compat servers that omit the
     /// trailing `data: [DONE]` marker (Azure, some Ollama-OpenAI proxies).
-    /// We treat any non-null `finish_reason` as an EOS so the chat doesn't
-    /// hang waiting for a [DONE] that never arrives.
+    /// Any non-null `finish_reason` ends the reply — after at most
+    /// `USAGE_GRACE` more for the usage frame — so the chat doesn't hang
+    /// waiting for a [DONE] that never arrives. `"error"` (OpenRouter) ends
+    /// it as an error.
     #[serde(default)]
     finish_reason: Option<String>,
 }
@@ -116,7 +131,12 @@ struct DeltaMsg {
     content: Option<String>,
     #[serde(default)]
     reasoning_content: Option<String>,
+    /// The same thing under the name Ollama's `/v1`, OpenRouter and newer
+    /// vLLM use. Read only when `reasoning_content` is absent or empty, so a server
+    /// sending both doesn't show its reasoning twice.
     #[serde(default)]
+    reasoning: Option<String>,
+    #[serde(default, deserialize_with = "null_as_empty")]
     tool_calls: Vec<DeltaToolCall>,
 }
 
@@ -144,7 +164,7 @@ struct DeltaToolFn {
 
 #[derive(Debug, Deserialize)]
 struct SseChunk {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_empty")]
     choices: Vec<Choice>,
     /// Some servers emit a final, choices-empty chunk that carries
     /// `usage: { completion_tokens, prompt_tokens, total_tokens }`. When
@@ -154,12 +174,38 @@ struct SseChunk {
     /// multiple tokens per chunk.
     #[serde(default)]
     usage: Option<Usage>,
+    /// A failure mid-reply. vLLM, llama-server and Ollama's compat endpoint
+    /// send it as a `data: {"error":{…}}` frame of its own; OpenRouter next
+    /// to a `finish_reason: "error"`. Read as an empty chunk, the cut-off
+    /// reply ended as a normal completion.
+    #[serde(default)]
+    error: Option<Value>,
 }
 
 #[derive(Debug, Deserialize, Clone, Copy)]
 struct Usage {
     #[serde(default)]
     completion_tokens: Option<u32>,
+}
+
+/// `#[serde(default)]` for a list that also takes an explicit `null` as
+/// empty. Some compat servers send `"tool_calls": null` on every delta;
+/// failing those frames dropped every token of the reply.
+fn null_as_empty<'de, D, T>(d: D) -> std::result::Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Ok(Option::<Vec<T>>::deserialize(d)?.unwrap_or_default())
+}
+
+/// The text of a mid-stream `error`: its `message` when it's the usual
+/// object, the string itself when a server sends just that, else the JSON.
+fn stream_error_message(err: &Value) -> String {
+    err.get("message")
+        .unwrap_or(err)
+        .as_str()
+        .map_or_else(|| err.to_string(), str::to_owned)
 }
 
 /// Accumulated tool call across a single turn — `name` and `arguments` may
@@ -244,7 +290,7 @@ pub async fn chat_stream(
     // there.
     if let Err(e) = super::refuse_link_local_host(&req.base_url).await {
         let _ = app.emit(&channel, StreamEvent::Error { message: e });
-        registry.finish(&req.stream_id);
+        registry.finish_own(&req.stream_id, &cancel);
         return Ok(());
     }
 
@@ -281,6 +327,10 @@ pub async fn chat_stream(
     // fallback when usage never arrives — e.g. older Ollama compat
     // shims that ignore `stream_options.include_usage`).
     let mut reported_tokens: Option<u32> = None;
+    // Request fields the server refused earlier in this stream (see
+    // `refused_field`), re-applied to every later tool turn's body so each
+    // turn doesn't pay the same rejected round-trip.
+    let mut refused: Vec<String> = Vec::new();
 
     for turn in 0..MAX_TOOL_TURNS {
         // Keep the running history under the soft cap. The first turn is
@@ -327,7 +377,13 @@ pub async fn chat_stream(
                 body["tool_choice"] = json!("none");
             }
         }
+        for field in &refused {
+            apply_refusal(&mut body, field);
+        }
 
+        // What the model says this turn, kept for the history should the
+        // turn end in tool calls.
+        let mut turn_text = String::new();
         let outcome = match run_one_turn(
             &app,
             &http,
@@ -336,8 +392,10 @@ pub async fn chat_stream(
             &cancel,
             api_key.as_deref(),
             body,
+            &mut refused,
             &mut total_tokens,
             &mut reported_tokens,
+            &mut turn_text,
             &req.stream_id,
             &registry,
         )
@@ -355,7 +413,7 @@ pub async fn chat_stream(
                 let tokens_for_metrics = reported_tokens.unwrap_or(total_tokens);
                 emit_metrics(&app, &channel, tokens_for_metrics, start, tool_ctx.approval_wait());
                 let _ = app.emit(&channel, StreamEvent::Done);
-                registry.finish(&req.stream_id);
+                registry.finish_own(&req.stream_id, &cancel);
                 return Ok(());
             }
             // Asked for tools on the last round anyway (a server that
@@ -365,8 +423,9 @@ pub async fn chat_stream(
             TurnOutcome::Tools(calls) => {
                 // Assistant turn carrying the tool calls. OpenAI requires
                 // the tool_calls array (with `id` and the `function` object)
-                // and a `content` field that may be empty when the model
-                // immediately reached for a tool.
+                // and a `content` field: whatever the model said before
+                // reaching for the tools — left out, the model saw no trace
+                // of it and said it all again — or null when it said nothing.
                 let oa_calls: Vec<Value> = calls
                     .iter()
                     .enumerate()
@@ -387,7 +446,7 @@ pub async fn chat_stream(
                     // turn is purely tool calls. Strict gateways (Azure,
                     // some local OpenAI-compat proxies) 400 on empty
                     // strings here, so we use Null explicitly.
-                    "content": Value::Null,
+                    "content": if turn_text.is_empty() { Value::Null } else { json!(turn_text) },
                     "tool_calls": oa_calls,
                 }));
 
@@ -441,7 +500,7 @@ pub async fn chat_stream(
                     .await
                     else {
                         let _ = app.emit(&channel, StreamEvent::Cancelled);
-                        registry.finish(&req.stream_id);
+                        registry.finish_own(&req.stream_id, &cancel);
                         return Ok(());
                     };
 
@@ -466,8 +525,65 @@ pub async fn chat_stream(
             ),
         },
     );
-    registry.finish(&req.stream_id);
+    registry.finish_own(&req.stream_id, &cancel);
     Ok(())
+}
+
+/// Request fields a 400 may name that are safe to adjust and resend: ones
+/// Loach sets on its own, never the conversation or the tools.
+const ADJUSTABLE_FIELDS: &[&str] = &[
+    "stream_options",
+    "max_tokens",
+    "max_completion_tokens",
+    "temperature",
+    "top_p",
+    "frequency_penalty",
+    "presence_penalty",
+    "seed",
+];
+
+/// Which field a 400 body refuses, if it's one in `body` that
+/// `apply_refusal` can adjust. OpenAI names it in `error.param`; other
+/// servers only in the message, so that falls back to OpenAI's wording
+/// ("Unsupported parameter: 'max_tokens' …") — plus any mention of
+/// `stream_options`, the one strict gateways reject in their own words.
+fn refused_field(body: &Value, error_text: &str) -> Option<String> {
+    let param = serde_json::from_str::<Value>(error_text).ok().and_then(|v| {
+        v.pointer("/error/param")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    });
+    ADJUSTABLE_FIELDS
+        .iter()
+        .find(|&&field| {
+            body.get(field).is_some()
+                && match &param {
+                    Some(p) => p == field,
+                    None if field == "stream_options" => error_text.contains(field),
+                    None => [
+                        "Unsupported parameter: '",
+                        "Unsupported value: '",
+                        "Unrecognized request argument supplied: ",
+                    ]
+                    .iter()
+                    .any(|lead| error_text.contains(&format!("{lead}{field}"))),
+                }
+        })
+        .map(|field| field.to_string())
+}
+
+/// Drop `field` from the request, except `max_tokens`, whose cap moves to
+/// `max_completion_tokens` — the name OpenAI's reasoning models take.
+fn apply_refusal(body: &mut Value, field: &str) {
+    let Some(obj) = body.as_object_mut() else {
+        return;
+    };
+    let removed = obj.remove(field);
+    if field == "max_tokens" {
+        if let Some(cap) = removed {
+            obj.insert("max_completion_tokens".into(), cap);
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -479,8 +595,10 @@ async fn run_one_turn(
     cancel: &Arc<tokio::sync::Notify>,
     api_key: Option<&str>,
     mut body: Value,
+    refused: &mut Vec<String>,
     total_tokens: &mut u32,
     reported_tokens: &mut Option<u32>,
+    turn_text: &mut String,
     stream_id: &str,
     registry: &StreamRegistry,
 ) -> Result<Option<TurnOutcome>> {
@@ -489,8 +607,8 @@ async fn run_one_turn(
     // that re-reports cumulative usage per chunk can't inflate the total.
     let mut turn_tokens: Option<u32> = None;
     let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
-    // Built through a closure so the `stream_options` retry below can issue a
-    // second, identically-authenticated request without duplicating the
+    // Built through a closure so the refused-field retry below can issue
+    // another, identically-authenticated request without duplicating the
     // bearer logic.
     let build_req = |b: &Value| {
         let mut r = http.post(&url).json(b);
@@ -530,7 +648,7 @@ async fn run_one_turn(
         biased;
         _ = cancel.notified() => {
             let _ = app.emit(channel, StreamEvent::Cancelled);
-            registry.finish(stream_id);
+            registry.finish_own(stream_id, cancel);
             return Ok(None);
         }
         r = http_req.send() => r,
@@ -544,48 +662,22 @@ async fn run_one_turn(
                     message: format!("OpenAI request failed: {e}"),
                 },
             );
-            registry.finish(stream_id);
+            registry.finish_own(stream_id, cancel);
             return Err(e.into());
         }
     };
 
-    // `stream_options` is opt-in usage telemetry, not something the chat
-    // needs. A strict gateway that rejects unknown arguments would otherwise
-    // fail the whole turn over a field the user never asked for — so on that
-    // specific rejection, drop it and retry once. Mirrors the Ollama path's
-    // `think` retry. Metrics fall back to the chunk counter afterwards.
-    if resp.status() == reqwest::StatusCode::BAD_REQUEST
-        && body.get("stream_options").is_some()
-    {
-        let text = resp.text().await.unwrap_or_default();
-        if text.contains("stream_options") {
-            tracing::warn!("server rejected `stream_options`; retrying without it");
-            if let Some(obj) = body.as_object_mut() {
-                obj.remove("stream_options");
-            }
-            let retried = select! {
-                biased;
-                _ = cancel.notified() => {
-                    let _ = app.emit(channel, StreamEvent::Cancelled);
-                    registry.finish(stream_id);
-                    return Ok(None);
-                }
-                r = build_req(&body).send() => r,
-            };
-            resp = match retried {
-                Ok(r) => r,
-                Err(e) => {
-                    let _ = app.emit(
-                        channel,
-                        StreamEvent::Error {
-                            message: format!("OpenAI request failed: {e}"),
-                        },
-                    );
-                    registry.finish(stream_id);
-                    return Err(e.into());
-                }
-            };
-        } else {
+    // A 400 that names a field Loach added on its own: `stream_options`
+    // (opt-in usage telemetry strict gateways reject), or a sampling knob a
+    // model refuses — OpenAI's o-series and GPT-5 reject `max_tokens` (they
+    // take `max_completion_tokens`) and any non-default `temperature`. The
+    // whole turn would otherwise fail over a field the user never set, so
+    // adjust that one field and retry; each field once, recorded in `refused`
+    // for the stream's later turns. Mirrors the Ollama path's `think` retry.
+    // Metrics fall back to the chunk counter without `stream_options`.
+    while resp.status() == reqwest::StatusCode::BAD_REQUEST {
+        let text = super::error_body(resp).await;
+        let Some(field) = refused_field(&body, &text).filter(|f| !refused.contains(f)) else {
             // A 400 about something else. The body is already consumed, so
             // report it here rather than falling through to the block below.
             let _ = app.emit(
@@ -594,14 +686,39 @@ async fn run_one_turn(
                     message: format!("OpenAI HTTP 400 Bad Request: {text}"),
                 },
             );
-            registry.finish(stream_id);
+            registry.finish_own(stream_id, cancel);
             return Err(anyhow!("openai http error"));
-        }
+        };
+        tracing::warn!("server refused `{field}`; retrying without it");
+        apply_refusal(&mut body, &field);
+        refused.push(field);
+        let retried = select! {
+            biased;
+            _ = cancel.notified() => {
+                let _ = app.emit(channel, StreamEvent::Cancelled);
+                registry.finish_own(stream_id, cancel);
+                return Ok(None);
+            }
+            r = build_req(&body).send() => r,
+        };
+        resp = match retried {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = app.emit(
+                    channel,
+                    StreamEvent::Error {
+                        message: format!("OpenAI request failed: {e}"),
+                    },
+                );
+                registry.finish_own(stream_id, cancel);
+                return Err(e.into());
+            }
+        };
     }
 
     if !resp.status().is_success() {
         let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
+        let text = super::error_body(resp).await;
         // If the server rejected the request for auth reasons AND we
         // deliberately withheld the bearer because the base URL is cleartext
         // to a non-loopback host, surface the *why* — a bare "401" against
@@ -622,7 +739,7 @@ async fn run_one_turn(
                 message: format!("OpenAI HTTP {status}: {text}{suffix}"),
             },
         );
-        registry.finish(stream_id);
+        registry.finish_own(stream_id, cancel);
         return Err(anyhow!("openai http error"));
     }
 
@@ -634,6 +751,11 @@ async fn run_one_turn(
     // arguments. Bounded by `MAX_TOOL_CALL_BYTES` in the loop so an untrusted
     // server can't grow `accum` without limit via a flood of small frames.
     let mut tool_call_bytes: usize = 0;
+    // Set once a choice carries a `finish_reason`. The reply's content is
+    // complete then, but the `usage` frame is still to come, so reading
+    // goes on until `[DONE]`, the end of the stream, or `usage_deadline`.
+    let mut finish_seen = false;
+    let mut usage_deadline: Option<tokio::time::Instant> = None;
 
     loop {
         select! {
@@ -641,8 +763,19 @@ async fn run_one_turn(
             _ = cancel.notified() => {
                 drop(byte_stream);
                 let _ = app.emit(channel, StreamEvent::Cancelled);
-                registry.finish(stream_id);
+                registry.finish_own(stream_id, cancel);
                 return Ok(None);
+            }
+            _ = tokio::time::sleep_until(
+                usage_deadline.unwrap_or_else(tokio::time::Instant::now)
+            ), if usage_deadline.is_some() => {
+                // Finished, but neither `[DONE]` nor the close followed —
+                // same fold as the `finished` path below.
+                if let Some(n) = turn_tokens {
+                    *reported_tokens =
+                        Some(reported_tokens.unwrap_or(0).saturating_add(n));
+                }
+                return Ok(Some(decide_outcome(accum)));
             }
             maybe = byte_stream.next() => {
                 match maybe {
@@ -658,13 +791,14 @@ async fn run_one_turn(
                                     ),
                                 },
                             );
-                            registry.finish(stream_id);
+                            registry.finish_own(stream_id, cancel);
                             return Err(anyhow!("openai stream frame too large"));
                         }
 
                         let mut pending_token = String::new();
                         let mut pending_think = String::new();
                         let mut finished = false;
+                        let mut stream_error: Option<String> = None;
                         while let Some((rel_pos, sep_len)) =
                             find_frame_end(&buf[scan_offset..])
                         {
@@ -675,7 +809,7 @@ async fn run_one_turn(
                                 &frame[..frame.len() - sep_len],
                             )
                             .to_string();
-                            for line in text.lines() {
+                            for line in frame_lines(&text) {
                                 let line = line.trim_start();
                                 if !line.starts_with("data:") { continue; }
                                 let data = line[5..].trim_start();
@@ -696,6 +830,10 @@ async fn run_one_turn(
                                     );
                                 }
                                 if let Ok(parsed) = parsed {
+                                    if let Some(err) = parsed.error.as_ref() {
+                                        stream_error = Some(stream_error_message(err));
+                                        break;
+                                    }
                                     // OpenAI (and most compat servers)
                                     // emit a final choices-empty frame
                                     // carrying `usage`. When we see it,
@@ -723,9 +861,17 @@ async fn run_one_turn(
                                             turn_tokens = Some(n);
                                         }
                                     }
+                                    // Past the finish only `usage` still
+                                    // counts: the reply's text and tool
+                                    // calls are complete.
+                                    if finish_seen { continue; }
                                     for c in parsed.choices {
                                         if let Some(d) = c.delta {
-                                            if let Some(think) = d.reasoning_content {
+                                            let think = d
+                                                .reasoning_content
+                                                .filter(|t| !t.is_empty())
+                                                .or(d.reasoning);
+                                            if let Some(think) = think {
                                                 if !think.is_empty() {
                                                     pending_think.push_str(&think);
                                                 }
@@ -734,28 +880,19 @@ async fn run_one_turn(
                                                 if !delta.is_empty() {
                                                     *total_tokens += 1;
                                                     pending_token.push_str(&delta);
+                                                    turn_text.push_str(&delta);
                                                 }
                                             }
-                                            for tc in d.tool_calls {
+                                            for (pos, tc) in d.tool_calls.into_iter().enumerate() {
                                                 // OpenAI's wire protocol
                                                 // always includes the
                                                 // index. A compat server
-                                                // that omits it confuses
-                                                // multi-call assembly
-                                                // (without `index` we
-                                                // can't tell which slot
-                                                // a delta belongs to) —
-                                                // log and skip rather
-                                                // than silently collapse
-                                                // every call into slot 0.
-                                                let Some(idx_raw) = tc.index else {
-                                                    tracing::warn!(
-                                                        "openai stream: tool_call delta has no `index`; \
-                                                         skipping frame to avoid collapsing into slot 0"
-                                                    );
-                                                    continue;
-                                                };
-                                                let idx = idx_raw as usize;
+                                                // that omits it sends each
+                                                // call whole, so its place
+                                                // in this delta's list is
+                                                // its slot — skipping them
+                                                // dropped every call.
+                                                let idx = tc.index.map_or(pos, |i| i as usize);
                                                 // `index` is untrusted server
                                                 // input — cap it so a single
                                                 // frame can't drive `resize_with`
@@ -807,7 +944,7 @@ async fn run_one_turn(
                                                             ),
                                                         },
                                                     );
-                                                    registry.finish(stream_id);
+                                                    registry.finish_own(stream_id, cancel);
                                                     return Err(anyhow!("openai tool-call payload too large"));
                                                 }
                                             }
@@ -818,16 +955,23 @@ async fn run_one_turn(
                                         // We still let the current chunk's
                                         // deltas accumulate (they may carry
                                         // the last tokens or tool-call
-                                        // pieces) — the `finished` flag
-                                        // only takes effect once the
-                                        // outer frame loop finishes.
-                                        if c.finish_reason.is_some() {
-                                            finished = true;
+                                        // pieces). Reading goes on only for
+                                        // the `usage` frame, which comes
+                                        // after this one.
+                                        match c.finish_reason.as_deref() {
+                                            Some("error") => {
+                                                stream_error = Some(
+                                                    "the server ended the reply with an error".into(),
+                                                );
+                                            }
+                                            Some(_) => finish_seen = true,
+                                            None => {}
                                         }
                                     }
+                                    if stream_error.is_some() { break; }
                                 }
                             }
-                            if finished { break; }
+                            if finished || stream_error.is_some() { break; }
                         }
                         // The longest SSE frame separator is `\r\n\r\n`
                         // (4 bytes), so keep that many bytes of overlap
@@ -846,6 +990,18 @@ async fn run_one_turn(
                                 StreamEvent::Token { delta: pending_token },
                             );
                         }
+                        // The text so far went out above; the reply ends
+                        // here as an error, not Done.
+                        if let Some(message) = stream_error {
+                            let _ = app.emit(
+                                channel,
+                                StreamEvent::Error {
+                                    message: format!("OpenAI stream stopped mid-reply: {message}"),
+                                },
+                            );
+                            registry.finish_own(stream_id, cancel);
+                            return Err(anyhow!("openai stream error: {message}"));
+                        }
                         if finished {
                             // Fold this turn's reported usage into the
                             // running total exactly once.
@@ -855,13 +1011,16 @@ async fn run_one_turn(
                             }
                             return Ok(Some(decide_outcome(accum)));
                         }
+                        if finish_seen && usage_deadline.is_none() {
+                            usage_deadline = Some(tokio::time::Instant::now() + USAGE_GRACE);
+                        }
                     }
                     Some(Err(e)) => {
                         let _ = app.emit(
                             channel,
                             StreamEvent::Error { message: format!("stream error: {e}") },
                         );
-                        registry.finish(stream_id);
+                        registry.finish_own(stream_id, cancel);
                         return Err(e.into());
                     }
                     None => {
@@ -974,7 +1133,7 @@ fn parse_args(s: &str) -> Value {
 /// Anything else — http:// to an external host — is treated as
 /// untrusted transport and we drop the auth header to avoid leaking the
 /// user's API key over cleartext.
-fn is_safe_for_bearer(base_url: &str) -> bool {
+pub(crate) fn is_safe_for_bearer(base_url: &str) -> bool {
     let Ok(url) = reqwest::Url::parse(base_url) else {
         return false;
     };
@@ -1044,6 +1203,68 @@ fn sniff_image_mime(b64: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- refused_field / apply_refusal ----------------------------------------
+    // OpenAI's reasoning models (o-series, GPT-5) refuse `max_tokens` and a
+    // non-default `temperature`, and every request carries both — so without
+    // the retry each send to them failed with a 400.
+
+    fn request() -> Value {
+        json!({
+            "model": "gpt-5",
+            "messages": [],
+            "stream": true,
+            "stream_options": { "include_usage": true },
+            "temperature": 0.7,
+            "max_tokens": 4096,
+        })
+    }
+
+    #[test]
+    fn moves_a_refused_max_tokens_to_max_completion_tokens() {
+        let mut body = request();
+        let err = r#"{"error":{"message":"Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.","type":"invalid_request_error","param":"max_tokens","code":"unsupported_parameter"}}"#;
+        let field = refused_field(&body, err).expect("named");
+        assert_eq!(field, "max_tokens");
+        apply_refusal(&mut body, &field);
+        assert!(body.get("max_tokens").is_none());
+        assert_eq!(body["max_completion_tokens"], 4096);
+    }
+
+    #[test]
+    fn drops_a_refused_temperature() {
+        let mut body = request();
+        let err = r#"{"error":{"message":"Unsupported value: 'temperature' does not support 0.7 with this model. Only the default (1) value is supported.","type":"invalid_request_error","param":"temperature","code":"unsupported_value"}}"#;
+        let field = refused_field(&body, err).expect("named");
+        apply_refusal(&mut body, &field);
+        assert!(body.get("temperature").is_none());
+        assert_eq!(body["max_tokens"], 4096);
+    }
+
+    #[test]
+    fn reads_the_field_from_plain_text_errors_too() {
+        let body = request();
+        assert_eq!(
+            refused_field(&body, "Unsupported parameter: 'max_tokens' is not supported").as_deref(),
+            Some("max_tokens")
+        );
+        assert_eq!(
+            refused_field(&body, "unknown field `stream_options`").as_deref(),
+            Some("stream_options")
+        );
+    }
+
+    #[test]
+    fn leaves_other_400s_alone() {
+        let body = request();
+        // The conversation itself, a field we never sent, and prose that
+        // merely mentions a knob are all reported, not retried.
+        let messages = r#"{"error":{"message":"This model's maximum context length is 8192 tokens.","param":"messages","code":"context_length_exceeded"}}"#;
+        assert_eq!(refused_field(&body, messages), None);
+        let unsent = r#"{"error":{"message":"Unsupported value","param":"top_p"}}"#;
+        assert_eq!(refused_field(&body, unsent), None);
+        assert_eq!(refused_field(&body, "temperature must be at most 2"), None);
+    }
 
     // --- is_safe_for_bearer -------------------------------------------------
     // A regression here silently leaks the user's API key over cleartext
@@ -1202,5 +1423,67 @@ mod tests {
         let debris = vec![AccumTool { id: None, name: String::new(), arguments: "{}".into() }];
         assert!(matches!(decide_outcome(debris), TurnOutcome::Done));
         assert!(matches!(decide_outcome(vec![]), TurnOutcome::Done));
+    }
+
+    // --- SseChunk ---------------------------------------------------------------
+
+    #[test]
+    fn explicit_null_lists_read_as_empty() {
+        // Some compat servers send this on every delta; it used to fail the
+        // frame, so the whole reply came back empty.
+        let chunk: SseChunk = serde_json::from_str(
+            r#"{"choices":[{"delta":{"content":"Hi","tool_calls":null},"finish_reason":null}]}"#,
+        )
+        .expect("parses");
+        let delta = chunk.choices[0].delta.as_ref().expect("delta");
+        assert_eq!(delta.content.as_deref(), Some("Hi"));
+        assert!(delta.tool_calls.is_empty());
+
+        let usage_only: SseChunk =
+            serde_json::from_str(r#"{"choices":null,"usage":{"completion_tokens":7}}"#)
+                .expect("parses");
+        assert!(usage_only.choices.is_empty());
+        assert_eq!(usage_only.usage.and_then(|u| u.completion_tokens), Some(7));
+    }
+
+    /// Ollama's `/v1`, OpenRouter and newer vLLM name the field `reasoning`;
+    /// reading only `reasoning_content` dropped their thinking.
+    #[test]
+    fn reasoning_is_read_under_either_name() {
+        let chunk: SseChunk =
+            serde_json::from_str(r#"{"choices":[{"delta":{"reasoning":"Let me see"}}]}"#)
+                .expect("parses");
+        let delta = chunk.choices[0].delta.as_ref().expect("delta");
+        assert_eq!(delta.reasoning.as_deref(), Some("Let me see"));
+        assert!(delta.reasoning_content.is_none());
+    }
+
+    #[test]
+    fn mid_stream_error_frames_carry_their_message() {
+        // vLLM / llama-server: an error frame of its own.
+        let chunk: SseChunk = serde_json::from_str(
+            r#"{"error":{"message":"CUDA out of memory","type":"server_error","code":500}}"#,
+        )
+        .expect("parses");
+        assert_eq!(
+            chunk.error.as_ref().map(stream_error_message).as_deref(),
+            Some("CUDA out of memory")
+        );
+        // OpenRouter: the error beside a `finish_reason: "error"` choice.
+        let chunk: SseChunk = serde_json::from_str(
+            r#"{"error":{"code":502,"message":"Provider disconnected"},"choices":[{"delta":{"content":""},"finish_reason":"error"}]}"#,
+        )
+        .expect("parses");
+        assert_eq!(
+            chunk.error.as_ref().map(stream_error_message).as_deref(),
+            Some("Provider disconnected")
+        );
+        assert_eq!(chunk.choices[0].finish_reason.as_deref(), Some("error"));
+
+        assert_eq!(stream_error_message(&json!("overloaded")), "overloaded");
+        assert_eq!(stream_error_message(&json!({ "code": 1 })), r#"{"code":1}"#);
+        // An explicit `"error": null` is no error.
+        let ok: SseChunk = serde_json::from_str(r#"{"choices":[],"error":null}"#).expect("parses");
+        assert!(ok.error.is_none());
     }
 }

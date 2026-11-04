@@ -28,18 +28,38 @@ export function SnippetVariableFillDialog() {
 
   // Local copy of the input values. Keyed by placeholder name. Initialised
   // from recall whenever a fresh `pending` request lands so reopening the
-  // dialog after cancel starts from last-saved values instead of blank.
-  const [values, setValues] = useState<Record<string, string>>({});
+  // dialog after cancel starts from last-saved values instead of blank —
+  // unless this request already has typed values kept in the store, because
+  // the app lock unmounted the dialog while it was open (see `fillDraft`).
+  const keptValues = () => {
+    const d = useSnippetVarStore.getState().fillDraft;
+    return d && d.fill === pending ? d.values : null;
+  };
+  const [values, setValues] = useState<Record<string, string>>(() => keptValues() ?? {});
   const firstInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     if (!pending) return;
+    const kept = keptValues();
+    if (kept) {
+      setValues(kept);
+      return;
+    }
     const seeded: Record<string, string> = {};
     for (const key of pending.unresolved) {
       seeded[key] = pending.recall[key] ?? "";
     }
     setValues(seeded);
+    // Re-seed only when a different request lands.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pending]);
+
+  // Keep the store's copy of the typed values current, so they outlive an
+  // unmount.
+  useEffect(() => {
+    if (!pending) return;
+    useSnippetVarStore.setState({ fillDraft: { fill: pending, values } });
+  }, [pending, values]);
 
   // Auto-focus the first empty input on open. If every input is pre-filled
   // from recall, focus the first one anyway so the user can tab through.
@@ -105,6 +125,8 @@ export function SnippetVariableFillDialog() {
                 }
                 placeholder={`Value for ${key}`}
                 onKeyDown={(e) => {
+                  // The Enter that confirms an IME candidate isn't the form's.
+                  if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
                   // Enter on the last field submits; on earlier fields it
                   // moves focus forward. Matches the typical "form" muscle
                   // memory without trapping Shift+Tab navigation.

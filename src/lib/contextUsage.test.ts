@@ -7,6 +7,7 @@
 
 import { describe, it, expect } from "vitest";
 import {
+  charsPerToken,
   computeContextUsage,
   estimateTokens,
   extractSummary,
@@ -89,13 +90,15 @@ describe("computeContextUsage — what reaches the model", () => {
     expect(usage.used).toBe(3);
   });
 
-  it("counts thinking text toward the estimate", () => {
+  it("leaves thinking text out, as chatHistory() does", () => {
+    // Only `content` is sent back to the model; counting a long reasoning
+    // trace made the bar warn about a window the chat wasn't using.
     const usage = computeContextUsage(
-      [msg("assistant", "abcd", { thinking: "abcd" })],
+      [msg("assistant", "abcd", { thinking: "x".repeat(4000) })],
       null,
       NO_PARAMS,
     );
-    expect(usage.messagesTokens).toBe(2);
+    expect(usage.messagesTokens).toBe(1);
   });
 
   it("falls back to 8192 ctx when num_ctx is absent or nonsense, and clamps ratio", () => {
@@ -166,5 +169,45 @@ describe("computeContextUsage — project instructions", () => {
     const withMemories = computeContextUsage(messages, "be brief", NO_PARAMS, null, "m".repeat(800));
     expect(withMemories.memoriesTokens).toBe(200);
     expect(withMemories.used).toBe(without.used + 200);
+  });
+});
+
+describe("charsPerToken", () => {
+  // Common tokenizers spend about a token per CJK character, so the flat
+  // char/4 estimate sized Chinese and Japanese sources at a quarter of what
+  // they cost — and excerpts came back four times over their budget.
+  it("is 4 for Latin text, about 1 for CJK, and in between for a mix", () => {
+    expect(charsPerToken("The quick brown fox")).toBe(4);
+    expect(charsPerToken("机器学习是人工智能的一个分支")).toBe(1);
+    expect(charsPerToken("日本語のテキスト")).toBe(1);
+    const mixed = charsPerToken("Loach 是一个本地应用");
+    expect(mixed).toBeGreaterThan(1);
+    expect(mixed).toBeLessThan(4);
+    expect(charsPerToken("")).toBe(4);
+  });
+
+  it("makes estimateTokens count CJK at about a token per character", () => {
+    expect(estimateTokens("机器学习是人工智能的一个分支")).toBe(14);
+    expect(estimateTokens("abcdefgh")).toBe(2);
+  });
+});
+
+describe("charsPerToken", () => {
+  // Common tokenizers spend about a token per CJK character, so the flat
+  // char/4 estimate sized Chinese and Japanese sources at a quarter of what
+  // they cost — and excerpts came back four times over their budget.
+  it("is 4 for Latin text, about 1 for CJK, and in between for a mix", () => {
+    expect(charsPerToken("The quick brown fox")).toBe(4);
+    expect(charsPerToken("机器学习是人工智能的一个分支")).toBe(1);
+    expect(charsPerToken("日本語のテキスト")).toBe(1);
+    const mixed = charsPerToken("Loach 是一个本地应用");
+    expect(mixed).toBeGreaterThan(1);
+    expect(mixed).toBeLessThan(4);
+    expect(charsPerToken("")).toBe(4);
+  });
+
+  it("makes estimateTokens count CJK at about a token per character", () => {
+    expect(estimateTokens("机器学习是人工智能的一个分支")).toBe(14);
+    expect(estimateTokens("abcdefgh")).toBe(2);
   });
 });

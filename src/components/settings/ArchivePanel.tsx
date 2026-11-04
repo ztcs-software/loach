@@ -6,13 +6,21 @@ import type { Session } from "@/types";
 import { Archive, ArchiveRestore, Layers, Loader2, MoreHorizontal, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { deleteChatConfirm } from "@/lib/confirmations";
 import { cn } from "@/lib/utils";
 import { useChatStore } from "@/stores/chatStore";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { useState } from "react";
+import { useModelsStore } from "@/stores/modelsStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useToastStore } from "@/stores/toastStore";
+import { useUIStore } from "@/stores/uiStore";
 
+/**
+ * Embedded Archive browser — same rows the old full-page ArchiveView had,
+ * just squeezed into the Settings dialog's right column. Opening a chat
+ * closes the dialog so the user lands straight in the chat.
+ */
 export function ArchivePanel({ onOpenChat }: { onOpenChat: () => void }) {
   const sessions = useChatStore((s) => s.sessions);
   const archive = useChatStore((s) => s.archive);
@@ -20,6 +28,8 @@ export function ArchivePanel({ onOpenChat }: { onOpenChat: () => void }) {
   const removeAllArchived = useChatStore((s) => s.removeAllArchived);
   const select = useChatStore((s) => s.selectSession);
   const setViewingSpace = useSpaceStore((s) => s.setViewingSpace);
+  const setViewingModel = useModelsStore((s) => s.setViewingModel);
+  const setSidebarTab = useUIStore((s) => s.setSidebarTab);
   const { confirm } = useConfirm();
   const [removingAll, setRemovingAll] = useState(false);
 
@@ -28,7 +38,12 @@ export function ArchivePanel({ onOpenChat }: { onOpenChat: () => void }) {
     .sort((a, b) => (b.archived_at ?? 0) - (a.archived_at ?? 0));
 
   const handleOpen = async (id: string) => {
+    // App routes on a viewed Space or model, then the sidebar tab, before
+    // the chat — opened from the Library, Snippets or Models page, the chat
+    // was selected behind that page and never shown.
     setViewingSpace(null);
+    setViewingModel(null);
+    setSidebarTab("chats");
     await select(id);
     onOpenChat();
   };
@@ -111,12 +126,7 @@ export function ArchivePanel({ onOpenChat }: { onOpenChat: () => void }) {
             onUnarchive={() => void archive(s.id, false)}
             onDelete={() =>
               void (async () => {
-                const ok = await confirm({
-                  title: "Delete this chat?",
-                  body: `“${s.title || "Untitled"}” and all its messages will be permanently deleted. This cannot be undone.`,
-                  confirmLabel: "Delete",
-                  destructive: true,
-                });
+                const ok = await confirm(deleteChatConfirm(s.title));
                 if (ok) await remove(s.id);
               })()
             }
@@ -207,23 +217,3 @@ function ArchivedRow({
     </li>
   );
 }
-
-/* ───────────────────────── Data tab panel ─────────────────────────
- *
- * Four bulk operations live here:
- *
- *   1. Export   — dump the whole DB to a JSON file via a save dialog.
- *   2. Import   — pick a JSON dump, replace everything with its contents,
- *                 then reload the window so every store re-hydrates from
- *                 the freshly-written DB.
- *   3. Archive all — flip every live chat to archived in one shot.
- *   4. Erase    — two-mode destructive flow (user-data vs factory reset),
- *                 gated on a typed "YES" confirmation.
- *
- * The destructive actions rebuild the whole app by calling
- * `window.location.reload()` — every Zustand store derives from SQLite
- * on mount (see App.tsx's hydrate useEffect), so a reload is the
- * cheapest way to get back to a consistent state without writing a
- * bespoke rehydrate function per store.
- * ─────────────────────────────────────────────────────────────────── */
-

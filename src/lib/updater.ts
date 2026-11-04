@@ -88,13 +88,15 @@ export async function installPendingUpdate(
         onProgress?.({ downloaded: total ?? downloaded, total });
       }
     });
+    const { relaunch } = await import("@tauri-apps/plugin-process");
+    await relaunch();
   } catch (e) {
-    // Only clear on failure: on success the relaunch below tears the process
-    // down, and leaving the flag set keeps every dismissal guard closed for
-    // the moments between "download finished" and the window disappearing.
+    // Only clear on failure — of the download, the install or the relaunch:
+    // on success the relaunch tears the process down, and leaving the flag
+    // set keeps every dismissal guard closed for the moments between
+    // "download finished" and the window disappearing. A relaunch that
+    // failed left it set, and Settings refused Esc and ✕ for the session.
     installing = false;
     throw e;
   }
-  const { relaunch } = await import("@tauri-apps/plugin-process");
-  await relaunch();
 }

@@ -4,20 +4,14 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Loach</title>
-    <!-- Paint the app's dark base immediately so there's no white flash while
-         the bundle's CSS loads on a cold start. Matches `.dark .app-mesh` in
-         globals.css; this inline <style> is allowed by the window CSP's
-         `style-src 'unsafe-inline'` (no inline script, so script-src is
-         untouched). Light-theme users still transition to light after hydration
-         — same as before, just without the preceding white frame.
-
-         MUST target `body`, NOT `html`: the Aurora gradient is a `-z-10` fixed
-         div (`.app-mesh`). The body→canvas background propagation that lets a
-         negative-z-index element show through only happens while `<html>` has
-         NO background of its own. Giving `<html>` a background disables that
-         propagation, so the opaque `body` background then paints OVER the mesh
-         and Aurora collapses to a flat fill (looks like the Solid theme). -->
-    <style>body{background:#06070f}</style>
+    <!-- No inline <style> here, ever. At build time Tauri gives every inline
+         <style> a nonce and adds it to the CSP's `style-src`, and once a nonce
+         is there CSP3 ignores `'unsafe-inline'` — which blocks the <style> tags
+         Radix ScrollArea and react-remove-scroll-bar inject at runtime, in
+         release builds only. The dark first frame needs nothing extra: the
+         bundle's stylesheet is linked in <head>, so it's render-blocking, and
+         it paints `body` dark under the `dark` class above; before any page
+         paint the window shows its `backgroundColor` (tauri.conf.json). -->
   </head>
   <body class="bg-background text-foreground antialiased">
     <div id="root"></div>

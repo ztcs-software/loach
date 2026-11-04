@@ -1,7 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import {
-  ArrowLeft,
   Brain,
+  ChevronRight,
   Cpu,
   Eye,
   EyeOff,
@@ -115,6 +115,16 @@ export function ModelsView() {
       });
   }, [viewingModel, showModel]);
 
+  const previewText = useMemo(() => {
+    try {
+      return buildModelfile(form);
+    } catch (e) {
+      return `# Modelfile preview unavailable\n# ${
+        e instanceof Error ? e.message : String(e)
+      }`;
+    }
+  }, [form]);
+
   if (!viewingModel) return null;
 
   const handleBack = () => {
@@ -147,21 +157,44 @@ export function ModelsView() {
       setSaveError("Give the new model a tag, e.g. `my-llama:v1`.");
       return;
     }
+    // Ollama's create replaces whatever is under the tag already — the base
+    // model itself, if the tag is its FROM. Ask first. A bare name is
+    // Ollama's `:latest`.
+    const fullTag = (t: string) => (t.includes(":") ? t : `${t}:latest`);
+    const isBase = fullTag(targetName) === fullTag(form.from.trim());
+    if (
+      (isBase || models.some((m) => m.provider === "ollama" && fullTag(m.id) === fullTag(targetName))) &&
+      !(await confirm({
+        title: `Replace “${targetName}”?`,
+        body: isBase
+          ? "That's the base model this one is built from. Saving replaces it with the customized version."
+          : "A model with this tag already exists. Saving replaces it with this one.",
+        confirmLabel: "Replace",
+        destructive: true,
+      }))
+    ) {
+      return;
+    }
+    // The editor the save started from. The user may open another model's
+    // editor while it runs; the result mustn't pull them back to this one
+    // (discarding that form) or land its error there.
+    const editing = viewingModel;
+    const stillHere = () => useModelsStore.getState().viewingModel === editing;
     setSaving(true);
     try {
       const run = await createModel(targetName, modelfile);
       if (run?.finished === "ok") {
         // Land the user on the freshly-created model so they can immediately
         // iterate on it or try it in a new chat.
-        setViewingModel(targetName);
+        if (stillHere()) setViewingModel(targetName);
       } else if (run?.finished === "error") {
         // The create reached a terminal error — surface the real reason
         // instead of navigating to a model that was never created.
-        setSaveError(run.error ?? "Couldn't create the model.");
+        if (stillHere()) setSaveError(run.error ?? "Couldn't create the model.");
       }
       // `cancelled` → the user aborted; stay on the form with no error.
     } catch (e) {
-      setSaveError(e instanceof Error ? e.message : String(e));
+      if (stillHere()) setSaveError(e instanceof Error ? e.message : String(e));
     } finally {
       setSaving(false);
     }
@@ -178,34 +211,34 @@ export function ModelsView() {
     setSidebarTab("chats");
   };
 
-  const previewText = useMemo(() => {
-    try {
-      return buildModelfile(form);
-    } catch (e) {
-      return `# Modelfile preview unavailable\n# ${
-        e instanceof Error ? e.message : String(e)
-      }`;
-    }
-  }, [form]);
-
   return (
     <main className="flex min-w-0 flex-1 flex-col">
       <ScrollArea className="flex-1">
-        <div className="mx-auto w-full max-w-4xl px-8 py-6">
+        {/* Same column as a Space's and a dataset's page. */}
+        <div className="mx-auto w-full max-w-3xl px-4 pb-12 pt-8">
+          {/* Breadcrumb — the same one a Space's and a dataset's page lead
+              with, so every detail page goes back the same way. */}
           <button
+            type="button"
             onClick={handleBack}
-            className="mb-6 flex items-center gap-1.5 text-sm text-foreground/50 transition-colors hover:text-foreground"
+            className="mb-6 inline-flex max-w-full items-center gap-1.5 text-xs text-foreground/45 transition-colors hover:text-foreground/75"
           >
-            <ArrowLeft className="h-4 w-4" />
-            All models
+            <span>Models</span>
+            <ChevronRight className="h-3 w-3 shrink-0" />
+            <span className="truncate text-foreground/55">{viewingModel}</span>
           </button>
 
           {/* Header */}
           <div className="mb-6 flex items-start justify-between gap-4">
             <div className="min-w-0 flex-1">
-              <h1 className="flex items-center gap-2 truncate text-3xl font-semibold tracking-tight">
-                <Cpu className="h-6 w-6 text-foreground/60" />
-                {viewingModel}
+              {/* The tag in its own span: `truncate` on the flex row itself
+                  draws no ellipsis, so a long tag was just clipped. */}
+              <h1
+                className="flex min-w-0 items-center gap-2 text-3xl font-semibold tracking-tight"
+                title={viewingModel}
+              >
+                <Cpu className="h-6 w-6 shrink-0 text-foreground/60" />
+                <span className="truncate">{viewingModel}</span>
               </h1>
               <p className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-foreground/50">
                 {baseInfo?.family && <span>Family: {baseInfo.family}</span>}
@@ -541,10 +574,16 @@ const NUMERIC_FIELDS: {
   group: (typeof PARAM_GROUPS)[number];
   step?: number;
   hint?: string;
+  /** Set on the fields every chat with the model sends as its defaults,
+   *  where the chat request types them as whole numbers (`u32`, `i64` for
+   *  the seed). Ollama itself takes e.g. `num_predict -1`, but a chat can't
+   *  carry it, so the editor refuses what a chat couldn't send. */
+  integer?: boolean;
+  min?: number;
 }[] = [
   { key: "temperature", label: "Temperature", group: "Sampling", step: 0.05, hint: "0 – 2" },
   { key: "top_p", label: "Top-P", group: "Sampling", step: 0.01, hint: "0 – 1" },
-  { key: "top_k", label: "Top-K", group: "Sampling", step: 1 },
+  { key: "top_k", label: "Top-K", group: "Sampling", step: 1, integer: true, min: 0 },
   { key: "min_p", label: "Min-P", group: "Sampling", step: 0.01, hint: "0 – 1" },
   { key: "tfs_z", label: "Tail-free (tfs_z)", group: "Sampling", step: 0.05 },
   { key: "typical_p", label: "Typical-P", group: "Sampling", step: 0.01 },
@@ -553,16 +592,16 @@ const NUMERIC_FIELDS: {
   // (Η/Τ) are indistinguishable from Latin H/T.
   { key: "mirostat_eta", label: "Mirostat eta", group: "Sampling", step: 0.05 },
   { key: "mirostat_tau", label: "Mirostat tau", group: "Sampling", step: 0.5 },
-  { key: "num_ctx", label: "Context (num_ctx)", group: "Length", step: 256 },
-  { key: "num_predict", label: "Max tokens (num_predict)", group: "Length", step: 16 },
+  { key: "num_ctx", label: "Context (num_ctx)", group: "Length", step: 256, integer: true, min: 0 },
+  { key: "num_predict", label: "Max tokens (num_predict)", group: "Length", step: 16, integer: true, min: 0 },
   { key: "repeat_penalty", label: "Repeat penalty", group: "Repetition", step: 0.05 },
   { key: "repeat_last_n", label: "Repeat look-back", group: "Repetition", step: 8 },
   { key: "frequency_penalty", label: "Frequency penalty", group: "Repetition", step: 0.05 },
   { key: "presence_penalty", label: "Presence penalty", group: "Repetition", step: 0.05 },
   { key: "num_batch", label: "Batch size (num_batch)", group: "Performance", step: 8 },
-  { key: "num_gpu", label: "GPU layers (num_gpu)", group: "Performance", step: 1 },
+  { key: "num_gpu", label: "GPU layers (num_gpu)", group: "Performance", step: 1, integer: true, min: 0 },
   { key: "num_thread", label: "CPU threads (num_thread)", group: "Performance", step: 1 },
-  { key: "seed", label: "Seed (blank = random)", group: "Reproducibility", step: 1 },
+  { key: "seed", label: "Seed (blank = random)", group: "Reproducibility", step: 1, integer: true },
 ];
 
 /**
@@ -662,6 +701,8 @@ function ParamsGrid({
                 label={f.label}
                 hint={f.hint}
                 step={f.step}
+                integer={f.integer}
+                min={f.min}
                 value={params[f.key] ?? null}
                 onChange={(v) =>
                   onChange({ [f.key]: v } as Partial<ModelfileParams>)
@@ -680,12 +721,16 @@ function NumField({
   hint,
   value,
   step,
+  integer,
+  min,
   onChange,
 }: {
   label: string;
   hint?: string;
   value: number | null;
   step?: number;
+  integer?: boolean;
+  min?: number;
   onChange: (v: number | null) => void;
 }) {
   // `label` is a prop, so the id can't be a literal — one per instance.
@@ -705,8 +750,13 @@ function NumField({
       return;
     }
     const n = Number(trimmed);
-    if (!Number.isFinite(n)) {
-      // Revert on garbage input rather than silently zeroing the field.
+    if (
+      !Number.isFinite(n) ||
+      (integer && !Number.isSafeInteger(n)) ||
+      (min !== undefined && n < min)
+    ) {
+      // Revert on garbage (or out-of-range) input rather than silently
+      // zeroing the field.
       setText(value === null ? "" : String(value));
       return;
     }
@@ -723,10 +773,13 @@ function NumField({
         type="number"
         inputMode="decimal"
         step={step}
+        min={min}
         value={text}
         onChange={(e) => setText(e.target.value)}
         onBlur={commit}
         onKeyDown={(e) => {
+          // The Enter that confirms an IME candidate isn't a commit.
+          if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
           if (e.key === "Enter") (e.target as HTMLInputElement).blur();
         }}
         placeholder="(inherit)"
@@ -784,6 +837,8 @@ function StopEditor({
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={(e) => {
+            // The Enter that confirms an IME candidate isn't an add.
+            if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
             if (e.key === "Enter") {
               e.preventDefault();
               add();

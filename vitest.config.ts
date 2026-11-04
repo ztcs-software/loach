@@ -11,7 +11,7 @@ import path from "node:path";
 // components needs the plugin plus a DOM environment, not just the globs.
 export default defineConfig({
   resolve: {
-    alias: { "@": path.resolve(__dirname, "./src") },
+    alias: { "@": path.resolve(import.meta.dirname, "./src") },
   },
   test: {
     // `tests/` holds repo-level invariants (e.g. the release version

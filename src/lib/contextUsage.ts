@@ -1,13 +1,33 @@
 import type { GenerationParams, Message } from "@/types";
 
 /**
- * Char/4 token estimate. English is ~4 chars/token for common tokenizers
- * (BPE, SentencePiece); accuracy is roughly within ±15% — good enough for
- * a UI progress bar but never quote this as a real billing number.
+ * Char/4 token estimate, scaled down for CJK text. English is ~4
+ * chars/token for common tokenizers (BPE, SentencePiece); accuracy is
+ * roughly within ±15% — good enough for a UI progress bar but never quote
+ * this as a real billing number.
  */
 export function estimateTokens(text: string | null | undefined): number {
   if (!text) return 0;
-  return Math.ceil(text.length / 4);
+  return Math.ceil(text.length / charsPerToken(text));
+}
+
+const CJK = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
+
+/**
+ * Characters per token for text like `sample`: ~4 for Latin-script text,
+ * ~1 for Chinese, Japanese and Korean, where common tokenizers spend about
+ * a token per character — so a flat 4 sized CJK sources and excerpts at a
+ * quarter of what they really cost. Blended by the share of CJK characters
+ * in (the first 2000 characters of) the sample.
+ */
+export function charsPerToken(sample: string): number {
+  let total = 0;
+  let cjk = 0;
+  for (const ch of sample.slice(0, 2000)) {
+    total += 1;
+    if (CJK.test(ch)) cjk += 1;
+  }
+  return total === 0 ? 4 : 4 - (3 * cjk) / total;
 }
 
 export interface ContextUsageBreakdown {
@@ -19,6 +39,9 @@ export interface ContextUsageBreakdown {
   /** The global and Space memory lists the send prepends to the system
    *  prompt — up to a few thousand characters each. */
   memoriesTokens: number;
+  /** Space uploads and Library sources: their full text, or the retrieval
+   *  budget when they're searched instead (see `src/lib/sources.ts`). */
+  sourcesTokens: number;
   messagesTokens: number;
   /** Sum of attachment text bodies inlined into user messages. Already
    *  counted inside `messagesTokens`; surfaced separately so the popup
@@ -27,7 +50,7 @@ export interface ContextUsageBreakdown {
   messageCount: number;
   /** Total estimated tokens that will be sent to the model on the next
    *  request: `systemPromptTokens + projectInstructionsTokens +
-   *  memoriesTokens + messagesTokens`. */
+   *  memoriesTokens + sourcesTokens + messagesTokens`. */
   used: number;
   /** The effective context window for the next request — `params.num_ctx`
    *  with a sensible fallback when the field is missing. */
@@ -45,7 +68,8 @@ const FALLBACK_CTX = 8192;
  *   \n\n---\nAttached file: `name`\n```\n<body>\n```
  *
  * with the label reading `Attached PDF:` / `Attached Word document:` for
- * those types. We sum the length of those blocks so the popup can show
+ * those types, and a longer fence when the body holds a run of three or
+ * more backticks itself. We sum the length of those blocks so the popup can show
  * "X tokens of your context are attachments". Keep these patterns in sync
  * with the `header`/`footer` in `inlineTextAttachments` — they previously
  * drifted (the old regex expected a `--- Attached file: name ---` header
@@ -53,7 +77,7 @@ const FALLBACK_CTX = 8192;
  */
 const ATTACHMENT_HEADER = /\n---\nAttached (?:file|PDF|Word document): /;
 const ATTACHMENT_BLOCK =
-  /\n\n---\nAttached (?:file|PDF|Word document): [^\n]*\n```\n[\s\S]*?\n```/g;
+  /\n\n---\nAttached (?:file|PDF|Word document): [^\n]*\n(`{3,})\n[\s\S]*?\n\1(?!`)/g;
 
 function attachmentCharsIn(content: string): number {
   if (!ATTACHMENT_HEADER.test(content)) return 0;
@@ -70,6 +94,7 @@ export function computeContextUsage(
   params: GenerationParams,
   projectInstructions: string | null = null,
   memories: string | null = null,
+  sourcesTokens = 0,
 ): ContextUsageBreakdown {
   const systemPromptTokens = estimateTokens(systemPrompt);
   const projectInstructionsTokens = estimateTokens(projectInstructions);
@@ -83,12 +108,12 @@ export function computeContextUsage(
     // system_prompt field) AND messages flagged `compacted_at` (rolled
     // into the running auto-summary). Mirror both filters here so the
     // popup's "what reaches the model" estimate stays accurate after a
-    // compaction.
+    // compaction. It sends only `content`, too: a reply's thinking stays
+    // in the transcript and never goes back to the model.
     if (m.role === "system") continue;
     if (m.compacted_at != null) continue;
     nonSystemCount += 1;
     messageChars += m.content.length;
-    if (m.thinking) messageChars += m.thinking.length;
     if (m.role === "user") {
       attachmentChars += attachmentCharsIn(m.content);
     }
@@ -96,7 +121,8 @@ export function computeContextUsage(
 
   const messagesTokens = Math.ceil(messageChars / 4);
   const attachmentsTokens = Math.ceil(attachmentChars / 4);
-  const used = systemPromptTokens + projectInstructionsTokens + memoriesTokens + messagesTokens;
+  const used =
+    systemPromptTokens + projectInstructionsTokens + memoriesTokens + sourcesTokens + messagesTokens;
   const total =
     typeof params.num_ctx === "number" && params.num_ctx > 0
       ? params.num_ctx
@@ -107,6 +133,7 @@ export function computeContextUsage(
     systemPromptTokens,
     projectInstructionsTokens,
     memoriesTokens,
+    sourcesTokens,
     messagesTokens,
     attachmentsTokens,
     messageCount: nonSystemCount,

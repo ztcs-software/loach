@@ -1,10 +1,14 @@
+import { CHAT_LABELS } from "@/lib/labels";
+import { PERSONAS } from "@/lib/personas";
+import { TONES } from "@/lib/tones";
 import type { CommandSpec } from "./types";
 
 // Canonical list of slash commands. The dispatcher reads `name` to route to a
 // handler in `./dispatch.ts`; the palette reads `description` / `usage` /
 // `subcommands` to render hints; the `/help` dialog reads `group` to render
 // scannable sections. Keep this list ordered the way it should appear in the
-// palette — there's no separate sort layer.
+// palette — there's no separate sort layer. An entry with neither `usage` nor
+// `subcommands` takes no argument: the dispatcher refuses one.
 export const COMMANDS: readonly CommandSpec[] = [
   // ----- chat session control -----
   {
@@ -29,6 +33,20 @@ export const COMMANDS: readonly CommandSpec[] = [
     group: "Chat",
   },
   {
+    name: "label",
+    description: "Colour-label the current chat",
+    usage: "<color|clear>",
+    subcommands: [...CHAT_LABELS.map((l) => l.id), "clear"],
+    group: "Chat",
+  },
+  {
+    name: "folder",
+    description: "Move the current chat into a folder, creating it if needed",
+    usage: "<name|none>",
+    subcommands: ["none"],
+    group: "Chat",
+  },
+  {
     name: "archive",
     description: "Archive the current chat",
     group: "Chat",
@@ -49,14 +67,30 @@ export const COMMANDS: readonly CommandSpec[] = [
     group: "Chat",
   },
   {
+    name: "stop",
+    description: "Stop the reply running (or queued) in this chat",
+    group: "Chat",
+  },
+  {
     name: "copy",
     description: "Copy the last (or Nth-latest) assistant reply",
     usage: "[N]",
     group: "Chat",
   },
   {
+    name: "find",
+    description: "Find text in the current chat",
+    usage: "[text]",
+    group: "Chat",
+  },
+  {
     name: "export",
     description: "Export this chat's context",
+    group: "Chat",
+  },
+  {
+    name: "import",
+    description: "Import context into this chat",
     group: "Chat",
   },
   {
@@ -79,20 +113,53 @@ export const COMMANDS: readonly CommandSpec[] = [
   {
     name: "model",
     description: "Switch model for this chat",
-    usage: "<name>",
+    usage: "[name]",
     group: "Model & persona",
   },
   {
     name: "persona",
     description: "Apply a persona to this chat",
-    usage: "<name>",
+    usage: "[name]",
+    subcommands: PERSONAS.map((p) => p.id),
+    group: "Model & persona",
+  },
+  {
+    name: "tone",
+    description: "Set the response tone for this chat",
+    usage: "[name]",
+    subcommands: TONES.map((t) => t.id),
+    group: "Model & persona",
+  },
+  {
+    name: "set",
+    description: "Set a generation parameter for this chat",
+    usage: "<param> <value>|reset",
+    subcommands: [
+      "temperature",
+      "top_p",
+      "top_k",
+      "min_p",
+      "num_ctx",
+      "max_tokens",
+      "repeat_penalty",
+      "frequency_penalty",
+      "presence_penalty",
+      "num_gpu",
+      "seed",
+      "reset",
+    ],
+    group: "Model & persona",
+  },
+  {
+    name: "unload",
+    description: "Unload this chat's Ollama model from memory",
     group: "Model & persona",
   },
 
   // ----- listings -----
   {
     name: "list",
-    description: "List models, personas, spaces, snippets, MCP servers…",
+    description: "List models, personas, Spaces, snippets, MCP servers…",
     subcommands: [
       "models",
       "personas",
@@ -109,7 +176,7 @@ export const COMMANDS: readonly CommandSpec[] = [
   {
     name: "instructions",
     description: "Set or clear per-chat instructions",
-    usage: "<text|clear>",
+    usage: "[text|clear]",
     subcommands: ["clear"],
     group: "Prompts",
   },
@@ -123,21 +190,21 @@ export const COMMANDS: readonly CommandSpec[] = [
   // ----- memory & spaces -----
   {
     name: "remember",
-    description: "Save a fact to the active space's memory, or to global memory outside a space",
+    description: "Save a fact to the active Space's memory, or to global memory outside a Space",
     usage: "<fact>",
-    group: "Memory & spaces",
+    group: "Memory & Spaces",
   },
   {
     name: "forget",
     description: "Remove a memory by id or content match",
     usage: "<id|query>",
-    group: "Memory & spaces",
+    group: "Memory & Spaces",
   },
   {
     name: "space",
-    description: "Switch the active space",
+    description: "Switch the active Space",
     usage: "<name>",
-    group: "Memory & spaces",
+    group: "Memory & Spaces",
   },
 
   // ----- tools & web -----
@@ -150,6 +217,7 @@ export const COMMANDS: readonly CommandSpec[] = [
     name: "web-fetch",
     description: "Toggle URL fetching for prompts",
     usage: "on|off",
+    subcommands: ["on", "off"],
     group: "Tools & web",
   },
   {
@@ -162,6 +230,7 @@ export const COMMANDS: readonly CommandSpec[] = [
     name: "thinking",
     description: "Toggle the model's reasoning step (Ollama)",
     usage: "on|off",
+    subcommands: ["on", "off"],
     group: "Tools & web",
   },
 
@@ -170,6 +239,18 @@ export const COMMANDS: readonly CommandSpec[] = [
     name: "settings",
     description: "Open Settings",
     usage: "[tab]",
+    group: "App",
+  },
+  {
+    name: "theme",
+    description: "Switch the colour theme",
+    usage: "light|dark|system",
+    subcommands: ["light", "dark", "system"],
+    group: "App",
+  },
+  {
+    name: "lock",
+    description: "Lock Loach now",
     group: "App",
   },
   {

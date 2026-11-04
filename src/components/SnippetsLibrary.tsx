@@ -1,15 +1,18 @@
 import { useMemo, useState } from "react";
 import {
   Cpu,
+  ExternalLink,
   MoreHorizontal,
   Pencil,
   Play,
   Plus,
   RefreshCw,
+  Search,
   SquareTerminal,
   Trash2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   DropdownMenu,
@@ -18,14 +21,19 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useConfirm } from "@/components/ConfirmDialog";
+import { SpaceSubmenu } from "@/components/ChatSpaceMenu";
+import { DEFAULT_MODEL_LABEL } from "@/components/DefaultModelPicker";
 import { SnippetVariablesPanel } from "@/components/SnippetVariablesPanel";
 import { useChatStore } from "@/stores/chatStore";
 import { useSnippetStore } from "@/stores/snippetStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useUIStore } from "@/stores/uiStore";
 import { expandAndPrimeSnippet } from "@/lib/runSnippet";
+import { openExternal } from "@/lib/tauri";
 import { cn, relativeTime } from "@/lib/utils";
 import type { Snippet } from "@/types";
+
+const PROMPT_GALLERY_URL = "https://loach.dev/prompt-gallery/";
 
 /**
  * Full-canvas browse-and-act surface for saved prompts. Each snippet is a
@@ -49,26 +57,36 @@ export function SnippetsLibrary() {
   const setViewingSpace = useSpaceStore((s) => s.setViewingSpace);
   const setSidebarTab = useUIStore((s) => s.setSidebarTab);
 
+  const [query, setQuery] = useState("");
+  const q = query.trim().toLowerCase();
   const sorted = useMemo(
-    () => [...snippets].sort((a, b) => b.updated_at - a.updated_at),
-    [snippets],
+    () =>
+      [...snippets]
+        .filter((s) => !q || s.title.toLowerCase().includes(q) || s.prompt.toLowerCase().includes(q))
+        .sort((a, b) => b.updated_at - a.updated_at),
+    [snippets, q],
   );
 
-  const runSnippet = async (snippet: Snippet) => {
-    // Land the user on the chats canvas so primeComposer's draft has a place
-    // to render. Without this the new session would mount under the still-
-    // active "snippets" tab and the chat surface would never appear.
-    setViewingSpace(null);
-    setSidebarTab("chats");
-    await newSession({
-      spaceId: null,
-      provider: snippet.provider ?? undefined,
-      model: snippet.model ?? undefined,
-    });
+  // `spaceId` runs it in a new chat inside that Space ("Run in Space ▸"),
+  // so the chat also gets the Space's instructions, sources and memory. A
+  // model pinned on the snippet still wins over the Space's default.
+  const runSnippet = async (snippet: Snippet, spaceId: string | null = null) => {
     // `expandAndPrimeSnippet` substitutes built-ins + custom globals; if any
-    // `{{VAR}}` is still unresolved it opens the fill-blanks dialog before
-    // priming the composer.
-    await expandAndPrimeSnippet(snippet);
+    // `{{VAR}}` is still unresolved it opens the fill-blanks dialog first.
+    // The chat is only created once the prompt is final, so cancelling that
+    // dialog leaves the user here instead of in an empty chat.
+    await expandAndPrimeSnippet(snippet, async () => {
+      // Land the user on the chats canvas so primeComposer's draft has a
+      // place to render. Without this the new session would mount under the
+      // still-active "snippets" tab and the chat surface would never appear.
+      setViewingSpace(null);
+      setSidebarTab("chats");
+      await newSession({
+        spaceId,
+        provider: snippet.provider ?? undefined,
+        model: snippet.model ?? undefined,
+      });
+    });
   };
 
   const handleDelete = async (snippet: Snippet) => {
@@ -98,13 +116,23 @@ export function SnippetsLibrary() {
                 and, if pinned, the right model already selected.
               </p>
             </div>
-            <Button
-              onClick={() => openDialog("new")}
-              className="gap-1.5 rounded-xl"
-            >
-              <Plus className="h-4 w-4" />
-              New snippet
-            </Button>
+            <div className="flex items-center gap-4">
+              <button
+                type="button"
+                onClick={() => void openExternal(PROMPT_GALLERY_URL)}
+                className="inline-flex items-center gap-1 text-sm text-foreground/60 underline underline-offset-2 transition-colors hover:text-foreground"
+              >
+                Prompt gallery
+                <ExternalLink className="h-3.5 w-3.5" />
+              </button>
+              <Button
+                onClick={() => openDialog("new")}
+                className="gap-1.5 rounded-xl"
+              >
+                <Plus className="h-4 w-4" />
+                New snippet
+              </Button>
+            </div>
           </header>
 
           <SnippetVariablesPanel />
@@ -129,17 +157,27 @@ export function SnippetsLibrary() {
               }
             />
           ) : (
-            <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-              {sorted.map((snippet) => (
-                <SnippetCard
-                  key={snippet.id}
-                  snippet={snippet}
-                  onRun={() => void runSnippet(snippet)}
-                  onEdit={() => openDialog(snippet)}
-                  onDelete={() => handleDelete(snippet)}
-                />
-              ))}
-            </div>
+            <>
+              <SearchField value={query} onChange={setQuery} label="Search snippets" />
+              {sorted.length === 0 ? (
+                <p className="mt-10 text-center text-sm text-foreground/45">
+                  No snippets match your search.
+                </p>
+              ) : (
+                <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+                  {sorted.map((snippet) => (
+                    <SnippetCard
+                      key={snippet.id}
+                      snippet={snippet}
+                      onRun={() => void runSnippet(snippet)}
+                      onRunInSpace={(spaceId) => void runSnippet(snippet, spaceId)}
+                      onEdit={() => openDialog(snippet)}
+                      onDelete={() => handleDelete(snippet)}
+                    />
+                  ))}
+                </div>
+              )}
+            </>
           )}
         </div>
       </ScrollArea>
@@ -154,11 +192,13 @@ export function SnippetsLibrary() {
 function SnippetCard({
   snippet,
   onRun,
+  onRunInSpace,
   onEdit,
   onDelete,
 }: {
   snippet: Snippet;
   onRun: () => void;
+  onRunInSpace: (spaceId: string) => void;
   /** Tile body click + kebab "Edit" both use this — opens the snippet
    *  editor dialog. The "Run" footer button is the dominant verb so it
    *  stays separate. */
@@ -173,6 +213,10 @@ function SnippetCard({
       aria-label={`Edit snippet: ${snippet.title}`}
       onClick={onEdit}
       onKeyDown={(e) => {
+        // Only the card's own keys: Enter on its Run or ⋯ button (or a menu
+        // item, which bubbles here through the portal) belongs to that
+        // control — the preventDefault below swallowed a keyboard Run.
+        if (e.target !== e.currentTarget) return;
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
           onEdit();
@@ -207,6 +251,11 @@ function SnippetCard({
             <DropdownMenuItem onSelect={onRun}>
               <Play className="h-4 w-4" /> Run
             </DropdownMenuItem>
+            <SpaceSubmenu
+              label="Run in Space"
+              icon={<Play className="h-4 w-4" />}
+              onSelect={onRunInSpace}
+            />
             <DropdownMenuItem onSelect={onEdit}>
               <Pencil className="h-4 w-4" /> Edit
             </DropdownMenuItem>
@@ -241,7 +290,7 @@ function SnippetCard({
               <span className="truncate">{snippet.model}</span>
             </span>
           ) : (
-            <span className="italic text-foreground/40">Default model</span>
+            <span className="italic text-foreground/40">{DEFAULT_MODEL_LABEL}</span>
           )}
           <span aria-hidden className="text-foreground/25">
             ·
@@ -273,6 +322,30 @@ function SnippetCard({
 // Shared empty state — reused by SpacesLibrary too via plain shape parity, but
 // kept local for now to avoid a tiny shared file.
 // ---------------------------------------------------------------------------
+
+/** Search box above the grid, styled like the Library's. */
+function SearchField({
+  value,
+  onChange,
+  label,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  label: string;
+}) {
+  return (
+    <div className="relative mb-5 ml-auto w-full sm:w-64">
+      <Search className="pointer-events-none absolute left-3.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-foreground/40" />
+      <Input
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={label}
+        aria-label={label}
+        className="h-10 rounded-2xl pl-9"
+      />
+    </div>
+  );
+}
 
 function LibraryLoading() {
   return (

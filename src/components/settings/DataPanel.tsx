@@ -13,13 +13,32 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { StorageTile } from "@/components/settings/StorageTile";
 import { cn } from "@/lib/utils";
-import { type DestructiveAuth, type LockMethod, archiveAllSessions, exportDataJson, factoryReset, importDataWithDialog, isTauri, saveTextToFile, wipeUserData } from "@/lib/tauri";
+import { type DestructiveAuth, type LockMethod, archiveAllSessions, exportDataToFile, factoryReset, importDataWithDialog, isTauri, wipeUserData } from "@/lib/tauri";
 import { useChatStore } from "@/stores/chatStore";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { useEffect, useRef, useState } from "react";
 import { useSecurityStore } from "@/stores/securityStore";
 
 type BusyKind = "export" | "import" | "archive-all" | null;
+
+/* ───────────────────────── Data tab panel ─────────────────────────
+ *
+ * Four bulk operations live here:
+ *
+ *   1. Export   — dump the whole DB to a JSON file via a save dialog.
+ *   2. Import   — pick a JSON dump, replace everything with its contents,
+ *                 then reload the window so every store re-hydrates from
+ *                 the freshly-written DB.
+ *   3. Archive all — flip every live chat to archived in one shot.
+ *   4. Erase    — two-mode destructive flow (user-data vs factory reset),
+ *                 gated on a typed "YES" confirmation.
+ *
+ * The destructive actions rebuild the whole app by calling
+ * `window.location.reload()` — every Zustand store derives from SQLite
+ * on mount (see App.tsx's hydrate useEffect), so a reload is the
+ * cheapest way to get back to a consistent state without writing a
+ * bespoke rehydrate function per store.
+ * ─────────────────────────────────────────────────────────────────── */
 
 export function DataPanel() {
   const { confirm } = useConfirm();
@@ -92,14 +111,9 @@ export function DataPanel() {
     }
     setBusy("export");
     try {
-      const stamp = new Date().toISOString().slice(0, 10);
-      const payload = await exportDataJson();
-      // Backend owns both the dialog and the write — see saveTextToFile.
-      const path = await saveTextToFile({
-        content: payload,
-        default_path: `loach-export-${stamp}.json`,
-        filters: [{ name: "Loach export", extensions: ["json"] }],
-      });
+      // Backend owns the dialog, the snapshot and the write — the export
+      // never passes through here.
+      const path = await exportDataToFile();
       if (!path) {
         setBusy(null);
         return; // user cancelled the save dialog
@@ -145,9 +159,11 @@ export function DataPanel() {
       flash("error", "Archive requires the desktop app.");
       return;
     }
-    const live = useChatStore
+    const liveIds = useChatStore
       .getState()
-      .sessions.filter((s) => !s.archived_at).length;
+      .sessions.filter((s) => !s.archived_at)
+      .map((s) => s.id);
+    const live = liveIds.length;
     if (live === 0) {
       flash("info", "No live chats to archive.");
       return;
@@ -162,9 +178,16 @@ export function DataPanel() {
     setBusy("archive-all");
     try {
       const n = await archiveAllSessions();
+      // As when archiving one chat (chatStore `archive`): stop work for the
+      // chats just parked, and close the one on screen — it would otherwise
+      // stay open, composer and all, although it's archived.
+      const chats = useChatStore.getState();
+      for (const id of liveIds) await chats.cancelForSession(id);
       // Re-hydrate the chat store so the sidebar collapses the now-archived
-      // sessions and a fresh blank chat is created for the user to land in.
-      await useChatStore.getState().hydrate();
+      // sessions.
+      await chats.hydrate();
+      const active = useChatStore.getState().activeSessionId;
+      if (active && liveIds.includes(active)) await chats.selectSession(null);
       flash("info", `Archived ${n} chat${n === 1 ? "" : "s"}.`);
     } catch (e) {
       flash("error", e instanceof Error ? e.message : String(e));
@@ -181,7 +204,7 @@ export function DataPanel() {
         <DataRow
           icon={<Download className="h-4 w-4" />}
           title="Export data"
-          description="Save a full database dump (including chats, spaces, snippets and settings) to a JSON file."
+          description="Save a full database dump (including chats, spaces, your Library, memories, snippets and settings) to a JSON file."
           action={
             <Button
               variant="outline"
@@ -364,6 +387,10 @@ function formatImportSummary(s: ImportStats): string {
   if (s.messages) parts.push(`${s.messages} message${s.messages === 1 ? "" : "s"}`);
   if (s.spaces) parts.push(`${s.spaces} space${s.spaces === 1 ? "" : "s"}`);
   if (s.snippets) parts.push(`${s.snippets} snippet${s.snippets === 1 ? "" : "s"}`);
+  if (s.library_items)
+    parts.push(`${s.library_items} Library item${s.library_items === 1 ? "" : "s"}`);
+  if (s.library_datasets)
+    parts.push(`${s.library_datasets} dataset${s.library_datasets === 1 ? "" : "s"}`);
   if (s.snippet_variables)
     parts.push(`${s.snippet_variables} variable${s.snippet_variables === 1 ? "" : "s"}`);
   if (s.mcp_servers)
@@ -446,7 +473,7 @@ function EraseDialog({
     try {
       if (mode === "user-data") {
         await wipeUserData(auth);
-        onDone("All chats, spaces, snippets, and MCP servers deleted. Reloading…");
+        onDone("All chats, Spaces, snippets, and MCP servers deleted. Reloading…");
       } else {
         await factoryReset(auth);
         onDone("Loach has been reset to factory defaults. Reloading…");
@@ -480,7 +507,8 @@ function EraseDialog({
             title="Remove my data"
             body={
               <>
-                Delete all <strong>chats</strong>, <strong>spaces</strong>,{" "}
+                Delete all <strong>chats</strong>, <strong>spaces</strong>, your{" "}
+                <strong>Library</strong> (texts, files, links and datasets),{" "}
                 <strong>global memories</strong>, <strong>snippets</strong>, and{" "}
                 <strong>MCP servers</strong>.
                 Keeps your settings (theme, provider URLs, system prompt) and
@@ -745,9 +773,11 @@ function ImportConfirm({
             Import data
           </DialogTitle>
           <DialogDescription className="mt-1.5 text-[13px] text-foreground/60">
-            Importing will replace ALL chats, spaces, snippets, MCP servers,
-            and settings with the contents of the file you select next. Your
-            stored OpenAI API key is not touched.
+            Importing will replace ALL chats, Spaces, your Library (texts,
+            files, links and datasets), memories, snippets, MCP servers, and
+            settings with the contents of the file you select next — a backup
+            made before the Library existed leaves it empty. Your stored
+            OpenAI API key is not touched.
           </DialogDescription>
         </div>
 

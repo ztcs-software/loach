@@ -9,6 +9,7 @@ import {
   FolderOpen,
   GitFork,
   Layers,
+  Library,
   Loader2,
   MoreHorizontal,
   Pencil,
@@ -28,11 +29,14 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { ChatLabelDot, ChatLabelSubmenu } from "@/components/ChatLabelMenu";
+import { ChatSpaceSubmenu } from "@/components/ChatSpaceMenu";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useConfirm } from "@/components/ConfirmDialog";
+import { deleteChatConfirm } from "@/lib/confirmations";
 import { findChatLabel } from "@/lib/labels";
 import { useChatStore } from "@/stores/chatStore";
+import { useLibraryStore } from "@/stores/libraryStore";
 import { useModelsStore } from "@/stores/modelsStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useUIStore } from "@/stores/uiStore";
@@ -97,10 +101,12 @@ function CollapsedRail() {
   const newSession = useChatStore((s) => s.newSession);
   const setViewingSpace = useSpaceStore((s) => s.setViewingSpace);
   const setViewingModel = useModelsStore((s) => s.setViewingModel);
+  const setViewingDataset = useLibraryStore((s) => s.setViewingDataset);
 
   const goToTab = (tab: SidebarTab) => {
     setViewingSpace(null);
     setViewingModel(null);
+    setViewingDataset(null);
     setSidebarTab(tab);
   };
 
@@ -124,6 +130,12 @@ function CollapsedRail() {
           label="Spaces"
           onClick={() => goToTab("spaces")}
           active={sidebarTab === "spaces"}
+        />
+        <RailIcon
+          icon={<Library className="h-4 w-4" />}
+          label="Library"
+          onClick={() => goToTab("library")}
+          active={sidebarTab === "library"}
         />
         <RailIcon
           icon={<SquareTerminal className="h-4 w-4" />}
@@ -195,12 +207,16 @@ function Quicklinks() {
   const activeSessionId = useChatStore((s) => s.activeSessionId);
   const setViewingSpace = useSpaceStore((s) => s.setViewingSpace);
   const setViewingModel = useModelsStore((s) => s.setViewingModel);
+  const setViewingDataset = useLibraryStore((s) => s.setViewingDataset);
 
   const goToTab = (tab: SidebarTab) => {
     // Clearing override views ensures the new tab's canvas actually renders;
     // App.tsx prioritizes viewingSpaceId and viewingModel over sidebarTab.
+    // An open dataset is cleared too, so the Library entry lands on the
+    // Library list the way the Spaces entry lands on the Spaces grid.
     setViewingSpace(null);
     setViewingModel(null);
+    setViewingDataset(null);
     setSidebarTab(tab);
   };
 
@@ -233,6 +249,12 @@ function Quicklinks() {
         label="Spaces"
         onClick={() => goToTab("spaces")}
         active={tabActive("spaces")}
+      />
+      <Quicklink
+        icon={<Library className="h-4 w-4" />}
+        label="Library"
+        onClick={() => goToTab("library")}
+        active={tabActive("library")}
       />
       <Quicklink
         icon={<SquareTerminal className="h-4 w-4" />}
@@ -397,7 +419,14 @@ function readOpenFolders(): Set<string> {
 function ChatList() {
   const sessions = useChatStore((s) => s.sessions);
   const folders = useChatStore((s) => s.folders);
-  const activeId = useChatStore((s) => s.activeSessionId);
+  // The open chat's row is highlighted only while that chat is what's on
+  // screen. On Spaces, the Library, Snippets, Models or a Space's page the
+  // section's own entry is the highlight — two at once read as two places.
+  const openId = useChatStore((s) => s.activeSessionId);
+  const onChatsTab = useUIStore((s) => s.sidebarTab === "chats");
+  const viewingSpace = useSpaceStore((s) => s.viewingSpaceId !== null);
+  const viewingModel = useModelsStore((s) => s.viewingModel !== null);
+  const activeId = onChatsTab && !viewingSpace && !viewingModel ? openId : null;
   const select = useChatStore((s) => s.selectSession);
   const moveToFolder = useChatStore((s) => s.moveToFolder);
   const createFolderWith = useChatStore((s) => s.createFolderWith);
@@ -909,6 +938,8 @@ const SessionRow = memo(function SessionRowImpl({
             }
           }}
           onKeyDown={(e) => {
+            // The Enter that confirms an IME candidate isn't the rename's.
+            if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
             if (e.key === "Enter") (e.target as HTMLInputElement).blur();
             if (e.key === "Escape") {
               setDraft(session.title);
@@ -1070,6 +1101,7 @@ const SessionRow = memo(function SessionRowImpl({
               value={session.label}
               onSelect={(label) => void setLabel(session.id, label)}
             />
+            <ChatSpaceSubmenu session={session} />
             <DropdownMenuItem onSelect={beginRename}>
               <Pencil className="h-4 w-4" /> Rename
             </DropdownMenuItem>
@@ -1087,12 +1119,7 @@ const SessionRow = memo(function SessionRowImpl({
             <DropdownMenuItem
               onSelect={() =>
                 void (async () => {
-                  const ok = await confirm({
-                    title: "Delete this chat?",
-                    body: `“${session.title || "Untitled"}” and all its messages will be permanently deleted. This cannot be undone.`,
-                    confirmLabel: "Delete",
-                    destructive: true,
-                  });
+                  const ok = await confirm(deleteChatConfirm(session.title));
                   if (ok) await remove(session.id);
                 })()
               }

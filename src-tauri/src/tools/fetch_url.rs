@@ -106,6 +106,12 @@ pub struct FetchedPage {
 /// to close the TOCTOU window between "we resolved a public IP" and
 /// "reqwest dials a now-private one".
 pub async fn fetch(_shared_http: &reqwest::Client, raw_url: &str) -> Result<FetchedPage, String> {
+    fetch_capped(raw_url, MAX_TEXT_CHARS).await
+}
+
+/// [`fetch`] with a caller-chosen text cap. The Library keeps whole pages
+/// (it chunks them for retrieval), where a prompt prefetch wants a short one.
+pub async fn fetch_capped(raw_url: &str, max_text_chars: usize) -> Result<FetchedPage, String> {
     // Rate-limit before URL parsing so even an invalid-URL flood is bounded.
     // The slot is consumed regardless of fetch success — a renderer that
     // keeps firing fetches against malformed URLs still gets throttled.
@@ -144,15 +150,21 @@ pub async fn fetch(_shared_http: &reqwest::Client, raw_url: &str) -> Result<Fetc
         // per-request client. Reqwest will use this map instead of re-
         // resolving before it dials, so a hostname can't flip from public →
         // private between our check and the actual connection.
-        let resolved = resolve_safe_addrs(&url).await?;
+        //
+        // The lookup spends the same budget: checked only after it, a
+        // resolver that never answered held each hop as long as the OS let it.
+        let over_budget = || format!("Fetch exceeded its {}s time budget", FETCH_TIMEOUT.as_secs());
+        let resolved = tokio::time::timeout(
+            deadline.saturating_duration_since(Instant::now()),
+            resolve_safe_addrs(&url),
+        )
+        .await
+        .map_err(|_| over_budget())??;
         let http = build_pinned_client(&url, &resolved)?;
 
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            return Err(format!(
-                "Fetch exceeded its {}s time budget",
-                FETCH_TIMEOUT.as_secs()
-            ));
+            return Err(over_budget());
         }
         let resp = http
             .get(url.clone())
@@ -221,7 +233,7 @@ pub async fn fetch(_shared_http: &reqwest::Client, raw_url: &str) -> Result<Fetc
     }
 
     let bytes = buf.len();
-    let body = String::from_utf8_lossy(&buf).to_string();
+    let body = decode_body(&buf, &content_type);
 
     let (title, text_raw) = if content_type.contains("html") || looks_like_html(&body) {
         html_to_text(&body)
@@ -229,7 +241,7 @@ pub async fn fetch(_shared_http: &reqwest::Client, raw_url: &str) -> Result<Fetc
         (None, body)
     };
 
-    let (text, truncated_text) = truncate(&text_raw, MAX_TEXT_CHARS);
+    let (text, truncated_text) = truncate(&text_raw, max_text_chars);
 
     Ok(FetchedPage {
         url: raw_url.to_string(),
@@ -408,7 +420,13 @@ pub(crate) fn build_pinned_client(url: &Url, addrs: &[SocketAddr]) -> Result<req
         // back to the system resolver, bypassing the SSRF guard. `fetch()`
         // walks the redirect chain manually and rebuilds a pinned client
         // per hop.
-        .redirect(reqwest::redirect::Policy::none());
+        .redirect(reqwest::redirect::Policy::none())
+        // Connect directly, never through a proxy. reqwest otherwise picks
+        // one up from HTTP(S)_PROXY / ALL_PROXY or the OS settings, and a
+        // proxy resolves the hostname itself — the `resolve()` pin below is
+        // never consulted, so a rebinding host could reach a private
+        // address through it after passing our screen.
+        .no_proxy();
 
     // `resolve()` plumbs a (host, addr) override into the internal resolver.
     // We feed in every screened address so a multi-A-record host can still
@@ -484,6 +502,31 @@ pub fn is_public_ip(ip: &IpAddr) -> bool {
             if (segs[0] & 0xffc0) == 0xfe80 {
                 return false;
             }
+            // fec0::/10 — site-local: deprecated, but where it's still used
+            // it's a private range like fc00::/7.
+            if (segs[0] & 0xffc0) == 0xfec0 {
+                return false;
+            }
+            // 2001:db8::/32 (documentation, the twin of the v4 ranges
+            // `is_documentation()` refuses) and 100::/64 (discard-only,
+            // RFC 6666) name no real host.
+            if (segs[0] == 0x2001 && segs[1] == 0x0db8) || segs[..4] == [0x0100, 0, 0, 0] {
+                return false;
+            }
+            // Tunnels and translators that pass the packet on to an IPv4
+            // address carried inside the IPv6 one, which an AAAA record could
+            // aim at a private host: 6to4 (2002::/16), Teredo (2001::/32),
+            // local-use NAT64 (64:ff9b:1::/48) and IPv4-translated addresses
+            // (::ffff:0:0:0/96). All are obsolete or site-local, so refusing
+            // them outright loses no public host, where decoding each layout
+            // would be more to get wrong.
+            if segs[0] == 0x2002
+                || (segs[0] == 0x2001 && segs[1] == 0)
+                || (segs[0] == 0x0064 && segs[1] == 0xff9b && segs[2] == 0x0001)
+                || (segs[..4] == [0, 0, 0, 0] && segs[4] == 0xffff && segs[5] == 0)
+            {
+                return false;
+            }
             // Helper: rebuild the embedded IPv4 from the low 32 bits and run
             // it back through the v4 screen.
             let embedded_v4 = |segs: &[u16; 8]| {
@@ -537,12 +580,12 @@ pub fn is_public_ip(ip: &IpAddr) -> bool {
 }
 
 /// Returns `true` only for link-local addresses — IPv4 169.254.0.0/16, IPv6
-/// fe80::/10, and the IPv4-mapped / NAT64 / IPv4-compatible IPv6 forms that
-/// smuggle a link-local IPv4 (e.g. `::ffff:169.254.169.254`). This is the
-/// narrow "cloud-metadata" screen shared by the MCP resolver
-/// ([`resolve_lan_addrs`]) and the LLM-provider guard
-/// (`providers::refuse_link_local_host`) — one source of truth, distinct from
-/// the all-private-ranges screen in [`is_public_ip`].
+/// fe80::/10, and the IPv6 forms that smuggle a link-local IPv4 (IPv4-mapped,
+/// -translated and -compatible, NAT64, 6to4 and Teredo — e.g.
+/// `::ffff:169.254.169.254`). This is the narrow "cloud-metadata" screen
+/// shared by the MCP resolver ([`resolve_lan_addrs`]) and the LLM-provider
+/// guard (`providers::refuse_link_local_host`) — one source of truth, distinct
+/// from the all-private-ranges screen in [`is_public_ip`].
 pub(crate) fn is_link_local(ip: &IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => v4.is_link_local(),
@@ -580,7 +623,9 @@ pub(crate) fn is_link_local(ip: &IpAddr) -> bool {
                 && segs[3] == 0
                 && segs[4] == 0
                 && segs[5] == 0;
-            if is_v4_mapped || is_nat64 || is_v4_compat {
+            // ::ffff:0:a.b.c.d — IPv4-translated.
+            let is_v4_translated = segs[..4] == [0, 0, 0, 0] && segs[4] == 0xffff && segs[5] == 0;
+            if is_v4_mapped || is_nat64 || is_v4_compat || is_v4_translated {
                 let embedded = std::net::Ipv4Addr::new(
                     (segs[6] >> 8) as u8,
                     (segs[6] & 0xff) as u8,
@@ -589,9 +634,83 @@ pub(crate) fn is_link_local(ip: &IpAddr) -> bool {
                 );
                 return embedded.is_link_local();
             }
+            // The tunnel and translator forms `is_public_ip` refuses outright
+            // carry an IPv4 the packet is handed on to as well. This screen
+            // lets LAN and public hosts through, so it decodes that IPv4
+            // instead of refusing the whole range: a LAN host behind
+            // local-use NAT64 is legitimate here, only 169.254.x.x is not.
+            let o = v6.octets();
+            let link_local_at = |at: [usize; 4]| {
+                std::net::Ipv4Addr::new(o[at[0]], o[at[1]], o[at[2]], o[at[3]]).is_link_local()
+            };
+            // 6to4 (2002::/16): the site router's IPv4 follows the prefix.
+            if segs[0] == 0x2002 {
+                return link_local_at([2, 3, 4, 5]);
+            }
+            // Teredo (2001::/32): the server's IPv4, then the client's with
+            // every bit inverted (RFC 4380) — traffic goes to both.
+            if segs[0] == 0x2001 && segs[1] == 0 {
+                let client = std::net::Ipv4Addr::new(!o[12], !o[13], !o[14], !o[15]);
+                return link_local_at([4, 5, 6, 7]) || client.is_link_local();
+            }
+            // Local-use NAT64 (64:ff9b:1::/48): the operator picks the prefix
+            // length, which moves the IPv4 (RFC 6052 §2.2, skipping the
+            // reserved byte 8), so try each layout a /48 leaves room for.
+            if segs[..3] == [0x0064, 0xff9b, 0x0001] {
+                return [[6, 7, 9, 10], [7, 9, 10, 11], [9, 10, 11, 12], [12, 13, 14, 15]]
+                    .into_iter()
+                    .any(link_local_at);
+            }
             false
         }
     }
+}
+
+/// The body as text, in the charset the page declares — the `Content-Type`
+/// header's, else an HTML `<meta charset>` near the top — and UTF-8 when it
+/// declares none. Read as UTF-8 regardless, a page served as ISO-8859-2 or
+/// windows-1250 came out full of replacement characters, and a Library link
+/// keeps that text for good. A byte-order mark wins over both.
+fn decode_body(buf: &[u8], content_type: &str) -> String {
+    let encoding = match charset_param(content_type) {
+        Some(label) => encoding_rs::Encoding::for_label(label.as_bytes()),
+        // As the HTML spec's prescan reads a `<meta>`: one declaring UTF-16
+        // means UTF-8 — the page that spelt it out in ASCII can't be UTF-16 —
+        // and a "replacement" label (`iso-2022-kr`) must not collapse the
+        // whole page into one U+FFFD. `output_encoding` maps both to UTF-8.
+        None => meta_charset(buf)
+            .and_then(|label| encoding_rs::Encoding::for_label(label.as_bytes()))
+            .map(encoding_rs::Encoding::output_encoding),
+    }
+    .unwrap_or(encoding_rs::UTF_8);
+    encoding.decode(buf).0.into_owned()
+}
+
+/// `charset=` from a `Content-Type` value like `text/html; charset="utf-8"`.
+fn charset_param(content_type: &str) -> Option<String> {
+    content_type.split(';').skip(1).find_map(|p| {
+        let (k, v) = p.split_once('=')?;
+        k.trim()
+            .eq_ignore_ascii_case("charset")
+            .then(|| v.trim().trim_matches(['"', '\'']).to_string())
+    })
+}
+
+/// The charset an HTML page names in its first 1 KiB — `<meta charset=…>` or
+/// a `http-equiv` Content-Type — where the HTML spec's prescan looks. Only
+/// inside a `<meta>` tag: a `charset=` in the page's text or in another tag
+/// declares nothing.
+fn meta_charset(buf: &[u8]) -> Option<String> {
+    let head = String::from_utf8_lossy(&buf[..buf.len().min(1024)]).to_ascii_lowercase();
+    head.match_indices("<meta").find_map(|(at, _)| {
+        let tag = &head[at..];
+        let tag = &tag[..tag.find('>').unwrap_or(tag.len())];
+        let rest = tag[tag.find("charset=")? + "charset=".len()..].trim_start_matches(['"', '\'']);
+        let end = rest
+            .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':' | '.')))
+            .unwrap_or(rest.len());
+        Some(rest[..end].to_string()).filter(|l| !l.is_empty())
+    })
 }
 
 fn looks_like_html(body: &str) -> bool {
@@ -703,7 +822,7 @@ fn strip_blocks_with_lower(
     // whole pass O(n·k).
     let mut next_open: Vec<Option<usize>> = blocks_l
         .iter()
-        .map(|(open_l, _, _)| lower.find(open_l.as_str()))
+        .map(|(open_l, _, _)| find_opener(lower, open_l, 0))
         .collect();
 
     let mut out = String::with_capacity(hay.len());
@@ -715,7 +834,7 @@ fn strip_blocks_with_lower(
         let mut best: Option<(usize, usize)> = None; // (opener_pos, block index)
         for (idx, (open_l, _, _)) in blocks_l.iter().enumerate() {
             if matches!(next_open[idx], Some(pos) if pos < i) {
-                next_open[idx] = lower[i..].find(open_l.as_str()).map(|rel| i + rel);
+                next_open[idx] = find_opener(lower, open_l, i);
             }
             if let Some(pos) = next_open[idx] {
                 if best.map_or(true, |(bp, _)| pos < bp) {
@@ -745,6 +864,23 @@ fn strip_blocks_with_lower(
         }
     }
     out
+}
+
+/// Byte offset of the first `opener` — a tag opening like `<style` — at or
+/// after `from` in `lower` that names that tag and no longer one: followed by
+/// whitespace, `>` or `/`. Without that check `<style-switcher>` or
+/// `<scripts>` opened a block, and with no `</style>` after it the rest of
+/// the page was dropped.
+fn find_opener(lower: &str, opener: &str, from: usize) -> Option<usize> {
+    let mut at = from;
+    loop {
+        let pos = at + lower[at..].find(opener)?;
+        let next = pos + opener.len();
+        match lower.as_bytes().get(next) {
+            None | Some(b'>' | b'/' | b' ' | b'\t' | b'\n' | b'\r' | b'\x0c') => return Some(pos),
+            Some(_) => at = next,
+        }
+    }
 }
 
 /// Replace any occurrence of any needle in `needles` with `repl`. Single
@@ -805,7 +941,9 @@ fn extract_between_ci(hay: &str, lower: &str, open: &str, close: &str) -> Option
     debug_assert_eq!(lower.len(), hay.len());
     let open_l = open.to_ascii_lowercase();
     let close_l = close.to_ascii_lowercase();
-    let a = lower.find(&open_l)?;
+    // A tag-name match, so a `<titlebar>` ahead of the real `<title>` isn't
+    // taken for it.
+    let a = find_opener(lower, &open_l, 0)?;
     let rest = &lower[a..];
     let b_rel = rest.find(&close_l)?;
     let b = a + b_rel;
@@ -994,6 +1132,15 @@ mod tests {
     }
 
     #[test]
+    fn title_skips_longer_tag_names() {
+        // `<titlebar>` opened the title match, and its `</titlebar>` closed
+        // it, so the page was titled "Menu".
+        let html = "<head><titlebar>Menu</titlebar><title>Real</title></head><body>x</body>";
+        let (title, _) = html_to_text(html);
+        assert_eq!(title.as_deref(), Some("Real"));
+    }
+
+    #[test]
     fn drops_scripts() {
         let html = "<body><script>alert(1)</script>A</body>";
         let (_, text) = html_to_text(html);
@@ -1088,6 +1235,61 @@ mod tests {
         assert!(is_public_ip(&"64:ff9b::808:808".parse().unwrap()));
     }
 
+    /// Special-purpose IPv4 ranges the screen refuses beyond the RFC 1918
+    /// ones above.
+    #[test]
+    fn rejects_reserved_ipv4_ranges() {
+        for ip in [
+            "0.1.2.3",         // 0.0.0.0/8, "this network"
+            "0.0.0.0",         // unspecified
+            "192.0.0.8",       // 192.0.0.0/24, IETF protocol assignments
+            "198.19.255.1",    // 198.18.0.0/15, benchmarking
+            "240.0.0.1",       // 240.0.0.0/4, reserved
+            "255.255.255.255", // broadcast
+            "224.0.0.1",       // multicast
+            "239.255.255.250", // multicast (SSDP)
+        ] {
+            assert!(!is_public_ip(&ip.parse().unwrap()), "{ip}");
+        }
+        assert!(is_public_ip(&"198.20.0.1".parse().unwrap()));
+        assert!(is_public_ip(&"192.0.1.1".parse().unwrap()));
+    }
+
+    /// IPv6 forms that hand the packet to an embedded IPv4 address, plus
+    /// site-local, multicast and unspecified.
+    #[test]
+    fn rejects_tunnelled_translated_and_special_ipv6() {
+        for ip in [
+            "fec0::1",                 // site-local
+            "2002:7f00:1::1",          // 6to4 around 127.0.0.1
+            "2002:808:808::1",         // 6to4, even around a public v4
+            "2001:0:4136:e378::1",     // Teredo
+            "64:ff9b:1::a9fe:a9fe",    // local-use NAT64
+            "::ffff:0:7f00:1",         // IPv4-translated 127.0.0.1
+            "::ffff:0:808:808",        // IPv4-translated, public v4
+            "ff02::1",                 // multicast
+            "::",                      // unspecified
+        ] {
+            assert!(!is_public_ip(&ip.parse().unwrap()), "{ip}");
+        }
+        // Neighbours of those ranges stay public.
+        for ip in ["2001:4860:4860::8888", "2003::1", "64:ff9b:2::1"] {
+            assert!(is_public_ip(&ip.parse().unwrap()), "{ip}");
+        }
+    }
+
+    #[test]
+    fn rejects_documentation_and_discard_ipv6() {
+        for ip in ["2001:db8::1", "2001:db8:ffff::8888", "100::1", "100::ffff:1"] {
+            assert!(!is_public_ip(&ip.parse().unwrap()), "{ip}");
+        }
+        // Neighbours stay public: 2001:db9::/32 and 100:0:0:1::/64 are
+        // outside both ranges.
+        for ip in ["2001:db9::1", "100:0:0:1::1"] {
+            assert!(is_public_ip(&ip.parse().unwrap()), "{ip}");
+        }
+    }
+
     #[test]
     fn rejects_ipv4_compatible_private() {
         // ::a.b.c.d (deprecated IPv4-compatible). ::1 is loopback and handled
@@ -1112,6 +1314,32 @@ mod tests {
         assert!(!is_link_local(&"::1".parse().unwrap()));
         assert!(!is_link_local(&"fc00::1".parse().unwrap()));
         assert!(!is_link_local(&"8.8.8.8".parse().unwrap()));
+    }
+
+    /// 169.254.169.254 (`a9fe:a9fe`) carried by the tunnel and translator
+    /// forms is flagged; the same forms around any other IPv4 are not.
+    #[test]
+    fn is_link_local_looks_inside_tunnels_and_translators() {
+        for ip in [
+            "::ffff:0:a9fe:a9fe",                      // IPv4-translated
+            "2002:a9fe:a9fe::1",                       // 6to4
+            "2001:0:a9fe:a9fe::1",                     // Teredo server
+            "2001:0:4136:e378:8000:63bf:5601:5601",    // Teredo client, inverted
+            "64:ff9b:1::a9fe:a9fe",                    // local-use NAT64, /96
+            "64:ff9b:1:a9fe:a9:fe00::",                // local-use NAT64, /48
+            "64:ff9b:1:a9:fe:a9fe::",                  // local-use NAT64, /56
+            "64:ff9b:1:0:a9:fea9:fe00:0",              // local-use NAT64, /64
+        ] {
+            assert!(is_link_local(&ip.parse().unwrap()), "{ip}");
+        }
+        for ip in [
+            "::ffff:0:c0a8:110",                       // IPv4-translated LAN
+            "2002:808:808::1",                         // 6to4 around 8.8.8.8
+            "2001:0:4136:e378:8000:63bf:3fff:fdd2",    // RFC 4380's example
+            "64:ff9b:1::c0a8:110",                     // LAN host via NAT64
+        ] {
+            assert!(!is_link_local(&ip.parse().unwrap()), "{ip}");
+        }
     }
 
     #[tokio::test]
@@ -1174,6 +1402,64 @@ mod tests {
             matches!(err, HostScreenError::Unresolvable(_)),
             "expected Unresolvable, got {err:?}"
         );
+    }
+
+    #[test]
+    fn bodies_decode_in_the_charset_they_declare() {
+        // Regression: every body was read as UTF-8, so a Polish page served
+        // as ISO-8859-2 or windows-1250 was stored garbled.
+        let iso = encoding_rs::ISO_8859_2.encode("Żółw błotny").0;
+        assert_eq!(decode_body(&iso, "text/html; charset=\"ISO-8859-2\""), "Żółw błotny");
+        let page = [
+            b"<html><head><meta http-equiv=\"Content-Type\" content=\"text/html; charset=windows-1250\"></head><body>"
+                .as_slice(),
+            &encoding_rs::WINDOWS_1250.encode("Zażółć gęślą jaźń").0,
+            b"</body></html>",
+        ]
+        .concat();
+        assert!(decode_body(&page, "text/html").contains("Zażółć gęślą jaźń"));
+        // Nothing declared: UTF-8, as before.
+        assert_eq!(decode_body("zwykły tekst".as_bytes(), "text/plain"), "zwykły tekst");
+        assert_eq!(charset_param("text/html;charset=utf-8").as_deref(), Some("utf-8"));
+        assert_eq!(meta_charset(b"<p>no meta here, charset=nothing</p>"), None);
+    }
+
+    /// A `charset=` counts only inside a `<meta>` tag, not wherever it first
+    /// turns up once any `<meta` has.
+    #[test]
+    fn meta_charset_is_read_from_meta_tags_only() {
+        assert_eq!(
+            meta_charset(b"<meta name=\"viewport\" content=\"width=device-width\"><p>charset=koi8-r</p>"),
+            None
+        );
+        assert_eq!(
+            meta_charset(b"<meta name=\"viewport\"><meta charset=\"windows-1250\">").as_deref(),
+            Some("windows-1250")
+        );
+    }
+
+    /// The HTML spec reads a `<meta>` naming UTF-16 as UTF-8, and a label
+    /// for the "replacement" encoding decoded the page to a single U+FFFD.
+    #[test]
+    fn meta_utf16_and_replacement_labels_read_as_utf8() {
+        for label in ["utf-16", "unicode", "utf-16be", "iso-2022-kr", "hz-gb-2312"] {
+            let page = format!("<html><head><meta charset=\"{label}\"></head><body>Zażółć</body></html>");
+            let text = decode_body(page.as_bytes(), "text/html");
+            assert!(text.contains("Zażółć"), "{label}: {text:?}");
+        }
+    }
+
+    /// `<style-switcher>` isn't a `<style>`: with no `</style>` after it,
+    /// taking it for one dropped the rest of the page.
+    #[test]
+    fn tags_that_merely_start_like_style_or_script_are_kept() {
+        let html = "<body><style-switcher>Theme</style-switcher><scripts>s</scripts>\
+                    <p>Rest of the page</p><style media=\"x\">x{}</style>\
+                    <script\ntype=\"module\">alert(1)</script>End</body>";
+        let (_, text) = html_to_text(html);
+        assert!(text.contains("Rest of the page"), "{text:?}");
+        assert!(text.contains("Theme") && text.contains("End"), "{text:?}");
+        assert!(!text.contains("x{}") && !text.contains("alert"), "{text:?}");
     }
 
     #[test]

@@ -10,6 +10,7 @@ import {
   Eye,
   EyeOff,
   HardDrive,
+  KeyRound,
   Loader2,
   Play,
   Plug2,
@@ -35,6 +36,7 @@ import {
   ollamaListModels,
   ollamaStart,
   openaiListModels,
+  openaiListModelsWithKey,
   systemInfo,
 } from "@/lib/tauri";
 import {
@@ -42,6 +44,7 @@ import {
   capacityBasis,
   classifyFit,
   formatGb,
+  fullOllamaTag,
   rankChatModels,
   recommendVariant,
   type FitVerdict,
@@ -380,11 +383,17 @@ function OllamaPath({ onProvisioned }: { onProvisioned: () => void }) {
         // this same setting, and the probe re-runs on every remount of this
         // path (toggling the provider switch away and back, saving a base URL,
         // leaving and re-entering the step). Pinning unconditionally stamped
-        // the user's explicit choice back to `list[0]` each time.
+        // the user's explicit choice back to `list[0]` each time. Nor over
+        // another provider's default: a model verified on the OpenAI tab
+        // stays the default when the user merely looks at this one — the
+        // picker below shows nothing picked, and picking is explicit.
         const settings = useSettingsStore.getState();
         const alreadyPinned =
-          settings.default_provider === "ollama" &&
-          list.some((m) => m.id === settings.default_model);
+          settings.default_provider === "ollama"
+            ? list.some(
+                (m) => fullOllamaTag(m.id) === fullOllamaTag(settings.default_model ?? ""),
+              )
+            : !!settings.default_model;
         if (!alreadyPinned) await setProviderDefault("ollama", list[0].id);
         await refreshModels();
         onProvisioned();
@@ -692,7 +701,9 @@ function DefaultModelPicker({
   onSelect: (id: string) => void;
   hint: string;
 }) {
-  const current = models.find((m) => m.id === value) ?? models[0];
+  // No fallback to `models[0]`: a check on a model that isn't the default
+  // says new chats will use it when they won't.
+  const current = models.find((m) => m.id === value);
   return (
     <div className="rounded-xl border border-foreground/[0.08] bg-foreground/[0.015] p-3">
       <Label className="text-[12px]">Default model</Label>
@@ -871,7 +882,10 @@ function ModelCatalog({
     // Don't stack a second pull of the same tag on top of a live one — the
     // Retry button is reachable while the previous attempt is still running.
     const live = Object.values(useModelsStore.getState().runs).some(
-      (r) => r.kind === "pull" && r.target === tag && r.finished === null,
+      (r) =>
+        r.kind === "pull" &&
+        fullOllamaTag(r.target) === fullOllamaTag(tag) &&
+        r.finished === null,
     );
     if (live) return;
     // Pin as default and unblock Continue immediately — the pull
@@ -1264,7 +1278,6 @@ function OpenAIPath({ onProvisioned }: { onProvisioned: () => void }) {
   const pinnedModel = useSettingsStore((s) => s.default_model);
   const update = useSettingsStore((s) => s.update);
   const setOpenAIKey = useSettingsStore((s) => s.setOpenAIKey);
-  const clearOpenAIKey = useSettingsStore((s) => s.clearOpenAIKey);
   const setProviderDefault = useSettingsStore((s) => s.setProviderDefault);
   const refreshModels = useModelsStore((s) => s.refresh);
 
@@ -1273,28 +1286,29 @@ function OpenAIPath({ onProvisioned }: { onProvisioned: () => void }) {
   const [showKey, setShowKey] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [verified, setVerified] = useState(keySet);
+  // A stored key isn't a verified one — it may have been revoked since — so
+  // this waits for a probe to succeed: the one below, or Verify & save.
+  const [verified, setVerified] = useState(false);
   /** Models the verified endpoint returned, ranked so a chat model leads.
    *  Feeds the default-model picker below. */
   const [catalog, setCatalog] = useState<ModelInfo[]>([]);
+  // Set once Verify & save starts: its result is the one that counts.
+  const superseded = useRef(false);
 
-  // If a verified key is already stored (the user set it, advanced, then
-  // navigated back), the parent's `provisioned` flag has reset but there's
-  // nothing left to do — mark provisioned so Continue re-enables without
+  // If a key is already stored (the user set it, advanced, then navigated
+  // back), the parent's `provisioned` flag has reset. Re-check that key
+  // and mark provisioned once it answers, so Continue re-enables without
   // forcing a full re-type. Snapshot the flag at MOUNT rather than
-  // subscribing to it: `setOpenAIKey` flips `openai_key_set` true before
-  // the probe validates the key, so a live subscription would fire
-  // mid-save and enable Continue — and a failed probe only rolls the key
-  // back, never the parent's `provisioned` flag. At mount no save can be
-  // in flight, so a stored key here really is a verified one.
+  // subscribing to it: `setOpenAIKey` flips `openai_key_set` true partway
+  // through a save, so a live subscription would fire mid-save and enable
+  // Continue before the rest of the save has landed.
   const keySetAtMount = useRef(useSettingsStore.getState().openai_key_set);
   useEffect(() => {
     if (!keySetAtMount.current) return;
-    onProvisioned();
-    // Also re-load the catalog. `catalog` is otherwise only filled by
-    // `handleSave`, so a user returning to this step with a key already
-    // verified got no default-model picker at all — nothing to change the
-    // pick with, and no indication of what the pick even was.
+    // The probe also re-loads the catalog. `catalog` is otherwise only
+    // filled by `handleSave`, so a user returning to this step with a key
+    // already verified got no default-model picker at all — nothing to
+    // change the pick with, and no indication of what the pick even was.
     //
     // Genuinely mount-only: `onProvisioned` used to be the dependency, but the
     // parent passes it as an inline arrow, so this effect's own
@@ -1303,14 +1317,23 @@ function OpenAIPath({ onProvisioned }: { onProvisioned: () => void }) {
     // request on every entry to this path. Reading `baseUrl` from the mount
     // closure is deliberate for the same reason the key snapshot above is.
     void openaiListModels(baseUrl)
-      .then((list) => setCatalog(rankChatModels(list)))
-      .catch(() => {
-        /* Key may have been revoked since — the form below still works. */
+      .then((list) => {
+        if (superseded.current) return;
+        setCatalog(rankChatModels(list));
+        setVerified(true);
+        onProvisioned();
+      })
+      .catch((e) => {
+        if (superseded.current) return;
+        setError(
+          `${e instanceof Error ? e.message : String(e)}. The stored key didn't work — double-check it and the base URL.`,
+        );
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const handleSave = async () => {
+    superseded.current = true;
     setError(null);
     setBusy(true);
     // A blank key is a supported path, not a validation error: local
@@ -1318,42 +1341,29 @@ function OpenAIPath({ onProvisioned }: { onProvisioned: () => void }) {
     // requests, and the Rust side already omits the Authorization header
     // when no key is stored.
     const newKey = key.trim();
+    const url = urlDraft.trim() || baseUrl;
     try {
-      // Persist URL changes first so the model-list call uses the right base.
-      if (urlDraft.trim() && urlDraft.trim() !== baseUrl) {
-        await update("openai_base_url", urlDraft.trim());
+      // Probe — a key that isn't valid will surface here as a 401. A typed
+      // key is checked as typed, before anything is saved: a failed check
+      // then leaves the stored URL and key — possibly a working pair, which
+      // the parent's `provisioned` flag still vouches for — as they were.
+      // Nothing typed probes with whatever is stored: usually nothing, the
+      // keyless local-server case, or a stored key re-verified without a
+      // re-type.
+      const list = newKey
+        ? await openaiListModelsWithKey(url, newKey)
+        : await openaiListModels(url);
+      if (url !== baseUrl) await update("openai_base_url", url);
+      if (newKey) await setOpenAIKey(newKey);
+      const ranked = rankChatModels(list);
+      setCatalog(ranked);
+      if (ranked.length > 0) {
+        // Pin the best chat candidate rather than whatever `/v1/models`
+        // listed first — on api.openai.com that's frequently an embedding
+        // or audio model. The picker below shows the result either way.
+        await setProviderDefault("openai", ranked[0].id);
       }
-      // Probe — a key that isn't valid will surface here as a 401.
-      const probe = async () => {
-        const list = await openaiListModels(urlDraft.trim() || baseUrl);
-        const ranked = rankChatModels(list);
-        setCatalog(ranked);
-        if (ranked.length > 0) {
-          // Pin the best chat candidate rather than whatever `/v1/models`
-          // listed first — on api.openai.com that's frequently an embedding
-          // or audio model. The picker below shows the result either way.
-          await setProviderDefault("openai", ranked[0].id);
-        }
-        await refreshModels();
-      };
-      if (newKey) {
-        // The probe reads the key from the keyring, so it must be stored
-        // first. If the probe then fails, roll the key back — leaving a
-        // known-bad key stored would flip `keySet` true and auto-provision
-        // it on re-entry.
-        await setOpenAIKey(newKey);
-        try {
-          await probe();
-        } catch (probeErr) {
-          await clearOpenAIKey().catch(() => {});
-          throw probeErr;
-        }
-      } else {
-        // Nothing typed: probe with whatever is stored — usually nothing,
-        // the keyless local-server case. A stored key stays untouched, so
-        // this also re-verifies without forcing a re-type.
-        await probe();
-      }
+      await refreshModels();
       setVerified(true);
       setKey("");
       onProvisioned();
@@ -1461,6 +1471,12 @@ function OpenAIPath({ onProvisioned }: { onProvisioned: () => void }) {
           <p className="flex items-center gap-1.5 rounded-lg border border-emerald-500/25 bg-emerald-500/[0.06] px-3 py-2 text-[12px] text-emerald-800 dark:text-emerald-300">
             <Check className="h-3.5 w-3.5" />
             Connection verified — you're ready to chat.
+          </p>
+        )}
+        {keySet && !verified && !error && (
+          <p className="flex items-center gap-1.5 rounded-lg border border-foreground/10 bg-foreground/[0.03] px-3 py-2 text-[12px] text-foreground/65">
+            <KeyRound className="h-3.5 w-3.5" />
+            Key stored — not verified yet.
           </p>
         )}
       </div>

@@ -1,6 +1,7 @@
 /**
  * Parser for the "Import context" dialog. Three input shapes are accepted —
- * the same two we emit from `export_session` plus a plain-text fallback —
+ * the Markdown `export_session` emits, the JSON it emitted before 1.6 (older
+ * files still import), plus a plain-text fallback —
  * and they all collapse onto a single output type so the importer doesn't
  * have to branch on format itself.
  *

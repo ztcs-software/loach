@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   AdminEvent,
@@ -8,6 +8,14 @@ import type {
   Folder,
   GlobalMemory,
   ImportStats,
+  IndexStatus,
+  LibraryDataset,
+  LibraryItem,
+  LibraryItemKind,
+  LibraryItemMeta,
+  LibrarySource,
+  LibrarySourceOwner,
+  LibraryUsage,
   McpServer,
   McpServerInput,
   McpTestResult,
@@ -17,6 +25,9 @@ import type {
   MessageHit,
   ModelInfo,
   OllamaShowResponse,
+  RagDocRef,
+  RagSearchResult,
+  RetrievalMode,
   Session,
   Snippet,
   SnippetFillValue,
@@ -41,6 +52,23 @@ export const isTauri =
 
 function notInTauri<T>(fallback: T): Promise<T> {
   return Promise.resolve(fallback);
+}
+
+/** `invoke` for a command whose events `unlisten` was subscribed for first.
+ *  A rejected start returns no handle, so the caller never gets the
+ *  `unlisten` either — drop the listener here, or each failed start leaked
+ *  one. */
+async function invokeOrUnlisten<T>(
+  unlisten: UnlistenFn,
+  cmd: string,
+  args: Record<string, unknown>,
+): Promise<T> {
+  try {
+    return await invoke<T>(cmd, args);
+  } catch (e) {
+    unlisten();
+    throw e;
+  }
 }
 
 /**
@@ -110,6 +138,8 @@ export function createSession(args: {
       label: null,
       folder_id: null,
       workspace_root: null,
+      retrieval_mode: null,
+      image_scaling_json: null,
       created_at: now,
       updated_at: now,
     });
@@ -141,6 +171,8 @@ export function forkSession(args: {
       label: null,
       folder_id: null,
       workspace_root: null,
+      retrieval_mode: null,
+      image_scaling_json: null,
       created_at: now,
       updated_at: now,
     });
@@ -217,6 +249,15 @@ export function setSessionFolder(args: {
   return invoke("set_session_folder", { args });
 }
 
+/** Move a chat into a Space, or out of any Space with `null`. */
+export function setSessionSpace(args: {
+  id: string;
+  space_id: string | null;
+}): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("set_session_space", { args });
+}
+
 /** Open the native folder picker and scope this chat's filesystem tools to
  *  what the user chooses. Resolves to the stored (canonical) path, or null
  *  if they cancelled.
@@ -253,7 +294,7 @@ export function readWorkspaceInstructions(sessionId: string): Promise<string | n
   return invoke("read_workspace_instructions", { sessionId });
 }
 
-export function exportSession(id: string, format: "json" | "md"): Promise<string> {
+export function exportSession(id: string, format: "md"): Promise<string> {
   if (!isTauri) return notInTauri("");
   return invoke("export_session", { id, format });
 }
@@ -552,6 +593,13 @@ export function securityClear(args?: {
   return invoke("security_clear", { args: args ?? {} });
 }
 
+/** Subscribe to the window being closed on macOS, where that only hides it
+ *  (`lib.rs`) — Loach stays in the Dock instead of quitting. */
+export async function onWindowCloseHidden(cb: () => void): Promise<UnlistenFn> {
+  if (!isTauri) return (() => undefined) as UnlistenFn;
+  return listen("window://close-hidden", () => cb());
+}
+
 // ------------ host hardware ------------
 
 /** Installed RAM + free disk, used by onboarding to size its model
@@ -611,6 +659,13 @@ export function openaiListModels(baseUrl: string): Promise<ModelInfo[]> {
   return invoke("openai_list_models", { baseUrl });
 }
 
+/** {@link openaiListModels} with `apiKey` in place of the stored key — checks
+ *  a key the user just typed before anything is stored. */
+export function openaiListModelsWithKey(baseUrl: string, apiKey: string): Promise<ModelInfo[]> {
+  if (!isTauri) return notInTauri([]);
+  return invoke("openai_list_models_with_key", { baseUrl, apiKey });
+}
+
 // ------------ ollama model admin ------------
 
 /** `POST /api/show` — returns the Modelfile, template, system prompt,
@@ -667,7 +722,7 @@ export async function ollamaPullModel(
   const unlisten = await listen<AdminEvent>(channel, (payload) =>
     onEvent(payload.payload),
   );
-  const handle = await invoke<{ stream_id: string }>("ollama_pull_model", {
+  const handle = await invokeOrUnlisten<{ stream_id: string }>(unlisten, "ollama_pull_model", {
     args,
   });
   return {
@@ -696,7 +751,7 @@ export async function ollamaCreateModel(
   const unlisten = await listen<AdminEvent>(channel, (payload) =>
     onEvent(payload.payload),
   );
-  const handle = await invoke<{ stream_id: string }>("ollama_create_model", {
+  const handle = await invokeOrUnlisten<{ stream_id: string }>(unlisten, "ollama_create_model", {
     args,
   });
   return {
@@ -731,6 +786,8 @@ export function createSpace(args: {
       default_model: null,
       default_params_json: null,
       memory_enabled: true,
+      retrieval_mode: "auto",
+      image_scaling_json: null,
       created_at: now,
       updated_at: now,
     });
@@ -782,6 +839,7 @@ export function addSpaceFile(args: {
       data: args.data,
       size: args.size,
       position: args.position,
+      enabled: true,
       created_at: now,
     });
   }
@@ -805,6 +863,8 @@ export function getSpaceContext(spaceId: string): Promise<SpaceContext> {
         default_model: null,
         default_params_json: null,
         memory_enabled: true,
+        retrieval_mode: "auto",
+        image_scaling_json: null,
         created_at: 0,
         updated_at: 0,
       },
@@ -812,6 +872,279 @@ export function getSpaceContext(spaceId: string): Promise<SpaceContext> {
       memories: [],
     });
   return invoke("get_space_context", { spaceId });
+}
+
+// ------------ library ------------
+//
+// Items (texts, files, links) stored once and linked into Spaces and chats,
+// plus the retrieval index over them. See `src-tauri/src/db/library.rs` and
+// `src-tauri/src/rag/`.
+
+export function libraryList(): Promise<{
+  items: LibraryItemMeta[];
+  datasets: LibraryDataset[];
+}> {
+  if (!isTauri) return notInTauri({ items: [], datasets: [] });
+  return invoke("library_list");
+}
+
+export function libraryGetItems(ids: string[]): Promise<LibraryItem[]> {
+  if (!isTauri) return notInTauri([]);
+  return invoke("library_get_items", { ids });
+}
+
+/** Browser-preview stand-in for a freshly stored item. */
+function mockLibraryMeta(args: {
+  kind: LibraryItemKind;
+  title: string;
+  mime: string;
+  media: "text" | "image";
+  content: string;
+  size: number;
+  url?: string | null;
+}): LibraryItemMeta {
+  const now = Date.now();
+  const text = args.media === "text";
+  return {
+    id: mockId("mock-lib"),
+    kind: args.kind,
+    title: args.title,
+    mime: args.mime,
+    media: args.media,
+    size: args.size,
+    chars: text ? args.content.length : 0,
+    preview: text ? args.content.slice(0, 280) : "",
+    url: args.url ?? null,
+    fetched_at: args.kind === "link" ? now : null,
+    content_hash: "",
+    truncated: false,
+    chunks: 0,
+    embedded: 0,
+    created_at: now,
+    updated_at: now,
+  };
+}
+
+export function libraryCreateItem(args: {
+  kind: "text" | "file";
+  title: string;
+  mime: string;
+  media: "text" | "image";
+  content: string;
+  size: number;
+  truncated?: boolean;
+}): Promise<LibraryItemMeta> {
+  if (!isTauri) return notInTauri(mockLibraryMeta(args));
+  return invoke("library_create_item", { args });
+}
+
+/** Returns the stored row; `null` outside Tauri, where there's no row. */
+export function libraryRenameItem(id: string, title: string): Promise<LibraryItemMeta | null> {
+  if (!isTauri) return notInTauri(null);
+  return invoke("library_rename_item", { id, title });
+}
+
+export function libraryUpdateText(args: {
+  id: string;
+  title: string;
+  content: string;
+}): Promise<LibraryItemMeta> {
+  if (!isTauri)
+    return notInTauri({
+      ...mockLibraryMeta({
+        kind: "text",
+        title: args.title,
+        mime: "text/markdown",
+        media: "text",
+        content: args.content,
+        size: args.content.length,
+      }),
+      id: args.id,
+    });
+  return invoke("library_update_text", args);
+}
+
+export function libraryAddLink(url: string): Promise<LibraryItemMeta> {
+  if (!isTauri)
+    return notInTauri(
+      mockLibraryMeta({
+        kind: "link",
+        title: url,
+        mime: "text/html",
+        media: "text",
+        content: "",
+        size: 0,
+        url,
+      }),
+    );
+  return invoke("library_add_link", { url });
+}
+
+export function libraryRefreshLink(id: string): Promise<LibraryItemMeta> {
+  if (!isTauri) return Promise.reject(new Error("library_refresh_link requires the Tauri runtime"));
+  return invoke("library_refresh_link", { id });
+}
+
+export function libraryDeleteItems(ids: string[]): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("library_delete_items", { ids });
+}
+
+export function libraryUsage(args: {
+  itemIds: string[];
+  datasetIds: string[];
+}): Promise<LibraryUsage> {
+  if (!isTauri) return notInTauri({ spaces: [], chats: 0 });
+  return invoke("library_usage", args);
+}
+
+export function libraryCreateDataset(args: {
+  name: string;
+  description: string;
+  itemIds: string[];
+}): Promise<LibraryDataset> {
+  if (!isTauri) {
+    const now = Date.now();
+    return notInTauri({
+      id: mockId("mock-ds"),
+      name: args.name,
+      description: args.description,
+      item_ids: args.itemIds,
+      created_at: now,
+      updated_at: now,
+    });
+  }
+  return invoke("library_create_dataset", args);
+}
+
+export function libraryUpdateDataset(args: {
+  id: string;
+  name: string;
+  description: string;
+}): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("library_update_dataset", args);
+}
+
+export function librarySetDatasetItems(id: string, itemIds: string[]): Promise<string[]> {
+  if (!isTauri) return notInTauri(itemIds);
+  return invoke("library_set_dataset_items", { id, itemIds });
+}
+
+export function libraryDeleteDataset(id: string): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("library_delete_dataset", { id });
+}
+
+export function libraryListSources(
+  owner: LibrarySourceOwner,
+  ownerId: string,
+): Promise<LibrarySource[]> {
+  if (!isTauri) return notInTauri([]);
+  return invoke("library_list_sources", { owner, ownerId });
+}
+
+export function libraryAddSources(args: {
+  owner: LibrarySourceOwner;
+  ownerId: string;
+  itemIds: string[];
+  datasetIds: string[];
+}): Promise<LibrarySource[]> {
+  if (!isTauri) {
+    const now = Date.now();
+    return notInTauri([
+      ...args.itemIds.map((item_id, i) => ({
+        id: mockId("mock-src"),
+        owner_id: args.ownerId,
+        item_id,
+        dataset_id: null,
+        enabled: true,
+        position: i,
+        created_at: now,
+      })),
+      ...args.datasetIds.map((dataset_id, i) => ({
+        id: mockId("mock-src"),
+        owner_id: args.ownerId,
+        item_id: null,
+        dataset_id,
+        enabled: true,
+        position: args.itemIds.length + i,
+        created_at: now,
+      })),
+    ]);
+  }
+  return invoke("library_add_sources", args);
+}
+
+export function libraryRemoveSource(owner: LibrarySourceOwner, id: string): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("library_remove_source", { owner, id });
+}
+
+export function librarySetSourceEnabled(
+  owner: LibrarySourceOwner,
+  id: string,
+  enabled: boolean,
+): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("library_set_source_enabled", { owner, id, enabled });
+}
+
+export function setSpaceFileEnabled(fileId: string, enabled: boolean): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("set_space_file_enabled", { fileId, enabled });
+}
+
+export function setSpaceRetrievalMode(id: string, mode: RetrievalMode): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("set_space_retrieval_mode", { id, mode });
+}
+
+/** `null` makes the chat inherit its Space's mode again. */
+export function setSessionRetrievalMode(id: string, mode: RetrievalMode | null): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("set_session_retrieval_mode", { id, mode });
+}
+
+/** `scaling` is `ImageScaling` JSON; `null` makes the Space inherit the
+ *  app's again. */
+export function setSpaceImageScaling(id: string, scaling: string | null): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("set_space_image_scaling", { id, scaling });
+}
+
+/** `scaling` is `ImageScaling` JSON; `null` makes the chat inherit its
+ *  Space's (or the app's) again. */
+export function setSessionImageScaling(id: string, scaling: string | null): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("set_session_image_scaling", { id, scaling });
+}
+
+export function ragSearch(args: {
+  docs: RagDocRef[];
+  query: string;
+  max_chars: number;
+  max_chunks?: number;
+}): Promise<RagSearchResult> {
+  if (!isTauri) return notInTauri({ hits: [], method: "keyword", warning: null });
+  return invoke("rag_search", { args });
+}
+
+export function ragStatus(): Promise<IndexStatus> {
+  if (!isTauri)
+    return notInTauri({ model: null, total: 0, embedded: 0, busy: false, error: null });
+  return invoke("rag_status");
+}
+
+export function ragReindex(): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("rag_reindex");
+}
+
+/** Subscribe to the indexer's progress. */
+export async function onIndexStatus(cb: (s: IndexStatus) => void): Promise<UnlistenFn> {
+  if (!isTauri) return (() => undefined) as UnlistenFn;
+  return listen<IndexStatus>("library://index", (e) => cb(e.payload));
 }
 
 // ------------ space memories ------------
@@ -1056,7 +1389,7 @@ export async function startChatStream(
   const unlisten = await listen<StreamEvent>(channel, (payload) => {
     onEvent(payload.payload);
   });
-  const handle = await invoke<{ stream_id: string }>("chat_stream", { request });
+  const handle = await invokeOrUnlisten<{ stream_id: string }>(unlisten, "chat_stream", { request });
   return {
     streamId: handle.stream_id,
     stop: async () => {
@@ -1156,12 +1489,13 @@ export function mcpTools(): Promise<McpToolsOverview> {
 
 // ------------ data (export / import / wipe) ------------
 
-/** Returns a JSON string representing every table in the DB. Use
- *  `saveTextToFile` to put the result on disk through a backend-owned
- *  save dialog. */
-export function exportDataJson(): Promise<string> {
+/** Open a native save dialog and write every table in the DB to the chosen
+ *  file as JSON. The dialog and the write both happen in Rust, so the export
+ *  never passes through the renderer. Resolves to the chosen path, or `null`
+ *  if the user cancelled the dialog. */
+export function exportDataToFile(): Promise<string | null> {
   if (!isTauri) return Promise.reject(new Error("export requires the Tauri runtime"));
-  return invoke<string>("export_data_json");
+  return invoke<string | null>("export_data_to_file");
 }
 
 /** Row counts and byte totals for the storage tile. Resolves `null` outside
@@ -1224,6 +1558,18 @@ export function saveBinaryToFile(args: {
 export function openInVscode(code: string, filename: string): Promise<void> {
   if (!isTauri) return notInTauri(undefined);
   return invoke<void>("open_in_vscode", { code, filename });
+}
+
+/** URL of the HTML preview host page on the `loach-sandbox` protocol
+ *  (`src-tauri/src/sandbox.rs`). `convertFileSrc` isn't file-specific — it
+ *  builds the per-platform custom-protocol URL (`http://loach-sandbox.localhost/…`
+ *  on Windows, `loach-sandbox://localhost/…` elsewhere). Null outside Tauri,
+ *  where there is no protocol to serve it. */
+export function sandboxPreviewUrl(scripts: boolean): string | null {
+  // The scripts-off page is the same host page under a CSP that runs only
+  // the host's own script (see `src-tauri/src/sandbox.rs`).
+  const page = scripts ? "preview.html" : "preview-static.html";
+  return isTauri ? convertFileSrc(page, "loach-sandbox") : null;
 }
 
 /** Optional app-lock credentials for destructive Tauri commands. */

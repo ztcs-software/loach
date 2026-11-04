@@ -1,11 +1,11 @@
 [package]
 name = "loach"
-version = "1.5.0"
+version = "1.6.0"
 description = "Native local LLM chat client (Ollama + OpenAI-compatible)."
 authors = ["Loach"]
 license = "MIT"
 edition = "2021"
-rust-version = "1.88"
+rust-version = "1.90"
 
 [lib]
 name = "loach_lib"
@@ -15,21 +15,25 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon", "image-png"] }
+# No `image-png`: the tray icon is decoded at compile time by
+# `include_image!`, and nothing loads an image from a path or bytes at runtime.
+tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-shell = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+tauri-plugin-single-instance = "2"
 
 # Async runtime + HTTP
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls", "http2", "gzip", "brotli"], default-features = false }
 futures-util = "0.3"
-async-stream = "0.3"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `preserve_order` keeps object keys in document order, so the built-in `json`
+# tool's `format` / `extract` give the model its own JSON back, not re-sorted.
+serde_json = { version = "1", features = ["preserve_order"] }
 
 # Storage
 rusqlite = { version = "0.40", features = ["bundled"] }
@@ -43,8 +47,7 @@ r2d2_sqlite = "0.35"
 
 # Secrets
 keyring = { version = "4", default-features = false, features = ["v1"] }
-argon2 = "0.5"
-rand_core = { version = "0.6", features = ["getrandom"] }
+argon2 = "0.6"
 
 # Utilities
 uuid = { version = "1", features = ["v4", "v7", "serde"] }
@@ -78,12 +81,17 @@ sha2 = "0.11"
 similar = "3"
 natord = "1"
 ipnet = "2"
+# Grapheme clusters for the `count` tool's `graphemes` mode — the characters
+# a reader sees, where `chars` counts scalar values. Already in the tree
+# through tao, so declaring it costs no new crate.
+unicode-segmentation = "1.13"
 
 # PDF generation for the built-in `pdf` tool. printpdf builds documents
 # from a structured spec and subsets a bundled Liberation Sans TTF (see
 # src-tauri/assets/fonts) into each file, so output supports Unicode —
 # Latin, European accents, common symbols — not just ASCII. Glyphs the
-# font lacks (e.g. CJK, emoji) fall back to `?` at render time.
+# font lacks (Cyrillic, Greek, CJK, emoji — the bundled cut is Latin-only)
+# fall back to `?` at render time.
 #
 # `default-features = false` drops printpdf's `html` feature, which we never
 # touch — the tool builds documents from a structured spec, not from markup.
@@ -133,7 +141,7 @@ chardetng = "1"
 # the Ollama catalog against the machine instead of quoting raw GB. Only the
 # `system` and `disk` collectors are compiled in — the default feature set also
 # pulls process enumeration, networks, components and users, none of which we
-# read. Held at 0.38: 0.39 raises its MSRV to 1.95, above our 1.88.
+# read. Held at 0.38: 0.39 raises its MSRV to 1.95, above our 1.90.
 sysinfo = { version = "0.38", default-features = false, features = ["system", "disk"] }
 
 # Windows VRAM + adapter name for the onboarding model recommendation, read via
@@ -146,15 +154,30 @@ sysinfo = { version = "0.38", default-features = false, features = ["system", "d
 # signature) put each stdio MCP server in a job, so stopping the server stops
 # every process it started — see `mcp/stdio.rs`. `Win32_Storage_FileSystem`
 # is for `MoveFileExW`, the rename behind `move_file` that refuses to
-# overwrite (`tools/fs.rs`).
+# overwrite (`tools/fs.rs`). `Win32_Security_Authorization` is for
+# `Get`/`SetNamedSecurityInfoW`, which carry a file's ACL over to the copy
+# an edit renames into its place (`tools/fs.rs`).
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D12", "Win32_System_JobObjects", "Win32_Security", "Win32_Storage_FileSystem"] }
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D12", "Win32_System_JobObjects", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem"] }
 
 # `killpg` for the same purpose on macOS / Linux: a stdio MCP server runs in
 # its own process group and the whole group is stopped with it. Already in
 # the tree through tokio.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# All three already in the tree on Linux (tauri / tao, and keyring's `v1`
+# store), so declaring them costs no new crate.
+#
+# `gtk` shows the fatal startup dialog on the main thread's own GLib loop:
+# `setup` runs inside tao's loop, which holds the default main context, so a
+# dialog waited on from anywhere else never gets drawn (`lib.rs`).
+# `keyring-core` + the Secret Service store rebuild the keyring store when
+# keyring's one-shot init failed (`secrets::keyring_entry`).
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
+keyring-core = "1"
+zbus-secret-service-keyring-store = { version = "1", features = ["crypto-rust"] }
 
 [dev-dependencies]
 # Only used by the db.rs test suite, which opens a fresh database in a

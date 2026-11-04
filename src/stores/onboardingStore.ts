@@ -47,7 +47,6 @@ interface OnboardingState {
 
   goNext: () => void;
   goBack: () => void;
-  goTo: (step: OnboardingStep) => void;
   setConfirmingClose: (v: boolean) => void;
 
   /** Mark onboarding finished in settings. Idempotent. */
@@ -69,8 +68,6 @@ export const useOnboardingStore = create<OnboardingState>((set, get) => ({
     const prev = ONBOARDING_STEPS[Math.max(i - 1, 0)];
     set({ step: prev, confirmingClose: false });
   },
-
-  goTo: (step) => set({ step, confirmingClose: false }),
 
   setConfirmingClose: (v) => set({ confirmingClose: v }),
 

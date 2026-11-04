@@ -11,8 +11,10 @@ import {
   makeRequestId,
 } from "@/lib/tauri";
 import { useSettingsStore } from "./settingsStore";
+import { useSpaceStore } from "./spaceStore";
 import { useToastStore } from "./toastStore";
 import { parseModelParameters } from "@/lib/modelParams";
+import { fullOllamaTag } from "@/lib/modelChoice";
 import {
   DEFAULT_SETTINGS,
   type AdminEvent,
@@ -71,14 +73,14 @@ interface ModelsState {
    *  `parameters` block). Lazy-populated by `loadModelDefaults`; entries are
    *  keyed by model id (e.g. `llama3.1:8b`). Empty `{}` is a valid result
    *  meaning "we looked, the model lists no overrides" — distinct from
-   *  "missing key" which means "we haven't asked yet". */
+   *  "missing key" which means "we haven't asked yet, or asking failed". */
   modelDefaults: Record<string, Partial<GenerationParams>>;
 
   /** Per-model capability tags from `/api/show` (e.g. `"thinking"`,
    *  `"tools"`, `"vision"`). Populated alongside `modelDefaults` by
    *  `loadModelDefaults`. Empty `[]` means "we looked and the model lists
-   *  none"; missing key means "we haven't asked yet". Older Ollama builds
-   *  that omit the field show up as `[]` here. */
+   *  none"; missing key means "we haven't asked yet, or asking failed".
+   *  Older Ollama builds that omit the field show up as `[]` here. */
   modelCapabilities: Record<string, string[]>;
 
   /** User-set "default thinking" preference per model (the Thinking toggle
@@ -90,8 +92,7 @@ interface ModelsState {
   modelThinkPrefs: Record<string, boolean>;
   /** Set / clear the per-model thinking preference. Pass `null` to clear
    *  back to the model's natural default; passing `true` / `false`
-   *  records an explicit override. Stored in-memory only for now — no
-   *  persistence layer yet. */
+   *  records an explicit override. Kept per device in localStorage. */
   setModelThinkPref: (modelId: string, value: boolean | null) => void;
 
   hydrate: () => Promise<void>;
@@ -124,6 +125,24 @@ interface ModelsState {
  *  cancel without putting function handles into zustand state (which would
  *  make state non-serialisable for devtools). */
 const activeRuns = new Map<string, AdminRun>();
+
+/** localStorage key for `modelThinkPrefs`. The Models page labels the toggle
+ *  "Default for new chats with this model", and in memory only it was gone
+ *  on the next launch. */
+const THINK_PREFS_KEY = "loach:model-think-prefs";
+
+function loadThinkPrefs(): Record<string, boolean> {
+  try {
+    const saved: unknown = JSON.parse(localStorage.getItem(THINK_PREFS_KEY) ?? "{}");
+    if (!saved || typeof saved !== "object" || Array.isArray(saved)) return {};
+    return Object.fromEntries(
+      Object.entries(saved).filter((e): e is [string, boolean] => typeof e[1] === "boolean"),
+    );
+  } catch {
+    // No storage (or a corrupt entry): start with no preferences.
+    return {};
+  }
+}
 
 /** In-flight `loadModelDefaults` calls, keyed by model id. Lets concurrent
  *  callers share one `/api/show` round-trip instead of each issuing their
@@ -163,13 +182,19 @@ export const useModelsStore = create<ModelsState>((set, get) => ({
   runs: {},
   modelDefaults: {},
   modelCapabilities: {},
-  modelThinkPrefs: {},
+  modelThinkPrefs: loadThinkPrefs(),
 
   setModelThinkPref: (modelId, value) =>
     set((s) => {
       const next = { ...s.modelThinkPrefs };
       if (value === null) delete next[modelId];
       else next[modelId] = value;
+      try {
+        localStorage.setItem(THINK_PREFS_KEY, JSON.stringify(next));
+      } catch (e) {
+        // Still applies for this run; only the next launch loses it.
+        logger.warn("couldn't save the model's Thinking default", e);
+      }
       return { modelThinkPrefs: next };
     }),
 
@@ -252,7 +277,8 @@ export const useModelsStore = create<ModelsState>((set, get) => ({
     // parameters, so we cache an empty patch and move on. Identifying it
     // through the existing `models` array works as long as the user has
     // refreshed at least once; if they haven't, we conservatively try
-    // Ollama's `/api/show` and let it 404 — cached as `{}` either way.
+    // Ollama's `/api/show` and let it 404 — which, like any failed show,
+    // caches nothing (see below).
     const known = get().models.find((m) => m.id === modelId);
     if (known && known.provider !== "ollama") {
       set((s) => ({
@@ -264,18 +290,19 @@ export const useModelsStore = create<ModelsState>((set, get) => ({
 
     const base = useSettingsStore.getState().ollama_base_url;
     const load = (async () => {
-      let patch: Partial<GenerationParams> = {};
-      let caps: string[] = [];
+      let patch: Partial<GenerationParams>;
+      let caps: string[];
       try {
         const resp = await ollamaShowModel(base, modelId);
         patch = parseModelParameters(resp.parameters);
         caps = resp.capabilities ?? [];
       } catch {
-        // Network / 404 — cache empty so we don't retry on every render.
-        // The user will still see app defaults; it's the same behaviour as
-        // before this feature landed.
-        patch = {};
-        caps = [];
+        // Network / 404 — app defaults for now, but nothing cached: Ollama
+        // simply not running yet failed here, and a cached `{}` / `[]` then
+        // outlived its start — the panel said the model can't think, and
+        // sends dropped the Modelfile's num_ctx — until a restart. The next
+        // caller (a send, opening the chat or the panel) asks again.
+        return {};
       }
       set((s) => ({
         modelDefaults: { ...s.modelDefaults, [modelId]: patch },
@@ -308,6 +335,7 @@ export const useModelsStore = create<ModelsState>((set, get) => ({
     if (get().viewingModel === name) set({ viewingModel: null });
     forgetModel(set, name);
     await get().refresh();
+    await unpinDeletedModel(name);
   },
 
   copyModel: async (source, destination) => {
@@ -558,7 +586,8 @@ async function unpinAbandonedPull(streamId: string) {
   const models = useModelsStore.getState();
   const run = models.runs[streamId];
   if (!run || run.kind !== "pull" || run.finished === "ok") return;
-  if (models.models.some((m) => m.id === run.target)) return;
+  // Ollama lists a bare tag the user typed as `<name>:latest`.
+  if (models.models.some((m) => fullOllamaTag(m.id) === fullOllamaTag(run.target))) return;
 
   const settings = useSettingsStore.getState();
   if (
@@ -573,5 +602,34 @@ async function unpinAbandonedPull(streamId: string) {
     await settings.update("default_model", "");
   } catch (e) {
     logger.warn("could not clear the default model after an abandoned pull", e);
+  }
+}
+
+/** Unpin every default aimed at a model the user just deleted, the way
+ *  `unpinAbandonedPull` does for a pull that never landed: the global one
+ *  (the Settings pick and the last-used pair) and any Space's. Left in
+ *  place, each new chat started on a tag Ollama no longer has. */
+async function unpinDeletedModel(name: string) {
+  const settings = useSettingsStore.getState();
+  // `update` reports a failed write itself (a toast) and reverts.
+  if (settings.default_model_choice === `model:ollama:${name}`) {
+    await settings.update("default_model_choice", "recent");
+  }
+  if (settings.default_provider === "ollama" && settings.default_model === name) {
+    await settings.update("default_model", "");
+  }
+  for (const space of useSpaceStore.getState().spaces) {
+    if (space.default_provider !== "ollama" || space.default_model !== name) continue;
+    try {
+      await useSpaceStore.getState().updateSpace(space.id, {
+        name: space.name,
+        description: space.description,
+        instructions: space.instructions,
+        default_provider: null,
+        default_model: null,
+      });
+    } catch (e) {
+      logger.warn("could not clear a Space's default model after deleting it", e);
+    }
   }
 }
