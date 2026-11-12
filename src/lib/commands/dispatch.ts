@@ -6,6 +6,7 @@ import { useModelsStore } from "@/stores/modelsStore";
 import { usePrivateChatStore } from "@/stores/privateChatStore";
 import { useSecurityStore } from "@/stores/securityStore";
 import { useSettingsStore } from "@/stores/settingsStore";
+import { useSkillStore } from "@/stores/skillStore";
 import { useSnippetStore } from "@/stores/snippetStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useUIStore, type SettingsTab } from "@/stores/uiStore";
@@ -231,6 +232,8 @@ async function run(
       return runWebFetch(rest);
     case "fetch":
       return runFetch(rest);
+    case "skill":
+      return runSkill(rest);
     case "thinking":
       return runThinking(rest);
     case "help":
@@ -797,6 +800,49 @@ async function runFetch(rest: string): Promise<CommandResult> {
   ]);
 }
 
+/** `/skill` lists the enabled skills; `/skill <name>` loads one into the
+ *  chat — the same as the model calling `activate_skill`, so its
+ *  instructions go with every message from now on. A unique prefix or
+ *  substring is enough. */
+async function runSkill(rest: string): Promise<CommandResult> {
+  if (!useSettingsStore.getState().skills_enabled) {
+    throw new Error("Skills are off. Turn them on in Settings → Skills.");
+  }
+  const skills = useSkillStore.getState();
+  const enabled = (await skills.loadCatalog()).skills.filter((s) => s.enabled);
+  const query = rest.trim().toLowerCase();
+  if (!query) {
+    if (enabled.length === 0) {
+      return ok("No skills enabled", "Add or enable one in Settings → Skills.");
+    }
+    const sid = composerSessionId();
+    const loaded = sid ? await skills.loadSession(sid) : [];
+    return listItems(
+      "Skills",
+      enabled.map((s) => ({
+        label: s.name,
+        detail: loaded.includes(s.name) ? "loaded" : undefined,
+        hint: s.description,
+      })),
+    );
+  }
+  const session = requireSession();
+  const exact = enabled.find((s) => s.name === query);
+  const matches = exact ? [exact] : enabled.filter((s) => s.name.includes(query));
+  if (matches.length === 0) {
+    throw new Error(`No enabled skill matches "${query}". Type /skill to list them.`);
+  }
+  if (matches.length > 1) {
+    return listItems(
+      `Multiple skills match "${query}"`,
+      matches.map((s) => ({ label: s.name, hint: s.description })),
+    );
+  }
+  const skill = matches[0]!;
+  await skills.setActive(session.id, skill.name, true);
+  return ok("Skill loaded", `${skill.name} — its instructions now go with every message in this chat.`);
+}
+
 async function runThinking(rest: string): Promise<CommandResult> {
   const flag = rest.trim().toLowerCase();
   if (flag !== "on" && flag !== "off") throw new Error("Usage: /thinking on|off");
@@ -872,6 +918,7 @@ const SETTINGS_TAB_SET: Record<SettingsTab, true> = {
   providers: true,
   features: true,
   tools: true,
+  skills: true,
   library: true,
   appearance: true,
   mcp: true,

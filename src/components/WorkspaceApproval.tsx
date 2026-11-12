@@ -1,6 +1,7 @@
 /**
  * Human-readable previews for the workspace filesystem tools' consent
- * prompt (and the expanded tool-call block afterwards).
+ * prompt (and the expanded tool-call block afterwards), and for a skill
+ * script's: the command the backend will run and the folder it runs in.
  *
  * The generic approval card prints a call's arguments as JSON. For
  * `write_file` that is a whole file as one escaped string, for `edit_file`
@@ -14,9 +15,10 @@
  */
 
 import { useMemo, useState, type ReactNode } from "react";
-import { ArrowRight, FilePlus, FileWarning, Pencil, Trash2 } from "lucide-react";
+import { ArrowRight, FilePlus, FileWarning, Pencil, Terminal, Trash2 } from "lucide-react";
 import { diffLines, foldUnchanged, splitHidden, splitLines } from "@/lib/lineDiff";
 import { cn, formatBytes } from "@/lib/utils";
+import type { ScriptRunPreview } from "@/types";
 
 /** Synthetic server id the backend gives built-in tools
  *  (`tools::builtin::BUILTIN_SERVER_ID`). */
@@ -41,15 +43,54 @@ const MAX_DIFF_LINES = 400;
  *  `tool` isn't one of the mutating workspace tools (or its arguments
  *  aren't the shape the backend would accept — the backend will refuse
  *  the call, and the JSON view shows why). `existingBytes` is the backend's
- *  word on what a `write_file` replaces (`ToolCallRecord.existing_bytes`). */
+ *  word on what a `write_file` replaces (`ToolCallRecord.existing_bytes`),
+ *  `scriptRun` the command a `run_skill_script` runs
+ *  (`ToolCallRecord.script_run`). */
 export function workspaceApproval(
   tool: string,
   args: unknown,
   existingBytes?: number | null,
+  scriptRun?: ScriptRunPreview,
 ): WorkspaceApproval | null {
   const o = argsObject(args);
   if (!o) return null;
   switch (tool) {
+    case "run_skill_script": {
+      const skill = str(o, "skill");
+      const script = str(o, "script");
+      if (skill === null || script === null || !scriptRun) return null;
+      const stdin = str(o, "stdin");
+      return {
+        title: (
+          <>
+            run <Mono>{script}</Mono> from the <Mono>{skill}</Mono> skill
+          </>
+        ),
+        body: (
+          <div className="mt-2 space-y-1.5">
+            <pre className="max-h-40 overflow-auto rounded border border-foreground/10 bg-foreground/[0.04] px-2 py-1.5 font-mono text-[11px] leading-snug text-foreground/80 whitespace-pre-wrap break-words">
+              <Revealed text={scriptRun.command} />
+            </pre>
+            <p className="text-[11px] text-foreground/60 [overflow-wrap:anywhere]">
+              In <Mono>{scriptRun.cwd}</Mono>
+              {stdin !== null && stdin.length > 0 && (
+                <> · with {stdin.length.toLocaleString()} characters of input</>
+              )}
+            </p>
+            {stdin !== null && stdin.length > 0 && <StdinPreview text={stdin} />}
+            <p className="flex items-start gap-1.5 text-[11px] text-foreground/70">
+              <Terminal className="mt-px h-3.5 w-3.5 shrink-0 text-amber-500" />
+              <span>
+                The script runs as you, with your access to every file on this
+                computer — not only this chat's folder. Allow it only if you trust
+                the skill it comes from.
+              </span>
+            </p>
+          </div>
+        ),
+        destructive: false,
+      };
+    }
     case "write_file": {
       const path = str(o, "path");
       const content = str(o, "content");
@@ -137,6 +178,28 @@ export function workspaceApproval(
     default:
       return null;
   }
+}
+
+/** Standard input a script would get, first lines only until "Show all". */
+function StdinPreview({ text }: { text: string }) {
+  const [showAll, setShowAll] = useState(false);
+  const clipped = !showAll && text.length > 2_000;
+  return (
+    <div>
+      <pre className="max-h-40 overflow-auto rounded border border-foreground/10 bg-foreground/[0.04] px-2 py-1.5 font-mono text-[11px] leading-snug text-foreground/80 whitespace-pre-wrap break-words">
+        <Revealed text={clipped ? text.slice(0, 2_000) : text} />
+      </pre>
+      {clipped && (
+        <button
+          type="button"
+          onClick={() => setShowAll(true)}
+          className="mt-1 text-[11px] text-foreground/60 underline-offset-2 hover:underline"
+        >
+          Show all
+        </button>
+      )}
+    </div>
+  );
 }
 
 function Mono({ children }: { children: ReactNode }) {

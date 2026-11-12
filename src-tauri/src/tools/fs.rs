@@ -337,7 +337,7 @@ fn ensure_inside(root: &Path, candidate: &Path, rel: &str) -> Result<(), String>
 }
 
 /// Resolve a path that must already exist.
-fn resolve_read(root: &Path, rel: &str) -> Result<PathBuf, String> {
+pub(crate) fn resolve_read(root: &Path, rel: &str) -> Result<PathBuf, String> {
     let vetted = vet_relative(rel)?;
     let joined = root.join(&vetted);
     let canon = joined

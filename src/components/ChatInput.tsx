@@ -37,13 +37,14 @@ import { useSnippetStore } from "@/stores/snippetStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useUIStore } from "@/stores/uiStore";
 import { useSettingsStore } from "@/stores/settingsStore";
+import { useSkillStore } from "@/stores/skillStore";
 import { useToastStore } from "@/stores/toastStore";
 import { cn } from "@/lib/utils";
 import { logger } from "@/lib/logger";
 import { formatShortcut, modalDialogOpen } from "@/lib/shortcuts";
 import { openSessionWorkspace } from "@/lib/tauri";
 import { chatRetrievalMode } from "@/lib/sources";
-import { ChipDivider, PersonaChip, ToneChip } from "./ComposerChip";
+import { ChipDivider, PersonaChip, SkillChip, ToneChip } from "./ComposerChip";
 import { WorkspaceNotice } from "./WorkspaceNotice";
 import { LibraryPicker, type LibrarySelection } from "./library/LibraryPicker";
 import {
@@ -278,6 +279,37 @@ export function ChatInput({ centered = false }: ChatInputProps) {
   );
   const chatSources = useChatSources(composerSessionId, sourcesSpaceId);
   const hasChatSources = chatSources.chips.length > 0 || chatSources.spaceCount > 0;
+  // Skills loaded in this chat. Shown only while skills are on, and only
+  // those still enabled once the catalogue is known: the rest aren't sent.
+  const skillsOn = useSettingsStore((s) => s.skills_enabled);
+  const recordedSkills = useSkillStore((s) =>
+    composerSessionId ? s.bySession[composerSessionId] : undefined,
+  );
+  const skillCatalog = useSkillStore((s) => s.catalog);
+  useEffect(() => {
+    if (!skillsOn || !composerSessionId) return;
+    const skills = useSkillStore.getState();
+    void skills.loadSession(composerSessionId).catch(() => {});
+    if (!skills.catalog) void skills.loadCatalog().catch(() => {});
+  }, [skillsOn, composerSessionId]);
+  const chatSkills = !skillsOn
+    ? []
+    : (recordedSkills ?? []).filter(
+        (name) => !skillCatalog || skillCatalog.skills.some((s) => s.name === name && s.enabled),
+      );
+  const removeSkill = (name: string) => {
+    if (!composerSessionId) return;
+    void useSkillStore
+      .getState()
+      .setActive(composerSessionId, name, false)
+      .catch((e) =>
+        useToastStore.getState().push({
+          kind: "error",
+          title: `Couldn't remove ${name}`,
+          body: e instanceof Error ? e.message : String(e),
+        }),
+      );
+  };
   // A Modelfile's own window, which the send layers under the chat's (for
   // an OpenAI-compatible chat, the window Loach assumes for it). Before the
   // chat exists, the window of the model it will start on.
@@ -1100,7 +1132,7 @@ export function ChatInput({ centered = false }: ChatInputProps) {
             onDismiss={() => setCommandResult(null)}
           />
         )}
-        {(attachments.length > 0 || activePersona || activeTone || hasChatSources) && (
+        {(attachments.length > 0 || activePersona || activeTone || hasChatSources || chatSkills.length > 0) && (
           // Config chips first, then payload. The divider marks the lifetime
           // boundary — everything left of it survives the send, everything
           // right of it goes with the message.
@@ -1115,8 +1147,11 @@ export function ChatInput({ centered = false }: ChatInputProps) {
                 onRemove={clearTone}
               />
             )}
+            {chatSkills.map((name) => (
+              <SkillChip key={name} name={name} onRemove={() => removeSkill(name)} />
+            ))}
             <ChatSourceChips sessionId={composerSessionId} spaceId={sourcesSpaceId} />
-            {(activePersona || activeTone || hasChatSources) &&
+            {(activePersona || activeTone || hasChatSources || chatSkills.length > 0) &&
               attachments.length > 0 && <ChipDivider />}
             {attachments.map((a, i) => (
               <FileChip

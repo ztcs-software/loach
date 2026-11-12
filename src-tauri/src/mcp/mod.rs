@@ -510,7 +510,8 @@ fn keeps_session(p: &PooledSession, err: &anyhow::Error) -> bool {
 /// server row to record an allow-list on.
 pub fn needs_approval(db: &Database, server_id: &str, tool_name: &str) -> bool {
     if server_id == crate::tools::builtin::BUILTIN_SERVER_ID {
-        return crate::tools::fs::requires_approval(tool_name);
+        return crate::tools::fs::requires_approval(tool_name)
+            || tool_name == crate::skills::RUN_SKILL_SCRIPT;
     }
     server_needs_approval(db.list_mcp_servers(), server_id, tool_name)
 }

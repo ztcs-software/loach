@@ -35,7 +35,7 @@ pub const BUILTIN_SERVER_ID: &str = "__builtin__";
 /// `server_name` field on every built-in def — only shown in places like
 /// the assistant-bubble tool-call chip; the user sees "Loach" rather than
 /// "__builtin__".
-const SERVER_NAME: &str = "Loach";
+pub(crate) const SERVER_NAME: &str = "Loach";
 
 /// How a built-in is invoked.
 ///

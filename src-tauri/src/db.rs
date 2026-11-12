@@ -1070,6 +1070,15 @@ impl Database {
                 ON session_library_sources(owner_id, item_id) WHERE item_id IS NOT NULL;
             CREATE UNIQUE INDEX IF NOT EXISTS idx_session_library_sources_dataset
                 ON session_library_sources(owner_id, dataset_id) WHERE dataset_id IS NOT NULL;
+            -- Agent Skills switched on in a chat, by name (see `skills`). The
+            -- skills themselves are folders on disk, not rows: a name whose
+            -- folder is gone is simply skipped when the prompt is built.
+            CREATE TABLE IF NOT EXISTS session_skills (
+                session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                name TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                PRIMARY KEY (session_id, name)
+            );
             "#,
         )?;
 
@@ -1306,6 +1315,12 @@ impl Database {
              FROM session_library_sources WHERE owner_id = ?3",
             params![new_id, now, source.id],
         )?;
+        // …and so do its skills, for the same reason.
+        tx.execute(
+            "INSERT INTO session_skills (session_id, name, created_at)
+             SELECT ?1, name, created_at FROM session_skills WHERE session_id = ?2",
+            params![new_id, source.id],
+        )?;
 
         // One prepare for the whole copy — forking a long chat replays every
         // message, and `tx.execute` would re-parse the INSERT each time.
@@ -1524,6 +1539,39 @@ impl Database {
     pub fn delete_session(&self, id: &str) -> Result<()> {
         let conn = self.conn.lock();
         conn.execute("DELETE FROM sessions WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    /// Skills switched on in a chat, in the order they were switched on.
+    pub fn session_skills(&self, session_id: &str) -> Result<Vec<String>> {
+        self.with_read(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT name FROM session_skills WHERE session_id = ?1 ORDER BY created_at, name",
+            )?;
+            let names = stmt
+                .query_map(params![session_id], |r| r.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(names)
+        })
+    }
+
+    /// Switch a skill on in a chat. `Ok(false)` when it already was; an
+    /// error when the chat is gone.
+    pub fn add_session_skill(&self, session_id: &str, name: &str) -> Result<bool> {
+        let conn = self.conn.lock();
+        let added = conn.execute(
+            "INSERT OR IGNORE INTO session_skills (session_id, name, created_at) VALUES (?1, ?2, ?3)",
+            params![session_id, name, Utc::now().timestamp_millis()],
+        )?;
+        Ok(added > 0)
+    }
+
+    pub fn remove_session_skill(&self, session_id: &str, name: &str) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "DELETE FROM session_skills WHERE session_id = ?1 AND name = ?2",
+            params![session_id, name],
+        )?;
         Ok(())
     }
 
@@ -3164,6 +3212,7 @@ impl Database {
         tx.execute_batch(
             r#"
             DELETE FROM rag_chunks;
+            DELETE FROM session_skills;
             DELETE FROM session_library_sources;
             DELETE FROM space_library_sources;
             DELETE FROM library_dataset_items;
@@ -3506,6 +3555,7 @@ impl Database {
         tx.execute_batch(
             r#"
             DELETE FROM rag_chunks;
+            DELETE FROM session_skills;
             DELETE FROM session_library_sources;
             DELETE FROM space_library_sources;
             DELETE FROM library_dataset_items;
@@ -3553,6 +3603,7 @@ impl Database {
         tx.execute_batch(
             r#"
             DELETE FROM rag_chunks;
+            DELETE FROM session_skills;
             DELETE FROM session_library_sources;
             DELETE FROM space_library_sources;
             DELETE FROM library_dataset_items;
@@ -5049,5 +5100,24 @@ mod tests {
         let stats = db.restore_snapshot(&snapshot).unwrap();
         assert_eq!(stats.global_memories, 1);
         assert_eq!(db.list_global_memories().unwrap()[0].content, "Lives in Berlin.");
+    }
+
+    #[test]
+    fn session_skills_follow_the_chat() {
+        let (db, _dir) = fresh_db();
+        let s = db.create_session("t", "ollama", "m", None, None).unwrap();
+        assert!(db.add_session_skill(&s.id, "pdf").unwrap());
+        assert!(!db.add_session_skill(&s.id, "pdf").unwrap());
+        assert!(db.add_session_skill(&s.id, "docx").unwrap());
+        assert_eq!(db.session_skills(&s.id).unwrap().len(), 2);
+        db.remove_session_skill(&s.id, "docx").unwrap();
+        assert_eq!(db.session_skills(&s.id).unwrap(), ["pdf"]);
+
+        let fork = db.fork_session(&s.id, None).unwrap();
+        assert_eq!(db.session_skills(&fork.id).unwrap(), ["pdf"]);
+
+        db.delete_session(&s.id).unwrap();
+        assert!(db.session_skills(&s.id).unwrap().is_empty());
+        assert!(db.add_session_skill("gone", "pdf").is_err());
     }
 }

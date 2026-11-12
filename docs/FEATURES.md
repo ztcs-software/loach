@@ -430,7 +430,8 @@ Commands are grouped the way `/help` lists them:
   memory; outside one they act on the global list. `/remember` needs that
   memory turned on — the Space's memory toggle, or Global memories.
 - **Tools & web** — `/tools` (list tools from enabled MCP servers),
-  `/web-fetch on|off`, `/fetch <url>`, `/thinking on|off`.
+  `/web-fetch on|off`, `/fetch <url>`, `/skill [name]` (list skills, or
+  load one into the chat — §9.5), `/thinking on|off`.
 - **App** — `/settings [tab]` (general, providers, features, tools,
   library, appearance, mcp, archive, data, security, updates, about),
   `/theme light|dark|system`, `/lock` (needs an app lock — §13), `/help`.
@@ -1289,6 +1290,60 @@ A sample to start from is in
 
 Deliberately absent: a shell, a recursive delete, and any way to point the
 tools at a folder other than through the native picker.
+
+### 9.5 Skills
+
+Skills are folders that teach the model a kind of task: a `SKILL.md` with a
+`name`, a `description` of when to use it, and instructions, plus any
+reference files, templates and scripts those instructions point to. They
+follow the open [Agent Skills](https://agentskills.io) format, so a skill
+written for another agent works in Loach unchanged. Off until you turn on
+**Use skills** in **Settings → Skills**.
+
+**Where skills come from.** Loach reads two folders: its own skills folder
+(**Open folder** in Settings → Skills shows it) and `~/.agents/skills`, the
+folder other agents share. **Import folder…** copies a skill's folder into
+Loach's own, named after the skill. When both folders have a skill of the
+same name, Loach's is used and the other is listed under **Not loaded**,
+along with any folder whose `SKILL.md` is missing a description, has a
+name with anything but lowercase letters, digits and hyphens, or has no
+`---` header. Smaller departures from the format — a name that doesn't
+match its folder, an over-long description — load with a warning. Every
+installed skill has its own switch; the folders are read again on every
+message, so a skill added, edited or removed takes effect on the next one.
+
+**How the model uses them.** The model sees the name and description of
+every enabled skill (a few dozen tokens each, on every message — switch off
+the ones you don't use). When your request matches one, it loads that
+skill's instructions with the `activate_skill` tool; `/skill <name>` loads
+one yourself, and `/skill` lists them. A loaded skill stays loaded for the
+rest of the chat: its instructions go with every message, shown as a chip
+above the message box, until you remove the chip. Forking a chat keeps its
+skills. The model reads a skill's other files with `read_skill_file`, which
+reaches nothing outside that skill's folder. Skills need a model that can
+call tools to load themselves; `/skill` works with any model. Private Chat
+has no skills.
+
+A skill's instructions are text from a folder, not from you. They go in
+fenced, ahead of your own instructions, and the model is told they can't
+grant permissions and that yours win when the two conflict. Nothing in a
+skill changes what asks for approval — the format's experimental
+`allowed-tools` field is ignored.
+
+**Scripts.** With **Let skills run scripts** on, the model can also run the
+scripts a skill ships with through `run_skill_script`: `.py` (Python),
+`.sh` (bash), `.js`/`.mjs`/`.cjs` (Node.js) and `.ps1` (PowerShell), using
+what's installed on your computer. Only files inside an enabled skill's
+folder can be run, the interpreter comes from the extension, and the
+arguments are passed as they are, with no shell in between. **Every run
+asks first**, showing the exact command, the folder it runs in and any
+input; there is no "allow for this chat" for scripts. A script runs as you,
+with your access to every file on the computer — not just the chat's
+folder — so allow runs only from skills you trust. It runs in the chat's
+workspace folder if it has one, otherwise in the skill's folder, with no
+terminal, for up to 5 minutes; Stop ends it (but not programs it started
+and left running). The model gets the exit code and the output, capped at
+32 KB like any tool result.
 
 ---
 

@@ -93,6 +93,7 @@ import { useSpaceStore } from "./spaceStore";
 import { useUIStore } from "./uiStore";
 import { useLibraryStore } from "./libraryStore";
 import { useModelsStore } from "./modelsStore";
+import { useSkillStore } from "./skillStore";
 import { getLivePullFor, pullPercent } from "@/lib/usePullRuns";
 
 interface ActiveStream {
@@ -1535,6 +1536,7 @@ async function startTask(task: QueueTask, get: Getter, set: Setter): Promise<boo
             is_error: false,
             ...(ev.approval_required ? { awaiting_approval: true } : {}),
             ...(ev.existing_bytes !== undefined ? { existing_bytes: ev.existing_bytes } : {}),
+            ...(ev.script_run ? { script_run: ev.script_run } : {}),
           });
           pendingDirty.toolCalls = true;
           scheduleFlush(get, set);
@@ -1548,6 +1550,15 @@ async function startTask(task: QueueTask, get: Getter, set: Setter): Promise<boo
             delete existing.awaiting_approval;
             if (ev.denied) existing.denied = true;
             if (ev.timed_out) existing.timed_out = true;
+            // The model loaded a skill: the backend recorded it against the
+            // chat, so its chip appears now rather than on the next visit.
+            // The catalogue too — the chips hide names it doesn't list as
+            // enabled, and the skill may have been installed since it loaded.
+            if (existing.tool === "activate_skill" && !ev.is_error) {
+              const skills = useSkillStore.getState();
+              void skills.loadSession(task.sessionId).catch(() => {});
+              void skills.loadCatalog().catch(() => {});
+            }
           } else {
             // Defensive: a tool_result without a matching tool_call should
             // never happen (Rust emits the pair), but if it does, surface

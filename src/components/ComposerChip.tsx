@@ -1,4 +1,4 @@
-import { X } from "lucide-react";
+import { Puzzle, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { Persona } from "@/lib/personas";
 import type { Tone } from "@/lib/tones";
@@ -106,6 +106,22 @@ export function PersonaChip({
       <Icon className={composerChipIconClass("config")} />
       <span>{persona.label}</span>
       <ChipRemove label={`Remove ${persona.label} persona`} onClick={onRemove} />
+    </div>
+  );
+}
+
+/** A skill loaded in this chat (`/skill`, or the model's `activate_skill`).
+ *  Config, not payload: its instructions go with every message until the
+ *  chip is removed. */
+export function SkillChip({ name, onRemove }: { name: string; onRemove: () => void }) {
+  return (
+    <div
+      className={composerChipClass("config")}
+      title={`Skill: ${name} — its instructions go with every message in this chat`}
+    >
+      <Puzzle className={composerChipIconClass("config")} />
+      <span>{name}</span>
+      <ChipRemove label={`Remove the ${name} skill from this chat`} onClick={onRemove} />
     </div>
   );
 }

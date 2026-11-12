@@ -125,6 +125,10 @@ pub enum StreamEvent {
     /// `existing_bytes` is set for the built-in `write_file` only: the size
     /// of the file the write would replace, or `null` when it would create
     /// one, so the approval card can say which.
+    ///
+    /// `script_run` is set for `run_skill_script` only: the command as it
+    /// will run and the folder it runs in, so the card shows the real
+    /// command rather than the model's arguments.
     ToolCall {
         id: String,
         server_id: String,
@@ -134,6 +138,8 @@ pub enum StreamEvent {
         approval_required: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         existing_bytes: Option<Option<u64>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        script_run: Option<crate::skills::script::Preview>,
     },
     /// Outcome of a `ToolCall`. `is_error` mirrors the MCP `isError` flag;
     /// `content` is the concatenated text content (or a stringified

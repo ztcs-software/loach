@@ -404,6 +404,91 @@ fn instructions_fallback_on(db: &crate::db::Database) -> bool {
         != Some("false")
 }
 
+// ---------- skills ----------
+//
+// Agent Skills are folders on disk (see `skills`); these commands list and
+// switch them, import one, and record which are on in a chat.
+
+/// Every installed skill, and the folders that couldn't be loaded.
+#[tauri::command]
+pub async fn skills_list(state: State<'_, AppState>) -> Result<crate::skills::Catalog, String> {
+    let (roots, db) = (state.skill_roots.clone(), state.db.clone());
+    tokio::task::spawn_blocking(move || crate::skills::discover(&roots, &crate::skills::disabled(&db)))
+        .await
+        .map_err(|e| format!("skills scan panicked: {e}"))
+}
+
+#[tauri::command]
+pub async fn skill_set_enabled(
+    state: State<'_, AppState>,
+    name: String,
+    enabled: bool,
+) -> Result<(), String> {
+    crate::skills::set_enabled(&state.db, &name, enabled).map_err(err)
+}
+
+/// Pick a skill folder and copy it into Loach's skills folder. `None` when
+/// the dialog was cancelled; otherwise the imported skill's name.
+#[tauri::command]
+pub async fn skill_import(app: AppHandle, state: State<'_, AppState>) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let picked = tauri::async_runtime::spawn_blocking(move || app.dialog().file().blocking_pick_folder())
+        .await
+        .map_err(|e| format!("folder dialog task failed: {e}"))?;
+    let Some(chosen) = picked else {
+        return Ok(None);
+    };
+    let path = chosen
+        .into_path()
+        .map_err(|e| format!("invalid path returned from dialog: {e}"))?;
+    let roots = state.skill_roots.clone();
+    tokio::task::spawn_blocking(move || crate::skills::import(&roots, &path))
+        .await
+        .map_err(|e| format!("skill import panicked: {e}"))?
+        .map(Some)
+}
+
+/// Open Loach's skills folder in the OS file manager.
+#[tauri::command]
+pub async fn skills_open_folder(state: State<'_, AppState>) -> Result<(), String> {
+    let dir = state.skill_roots.loach_dir().to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        std::fs::create_dir_all(&dir).map_err(|e| format!("couldn't create the skills folder: {e}"))?;
+        open::that_detached(&dir).map_err(|e| format!("couldn't open the folder: {e}"))
+    })
+    .await
+    .map_err(|e| format!("open folder task panicked: {e}"))?
+}
+
+/// The skills switched on in a chat.
+#[tauri::command]
+pub async fn session_skills(state: State<'_, AppState>, session_id: String) -> Result<Vec<String>, String> {
+    state.db.session_skills(&session_id).map_err(err)
+}
+
+/// Switch a skill on or off in a chat. Switching on needs an enabled skill
+/// of that name, so a typo in `/skill` is an error rather than a chip that
+/// does nothing.
+#[tauri::command]
+pub async fn session_skill_set(
+    state: State<'_, AppState>,
+    session_id: String,
+    name: String,
+    active: bool,
+) -> Result<(), String> {
+    if !active {
+        return state.db.remove_session_skill(&session_id, &name).map_err(err);
+    }
+    let (roots, db) = (state.skill_roots.clone(), state.db.clone());
+    let catalog = tokio::task::spawn_blocking(move || crate::skills::discover(&roots, &crate::skills::disabled(&db)))
+        .await
+        .map_err(|e| format!("skills scan panicked: {e}"))?;
+    if !catalog.skills.iter().any(|s| s.name == name && s.enabled) {
+        return Err(format!("There's no enabled skill named `{name}`."));
+    }
+    state.db.add_session_skill(&session_id, &name).map(|_| ()).map_err(err)
+}
+
 // ---------- folders ----------
 
 #[tauri::command]
@@ -770,6 +855,8 @@ const WRITABLE_SETTING_KEYS: &[&str] = &[
     "image_scaling",
     "library_image_scaling",
     "workspace_instructions_fallback",
+    "skills_enabled",
+    "skill_scripts_enabled",
 ];
 
 /// Whether `key` is a setting the app is allowed to write. Built-in tool
@@ -2654,6 +2741,7 @@ pub async fn chat_stream(
     let db = state.db.clone();
     let mcp_cache = state.mcp_tools_cache.clone();
     let approvals = state.approvals.clone();
+    let skill_roots = state.skill_roots.clone();
 
     // Register the cancel Notify SYNCHRONOUSLY here — before we spawn the
     // worker — so a `chat_cancel(stream_id)` arriving while we're still
@@ -2726,6 +2814,40 @@ pub async fn chat_stream(
             );
         }
         request.tools = tools;
+
+        // Agent Skills: the instructions of those switched on in this chat,
+        // and the skill tools with the catalogue in `activate_skill`. Read
+        // from disk every turn, off the async runtime and racing Stop like
+        // the workspace lookup below. Private Chat and background tasks get
+        // neither: they have no tools to load skills with, and no chat to
+        // keep them in.
+        let mut skill_tools = Vec::new();
+        if let Some(sid) = request
+            .session_id
+            .clone()
+            .filter(|_| !request.private && !request.no_tools)
+        {
+            let (roots, db) = (skill_roots.clone(), db.clone());
+            let prep = tokio::task::spawn_blocking(move || crate::skills::prepare_turn(&roots, &db, &sid));
+            let turn = tokio::select! {
+                biased;
+                _ = cancel.notified() => {
+                    let _ = app.emit(&channel, crate::stream::StreamEvent::Cancelled);
+                    registry.finish_own(&request.stream_id, &cancel);
+                    return;
+                }
+                r = prep => r.unwrap_or_default(),
+            };
+            // Ahead of the user's own system prompt, so their instructions
+            // come last; the workspace note below goes ahead of this.
+            if let Some(block) = turn.prompt {
+                request.system_prompt = Some(match request.system_prompt.take() {
+                    Some(existing) if !existing.trim().is_empty() => format!("{block}\n\n{existing}"),
+                    _ => block,
+                });
+            }
+            skill_tools = turn.tools;
+        }
 
         // Resolve the chat's workspace directory from its own row. The
         // renderer sends a session id, never a path — `workspace_root` is
@@ -2876,6 +2998,7 @@ pub async fn chat_stream(
                 request.workspace_root.is_some(),
             ));
         }
+        request.tools.extend(skill_tools);
 
         let res = match provider.as_str() {
             "ollama" => {

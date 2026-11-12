@@ -12,6 +12,7 @@ export type SettingsTab =
   | "providers"
   | "features"
   | "tools"
+  | "skills"
   | "library"
   | "appearance"
   | "mcp"

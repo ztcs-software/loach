@@ -29,6 +29,7 @@ import type {
   RagSearchResult,
   RetrievalMode,
   Session,
+  SkillCatalog,
   Snippet,
   SnippetFillValue,
   SnippetVariable,
@@ -296,6 +297,44 @@ export function readWorkspaceInstructions(
 ): Promise<WorkspaceInstructions | null> {
   if (!isTauri) return notInTauri(null);
   return invoke("read_workspace_instructions", { sessionId });
+}
+
+// ------------ skills ------------
+
+/** Every installed Agent Skill, read from disk now. */
+export function listSkills(): Promise<SkillCatalog> {
+  if (!isTauri) return notInTauri({ skills: [], problems: [] });
+  return invoke("skills_list");
+}
+
+export function setSkillEnabled(name: string, enabled: boolean): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("skill_set_enabled", { name, enabled });
+}
+
+/** Pick a skill folder and copy it into Loach's skills folder. Resolves to
+ *  the skill's name, or null if the dialog was cancelled. */
+export function importSkill(): Promise<string | null> {
+  if (!isTauri) return notInTauri(null);
+  return invoke("skill_import");
+}
+
+export function openSkillsFolder(): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("skills_open_folder");
+}
+
+/** The skills switched on in a chat, oldest first. */
+export function sessionSkills(sessionId: string): Promise<string[]> {
+  if (!isTauri) return notInTauri([]);
+  return invoke("session_skills", { sessionId });
+}
+
+/** Switch a skill on or off in a chat. Switching on rejects a name that
+ *  isn't an enabled skill. */
+export function setSessionSkill(sessionId: string, name: string, active: boolean): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("session_skill_set", { sessionId, name, active });
 }
 
 export function exportSession(id: string, format: "md"): Promise<string> {

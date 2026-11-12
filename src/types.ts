@@ -58,6 +58,35 @@ export interface WorkspaceInstructions {
   text: string;
 }
 
+/** An installed Agent Skill (`skills::Skill`): a folder with a `SKILL.md`,
+ *  from Loach's own skills folder or `~/.agents/skills`. */
+export interface SkillInfo {
+  name: string;
+  description: string;
+  /** The skill's folder. */
+  path: string;
+  source: "loach" | "agents";
+  /** Off in Settings → Skills: the model isn't offered it. */
+  enabled: boolean;
+  /** Departures from the spec that didn't stop it loading. */
+  warnings: string[];
+}
+
+/** Every installed skill, plus the folders that couldn't be loaded. */
+export interface SkillCatalog {
+  skills: SkillInfo[];
+  problems: { path: string; message: string }[];
+}
+
+/** What a `run_skill_script` call will run, worked out by the backend for
+ *  its approval card (`skills::script::Preview`). */
+export interface ScriptRunPreview {
+  command: string;
+  cwd: string;
+  /** Characters of standard input, when there is any. */
+  stdin_chars?: number;
+}
+
 /** How images are scaled down before they're sent to a model: `px` caps the
  *  longest side, `percent` shrinks both sides to that share of the original.
  *  Neither ever enlarges. Off sends the original. Both sizes are kept so
@@ -311,6 +340,9 @@ export interface ToolCallRecord {
   /** `write_file` only: size of the file the write replaces, or `null`
    *  when it creates one. Absent on records saved before it existed. */
   existing_bytes?: number | null;
+  /** `run_skill_script` only: the command and folder it runs in, as the
+   *  backend worked them out. Absent when the call couldn't run. */
+  script_run?: ScriptRunPreview;
   /** True when the reply ended (Stop, error) before this call's result
    *  arrived. `result` then says whether it could have run — a workspace
    *  write already under way when Stop landed still finishes on disk. */
@@ -439,6 +471,8 @@ export type StreamEvent =
       approval_required?: boolean;
       /** `write_file` only — see `ToolCallRecord.existing_bytes`. */
       existing_bytes?: number | null;
+      /** `run_skill_script` only — see `ToolCallRecord.script_run`. */
+      script_run?: ScriptRunPreview;
     }
   /** Outcome of a tool call. `id` pairs with the matching `tool_call`. */
   | {
@@ -572,6 +606,11 @@ export interface Settings {
    *  its `AGENTS.md`, as project instructions. On by default; read by the
    *  backend on every turn and by `read_workspace_instructions`. */
   workspace_instructions_fallback: boolean;
+  /** Settings → Skills master switch. Off: no skill catalogue, tools or
+   *  instructions reach any model. */
+  skills_enabled: boolean;
+  /** Whether `run_skill_script` is offered. Every run still asks. */
+  skill_scripts_enabled: boolean;
   /** Global override for Ollama's `low_vram` option. When `true`, every
    *  Ollama request is sent with `low_vram: true` regardless of per-chat
    *  params or per-model Modelfile defaults — handy on memory-constrained
@@ -669,6 +708,8 @@ export const DEFAULT_SETTINGS: Settings = {
   pdf_tool_enabled: false,
   workspace_tool_enabled: false,
   workspace_instructions_fallback: true,
+  skills_enabled: false,
+  skill_scripts_enabled: false,
   low_vram_global: false,
   ollama_keep_alive: "5m",
   thinking_default: true,

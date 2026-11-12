@@ -9,6 +9,7 @@ mod rag;
 mod sandbox;
 mod secrets;
 mod security;
+mod skills;
 mod sse;
 mod stream;
 mod tools;
@@ -90,6 +91,8 @@ pub struct AppState {
     /// Background worker keeping the Library / Space-source retrieval index
     /// chunked and embedded. Woken by anything that can create work.
     pub indexer: Arc<rag::indexer::Indexer>,
+    /// The folders Agent Skills are read from (see `skills`).
+    pub skill_roots: skills::Roots,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -159,6 +162,13 @@ pub fn run() {
             }
 
             security::init_marker(&data_dir);
+
+            // Loach's own skills folder exists from the start, so "Open
+            // skills folder" always has somewhere to go.
+            let skill_roots = skills::Roots::new(&data_dir, app.path().home_dir().ok().as_deref());
+            if let Err(e) = std::fs::create_dir_all(skill_roots.loach_dir()) {
+                tracing::warn!("couldn't create the skills folder: {e}");
+            }
 
             let db_path = data_dir.join("loach.db");
             let db = match Database::open(&db_path) {
@@ -236,6 +246,7 @@ pub fn run() {
                 approvals: crate::stream::ApprovalRegistry::new(),
                 stdio_approved: Default::default(),
                 indexer,
+                skill_roots,
             };
             app.manage(state);
 
@@ -378,6 +389,12 @@ pub fn run() {
             commands::clear_session_workspace,
             commands::open_session_workspace,
             commands::read_workspace_instructions,
+            commands::skills_list,
+            commands::skill_set_enabled,
+            commands::skill_import,
+            commands::skills_open_folder,
+            commands::session_skills,
+            commands::session_skill_set,
             commands::list_folders,
             commands::create_folder,
             commands::rename_folder,

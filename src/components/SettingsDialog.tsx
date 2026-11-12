@@ -11,6 +11,7 @@ import {
   Palette,
   Play,
   Plug,
+  Puzzle,
   RefreshCw,
   Server,
   Sparkles,
@@ -47,6 +48,7 @@ import { ArchivePanel } from "@/components/settings/ArchivePanel";
 import { FeaturesTab } from "@/components/settings/FeaturesTab";
 import { GeneralTab } from "@/components/settings/GeneralTab";
 import { LibraryTab } from "@/components/settings/LibraryTab";
+import { SkillsTab } from "@/components/settings/SkillsTab";
 import {
   SectionTitle,
   useBufferedSetting,
@@ -89,6 +91,7 @@ const NAV = [
   { value: "providers", label: "Providers", icon: Server },
   { value: "features", label: "Features", icon: Sparkles },
   { value: "tools", label: "Tools", icon: Wrench },
+  { value: "skills", label: "Skills", icon: Puzzle },
   { value: "library", label: "Library", icon: Library },
   { value: "appearance", label: "Appearance", icon: Palette },
   { value: "mcp", label: "MCP", icon: Plug },
@@ -483,6 +486,10 @@ export function SettingsDialog() {
                     {tool.key === "workspace_tool_enabled" && <InstructionsFallbackToggle />}
                   </ToolToggleRow>
                 ))}
+              </TabsContent>
+
+              <TabsContent value="skills" className="mt-0 space-y-6 focus-visible:ring-0 focus-visible:ring-offset-0">
+                <SkillsTab />
               </TabsContent>
 
               <TabsContent value="library" className="mt-0 space-y-6 focus-visible:ring-0 focus-visible:ring-offset-0">
