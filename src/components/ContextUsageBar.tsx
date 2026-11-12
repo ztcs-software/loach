@@ -90,7 +90,7 @@ export function ContextUsageBar() {
     session?.space_id ? s.spaces.find((x) => x.id === session.space_id) : null,
   );
   // Counted only while Workspace files is on — the backend drops the
-  // folder, and with it LOACHFILE.md, when the switch is off.
+  // folder, and with it its instructions file, when the switch is off.
   const workspaceToolsEnabled = useSettingsStore((s) => s.workspace_tool_enabled);
   const projectInstructions = useChatStore((s) =>
     workspaceToolsEnabled && s.activeSessionId
@@ -178,8 +178,9 @@ export function ContextUsageBar() {
   // pick the send makes. Sources (Space uploads, Library items) are counted
   // separately below at what the send will spend on them. The bar is a
   // hint, not a billing tool — close enough for sizing decisions. The one
-  // backend-appended layer that can be big is the workspace's LOACHFILE.md,
-  // so that is counted from the store's last read of it.
+  // backend-appended layer that can be big is the workspace's instructions
+  // file (LOACHFILE.md, CLAUDE.md or AGENTS.md), so that is counted from
+  // the store's last read of it.
   const effectiveSystemPrompt = baseSystemPrompt(
     session?.system_prompt ?? null,
     globalSystemPrompt,
@@ -214,7 +215,7 @@ export function ContextUsageBar() {
         deferredMessages,
         effectiveSystemPrompt,
         params,
-        projectInstructions,
+        projectInstructions?.text ?? null,
         memoryText,
         sources.tokens,
       ),
@@ -312,6 +313,7 @@ export function ContextUsageBar() {
               ? `Sources (${sources.count}${sources.mode === "retrieval" ? ", excerpts" : ""})`
               : null
           }
+          instructionsFile={projectInstructions?.file ?? null}
           compacting={isCompacting}
           onCompact={() => void compactContext(session.id)}
           expandedSize={usage.total * 2}
@@ -353,6 +355,8 @@ interface PopoverProps {
   usage: ReturnType<typeof computeContextUsage>;
   /** Row label for the sources line, or null when the chat has none. */
   sourcesLabel: string | null;
+  /** The file the project instructions came from, or null when none. */
+  instructionsFile: string | null;
   compacting: boolean;
   onCompact: () => void;
   /** False for OpenAI-compatible chats, whose servers ignore `num_ctx`. */
@@ -366,6 +370,7 @@ interface PopoverProps {
 const ContextUsagePopover = ({
   usage,
   sourcesLabel,
+  instructionsFile,
   compacting,
   onCompact,
   canExpand,
@@ -436,7 +441,7 @@ const ContextUsagePopover = ({
         />
         {usage.projectInstructionsTokens > 0 && (
           <Row
-            label="Project instructions (LOACHFILE.md)"
+            label={`Project instructions (${instructionsFile ?? "LOACHFILE.md"})`}
             value={formatTokens(usage.projectInstructionsTokens)}
           />
         )}

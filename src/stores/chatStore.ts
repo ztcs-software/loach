@@ -86,6 +86,7 @@ import {
   type SpaceContext,
   type ToolApprovalDecision,
   type ToolCallRecord,
+  type WorkspaceInstructions,
 } from "@/types";
 import { useSettingsStore } from "./settingsStore";
 import { useSpaceStore } from "./spaceStore";
@@ -219,11 +220,12 @@ interface ChatState {
   pickWorkspace: (sessionId: string) => Promise<string | null>;
   /** Drop this chat's workspace directory. */
   clearWorkspace: (sessionId: string) => Promise<void>;
-  /** Each chat's `LOACHFILE.md` as last read, by session id — null when the
-   *  workspace has none. Drives the workspace badge and the context usage row;
-   *  the model's copy is read by the backend on every turn regardless. */
-  workspaceInstructions: Record<string, string | null>;
-  /** Re-read this chat's `LOACHFILE.md`. Cheap, so the composer calls it on
+  /** Each chat's project instructions (`LOACHFILE.md`, else `CLAUDE.md` or
+   *  `AGENTS.md`) as last read, by session id — null when the workspace has
+   *  none. Drives the workspace badge and the context usage row; the model's
+   *  copy is read by the backend on every turn regardless. */
+  workspaceInstructions: Record<string, WorkspaceInstructions | null>;
+  /** Re-read this chat's project instructions. Cheap, so the composer calls it on
    *  every chance the file may have changed: opening the chat, picking a
    *  folder, and the end of a turn (the model may have written it). */
   refreshWorkspaceInstructions: (sessionId: string) => Promise<void>;
@@ -2111,15 +2113,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   refreshWorkspaceInstructions: async (sessionId) => {
-    let text: string | null = null;
+    let found: WorkspaceInstructions | null = null;
     try {
-      text = await readWorkspaceInstructions(sessionId);
+      found = await readWorkspaceInstructions(sessionId);
     } catch (e) {
       // Display only — a failed read hides the badge, nothing more.
-      logger.warn("couldn't read LOACHFILE.md", e);
+      logger.warn("couldn't read the project instructions", e);
     }
     set((s) => ({
-      workspaceInstructions: { ...s.workspaceInstructions, [sessionId]: text },
+      workspaceInstructions: { ...s.workspaceInstructions, [sessionId]: found },
     }));
   },
 

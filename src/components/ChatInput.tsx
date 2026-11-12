@@ -132,7 +132,8 @@ export function ChatInput({ centered = false }: ChatInputProps) {
   const refreshWorkspaceInstructions = useChatStore(
     (s) => s.refreshWorkspaceInstructions,
   );
-  // Keep the LOACHFILE.md badge honest. The file can change under us — the
+  // Keep the project-instructions badge honest (LOACHFILE.md, else
+  // CLAUDE.md or AGENTS.md). The file can change under us — the
   // user edits it, or the model writes it mid-turn — so it is re-read when
   // this chat is opened or gets a folder, and again once a turn in it ends.
   // The backend reads its own copy every turn regardless; this only feeds
@@ -1159,7 +1160,7 @@ export function ChatInput({ centered = false }: ChatInputProps) {
             <WorkspaceNotice
               root={workspaceRoot}
               toolsEnabled={workspaceToolsEnabled}
-              // With the switch off the backend sends no LOACHFILE.md either.
+              // With the switch off the backend sends no instructions either.
               instructions={workspaceToolsEnabled ? workspaceInstructions : null}
               locked={streamingThisChat}
               hidden={dragging}

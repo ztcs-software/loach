@@ -130,14 +130,25 @@ fn cut_by_depth(entry: &walkdir::DirEntry) -> bool {
 /// tree costs a stat, not an allocation.
 const MAX_SEARCH_FILE_BYTES: u64 = 512 * 1024;
 
-/// Project instructions file, read from the workspace root on every turn
-/// and appended to the system prompt — the same idea as a `CLAUDE.md` or
-/// `AGENTS.md`: the project's own notes on how to work in the tree.
-pub const INSTRUCTIONS_FILE: &str = "LOACHFILE.md";
-/// How much of `LOACHFILE.md` reaches the prompt. The same cap as a tool
-/// result: past this the file is a document rather than instructions, and
-/// local models follow short instruction files far better anyway.
+/// Project instructions files, in the order they're looked for at the
+/// workspace root; the first usable one is read on every turn and appended
+/// to the system prompt — the project's own notes on how to work in the
+/// tree. Loach's own `LOACHFILE.md` wins; a project without one falls back
+/// to the file it already keeps for Claude Code (`CLAUDE.md`) or Codex
+/// (`AGENTS.md`), so it needn't keep a third copy.
+pub const INSTRUCTIONS_FILES: [&str; 3] = ["LOACHFILE.md", "CLAUDE.md", "AGENTS.md"];
+/// How much of an instructions file reaches the prompt. The same cap as a
+/// tool result: past this the file is a document rather than instructions,
+/// and local models follow short instruction files far better anyway.
 const MAX_INSTRUCTIONS_BYTES: usize = crate::providers::MAX_TOOL_RESULT_BYTES;
+
+/// The workspace's project instructions and the file they came from.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct WorkspaceInstructions {
+    /// One of [`INSTRUCTIONS_FILES`].
+    pub file: &'static str,
+    pub text: String,
+}
 
 /// Directories skipped when *walking* (`list_directory`, `find_files`,
 /// `search_files`). Naming one explicitly still works — the user may well
@@ -845,22 +856,29 @@ pub fn write_target_size(root: &Path, args: &Value) -> Option<Option<u64>> {
 // Project instructions
 // ---------------------------------------------------------------------------
 
-/// The workspace's `LOACHFILE.md`, ready for the system prompt, or `None`
-/// when there isn't one worth sending.
+/// The workspace's project instructions, ready for the system prompt, from
+/// the first of [`INSTRUCTIONS_FILES`] worth sending, or `None` when none is.
 ///
-/// Resolved through the same sandbox as every tool path, so a
-/// `LOACHFILE.md` that is a symlink out of the tree is refused rather than
-/// followed, and decoded like any file the tools read, so one saved as
-/// Windows-1250 or UTF-16 reads correctly. Anything else that can't be used
-/// — a directory by that name, a binary, a blank file, an I/O error — also
-/// counts as absent: the file is a courtesy to the model, not something a
-/// turn should fail on.
+/// Each is resolved through the same sandbox as every tool path, so one
+/// that is a symlink out of the tree is refused rather than followed, and
+/// decoded like any file the tools read, so one saved as Windows-1250 or
+/// UTF-16 reads correctly. Anything else that can't be used — a directory
+/// by that name, a binary, a blank file, an I/O error — also counts as
+/// absent, and the next file in line is tried: the file is a courtesy to
+/// the model, not something a turn should fail on.
+pub fn read_workspace_instructions(root: &Path) -> Option<WorkspaceInstructions> {
+    INSTRUCTIONS_FILES.into_iter().find_map(|file| {
+        read_instructions_file(root, file).map(|text| WorkspaceInstructions { file, text })
+    })
+}
+
+/// One instructions file's text, or `None` when it can't be used.
 ///
 /// Reads at most the cap plus one byte, so a runaway file costs one bounded
 /// read; what survives is clipped to [`MAX_INSTRUCTIONS_BYTES`] with a note
 /// that says so and names the real size.
-pub fn read_workspace_instructions(root: &Path) -> Option<String> {
-    let path = resolve_read(root, INSTRUCTIONS_FILE).ok()?;
+fn read_instructions_file(root: &Path, name: &str) -> Option<String> {
+    let path = resolve_read(root, name).ok()?;
     if !path.is_file() {
         return None;
     }
@@ -881,7 +899,7 @@ pub fn read_workspace_instructions(root: &Path) -> Option<String> {
     // trailing U+FFFD; drop it rather than send the model garbage.
     let body = text.trim_end_matches('\u{FFFD}').trim();
     Some(format!(
-        "{body}\n\n[{INSTRUCTIONS_FILE} truncated by Loach at {}; the file is {}. \
+        "{body}\n\n[{name} truncated by Loach at {}; the file is {}. \
          Keep project instructions short.]",
         human_size(MAX_INSTRUCTIONS_BYTES as u64),
         human_size(total)
@@ -3114,31 +3132,67 @@ mod tests {
 
     // ---- project instructions ----
 
+    /// Just the text, for the tests that only care what the model reads.
+    fn instructions_text(root: &Path) -> Option<String> {
+        read_workspace_instructions(root).map(|i| i.text)
+    }
+
     #[test]
     fn instructions_are_absent_without_a_usable_loachfile() {
         let (_d, root) = workspace();
         assert_eq!(read_workspace_instructions(&root), None);
 
         // Blank is as good as missing: there is nothing to tell the model.
-        fs::write(root.join(INSTRUCTIONS_FILE), "  \n\n").unwrap();
+        fs::write(root.join("LOACHFILE.md"), "  \n\n").unwrap();
         assert_eq!(read_workspace_instructions(&root), None);
 
         // So is a directory that happens to carry the name.
-        fs::remove_file(root.join(INSTRUCTIONS_FILE)).unwrap();
-        fs::create_dir(root.join(INSTRUCTIONS_FILE)).unwrap();
+        fs::remove_file(root.join("LOACHFILE.md")).unwrap();
+        fs::create_dir(root.join("LOACHFILE.md")).unwrap();
         assert_eq!(read_workspace_instructions(&root), None);
+    }
+
+    #[test]
+    fn instructions_fall_back_to_claude_md_then_agents_md() {
+        let (_d, root) = workspace();
+        let found = |root: &Path| read_workspace_instructions(root).map(|i| (i.file, i.text));
+
+        fs::write(root.join("AGENTS.md"), "From AGENTS.md\n").unwrap();
+        assert_eq!(found(&root), Some(("AGENTS.md", "From AGENTS.md".into())));
+
+        fs::write(root.join("CLAUDE.md"), "From CLAUDE.md\n").unwrap();
+        assert_eq!(found(&root), Some(("CLAUDE.md", "From CLAUDE.md".into())));
+
+        // Loach's own file wins, and only one file is ever sent.
+        fs::write(root.join("LOACHFILE.md"), "From LOACHFILE.md\n").unwrap();
+        assert_eq!(
+            found(&root),
+            Some(("LOACHFILE.md", "From LOACHFILE.md".into()))
+        );
+    }
+
+    /// A file that can't be used is passed over, not taken as "none".
+    #[test]
+    fn an_unusable_instructions_file_falls_through_to_the_next() {
+        let (_d, root) = workspace();
+        fs::write(root.join("LOACHFILE.md"), "  \n").unwrap();
+        fs::create_dir(root.join("CLAUDE.md")).unwrap();
+        fs::write(root.join("AGENTS.md"), "From AGENTS.md\n").unwrap();
+        let found = read_workspace_instructions(&root).expect("present");
+        assert_eq!(found.file, "AGENTS.md");
+        assert_eq!(found.text, "From AGENTS.md");
     }
 
     #[test]
     fn instructions_come_back_verbatim_when_within_the_cap() {
         let (_d, root) = workspace();
         fs::write(
-            root.join(INSTRUCTIONS_FILE),
+            root.join("LOACHFILE.md"),
             "# Project\r\n\r\nRun the tests before you edit.\r\n",
         )
         .unwrap();
         assert_eq!(
-            read_workspace_instructions(&root).as_deref(),
+            instructions_text(&root).as_deref(),
             Some("# Project\r\n\r\nRun the tests before you edit.")
         );
     }
@@ -3149,9 +3203,9 @@ mod tests {
         // Three-byte characters: the byte cap can't fall between them
         // evenly, so the clip has to cope with a split sequence.
         let big = "€".repeat(MAX_INSTRUCTIONS_BYTES);
-        fs::write(root.join(INSTRUCTIONS_FILE), &big).unwrap();
+        fs::write(root.join("LOACHFILE.md"), &big).unwrap();
 
-        let out = read_workspace_instructions(&root).expect("present");
+        let out = instructions_text(&root).expect("present");
         let (body, note) = out
             .split_once("\n\n[")
             .expect("truncation note follows the body");
@@ -3167,6 +3221,19 @@ mod tests {
         );
     }
 
+    /// The truncation note names the file the text actually came from.
+    #[test]
+    fn a_clipped_fallback_names_its_own_file() {
+        let (_d, root) = workspace();
+        fs::write(root.join("CLAUDE.md"), "x".repeat(MAX_INSTRUCTIONS_BYTES + 1)).unwrap();
+        let out = instructions_text(&root).expect("present");
+        assert!(
+            out.contains("\n\n[CLAUDE.md truncated by Loach at"),
+            "{}",
+            &out[out.len() - 120..]
+        );
+    }
+
     /// Unix-only for the same reason as the tool symlink tests above.
     #[cfg(unix)]
     #[test]
@@ -3175,7 +3242,9 @@ mod tests {
         let outside = tempfile::TempDir::new().unwrap();
         let secret = outside.path().join("notes.md");
         fs::write(&secret, "classified\n").unwrap();
-        std::os::unix::fs::symlink(&secret, root.join(INSTRUCTIONS_FILE)).unwrap();
+        for file in INSTRUCTIONS_FILES {
+            std::os::unix::fs::symlink(&secret, root.join(file)).unwrap();
+        }
         assert_eq!(read_workspace_instructions(&root), None);
     }
 
@@ -3185,12 +3254,12 @@ mod tests {
     fn instructions_in_a_legacy_encoding_are_decoded() {
         let (_d, root) = workspace();
         fs::write(
-            root.join(INSTRUCTIONS_FILE),
+            root.join("LOACHFILE.md"),
             cp1250("Pisz komentarze po polsku: zażółć.\n"),
         )
         .unwrap();
         assert_eq!(
-            read_workspace_instructions(&root).as_deref(),
+            instructions_text(&root).as_deref(),
             Some("Pisz komentarze po polsku: zażółć.")
         );
     }

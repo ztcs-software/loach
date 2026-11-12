@@ -32,8 +32,9 @@ export function charsPerToken(sample: string): number {
 
 export interface ContextUsageBreakdown {
   systemPromptTokens: number;
-  /** The workspace's `LOACHFILE.md`, which the backend appends to the
-   *  system prompt on every turn. Counted on its own because it is the one
+  /** The workspace's `LOACHFILE.md` (or the `CLAUDE.md` / `AGENTS.md` it
+   *  falls back to), which the backend appends to the system prompt on
+   *  every turn. Counted on its own because it is the one
    *  backend-added layer that can be large, and the user can shrink it. */
   projectInstructionsTokens: number;
   /** The global and Space memory lists the send prepends to the system

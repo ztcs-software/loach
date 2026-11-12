@@ -39,6 +39,7 @@ import type {
   StorageStats,
   StreamEvent,
   SystemInfo,
+  WorkspaceInstructions,
 } from "@/types";
 
 /**
@@ -285,11 +286,14 @@ export function openSessionWorkspace(sessionId: string): Promise<void> {
   return invoke("open_session_workspace", { sessionId });
 }
 
-/** The chat's `LOACHFILE.md` as the next turn will see it — clipped the
- *  same way — or null when the workspace has none. Display only: the
- *  workspace badge and the context usage estimate. The backend re-reads the file on
- *  every turn regardless. */
-export function readWorkspaceInstructions(sessionId: string): Promise<string | null> {
+/** The chat's project instructions (`LOACHFILE.md`, else `CLAUDE.md`, else
+ *  `AGENTS.md`) as the next turn will see them — clipped the same way — or
+ *  null when the workspace has none. Display only: the workspace badge and
+ *  the context usage estimate. The backend re-reads the file on every turn
+ *  regardless. */
+export function readWorkspaceInstructions(
+  sessionId: string,
+): Promise<WorkspaceInstructions | null> {
   if (!isTauri) return notInTauri(null);
   return invoke("read_workspace_instructions", { sessionId });
 }

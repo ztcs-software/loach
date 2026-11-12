@@ -451,7 +451,8 @@ A slim **context usage bar** sits just below the message box once a chat
 has messages. It shows how much of the model's context window the chat is
 using — `used / total` tokens and a percentage — with a popover that breaks
 the estimate down into the system prompt (a Space's instructions
-included), project instructions (`LOACHFILE.md`), memories, sources (what
+included), project instructions (`LOACHFILE.md`, `CLAUDE.md` or
+`AGENTS.md`), memories, sources (what
 the next message will send of them, in full or as excerpts — §4.4) and
 messages (attachments called out), plus what's left of the window. It's an
 estimate, at about four characters per token (about one per character for
@@ -1155,7 +1156,7 @@ it with the ✕ beside it. Picking a folder also switches
 on **Workspace files** in **Settings → Tools** if it was off, and the
 notice says so if that switch is later turned off again — while it's off,
 the model gets neither the tools nor
-the folder's note and `LOACHFILE.md`. While a reply is running in the
+the folder's note and project instructions. While a reply is running in the
 chat, the folder can't be changed or removed — that turn keeps the folder
 it started with. Forking a chat carries the folder over; exports and
 imports never do — a path means nothing on another machine. If the folder
@@ -1260,23 +1261,28 @@ like any other message.
 
 **Project instructions.** If the folder has a `LOACHFILE.md` at its root,
 its contents are added to the system prompt on every turn, right after the
-note that tells the model where it is — the same idea as a `CLAUDE.md` or
-`AGENTS.md`: the project's own notes on how to work in it (how to run the
-tests, what not to touch, house style). It is read fresh each turn, so an
-edit — yours, or one the model makes through `write_file` — takes effect on
-the next send, and it goes through the same sandbox as everything else, so
-a `LOACHFILE.md` that is a link out of the folder is ignored. The
-"Working in" notice shows a `LOACHFILE.md` badge while one is present, with its first line in
-the tooltip, and the context usage popover (§2.10) lists it on its own
-row. Anything past 32 KB is cut with a note; local models follow short
-instruction files far better, so keep it brief. A blank file counts as
-none. The file goes in fenced between clear start and end markers, ahead
-of your own instructions, and the model is told it's the project's text
-rather than yours: it can't grant permissions, yours win when the two
-conflict, and anything in it asking to send files or data elsewhere is to
-be ignored unless you ask for that too — a folder you just cloned can say
-anything, and the approval card on writes, moves and deletions remains
-the backstop. A sample to start from is in
+note that tells the model where it is: the project's own notes on how to
+work in it (how to run the tests, what not to touch, house style). A
+folder without one falls back to the file it may already keep for another
+coding agent — `CLAUDE.md` (Claude Code), else `AGENTS.md` (Codex and
+others) — so a project needn't keep a third copy; only the first of the
+three that's usable is sent, and the model is told a borrowed file was
+written for an agent that may have tools it lacks, such as a shell. It is
+read fresh each turn, so an edit — yours, or one the model makes through
+`write_file` — takes effect on the next send, and it goes through the same
+sandbox as everything else, so a file that is a link out of the folder is
+ignored. The "Working in" notice shows a badge naming the file while one
+is in use, with its first line in the tooltip, and the context usage
+popover (§2.10) lists it on its own row. Anything past 32 KB is cut with a
+note; local models follow short instruction files far better, so keep it
+brief. A blank file counts as none, and the next one in line is used. The
+file goes in fenced between clear start and end markers, ahead of your own
+instructions, and the model is told it's the project's text rather than
+yours: it can't grant permissions, yours win when the two conflict, and
+anything in it asking to send files or data elsewhere is to be ignored
+unless you ask for that too — a folder you just cloned can say anything,
+and the approval card on writes, moves and deletions remains the backstop.
+A sample to start from is in
 [`docs/LOACHFILE.md.sample`](LOACHFILE.md.sample).
 
 Deliberately absent: a shell, a recursive delete, and any way to point the

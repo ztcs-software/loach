@@ -51,6 +51,13 @@ export interface Session {
   updated_at: number;
 }
 
+/** A chat's project instructions as the next turn will see them: the first
+ *  usable file at the workspace root, in this order. */
+export interface WorkspaceInstructions {
+  file: "LOACHFILE.md" | "CLAUDE.md" | "AGENTS.md";
+  text: string;
+}
+
 /** How images are scaled down before they're sent to a model: `px` caps the
  *  longest side, `percent` shrinks both sides to that share of the original.
  *  Neither ever enlarges. Off sends the original. Both sizes are kept so
