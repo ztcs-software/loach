@@ -52,6 +52,7 @@ import {
   useBufferedSetting,
 } from "@/components/settings/shared";
 import {
+  InstructionsFallbackToggle,
   TOOL_TOGGLES,
   ToolToggleRow,
 } from "@/components/settings/ToolToggles";
@@ -478,7 +479,9 @@ export function SettingsDialog() {
                 </p>
 
                 {TOOL_TOGGLES.map((tool) => (
-                  <ToolToggleRow key={tool.key} tool={tool} />
+                  <ToolToggleRow key={tool.key} tool={tool}>
+                    {tool.key === "workspace_tool_enabled" && <InstructionsFallbackToggle />}
+                  </ToolToggleRow>
                 ))}
               </TabsContent>
 

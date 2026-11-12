@@ -135,8 +135,12 @@ const MAX_SEARCH_FILE_BYTES: u64 = 512 * 1024;
 /// to the system prompt — the project's own notes on how to work in the
 /// tree. Loach's own `LOACHFILE.md` wins; a project without one falls back
 /// to the file it already keeps for Claude Code (`CLAUDE.md`) or Codex
-/// (`AGENTS.md`), so it needn't keep a third copy.
+/// (`AGENTS.md`), so it needn't keep a third copy — unless the user has
+/// switched that off ([`INSTRUCTIONS_FALLBACK_SETTING_KEY`]).
 pub const INSTRUCTIONS_FILES: [&str; 3] = ["LOACHFILE.md", "CLAUDE.md", "AGENTS.md"];
+/// Settings → Tools → Workspace files → "Use CLAUDE.md or AGENTS.md". On
+/// unless set to `"false"`, so an install that never touched it falls back.
+pub const INSTRUCTIONS_FALLBACK_SETTING_KEY: &str = "workspace_instructions_fallback";
 /// How much of an instructions file reaches the prompt. The same cap as a
 /// tool result: past this the file is a document rather than instructions,
 /// and local models follow short instruction files far better anyway.
@@ -858,6 +862,7 @@ pub fn write_target_size(root: &Path, args: &Value) -> Option<Option<u64>> {
 
 /// The workspace's project instructions, ready for the system prompt, from
 /// the first of [`INSTRUCTIONS_FILES`] worth sending, or `None` when none is.
+/// Without `fallback`, only `LOACHFILE.md` is looked for.
 ///
 /// Each is resolved through the same sandbox as every tool path, so one
 /// that is a symlink out of the tree is refused rather than followed, and
@@ -866,8 +871,13 @@ pub fn write_target_size(root: &Path, args: &Value) -> Option<Option<u64>> {
 /// by that name, a binary, a blank file, an I/O error — also counts as
 /// absent, and the next file in line is tried: the file is a courtesy to
 /// the model, not something a turn should fail on.
-pub fn read_workspace_instructions(root: &Path) -> Option<WorkspaceInstructions> {
-    INSTRUCTIONS_FILES.into_iter().find_map(|file| {
+pub fn read_workspace_instructions(root: &Path, fallback: bool) -> Option<WorkspaceInstructions> {
+    let files = if fallback {
+        &INSTRUCTIONS_FILES[..]
+    } else {
+        &INSTRUCTIONS_FILES[..1]
+    };
+    files.iter().find_map(|&file| {
         read_instructions_file(root, file).map(|text| WorkspaceInstructions { file, text })
     })
 }
@@ -3134,28 +3144,28 @@ mod tests {
 
     /// Just the text, for the tests that only care what the model reads.
     fn instructions_text(root: &Path) -> Option<String> {
-        read_workspace_instructions(root).map(|i| i.text)
+        read_workspace_instructions(root, true).map(|i| i.text)
     }
 
     #[test]
     fn instructions_are_absent_without_a_usable_loachfile() {
         let (_d, root) = workspace();
-        assert_eq!(read_workspace_instructions(&root), None);
+        assert_eq!(read_workspace_instructions(&root, true), None);
 
         // Blank is as good as missing: there is nothing to tell the model.
         fs::write(root.join("LOACHFILE.md"), "  \n\n").unwrap();
-        assert_eq!(read_workspace_instructions(&root), None);
+        assert_eq!(read_workspace_instructions(&root, true), None);
 
         // So is a directory that happens to carry the name.
         fs::remove_file(root.join("LOACHFILE.md")).unwrap();
         fs::create_dir(root.join("LOACHFILE.md")).unwrap();
-        assert_eq!(read_workspace_instructions(&root), None);
+        assert_eq!(read_workspace_instructions(&root, true), None);
     }
 
     #[test]
     fn instructions_fall_back_to_claude_md_then_agents_md() {
         let (_d, root) = workspace();
-        let found = |root: &Path| read_workspace_instructions(root).map(|i| (i.file, i.text));
+        let found = |root: &Path| read_workspace_instructions(root, true).map(|i| (i.file, i.text));
 
         fs::write(root.join("AGENTS.md"), "From AGENTS.md\n").unwrap();
         assert_eq!(found(&root), Some(("AGENTS.md", "From AGENTS.md".into())));
@@ -3178,9 +3188,23 @@ mod tests {
         fs::write(root.join("LOACHFILE.md"), "  \n").unwrap();
         fs::create_dir(root.join("CLAUDE.md")).unwrap();
         fs::write(root.join("AGENTS.md"), "From AGENTS.md\n").unwrap();
-        let found = read_workspace_instructions(&root).expect("present");
+        let found = read_workspace_instructions(&root, true).expect("present");
         assert_eq!(found.file, "AGENTS.md");
         assert_eq!(found.text, "From AGENTS.md");
+    }
+
+    /// With the fallback switched off, only Loach's own file counts.
+    #[test]
+    fn without_the_fallback_only_loachfile_is_read() {
+        let (_d, root) = workspace();
+        fs::write(root.join("CLAUDE.md"), "From CLAUDE.md\n").unwrap();
+        fs::write(root.join("AGENTS.md"), "From AGENTS.md\n").unwrap();
+        assert_eq!(read_workspace_instructions(&root, false), None);
+
+        fs::write(root.join("LOACHFILE.md"), "From LOACHFILE.md\n").unwrap();
+        let found = read_workspace_instructions(&root, false).expect("present");
+        assert_eq!(found.file, "LOACHFILE.md");
+        assert_eq!(found.text, "From LOACHFILE.md");
     }
 
     #[test]
@@ -3225,7 +3249,11 @@ mod tests {
     #[test]
     fn a_clipped_fallback_names_its_own_file() {
         let (_d, root) = workspace();
-        fs::write(root.join("CLAUDE.md"), "x".repeat(MAX_INSTRUCTIONS_BYTES + 1)).unwrap();
+        fs::write(
+            root.join("CLAUDE.md"),
+            "x".repeat(MAX_INSTRUCTIONS_BYTES + 1),
+        )
+        .unwrap();
         let out = instructions_text(&root).expect("present");
         assert!(
             out.contains("\n\n[CLAUDE.md truncated by Loach at"),
@@ -3245,7 +3273,7 @@ mod tests {
         for file in INSTRUCTIONS_FILES {
             std::os::unix::fs::symlink(&secret, root.join(file)).unwrap();
         }
-        assert_eq!(read_workspace_instructions(&root), None);
+        assert_eq!(read_workspace_instructions(&root, true), None);
     }
 
     /// A LOACHFILE.md saved by a Polish Notepad reads as Polish, not as

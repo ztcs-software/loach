@@ -1267,16 +1267,18 @@ folder without one falls back to the file it may already keep for another
 coding agent — `CLAUDE.md` (Claude Code), else `AGENTS.md` (Codex and
 others) — so a project needn't keep a third copy; only the first of the
 three that's usable is sent, and the model is told a borrowed file was
-written for an agent that may have tools it lacks, such as a shell. It is
-read fresh each turn, so an edit — yours, or one the model makes through
-`write_file` — takes effect on the next send, and it goes through the same
-sandbox as everything else, so a file that is a link out of the folder is
-ignored. The "Working in" notice shows a badge naming the file while one
-is in use, with its first line in the tooltip, and the context usage
-popover (§2.10) lists it on its own row. Anything past 32 KB is cut with a
-note; local models follow short instruction files far better, so keep it
-brief. A blank file counts as none, and the next one in line is used. The
-file goes in fenced between clear start and end markers, ahead of your own
+written for an agent that may have tools it lacks, such as a shell. To
+send only `LOACHFILE.md`, turn off **Use CLAUDE.md or AGENTS.md** under
+Workspace files in **Settings → Tools** (on by default). It is read fresh
+each turn, so an edit — yours, or one the model makes through `write_file`
+— takes effect on the next send, and it goes through the same sandbox as
+everything else, so a file that is a link out of the folder is ignored.
+The "Working in" notice shows a badge naming the file while one is in use,
+with its first line in the tooltip, and the context usage popover (§2.10)
+lists it on its own row. Anything past 32 KB is cut with a note; local
+models follow short instruction files far better, so keep it brief. A
+blank file counts as none, and the next one in line is used. The file goes
+in fenced between clear start and end markers, ahead of your own
 instructions, and the model is told it's the project's text rather than
 yours: it can't grant permissions, yours win when the two conflict, and
 anything in it asking to send files or data elsewhere is to be ignored

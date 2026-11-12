@@ -568,6 +568,10 @@ export interface Settings {
    *  require the chat to have a directory picked — see `Session.workspace_root`.
    *  Picking one turns this on (`chatStore.pickWorkspace`). */
   workspace_tool_enabled: boolean;
+  /** Whether a workspace without a `LOACHFILE.md` uses its `CLAUDE.md`, else
+   *  its `AGENTS.md`, as project instructions. On by default; read by the
+   *  backend on every turn and by `read_workspace_instructions`. */
+  workspace_instructions_fallback: boolean;
   /** Global override for Ollama's `low_vram` option. When `true`, every
    *  Ollama request is sent with `low_vram: true` regardless of per-chat
    *  params or per-model Modelfile defaults — handy on memory-constrained
@@ -664,6 +668,7 @@ export const DEFAULT_SETTINGS: Settings = {
   ip_tool_enabled: false,
   pdf_tool_enabled: false,
   workspace_tool_enabled: false,
+  workspace_instructions_fallback: true,
   low_vram_global: false,
   ollama_keep_alive: "5m",
   thinking_default: true,

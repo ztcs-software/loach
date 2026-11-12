@@ -135,13 +135,21 @@ export function ChatInput({ centered = false }: ChatInputProps) {
   // Keep the project-instructions badge honest (LOACHFILE.md, else
   // CLAUDE.md or AGENTS.md). The file can change under us — the
   // user edits it, or the model writes it mid-turn — so it is re-read when
-  // this chat is opened or gets a folder, and again once a turn in it ends.
+  // this chat is opened or gets a folder, again once a turn in it ends, and
+  // when the CLAUDE.md / AGENTS.md fallback is switched in Settings.
   // The backend reads its own copy every turn regardless; this only feeds
   // the workspace notice and the context usage row.
+  const instructionsFallback = useSettingsStore((s) => s.workspace_instructions_fallback);
   useEffect(() => {
     if (!composerSessionId || !workspaceRoot || streamingThisChat) return;
     void refreshWorkspaceInstructions(composerSessionId);
-  }, [composerSessionId, workspaceRoot, streamingThisChat, refreshWorkspaceInstructions]);
+  }, [
+    composerSessionId,
+    workspaceRoot,
+    streamingThisChat,
+    instructionsFallback,
+    refreshWorkspaceInstructions,
+  ]);
   const composerDraft = useUIStore((s) => s.composerDraft);
   const composerAttachments = useUIStore((s) => s.composerAttachments);
   const composerInsertSeq = useUIStore((s) => s.composerInsertSeq);

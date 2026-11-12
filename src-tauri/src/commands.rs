@@ -382,15 +382,26 @@ pub async fn read_workspace_instructions(
     let Some(stored) = stored else {
         return Ok(None);
     };
+    let fallback = instructions_fallback_on(&state.db);
     tokio::task::spawn_blocking(move || {
         let root = std::path::Path::new(&stored).canonicalize().ok()?;
         if !root.is_dir() {
             return None;
         }
-        crate::tools::fs::read_workspace_instructions(&root)
+        crate::tools::fs::read_workspace_instructions(&root, fallback)
     })
     .await
     .map_err(|e| format!("instructions read task panicked: {e}"))
+}
+
+/// Whether a workspace without a `LOACHFILE.md` borrows its `CLAUDE.md` or
+/// `AGENTS.md`. On by default: only an explicit `"false"` turns it off.
+fn instructions_fallback_on(db: &crate::db::Database) -> bool {
+    db.get_setting(crate::tools::fs::INSTRUCTIONS_FALLBACK_SETTING_KEY)
+        .ok()
+        .flatten()
+        .as_deref()
+        != Some("false")
 }
 
 // ---------- folders ----------
@@ -758,6 +769,7 @@ const WRITABLE_SETTING_KEYS: &[&str] = &[
     "embedding_model",
     "image_scaling",
     "library_image_scaling",
+    "workspace_instructions_fallback",
 ];
 
 /// Whether `key` is a setting the app is allowed to write. Built-in tool
@@ -2757,6 +2769,7 @@ pub async fn chat_stream(
         let (root, instructions) = match stored_root.clone() {
             None => (None, None),
             Some(stored) => {
+                let fallback = instructions_fallback_on(&db);
                 let lookup = tokio::task::spawn_blocking(move || {
                     let root = match std::path::Path::new(&stored).canonicalize() {
                         Ok(p) if p.is_dir() => Some(p),
@@ -2767,9 +2780,9 @@ pub async fn chat_stream(
                             None
                         }
                     };
-                    let instructions = root
-                        .as_deref()
-                        .and_then(crate::tools::fs::read_workspace_instructions);
+                    let instructions = root.as_deref().and_then(|root| {
+                        crate::tools::fs::read_workspace_instructions(root, fallback)
+                    });
                     (root, instructions)
                 });
                 tokio::select! {

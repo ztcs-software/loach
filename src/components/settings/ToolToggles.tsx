@@ -303,8 +303,15 @@ export const TOOL_TOGGLES: {
 
 /** One row in Settings → Tools: icon, title, explanation, and the switch
  *  that flips its setting. Subscribes to just its own boolean so toggling
- *  one tool doesn't re-render the other twelve. */
-export function ToolToggleRow({ tool }: { tool: (typeof TOOL_TOGGLES)[number] }) {
+ *  one tool doesn't re-render the other twelve. `children` are sub-options
+ *  shown under the row. */
+export function ToolToggleRow({
+  tool,
+  children,
+}: {
+  tool: (typeof TOOL_TOGGLES)[number];
+  children?: React.ReactNode;
+}) {
   const enabled = useSettingsStore((s) => s[tool.key]);
   const update = useSettingsStore((s) => s.update);
   const Icon = tool.icon;
@@ -327,6 +334,42 @@ export function ToolToggleRow({ tool }: { tool: (typeof TOOL_TOGGLES)[number] })
           aria-label={enabled ? tool.ariaOff : tool.ariaOn}
         />
       </div>
+      {children}
+    </div>
+  );
+}
+
+/** Sub-option of Workspace files: whether a folder without a LOACHFILE.md
+ *  borrows the CLAUDE.md or AGENTS.md it keeps for another coding agent.
+ *  Not in `TOOL_TOGGLES`, which onboarding also offers as tools. Left
+ *  switchable while Workspace files is off, since picking a folder turns
+ *  that on. */
+export function InstructionsFallbackToggle() {
+  const enabled = useSettingsStore((s) => s.workspace_instructions_fallback);
+  const update = useSettingsStore((s) => s.update);
+  return (
+    <div className="mt-3 ml-5 flex items-start justify-between gap-4 border-l border-foreground/10 pl-3">
+      <div className="min-w-0">
+        <Label>Use CLAUDE.md or AGENTS.md</Label>
+        <p className="mt-1 text-[11px] text-foreground/50">
+          A folder without a <span className="font-mono">LOACHFILE.md</span>{" "}
+          uses its <span className="font-mono">CLAUDE.md</span>, else its{" "}
+          <span className="font-mono">AGENTS.md</span>, as project
+          instructions instead. Those are written for other coding agents, which
+          may have tools the model lacks — turn this off to send only{" "}
+          <span className="font-mono">LOACHFILE.md</span>.
+        </p>
+      </div>
+      <Switch
+        checked={enabled}
+        onCheckedChange={(next) => void update("workspace_instructions_fallback", next)}
+        className="shrink-0"
+        aria-label={
+          enabled
+            ? "Stop using CLAUDE.md or AGENTS.md as project instructions"
+            : "Use CLAUDE.md or AGENTS.md as project instructions"
+        }
+      />
     </div>
   );
 }
