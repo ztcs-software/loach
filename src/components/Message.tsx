@@ -167,9 +167,9 @@ function ApprovalCard({ call }: { call: ToolCallRecord }) {
     ? workspaceApproval(tool, call.arguments, call.existing_bytes, call.script_run)
     : null;
   const destructive = preview?.destructive === true;
-  // A skill script is asked about every time: a standing yes for the tool
-  // would cover any script with any arguments (see `execute_tool_call`).
-  const everyTime = builtin && tool === "run_skill_script";
+  // A script is asked about every time: a standing yes for the tool would
+  // cover any script with any arguments (see `execute_tool_call`).
+  const everyTime = builtin && (tool === "run_skill_script" || tool === "run_script");
   return (
     <div
       role="group"

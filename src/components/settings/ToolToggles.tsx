@@ -6,7 +6,7 @@
 
 import type { LucideIcon } from "lucide-react";
 import type { Settings } from "@/types";
-import { ArrowDownAZ, Binary, Braces, Calculator, CalendarClock, Diff, FileText, Fingerprint, FolderOpen, Globe, Hash, KeyRound, Network, Ruler } from "lucide-react";
+import { ArrowDownAZ, Binary, Braces, Calculator, CalendarClock, Diff, FileText, Fingerprint, FolderOpen, Globe, Hash, KeyRound, Network, Ruler, Terminal } from "lucide-react";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -300,6 +300,34 @@ export const TOOL_TOGGLES: {
     ),
   },
 ];
+
+/** Settings → Tools → Run scripts. Not in `TOOL_TOGGLES`: onboarding offers
+ *  those as in-process utilities, and its All ON preset would switch this
+ *  on with them. */
+export const RUN_SCRIPT_TOGGLE: (typeof TOOL_TOGGLES)[number] = {
+  key: "run_script_enabled",
+  icon: Terminal,
+  title: "Run scripts",
+  blurb: "Run code the model writes, asking every time",
+  ariaOn: "Enable running scripts",
+  ariaOff: "Disable running scripts",
+  description: (
+    <>
+      Exposes a <span className="font-mono">run_script</span> tool: the model
+      can write a Python, bash, Node.js or PowerShell script and run it with
+      what's installed on this computer, or run a{" "}
+      <span className="font-mono">.py</span>, <span className="font-mono">.sh</span>,{" "}
+      <span className="font-mono">.js</span> or <span className="font-mono">.ps1</span>{" "}
+      file in the chat's workspace folder. Every run asks you first, showing
+      the code, the exact command and the folder it runs in — there is no
+      "allow for this chat". A script runs as you, with your access to every
+      file on this computer, not only the chat's folder. It runs in the chat's
+      workspace folder if it has one, otherwise in a temporary folder deleted
+      afterwards, for up to 5 minutes; Stop ends it. Not in Private Chat.
+      Scripts that ship with skills have their own switch in Settings → Skills.
+    </>
+  ),
+};
 
 /** One row in Settings → Tools: icon, title, explanation, and the switch
  *  that flips its setting. Subscribes to just its own boolean so toggling

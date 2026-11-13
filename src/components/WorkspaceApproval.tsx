@@ -1,7 +1,8 @@
 /**
  * Human-readable previews for the workspace filesystem tools' consent
- * prompt (and the expanded tool-call block afterwards), and for a skill
- * script's: the command the backend will run and the folder it runs in.
+ * prompt (and the expanded tool-call block afterwards), and for a script
+ * run's (`run_skill_script`, `run_script`): the code when the model wrote
+ * it, the command the backend will run and the folder it runs in.
  *
  * The generic approval card prints a call's arguments as JSON. For
  * `write_file` that is a whole file as one escaped string, for `edit_file`
@@ -32,9 +33,9 @@ export interface WorkspaceApproval {
   destructive: boolean;
 }
 
-/** Characters of a `write_file` payload shown before the preview is cut —
- *  until "Show all". The full content is still written; this only bounds
- *  the card. */
+/** Characters of a `write_file` payload, or of code to run, shown before
+ *  the preview is cut — until "Show all". The full content is still
+ *  written or run; this only bounds the card. */
 const MAX_PREVIEW_CHARS = 20_000;
 /** Diff rows shown before the rest is summarised — until "Show all". */
 const MAX_DIFF_LINES = 400;
@@ -44,7 +45,7 @@ const MAX_DIFF_LINES = 400;
  *  aren't the shape the backend would accept — the backend will refuse
  *  the call, and the JSON view shows why). `existingBytes` is the backend's
  *  word on what a `write_file` replaces (`ToolCallRecord.existing_bytes`),
- *  `scriptRun` the command a `run_skill_script` runs
+ *  `scriptRun` the command a `run_skill_script` or `run_script` runs
  *  (`ToolCallRecord.script_run`). */
 export function workspaceApproval(
   tool: string,
@@ -59,7 +60,6 @@ export function workspaceApproval(
       const skill = str(o, "skill");
       const script = str(o, "script");
       if (skill === null || script === null || !scriptRun) return null;
-      const stdin = str(o, "stdin");
       return {
         title: (
           <>
@@ -67,26 +67,34 @@ export function workspaceApproval(
           </>
         ),
         body: (
-          <div className="mt-2 space-y-1.5">
-            <pre className="max-h-40 overflow-auto rounded border border-foreground/10 bg-foreground/[0.04] px-2 py-1.5 font-mono text-[11px] leading-snug text-foreground/80 whitespace-pre-wrap break-words">
-              <Revealed text={scriptRun.command} />
-            </pre>
-            <p className="text-[11px] text-foreground/60 [overflow-wrap:anywhere]">
-              In <Mono>{scriptRun.cwd}</Mono>
-              {stdin !== null && stdin.length > 0 && (
-                <> · with {stdin.length.toLocaleString()} characters of input</>
-              )}
-            </p>
-            {stdin !== null && stdin.length > 0 && <StdinPreview text={stdin} />}
-            <p className="flex items-start gap-1.5 text-[11px] text-foreground/70">
-              <Terminal className="mt-px h-3.5 w-3.5 shrink-0 text-amber-500" />
-              <span>
-                The script runs as you, with your access to every file on this
-                computer — not only this chat's folder. Allow it only if you trust
-                the skill it comes from.
-              </span>
-            </p>
-          </div>
+          <ScriptRun run={scriptRun} stdin={str(o, "stdin")} code={null}>
+            Allow it only if you trust the skill it comes from.
+          </ScriptRun>
+        ),
+        destructive: false,
+      };
+    }
+    case "run_script": {
+      // Code the model wrote, or a script in the workspace; the backend
+      // refuses a call with both or neither, and sends no `scriptRun`.
+      const code = str(o, "code");
+      const script = str(o, "script");
+      if ((code === null && script === null) || !scriptRun) return null;
+      return {
+        title:
+          code !== null ? (
+            <>
+              run <Mono>{str(o, "language")}</Mono> code
+            </>
+          ) : (
+            <>
+              run <Mono>{script}</Mono>
+            </>
+          ),
+        body: (
+          <ScriptRun run={scriptRun} stdin={str(o, "stdin")} code={code}>
+            Allow it only if you know what it does.
+          </ScriptRun>
         ),
         destructive: false,
       };
@@ -178,6 +186,74 @@ export function workspaceApproval(
     default:
       return null;
   }
+}
+
+/** A script run as the card shows it: the code when the model wrote it,
+ *  the command, where it runs and with what input, and what allowing it
+ *  means, ending with `children`. */
+function ScriptRun({
+  run,
+  stdin,
+  code,
+  children,
+}: {
+  run: ScriptRunPreview;
+  stdin: string | null;
+  code: string | null;
+  children: ReactNode;
+}) {
+  const input = stdin !== null && stdin.length > 0 ? stdin : null;
+  return (
+    <div className="mt-2 space-y-1.5">
+      {code !== null && <CodePreview code={code} />}
+      <pre className="max-h-40 overflow-auto rounded border border-foreground/10 bg-foreground/[0.04] px-2 py-1.5 font-mono text-[11px] leading-snug text-foreground/80 whitespace-pre-wrap break-words">
+        <Revealed text={run.command} />
+      </pre>
+      <p className="text-[11px] text-foreground/60 [overflow-wrap:anywhere]">
+        {run.cwd === undefined ? (
+          <>In a temporary folder holding the code above, deleted afterwards</>
+        ) : (
+          <>
+            In <Mono>{run.cwd}</Mono>
+            {code !== null && <> · the code above runs from a temporary file, deleted afterwards</>}
+          </>
+        )}
+        {input !== null && <> · with {input.length.toLocaleString()} characters of input</>}
+      </p>
+      {input !== null && <StdinPreview text={input} />}
+      <p className="flex items-start gap-1.5 text-[11px] text-foreground/70">
+        <Terminal className="mt-px h-3.5 w-3.5 shrink-0 text-amber-500" />
+        <span>
+          The script runs as you, with your access to every file on this
+          computer — not only this chat's folder. {children}
+        </span>
+      </p>
+    </div>
+  );
+}
+
+/** Code the model wrote, as it will run — cut until "Show all" past
+ *  {@link MAX_PREVIEW_CHARS}. */
+function CodePreview({ code }: { code: string }) {
+  const [showAll, setShowAll] = useState(false);
+  const lines = useMemo(() => splitLines(code).length, [code]);
+  const clipped = !showAll && code.length > MAX_PREVIEW_CHARS;
+  return (
+    <div>
+      <div className="mb-1 text-[10.5px] uppercase tracking-wider text-foreground/45">
+        Code · {lines} {lines === 1 ? "line" : "lines"}
+      </div>
+      <pre className="max-h-72 overflow-auto rounded border border-foreground/10 bg-foreground/[0.04] px-2 py-1.5 font-mono text-[11px] leading-snug text-foreground/80 whitespace-pre-wrap break-words">
+        <Revealed text={clipped ? code.slice(0, MAX_PREVIEW_CHARS) : code} />
+        {clipped && (
+          <span className="block pt-1 italic text-foreground/50">
+            … preview cut at {MAX_PREVIEW_CHARS.toLocaleString()} characters; all of it runs.{" "}
+            <ShowAll onClick={() => setShowAll(true)} />
+          </span>
+        )}
+      </pre>
+    </div>
+  );
 }
 
 /** Standard input a script would get, first lines only until "Show all". */

@@ -133,14 +133,25 @@ pub(super) async fn execute_tool_call(
         }
         _ => (None, false),
     };
-    // A skill script's card shows the command Loach will actually run, and
-    // where, worked out by the same code that will run it.
-    let script_run = if builtin && tool_name == crate::skills::RUN_SKILL_SCRIPT {
+    // A script's card shows the command Loach will actually run, and where,
+    // worked out by the same code that will run it. Scripts are asked about
+    // every time: a standing yes for either tool would cover any script with
+    // any arguments.
+    let every_time = builtin
+        && matches!(tool_name, crate::skills::RUN_SKILL_SCRIPT | crate::tools::run_script::TOOL_NAME);
+    let script_run = if every_time {
         let (app, root, args) = (ctx.app.clone(), ctx.workspace_root.map(|p| p.to_path_buf()), args.clone());
-        tokio::task::spawn_blocking(move || crate::skills::script_preview(&app, root.as_deref(), &args))
-            .await
-            .ok()
-            .flatten()
+        let tool = tool_name.to_string();
+        tokio::task::spawn_blocking(move || {
+            if tool == crate::skills::RUN_SKILL_SCRIPT {
+                crate::skills::script_preview(&app, root.as_deref(), &args)
+            } else {
+                crate::tools::run_script::preview(root.as_deref(), &args)
+            }
+        })
+        .await
+        .ok()
+        .flatten()
     } else {
         None
     };
@@ -219,10 +230,9 @@ pub(super) async fn execute_tool_call(
                 // Built-ins have no server row to hang an allow-list on, so
                 // the grant is remembered in memory against this chat and
                 // folder. It covers the rest of the conversation and dies
-                // with the app. Never for a skill script: a grant for the
-                // tool would cover any script with any arguments, so each
-                // run is asked about (the card offers no such answer).
-                if let Some(sid) = ctx.session_id.filter(|_| tool_name != crate::skills::RUN_SKILL_SCRIPT) {
+                // with the app. Never for a script (`every_time`): the card
+                // offers no such answer.
+                if let Some(sid) = ctx.session_id.filter(|_| !every_time) {
                     ctx.approvals.grant(sid, &scope, &tool_def.server_id, tool_name);
                 }
             }
@@ -248,12 +258,15 @@ pub(super) async fn execute_tool_call(
     // Honour cancellation while the tool runs — a slow MCP server (GitHub
     // at peak hours, a tool that does its own long fetch) shouldn't lock
     // the user into waiting once they hit Stop.
-    // The skill tools need the chat and Loach's skill folders, which the
-    // MCP dispatcher doesn't carry. A script is raced against Stop like any
-    // other call: dropping it kills the process.
+    // The skill tools need the chat and Loach's skill folders, and
+    // `run_script` an async run, neither of which the MCP dispatcher
+    // carries. A script is raced against Stop like any other call: dropping
+    // it kills the process.
     let dispatch = async {
         if builtin && crate::skills::is_skill_tool(tool_name) {
             Ok(crate::skills::dispatch(ctx.app, ctx.session_id, ctx.workspace_root, tool_name, args).await)
+        } else if builtin && tool_name == crate::tools::run_script::TOOL_NAME {
+            Ok(crate::tools::run_script::dispatch(ctx.db, ctx.workspace_root, args).await)
         } else {
             crate::mcp::dispatch_tool_call(
                 ctx.db,

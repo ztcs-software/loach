@@ -55,6 +55,7 @@ import {
 } from "@/components/settings/shared";
 import {
   InstructionsFallbackToggle,
+  RUN_SCRIPT_TOGGLE,
   TOOL_TOGGLES,
   ToolToggleRow,
 } from "@/components/settings/ToolToggles";
@@ -486,6 +487,7 @@ export function SettingsDialog() {
                     {tool.key === "workspace_tool_enabled" && <InstructionsFallbackToggle />}
                   </ToolToggleRow>
                 ))}
+                <ToolToggleRow tool={RUN_SCRIPT_TOGGLE} />
               </TabsContent>
 
               <TabsContent value="skills" className="mt-0 space-y-6 focus-visible:ring-0 focus-visible:ring-offset-0">

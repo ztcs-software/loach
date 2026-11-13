@@ -857,6 +857,7 @@ const WRITABLE_SETTING_KEYS: &[&str] = &[
     "workspace_instructions_fallback",
     "skills_enabled",
     "skill_scripts_enabled",
+    "run_script_enabled",
 ];
 
 /// Whether `key` is a setting the app is allowed to write. Built-in tool
@@ -2997,6 +2998,13 @@ pub async fn chat_stream(
                 &db,
                 request.workspace_root.is_some(),
             ));
+            // Not in the registry: a run is a process, asked about every
+            // time (`tools::run_script`).
+            if crate::tools::run_script::enabled(&db) {
+                request
+                    .tools
+                    .push(crate::tools::run_script::tool_def(request.workspace_root.is_some()));
+            }
         }
         request.tools.extend(skill_tools);
 

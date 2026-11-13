@@ -72,6 +72,10 @@ open = { version = "5", features = ["shellexecute-on-windows"] }
 # (see `commands::confirm_stdio_spawn`). Already in the tree through that
 # plugin, which also switches on the per-platform backend features.
 rfd = { version = "0.16", default-features = false }
+# The temporary folder code from `run_script` is saved and run in, removed
+# afterwards (`skills/script.rs`). Already in the tree through
+# tauri-plugin-updater; the test suites use it for scratch folders too.
+tempfile = "3"
 
 
 # Backing crates for the rest of the built-in tools. Each is small,
@@ -178,12 +182,6 @@ libc = "0.2"
 gtk = "0.18"
 keyring-core = "1"
 zbus-secret-service-keyring-store = { version = "1", features = ["crypto-rust"] }
-
-[dev-dependencies]
-# Only used by the db.rs test suite, which opens a fresh database in a
-# tempdir per test so we don't trample the user's real `loach.db` and so
-# tests can run in parallel without sharing state.
-tempfile = "3"
 
 [features]
 # this feature is used for production builds or when a dev server is not specified

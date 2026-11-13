@@ -78,11 +78,14 @@ export interface SkillCatalog {
   problems: { path: string; message: string }[];
 }
 
-/** What a `run_skill_script` call will run, worked out by the backend for
- *  its approval card (`skills::script::Preview`). */
+/** What a `run_skill_script` or `run_script` call will run, worked out by
+ *  the backend for its approval card (`skills::script::Preview`). */
 export interface ScriptRunPreview {
+  /** Code the model wrote appears under the name it's saved as
+   *  (`script.py`). */
   command: string;
-  cwd: string;
+  /** Absent: the temporary folder the code is saved in. */
+  cwd?: string;
   /** Characters of standard input, when there is any. */
   stdin_chars?: number;
 }
@@ -340,8 +343,9 @@ export interface ToolCallRecord {
   /** `write_file` only: size of the file the write replaces, or `null`
    *  when it creates one. Absent on records saved before it existed. */
   existing_bytes?: number | null;
-  /** `run_skill_script` only: the command and folder it runs in, as the
-   *  backend worked them out. Absent when the call couldn't run. */
+  /** `run_skill_script` and `run_script` only: the command and folder it
+   *  runs in, as the backend worked them out. Absent when the call couldn't
+   *  run. */
   script_run?: ScriptRunPreview;
   /** True when the reply ended (Stop, error) before this call's result
    *  arrived. `result` then says whether it could have run — a workspace
@@ -471,7 +475,8 @@ export type StreamEvent =
       approval_required?: boolean;
       /** `write_file` only — see `ToolCallRecord.existing_bytes`. */
       existing_bytes?: number | null;
-      /** `run_skill_script` only — see `ToolCallRecord.script_run`. */
+      /** `run_skill_script` and `run_script` only — see
+       *  `ToolCallRecord.script_run`. */
       script_run?: ScriptRunPreview;
     }
   /** Outcome of a tool call. `id` pairs with the matching `tool_call`. */
@@ -611,6 +616,10 @@ export interface Settings {
   skills_enabled: boolean;
   /** Whether `run_skill_script` is offered. Every run still asks. */
   skill_scripts_enabled: boolean;
+  /** Settings → Tools → Run scripts: whether `run_script` is offered, to
+   *  run code the model writes or a script in the chat's workspace. Every
+   *  run still asks. */
+  run_script_enabled: boolean;
   /** Global override for Ollama's `low_vram` option. When `true`, every
    *  Ollama request is sent with `low_vram: true` regardless of per-chat
    *  params or per-model Modelfile defaults — handy on memory-constrained
@@ -710,6 +719,7 @@ export const DEFAULT_SETTINGS: Settings = {
   workspace_instructions_fallback: true,
   skills_enabled: false,
   skill_scripts_enabled: false,
+  run_script_enabled: false,
   low_vram_global: false,
   ollama_keep_alive: "5m",
   thinking_default: true,

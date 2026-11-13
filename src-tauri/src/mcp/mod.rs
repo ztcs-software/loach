@@ -502,16 +502,19 @@ fn keeps_session(p: &PooledSession, err: &anyhow::Error) -> bool {
 /// the dispatch re-reads the row, so a transient error here (a busy read
 /// pool) would otherwise run the tool unasked.
 ///
-/// The one built-in exception is the workspace tools that write to disk.
-/// "Local and in-process" is why the others are safe to run unattended;
-/// it is not why a write is, since a write changes the user's own files.
+/// The built-in exceptions are the workspace tools that write to disk, and
+/// the two that run scripts (`run_skill_script`, `run_script`), which ask
+/// every time. "Local and in-process" is why the others are safe to run
+/// unattended; it is not why a write is, since a write changes the user's
+/// own files, nor a script, which runs as the user.
 /// The per-turn "Always allow" answer is handled by the caller
 /// (`providers::execute_tool_call`) rather than here — built-ins have no
 /// server row to record an allow-list on.
 pub fn needs_approval(db: &Database, server_id: &str, tool_name: &str) -> bool {
     if server_id == crate::tools::builtin::BUILTIN_SERVER_ID {
         return crate::tools::fs::requires_approval(tool_name)
-            || tool_name == crate::skills::RUN_SKILL_SCRIPT;
+            || tool_name == crate::skills::RUN_SKILL_SCRIPT
+            || tool_name == crate::tools::run_script::TOOL_NAME;
     }
     server_needs_approval(db.list_mcp_servers(), server_id, tool_name)
 }

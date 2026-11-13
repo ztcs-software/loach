@@ -1,6 +1,6 @@
 //! Backend "tools" that augment a chat with out-of-band capabilities.
 //!
-//! Three flavours live here:
+//! Four flavours live here:
 //! * [`fetch_url`] — user-driven URL prefetcher. The frontend scans the
 //!   user message, calls `fetch_url` for each link, and inlines the
 //!   returned text into the outgoing prompt before streaming starts.
@@ -17,6 +17,9 @@
 //!   They are the only built-ins that touch the disk, the only ones that
 //!   need context beyond their arguments, and the only ones whose
 //!   mutating half goes through the per-call approval prompt.
+//! * [`run_script`] — runs code the model wrote, or a script in the
+//!   workspace, asking every time. Outside the registry: a run is a
+//!   process, not an in-process call.
 
 pub mod base64_tool;
 pub mod builtin;
@@ -30,6 +33,7 @@ pub mod hash;
 pub mod ip_tool;
 pub mod json_tool;
 pub mod pdf;
+pub mod run_script;
 pub mod sort_tool;
 pub mod unit_convert;
 pub mod uuid_gen;

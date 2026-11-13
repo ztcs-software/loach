@@ -1,17 +1,22 @@
-//! `run_skill_script`: runs a script that ships with a skill. The only
-//! place Loach starts a program the model picked, so it is narrow on
+//! `run_skill_script`: runs a script that ships with a skill. The same
+//! runner serves `run_script` ([`crate::tools::run_script`]), which runs
+//! code the model wrote or a script in the chat's workspace folder. The
+//! only place Loach starts a program the model picked, so it is narrow on
 //! purpose:
 //!
-//! * **Only a skill's own files.** The script is resolved through the
-//!   workspace sandbox with the skill's folder as the root — no absolute
-//!   paths, no `..`, no link out of the folder.
+//! * **Only checked files.** A script is resolved through the workspace
+//!   sandbox with the skill's folder — or, for `run_script`, the workspace —
+//!   as the root: no absolute paths, no `..`, no link out of the folder.
+//!   Code the model wrote is saved to a temporary folder of its own, deleted
+//!   when the run ends.
 //! * **No shell.** The interpreter comes from the extension
 //!   ([`interpreter`]) and the arguments are handed over as an argv, so
 //!   nothing in them is expanded, piped or redirected.
 //! * **Asked every time.** `mcp::needs_approval` parks every call on the
-//!   approval card, which shows the exact command and folder ([`Preview`]),
-//!   and `providers::execute_tool_call` never records "allow for this chat"
-//!   for it.
+//!   approval card, which shows the exact command and folder ([`Preview`])
+//!   — and the code, when the model wrote it — and
+//!   `providers::execute_tool_call` never records "allow for this chat"
+//!   for either tool.
 //! * **Bounded.** [`TIMEOUT`], capped output, no terminal and no input
 //!   beyond `stdin`. Stop drops the run, and `kill_on_drop` kills the
 //!   process. Only that process, though: anything it started itself and
@@ -35,6 +40,9 @@ pub const TIMEOUT: Duration = Duration::from_secs(300);
 const MAX_ARGS: usize = 64;
 const MAX_ARGS_BYTES: usize = 16 * 1024;
 const MAX_STDIN_BYTES: usize = 1024 * 1024;
+const MAX_CODE_BYTES: usize = 1024 * 1024;
+/// The languages `run_script` takes code in, as its schema lists them.
+pub const LANGUAGES: &[&str] = &["python", "bash", "node", "powershell"];
 /// Output kept per stream. The model gets less (the per-result cap); the
 /// transcript gets this much.
 const MAX_CAPTURE_BYTES: usize = 256 * 1024;
@@ -81,8 +89,12 @@ pub fn input_schema(skills: &[&str]) -> Value {
 /// What the approval card shows: the command as it will run, and where.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Preview {
+    /// Code the model wrote appears here under the name it's saved as
+    /// (`script.py`); the card shows the code itself next to it.
     pub command: String,
-    pub cwd: String,
+    /// `None`: the temporary folder the code is saved in.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
     /// Characters of standard input, when there is any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stdin_chars: Option<usize>,
@@ -92,9 +104,23 @@ pub struct Preview {
 #[derive(Debug)]
 pub struct Plan {
     program: String,
+    /// The interpreter's own flags, ahead of the script.
+    lead: &'static [&'static str],
+    script: Script,
+    /// The script's arguments.
     args: Vec<String>,
-    cwd: PathBuf,
+    /// `None`: the temporary folder the code is saved in.
+    cwd: Option<PathBuf>,
     stdin: Option<String>,
+}
+
+#[derive(Debug)]
+enum Script {
+    /// A checked file on disk.
+    File(PathBuf),
+    /// Code the model wrote, saved as `name` in a temporary folder when the
+    /// run starts.
+    Code { name: &'static str, text: String },
 }
 
 /// The interpreter for a script, and the arguments that go before it.
@@ -114,20 +140,78 @@ fn interpreter(script: &Path) -> Option<(&'static str, &'static [&'static str])>
     })
 }
 
+/// The name code in `language` is saved as; its extension picks the
+/// interpreter. Takes the names models tend to use besides [`LANGUAGES`].
+fn code_file(language: &str) -> Option<&'static str> {
+    Some(match language.trim().to_ascii_lowercase().as_str() {
+        "python" | "python3" | "py" => "script.py",
+        "bash" | "sh" => "script.sh",
+        "node" | "javascript" | "js" => "script.js",
+        "powershell" | "pwsh" | "ps1" => "script.ps1",
+        _ => return None,
+    })
+}
+
 /// Check a `run_skill_script` call against the skill's folder.
 pub fn plan(skill_dir: &Path, args: &Value, workspace_root: Option<&Path>) -> Result<Plan, String> {
     let Some(rel) = args.get("script").and_then(Value::as_str) else {
         return Err("missing required `script` argument (string)".into());
     };
-    let script = crate::tools::fs::resolve_read(skill_dir, rel)?;
+    plan_file(skill_dir, rel, args, workspace_root.unwrap_or(skill_dir))
+}
+
+/// A run of the script at `rel` inside `root`, in `cwd`, with the call's
+/// `args` and `stdin`.
+pub fn plan_file(root: &Path, rel: &str, args: &Value, cwd: &Path) -> Result<Plan, String> {
+    let script = crate::tools::fs::resolve_read(root, rel)?;
     if !script.is_file() {
-        return Err(format!("`{rel}` isn't a file in the skill's folder."));
+        return Err(format!("`{rel}` isn't a file."));
     }
     let Some((program, lead)) = interpreter(&script) else {
         return Err(format!(
             "Loach runs .py, .sh, .js, .mjs, .cjs and .ps1 scripts, and `{rel}` isn't one of them."
         ));
     };
+    let (args, stdin) = inputs(args)?;
+    Ok(Plan {
+        program: program.to_string(),
+        lead,
+        script: Script::File(script),
+        args,
+        // The display form: Windows won't run a process in a `\\?\` folder.
+        cwd: Some(dunce::simplified(cwd).to_path_buf()),
+        stdin,
+    })
+}
+
+/// A run of code the model wrote, with the call's `args` and `stdin`, in
+/// `cwd` — or, with none, in the temporary folder the code is saved in.
+pub fn plan_code(language: &str, code: &str, args: &Value, cwd: Option<&Path>) -> Result<Plan, String> {
+    let Some(name) = code_file(language) else {
+        return Err(format!(
+            "Loach runs python, bash, node and powershell code, and `{language}` isn't one of them."
+        ));
+    };
+    if code.trim().is_empty() {
+        return Err("`code` is empty.".into());
+    }
+    if code.len() > MAX_CODE_BYTES {
+        return Err("`code` is limited to 1 MB".into());
+    }
+    let (program, lead) = interpreter(Path::new(name)).expect("every code file has an interpreter");
+    let (args, stdin) = inputs(args)?;
+    Ok(Plan {
+        program: program.to_string(),
+        lead,
+        script: Script::Code { name, text: code.to_string() },
+        args,
+        cwd: cwd.map(|p| dunce::simplified(p).to_path_buf()),
+        stdin,
+    })
+}
+
+/// A call's `args` and `stdin`, checked.
+fn inputs(args: &Value) -> Result<(Vec<String>, Option<String>), String> {
     let extra: Vec<String> = match args.get("args") {
         None | Some(Value::Null) => Vec::new(),
         Some(Value::Array(items)) => items
@@ -154,16 +238,7 @@ pub fn plan(skill_dir: &Path, args: &Value, workspace_root: Option<&Path>) -> Re
         Some(Value::String(_)) => return Err("`stdin` is limited to 1 MB".into()),
         Some(_) => return Err("`stdin` must be a string".into()),
     };
-    let mut argv: Vec<String> = lead.iter().map(|s| s.to_string()).collect();
-    argv.push(crate::tools::fs::display_path(&script));
-    argv.extend(extra);
-    Ok(Plan {
-        program: program.to_string(),
-        args: argv,
-        // The display form: Windows won't run a process in a `\\?\` folder.
-        cwd: dunce::simplified(workspace_root.unwrap_or(skill_dir)).to_path_buf(),
-        stdin,
-    })
+    Ok((extra, stdin))
 }
 
 /// One argument as a reader would type it: quoted when it has spaces or
@@ -177,17 +252,33 @@ fn shown(arg: &str) -> String {
 
 impl Plan {
     pub fn preview(&self) -> Preview {
+        // Code shows as the name it's saved under: its folder doesn't exist
+        // until the run starts.
+        let script = match &self.script {
+            Script::File(path) => crate::tools::fs::display_path(path),
+            Script::Code { name, .. } => name.to_string(),
+        };
         let mut command = shown(&self.program);
-        for a in &self.args {
+        for a in self.lead.iter().copied().chain([script.as_str()]).chain(self.args.iter().map(String::as_str)) {
             command.push(' ');
             command.push_str(&shown(a));
         }
         Preview {
             command,
-            cwd: self.cwd.to_string_lossy().into_owned(),
+            cwd: self.cwd.as_ref().map(|p| p.to_string_lossy().into_owned()),
             stdin_chars: self.stdin.as_ref().map(|s| s.chars().count()),
         }
     }
+}
+
+/// Save code in a temporary folder of its own, removed when the returned
+/// guard drops. Windows PowerShell reads a script without a byte-order mark
+/// in the ANSI code page, so a `.ps1` gets one.
+fn save_code(name: &str, text: &str) -> std::io::Result<tempfile::TempDir> {
+    let dir = tempfile::Builder::new().prefix("loach-script-").tempdir()?;
+    let bom = if name.ends_with(".ps1") { "\u{feff}" } else { "" };
+    std::fs::write(dir.path().join(name), format!("{bom}{text}"))?;
+    Ok(dir)
 }
 
 #[derive(Default)]
@@ -227,10 +318,21 @@ impl Capture {
 }
 
 pub async fn run(plan: Plan) -> McpCallResult {
+    // Code goes in a folder of its own, removed when `saved` drops: when the
+    // run ends, however it ends — Stop drops this future, the process first.
+    let (script, saved) = match &plan.script {
+        Script::File(path) => (crate::tools::fs::display_path(path), None),
+        Script::Code { name, text } => match save_code(name, text) {
+            Ok(dir) => (dir.path().join(name).to_string_lossy().into_owned(), Some(dir)),
+            Err(e) => return failed(format!("Couldn't save the code to a temporary file: {e}")),
+        },
+    };
     let mut cmd = tokio::process::Command::new(&plan.program);
-    cmd.args(&plan.args)
-        .current_dir(&plan.cwd)
-        .stdin(if plan.stdin.is_some() { Stdio::piped() } else { Stdio::null() })
+    cmd.args(plan.lead).arg(&script).args(&plan.args);
+    if let Some(cwd) = plan.cwd.as_deref().or(saved.as_ref().map(tempfile::TempDir::path)) {
+        cmd.current_dir(cwd);
+    }
+    cmd.stdin(if plan.stdin.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         // Python on Windows writes a pipe in the ANSI code page and fails on
@@ -325,20 +427,38 @@ mod tests {
         let dir = tmp.path().canonicalize().unwrap();
         let plan = plan(&dir, &json!({ "script": "scripts/run.sh", "args": ["a b", 3] }), None).unwrap();
         assert_eq!(plan.program, "bash");
-        assert_eq!(plan.args.len(), 3);
-        assert!(plan.args[0].ends_with("run.sh"));
-        assert_eq!(plan.args[1..], ["a b".to_string(), "3".to_string()]);
-        assert_eq!(plan.cwd, dunce::simplified(&dir));
+        assert!(matches!(&plan.script, Script::File(p) if p.ends_with("run.sh")));
+        assert_eq!(plan.args, ["a b".to_string(), "3".to_string()]);
+        assert_eq!(plan.cwd.as_deref(), Some(dunce::simplified(&dir)));
         let preview = plan.preview();
         assert!(preview.command.starts_with("bash "));
-        assert!(preview.command.ends_with(" \"a b\" 3"));
+        assert!(preview.command.ends_with("run.sh \"a b\" 3"));
+        assert_eq!(preview.cwd, Some(dunce::simplified(&dir).to_string_lossy().into_owned()));
         assert_eq!(preview.stdin_chars, None);
 
         let ws = TempDir::new().unwrap();
         let ws_dir = ws.path().canonicalize().unwrap();
         let plan = super::plan(&dir, &json!({ "script": "scripts/run.sh", "stdin": "xyz" }), Some(&ws_dir)).unwrap();
-        assert_eq!(plan.cwd, dunce::simplified(&ws_dir));
+        assert_eq!(plan.cwd.as_deref(), Some(dunce::simplified(&ws_dir)));
         assert_eq!(plan.preview().stdin_chars, Some(3));
+    }
+
+    #[test]
+    fn plans_code_under_the_name_it_is_saved_as() {
+        let plan = plan_code("Python", "print(1)", &json!({ "args": ["x"] }), None).unwrap();
+        let python = if cfg!(windows) { "python" } else { "python3" };
+        assert_eq!(plan.preview().command, format!("{python} script.py x"));
+        assert_eq!(plan.preview().cwd, None);
+        let ws = TempDir::new().unwrap();
+        let plan = plan_code("pwsh", "Write-Output 1", &json!({}), Some(ws.path())).unwrap();
+        assert!(plan.preview().command.ends_with(" -File script.ps1"));
+        assert_eq!(plan.cwd.as_deref(), Some(dunce::simplified(ws.path())));
+        for language in LANGUAGES {
+            assert!(plan_code(language, "x", &json!({}), None).is_ok(), "{language}");
+        }
+        assert!(plan_code("ruby", "x", &json!({}), None).unwrap_err().contains("isn't one of them"));
+        assert!(plan_code("bash", " \n", &json!({}), None).unwrap_err().contains("empty"));
+        assert!(plan_code("bash", "x", &json!({ "stdin": 5 }), None).unwrap_err().contains("string"));
     }
 
     #[test]
@@ -370,8 +490,10 @@ mod tests {
     async fn a_missing_interpreter_says_so() {
         let plan = Plan {
             program: "loach-no-such-program".into(),
+            lead: &[],
+            script: Script::File(std::env::temp_dir()),
             args: Vec::new(),
-            cwd: std::env::temp_dir(),
+            cwd: Some(std::env::temp_dir()),
             stdin: None,
         };
         let r = run(plan).await;
@@ -416,5 +538,22 @@ mod tests {
         assert!(r.content_text.starts_with("Exit code 3."), "{}", r.content_text);
         assert!(r.content_text.contains("--- stdout ---\ngot input and arg"), "{}", r.content_text);
         assert!(r.content_text.contains("--- stderr ---\noops"), "{}", r.content_text);
+    }
+
+    #[tokio::test]
+    async fn runs_code_in_a_folder_it_removes_afterwards() {
+        // On Windows, the length also shows the code was read as UTF-8.
+        let (language, code, rest) = if cfg!(windows) {
+            ("powershell", "(Get-Location).Path\n'zażółć'.Length\n$args[0]\n", vec!["6", "arg"])
+        } else {
+            ("bash", "pwd\necho \"$1\"\n", vec!["arg"])
+        };
+        let plan = plan_code(language, code, &json!({ "args": ["arg"] }), None).unwrap();
+        let r = run(plan).await;
+        assert!(!r.is_error, "{}", r.content_text);
+        let out: Vec<&str> = r.content_text.split("--- stdout ---\n").nth(1).unwrap().lines().collect();
+        assert!(out[0].contains("loach-script-"), "{}", r.content_text);
+        assert!(!Path::new(out[0]).exists());
+        assert_eq!(out[1..], rest);
     }
 }

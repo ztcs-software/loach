@@ -1100,7 +1100,8 @@ a server skips the prompt for all of its tools; the server row shows an
 *Auto-approve* badge so the exception stays visible. Built-in tools
 (§9.3) never ask — they run in-process, with no network access — except
 the four workspace file tools that change files (§9.4), which ask unless
-you've allowed them for the chat.
+you've allowed them for the chat, and the tools that run scripts (§9.5,
+§9.6), which ask every time.
 
 ### 9.3 Built-in tools
 
@@ -1344,6 +1345,29 @@ workspace folder if it has one, otherwise in the skill's folder, with no
 terminal, for up to 5 minutes; Stop ends it (but not programs it started
 and left running). The model gets the exit code and the output, capped at
 32 KB like any tool result.
+
+### 9.6 Scripts
+
+With **Run scripts** on in **Settings → Tools** (off by default, and not
+part of onboarding's tool presets), the model can run a script in any chat
+through `run_script` — not only one that ships with a skill (§9.5). It can
+write the code itself, in Python, bash, Node.js or PowerShell, or, in a chat
+with a workspace folder (§9.4), run a `.py`, `.sh`, `.js`/`.mjs`/`.cjs` or
+`.ps1` file from that folder; either way it uses what's installed on your
+computer. Code it writes is saved to a temporary file, deleted after the run.
+**Every run asks first**: the card shows the code, the exact command, the
+folder it runs in and any input, and there is no "allow for this chat".
+
+The rest works as for skill scripts: the arguments are passed as they are,
+with no shell in between; the script runs as you, with your access to every
+file on the computer; it gets up to 5 minutes with no terminal, and Stop
+ends it (but not programs it started and left running). It runs in the
+chat's workspace folder if it has one, otherwise in the temporary folder —
+so files it writes there are gone afterwards; give the chat a folder to keep
+them. The model gets the exit code and the output, capped at 32 KB like any
+tool result, and what a script prints becomes part of the conversation: with
+a cloud provider, it's sent there like any other message. Not in Private
+Chat.
 
 ---
 
