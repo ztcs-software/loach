@@ -43,7 +43,7 @@ Behind a calm, beautifully crafted UI sits a rich feature set - ready when you n
 - **Default model selector** - pick the model new chats open with - a specific one, or whichever you used last (overall or per provider) - no need to re-select on each fresh conversation.
 - **Model preloading** - optionally warm your default local model into VRAM at launch so the first message streams faster. 
 - **Per-chat parameters** - set temperature, top_k, top_p, min_p, max tokens, context length, per-chat system prompts and more. Layered over Modelfile and per-model defaults.
-- **Low VRAM mode** - global or per-chat toggle that sends Ollama's `low_vram` flag to every request. Useful on lower-spec devices. 
+- **Image scaling** - images are scaled down before they're sent (1024 px on the longest side by default), saving tokens; the original stays in your chat. Change it or turn it off for the whole app, the Library, a Space or a single chat.
 
 #### Organizing chats & content
 - **Spaces** - group chats around a project, with shared instructions, reference sources and memory. 
@@ -63,13 +63,16 @@ Behind a calm, beautifully crafted UI sits a rich feature set - ready when you n
 - **Slash commands** - type `/` in the composer for a command palette: `/fork`, `/regenerate`, `/compact`, `/private`, `/model`, `/persona`, `/snippet`, `/remember` and more.
 - **Personas and Tones** - pick a role (Code Reviewer, Translator, ELI5...) and delivery style (Formal, Casual, Direct, Detailed...).
 - **Context management** - a live bar under the composer shows how full the context window is; click it for a breakdown and to compact older turns into a summary that frees space.
+- **Voice** - dictate into the composer with the mic button, and have any reply read aloud from its menu, using your system's speech engine (where the system provides one).
 - **Import / export context** - copy a chat's context as Markdown, optionally summarized to compact it, and paste it - or any text - back into any chat's context.
 - **LaTeX math** - replies typeset with KaTeX: `$$…$$`, `$…$`, `\(…\)`, `\[…\]` and ` ```math ` fences render out of the box. `$` doubles as a currency sign, so `$…$` only typesets when the span actually reads as math - "it costs $5 and $10" stays prose. KaTeX ships inside the app (no network access) and is only read from disk the first time a reply contains math.
 
 #### Model tools & capabilities
 - **Tools** - let models call local tools including calculate, date/time, count, hash, UUID, base64, JSON, unit convert, text diff, sort, IP math and PDF generation. 
 - **PDF generation** - the built-in pdf tool turns a model's structured spec (headings, lists, tables, page breaks) into a real PDF attached to the reply.
-- **Work in folders** - add a folder to a chat from the composer's **+** menu and the model can list, find, read, search and edit the files in it - sandboxed to that folder, with no shell - showing you the change and asking before it writes, edits, moves or deletes anything unless you allow that tool for the chat. A `LOACHFILE.md` at the folder root adds the project's own instructions to every turn ([sample](docs/LOACHFILE.md.sample)), falling back to an existing `CLAUDE.md` or `AGENTS.md`. With a cloud provider, files the model reads are sent to it like any other message.
+- **Work in folders** - add a folder to a chat from the composer's **+** menu and the model can list, find, read, search and edit the files in it - the file tools are sandboxed to that folder and have no shell - showing you the change and asking before it writes, edits, moves or deletes anything unless you allow that tool for the chat. A `LOACHFILE.md` at the folder root adds the project's own instructions to every turn ([sample](docs/LOACHFILE.md.sample)), falling back to an existing `CLAUDE.md` or `AGENTS.md`. With a cloud provider, files the model reads are sent to it like any other message.
+- **Run scripts** - opt-in (**Settings → Tools**): the model can run Python, bash, Node.js or PowerShell code it writes, or a script from the chat's folder, using what's installed on your computer. Every run shows you the code and command and asks first; a script runs as you, with access to all your files, so it's off by default.
+- **Agent Skills** - opt-in (**Settings → Skills**): install skills in the open [Agent Skills](https://agentskills.io) format - instructions, references and scripts for a kind of task - and the model loads the one that fits, or you load one with `/skill`. Skills from `~/.agents/skills`, shared with other agents, show up too.
 - **MCP support** - register Model Context Protocol servers over Streamable HTTP or as local stdio processes (`npx`, `uvx`, …; a native dialog asks before any local program starts), test the handshake, inspect the tools they provide, and approve each tool call in the chat before it runs - or mark trusted tools as Always allow. 
 - **Web fetch** - opt-in: add URLs to messages (up to 5) and they will be fetched, sanitized and inlined to context. 
 - **Temporal awareness** - inject current date, weekday and timezone into the system prompt so models can answer to "what day is it today?".
@@ -141,7 +144,7 @@ Auto-updates are delivered through Loach's own signed updater (independent of Ap
 - **Rust 1.90+** via [`rustup`](https://rustup.rs) — the dependency tree's minimum; CI builds on 1.90.0
 - Platform build tooling — install once via the official Tauri prerequisites guide: <https://tauri.app/start/prerequisites/>
   - **Windows**: Microsoft Visual Studio Build Tools, WebView2 runtime (preinstalled on Windows 11)
-  - **Linux**: `libwebkit2gtk-4.1-dev`, `libappindicator3-dev` (or `libayatana-appindicator3-dev`), `librsvg2-dev`, `build-essential`, `libssl-dev`, `pkg-config`; bundling `.AppImage` / `.rpm` installers also needs `patchelf`, `rpm`, `file`, `wget` and `desktop-file-utils`. No Secret Service headers are needed — the keyring backend is pure Rust.
+  - **Linux**: `libwebkit2gtk-4.1-dev`, `libappindicator3-dev` (or `libayatana-appindicator3-dev`), `librsvg2-dev`, `build-essential`, `libssl-dev`, `pkg-config`; bundling `.AppImage` / `.rpm` installers also needs `patchelf`, `rpm`, `file` and `wget`. No Secret Service headers are needed — the keyring backend is pure Rust.
   - **macOS**: Xcode Command Line Tools (`xcode-select --install`)
 
 #### Clone and install
@@ -238,12 +241,13 @@ Only one OpenAI-compatible endpoint is active at a time — switch the base URL 
 | OpenAI API key | OS credential manager (Windows Credential Manager / Linux Secret Service / macOS Keychain) |
 | App-lock hash + hint | OS credential manager — same store, separate entry |
 | App-lock marker (whether a lock is set, its method, PIN length and whether it has a hint — no hashes) and failed-unlock count | `app_lock.json` and `app_lock_attempts.json` next to `loach.db` |
+| Skills you import | `skills` folder next to `loach.db`; skills in `~/.agents/skills` are read where they are |
 | Attached files (images, text, PDF, DOCX) and PDFs the pdf tool generates | Stored with their message in `loach.db`; no separate file store |
 | App data dir on Windows | `%APPDATA%\dev.loach.app\` |
 | App data dir on Linux | `~/.local/share/dev.loach.app/` |
 | App data dir on macOS | `~/Library/Application Support/dev.loach.app/` |
 
-Loach launches and works completely offline as long as you stick to local providers. The **Models** library, **Spaces**, the **Library**, **Snippets**, search, parameter sidebar, app lock, and chat history are all available without network access. Only chat generations against remote endpoints (OpenAI, Groq, OpenRouter, …), model pulls, web fetch and Library links, embeddings from a remote endpoint, remote MCP servers (and the first launch of an `npx`/`uvx` one, which downloads its package) and update checks require internet connection.
+Loach launches and works completely offline as long as you stick to local providers. The **Models** library, **Spaces**, the **Library**, **Snippets**, search, parameter sidebar, app lock, and chat history are all available without network access. Only chat generations against remote endpoints (OpenAI, Groq, OpenRouter, …), model pulls, web fetch and Library links, embeddings from a remote endpoint, remote MCP servers (and the first launch of an `npx`/`uvx` one, which downloads its package), update checks and, depending on your system, voice dictation require internet connection.
 
 ---
 

@@ -113,9 +113,11 @@ transcript of messages.
   is marked *Interrupted*, saying whether it can have run: one stopped
   while running may still have finished (a workspace write that was under
   way completes on disk regardless).
-  An MCP call that needs your approval shows an **approval card** above
-  the block — server, tool, arguments, and **Allow once**, **Always allow
-  <tool>** and **Deny** — and the reply waits until you answer (§9.2).
+  A call that needs your approval — an MCP tool (§9.2), a workspace change
+  (§9.4) or a script (§9.5, §9.6) — shows an **approval card** above the
+  block with **Allow once**, **Deny**, and a standing yes: **Always allow
+  <tool>** for an MCP tool, **Allow <tool> for this chat** for a workspace
+  tool, none for a script. The reply waits until you answer.
 - **Metrics chip** — every finished assistant turn shows the completion
   token count, wall-clock time, and tokens/sec. Ollama reports the count
   itself; OpenAI-compatible endpoints do so only when they send a `usage`
@@ -126,7 +128,7 @@ transcript of messages.
   language-aware syntax highlighting work out of the box.
 - **LaTeX math** — formulas typeset with KaTeX, no opt-in required.
   `$$…$$`, `$…$`, `\(…\)`, `\[…\]` and ``` ```math ``` fences all render,
-  and a `$$…$$` written on a single line is promoted to a centred display
+  and a `$$…$$` alone on its own line is promoted to a centred display
   block. TeX that doesn't parse degrades to showing its own source (parse
   error on hover) rather than flashing an error, which keeps half-typed
   formulas quiet mid-stream. Applies to assistant replies in the transcript
@@ -154,6 +156,8 @@ transcript of messages.
   left byte-for-byte intact.
 - **Long-prompt clamp** — user bubbles that paste in dozens of lines clamp
   to ten lines with a **Show more** toggle so the answer stays visible.
+- **Long chats** — only the last 50 messages are drawn at first; **Show
+  earlier messages (N)** at the top brings back the rest.
 - **Right-click menu** — right-click any bubble for a contextual menu with
   **Copy** (the current selection inside that bubble, or the full message
   when nothing is selected) and **Select all** (highlights just the body
@@ -166,6 +170,12 @@ transcript of messages.
   bubble; **Pin this response** (§2.11), **Fork from here** (§2.6) and
   **Save to Library** (§4) on assistant replies, and **Save attachments to
   Library** on user prompts that carry files.
+- **Read aloud** — in an assistant reply's `…` menu: reads the reply with
+  your system's voices, skipping code blocks and display math, and turns
+  into **Stop reading** while it plays (the `…` button shows a speaker).
+  One reply at a time; switching chats or locking stops it. Not while that
+  reply is still streaming, and absent where the system has no speech
+  engine (some Linux builds).
 
 ### 2.2 Composer
 
@@ -183,11 +193,12 @@ The input box at the bottom of every chat.
 - **Suggestion chips** — on the welcome hero screen of an empty chat,
   shortcuts seed the composer with starter prompts ("Explain a concept",
   "Write code", "Summarize a file", "Brainstorm").
-- **Chip row** — the active persona and tone each show as a chip above the
-  input, sharing the row with the attachment chips. Persona and tone are
-  accent-tinted and stick across sends; file chips are neutral and leave on
-  send, with a divider between the two groups. Click a chip's ✕ to clear it
-  (swap persona or tone from the parameters panel). Clearing a tone clears
+- **Chip row** — the active persona and tone, the skills loaded in the chat
+  (§9.5) and its linked Library sources (§4.3) show as chips above the
+  input, sharing the row with the attachment chips. These stick across
+  sends; file chips are neutral and leave on send, with a divider between
+  the two groups. Click a chip's ✕ to clear it (swap persona or tone from
+  the parameters panel). Clearing a tone clears
   it for *this* chat only — it's
   written as a per-chat override rather than an unset, which would fall
   straight back through to the **Settings → General** default and put the
@@ -199,13 +210,33 @@ The input box at the bottom of every chat.
   (or the Space page) they were written in, so switching chats never
   carries them along. Drafts are kept in memory only; quitting Loach drops
   them.
+- **Paste files** — `Ctrl/Cmd+V` with a file or screenshot on the
+  clipboard attaches it like a drop. When the clipboard holds text as well
+  as a picture of it (cells copied from Excel, a paragraph from Word), the
+  text is pasted instead.
+- **Voice dictation** — the microphone button next to Send turns speech
+  into text in the message box, using the system's speech recognition.
+  It's shown only where the web view offers one (most Linux builds
+  don't).
+- **Right-click menu** — right-click the message box for **Cut**,
+  **Copy**, **Paste** and **Select All**.
 
 ### 2.3 Attachments
 
 Drop any file up to **20 MB** into the composer. Loach handles three flavours:
 
 - **Images** (PNG, JPEG, WEBP, GIF) — sent as base64 to vision-capable
-  models alongside the text turn.
+  models alongside the text turn, scaled down first: by default to 1024 px
+  on the longest side, since a full-size photo costs thousands of image
+  tokens and many local models read it worse, not better. Smaller images
+  go as they are; a scaled JPEG stays JPEG, anything else becomes PNG. The
+  original stays in your chat. Choose **Scale down** (a longest side in
+  px, or a percentage) or **Original** in **Settings → Features → Image
+  scaling**; a Space (its **Settings** tab) and a chat (the parameters
+  panel's **Images** section) can set their own, and **Settings → Library
+  → Images** covers Library images. The most specific setting wins — chat,
+  then Space, then (for Library images) Library, then the app — and
+  **Default** follows the next one up.
 - **Text and code** (one of ~70 recognised extensions, plus anything with a
   `text/*` MIME) — read verbatim and inlined into the prompt as a fenced
   code block. UTF-16 files and legacy Windows code pages (Windows-1250 /
@@ -218,7 +249,8 @@ also tells the model how many pages it got). The file chip flags
 truncation; the model is also told inline.
 
 Total inlined content per message is capped at **500,000 characters** across
-attachments + URL fetches + the prompt itself. An attachment that only partly
+attachments + URL fetches + the prompt itself. Attachments are inlined
+first and fetched pages fill what's left. An attachment that only partly
 fits is clipped with a note to the model (the chip shows no *truncated* flag
 for this), and anything with no room left is listed by name in a trailing
 footer so the model knows it exists.
@@ -251,9 +283,10 @@ FIFO queue:
 - A waiting chat shows a **Waiting for other chats to finish…** banner in
   its transcript with **Respond now** to jump the queue and cancel the
   current runner (and **Cancel** to withdraw the request).
-- A reply waiting on a tool approval card (§9.2, §9.4) keeps its turn, so
-  other chats queue behind it until you answer the card — or use
-  **Respond now** in a waiting chat, which cancels the waiting reply.
+- A reply waiting on a tool approval card (§9.2, §9.4–9.6) keeps its turn,
+  so other chats queue behind it until you answer the card. A waiting
+  chat's banner then names the chat that needs you, with **Go to it**; or
+  use **Respond now**, which cancels the waiting reply.
 - A cancelled stream keeps whatever streamed before you stopped it; an
   errored one also gets a visible ⚠ error line, so a failed reply is never
   silently empty.
@@ -263,8 +296,11 @@ FIFO queue:
 - **Grouped by recency** — Pinned, Today, Yesterday, This week, Older.
 - **Per-row indicator** — spinner while generating, accent dot for unread
   replies that finished (or failed) while you were in another chat.
-- **Per-row menu** — **Pin this chat** / **Unpin**, **Label**, **Rename**,
-  **Remove from folder** (when filed), **Move to archive**, **Delete**.
+- **Per-row menu** — **Pin this chat** / **Unpin**, **Label**, **Move to
+  Space** (every Space, plus **Remove from Space** when the chat is in
+  one), **Rename**, **Remove from folder** (when filed), **Move to
+  archive**, **Delete**. A moved chat uses its new Space's instructions,
+  sources and memory from its next message.
 - **Right-click** anywhere on the row opens the same menu.
 - **Spaces icon** marks chats that belong to a Space (not shown on pinned
   or forked chats, whose own icon takes the slot).
@@ -296,11 +332,14 @@ pending restore.
 
 ### 2.6 Header actions (per chat)
 
-- **Search in chat**, **Pin this chat** / **Unpin**, **Label**, **Rename**,
-  **Move to archive** / **Restore from archive**, **Delete**.
+- **Search in chat**, **Pin this chat** / **Unpin**, **Label**, **Move to
+  Space** (§2.5), **Rename**, **Move to archive** / **Restore from
+  archive**, **Delete**.
+- **Space breadcrumb** — a chat in a Space shows the Space's name before
+  its title; click it to open the Space.
 - **Fork this chat** — clone the conversation into a new chat (same model,
-  Space, sidebar folder, workspace folder, Library sources, instructions and
-  parameters) so
+  Space, sidebar folder, workspace folder, Library sources and source mode,
+  loaded skills, instructions, parameters and image scaling) so
   you can branch a tangent without disturbing the original.
   The fork carries a **"Forked from …"** badge in its header that jumps
   back to the source; the badge disappears if the source is deleted. Also
@@ -320,7 +359,8 @@ pending restore.
   it's parsed into messages and appended to the current chat. A **Hide
   from transcript** toggle folds the imported messages into a single
   collapsed card instead of showing them inline — either way they're
-  still sent to the model.
+  still sent to the model. The card's trash button (**Remove imported
+  context**) deletes the whole batch. Unavailable while a reply streams.
 - **Search in chat** — Cmd/Ctrl+F-style find within the chat.
 
 ### 2.7 Archive
@@ -384,8 +424,9 @@ no trace. Open it from the ghost icon in the title bar.
   context or Library sources, no `{{USER_NAME}}` substitution, no temporal
   preamble — those layers belong to persistent chats.
 - **Parameters panel** — the Simple view of the regular panel (context
-  length, model defaults, Thinking and Low VRAM toggles); there is no
-  Advanced view here. Closes and wipes along with the rest of the overlay.
+  length, model defaults, Thinking and Low VRAM toggles) without its
+  **Images** section; there is no Advanced view here. Closes and wipes
+  along with the rest of the overlay.
 
 ### 2.9 Slash commands
 
@@ -411,8 +452,9 @@ Commands are grouped the way `/help` lists them:
   assistant reply), `/find [text]` (open the in-chat finder), `/export`,
   `/import`, `/stats`, `/compact`, `/private`.
 - **Model & persona** — `/model [name]`, `/persona [name]`,
-  `/tone [name]` (matched by full or partial name; several matches show a
-  list to pick from). Bare `/model` opens the model picker; bare
+  `/tone [name]` (matched by full or partial name; several matches are
+  listed so you can retype a more specific name). Bare `/model` opens the
+  model picker; bare
   `/persona` and `/tone` say which one is in effect. Where Ollama and the
   OpenAI-compatible endpoint serve the same model id, `/model ollama/<id>`
   or `/model openai/<id>` picks one. `/set <param> <value>` sets a
@@ -433,7 +475,8 @@ Commands are grouped the way `/help` lists them:
   `/web-fetch on|off`, `/fetch <url>`, `/skill [name]` (list skills, or
   load one into the chat — §9.5), `/thinking on|off`.
 - **App** — `/settings [tab]` (general, providers, features, tools,
-  library, appearance, mcp, archive, data, security, updates, about),
+  skills, library, appearance, mcp, archive, data, security, updates,
+  about),
   `/theme light|dark|system`, `/lock` (needs an app lock — §13), `/help`.
 
 Above those sits a **Recent** group: the four commands you last ran, hoisted
@@ -456,8 +499,10 @@ included), project instructions (`LOACHFILE.md`, `CLAUDE.md` or
 `AGENTS.md`), memories, sources (what
 the next message will send of them, in full or as excerpts — §4.4) and
 messages (attachments called out), plus what's left of the window. It's an
-estimate, at about four characters per token (about one per character for
-Chinese, Japanese and Korean).
+estimate, at about four characters per token; the system prompt, project
+instructions, memories and sources count Chinese, Japanese and Korean text
+at about one character per token, but messages and attachments stay at
+four.
 On an Ollama chat the popover's **Expand context window** button doubles
 this chat's context length. An OpenAI-compatible server ignores that
 setting, so there the bar measures against the 32k Loach assumes (§1.2),
@@ -468,8 +513,9 @@ popover, or the `/compact` command) summarises the older turns with the chat's o
 model and tucks the summary into the system prompt. The summary doesn't
 count as the chat's own instructions: it rides along with whichever ones
 apply — the Space's, the chat's, or your Custom instructions (§16). The original messages
-aren't deleted — they stay in the transcript for scrollback, marked with a
-compaction divider, but are dropped from what the model sees on the next
+aren't deleted — they stay in the transcript for scrollback, marked with an
+**Earlier messages compacted** divider (click it to read the summary), but
+are dropped from what the model sees on the next
 turn so the freed context goes to new conversation. The popover button is
 only enabled once a chat is large enough to benefit (at least six messages
 and a quarter of the window in use); `/compact` checks only the
@@ -477,7 +523,8 @@ six-message minimum.
 
 ### 2.11 Pinned responses
 
-Any assistant reply can be pinned from its `…` menu (**Pin this response**).
+Any assistant reply can be pinned from its `…` menu (**Pin this response**),
+except one folded into a hidden import card (§2.6).
 A pin is a bookmark, not an edit — the message still reaches the model
 exactly like every other turn.
 
@@ -505,9 +552,10 @@ exactly like every other turn.
   quote field. The clipboard always gets the full text.
 - **As image** — the same message drawn as a chat-bubble PNG that follows
   your current light/dark theme, captioned **Prompt** or **AI Response**
-  and footed with "Shared from Loach". **Copy** puts the image on the
-  clipboard; **Save** writes the PNG through the native save dialog. The
-  networks' share links carry text only, so image mode swaps them for
+  and footed with "Shared from Loach". Markdown shows as written, and a
+  long message is cut off after about 48 lines. **Copy** puts the image on
+  the clipboard; **Save** writes the PNG through the native save dialog.
+  The networks' share links carry text only, so image mode swaps them for
   Save.
 
 Loach uploads nothing itself — sharing either hands text to your browser
@@ -527,12 +575,12 @@ context.
   prompt when set (the Space is the user explicitly opting into space-level
   guidance).
 - **Reference sources** — on the **Sources** tab: files uploaded to the
-  Space (text files, PDFs and DOCX documents; **20 MB** per file, **200 MB**
-  total per Space) and Library items or datasets linked to it (§4). Every
-  chat in the Space gets them, as full text or as the most relevant
-  excerpts — the tab shows how much of the context window they take, and the
-  Space's mode is set on its **Settings** tab (§4.4); images ride along with
-  the user turn. A switch on
+  Space (text files, PDFs, DOCX documents and images; **20 MB** per file,
+  **200 MB** total per Space) and Library items or datasets linked to it
+  (§4). Every chat in the Space gets them, as full text or as the most
+  relevant excerpts — the tab shows how much of the context window they
+  take, and the Space's mode is set on its **Settings** tab (§4.4); images
+  ride along with the user turn, scaled as the Space sets (§2.3). A switch on
   each source keeps it in the Space without using it. Uploads in formats
   Loach can't read (spreadsheets, archives, legacy `.doc`) are kept but
   marked **unreadable** and never sent.
@@ -545,11 +593,13 @@ context.
 - Create from the **Spaces** library (**New Space**).
 - Edit name and description from the Space's `⋯` menu → **Edit details**;
   instructions live on their own tab, and the default model, memory
-  auto-save and source mode together on the **Settings** tab.
+  auto-save, source mode and image scaling (§2.3) together on the
+  **Settings** tab.
 - Open a Space to see its detail view — **Chats**, **Instructions**,
   **Sources**, **Memory** and **Settings**, each on its own tab. Each chat row
   in the Chats tab exposes the same `…` action menu as the main sidebar
-  (Pin this chat / Unpin, Label, Rename, Move to archive, Delete).
+  (Pin this chat / Unpin, Label, Move to Space, Rename, Move to archive,
+  Delete).
 - **Delete Space** (same `⋯` menu) removes its instructions, uploaded
   sources and memories; Library items linked to it stay in the Library. Its
   chats stay, but leave the Space.
@@ -570,7 +620,9 @@ fact about you, and a "fact" that just reports a request ("User requested
 a Python file…", "Is asking how to…") is dropped locally as well. It reads
 what you typed, not the files you attached or the pages Loach fetched for
 the turn — text you didn't write isn't a fact about you, and it's where an
-injected "remember that I…" would hide. Facts you added yourself (in the
+injected "remember that I…" would hide. It never saves a secret: it's told
+not to, and a "fact" that looks like a password, PIN, API key or token is
+dropped locally. Facts you added yourself (in the
 Memory tab or with `/remember`) are shown to it as read-only: it can't
 rewrite or remove them, only avoid repeating them.
 
@@ -586,9 +638,11 @@ rewrite or remove them, only avoid repeating them.
   Existing memories continue to ride along in every chat; automatic
   extraction, the Memory tab's **Add** and `/remember` stop.
 - **Coverage** — a reply that finishes while more messages are queued, or
-  an extraction aborted by the next send, is parked and folded into the
-  next extraction in that chat (up to three turns per run). Parked turns
-  are held in memory, so quitting Loach drops them.
+  an extraction aborted by the next send, is parked and read by the next
+  extraction run (up to three turns per chat), which starts when a reply
+  in any chat ends with nothing else waiting for the model. Parked turns
+  survive a restart; one whose chat was deleted, or whose memory was
+  switched off, is dropped.
 - **Caps** — the newest memories go into both the chat prompt and the
   extractor prompt, up to 60 of them and about 6,000 characters (roughly
   1,500 tokens) per list, so every fact the model sees is also shown to the
@@ -663,11 +717,12 @@ before storing it twice.
   added or fetched, and the datasets it's in. The title is renamed in place
   (Enter saves, Esc cancels).
 - Each item's `⋯` menu has **Preview**, **Edit** (texts), **Refresh** and
-  **Open in browser** (links), **New chat**, **Add to dataset**, **Add to
-  Space** and **Delete**.
+  **Open in browser** (links), **New chat**, **New chat in Space**, **Add to
+  dataset**, **Add to Space** and **Delete**.
 - Tick several items — across tabs, or a whole tab with **Select all** — to
   act on them together: **Add to dataset** (a new or an existing one), **Add
-  to Space**, **New chat**, **Delete**.
+  to Space**, **New chat** (its ▾ starts it in a Space), **Delete**.
+  Datasets can be ticked too, but not added to another dataset.
 - **Delete** asks first and names the datasets, Spaces and chats that use the
   item, directly or through a dataset; it's removed from all of them.
   Deleting a dataset keeps its items.
@@ -703,8 +758,9 @@ follows it until you pick something else):
 - **Excerpts** — always search: for each message, the passages most
   relevant to it (and to your previous question, so a short follow-up still
   finds its subject) are added to that message, up to about a quarter of the
-  window. They're picked again for every message: they aren't saved into
-  your message or sent again on later turns.
+  window (at most about 12,000 tokens). They're picked again for every
+  message: they aren't saved into your message or sent again on later
+  turns.
 
 New Spaces start on **Auto**. Spaces created before Loach 1.6 — and those
 restored from an older backup — start on **Full text**, which is what they
@@ -713,7 +769,9 @@ you.
 
 Full text goes into the system prompt and stays the same from turn to turn,
 so a local model's prompt cache keeps it. Image items are attached to the
-message as images, for vision models. The window is the chat's context
+message as images, for vision models, scaled first (§2.3) — at most 16 per
+message, the chat's own first; the sources chip says when some were left
+out. The window is the chat's context
 length (§8); the context usage bar (§2.10) counts what the sources will
 actually cost. An OpenAI-compatible server picks its own window, so for
 those chats Loach assumes 32k (§1.2); set the context length to the
@@ -744,13 +802,16 @@ a recent Ollama — `qwen3-embedding:0.6b`, `bge-m3`, `nomic-embed-text`) to
 **Download & use** in one click — or on the OpenAI-compatible endpoint from
 **Settings → Providers** (`text-embedding-3-small` / `-large`). Indexing runs
 in the background, and keyword search keeps working meanwhile. The Library
-header and Settings show where it stands: **Keyword search only** without a
-model, **Indexing n / m**, **Search by meaning** once done, or **Embedding paused** with the reason (and **Retry**)
-when the model can't be reached — searches then fall back to keywords and
-the reply's sources chip says so. After a message's search couldn't reach
-the model, the next minute's messages go straight to keywords instead of
-each waiting on it. A passage the model refuses or fails on by itself is
-set aside for keyword search rather than holding up the rest.
+header shows where it stands: **Keyword search only** without a model,
+**Indexing n / m**, **Search by meaning** once done, or **Embedding
+paused** (the reason on hover) when the model can't be reached. **Settings
+→ Library** shows the same state in its own words (**Embedding is
+paused**), with the reason and **Retry**. Searches then fall back to
+keywords and the reply's sources chip says so. After a message's search
+couldn't reach the model, the next minute's messages go straight to
+keywords instead of each waiting on it. A passage the model refuses or
+fails on by itself is set aside for keyword search rather than holding up
+the rest.
 
 Changing the model, or the server it runs on (the base URL), re-embeds
 every source. **Rebuild** re-embeds everything too, for example after
@@ -767,8 +828,8 @@ is sent to that endpoint. With Ollama it stays on your machine.
 
 ## 5. Snippets
 
-A **Snippet** is a saved prompt with an optional pinned provider/model. Live
-in the **Snippets** sidebar tab.
+A **Snippet** is a saved prompt with an optional pinned provider/model.
+They live in the **Snippets** sidebar tab.
 
 - **Create** with title + prompt body. Optionally pin to a specific provider
   and model so "Run" always starts a chat there.
@@ -778,8 +839,11 @@ in the **Snippets** sidebar tab.
   messages offers **Save as Snippet**, which prefills the editor with that
   text.
 - **Library view** — tile grid sorted by recency, with the static-variables
-  panel (§5.1) above it.
-- **Run / Edit / Delete** behind a per-tile `⋯` menu.
+  panel (§5.1) above it, a **Search snippets** box that filters by title
+  and text, and a **Prompt gallery** link to ready-made prompts on the web.
+- **Run / Run in Space / Edit / Delete** behind a per-tile `⋯` menu
+  (**Run in Space** starts the chat inside a Space; a pinned model still
+  wins); clicking a tile opens it in the editor.
 
 ### 5.1 Snippet variables
 
@@ -829,8 +893,8 @@ For a single Ollama model, the editor lets you:
   new tag without changes, asking first if that tag is taken.
 - **Delete** — irreversible removal of the local copy.
 - **Allow thinking step** — per-model override for the Thinking toggle.
-  Sits between the Modelfile default and per-chat overrides. Remembered
-  until Loach restarts.
+  Sits between the Modelfile default and per-chat overrides. Kept on this
+  device across restarts; **Reset** goes back to the model's own default.
 - **New chat** pre-selected to this model.
 
 ### 6.3 Modelfile guardrails
@@ -883,10 +947,12 @@ Style modifier appended *after* the persona / instructions:
 - **Socratic** — guides with questions instead of handing over answers
   (switches to direct answers when explicitly asked).
 
-Set per chat from the parameters sidebar, or pick a default tone in
-**Settings → General**. The General tab has an expandable
-**"What each tone does"** drawer that shows the one-line summary for
-every tone, so the default-tone picker doubles as a reference.
+Set per chat from the parameters sidebar or with `/tone`, and clear it
+from its chip (§2.2), or pick a default tone in **Settings → General**.
+Like a persona, a chat's own tone isn't kept across launches: after a
+restart the chat follows the default tone again. The General tab has an
+expandable **"What each tone does"** drawer that shows the one-line
+summary for every tone, so the default-tone picker doubles as a reference.
 
 ---
 
@@ -895,15 +961,16 @@ every tone, so the default-tone picker doubles as a reference.
 Every chat has a slide-out **parameters panel** on the right. Two modes:
 
 - **Simple** — context length, Thinking toggle, Low VRAM toggle, persona,
-  tone, and the per-chat **Additional instructions** textarea. The view
-  stays terse on purpose so the common knobs are reachable without
-  scrolling.
+  tone, the per-chat **Additional instructions** textarea, and **Images**
+  (this chat's image scaling — §2.3). The view stays terse on purpose so
+  the common knobs are reachable without scrolling.
 - **Advanced** — adds **temperature**, top_p, top_k, min_p, max tokens,
   repeat_penalty, frequency and presence penalties, GPU layer count, and
   seed.
 
-**Private Chat** (§2.8) reuses the Simple view and sends exactly the values
-it shows: the merge below, minus the per-model preferences (layer 4).
+**Private Chat** (§2.8) reuses the Simple view, without **Images**, and
+sends exactly the values it shows: the merge below, minus the per-model
+preferences (layer 4).
 
 The parameter merge order, top to bottom (later layers win):
 
@@ -913,10 +980,10 @@ The parameter merge order, top to bottom (later layers win):
 3. **Model defaults** — parsed from the Ollama Modelfile's PARAMETER
    block; cached after the first chat with that model.
 4. **Per-model preferences** — currently the Models-editor Thinking
-   toggle (kept until Loach restarts).
+   toggle (kept on this device — §6.2).
 5. **Per-session overrides** — what the sliders in this panel save.
 6. **Global app overrides** — the **Settings → Features → Low VRAM mode**
-   pin, which forces `low_vram: true` on every Ollama request.
+   pin, which forces `low_vram: true` on every Ollama request (§8.2).
 
 A **Reset to defaults** button below the sliders (labelled
 **Reset to model defaults** when the model ships Modelfile defaults) clears
@@ -926,21 +993,24 @@ the per-session overrides and falls back to the merged defaults.
 
 Only meaningful for Ollama models whose `capabilities` include `"thinking"`.
 Sets the `think` parameter on `/api/chat`; ignored by OpenAI providers.
-The default for new chats comes from **Settings → Features → Thinking**.
+A chat that hasn't set its own follows the model's preference from the
+Models editor (§6.2), else **Settings → Features → Thinking**.
 
 ### 8.2 Low VRAM toggle
 
-Ollama-only. Forces smaller batches and a leaner KV cache. The per-chat
-toggle is overridden when **Settings → Features → Low VRAM mode** is on —
-the panel shows the toggle pinned and disabled with a pointer back to the
-setting.
+Ollama-only. Sends Ollama's `low_vram` option, which Ollama releases since
+mid-2025 no longer read, so on a current Ollama it changes nothing. To
+save VRAM, lower **Context Length** or set **GPU Layers** (Advanced view)
+instead. The per-chat toggle is overridden when **Settings → Features →
+Low VRAM mode** is on — the panel shows the toggle pinned and disabled
+with a pointer back to the setting.
 
 ---
 
 ## 9. Tools
 
 Capabilities Loach offers to the models. Opt-in in **Settings → Tools**
-(MCP servers in **Settings → MCP**).
+(MCP servers in **Settings → MCP**, skills in **Settings → Skills**).
 
 Whichever tools a model uses, one reply gets at most 10 rounds with the
 model: tools can run in the first nine, and the last round goes out
@@ -998,7 +1068,8 @@ Loach speaks two MCP transports. Configure servers in **Settings → MCP**.
   stopped together with every process it started, such as the `node`
   behind `npx`, while one that exits by itself keeps what it deliberately
   left running (the browser `mcp-remote` opens to sign in, say). When Loach
-  itself exits, servers are stopped at once. Startup is allowed 60 s
+  itself exits, servers get their input closed and about a second between
+  them to exit; any still running are then stopped. Startup is allowed 60 s
   (first-run package downloads) and each request 30 s; a request that runs
   out of time fails, but the server keeps running — it may still be working
   on it — and is told the result is no longer wanted
@@ -1071,9 +1142,11 @@ exported as typed, except a URL's credentials (the password in
 the value of a flag like `--token` or `--api-key=…`, and an environment
 assignment or header whose name says it holds a credential
 (`-e GITHUB_TOKEN=…`, `--header "Authorization: …"`), which read
-`REDACTED`. An HTTP server's URL loses its credentials and every query
-value the same way. Re-enter them after an import. An environment
-variable is still the better place for a secret.
+`REDACTED`. An HTTP server's URL loses its user-info and every query
+value the same way, but keeps its path, so a token written into the path
+(`…/s/<token>/mcp`) is exported as it is. Re-enter them after an import.
+A header or an environment variable is still the better place for a
+secret.
 
 #### Per-call approvals
 
@@ -1107,11 +1180,13 @@ you've allowed them for the chat, and the tools that run scripts (§9.5,
 
 A set of small, local utilities the model can call mid-answer through the
 same tool-call loop as MCP. Each has its own toggle in **Settings →
-Tools** and all of them are **off by default** — turn on only what you
-want a given model to reach for. They run entirely in Rust on your machine
-(no network, no disk writes beyond a PDF you ask for). The one exception is
-the workspace file group in §9.4, which does touch the disk — inside a
-folder you pick. None of them is offered inside Private Chat (§2.8).
+Tools** and all of them are **off by default** until you turn them on —
+onboarding's Tools step offers a Recommended set (§15) — so turn on only
+what you want a given model to reach for. They run entirely in Rust on
+your machine (no network, no disk writes beyond a PDF you ask for). The
+one exception is the workspace file group in §9.4, which does touch the
+disk — inside a folder you pick. None of them is offered inside Private
+Chat (§2.8).
 
 - **calculate** — evaluate arithmetic, trig, functions, and constants;
   results carry 12 significant digits (as do **unit_convert**'s).
@@ -1146,7 +1221,8 @@ Calls render in the collapsible tool-call block described in §2.1.
 
 Give a chat a folder and the model can work in it — read the project,
 search it, and make changes — the way a coding assistant does, minus the
-shell. Click the **+** button next to the message box and choose **Add
+shell (running code is a separate opt-in, §9.6). Click the **+** button
+next to the message box and choose **Add
 directory** (the same menu's **Add files** attaches file contents to one
 message instead; the two are not variants of each other). A chat needs
 its first message before it can have a folder, and the picker refuses a
@@ -1247,15 +1323,15 @@ a write that fails partway leaves the old file intact. Permissions carry
 over (a script stays executable; on Windows a file's own access rules are
 copied to the new copy), and a read-only file is refused.
 
-So is the text encoding. Files that aren't UTF-8 — Windows-1250 or another
-legacy code page, or UTF-16 with a byte-order mark (what PowerShell 5.1
-writes by default) — are read, searched and edited in their own encoding
-and written back in it, byte-order mark included; only the edited text
-changes. A legacy encoding is recognised from the file's contents, so it is
-a best guess, and `read_file` tells the model which one it used. A change
-the encoding can't store (an emoji in a Windows-1250 file) is refused rather
-than written as `?`, and a file that doesn't decode cleanly can be read but
-not edited.
+The text encoding is preserved too. Files that aren't UTF-8 —
+Windows-1250 or another legacy code page, or UTF-16 with a byte-order mark
+(what PowerShell 5.1 writes by default) — are read, searched and edited
+in their own encoding and written back in it, byte-order mark included;
+only the edited text changes. A legacy encoding is recognised from the
+file's contents, so it is a best guess, and `read_file` tells the model
+which one it used. A change the encoding can't store (an emoji in a
+Windows-1250 file) is refused rather than written as `?`, and a file that
+doesn't decode cleanly can be read but not edited.
 
 The tools run inside Loach, but what they read becomes part of the
 conversation: with a cloud provider, those file contents are sent to it
@@ -1289,8 +1365,10 @@ and the approval card on writes, moves and deletions remains the backstop.
 A sample to start from is in
 [`docs/LOACHFILE.md.sample`](LOACHFILE.md.sample).
 
-Deliberately absent: a shell, a recursive delete, and any way to point the
-tools at a folder other than through the native picker.
+Deliberately absent from these tools: a shell, a recursive delete, and any
+way to point them at a folder other than through the native picker.
+Running code is a separate opt-in that asks every time (§9.5, §9.6), and
+a script, once allowed, isn't confined to the folder.
 
 ### 9.5 Skills
 
@@ -1307,20 +1385,23 @@ folder other agents share. **Import folder…** copies a skill's folder into
 Loach's own, named after the skill. When both folders have a skill of the
 same name, Loach's is used and the other is listed under **Not loaded**,
 along with any folder whose `SKILL.md` is missing a description, has a
-name with anything but lowercase letters, digits and hyphens, or has no
-`---` header. Smaller departures from the format — a name that doesn't
+name with uppercase letters, spaces or punctuation other than hyphens, has
+no `---` header (or one that's never closed), is larger than 256 KB or
+isn't UTF-8 text, and any folder that is a whole drive or holds Loach's
+own data. Smaller departures from the format — a name that doesn't
 match its folder, an over-long description — load with a warning. Every
 installed skill has its own switch; the folders are read again on every
 message, so a skill added, edited or removed takes effect on the next one.
 
 **How the model uses them.** The model sees the name and description of
-every enabled skill (a few dozen tokens each, on every message — switch off
-the ones you don't use). When your request matches one, it loads that
-skill's instructions with the `activate_skill` tool; `/skill <name>` loads
-one yourself, and `/skill` lists them. A loaded skill stays loaded for the
-rest of the chat: its instructions go with every message, shown as a chip
-above the message box, until you remove the chip. Forking a chat keeps its
-skills. The model reads a skill's other files with `read_skill_file`, which
+every enabled skill (from a few dozen to a few hundred tokens each, on
+every message — switch off the ones you don't use). When your request
+matches one, it loads that skill's instructions with the `activate_skill`
+tool; `/skill <name>` loads one yourself, and `/skill` lists them. A
+loaded skill stays loaded for the rest of the chat: its instructions go
+with every message, shown as a chip above the message box, until you
+remove the chip. Forking a chat keeps its skills, and backups carry them
+(§14). The model reads a skill's other files with `read_skill_file`, which
 reaches nothing outside that skill's folder. Skills need a model that can
 call tools to load themselves; `/skill` works with any model. Private Chat
 has no skills.
@@ -1334,14 +1415,18 @@ skill changes what asks for approval — the format's experimental
 **Scripts.** With **Let skills run scripts** on, the model can also run the
 scripts a skill ships with through `run_skill_script`: `.py` (Python),
 `.sh` (bash), `.js`/`.mjs`/`.cjs` (Node.js) and `.ps1` (PowerShell), using
-what's installed on your computer. Only files inside an enabled skill's
+what's installed on your computer: `python` on Windows and `python3`
+elsewhere, `bash`, `node`, and `powershell` on Windows or `pwsh` (PowerShell
+7) elsewhere, which must be on Loach's `PATH`; a `.ps1` runs with its
+execution policy bypassed. Only files inside an enabled skill's
 folder can be run, the interpreter comes from the extension, and the
 arguments are passed as they are, with no shell in between. **Every run
 asks first**, showing the exact command, the folder it runs in and any
 input; there is no "allow for this chat" for scripts. A script runs as you,
 with your access to every file on the computer — not just the chat's
 folder — so allow runs only from skills you trust. It runs in the chat's
-workspace folder if it has one, otherwise in the skill's folder, with no
+workspace folder if it has one and **Workspace files** is on (§9.4),
+otherwise in the skill's folder, with no
 terminal, for up to 5 minutes; Stop ends it (but not programs it started
 and left running). The model gets the exit code and the output, capped at
 32 KB like any tool result.
@@ -1352,9 +1437,11 @@ With **Run scripts** on in **Settings → Tools** (off by default, and not
 part of onboarding's tool presets), the model can run a script in any chat
 through `run_script` — not only one that ships with a skill (§9.5). It can
 write the code itself, in Python, bash, Node.js or PowerShell, or, in a chat
-with a workspace folder (§9.4), run a `.py`, `.sh`, `.js`/`.mjs`/`.cjs` or
-`.ps1` file from that folder; either way it uses what's installed on your
-computer. Code it writes is saved to a temporary file, deleted after the run.
+with a workspace folder (§9.4) while **Workspace files** is on, run a `.py`,
+`.sh`, `.js`/`.mjs`/`.cjs` or `.ps1` file from that folder; either way it
+uses what's installed on your computer (the same programs as for skill
+scripts, §9.5). Code it writes is saved to a temporary file, deleted after
+the run.
 **Every run asks first**: the card shows the code, the exact command, the
 folder it runs in and any input, and there is no "allow for this chat".
 
@@ -1362,7 +1449,8 @@ The rest works as for skill scripts: the arguments are passed as they are,
 with no shell in between; the script runs as you, with your access to every
 file on the computer; it gets up to 5 minutes with no terminal, and Stop
 ends it (but not programs it started and left running). It runs in the
-chat's workspace folder if it has one, otherwise in the temporary folder —
+chat's workspace folder if it has one and **Workspace files** is on,
+otherwise in the temporary folder —
 so files it writes there are gone afterwards; give the chat a folder to keep
 them. The model gets the exit code and the output, capped at 32 KB like any
 tool result, and what a script prints becomes part of the conversation: with
@@ -1453,13 +1541,14 @@ Inline code blocks in assistant messages get an **Open** button (tooltip
   HTML code blocks get a **Preview** button that opens the canvas straight
   on it. The page shows with its **scripts off**: markup and styles only,
   enforced by the preview's own security policy (inline scripts, event
-  handlers and `javascript:` links are refused). **Run scripts** turns them
-  on for that page — any other code block or edit starts off again — and
-  then scripts and form handlers work; **Reload** starts the page over. On
-  macOS and Linux the preview runs on Loach's own thread, so a script that
-  never stops freezes the app until you quit it; the button's tooltip says
-  so. On a reply that's still streaming, the preview appears once the code
-  block is complete.
+  handlers and `javascript:` links are refused). The preview bar's **Run
+  scripts** button (not the Settings switch of the same name, §9.6) turns
+  them on for that page — any other code block or edit starts off again —
+  and then scripts and form handlers work; **Reload** starts the page
+  over. On macOS and Linux the preview runs on Loach's own thread, so a
+  script that never stops freezes the app until you quit it; the button's
+  tooltip says so. On a reply that's still streaming, the preview appears
+  once the code block is complete.
 
   The page runs in a sandbox, on an origin of its own: it can't reach
   Loach, your chats or your files, can't open windows or navigate away,
@@ -1591,7 +1680,10 @@ Below it sit the actions:
 
 - **Export data** — produces a single JSON blob with every chat, message,
   folder, Space, source, memory, Library item and dataset (and which chats
-  and Spaces use them), snippet, snippet variable, MCP server, and setting.
+  and Spaces use them), snippet, snippet variable and saved fill-in, MCP
+  server, and setting, plus which skills each chat has loaded and which
+  skills you've switched off in **Settings → Skills**. The skills
+  themselves are folders on disk (§9.5) and aren't included.
   The Library's search index is left out; Loach rebuilds it after a restore.
   MCP headers and environment variables are scrubbed, and so are
   secrets passed as arguments and an HTTP server URL's credentials and
@@ -1608,18 +1700,25 @@ Below it sit the actions:
   key is kept, and so is the current OpenAI base URL while a key is stored,
   so the key never goes to a server a backup names. Stdio MCP servers
   arrive disabled (§9.2); a server name that breaks the naming rules is
-  fixed up rather than failing the import. Requires
+  fixed up rather than failing the import. Chats get back the skills they
+  had loaded, and skills switched off in the backup stay off; the skill
+  folders on disk are left as they are. Requires
   current app-lock credentials when a lock is configured.
 - **Archive all chats** — parks every live chat in the archive (§2.7).
 - **Erase & Reset → Remove my data** — drops chats, folders, Spaces (with
   their sources and memories), the whole Library (texts, files, links and
   datasets), global memories, snippets, snippet variables and saved
-  fill-ins, and MCP servers, but keeps app settings and the stored
-  OpenAI key. Gated on the app-lock credentials, and on typing `YES`.
+  fill-ins, MCP servers and the skills loaded in each chat, but keeps app
+  settings and the stored OpenAI key. Gated on the app-lock credentials,
+  and on typing `YES`.
 - **Erase & Reset → Factory reset** — the same wipe + clear all settings +
   remove the OpenAI key and the app lock from the credential store.
   Same `YES` confirmation. Loach then reloads straight into onboarding.
   Irreversible.
+
+Neither erase touches the skill folders (§9.5): imported skills stay in
+Loach's skills folder — delete them from **Settings → Skills → Open
+folder**.
 
 ---
 
@@ -1874,9 +1973,13 @@ verification happens before the binary is replaced.
 ## 19. Storage and privacy posture
 
 - **Everything except the OpenAI-compatible API key and the app-lock hash
-  lives in a local SQLite database** under the user's app-data directory
-  (apart from scratch files written for the canvas's **VS Code** button,
-  a few layout preferences kept in the web view's local storage, and the
+  and hint lives in a local SQLite database** under the user's app-data
+  directory (apart from scratch files written for the canvas's **VS Code**
+  button; skills, which are folders — Loach's own `skills` folder next to
+  the database and `~/.agents/skills` (§9.5); code `run_script` saves to a
+  temporary folder for the run (§9.6); layout preferences, per-model
+  Thinking defaults (§6.2) and references to memory turns waiting for
+  extraction (§3.3), kept in the web view's local storage; and the
   app lock's non-secret marker and failed-attempt count — `app_lock.json`
   and `app_lock_attempts.json` next to the database, §13). Foreign
   keys are enforced in normal use; restoring a backup checks message roles,
@@ -1884,7 +1987,7 @@ verification happens before the binary is replaced.
   older or partial backups still load — afterwards a chat pointing at a
   Space or folder the backup doesn't carry simply leaves it, and rows whose
   parent is missing are dropped.
-- **OpenAI-compatible API key, app-lock hash** — OS credential store
+- **OpenAI-compatible API key, app-lock hash and hint** — OS credential store
   (Windows Credential Manager / Linux Secret Service / macOS Keychain via
   the `keyring` crate).
 - **MCP credentials are not in the credential store.** A server's HTTP
@@ -1896,7 +1999,10 @@ verification happens before the binary is replaced.
   the providers the user configures (an embedding model for the Library
   included — §4.5), the optional URL fetches the user triggers (Library
   links included), the MCP servers the user wires up, and the in-app
-  updater check against the GitHub releases endpoint.
+  updater check against the GitHub releases endpoint. A script you allow
+  to run (§9.5, §9.6) can do anything you can, network included, and voice
+  dictation (§2.2) uses the system's speech recognition, which on some
+  systems is an online service.
 - **CSP is locked down** — no remote scripts, no inline scripts, no eval.
   The Tauri global is disabled; the renderer talks to the backend only
   through registered commands. The one place inline scripts run is the
@@ -1907,13 +2013,18 @@ verification happens before the binary is replaced.
   dialog, the workspace folder picker (§9.4), and the actual read / write
   happen in Rust. The renderer can't pick a path itself (it only learns
   where a backup landed after the write), so a compromised UI cannot read
-  or overwrite arbitrary files.
-- **Running a program is backend-gated** — a stdio MCP server's command
-  line is confirmed in a native OS dialog before it can start (§9.2), and
-  every MCP tool call asks in the chat before it runs unless you opted that
-  server or tool out. The in-chat approval cards guard against what the
-  model asks for; they're answered in the app window, so the native dialog
-  is the barrier against a compromised UI, not the cards.
+  or overwrite arbitrary files through them. Scripts are the exception
+  (next point).
+- **Starting an MCP server is backend-gated** — a stdio MCP server's
+  command line is confirmed in a native OS dialog before it can start
+  (§9.2), and every MCP tool call asks in the chat before it runs unless
+  you opted that server or tool out. The in-chat approval cards guard
+  against what the model asks for; they're answered in the app window, so
+  for MCP servers the native dialog is the barrier against a compromised
+  UI, not the cards. Scripts (§9.5, §9.6) have no such barrier: their
+  switches and their approval card are all in the app window, so a
+  compromised UI could run one — one more reason **Run scripts** and
+  **Let skills run scripts** start off.
 
 ---
 
@@ -1954,10 +2065,14 @@ key's position, and `Cmd/Ctrl + /` works where `/` itself needs Shift
   open the highlighted result; in the in-chat finder, jump to the next match
   (`Shift + Enter` for the previous one).
 - `Shift + Enter` — newline in the composer.
+- `Enter` / `Cmd/Ctrl + Enter` in a create or edit dialog (snippet, Space,
+  Library text, variable) — `Enter` in a one-line field, or `Cmd/Ctrl +
+  Enter` in a multi-line one, saves once the form is complete; before
+  that it moves to the field still to fill.
 - `Tab` — in the command palette, complete the highlighted command.
 - `Esc` — clear the search palette's query (a second press closes it),
-  close the command palette or the in-chat finder, dismiss menus and
-  dialogs, exit onboarding (with confirm on the provider step).
+  close the command palette, the `#` picker or the in-chat finder, dismiss
+  menus and dialogs, exit onboarding (with confirm on the provider step).
 - Up / Down inside the search or command palette — move the active entry;
   in the in-chat finder, step through matches.
 
@@ -1965,7 +2080,9 @@ key's position, and `Cmd/Ctrl + /` works where `/` itself needs Shift
 
 ## 21. Platform support
 
-- **Windows 10/11 x86_64** — NSIS installer, in-app updater.
+- **Windows 10/11 x86_64** — NSIS installer, in-app updater. The window
+  runs on the Microsoft Edge WebView2 runtime, part of Windows 11; the
+  installer fetches it when it's missing.
 - **Linux x86_64** — AppImage, `.deb`, and `.rpm`, all three with the
   in-app updater (§18). Built against **glibc 2.35**, so Ubuntu 22.04 and
   Debian 12 are the oldest supported distributions.

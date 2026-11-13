@@ -14,9 +14,13 @@
     what the file is.
   - Anything past 32 KB is cut, but aim for a page: local models follow
     short instruction files far more reliably than long ones.
+  - No LOACHFILE.md in the folder? Loach uses its CLAUDE.md, else its
+    AGENTS.md, unless "Use CLAUDE.md or AGENTS.md" under Workspace files
+    is off. A LOACHFILE.md always takes precedence.
   - The model can list, find, read, search, write, edit, move and delete
-    files in the folder, but it has no shell. Ask it to tell you which
-    command to run, not to run it.
+    files in the folder; the file tools have no shell. It can run
+    commands only while Run scripts is on in Settings → Tools, and then
+    every run asks you first.
   - It's guidance, not a sandbox. Writes, edits, moves and deletes
     still ask you first (unless you allowed that tool for the chat), and
     your own instructions win when they conflict with this file.
@@ -53,7 +57,7 @@ SQLite for storage.
 
 ## Checking your work
 
-You can't run commands. When a change is done, tell me what to run:
+Don't run commands yourself. When a change is done, tell me what to run:
 
 - `npm test` — unit tests (Vitest), from the repo root.
 - `npm run lint` — ESLint and Prettier.

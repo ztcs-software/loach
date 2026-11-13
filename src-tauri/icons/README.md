@@ -14,7 +14,7 @@ system tints it), embedded by `src/lib.rs`.
 Regenerate the bundle icons from the 1024x1024 `source.png` with:
 
 ```bash
-npm run tauri icon icons/source.png
+npm run tauri icon src-tauri/icons/source.png
 ```
 
 `tauri icon` also writes Android, iOS, Windows Store (`Square*Logo.png`,

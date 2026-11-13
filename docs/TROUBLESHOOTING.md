@@ -150,7 +150,7 @@ source, not typeset math.
   rather than flashing an error. Hover it to see what KaTeX objected to.
 - **`$…$` didn't typeset.** Single dollars are treated as currency unless
   the span reads as math: it has to hug both delimiters, stay on one line
-  and under 200 characters, not follow a word character, and not be chased
+  and at most 200 characters, not follow a word character, and not be chased
   by a digit. "$5 and $10"
   and "US$5" stay prose by design. Ask the model for `$$…$$`, `\(…\)` or
   a ```` ```math ```` fence if you need the ambiguous case.
@@ -205,6 +205,25 @@ to restart for. If a page still misbehaves with scripts on, it may load a
 library from the web: previews are offline, so a CDN `<script src>` never
 arrives.
 
+### No "Read aloud" in a reply's menu, or it says nothing
+
+**Problem.** The reply's `…` menu has no **Read aloud**, the item is greyed
+out, or it fails with a toast.
+
+**Solution.**
+
+- **Missing** — Read aloud uses the system's speech engine through the app's
+  web view. Where the web view has none (some Linux builds of WebKitGTK),
+  the item is hidden. On Linux, installing a speech engine and voices for
+  your distribution may help.
+- **Greyed out** — the reply is still streaming. Wait for it to finish.
+- *Nothing to read aloud* — the reply is only code or formulas, which Read
+  aloud skips.
+- *Couldn't read aloud* — the system's speech engine reported an error.
+  Check that your system has a voice installed for text-to-speech.
+
+Reading stops when you switch chats, regenerate the reply or lock Loach.
+
 ---
 
 ## 3. Performance and VRAM
@@ -216,16 +235,17 @@ with "ran out of memory loading or running the model".
 
 **Solution.**
 
-1. Turn on **Low VRAM** in the Parameters sidebar (or globally with
-   **Settings → Features → Low VRAM mode**). This forces smaller batches
-   and a leaner KV cache.
-2. Lower **Context Length** in the same panel — a smaller context window
-   uses dramatically less VRAM.
-3. Set **GPU Layers** (Advanced view; blank means auto, 0 means CPU only)
+1. Lower **Context Length** in the Parameters sidebar — a smaller context
+   window uses dramatically less VRAM.
+2. Set **GPU Layers** (Advanced view; blank means auto, 0 means CPU only)
    below the model's layer count to push more of it onto CPU/RAM at the
    cost of speed.
-4. Pick a smaller quantization (for example `q4_K_M` instead of `q8_0`)
+3. Pick a smaller quantization (for example `q4_K_M` instead of `q8_0`)
    or a smaller parameter size.
+
+The **Low VRAM** toggle (and **Settings → Features → Low VRAM mode**) won't
+help here: it sends Ollama's `low_vram` option, which Ollama releases since
+mid-2025 no longer read.
 
 ### Onboarding sized my machine wrong
 
@@ -341,7 +361,12 @@ attached a PDF.
 
 **Solution.** Loach extracts text from PDFs, but **scanned PDFs** (image
 pages with no text layer) have no text to extract. Run the PDF through an
-OCR tool first, or paste the relevant pages as plain text.
+OCR tool first, paste the relevant pages as plain text, or export the pages
+as images and attach those to a vision-capable model.
+
+A password-protected PDF doesn't attach at all: the composer shows
+*Couldn't read <file>: …* under the input. Save a copy without the password
+and attach that.
 
 ### The model can't read my Word document
 
@@ -358,21 +383,32 @@ file in Word or LibreOffice and **Save As → Word Document (.docx)**.
 **truncated** pill, and only part of it reached the model.
 
 **Solution.** Per-file cap is **200,000 characters**; total inlined content
-per message is **500,000 characters**, counting your prompt and fetched pages
-too. Files past that per-message budget are clipped or left out without a
-**truncated** pill — only the model is told. Either:
+per message is **500,000 characters**, counting your prompt. Files past that
+per-message budget are clipped or left out without a **truncated** pill —
+only the model is told. Fetched pages go in after your files and only fill
+the room left, so removing URLs doesn't make room for a file. Either:
 
 - Trim the document to the parts you actually need, or
 - Send several focused messages, each with a different excerpt.
 
 ### Images don't seem to be working
 
-**Problem.** You attached a PNG/JPEG but the model can't describe it.
+**Problem.** You attached a PNG/JPEG but the model can't describe it, or it
+misses small text or detail in a screenshot.
 
 **Solution.** The model needs **vision capability** — check the model's
 page on the Ollama library or the capabilities line of `ollama show`.
 Switch to a vision-capable model (Llava, Llama 3.2 Vision, GPT-4o, etc.)
 and re-send.
+
+If the model sees the image but misses fine detail, it may be the scaling:
+images are scaled down before they're sent, to 1024 px on the longest side
+by default (the original stays in your chat). Choose a larger size, or
+**Original**, under **Images** in the chat's Parameters sidebar, under
+**Image scaling** on a Space's **Settings** tab, or for every chat under
+**Settings → Features → Image scaling** (Library images:
+**Settings → Library → Images**). The most specific setting wins. Larger
+images cost more tokens.
 
 ---
 
@@ -425,7 +461,9 @@ the page arrived.
 - A non-2xx HTTP response,
 - More than **10 redirects**,
 - A DNS lookup failure or a TLS / certificate error,
-- The rate limit of **60 URLs per 60 seconds**, shared across all chats.
+- The rate limit of **60 URLs per 60 seconds**, shared across all chats and
+  Library link adds and refreshes (*Web fetch rate limit hit (60 URLs / 60
+  seconds). Try again shortly.*).
 
 A body over the **5 MB cap** isn't a failure: the page is cut off at the
 cap and the entry says "truncated by Loach" (so does a page whose
@@ -452,11 +490,14 @@ an error.
 2. If the server requires auth, open it in **Settings → MCP** and add an
    `Authorization: Bearer …` line under **Headers**.
 3. Check that the response body fits under **4 MiB** — misconfigured
-   servers that dump full schemas can exceed this.
+   servers that dump full schemas can exceed this. The error then reads
+   *MCP server response exceeded 4194304 bytes*.
 4. Per-request timeout is **30 s**.
 5. Loach doesn't follow redirects. When the error says the server
    redirects to the same URL with (or without) a trailing `/`, change the
-   server URL to match; for any other target, use the address it names.
+   server URL to match. For any other redirect the error names at most the
+   other server's address, never the path (it can carry credentials) — look
+   up the full endpoint URL in the server's docs.
 6. Loach connects directly, never through a proxy — a server reachable
    only through one won't answer.
 
@@ -532,15 +573,18 @@ them) is imported under a fixed-up name rather than failing the import.
 **Problem.** The assistant bubble shows an approval card and nothing else
 happens.
 
-**Solution.** The model asked to run an MCP tool, or to change a file in
-the chat's workspace folder, and Loach is waiting for you — answer
-**Allow once**, **Always allow** (**Allow … for this chat** for a file
-change), or **Deny** on the card. A prompt left unanswered for 10 minutes
-isn't run — the call is marked *No answer* — and the Stop button cancels
-the reply. Until you answer, other chats queue behind this one; if the
-card is in a chat you aren't looking at, Loach shows a notice with an
-**Open** button. To stop being asked for a
-server you trust, open it in **Settings → MCP** and turn off **Ask before
+**Solution.** The model asked to run an MCP tool, to change a file in the
+chat's workspace folder, or to run a script, and Loach is waiting for you —
+answer **Allow once**, **Always allow** (**Allow … for this chat** for a
+file change), or **Deny** on the card. A script's card has only **Allow
+once** and **Deny**: every script run asks, and nothing turns that off. An
+**Allow … for this chat** lasts until you quit Loach, change the chat's
+folder, or switch **Workspace files** off. A prompt left unanswered for
+10 minutes isn't run — the call is marked *No answer* — and the Stop
+button cancels the reply. Until you answer, other chats queue behind this
+one; if the card is in a chat you aren't looking at, Loach shows a notice
+with an **Open** button. To stop being asked for a server you trust, open
+it in **Settings → MCP** and turn off **Ask before
 each tool call**; to re-enable prompts for tools you answered "Always
 allow" for, use **Ask again for all** in the same editor and save.
 
@@ -556,7 +600,8 @@ means it asked for them anyway, and those calls weren't run. Either it was stuck
 needs more steps than that. Send a follow-up ("continue") to give it
 another 10 rounds, or break the task into smaller requests. With the
 workspace tools, pointing it at the right files up front (or putting that
-in `LOACHFILE.md`) saves rounds spent searching.
+in the folder's `LOACHFILE.md`, or the `CLAUDE.md` or `AGENTS.md` Loach
+falls back to) saves rounds spent searching.
 
 ### The model can't use a file or folder name on Windows
 
@@ -567,6 +612,58 @@ with a dot or a space", or "is a device name Windows reserves".
 data stream, and `CON`, `nul.txt` or a trailing dot would be created as
 files that Explorer and most tools can't open or delete. Ask the model to
 pick another name.
+
+### A script won't run
+
+**Problem.** A `run_script` or skill-script call ends with an error instead
+of the script's output.
+
+**Solution.** Expand the tool-call block on the reply to read the reason:
+
+- *Couldn't start `…`: it isn't installed, or isn't on PATH.* — Loach picks
+  the program from the language or the file's extension: `python` on
+  Windows and `python3` elsewhere, `bash`, `node`, and `powershell` on
+  Windows or `pwsh` (PowerShell 7) on macOS and Linux. Install it or add it
+  to `PATH`, then restart Loach. Scripts get the `PATH` Loach started with,
+  so a tool installed through Homebrew, nvm or pyenv may not be found when
+  Loach was started from the Dock or an app menu, even though it works in a
+  terminal.
+- *Stopped after 300 seconds, the most a script may run.* — a script gets 5
+  minutes. Ask for a faster approach, or split the work.
+- *Running scripts is switched off in Loach's settings.* — turn on **Run
+  scripts** in **Settings → Tools**. For scripts that come with a skill the
+  message is *Running skill scripts is switched off…*; turn on **Let skills
+  run scripts** in **Settings → Skills**.
+- *This chat has no workspace folder, so there's no script file to run.* —
+  a script file can only come from the chat's folder, and only while
+  **Workspace files** is on. Choose **Add directory** in the composer's
+  **+** menu, or let the model send the code instead.
+
+Scripts never run in Private Chat. The **Run scripts** button in the code
+canvas's HTML preview is unrelated: it only runs a previewed page's own
+scripts.
+
+### A skill isn't used, or `/skill` refuses
+
+**Problem.** The model ignores a skill you installed, or `/skill` answers
+with an error.
+
+**Solution.**
+
+- Turn on **Use skills** in **Settings → Skills**, and the skill's own
+  switch in the list. `/skill` says *Skills are off. Turn them on in
+  Settings → Skills.* while the first is off, and *No enabled skill matches
+  "…". Type /skill to list them.* when no enabled skill has that name.
+- A skill missing from the list may be in the **Not loaded** box below it,
+  with the reason — for example *Skipped: SKILL.md has no `description`, so
+  the model couldn't tell when to use it.* Fix the `SKILL.md`; the folders
+  are read again on every message.
+- The model loads a skill itself only if it can call tools; with any other
+  model, load it with `/skill <name>`. Private Chat has no skills.
+- After restoring a backup on another computer, a chat's skills come back
+  once a skill of the same name is installed and switched on there: a
+  backup records which skills each chat had loaded and which you switched
+  off, not the skill folders themselves.
 
 ---
 
@@ -584,8 +681,14 @@ tab.
 - Memory must be on in the Space's **Settings** tab. Outside a Space,
   memory stays off until you turn on **Settings → Features → Global
   memories**.
+- Extraction waits while the model is busy — another message queued or
+  sending — and catches up on the parked turns when it's free.
+- Only what you typed is read: facts that appear only in an attachment or
+  a fetched page aren't saved.
 - Each candidate fact must be **at most 280 characters**. Longer "facts"
-  are dropped.
+  are dropped, and so are ones that look like a password, PIN, key or
+  token, ones that only describe what you asked for, and duplicates. One
+  run saves at most 5 new facts.
 - Memory uses the same provider/model the chat is using. Tiny models
   often return empty extractions; try a larger one.
 
@@ -601,14 +704,26 @@ delete it. Turning a Space's memory toggle off only stops *new* writes; its
 existing memories still ride along until you remove them. Turning off
 **Global memories** stops both.
 
+Extraction can also correct or retire a fact it saved earlier. Those
+changes show an **Updated memory** or **Removed memory** toast, and its
+**Undo** puts the old fact back. Memories you added yourself (the Memory
+tab's **Add** or `/remember`) are never changed automatically.
+
 ### Reference sources won't add to a Space
 
-**Problem.** Adding a source to a Space fails or silently does nothing.
+**Problem.** Uploading a source on a Space's **Sources** tab fails with an
+error below the **Upload** button.
 
-**Solution.** Each file can be at most **20 MB**, and a Space's sources at
-most **200 MB** in total. Remove
-older references, or move the content into a smaller text file. Library
-items linked with **From Library** don't count toward that limit.
+**Solution.**
+
+- *… exceeds the 20 MB limit* or *Adding "…" would exceed the 200 MB space
+  limit.* — each file can be at most **20 MB**, and a Space's sources at
+  most **200 MB** in total. Remove older references, or move the content
+  into a smaller text file. Library items linked with **From Library**
+  don't count toward that limit.
+- *…: no readable text — it may be a scanned PDF* — the PDF has no text
+  layer (or the document is empty). Run it through an OCR tool, or upload
+  its pages as images or the text as a plain text file.
 
 ### Space instructions seem to override my custom instructions
 
@@ -625,9 +740,9 @@ Space's instructions, or repeat the relevant parts in them.
 
 ### Search by meaning says "Embedding paused"
 
-**Problem.** The Library header or **Settings → Library** shows **Embedding
-paused**, and replies' sources chips say the embedding model was
-unavailable.
+**Problem.** The Library header shows **Embedding paused** (**Settings →
+Library** says **Embedding is paused**), and replies' sources chips say the
+embedding model was unavailable.
 
 **Solution.** Loach can't reach the embedding model, so it searches your
 sources by keyword until it can — nothing is lost. **Settings → Library**
@@ -653,10 +768,10 @@ keyword search.
 **Solution.** Embedding runs in the background, a batch at a time, and a
 large Library on a CPU-only machine takes a while; keyword search works
 throughout. If the count stops moving, check **Settings → Library**: when
-something fails the status turns into **Embedding paused** with the reason
-(see above). Passages a model refuses or fails on by themselves — too long
-for some servers, or one that crashes the model's runner — are set aside
-for keyword search and don't hold up the rest; editing the source, new
+something fails the status turns into **Embedding is paused** with the
+reason (see above). Passages a model refuses or fails on by themselves —
+too long for some servers, or one that crashes the model's runner — are
+set aside for keyword search and don't hold up the rest; editing the source, new
 embedding settings or a rebuild gives them another try. **Rebuild** in
 **Settings → Library** starts over from scratch.
 
@@ -710,10 +825,11 @@ Small local models sometimes overlook long context; a larger model helps.
 chip shows the opening part of each source instead.
 
 **Solution.** These languages don't put spaces between words, so keyword
-search can only match long runs of text. Set a multilingual embedding model
-in **Settings → Library** (`embeddinggemma`, `qwen3-embedding:0.6b` or
-`bge-m3`) — search by meaning doesn't depend on spaces — or switch the chat
-to **Full text** when the sources fit.
+search treats each unbroken run of text between punctuation as one word,
+and matches only when your query is that whole run. Set a multilingual
+embedding model in **Settings → Library** (`embeddinggemma`,
+`qwen3-embedding:0.6b` or `bge-m3`) — search by meaning doesn't depend on
+spaces — or switch the chat to **Full text** when the sources fit.
 
 ### An item is marked "Truncated"
 
@@ -775,13 +891,15 @@ for exactly this case.
 ### "Too many failed attempts" on the lock screen
 
 **Problem.** After several wrong PINs, every unlock attempt is refused with
-a red *Too many failed attempts. Try again in N seconds* message.
+a red *Too many failed attempts. Try again in N seconds* message — at the
+lock screen, or in a prompt that asks for your current credentials.
 
 **Solution.** After 5 consecutive failed attempts, Loach starts an
-escalating cool-down (30 s → 60 s → 2 min … up to 2 h). Wait for the
-window to expire. Restarting the app doesn't help: the count is saved next
-to the database and only resets on a successful unlock (or when the lock is
-changed or removed).
+escalating cool-down (30 s → 60 s → 2 min … up to 2 h). The lock screen and
+every re-authentication prompt (changing or removing the lock, import,
+erase) share one count. Wait for the window to expire. Restarting the app
+doesn't help: the count is saved next to the database and only resets on a
+successful credential check (or when the lock is changed or removed).
 
 ### Changing or removing the lock asks for my current password
 
@@ -835,9 +953,10 @@ it.
 
 **Solution.** Expected. The idle deadline is re-checked periodically rather
 than driven by one long timer, so the lock lands up to 15 seconds after
-the interval. Erring late is deliberate: a timer that fires early on a
-throttled or suspended window is the worse failure. A machine that sleeps
-past the interval locks the moment it wakes.
+the interval. One long timer would run late in a background window and,
+after the machine sleeps, still owe its full time; checking a deadline
+avoids both. A machine that sleeps past the interval locks the moment it
+wakes.
 
 ---
 
@@ -965,10 +1084,14 @@ older backups.
 **Problem.** After erasing, your OpenAI key is still configured.
 
 **Solution.** By design. **Remove my data** (under **Settings → Data →
-Erase & Reset**) removes chats, folders, Spaces, snippets, snippet
-variables, MCP servers and memories but keeps app settings and your stored
-API key. To clear everything, including the key and the app lock, use
-**Factory reset** instead.
+Erase & Reset**) removes chats (with the skills loaded in them), folders,
+Spaces (with their sources and memories), your Library, global memories,
+snippets, snippet variables and MCP servers, but keeps app settings and
+your stored API key. To clear settings, the key and the app lock as well,
+use **Factory reset** instead.
+
+Neither removes skill folders, which live on disk outside the database:
+delete Loach's own from **Open folder** in **Settings → Skills**.
 
 ---
 
