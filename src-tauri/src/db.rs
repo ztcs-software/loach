@@ -295,6 +295,15 @@ pub struct SnippetFillValue {
     pub updated_at: i64,
 }
 
+/// A skill switched on in a chat (`session_skills`). Only the name: the
+/// skill itself is a folder on disk, outside the database.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SessionSkill {
+    pub session_id: String,
+    pub name: String,
+    pub created_at: i64,
+}
+
 /// A user-configured MCP (Model Context Protocol) server. Two transports:
 ///
 ///   - **Streamable HTTP** — one URL, POST JSON-RPC bodies, optional auth
@@ -1564,6 +1573,22 @@ impl Database {
             params![session_id, name, Utc::now().timestamp_millis()],
         )?;
         Ok(added > 0)
+    }
+
+    fn all_session_skills(&self) -> Result<Vec<SessionSkill>> {
+        self.with_read(|conn| {
+            let mut stmt = conn.prepare("SELECT session_id, name, created_at FROM session_skills")?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok(SessionSkill {
+                        session_id: r.get(0)?,
+                        name: r.get(1)?,
+                        created_at: r.get(2)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
     }
 
     pub fn remove_session_skill(&self, session_id: &str, name: &str) -> Result<()> {
@@ -3174,6 +3199,7 @@ impl Database {
                 library_datasets: self.list_library_datasets()?,
                 space_library_sources: self.all_library_sources(library::SourceOwner::Space)?,
                 session_library_sources: self.all_library_sources(library::SourceOwner::Session)?,
+                session_skills: self.all_session_skills()?,
             },
         })
     }
@@ -3284,6 +3310,17 @@ impl Database {
                     s.retrieval_mode.as_deref().filter(|m| is_retrieval_mode(m)),
                     s.image_scaling_json.as_deref().and_then(normalize_image_scaling),
                 ],
+            )?;
+        }
+
+        // A name off the skill-name rule never came from `/skill` or the
+        // model, so it's left out rather than shown as a chip. One whose
+        // chat isn't in the snapshot falls to `clear_dangling_refs`.
+        for sk in d.session_skills.iter().filter(|sk| crate::skills::is_valid_name(&sk.name)) {
+            tx.execute(
+                "INSERT OR IGNORE INTO session_skills (session_id, name, created_at)
+                 VALUES (?1, ?2, ?3)",
+                params![sk.session_id, sk.name, sk.created_at],
             )?;
         }
 
@@ -3726,6 +3763,10 @@ pub struct SnapshotData {
     /// Library items / datasets linked into chats.
     #[serde(default)]
     pub session_library_sources: Vec<library::LibrarySource>,
+    /// Skills switched on in each chat. Empty on exports that predate
+    /// skills. Older builds ignore the field, so it needs no schema bump.
+    #[serde(default)]
+    pub session_skills: Vec<SessionSkill>,
 }
 
 /// Row-count breakdown returned after a successful import.
@@ -5119,5 +5160,36 @@ mod tests {
         db.delete_session(&s.id).unwrap();
         assert!(db.session_skills(&s.id).unwrap().is_empty());
         assert!(db.add_session_skill("gone", "pdf").is_err());
+    }
+
+    /// A restore used to delete every chat's skills without exporting them.
+    /// They now travel in the snapshot; a name off the skill-name rule or a
+    /// chat the snapshot doesn't carry is dropped on the way back in.
+    #[test]
+    fn session_skills_survive_a_snapshot_round_trip() {
+        let (db, _dir) = fresh_db();
+        let s = db.create_session("t", "ollama", "m", None, None).unwrap();
+        db.add_session_skill(&s.id, "pdf").unwrap();
+        db.add_session_skill(&s.id, "docx").unwrap();
+
+        let mut snap = db.snapshot().expect("snapshot");
+        assert_eq!(snap.data.session_skills.len(), 2);
+        snap.data.session_skills.push(SessionSkill {
+            session_id: s.id.clone(),
+            name: "<b>Bad Name</b>".into(),
+            created_at: 0,
+        });
+        snap.data.session_skills.push(SessionSkill {
+            session_id: "missing-chat".into(),
+            name: "pdf".into(),
+            created_at: 0,
+        });
+
+        let (db2, _dir2) = fresh_db();
+        db2.restore_snapshot(&snap).expect("restore");
+        let mut names = db2.session_skills(&s.id).unwrap();
+        names.sort();
+        assert_eq!(names, ["docx", "pdf"]);
+        assert!(db2.session_skills("missing-chat").unwrap().is_empty());
     }
 }

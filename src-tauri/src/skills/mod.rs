@@ -48,8 +48,9 @@ pub const SETTING_KEY: &str = "skills_enabled";
 /// Whether `run_skill_script` is offered at all. Each run still asks.
 pub const SCRIPTS_SETTING_KEY: &str = "skill_scripts_enabled";
 /// JSON array of skill names switched off in Settings → Skills. Written
-/// only by [`set_enabled`], never through `set_setting`.
-const DISABLED_KEY: &str = "disabled_skills";
+/// only by [`set_enabled`] and by a restore ([`screen_disabled`]), never
+/// through `set_setting`.
+pub const DISABLED_KEY: &str = "disabled_skills";
 
 pub const ACTIVATE_SKILL: &str = "activate_skill";
 pub const READ_SKILL_FILE: &str = "read_skill_file";
@@ -168,6 +169,25 @@ pub fn set_enabled(db: &Database, name: &str, enabled: bool) -> anyhow::Result<(
     db.set_setting(DISABLED_KEY, &serde_json::to_string(&names)?)
 }
 
+/// A backup's [`DISABLED_KEY`] value as a restore may write it: the names
+/// that pass [`is_valid_name`], sorted and deduplicated. `None` when it
+/// isn't a JSON list of strings.
+pub fn screen_disabled(value: &str) -> Option<String> {
+    let names: BTreeSet<String> = serde_json::from_str::<Vec<String>>(value)
+        .ok()?
+        .into_iter()
+        .filter(|n| is_valid_name(n))
+        .collect();
+    serde_json::to_string(&names).ok()
+}
+
+/// The skill-name rule: lowercase letters, digits and hyphens. The name goes
+/// into prompts, a tool schema and the `/skill` command, so it must not
+/// carry markup or spaces.
+pub fn is_valid_name(name: &str) -> bool {
+    !name.is_empty() && name.chars().all(|c| c == '-' || (c.is_alphanumeric() && !c.is_uppercase()))
+}
+
 /// Every skill in `roots`, plus the folders that couldn't be loaded.
 pub fn discover(roots: &Roots, disabled: &HashSet<String>) -> Catalog {
     let mut catalog = Catalog::default();
@@ -259,9 +279,8 @@ fn load(dir: &Path, source: Source, data_dir: Option<&Path>) -> Result<Option<Sk
             folder.clone()
         }
     };
-    // Enforced, not just warned about: the name goes into prompts, a tool
-    // schema and the `/skill` command, so it must not carry markup or spaces.
-    if name.is_empty() || !name.chars().all(|c| c == '-' || (c.is_alphanumeric() && !c.is_uppercase())) {
+    // Enforced, not just warned about (see `is_valid_name`).
+    if !is_valid_name(&name) {
         return Err(format!(
             "Skipped: the name `{name}` may only use lowercase letters, digits and hyphens."
         ));

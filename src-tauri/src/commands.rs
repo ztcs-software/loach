@@ -4001,18 +4001,15 @@ pub async fn import_data_with_dialog(
     }
 
     // Stage 2.5 — filter imported settings through the SAME allowlist
-    // `set_setting` enforces. `restore_snapshot` writes settings rows
+    // `set_setting` enforces (plus the skills' switched-off list, screened —
+    // see `screen_imported_settings`). `restore_snapshot` writes settings rows
     // verbatim, which otherwise bypasses the gate entirely: a hand-edited
     // export could plant arbitrary keys. (We deliberately do NOT
     // value-screen base URLs: they're freely user-writable on the normal
     // path — local proxies like LM Studio need `localhost:1234` — so the
     // import path matches that. Stage 2.6 handles the one URL a stored
     // secret is sent to.)
-    let before = snap.data.settings.len();
-    snap.data
-        .settings
-        .retain(|(k, _)| is_writable_setting_key(k));
-    let dropped = before - snap.data.settings.len();
+    let dropped = screen_imported_settings(&mut snap.data.settings);
     if dropped > 0 {
         tracing::warn!(
             "import: dropped {dropped} setting(s) not on the writable allowlist"
@@ -4058,6 +4055,29 @@ pub async fn import_data_with_dialog(
 }
 
 const OPENAI_BASE_URL_KEY: &str = "openai_base_url";
+
+/// Keep only the imported settings `set_setting` would accept, plus the
+/// list of skills switched off in Settings → Skills. That one isn't on the
+/// allowlist (only the skill switches write it), but dropping it would
+/// switch every one of those skills back on; its names are screened
+/// instead. Returns how many rows were dropped.
+fn screen_imported_settings(settings: &mut Vec<(String, String)>) -> usize {
+    let before = settings.len();
+    settings.retain_mut(|(k, v)| {
+        if k == crate::skills::DISABLED_KEY {
+            match crate::skills::screen_disabled(v) {
+                Some(screened) => {
+                    *v = screened;
+                    true
+                }
+                None => false,
+            }
+        } else {
+            is_writable_setting_key(k)
+        }
+    });
+    before - settings.len()
+}
 
 /// Replace an imported `openai_base_url` with `current` (the installed value,
 /// `None` when it's the default). The API key never travels in a snapshot, so
@@ -4424,6 +4444,30 @@ mod tests {
         let mut s = vec![row("https://api.openai.com/v1")];
         assert!(!keep_current_openai_base_url(&mut s, Some("https://api.openai.com/v1".into())));
         assert_eq!(base_url_rows(&s), ["https://api.openai.com/v1"]);
+    }
+
+    /// Restoring a backup used to drop the skills' switched-off list (it
+    /// isn't on the allowlist), switching those skills back on. It's kept,
+    /// screened, while `set_setting` still refuses it.
+    #[test]
+    fn import_keeps_the_skills_switched_off() {
+        let key = crate::skills::DISABLED_KEY.to_string();
+        let row = |k: &str, v: &str| (k.to_string(), v.to_string());
+
+        let mut s = vec![
+            row("theme", "dark"),
+            row(&key, r#"["web-search","pdf","Bad Name","pdf"]"#),
+            row("planted_key", "x"),
+        ];
+        assert_eq!(screen_imported_settings(&mut s), 1);
+        assert_eq!(s, [row("theme", "dark"), row(&key, r#"["pdf","web-search"]"#)]);
+
+        // Not a list of names: dropped like an unknown key.
+        let mut s = vec![row(&key, "{\"pdf\":true}")];
+        assert_eq!(screen_imported_settings(&mut s), 1);
+        assert!(s.is_empty());
+
+        assert!(!is_writable_setting_key(&key));
     }
 
     fn stdio_input(command: &str, args: &[&str], env: &[(&str, &str)]) -> McpServerInput {

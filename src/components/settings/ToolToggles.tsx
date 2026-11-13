@@ -65,7 +65,7 @@ export const TOOL_TOGGLES: {
         expressions. Local models often miscalculate
         multi-step arithmetic; this gives them an exact
         answer instead. Runs entirely in-process — no
-        network — and is available even in Private Chat.
+        network.
       </>
     ),
   },
