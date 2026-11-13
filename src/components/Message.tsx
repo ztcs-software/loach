@@ -1,4 +1,4 @@
-import { memo, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   Ban,
@@ -19,6 +19,7 @@ import {
   Share2,
   ShieldAlert,
   TextSelect,
+  Volume2,
   Wrench,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -48,6 +49,7 @@ import { useShareStore } from "@/stores/shareStore";
 import { useSnippetStore } from "@/stores/snippetStore";
 import { useToastStore } from "@/stores/toastStore";
 import { useLibraryStore } from "@/stores/libraryStore";
+import { speechAvailable, useSpeechStore } from "@/stores/speechStore";
 import { SOURCES_TOOL } from "@/lib/sources";
 import { SourcesUsedChip } from "./library/SourcesUsedChip";
 
@@ -539,6 +541,12 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
   const bodyRef = useRef<HTMLDivElement>(null);
   const openSnippetDialog = useSnippetStore((s) => s.openDialog);
   const openShareDialog = useShareStore((s) => s.open);
+  const speaking = useSpeechStore((s) => s.speakingId === message.id);
+  const speak = useSpeechStore((s) => s.speak);
+  const stopSpeaking = useSpeechStore((s) => s.stop);
+  // Reading stops with the bubble: switching chats, regenerating or locking
+  // the app shouldn't leave a voice going with nothing on screen to stop it.
+  useEffect(() => () => useSpeechStore.getState().stop(message.id), [message.id]);
 
   // Single funnel for every clipboard write the message component does.
   // The Tauri webview can refuse `navigator.clipboard.writeText` in narrow
@@ -1083,6 +1091,9 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
                 >
                   {copied ? (
                     <Check className="h-4 w-4 text-emerald-400" />
+                  ) : speaking ? (
+                    // Marks the reply being read; Stop reading is in this menu.
+                    <Volume2 className="h-4 w-4 animate-pulse" />
                   ) : (
                     <MoreHorizontal className="h-4 w-4" />
                   )}
@@ -1099,6 +1110,31 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
                   <Copy className="h-4 w-4 text-foreground/60" />
                   Copy message
                 </DropdownMenuItem>
+                {/* Not while this reply streams: it would read only what has
+                    arrived so far. */}
+                {speechAvailable && (
+                  <DropdownMenuItem
+                    onSelect={() =>
+                      speaking
+                        ? stopSpeaking(message.id)
+                        : speak(message.id, message.content)
+                    }
+                    disabled={isStreaming}
+                    className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
+                  >
+                    {speaking ? (
+                      <>
+                        <CircleStop className="h-4 w-4 text-foreground/60" />
+                        Stop reading
+                      </>
+                    ) : (
+                      <>
+                        <Volume2 className="h-4 w-4 text-foreground/60" />
+                        Read aloud
+                      </>
+                    )}
+                  </DropdownMenuItem>
+                )}
                 <DropdownMenuItem
                   onSelect={() =>
                     openShareDialog({
