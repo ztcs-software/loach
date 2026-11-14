@@ -468,7 +468,8 @@ const ContextUsagePopover = ({
       </dl>
 
       <p className="mt-2.5 text-[10.5px] leading-relaxed text-foreground/45">
-        Estimate based on ~4 characters per token. Actual counts vary by model.
+        Estimate based on ~4 characters per token (~1 for Chinese, Japanese
+        and Korean). Actual counts vary by model.
       </p>
 
       <button

@@ -327,8 +327,23 @@ pub async fn run(plan: Plan) -> McpCallResult {
             Err(e) => return failed(format!("Couldn't save the code to a temporary file: {e}")),
         },
     };
-    let mut cmd = tokio::process::Command::new(&plan.program);
+    let program = match program_path(&plan.program) {
+        Ok(program) => program,
+        Err(e) => return failed(e),
+    };
+    let mut cmd = tokio::process::Command::new(&program);
     cmd.args(plan.lead).arg(&script).args(&plan.args);
+    #[cfg(unix)]
+    {
+        // The PATH a terminal would see, as stdio MCP servers get it: started
+        // from the Dock or a desktop launcher, Loach's own lacks what
+        // `.zprofile` or `.bashrc` add, so `python3`, `node` or `pwsh` from
+        // Homebrew, nvm or pyenv weren't found. std looks the program up on
+        // the child's PATH once it's set.
+        if let Some(path) = crate::mcp::stdio::login_shell_path().await {
+            cmd.env("PATH", path);
+        }
+    }
     if let Some(cwd) = plan.cwd.as_deref().or(saved.as_ref().map(tempfile::TempDir::path)) {
         cmd.current_dir(cwd);
     }
@@ -404,6 +419,81 @@ fn failed(text: String) -> McpCallResult {
         content_text: text,
         is_error: true,
         ..Default::default()
+    }
+}
+
+/// The program to start for `program`: itself, except `bash` on Windows,
+/// where a bare `bash` finds WSL's launcher in System32 before anything on
+/// PATH ([`find_bash`]).
+#[cfg(windows)]
+fn program_path(program: &str) -> Result<std::ffi::OsString, String> {
+    if program != "bash" {
+        return Ok(program.into());
+    }
+    let windir = std::env::var_os("SystemRoot").map_or_else(|| PathBuf::from(r"C:\Windows"), PathBuf::from);
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    match find_bash(std::env::split_paths(&path), &windir) {
+        Bash::Found(bash) => Ok(bash.into_os_string()),
+        Bash::OnlyWsl(bash) => Err(format!(
+            "Couldn't start `bash`: the only one here is WSL's ({}), which runs a script inside \
+             Linux, where this one's Windows path doesn't exist. Install Git for Windows, which \
+             brings Git Bash, or put another bash.exe on PATH, then restart Loach.",
+            bash.display()
+        )),
+        // Starting it then reports it missing.
+        Bash::Missing => Ok(program.into()),
+    }
+}
+
+#[cfg(not(windows))]
+fn program_path(program: &str) -> Result<std::ffi::OsString, String> {
+    Ok(program.into())
+}
+
+/// Where `bash` is, on Windows.
+#[cfg(any(windows, test))]
+#[derive(Debug, PartialEq)]
+enum Bash {
+    /// One that runs a script at its Windows path.
+    Found(PathBuf),
+    /// Only WSL's launcher.
+    OnlyWsl(PathBuf),
+    Missing,
+}
+
+/// The bash.exe to run a `.sh` with, given the `PATH` folders in order: the
+/// first outside Windows' own folder and `…\Microsoft\WindowsApps`, which is
+/// where WSL's launcher and its alias live, else Git for Windows' own
+/// `bin\bash.exe` beside the `git` on PATH (all its installer adds there by
+/// default). WSL's runs the script inside Linux, where a Windows path like
+/// the script's doesn't exist.
+#[cfg(any(windows, test))]
+fn find_bash(dirs: impl IntoIterator<Item = PathBuf>, windir: &Path) -> Bash {
+    let lower = |p: &Path| PathBuf::from(p.to_string_lossy().to_lowercase());
+    let (windir_lower, apps) = (lower(windir), Path::new("microsoft").join("windowsapps"));
+    let (mut wsl, mut git) = (None, None);
+    for dir in dirs.into_iter().filter(|d| d.is_absolute()) {
+        let bash = dir.join("bash.exe");
+        if bash.is_file() {
+            let d = lower(&dir);
+            if !d.starts_with(&windir_lower) && !d.ends_with(&apps) {
+                return Bash::Found(bash);
+            }
+            wsl.get_or_insert(bash);
+        }
+        if git.is_none() && dir.join("git.exe").is_file() {
+            // `<Git>\cmd\git.exe`, or `<Git>\mingw64\bin\git.exe`.
+            git = dir.ancestors().take(3).map(|a| a.join("bin").join("bash.exe")).find(|b| b.is_file());
+        }
+    }
+    if let Some(bash) = git {
+        return Bash::Found(bash);
+    }
+    // A bare `bash` tries the System32 folder even when it isn't on PATH.
+    let system = windir.join("System32").join("bash.exe");
+    match wsl.or_else(|| system.is_file().then_some(system)) {
+        Some(bash) => Bash::OnlyWsl(bash),
+        None => Bash::Missing,
     }
 }
 
@@ -499,6 +589,44 @@ mod tests {
         let r = run(plan).await;
         assert!(r.is_error);
         assert!(r.content_text.contains("isn't installed"), "{}", r.content_text);
+    }
+
+    /// WSL's launcher, in Windows' own folder or as the WindowsApps alias,
+    /// gives way to any other bash.exe on PATH, then to Git for Windows' own
+    /// beside `git`; when it's all there is, it's reported as WSL's.
+    #[test]
+    fn bash_on_windows_passes_over_wsls_launcher() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let touch = |rel: &str| {
+            let p = root.join(rel);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(&p, "").unwrap();
+            p
+        };
+        let windir = root.join("Windows");
+        let system = root.join("Windows/System32");
+        let apps = root.join("AppData/Local/Microsoft/WindowsApps");
+        let wsl = touch("Windows/System32/bash.exe");
+        touch("AppData/Local/Microsoft/WindowsApps/bash.exe");
+        assert_eq!(find_bash([system.clone(), apps.clone()], &windir), Bash::OnlyWsl(wsl.clone()));
+        assert_eq!(find_bash([apps.clone()], &windir), Bash::OnlyWsl(apps.join("bash.exe")));
+        assert_eq!(find_bash([], &windir), Bash::OnlyWsl(wsl));
+
+        touch("Git/cmd/git.exe");
+        touch("Git/mingw64/bin/git.exe");
+        let git_bash = touch("Git/bin/bash.exe");
+        let found = |dirs: Vec<PathBuf>| find_bash(dirs, &windir);
+        assert_eq!(found(vec![system.clone(), apps, root.join("Git/cmd")]), Bash::Found(git_bash.clone()));
+        assert_eq!(found(vec![root.join("Git/mingw64/bin")]), Bash::Found(git_bash));
+
+        let msys = touch("msys64/usr/bin/bash.exe");
+        assert_eq!(
+            found(vec![system, root.join("Git/cmd"), root.join("msys64/usr/bin")]),
+            Bash::Found(msys)
+        );
+        let nothing = TempDir::new().unwrap();
+        assert_eq!(find_bash([PathBuf::from("relative")], nothing.path()), Bash::Missing);
     }
 
     #[cfg(unix)]

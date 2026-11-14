@@ -624,10 +624,18 @@ of the script's output.
   the program from the language or the file's extension: `python` on
   Windows and `python3` elsewhere, `bash`, `node`, and `powershell` on
   Windows or `pwsh` (PowerShell 7) on macOS and Linux. Install it or add it
-  to `PATH`, then restart Loach. Scripts get the `PATH` Loach started with,
-  so a tool installed through Homebrew, nvm or pyenv may not be found when
-  Loach was started from the Dock or an app menu, even though it works in a
-  terminal.
+  to `PATH`, then restart Loach. On macOS and Linux, scripts get the `PATH`
+  your login shell builds, as local MCP servers do, so tools installed
+  through Homebrew, nvm or pyenv are found even when Loach was started from
+  the Dock or an app menu. If one still isn't, your shell took over 10 s to
+  start or sets `PATH` somewhere a login shell doesn't read.
+- *Couldn't start `bash`: the only one here is WSL's …* — on Windows,
+  `bash.exe` in `System32` (or its alias in `WindowsApps`) is WSL's: it
+  runs the script inside Linux, where the script's Windows path doesn't
+  exist. Loach passes it over for another `bash.exe` on `PATH`, or Git
+  Bash next to the `git` on `PATH`. Install
+  [Git for Windows](https://git-scm.com/download/win), or put another
+  `bash.exe` on `PATH`, then restart Loach.
 - *Stopped after 300 seconds, the most a script may run.* — a script gets 5
   minutes. Ask for a faster approach, or split the work.
 - *Running scripts is switched off in Loach's settings.* — turn on **Run

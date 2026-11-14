@@ -90,6 +90,25 @@ describe("computeContextUsage — what reaches the model", () => {
     expect(usage.used).toBe(3);
   });
 
+  it("counts CJK messages and attachments at about a token per character", () => {
+    // Messages and attachments once stayed at a flat char/4 while every
+    // other layer was CJK-aware, so a Chinese chat filled its window about
+    // four times faster than the bar showed.
+    const prompt = "机器学习是人工智能的一个分支"; // 14 chars → 14 tokens
+    const file = att({ name: "笔记.txt", data: "这是一个很长的中文文件。".repeat(40) });
+    const content = inlineTextAttachments(prompt, [file]);
+    const usage = computeContextUsage(
+      [msg("user", content), msg("assistant", "日本語のテキスト")], // 8 chars → 8 tokens
+      null,
+      NO_PARAMS,
+    );
+    const appendedChars = content.length - prompt.length;
+    expect(usage.attachmentsTokens).toBe(estimateTokens(content.slice(prompt.length)));
+    // Mostly CJK, so well above the flat char/4 count.
+    expect(usage.attachmentsTokens).toBeGreaterThan(appendedChars / 2);
+    expect(usage.messagesTokens).toBe(14 + usage.attachmentsTokens + 8);
+  });
+
   it("leaves thinking text out, as chatHistory() does", () => {
     // Only `content` is sent back to the model; counting a long reasoning
     // trace made the bar warn about a window the chat wasn't using.

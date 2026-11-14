@@ -991,8 +991,10 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
             full-content actions (Copy message, Save as Snippet) that the
             right-click menu intentionally omits. Hidden until hover/focus
             to keep the outgoing-message look clean, but tab-reachable so
-            keyboard users have a discoverable path to these actions. */}
-        {isUser && displayContent.length > 0 && (
+            keyboard users have a discoverable path to these actions. A
+            prompt that's only attachments keeps the menu for its
+            attachment action; the text actions need text. */}
+        {isUser && (displayContent.length > 0 || attachments.some((a) => a.kind !== "file")) && (
           <div className="absolute -bottom-1 right-2 translate-y-full">
             <DropdownMenu open={userKebabOpen} onOpenChange={setUserKebabOpen}>
               <DropdownMenuTrigger asChild>
@@ -1004,7 +1006,11 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
                   // differing. This one carries Copy + Share + Save as
                   // Snippet, which only make sense for the user's own
                   // message.
-                  aria-label="Copy, share or save this message"
+                  aria-label={
+                    displayContent.length > 0
+                      ? "Copy, share or save this message"
+                      : "Save this message's attachments"
+                  }
                   className={cn(
                     "inline-flex h-7 w-7 items-center justify-center rounded-full text-foreground/55 transition-opacity hover:bg-foreground/10 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
                     userKebabOpen
@@ -1019,31 +1025,35 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
                 align="end"
                 className="min-w-[180px]"
               >
-                <DropdownMenuItem
-                  onSelect={() => void copyUserContent(displayContent)}
-                  className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
-                >
-                  <Copy className="h-4 w-4 text-foreground/60" />
-                  Copy message
-                </DropdownMenuItem>
-                <DropdownMenuItem
-                  onSelect={() =>
-                    openShareDialog({ role: "user", content: displayContent })
-                  }
-                  className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
-                >
-                  <Share2 className="h-4 w-4 text-foreground/60" />
-                  Share
-                </DropdownMenuItem>
-                <DropdownMenuItem
-                  onSelect={() =>
-                    openSnippetDialog({ seedPrompt: displayContent })
-                  }
-                  className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
-                >
-                  <Bookmark className="h-4 w-4 text-foreground/60" />
-                  Save as Snippet
-                </DropdownMenuItem>
+                {displayContent.length > 0 && (
+                  <>
+                    <DropdownMenuItem
+                      onSelect={() => void copyUserContent(displayContent)}
+                      className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
+                    >
+                      <Copy className="h-4 w-4 text-foreground/60" />
+                      Copy message
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
+                      onSelect={() =>
+                        openShareDialog({ role: "user", content: displayContent })
+                      }
+                      className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
+                    >
+                      <Share2 className="h-4 w-4 text-foreground/60" />
+                      Share
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
+                      onSelect={() =>
+                        openSnippetDialog({ seedPrompt: displayContent })
+                      }
+                      className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
+                    >
+                      <Bookmark className="h-4 w-4 text-foreground/60" />
+                      Save as Snippet
+                    </DropdownMenuItem>
+                  </>
+                )}
                 {attachments.some((a) => a.kind !== "file") && (
                   <DropdownMenuItem
                     onSelect={() => void saveAttachmentsToLibrary()}

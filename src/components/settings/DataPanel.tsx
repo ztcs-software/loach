@@ -473,7 +473,7 @@ function EraseDialog({
     try {
       if (mode === "user-data") {
         await wipeUserData(auth);
-        onDone("All chats, Spaces, snippets, and MCP servers deleted. Reloading…");
+        onDone("All chats, Spaces, Library items, memories, snippets, and MCP servers deleted. Reloading…");
       } else {
         await factoryReset(auth);
         onDone("Loach has been reset to factory defaults. Reloading…");

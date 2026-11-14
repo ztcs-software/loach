@@ -1115,9 +1115,10 @@ const LOGIN_SHELL_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(any(unix, test))]
 const ENV_MARK: &str = "__LOACH_ENV_7F3C__";
 
-/// PATH for stdio servers on macOS / Linux: the login shell's, followed by
-/// any of Loach's own entries it lacks. `None` when the shell couldn't be
-/// asked; the server then inherits Loach's PATH as before.
+/// PATH for stdio servers and scripts (`skills::script`) on macOS / Linux:
+/// the login shell's, followed by any of Loach's own entries it lacks.
+/// `None` when the shell couldn't be asked; the child then inherits Loach's
+/// PATH as before.
 ///
 /// An app started from the Dock or a desktop launcher inherits the
 /// session's bare PATH, not the one the shell builds from `.zprofile`,
@@ -1127,7 +1128,7 @@ const ENV_MARK: &str = "__LOACH_ENV_7F3C__";
 /// per launch, interactive and login like a terminal (VS Code does the
 /// same), and the answer — or the failure — is kept.
 #[cfg(unix)]
-async fn login_shell_path() -> Option<std::ffi::OsString> {
+pub(crate) async fn login_shell_path() -> Option<std::ffi::OsString> {
     static PATH: tokio::sync::OnceCell<Option<std::ffi::OsString>> =
         tokio::sync::OnceCell::const_new();
     PATH.get_or_init(|| async {
@@ -1144,7 +1145,7 @@ async fn login_shell_path() -> Option<std::ffi::OsString> {
         let out = match tokio::time::timeout(LOGIN_SHELL_TIMEOUT, cmd.output()).await {
             Ok(Ok(out)) => out,
             _ => {
-                tracing::warn!("MCP: couldn't read PATH from the login shell {shell:?}");
+                tracing::warn!("couldn't read PATH from the login shell {shell:?}");
                 return None;
             }
         };

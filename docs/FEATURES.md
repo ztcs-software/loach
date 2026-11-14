@@ -169,7 +169,8 @@ transcript of messages.
   turn, and streams a fresh answer in place). **Share** (§2.12) is on every
   bubble; **Pin this response** (§2.11), **Fork from here** (§2.6) and
   **Save to Library** (§4) on assistant replies, and **Save attachments to
-  Library** on user prompts that carry files.
+  Library** on user prompts that carry files. A prompt with no text, only
+  attachments, gets just that last item.
 - **Read aloud** — in an assistant reply's `…` menu: reads the reply with
   your system's voices, skipping code blocks and display math, and turns
   into **Stop reading** while it plays (the `…` button shows a speaker).
@@ -499,10 +500,8 @@ included), project instructions (`LOACHFILE.md`, `CLAUDE.md` or
 `AGENTS.md`), memories, sources (what
 the next message will send of them, in full or as excerpts — §4.4) and
 messages (attachments called out), plus what's left of the window. It's an
-estimate, at about four characters per token; the system prompt, project
-instructions, memories and sources count Chinese, Japanese and Korean text
-at about one character per token, but messages and attachments stay at
-four.
+estimate, at about four characters per token, or about one character per
+token for Chinese, Japanese and Korean text.
 On an Ollama chat the popover's **Expand context window** button doubles
 this chat's context length. An OpenAI-compatible server ignores that
 setting, so there the bar measures against the 32k Loach assumes (§1.2),
@@ -1417,8 +1416,11 @@ scripts a skill ships with through `run_skill_script`: `.py` (Python),
 `.sh` (bash), `.js`/`.mjs`/`.cjs` (Node.js) and `.ps1` (PowerShell), using
 what's installed on your computer: `python` on Windows and `python3`
 elsewhere, `bash`, `node`, and `powershell` on Windows or `pwsh` (PowerShell
-7) elsewhere, which must be on Loach's `PATH`; a `.ps1` runs with its
-execution policy bypassed. Only files inside an enabled skill's
+7) elsewhere, which must be on `PATH`: on macOS and Linux the one your
+login shell builds, as for local MCP servers (§9.2). On Windows `bash` is
+never WSL's launcher, which can't open a Windows path: Loach takes another
+`bash.exe` on `PATH`, or Git Bash next to the `git` on `PATH`. A `.ps1` runs
+with its execution policy bypassed. Only files inside an enabled skill's
 folder can be run, the interpreter comes from the extension, and the
 arguments are passed as they are, with no shell in between. **Every run
 asks first**, showing the exact command, the folder it runs in and any

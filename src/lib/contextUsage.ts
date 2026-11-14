@@ -21,9 +21,13 @@ const CJK = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hang
  * in (the first 2000 characters of) the sample.
  */
 export function charsPerToken(sample: string): number {
+  const head = sample.slice(0, 2000);
+  // One native scan settles the common case; the context bar runs this per
+  // message on every streaming flush.
+  if (!CJK.test(head)) return 4;
   let total = 0;
   let cjk = 0;
-  for (const ch of sample.slice(0, 2000)) {
+  for (const ch of head) {
     total += 1;
     if (CJK.test(ch)) cjk += 1;
   }
@@ -70,7 +74,7 @@ const FALLBACK_CTX = 8192;
  *
  * with the label reading `Attached PDF:` / `Attached Word document:` for
  * those types, and a longer fence when the body holds a run of three or
- * more backticks itself. We sum the length of those blocks so the popup can show
+ * more backticks itself. We estimate those blocks on their own so the popup can show
  * "X tokens of your context are attachments". Keep these patterns in sync
  * with the `header`/`footer` in `inlineTextAttachments` — they previously
  * drifted (the old regex expected a `--- Attached file: name ---` header
@@ -80,13 +84,9 @@ const ATTACHMENT_HEADER = /\n---\nAttached (?:file|PDF|Word document): /;
 const ATTACHMENT_BLOCK =
   /\n\n---\nAttached (?:file|PDF|Word document): [^\n]*\n(`{3,})\n[\s\S]*?\n\1(?!`)/g;
 
-function attachmentCharsIn(content: string): number {
-  if (!ATTACHMENT_HEADER.test(content)) return 0;
-  let chars = 0;
-  for (const m of content.matchAll(ATTACHMENT_BLOCK)) {
-    chars += m[0].length;
-  }
-  return chars;
+function attachmentBlocksIn(content: string): string[] {
+  if (!ATTACHMENT_HEADER.test(content)) return [];
+  return Array.from(content.matchAll(ATTACHMENT_BLOCK), (m) => m[0]);
 }
 
 export function computeContextUsage(
@@ -101,8 +101,8 @@ export function computeContextUsage(
   const projectInstructionsTokens = estimateTokens(projectInstructions);
   const memoriesTokens = estimateTokens(memories);
 
-  let messageChars = 0;
-  let attachmentChars = 0;
+  let messagesTokens = 0;
+  let attachmentsTokens = 0;
   let nonSystemCount = 0;
   for (const m of messages) {
     // The chatHistory builder excludes role:"system" rows (sent via the
@@ -114,14 +114,22 @@ export function computeContextUsage(
     if (m.role === "system") continue;
     if (m.compacted_at != null) continue;
     nonSystemCount += 1;
-    messageChars += m.content.length;
+    // Each message, and each attached file apart from the prompt around it,
+    // is sized by its own script, so CJK text counts at about a token per
+    // character here too, as in the system prompt and sources.
+    let text = m.content;
     if (m.role === "user") {
-      attachmentChars += attachmentCharsIn(m.content);
+      const blocks = attachmentBlocksIn(text);
+      if (blocks.length > 0) {
+        const tokens = blocks.reduce((sum, block) => sum + estimateTokens(block), 0);
+        attachmentsTokens += tokens;
+        messagesTokens += tokens;
+        text = text.replace(ATTACHMENT_BLOCK, "");
+      }
     }
+    messagesTokens += estimateTokens(text);
   }
 
-  const messagesTokens = Math.ceil(messageChars / 4);
-  const attachmentsTokens = Math.ceil(attachmentChars / 4);
   const used =
     systemPromptTokens + projectInstructionsTokens + memoriesTokens + sourcesTokens + messagesTokens;
   const total =
