@@ -1,12 +1,12 @@
 import { useState } from "react";
-import { BookMarked, Brain, Clock, MemoryStick } from "lucide-react";
+import { BookMarked, Brain, Clock } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useOnboardingStore } from "@/stores/onboardingStore";
 import { StepShell } from "./StepShell";
 
 /**
- * Feature toggles. Four defaults that are easier to set once at onboarding
+ * Feature toggles. Three defaults that are easier to set once at onboarding
  * than to discover later in Settings:
  *
  *   - Global memories: OFF by default. When on, every reply costs a
@@ -15,10 +15,8 @@ import { StepShell } from "./StepShell";
  *     and fixes the "what's today's date?" surprise.
  *   - Thinking: ON by default. Reasoning models default to thinking
  *     unless the model author says otherwise.
- *   - Low VRAM: OFF by default. Hurts speed if you don't need it; the
- *     in-chat toggle is right there if a model OOMs.
  *
- * All four are committed to settings on Continue *and* on Skip —
+ * All three are committed to settings on Continue *and* on Skip —
  * establishing defaults is the wizard's job, and none of these reaches the
  * network or changes what the model is allowed to do (global memory's extra
  * call goes to the provider the chat already uses, and Skip writes it OFF).
@@ -31,14 +29,12 @@ interface DraftFeatures {
   global_memory_enabled: boolean;
   temporal_awareness: boolean;
   thinking_default: boolean;
-  low_vram_global: boolean;
 }
 
 const RECOMMENDED: DraftFeatures = {
   global_memory_enabled: false,
   temporal_awareness: true,
   thinking_default: true,
-  low_vram_global: false,
 };
 
 export function FeaturesStep({ onClose }: { onClose: () => void }) {
@@ -59,7 +55,6 @@ export function FeaturesStep({ onClose }: { onClose: () => void }) {
       update("global_memory_enabled", draft.global_memory_enabled),
       update("temporal_awareness", draft.temporal_awareness),
       update("thinking_default", draft.thinking_default),
-      update("low_vram_global", draft.low_vram_global),
     ]);
     goNext();
   };
@@ -97,13 +92,6 @@ export function FeaturesStep({ onClose }: { onClose: () => void }) {
           description="Default for the per-chat Thinking toggle. Only takes effect on thinking-capable Ollama models. Different providers ignore it."
           checked={draft.thinking_default}
           onChange={(v) => set("thinking_default", v)}
-        />
-        <FeatureRow
-          icon={<MemoryStick className="h-4 w-4" />}
-          title="Low VRAM mode"
-          description="Force Ollama into low-VRAM mode for every chat for smaller batches and leaner KV cache. This setting overrides the per-chat Low VRAM toggle so you don't have to flip it on each new session. Ignored by OpenAI API providers."
-          checked={draft.low_vram_global}
-          onChange={(v) => set("low_vram_global", v)}
         />
       </div>
     </StepShell>

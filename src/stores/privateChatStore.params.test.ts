@@ -1,7 +1,6 @@
 // Private Chat sends the parameters its panel shows.
 //
-// It used to send only what the user had changed (plus the Low VRAM pin),
-// leaving everything else to Ollama's own defaults, while the panel showed
+// It used to send only what the user had changed, leaving everything else to Ollama's own defaults, while the panel showed
 // the merged values — an 8K context, the global Thinking default, the
 // model's Modelfile defaults — that the request never carried.
 //
@@ -60,7 +59,7 @@ describe("Private Chat request params", () => {
     usePrivateChatStore.getState().wipe();
     usePrivateChatStore.setState({ model: "m" });
     useModelsStore.setState({ modelDefaults: {}, modelCapabilities: { m: ["thinking"] } });
-    useSettingsStore.setState({ thinking_default: false, low_vram_global: false });
+    useSettingsStore.setState({ thinking_default: false });
   });
 
   it("sends the app defaults and the global Thinking default when nothing was changed", async () => {
@@ -86,11 +85,6 @@ describe("Private Chat request params", () => {
     const params = await sentParams();
     expect(params.num_ctx).toBe(16384);
     expect(params.temperature).toBe(0.2);
-  });
-
-  it("applies the global Low VRAM pin", async () => {
-    useSettingsStore.setState({ low_vram_global: true });
-    expect((await sentParams()).low_vram).toBe(true);
   });
 
   it("is marked private, offers no tools and persists nothing", async () => {

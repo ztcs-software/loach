@@ -460,10 +460,10 @@ function flushPendingFrame(get: Getter, set: Setter) {
  *  with their runtime guard. Anything not in this list — or with the
  *  wrong type — is silently dropped so a corrupted DB row (or a
  *  pre-RTM blob written by an older format) can't push e.g.
- *  `temperature: "high"` through to the provider. Booleans for
- *  `think` / `low_vram` are coerced strictly: any non-boolean value is
- *  ignored. `seed` is the only field where `null` is a meaningful
- *  payload value ("random each run"). */
+ *  `temperature: "high"` through to the provider. The `think` boolean is
+ *  coerced strictly: any non-boolean value is ignored. `seed` is the
+ *  only field where `null` is a meaningful payload value ("random each
+ *  run"). */
 const PARAM_GUARDS: {
   [K in keyof GenerationParams]: (v: unknown) => GenerationParams[K] | undefined;
 } = {
@@ -487,7 +487,6 @@ const PARAM_GUARDS: {
   },
   think: (v) => (typeof v === "boolean" ? v : undefined),
   num_gpu: (v) => (typeof v === "number" && Number.isFinite(v) ? v : undefined),
-  low_vram: (v) => (typeof v === "boolean" ? v : undefined),
 };
 
 function parseOverrides(json: string | null): Partial<GenerationParams> {
@@ -530,10 +529,6 @@ function parseOverrides(json: string | null): Partial<GenerationParams> {
  *   4. Session overrides — whatever the user persisted by touching a slider
  *      (`params_json`). When `params_json` is `null` the session inherits
  *      from layers 1 – 3 only.
- *   5. Global app overrides — settings that win above every other layer,
- *      currently just the global Low-VRAM toggle from Settings → Features.
- *      When the user pins it on we want it to apply to every chat with
- *      every model, even ones whose Modelfile sets `low_vram` differently.
  *
  * Read synchronously so the chat send path doesn't pay an async hop on
  * every message. Cache warming happens up-front in `newSession` /
@@ -598,13 +593,6 @@ function readSessionParams(session: Session | undefined): GenerationParams {
     ...spaceLayer,
     ...overrides,
   };
-  // Global Low-VRAM pin (Settings → Features). Ollama-only — OpenAI ignores
-  // the field, so we don't bother stamping it on those requests. Stays out
-  // of `params_json` deliberately: a per-chat record of "user picked this"
-  // shouldn't include settings the user never touched in the panel.
-  if (isOllama && settingsState.low_vram_global) {
-    merged.low_vram = true;
-  }
   // `think` goes only to a model whose capabilities list "thinking": Ollama
   // answers any other model (llama3, gemma, …) with a 400, and the retry
   // without the field cost a second request on every message. Capabilities

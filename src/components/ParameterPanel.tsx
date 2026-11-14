@@ -1,5 +1,5 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
-import { Brain, ChevronRight, Dice5, Info, Layers, MemoryStick, RotateCcw, X } from "lucide-react";
+import { Brain, ChevronRight, Dice5, Info, Layers, RotateCcw, X } from "lucide-react";
 import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -100,11 +100,6 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
   );
   const supportsThinking =
     session?.provider === "ollama" && (modelCapabilities?.includes("thinking") ?? false);
-  // Global Low-VRAM pin (Settings → Features). When on, every Ollama request
-  // is sent with `low_vram: true` regardless of what's in this panel — so
-  // we visually pin the per-chat toggle on and disable it, with a hint
-  // pointing the user back to the global setting.
-  const lowVramGlobal = useSettingsStore((s) => s.low_vram_global);
   // Global Thinking default (Settings → Features). Mirrors the chatStore
   // merge order so the panel shows the same value the request will send.
   const thinkingDefault = useSettingsStore((s) => s.thinking_default);
@@ -506,8 +501,8 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
               </Section>
             )}
 
-            <Section title="Performance">
-              {isAdvanced && (
+            {isAdvanced && (
+              <Section title="Performance">
                 <GpuLayersRow
                   value={params.num_gpu ?? null}
                   inherited={inheritedNumGpu ?? null}
@@ -521,23 +516,8 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
                   }
                   isOpenAI={isOpenAI}
                 />
-              )}
-              <LowVramRow
-                checked={
-                  // Global pin wins above everything — show that state
-                  // honestly so users don't think their per-chat toggle
-                  // is broken when it's actually being overridden.
-                  lowVramGlobal && !isOpenAI
-                    ? true
-                    : (params.low_vram ?? false)
-                }
-                // An explicit false: dropping the key let a Space's
-                // `low_vram: true` through while the switch read off.
-                onChange={(next) => update({ low_vram: next })}
-                isOpenAI={isOpenAI}
-                pinnedByGlobal={lowVramGlobal && !isOpenAI}
-              />
-            </Section>
+              </Section>
+            )}
 
             {isAdvanced && (
               <Section title="Reproducibility">
@@ -995,55 +975,6 @@ function GpuLayersRow({
           : inherited === null
             ? "How many model layers to offload to the GPU. 0 = CPU only; leave blank for Ollama's auto-detect."
             : `How many model layers to offload to the GPU. 0 = CPU only; leave blank for the model's default (${inherited}).`}
-      </p>
-    </div>
-  );
-}
-
-/**
- * Low-VRAM toggle. Sends `low_vram: true` to Ollama, which trades
- * throughput for footprint (smaller batches, leaner KV cache). Off by
- * default — only flip when you're hitting OOMs and `num_gpu` alone
- * isn't enough. Turning it off persists `false`, not `undefined`, so it
- * still wins over a Space that pins it on.
- *
- * `pinnedByGlobal` reflects the Settings → Features master switch. When
- * true, the per-chat toggle is forced on and disabled — flipping it
- * would be a no-op, so we make that obvious instead of silently ignoring
- * the click.
- */
-function LowVramRow({
-  checked,
-  onChange,
-  isOpenAI,
-  pinnedByGlobal,
-}: {
-  checked: boolean;
-  onChange: (next: boolean) => void;
-  isOpenAI: boolean;
-  pinnedByGlobal: boolean;
-}) {
-  const disabled = isOpenAI || pinnedByGlobal;
-  return (
-    <div className={disabled ? "opacity-55" : undefined}>
-      <div className="flex items-center justify-between gap-3">
-        <Label className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.1em] text-foreground/70">
-          <MemoryStick className="h-3.5 w-3.5 shrink-0 text-foreground/70" />
-          Low VRAM
-        </Label>
-        <Switch
-          checked={checked}
-          disabled={disabled}
-          onCheckedChange={onChange}
-          aria-label={checked ? "Disable low VRAM mode" : "Enable low VRAM mode"}
-        />
-      </div>
-      <p className="mt-1.5 text-[10.5px] leading-snug text-foreground/50">
-        {isOpenAI
-          ? "Ignored by OpenAI providers."
-          : pinnedByGlobal
-            ? "Pinned on by the global Low VRAM setting (Settings → Features). Turn that off to control it per chat."
-            : "Trade speed for memory: smaller batches and KV cache. Helpful when you're up against VRAM limits."}
       </p>
     </div>
   );

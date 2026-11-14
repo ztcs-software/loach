@@ -316,7 +316,7 @@ export default function App() {
       if (resolved.provider === "ollama" && resolved.model) {
         // Resolve the runner-affecting params a fresh chat with this model
         // would send (num_ctx from the Modelfile defaults, else the app
-        // default; plus the global low-VRAM pin) so the warmed model isn't
+        // default) so the warmed model isn't
         // reloaded the instant the user sends their first message.
         void useModelsStore
           .getState()
@@ -326,7 +326,6 @@ export default function App() {
               s.ollama_base_url,
               resolved.model,
               md.num_ctx ?? DEFAULT_PARAMS.num_ctx,
-              s.low_vram_global ? true : md.low_vram,
               md.num_gpu,
             ).catch(() => {});
           })

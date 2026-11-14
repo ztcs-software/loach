@@ -243,9 +243,10 @@ with "ran out of memory loading or running the model".
 3. Pick a smaller quantization (for example `q4_K_M` instead of `q8_0`)
    or a smaller parameter size.
 
-The **Low VRAM** toggle (and **Settings → Features → Low VRAM mode**) won't
-help here: it sends Ollama's `low_vram` option, which Ollama releases since
-mid-2025 no longer read.
+Loach 1.6 and earlier also had a **Low VRAM** toggle (and **Settings →
+Features → Low VRAM mode**). It's gone because it only sent Ollama's
+`low_vram` option, which Ollama releases since mid-2025 no longer read; the
+steps above are what actually frees VRAM.
 
 ### Onboarding sized my machine wrong
 

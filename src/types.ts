@@ -387,11 +387,6 @@ export interface GenerationParams {
    *  `undefined` lets Ollama auto-detect. Lets users dial offload down when
    *  the model OOMs the GPU. Ignored by OpenAI providers. */
   num_gpu?: number;
-  /** Ollama-only: opt into low-VRAM mode. `true` shrinks batch sizes and
-   *  the KV cache; `undefined` / `false` leaves Ollama's default (off).
-   *  Pairs with `num_gpu` for memory-constrained setups. Ignored by OpenAI
-   *  providers. */
-  low_vram?: boolean;
 }
 
 /** Context window assumed for an OpenAI-compatible chat that doesn't set
@@ -620,12 +615,6 @@ export interface Settings {
    *  run code the model writes or a script in the chat's workspace. Every
    *  run still asks. */
   run_script_enabled: boolean;
-  /** Global override for Ollama's `low_vram` option. When `true`, every
-   *  Ollama request is sent with `low_vram: true` regardless of per-chat
-   *  params or per-model Modelfile defaults — handy on memory-constrained
-   *  hardware where you'd otherwise have to remember to flip the per-chat
-   *  toggle. Off by default. Ignored by OpenAI providers. */
-  low_vram_global: boolean;
   /** How long Ollama keeps the resolved model resident in VRAM after each
    *  request (the `keep_alive` field). The default `"5m"` matches Ollama's
    *  own idle-unload timeout; longer values (or `"-1"` = until unloaded)
@@ -720,7 +709,6 @@ export const DEFAULT_SETTINGS: Settings = {
   skills_enabled: false,
   skill_scripts_enabled: false,
   run_script_enabled: false,
-  low_vram_global: false,
   ollama_keep_alive: "5m",
   thinking_default: true,
   default_tone_id: "default",

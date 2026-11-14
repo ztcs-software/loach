@@ -682,7 +682,6 @@ export function ollamaPreloadModel(
   baseUrl: string,
   model: string,
   numCtx?: number,
-  lowVram?: boolean,
   numGpu?: number,
 ): Promise<void> {
   if (!isTauri) return notInTauri(undefined);
@@ -692,7 +691,6 @@ export function ollamaPreloadModel(
     baseUrl,
     model,
     numCtx: numCtx ?? null,
-    lowVram: lowVram ?? null,
     numGpu: numGpu ?? null,
   });
 }

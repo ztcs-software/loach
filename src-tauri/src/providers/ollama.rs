@@ -1310,19 +1310,12 @@ pub const DEFAULT_NUM_CTX: u32 = 8192;
 /// Build the Ollama `options` object for a preload so the warmed runner is
 /// sized like the one the first real chat request will ask for. `num_ctx` is
 /// the load-bearing one (a mismatch forces a KV-cache realloc, i.e. a reload);
-/// `low_vram` / `num_gpu` matter on memory-constrained setups. Returns `None`
+/// `num_gpu` matters on memory-constrained setups. Returns `None`
 /// when nothing is set so the request body omits `options` entirely.
-pub fn preload_options(
-    num_ctx: Option<u32>,
-    low_vram: Option<bool>,
-    num_gpu: Option<u32>,
-) -> Option<Value> {
+pub fn preload_options(num_ctx: Option<u32>, num_gpu: Option<u32>) -> Option<Value> {
     let mut o = serde_json::Map::new();
     if let Some(v) = num_ctx {
         o.insert("num_ctx".into(), json!(v));
-    }
-    if let Some(v) = low_vram {
-        o.insert("low_vram".into(), json!(v));
     }
     if let Some(v) = num_gpu {
         o.insert("num_gpu".into(), json!(v));
@@ -1389,9 +1382,6 @@ fn build_options(req: &ChatRequest) -> Value {
     }
     if let Some(v) = p.num_gpu {
         o.insert("num_gpu".into(), json!(v));
-    }
-    if let Some(v) = p.low_vram {
-        o.insert("low_vram".into(), json!(v));
     }
     Value::Object(o)
 }
@@ -1498,6 +1488,26 @@ mod tests {
         assert!(create_fields("FROM m\nSYSTEM \"\"\"never closed\n").is_err());
         assert!(create_fields("FROM m\nADAPTER ./lora.gguf\n").is_err());
         assert!(create_fields("FROM m\nPARAMETER temperature warm\n").is_err());
+    }
+
+    // --- build_options --------------------------------------------------------
+    // Ollama dropped its `low_vram` option (ollama/ollama#10574, May 2025)
+    // and logs any unknown option as invalid. Loach no longer offers the
+    // toggle, but chats and Spaces saved by older versions can still carry
+    // `low_vram` in their parameters.
+
+    #[test]
+    fn build_options_leaves_out_a_stored_low_vram() {
+        let req: ChatRequest = serde_json::from_value(json!({
+            "stream_id": "s",
+            "provider": "ollama",
+            "model": "m",
+            "base_url": "http://127.0.0.1:11434",
+            "messages": [],
+            "params": { "num_ctx": 4096, "num_gpu": 20, "low_vram": true },
+        }))
+        .expect("parameters saved by an older version still parse");
+        assert_eq!(build_options(&req), json!({ "num_ctx": 4096, "num_gpu": 20 }));
     }
 
     // --- normalise_args -------------------------------------------------------

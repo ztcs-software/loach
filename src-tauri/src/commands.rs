@@ -841,7 +841,6 @@ const WRITABLE_SETTING_KEYS: &[&str] = &[
     "temporal_awareness",
     "global_memory_enabled",
     "web_fetch_enabled",
-    "low_vram_global",
     "ollama_keep_alive",
     "thinking_default",
     "default_tone_id",
@@ -1127,7 +1126,6 @@ pub async fn ollama_preload_model(
     base_url: String,
     model: String,
     num_ctx: Option<u32>,
-    low_vram: Option<bool>,
     num_gpu: Option<u32>,
 ) -> Result<(), String> {
     let keep_alive = state
@@ -1137,7 +1135,7 @@ pub async fn ollama_preload_model(
         .flatten()
         .as_deref()
         .and_then(providers::ollama::keep_alive_value);
-    let options = providers::ollama::preload_options(num_ctx, low_vram, num_gpu);
+    let options = providers::ollama::preload_options(num_ctx, num_gpu);
     providers::ollama::preload_model(&state.http, &base_url, &model, keep_alive, options)
         .await
         .map_err(err)

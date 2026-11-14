@@ -96,22 +96,20 @@ function randomId(): string {
  *  values its parameters panel shows. `chatStore.readSessionParams`' merge
  *  minus the layers Private Chat doesn't use (per-model Thinking pref, Space
  *  defaults): DEFAULT_PARAMS < global Thinking default < Modelfile defaults
- *  < panel overrides, then the global Low-VRAM pin on top. Sending only the
- *  overrides left the rest to Ollama's own defaults, which didn't match the
- *  panel (it showed an 8K context while Ollama used its own). */
+ *  < panel overrides. Sending only the overrides left the rest to Ollama's
+ *  own defaults, which didn't match the panel (it showed an 8K context
+ *  while Ollama used its own). */
 export function effectivePrivateParams(
   overrides: Partial<GenerationParams>,
   modelDefaults: Partial<GenerationParams> | undefined,
-  settings: { thinking_default: boolean; low_vram_global: boolean },
+  settings: { thinking_default: boolean },
 ): GenerationParams {
-  const merged: GenerationParams = {
+  return {
     ...DEFAULT_PARAMS,
     think: settings.thinking_default,
     ...modelDefaults,
     ...overrides,
   };
-  if (settings.low_vram_global) merged.low_vram = true;
-  return merged;
 }
 
 /** Compose the effective system prompt the model should see, layering in
@@ -307,7 +305,7 @@ export const usePrivateChatStore = create<PrivateChatState>((set, get) => ({
     };
 
     // Ollama is the only provider Private Chat talks to, so the Ollama-only
-    // layers (Thinking default, Modelfile defaults, Low-VRAM pin) always apply.
+    // layers (Thinking default, Modelfile defaults) always apply.
     const models = useModelsStore.getState();
     const params = effectivePrivateParams(
       state.params,

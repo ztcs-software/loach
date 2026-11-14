@@ -7,7 +7,6 @@ import {
   ChevronRight,
   Clock,
   Image as ImageIcon,
-  MemoryStick,
 } from "lucide-react";
 import { KeepAliveSwitch } from "./switches";
 import { Button } from "@/components/ui/button";
@@ -173,38 +172,6 @@ export function FeaturesTab() {
                     open={globalMemoriesOpen}
                     onOpenChange={setGlobalMemoriesOpen}
                   />
-                </div>
-
-                <Separator />
-
-                <div>
-                  <div className="flex items-start justify-between gap-4">
-                    <div className="min-w-0">
-                      <Label className="flex items-center gap-1.5">
-                        <MemoryStick className="h-3.5 w-3.5 text-foreground/60" />
-                        Low VRAM mode
-                      </Label>
-                      <p className="mt-1 text-[11px] text-foreground/50">
-                        Force Ollama into low-VRAM mode for every chat for
-                        smaller batches and leaner KV cache. This setting
-                        overrides the per-chat Low&nbsp;VRAM toggle so you don't
-                        have to flip it on each new session. Ignored by OpenAI
-                        API providers.
-                      </p>
-                    </div>
-                    <Switch
-                      checked={settings.low_vram_global}
-                      onCheckedChange={(next) =>
-                        settings.update("low_vram_global", next)
-                      }
-                      className="shrink-0"
-                      aria-label={
-                        settings.low_vram_global
-                          ? "Disable global Low VRAM mode"
-                          : "Enable global Low VRAM mode"
-                      }
-                    />
-                  </div>
                 </div>
 
                 <Separator />

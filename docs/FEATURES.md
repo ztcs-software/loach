@@ -425,8 +425,8 @@ no trace. Open it from the ghost icon in the title bar.
   context or Library sources, no `{{USER_NAME}}` substitution, no temporal
   preamble — those layers belong to persistent chats.
 - **Parameters panel** — the Simple view of the regular panel (context
-  length, model defaults, Thinking and Low VRAM toggles) without its
-  **Images** section; there is no Advanced view here. Closes and wipes
+  length, model defaults, Thinking toggle) without its **Images**
+  section; there is no Advanced view here. Closes and wipes
   along with the rest of the overlay.
 
 ### 2.9 Slash commands
@@ -959,10 +959,10 @@ summary for every tone, so the default-tone picker doubles as a reference.
 
 Every chat has a slide-out **parameters panel** on the right. Two modes:
 
-- **Simple** — context length, Thinking toggle, Low VRAM toggle, persona,
-  tone, the per-chat **Additional instructions** textarea, and **Images**
-  (this chat's image scaling — §2.3). The view stays terse on purpose so
-  the common knobs are reachable without scrolling.
+- **Simple** — context length, Thinking toggle, persona, tone, the
+  per-chat **Additional instructions** textarea, and **Images** (this
+  chat's image scaling — §2.3). The view stays terse on purpose so the
+  common knobs are reachable without scrolling.
 - **Advanced** — adds **temperature**, top_p, top_k, min_p, max tokens,
   repeat_penalty, frequency and presence penalties, GPU layer count, and
   seed.
@@ -981,8 +981,6 @@ The parameter merge order, top to bottom (later layers win):
 4. **Per-model preferences** — currently the Models-editor Thinking
    toggle (kept on this device — §6.2).
 5. **Per-session overrides** — what the sliders in this panel save.
-6. **Global app overrides** — the **Settings → Features → Low VRAM mode**
-   pin, which forces `low_vram: true` on every Ollama request (§8.2).
 
 A **Reset to defaults** button below the sliders (labelled
 **Reset to model defaults** when the model ships Modelfile defaults) clears
@@ -994,15 +992,6 @@ Only meaningful for Ollama models whose `capabilities` include `"thinking"`.
 Sets the `think` parameter on `/api/chat`; ignored by OpenAI providers.
 A chat that hasn't set its own follows the model's preference from the
 Models editor (§6.2), else **Settings → Features → Thinking**.
-
-### 8.2 Low VRAM toggle
-
-Ollama-only. Sends Ollama's `low_vram` option, which Ollama releases since
-mid-2025 no longer read, so on a current Ollama it changes nothing. To
-save VRAM, lower **Context Length** or set **GPU Layers** (Advanced view)
-instead. The per-chat toggle is overridden when **Settings → Features →
-Low VRAM mode** is on — the panel shows the toggle pinned and disabled
-with a pointer back to the setting.
 
 ---
 
@@ -1736,9 +1725,9 @@ still leaves the app in a consistent state.
    (the key is optional for local servers). This is the only
    required step; the X / Esc on it routes through a confirm dialog. It sits
    second so a model download has the rest of the wizard to make progress.
-3. **Features** — defaults for Global memories, Temporal awareness,
-   Thinking, and Low VRAM (recommends OFF / ON / ON / OFF). Committed on
-   Skip as well as Continue.
+3. **Features** — defaults for Global memories, Temporal awareness, and
+   Thinking (recommends OFF / ON / ON). Committed on Skip as well as
+   Continue.
 4. **Tools** — Web fetch and the in-process utility tools, which before
    this screen existed were discover-by-accident in Settings. The
    utilities open on a **Recommended** preset — everything on except the
