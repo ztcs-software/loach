@@ -24,6 +24,7 @@ import {
   sessionMessageCounts,
   makeRequestId,
   markMessagesCompacted,
+  ollamaPreloadModel,
   ollamaUnloadModel,
   pinMessage as persistMessagePin,
   pinSession,
@@ -602,6 +603,32 @@ function readSessionParams(session: Session | undefined): GenerationParams {
     delete merged.think;
   }
   return merged;
+}
+
+/** The last typing warm-up sent (see `warmModelForTyping`), so keystrokes
+ *  don't each send one. */
+let lastTypingWarm: { key: string; at: number } | null = null;
+const TYPING_WARM_INTERVAL_MS = 60_000;
+
+/** Start loading an Ollama chat's model as the user types into its composer,
+ *  so the load overlaps the typing instead of holding up the reply. Sized
+ *  with the runner options the send will carry, so it isn't loaded twice; a
+ *  model that's already resident makes this a no-op for Ollama. Skipped
+ *  while a reply streams: the warmed model would wait for it and then evict
+ *  the one the reply's memory extraction runs on. */
+export async function warmModelForTyping(sessionId: string): Promise<void> {
+  const state = useChatStore.getState();
+  if (state.isStreaming) return;
+  const session = state.sessions.find((s) => s.id === sessionId);
+  if (!session || session.provider !== "ollama" || !session.model) return;
+  await warmModelDefaults(session);
+  const { num_ctx, num_gpu } = readSessionParams(session);
+  const baseUrl = useSettingsStore.getState().ollama_base_url;
+  const key = JSON.stringify([baseUrl, session.model, num_ctx, num_gpu]);
+  const now = Date.now();
+  if (lastTypingWarm?.key === key && now - lastTypingWarm.at < TYPING_WARM_INTERVAL_MS) return;
+  lastTypingWarm = { key, at: now };
+  await ollamaPreloadModel(baseUrl, session.model, num_ctx, num_gpu).catch(() => {});
 }
 
 function chatHistory(messages: Message[], userText: string, images: string[]): ChatMessageIn[] {
@@ -1715,6 +1742,7 @@ function resetForTests() {
   pendingDirty.metrics = false;
   pendingDirty.toolCalls = false;
   pendingDirty.attachments = false;
+  lastTypingWarm = null;
 }
 export const __testing = { startTask, resetForTests, buildTaskRequest };
 
