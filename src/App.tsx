@@ -96,6 +96,7 @@ let staleStreamsStopped = false;
 
 export default function App() {
   const hydrateSettings = useSettingsStore((s) => s.hydrate);
+  const hydrateOpenAIKey = useSettingsStore((s) => s.hydrateOpenAIKey);
   const hydrateChats = useChatStore((s) => s.hydrate);
   const hydrateSpaces = useSpaceStore((s) => s.hydrate);
   const hydrateSnippets = useSnippetStore((s) => s.hydrate);
@@ -217,7 +218,7 @@ export default function App() {
   //
   // The hydrates are independent — except `hydrateModels`, whose listing
   // reads the provider URLs and the key flag from the settings store, so it
-  // waits for settings — and we fan the rest out in parallel. The prior
+  // waits for both — and we fan the rest out in parallel. The prior
   // sequential await chain was the dominant chunk of post-unlock latency,
   // since IPC round-trips stack additively. Parallelising collapses them
   // to the slowest single call (typically `hydrateModels`, which is
@@ -247,6 +248,9 @@ export default function App() {
     phase2Started.current = true;
 
     const settingsP = hydrateSettings();
+    // Apart from the settings, which used to wait for it: a keyring read can
+    // sit behind an OS prompt, and only the model listing below needs it.
+    const keyP = hydrateOpenAIKey();
     const chatsP = hydrateChats();
     const spacesP = hydrateSpaces();
     void hydrateSnippets();
@@ -258,10 +262,10 @@ export default function App() {
     void hydrateMcp();
     // `hydrateModels` is network-bound (Ollama /api/tags) — fire-and-forget
     // so its latency never blocks anything the user sees. It lists from the
-    // configured URLs, so it starts once settings land: started alongside
-    // them, it listed the defaults (localhost Ollama, no OpenAI) and stayed
-    // that way for anyone with a remote server or an API key.
-    void settingsP.then(() => hydrateModels());
+    // configured URLs and the key flag, so it starts once both land: started
+    // alongside them, it listed the defaults (localhost Ollama, no OpenAI)
+    // and stayed that way for anyone with a remote server or an API key.
+    void Promise.all([settingsP, keyP]).then(() => hydrateModels());
     // Memory-extraction turns still queued when the app last quit. Checked
     // against the chats and against each scope's memory switch — a Space's
     // or the global setting — so it waits for all three.
@@ -336,6 +340,7 @@ export default function App() {
     securityHydrated,
     unlocked,
     hydrateSettings,
+    hydrateOpenAIKey,
     hydrateSpaces,
     hydrateSnippets,
     hydrateSnippetVars,
