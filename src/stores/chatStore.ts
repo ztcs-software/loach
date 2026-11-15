@@ -43,6 +43,7 @@ import {
   inlineTextAttachments,
   stripInlinedAttachments,
 } from "@/lib/files";
+import { loadAttachments } from "@/lib/messageAttachments";
 import {
   cancelMemoryExtraction,
   dropMemoryTurns,
@@ -2727,7 +2728,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // `sendUserMessage`'s placeholder: a fresh assistant row is created
       // when the task actually starts streaming (inside `startTask`), so
       // a cancel-while-waiting doesn't leave an empty bubble behind.
+      //
+      // Before that, re-read the original user turn's attachments so the new
+      // request reaches the model with the same images as the original send —
+      // their contents fetched, as a chat loaded from disk lists them
+      // without. A failed read then leaves the reply in place.
+      let triggerAttachments: Attachment[];
       try {
+        triggerAttachments = await loadAttachments(userMsg);
         await deleteMessage(last.id, sessionId);
       } catch (e) {
         useToastStore.getState().push({
@@ -2750,17 +2758,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
           streamingByMessage: sbm,
         };
       });
-
-      // Re-read the original user turn's attachments_json so the new
-      // request reaches the model with the same images as the original send.
-      let triggerAttachments: Attachment[] = [];
-      if (userMsg.attachments_json) {
-        try {
-          triggerAttachments = JSON.parse(userMsg.attachments_json) as Attachment[];
-        } catch {
-          /* malformed JSON — proceed without images */
-        }
-      }
 
       const history = (get().messages[sessionId] ?? []).filter(
         (m) => m.id !== userMsg.id,

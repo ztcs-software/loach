@@ -249,6 +249,9 @@ export interface Attachment {
    *  is told via an inline marker; the UI shows a "truncated" pill on the
    *  file chip so users know what reached the model isn't the full file. */
   truncated?: boolean;
+  /** Set on attachments of a message listed by `listMessages`: `data` and
+   *  `bytes` were left out (`data` reads ""). `loadAttachments` fetches them. */
+  omitted?: boolean;
 }
 
 export interface MessageMetrics {

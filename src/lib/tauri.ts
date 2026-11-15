@@ -375,9 +375,17 @@ export function deleteFolder(id: string): Promise<void> {
 
 // ------------ messages ------------
 
+/** A chat's messages, their attachments listed without contents (`omitted`)
+ *  — see `loadAttachments`. */
 export function listMessages(sessionId: string): Promise<Message[]> {
   if (!isTauri) return notInTauri([]);
   return invoke("list_messages", { sessionId });
+}
+
+/** One message's `attachments_json` with contents, or null when it has none. */
+export function messageAttachments(sessionId: string, messageId: string): Promise<string | null> {
+  if (!isTauri) return notInTauri(null);
+  return invoke("message_attachments", { sessionId, messageId });
 }
 
 /** Per-session message counts (`{ sessionId: count }`). A session with zero

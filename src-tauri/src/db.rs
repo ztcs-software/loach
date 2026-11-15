@@ -1726,6 +1726,21 @@ impl Database {
         })
     }
 
+    /// One message's `attachments_json`, or `None` when it has none or isn't
+    /// in `session_id` (scoped like `update_message`).
+    pub fn message_attachments(&self, id: &str, session_id: &str) -> Result<Option<String>> {
+        self.with_read(|conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT attachments_json FROM messages WHERE id = ?1 AND session_id = ?2",
+                    params![id, session_id],
+                    |r| r.get::<_, Option<String>>(0),
+                )
+                .optional()?
+                .flatten())
+        })
+    }
+
     /// Per-session message counts in one indexed pass — `SELECT session_id,
     /// COUNT(*) ... GROUP BY session_id`, covered by `idx_messages_session`.
     /// Lets the frontend's startup empty-session cull learn which chats are
@@ -5191,5 +5206,22 @@ mod tests {
         names.sort();
         assert_eq!(names, ["docx", "pdf"]);
         assert!(db2.session_skills("missing-chat").unwrap().is_empty());
+    }
+
+    /// `message_attachments` hands back a message's attachments whole, but
+    /// only to the chat the message is in.
+    #[test]
+    fn message_attachments_are_scoped_to_their_chat() {
+        let (db, _dir) = fresh_db();
+        let a = db.create_session("a", "ollama", "m", None, None).unwrap();
+        let b = db.create_session("b", "ollama", "m", None, None).unwrap();
+        let json = r#"[{"kind":"image","name":"cat.png","mime":"image/png","data":"iVBORw0K"}]"#;
+        let with = db.append_message(&a.id, "user", "look", Some(json)).unwrap();
+        let without = db.append_message(&a.id, "assistant", "a cat", None).unwrap();
+
+        assert_eq!(db.message_attachments(&with.id, &a.id).unwrap().as_deref(), Some(json));
+        assert_eq!(db.message_attachments(&with.id, &b.id).unwrap(), None);
+        assert_eq!(db.message_attachments(&without.id, &a.id).unwrap(), None);
+        assert_eq!(db.message_attachments("missing", &a.id).unwrap(), None);
     }
 }

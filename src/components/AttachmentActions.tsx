@@ -88,6 +88,8 @@ export function AttachmentActions({
     rawKind === "canvas" && privateChatOpen ? "file" : rawKind;
 
   const openPreview = () => {
+    // Contents still on their way (see `loadAttachments`): nothing to show yet.
+    if (attachment.omitted) return;
     if (kind === "canvas") {
       openCanvas({
         code: attachment.data,

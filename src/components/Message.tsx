@@ -43,6 +43,8 @@ import type {
 } from "@/types";
 import { cn } from "@/lib/utils";
 import { NO_DOCX_TEXT, NO_PDF_TEXT, safeImageMime, stripInlinedAttachments } from "@/lib/files";
+import { loadAttachments, parseAttachments } from "@/lib/messageAttachments";
+import { logger } from "@/lib/logger";
 import { Bookmark, BookmarkPlus } from "lucide-react";
 import { useChatStore } from "@/stores/chatStore";
 import { useShareStore } from "@/stores/shareStore";
@@ -80,21 +82,31 @@ function getSelectionWithin(el: Element): string {
   return sel.toString();
 }
 
+/** An image attachment's 80 px thumbnail, or a same-size placeholder while
+ *  its contents are still being fetched (`omitted`). */
+function Thumbnail({ image }: { image: Attachment }) {
+  if (image.omitted) {
+    return <span aria-hidden className="block h-20 w-20 rounded-lg bg-foreground/[0.06]" />;
+  }
+  return (
+    <img
+      src={`data:${safeImageMime(image.mime)};base64,${image.data}`}
+      alt={image.name}
+      width={80}
+      height={80}
+      loading="lazy"
+      decoding="async"
+      className="h-20 w-20 rounded-lg object-cover"
+    />
+  );
+}
+
 function parseMetrics(json: string | null): MessageMetrics | null {
   if (!json) return null;
   try {
     return JSON.parse(json) as MessageMetrics;
   } catch {
     return null;
-  }
-}
-
-function parseAttachments(json: string | null): Attachment[] {
-  if (!json) return [];
-  try {
-    return JSON.parse(json) as Attachment[];
-  } catch {
-    return [];
   }
 }
 
@@ -677,7 +689,7 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
   const saveToLibrary = useLibraryStore((s) => s.saveToLibrary);
   const saveAttachmentsToLibrary = async () => {
     const unreadable: string[] = [];
-    for (const a of attachments) {
+    for (const a of await loadAttachments(message)) {
       if (a.kind === "file") continue;
       // As in the Library's own upload (`prepareFiles`): a scanned PDF or an
       // empty document is only the shared "no text" note — stored, it'd be a
@@ -704,10 +716,33 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
       });
     }
   };
-  const attachments = useMemo(
+  const listedAttachments = useMemo(
     () => parseAttachments(message.attachments_json),
     [message.attachments_json],
   );
+  // A chat loaded from disk lists attachments without their contents. This
+  // row fetches its own and holds them itself, not in the store, so they
+  // leave memory with the row instead of staying for every chat opened.
+  const [loadedAttachments, setLoadedAttachments] = useState<{
+    from: string | null;
+    list: Attachment[];
+  } | null>(null);
+  const needsContents = listedAttachments.some((a) => a.omitted);
+  const { id: messageId, session_id: messageSessionId, attachments_json: attachmentsJson } = message;
+  useEffect(() => {
+    if (!needsContents) return;
+    let live = true;
+    loadAttachments({ id: messageId, session_id: messageSessionId, attachments_json: attachmentsJson })
+      .then((list) => {
+        if (live) setLoadedAttachments({ from: attachmentsJson, list });
+      })
+      .catch((e) => logger.warn("couldn't load a message's attachments", e));
+    return () => {
+      live = false;
+    };
+  }, [needsContents, messageId, messageSessionId, attachmentsJson]);
+  const attachments =
+    loadedAttachments?.from === attachmentsJson ? loadedAttachments.list : listedAttachments;
   // Images can come from a user upload or, on an assistant turn, from an
   // MCP tool result (mapped to an image attachment in mcp/client.rs).
   const images = attachments.filter((a) => a.kind === "image");
@@ -873,15 +908,7 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
                 attachment={img}
                 className="rounded-lg focus-visible:ring-2 focus-visible:ring-ring/40"
               >
-                <img
-                  src={`data:${safeImageMime(img.mime)};base64,${img.data}`}
-                  alt={img.name}
-                  width={80}
-                  height={80}
-                  loading="lazy"
-                  decoding="async"
-                  className="h-20 w-20 rounded-lg object-cover"
-                />
+                <Thumbnail image={img} />
               </AttachmentActions>
             ))}
           </div>
@@ -956,15 +983,7 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
                 attachment={img}
                 className="rounded-lg focus-visible:ring-2 focus-visible:ring-ring/40"
               >
-                <img
-                  src={`data:${safeImageMime(img.mime)};base64,${img.data}`}
-                  alt={img.name}
-                  width={80}
-                  height={80}
-                  loading="lazy"
-                  decoding="async"
-                  className="h-20 w-20 rounded-lg object-cover"
-                />
+                <Thumbnail image={img} />
               </AttachmentActions>
             ))}
           </div>

@@ -588,12 +588,52 @@ fn validate_role(role: &str) -> Result<(), String> {
     }
 }
 
+/// A chat's transcript for the renderer, its attachments listed without their
+/// contents (see [`omit_attachment_contents`]): an image is stored as its
+/// whole base64, so a chat with a few photos sent tens of MB across IPC on
+/// every open, and the renderer kept them in memory for every chat opened.
+/// Each message row fetches its own with [`message_attachments`].
 #[tauri::command]
 pub async fn list_messages(
     state: State<'_, AppState>,
     session_id: String,
 ) -> Result<Vec<Message>, String> {
-    state.db.list_messages(&session_id).map_err(err)
+    let mut messages = state.db.list_messages(&session_id).map_err(err)?;
+    for m in &mut messages {
+        if let Some(json) = m.attachments_json.as_deref() {
+            m.attachments_json = Some(omit_attachment_contents(json));
+        }
+    }
+    Ok(messages)
+}
+
+/// `attachments_json` with each attachment's `data` and `bytes` taken out and
+/// `omitted: true` put in their place; kind, name, mime and the rest stay.
+/// Anything that isn't a JSON array of objects comes back unchanged.
+fn omit_attachment_contents(json: &str) -> String {
+    use serde_json::{Map, Value};
+    let Ok(mut list) = serde_json::from_str::<Vec<Map<String, Value>>>(json) else {
+        return json.to_string();
+    };
+    for a in &mut list {
+        let data = a.remove("data").is_some();
+        let bytes = a.remove("bytes").is_some();
+        if data || bytes {
+            a.insert("omitted".into(), Value::Bool(true));
+        }
+    }
+    serde_json::to_string(&list).unwrap_or_else(|_| json.to_string())
+}
+
+/// One message's `attachments_json`, contents included — what
+/// [`list_messages`] leaves out. Scoped by chat like `update_message`.
+#[tauri::command]
+pub async fn message_attachments(
+    state: State<'_, AppState>,
+    session_id: String,
+    message_id: String,
+) -> Result<Option<String>, String> {
+    state.db.message_attachments(&message_id, &session_id).map_err(err)
 }
 
 /// Per-session message counts (`{ session_id: count }`). Lets the frontend
@@ -4773,5 +4813,32 @@ mod tests {
         ] {
             assert!(!is_textual_content_type(bad), "{bad:?}");
         }
+    }
+
+    /// The transcript lists attachments without their contents, flagged so
+    /// the renderer knows to fetch them; everything else about them stays.
+    #[test]
+    fn listed_attachments_leave_out_their_contents() {
+        let stored = json!([
+            { "kind": "image", "name": "cat.png", "mime": "image/png", "data": "iVBORw0K" },
+            { "kind": "text", "name": "a.pdf", "mime": "application/pdf", "data": "text",
+              "bytes": "JVBERi0", "truncated": true },
+            { "kind": "file", "name": "empty.bin", "mime": "application/octet-stream" },
+        ])
+        .to_string();
+        let listed: serde_json::Value =
+            serde_json::from_str(&omit_attachment_contents(&stored)).unwrap();
+        assert_eq!(
+            listed,
+            json!([
+                { "kind": "image", "name": "cat.png", "mime": "image/png", "omitted": true },
+                { "kind": "text", "name": "a.pdf", "mime": "application/pdf", "truncated": true,
+                  "omitted": true },
+                { "kind": "file", "name": "empty.bin", "mime": "application/octet-stream" },
+            ])
+        );
+        // Not a list of attachments: passed through as it was.
+        assert_eq!(omit_attachment_contents("not json"), "not json");
+        assert_eq!(omit_attachment_contents("{\"a\":1}"), "{\"a\":1}");
     }
 }

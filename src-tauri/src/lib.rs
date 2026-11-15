@@ -401,6 +401,7 @@ pub fn run() {
             commands::delete_folder,
             commands::export_session,
             commands::list_messages,
+            commands::message_attachments,
             commands::session_message_counts,
             commands::search_messages,
             commands::append_message,
