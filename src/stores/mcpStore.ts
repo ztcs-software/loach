@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { mcpDelete, mcpList, mcpSave, mcpTest } from "@/lib/tauri";
+import { mcpDelete, mcpList, mcpSave, mcpTest, mcpWarm } from "@/lib/tauri";
 import { useToastStore } from "./toastStore";
 import type {
   McpServer,
@@ -70,7 +70,16 @@ interface McpState {
   save: (input: McpServerInput) => Promise<McpServer>;
   remove: (id: string) => Promise<void>;
   test: (input: McpServerInput) => Promise<McpTestResult>;
+  /** Have the backend list the enabled servers' tools ahead of a send, as
+   *  the user types: the first send of a launch otherwise waited for every
+   *  stdio server to start. At most once a minute; nothing without an
+   *  enabled server. */
+  warmTools: () => void;
 }
+
+/** When `warmTools` last asked, so keystrokes don't each ask. */
+let lastWarm = 0;
+const WARM_INTERVAL_MS = 60_000;
 
 function parseMap(json: string | null): Record<string, string> {
   if (!json) return {};
@@ -160,5 +169,13 @@ export const useMcpStore = create<McpState>((set, get) => ({
 
   test: async (input) => {
     return mcpTest(input);
+  },
+
+  warmTools: () => {
+    if (!get().servers.some((s) => s.enabled)) return;
+    const now = Date.now();
+    if (now - lastWarm < WARM_INTERVAL_MS) return;
+    lastWarm = now;
+    void mcpWarm().catch(() => {});
   },
 }));

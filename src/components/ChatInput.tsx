@@ -31,6 +31,7 @@ import {
   FileTooLargeError,
 } from "@/lib/files";
 import { isPreparingSend, useChatStore, warmModelForTyping } from "@/stores/chatStore";
+import { useMcpStore } from "@/stores/mcpStore";
 import { useModelsStore } from "@/stores/modelsStore";
 import { usePrivateChatStore } from "@/stores/privateChatStore";
 import { useSnippetStore } from "@/stores/snippetStore";
@@ -1297,6 +1298,7 @@ export function ChatInput({ centered = false }: ChatInputProps) {
                 setText(e.target.value);
                 setCaret(e.target.selectionStart ?? e.target.value.length);
                 if (composerSessionId) void warmModelForTyping(composerSessionId);
+                useMcpStore.getState().warmTools();
               }}
               onSelect={(e) => setCaret(e.currentTarget.selectionStart ?? 0)}
               onKeyDown={(e) => {

@@ -1536,6 +1536,12 @@ export function mcpTools(): Promise<McpToolsOverview> {
   return invoke<McpToolsOverview>("mcp_tools");
 }
 
+/** Fill the backend's MCP tool cache ahead of a send (see `warmTools`). */
+export function mcpWarm(): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("mcp_warm");
+}
+
 // ------------ data (export / import / wipe) ------------
 
 /** Open a native save dialog and write every table in the DB to the chosen

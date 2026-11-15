@@ -138,7 +138,8 @@ pub async fn aggregate_tools(
 }
 
 /// How long a cached tool catalogue stays fresh before the next chat send
-/// re-probes every enabled server. Config edits (add / edit / delete /
+/// re-probes every enabled server (in the background — see
+/// [`aggregate_tools_cached`]). Config edits (add / edit / delete /
 /// enable-toggle) and snapshot restores invalidate the cache eagerly via
 /// [`invalidate_tools_cache`], so this TTL only bounds how long a server's
 /// *own* tool-list change (rare) — or a transient reachability change —
@@ -168,6 +169,18 @@ pub struct ToolsCacheState {
     /// invalidation stores nothing: its catalogue is from before the change
     /// — a deleted server's tools, a renamed one's old slug.
     generation: u64,
+    /// A background re-probe of an expired entry is running, so another
+    /// read doesn't start a second one.
+    refreshing: bool,
+}
+
+impl ToolsCacheState {
+    /// Keep a probe's catalogue, unless the config changed while it ran.
+    fn keep(&mut self, generation: u64, tools: Vec<McpToolDef>, errors: Vec<(String, String)>) {
+        if self.generation == generation {
+            self.entry = Some(CachedTools { cached_at: Instant::now(), tools, errors });
+        }
+    }
 }
 
 /// Construct a fresh, empty tool cache for `AppState`.
@@ -175,43 +188,48 @@ pub fn new_tools_cache() -> ToolsCache {
     Arc::default()
 }
 
-/// [`aggregate_tools`] for the chat hot path, served from `cache` when the
-/// entry is still within [`TOOLS_CACHE_TTL`]. On a miss (or expiry) it runs
-/// the live probe — DNS-pin + initialize + tools/list per enabled server —
-/// and stores the result so subsequent sends in the same conversation skip
-/// that whole round-trip. Returned shape is identical to `aggregate_tools`
-/// so the caller (and its cancel-aware `select!`) is unchanged; a cache hit
+/// [`aggregate_tools`] for the chat hot path, served from `cache`. With no
+/// entry (first use, or invalidated) it runs the live probe — DNS-pin +
+/// initialize + tools/list per enabled server — and stores the result so
+/// subsequent sends skip that whole round-trip. An entry past
+/// [`TOOLS_CACHE_TTL`] is still the answer, while a background probe
+/// replaces it: a send after a quiet spell used to wait on every server
+/// again, and a server's own tool-list change showing up one send later is
+/// the only cost. Returned shape is identical to `aggregate_tools` so the
+/// caller (and its cancel-aware `select!`) is unchanged; a cache hit
 /// simply resolves near-instantly.
 ///
-/// No single-flight guard: two simultaneous misses may both probe and the
-/// last writer wins — acceptable for a desktop app where concurrent sends to
-/// the same MCP set are rare, and far simpler than coordinating a barrier.
+/// No single-flight guard on a miss: two simultaneous misses may both probe
+/// and the last writer wins — acceptable for a desktop app where concurrent
+/// sends to the same MCP set are rare, and far simpler than coordinating a
+/// barrier.
 pub async fn aggregate_tools_cached(
-    db: &Database,
+    db: &Arc<Database>,
     cache: &ToolsCache,
 ) -> (Vec<McpToolDef>, Vec<(String, String)>) {
     let generation = {
-        let guard = cache.lock().await;
+        let mut guard = cache.lock().await;
+        let generation = guard.generation;
         if let Some(entry) = guard.entry.as_ref() {
-            if entry.cached_at.elapsed() < TOOLS_CACHE_TTL {
-                return (entry.tools.clone(), entry.errors.clone());
+            let answer = (entry.tools.clone(), entry.errors.clone());
+            if entry.cached_at.elapsed() >= TOOLS_CACHE_TTL && !guard.refreshing {
+                guard.refreshing = true;
+                let (db, cache) = (db.clone(), cache.clone());
+                tauri::async_runtime::spawn(async move {
+                    let (tools, errors) = aggregate_tools(&db).await;
+                    let mut guard = cache.lock().await;
+                    guard.keep(generation, tools, errors);
+                    guard.refreshing = false;
+                });
             }
+            return answer;
         }
-        guard.generation
+        generation
     };
     let (tools, errors) = aggregate_tools(db).await;
-    {
-        let mut guard = cache.lock().await;
-        // The config changed while this probe ran: its result is still the
-        // answer for this send, but it mustn't be kept for the next one.
-        if guard.generation == generation {
-            guard.entry = Some(CachedTools {
-                cached_at: Instant::now(),
-                tools: tools.clone(),
-                errors: errors.clone(),
-            });
-        }
-    }
+    // The config changed while this probe ran: its result is still the
+    // answer for this send, but it mustn't be kept for the next one.
+    cache.lock().await.keep(generation, tools.clone(), errors.clone());
     (tools, errors)
 }
 
@@ -1144,5 +1162,38 @@ mod tests {
         let (_, e) = errors.first().expect("the server failed to start");
         assert!(e.contains("exited before replying"), "{e}");
         assert!(!e.contains("token-123"), "{e}");
+    }
+
+    /// An expired catalogue is still the answer while a background probe
+    /// replaces it: a send after a quiet spell doesn't wait on every server.
+    #[tokio::test]
+    async fn an_expired_catalogue_answers_while_it_refreshes() {
+        let (db, _dir) = fresh_db();
+        let db = Arc::new(db);
+        let cache = new_tools_cache();
+        let old = vec![("old".to_string(), "unreachable".to_string())];
+        cache.lock().await.entry = Some(CachedTools {
+            cached_at: Instant::now()
+                .checked_sub(TOOLS_CACHE_TTL + Duration::from_secs(1))
+                .expect("uptime past the TTL"),
+            tools: Vec::new(),
+            errors: old.clone(),
+        });
+
+        let (_, errors) = aggregate_tools_cached(&db, &cache).await;
+        assert_eq!(errors, old);
+
+        // The background probe (no servers configured) replaces it.
+        for _ in 0..200 {
+            if !cache.lock().await.refreshing {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let guard = cache.lock().await;
+        assert!(!guard.refreshing);
+        let entry = guard.entry.as_ref().expect("refreshed");
+        assert!(entry.errors.is_empty());
+        assert!(entry.cached_at.elapsed() < TOOLS_CACHE_TTL);
     }
 }

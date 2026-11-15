@@ -2759,6 +2759,15 @@ pub async fn mcp_tools(state: State<'_, AppState>) -> Result<McpToolsOverview, S
     Ok(McpToolsOverview { tools, errors })
 }
 
+/// Fill the MCP tool cache ahead of a send. The composer calls this as the
+/// user starts typing, so starting stdio servers and listing every server's
+/// tools overlaps the typing instead of holding up the reply.
+#[tauri::command]
+pub async fn mcp_warm(state: State<'_, AppState>) -> Result<(), String> {
+    crate::mcp::aggregate_tools_cached(&state.db, &state.mcp_tools_cache).await;
+    Ok(())
+}
+
 // ---------- chat streaming ----------
 
 #[derive(Debug, Serialize)]
