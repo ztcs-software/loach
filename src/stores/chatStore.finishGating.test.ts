@@ -1,7 +1,8 @@
 // How a reply ends decides what follows it (`finishRunning`):
 //
 //   - done: the turn is parked for memory extraction, which starts once
-//     nothing else wants the model, and a chat in the background gets the
+//     nothing else wants the model — sized like the chat's next send, so
+//     Ollama keeps the loaded runner — and a chat in the background gets the
 //     unread dot;
 //   - cancelled: neither — the user said they were done with this turn;
 //   - error: no extraction, but the dot, so a failure in a chat nobody is
@@ -16,7 +17,7 @@ import type { Message, Session, Space } from "@/types";
 const mocks = vi.hoisted(() => ({
   streams: [] as Array<{ onEvent: (ev: unknown) => void }>,
   queueMemoryTurn: vi.fn(),
-  extractMemories: vi.fn(() => Promise.resolve()),
+  extractMemories: vi.fn<typeof import("@/lib/memory").extractMemories>(() => Promise.resolve()),
 }));
 
 vi.mock("@/lib/tauri", async (importOriginal) => {
@@ -44,6 +45,7 @@ vi.mock("@/lib/memory", async (importOriginal) => {
 });
 
 import { useChatStore, __testing } from "./chatStore";
+import { useModelsStore } from "./modelsStore";
 import { useSettingsStore } from "./settingsStore";
 import { useSpaceStore } from "./spaceStore";
 
@@ -110,6 +112,24 @@ describe("finishRunning", () => {
     });
     expect(mocks.extractMemories).toHaveBeenCalledTimes(1);
     expect(get().unread).toEqual({ bg: true });
+  });
+
+  it("on done, sizes the extraction like the chat's next send", async () => {
+    useChatStore.setState({
+      sessions: [
+        {
+          id: "bg",
+          provider: "ollama",
+          model: "test-model",
+          params_json: JSON.stringify({ num_gpu: 20 }),
+          space_id: null,
+        } as Session,
+      ],
+    });
+    useModelsStore.setState({ modelDefaults: { "test-model": { num_ctx: 32768 } } });
+    await runTo({ kind: "done" });
+    const runnerOptions = mocks.extractMemories.mock.calls[0][0];
+    await expect(runnerOptions?.("bg")).resolves.toEqual({ num_ctx: 32768, num_gpu: 20 });
   });
 
   it("on cancel, does neither", async () => {

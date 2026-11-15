@@ -3,6 +3,8 @@
 //
 //   - the extractor stream asks for no tools, so a tool call can't stall it
 //     on an approval card nobody sees
+//   - an Ollama run carries the chat's num_ctx / num_gpu, so Ollama doesn't
+//     reload the model for it
 //   - one run retires or rewrites at most three rows, however long the
 //     model's `remove` list is, and saves at most five new ones
 //   - a memory the user added by hand is never retired or rewritten
@@ -86,7 +88,7 @@ vi.stubGlobal("window", {
   clearTimeout: (id: Parameters<typeof clearTimeout>[0]) => clearTimeout(id),
 });
 
-import { dropMemoryTurns, extractMemories, queueMemoryTurn } from "./memory";
+import { dropMemoryTurns, extractMemories, queueMemoryTurn, type RunnerOptions } from "./memory";
 import { listGlobalMemories, removeGlobalMemory, startChatStream } from "@/lib/tauri";
 import { useGlobalMemoryStore } from "@/stores/globalMemoryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -105,7 +107,7 @@ function seed(count: number, byHand = false) {
   }));
 }
 
-const run = () => {
+const run = (runnerOptions?: (sessionId: string) => Promise<RunnerOptions>) => {
   queueMemoryTurn({
     scope: { kind: "global" },
     sessionId: "chat-1",
@@ -114,7 +116,7 @@ const run = () => {
     baseUrl: "",
     turn: { userText: "hi", assistantText: "hello", userMessageId: "u1", assistantMessageId: "a1" },
   });
-  return extractMemories();
+  return extractMemories(runnerOptions);
 };
 
 beforeEach(() => {
@@ -133,6 +135,15 @@ describe("extractMemories", () => {
     await run();
     expect(mocks.requests).toHaveLength(1);
     expect(mocks.requests[0].no_tools).toBe(true);
+  });
+
+  it("sizes an Ollama run like the chat's own requests", async () => {
+    // Sent without them, the request took Ollama's default context, which
+    // reloaded the model — and the chat's next message reloaded it back.
+    seed(0);
+    mocks.reply = '{"add":[],"update":[],"remove":[]}';
+    await run(async (sessionId) => (sessionId === "chat-1" ? { num_ctx: 32768, num_gpu: 20 } : {}));
+    expect(mocks.requests[0].params).toMatchObject({ num_ctx: 32768, num_gpu: 20, max_tokens: 512 });
   });
 
   it("removes at most three rows in one run", async () => {

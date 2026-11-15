@@ -16,7 +16,7 @@ import { useGlobalMemoryStore } from "@/stores/globalMemoryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useToastStore } from "@/stores/toastStore";
-import type { MemoryRow, Message, ProviderId, Session } from "@/types";
+import type { GenerationParams, MemoryRow, Message, ProviderId, Session } from "@/types";
 
 /** Where an extraction run reads and writes: one Space's memory, or the
  *  global list. Decided by the chat store when the message is sent — Space
@@ -41,6 +41,12 @@ export interface MemoryExtractionArgs {
   baseUrl: string;
   turn: MemoryTurn;
 }
+
+/** Ollama's runner options as a send in the chat would set them. The
+ *  extractor runs on the chat's model, and a request whose `num_ctx` or
+ *  `num_gpu` differs from the loaded runner's makes Ollama reload the model —
+ *  once for the extractor, then again for the chat's next message. */
+export type RunnerOptions = Pick<GenerationParams, "num_ctx" | "num_gpu">;
 
 /** One chat's turns waiting for a run, with where that run saves. */
 interface PendingRun extends Omit<MemoryExtractionArgs, "turn"> {
@@ -299,9 +305,12 @@ function opsFor(scope: MemoryScope): MemoryOps {
  * waiting for the model — in whichever chat — so turns a send elsewhere cut
  * short no longer wait for their own chat's next reply. A
  * `cancelMemoryExtraction` stops the pass; what it hadn't reached stays
- * parked for the next one.
+ * parked for the next one. `runnerOptions` gives a chat's `RunnerOptions`,
+ * read when its run starts; without it an Ollama run sends none.
  */
-export async function extractMemories(): Promise<void> {
+export async function extractMemories(
+  runnerOptions?: (sessionId: string) => Promise<RunnerOptions>,
+): Promise<void> {
   if (draining) return;
   draining = true;
   const epoch = cancelEpoch;
@@ -313,7 +322,7 @@ export async function extractMemories(): Promise<void> {
       pendingTurns.delete(key);
       extracting = run;
       try {
-        await extractRun(run, epoch);
+        await extractRun(run, epoch, runnerOptions);
       } finally {
         extracting = null;
         // Its turns are read, dropped or parked again by now.
@@ -345,7 +354,11 @@ export async function extractMemories(): Promise<void> {
  * Errors are caught at the boundary — extraction is best-effort and must
  * never disrupt the user's chat flow.
  */
-async function extractRun(run: PendingRun, epoch: number): Promise<void> {
+async function extractRun(
+  run: PendingRun,
+  epoch: number,
+  runnerOptions?: (sessionId: string) => Promise<RunnerOptions>,
+): Promise<void> {
   const { scope, sessionId, provider, model, baseUrl } = run;
   if (!model || !rememberingIn(scope)) return;
 
@@ -386,6 +399,10 @@ async function extractRun(run: PendingRun, epoch: number): Promise<void> {
     [...usersOwn, ...alreadyKnown],
   );
 
+  // Sized like the chat's own requests, so Ollama keeps the loaded runner.
+  const runner: RunnerOptions =
+    provider === "ollama" && runnerOptions ? await runnerOptions(sessionId) : {};
+
   // Read after the awaits above: a turn dropped meanwhile never reaches the
   // prompt.
   const turns = run.turns;
@@ -413,6 +430,7 @@ async function extractRun(run: PendingRun, epoch: number): Promise<void> {
         baseUrl,
         systemPrompt,
         userMessage: turnPrompt,
+        runner,
       },
       epoch,
     );
@@ -562,10 +580,11 @@ async function runOneShotStream(
     baseUrl: string;
     systemPrompt: string;
     userMessage: string;
+    runner: RunnerOptions;
   },
   epoch: number,
 ): Promise<string | null> {
-  const { provider, model, baseUrl, systemPrompt, userMessage } = args;
+  const { provider, model, baseUrl, systemPrompt, userMessage, runner } = args;
   // A send landed while this run read the memory list.
   if (epoch !== cancelEpoch) return null;
   const streamId = makeRequestId();
@@ -625,6 +644,7 @@ async function runOneShotStream(
           { role: "user", content: userMessage, images: [] },
         ],
         params: {
+          ...runner,
           // Small budget — a JSON object with a handful of one-line facts
           // shouldn't need more.
           max_tokens: 512,
