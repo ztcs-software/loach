@@ -45,6 +45,7 @@ pub async fn create_session(
     state: State<'_, AppState>,
     args: CreateSessionArgs,
 ) -> Result<Session, String> {
+    validate_provider(&args.provider)?;
     let title = args.title.unwrap_or_else(|| "New chat".to_string());
     state
         .db
@@ -131,6 +132,7 @@ pub async fn update_session_model(
     state: State<'_, AppState>,
     args: UpdateSessionModelArgs,
 ) -> Result<(), String> {
+    validate_provider(&args.provider)?;
     state
         .db
         .update_session_model(&args.id, &args.provider, &args.model)
@@ -580,6 +582,16 @@ pub async fn export_session(
 /// arbitrary role that the chat-history builder then forwards to the
 /// provider as a turn, surfacing as a confusing upstream 400 rather than a
 /// clear validation error.
+/// A chat's provider, checked where one is stored (as `validate_role` is for
+/// messages): an unknown one was stored as given, and the chat could only
+/// fail on its next send.
+fn validate_provider(provider: &str) -> Result<(), String> {
+    match provider {
+        "ollama" | "openai" => Ok(()),
+        other => Err(format!("unknown provider `{other}` (expected ollama or openai)")),
+    }
+}
+
 fn validate_role(role: &str) -> Result<(), String> {
     match role {
         "user" | "assistant" | "system" => Ok(()),
@@ -599,13 +611,20 @@ pub async fn list_messages(
     state: State<'_, AppState>,
     session_id: String,
 ) -> Result<Vec<Message>, String> {
-    let mut messages = state.db.list_messages(&session_id).map_err(err)?;
-    for m in &mut messages {
-        if let Some(json) = m.attachments_json.as_deref() {
-            m.attachments_json = Some(omit_attachment_contents(json));
+    // Every attachment is read whole and parsed to be stripped — tens of MB
+    // for a chat with photos — so on the blocking pool, like `export_session`.
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || -> Result<Vec<Message>, String> {
+        let mut messages = db.list_messages(&session_id).map_err(err)?;
+        for m in &mut messages {
+            if let Some(json) = m.attachments_json.as_deref() {
+                m.attachments_json = Some(omit_attachment_contents(json));
+            }
         }
-    }
-    Ok(messages)
+        Ok(messages)
+    })
+    .await
+    .map_err(err)?
 }
 
 /// `attachments_json` with each attachment's `data` and `bytes` taken out and
@@ -1466,7 +1485,13 @@ pub async fn update_space(
 
 #[tauri::command]
 pub async fn delete_space(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    state.db.delete_space(&id).map_err(err)?;
+    // Cascades through every file's chunks and their FTS entries under the
+    // write lock — blocking work, so on the blocking pool (as the wipe is).
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || db.delete_space(&id))
+        .await
+        .map_err(err)?
+        .map_err(err)?;
     // Its files' chunks went with it (triggers); let the index status catch up.
     state.indexer.wake();
     Ok(())
@@ -1528,7 +1553,12 @@ pub async fn remove_space_file(
     state: State<'_, AppState>,
     file_id: String,
 ) -> Result<(), String> {
-    state.db.remove_space_file(&file_id).map_err(err)?;
+    // Its chunks and their FTS entries go too — on the blocking pool.
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || db.remove_space_file(&file_id))
+        .await
+        .map_err(err)?
+        .map_err(err)?;
     // Its chunks went with it (trigger); let the index status catch up.
     state.indexer.wake();
     Ok(())
@@ -3202,10 +3232,17 @@ pub struct LibraryList {
 #[tauri::command]
 pub async fn library_list(state: State<'_, AppState>) -> Result<LibraryList, String> {
     let key = embed_model_key(&state);
-    Ok(LibraryList {
-        items: state.db.list_library_items(key.as_deref()).map_err(err)?,
-        datasets: state.db.list_library_datasets().map_err(err)?,
+    // Reading each item's metadata walks its whole body (the columns after
+    // `content` sit past it), images included — on the blocking pool.
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || -> Result<LibraryList, String> {
+        Ok(LibraryList {
+            items: db.list_library_items(key.as_deref()).map_err(err)?,
+            datasets: db.list_library_datasets().map_err(err)?,
+        })
     })
+    .await
+    .map_err(err)?
 }
 
 #[tauri::command]
@@ -3439,7 +3476,12 @@ pub async fn library_refresh_link(
 
 #[tauri::command]
 pub async fn library_delete_items(state: State<'_, AppState>, ids: Vec<String>) -> Result<(), String> {
-    state.db.delete_library_items(&ids).map_err(err)?;
+    // Their chunks and FTS entries go too — on the blocking pool.
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || db.delete_library_items(&ids))
+        .await
+        .map_err(err)?
+        .map_err(err)?;
     // Their chunks went with them (trigger); let the index status catch up.
     state.indexer.wake();
     Ok(())
@@ -4056,15 +4098,19 @@ pub async fn import_data_with_dialog(
             format!("import rejected: message #{} ({}): {e}", idx + 1, m.id)
         })?;
     }
-    for (idx, s) in snap.data.sessions.iter().enumerate() {
-        if s.provider != "ollama" && s.provider != "openai" {
-            return Err(format!(
-                "import rejected: chat #{} ({}) has unknown provider `{}`",
-                idx + 1,
-                s.title,
-                s.provider
-            ));
-        }
+    // A chat with an unknown provider is kept: its next send says so and asks
+    // for a model, which repairs it (`chat_stream`). Refusing the backup over
+    // one such row restored nothing at all.
+    let unknown_provider = snap
+        .data
+        .sessions
+        .iter()
+        .filter(|s| validate_provider(&s.provider).is_err())
+        .count();
+    if unknown_provider > 0 {
+        tracing::warn!(
+            "import: {unknown_provider} chat(s) name an unknown provider; each asks for a model on its next send"
+        );
     }
 
     if !quarantined.is_empty() {
@@ -4248,7 +4294,13 @@ pub async fn archive_all_sessions(state: State<'_, AppState>) -> Result<i64, Str
 /// destructive confirmation before calling this.
 #[tauri::command]
 pub async fn delete_archived_sessions(state: State<'_, AppState>) -> Result<i64, String> {
-    state.db.delete_archived_sessions().map_err(err)
+    // Possibly thousands of chats, each cascading to its messages — on the
+    // blocking pool.
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || db.delete_archived_sessions())
+        .await
+        .map_err(err)?
+        .map_err(err)
 }
 
 /// Delete chats / spaces / snippets / MCP servers but leave app
@@ -4732,6 +4784,15 @@ mod tests {
         assert!(!runs_something_else(&a, &renamed));
         assert!(runs_something_else(&a, &stdio_input("npx", &["-y", "server-b"], &[]).to_draft()));
         assert!(runs_something_else(&a, &stdio_input("npx", &["-y", "server-a"], &[("K", "v")]).to_draft()));
+    }
+
+    /// B1-05: chats are stored only with a provider the app can send to.
+    #[test]
+    fn only_known_providers_are_stored() {
+        assert!(validate_provider("ollama").is_ok());
+        assert!(validate_provider("openai").is_ok());
+        assert!(validate_provider("lmstudio").is_err());
+        assert!(validate_provider("").is_err());
     }
 
     /// X3-02: a failed export leaves the backup it was replacing as it was,

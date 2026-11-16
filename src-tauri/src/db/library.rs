@@ -224,7 +224,7 @@ fn last_chunk_id(conn: &Connection) -> Result<i64> {
 /// reach.
 pub(super) fn reissue_chunks(conn: &Connection, doc: Option<(&str, &str)>, last: i64) -> Result<()> {
     let (kind, id) = doc.unzip();
-    let filter = "id <= ?3 AND (?1 IS NULL OR (doc_kind = ?1 AND doc_id = ?2))";
+    let filter = if doc.is_some() { REISSUE_DOC } else { REISSUE_ALL };
     conn.execute(
         &format!(
             "INSERT INTO rag_chunks (doc_kind, doc_id, seq, text)
@@ -235,6 +235,12 @@ pub(super) fn reissue_chunks(conn: &Connection, doc: Option<(&str, &str)>, last:
     conn.execute(&format!("DELETE FROM rag_chunks WHERE {filter}"), params![kind, id, last])?;
     Ok(())
 }
+
+/// [`reissue_chunks`]' filters. Two rather than one `?1 IS NULL OR (…)`: the
+/// planner can't see the parameter, so that form used no index, and one
+/// rename walked the whole chunk table twice under the write lock.
+const REISSUE_DOC: &str = "doc_kind = ?1 AND doc_id = ?2 AND id <= ?3";
+const REISSUE_ALL: &str = "id <= ?3";
 
 /// Chunks [`Database::clear_rag_embeddings`] moves per transaction.
 const REISSUE_BATCH: i64 = 500;
@@ -343,6 +349,13 @@ pub(super) fn restore_library(conn: &Connection, d: &SnapshotData) -> Result<()>
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         )?;
         for i in &d.library_items {
+            // The checks `create_library_item` makes: anything else is never
+            // indexed or shown right. Dataset members and links left pointing
+            // at a skipped item are dropped with the other dangling rows.
+            if !matches!(i.kind.as_str(), "text" | "file" | "link") || !matches!(i.media.as_str(), "text" | "image") {
+                tracing::warn!("restore: skipped Library item {} ({} / {})", i.id, i.kind, i.media);
+                continue;
+            }
             // A hand-edited or old export may lack the digest; recompute so
             // duplicate detection keeps working on restored rows.
             let hash = if i.content_hash.is_empty() {
@@ -391,6 +404,12 @@ pub(super) fn restore_library(conn: &Connection, d: &SnapshotData) -> Result<()>
             owner.table()
         );
         for s in rows {
+            // A link names exactly one thing; one with neither (or both) had
+            // nothing for the foreign-key check to catch.
+            if s.item_id.is_some() == s.dataset_id.is_some() {
+                tracing::warn!("restore: skipped Library link {} with no single target", s.id);
+                continue;
+            }
             conn.execute(
                 &sql,
                 params![
@@ -1561,6 +1580,54 @@ mod tests {
             stmt.query_map(params![s], |r| r.get(3)).unwrap().collect::<Result<_, _>>().unwrap()
         };
         assert!(plan.iter().any(|d| d.contains("INDEX idx_rag_chunks_doc (doc_kind=? AND doc_id=?)")), "{plan:?}");
+    }
+
+    /// B2-04 / B2-07: the lookups a delete cascade and a rename make go
+    /// through an index, not a scan; the unused hash index is gone.
+    #[test]
+    fn link_cascades_and_reissues_use_an_index() {
+        let (db, _dir) = fresh_db();
+        let conn = db.conn.lock();
+        let plan = |sql: &str| -> Vec<String> {
+            let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+            stmt.query_map(params!["a", "b", 1], |r| r.get(3)).unwrap().collect::<Result<_, _>>().unwrap()
+        };
+        for (sql, index) in [
+            ("SELECT id FROM session_library_sources WHERE owner_id = ?1 AND ?2 AND ?3", "idx_session_library_sources_owner"),
+            ("SELECT id FROM space_library_sources WHERE item_id = ?1 AND ?2 AND ?3", "idx_space_library_sources_item_id"),
+            ("SELECT id FROM session_library_sources WHERE dataset_id = ?1 AND ?2 AND ?3", "idx_session_library_sources_dataset_id"),
+            ("SELECT id FROM sessions WHERE forked_from_session_id = ?1 AND ?2 AND ?3", "idx_sessions_forked"),
+            (&format!("SELECT id FROM rag_chunks WHERE {REISSUE_DOC}"), "idx_rag_chunks_doc"),
+        ] {
+            let p = plan(sql);
+            assert!(p.iter().any(|d| d.contains(index)), "{sql}: {p:?}");
+        }
+        let hash_index: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sqlite_master WHERE name = 'idx_library_items_hash'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(hash_index, 0);
+    }
+
+    /// B2-08: restore skips what the app itself would never write.
+    #[test]
+    fn restore_skips_items_and_links_the_app_never_writes() {
+        let (db, _dir) = fresh_db();
+        let a = text_item(&db, "A", "alpha");
+        let b = text_item(&db, "B", "beta");
+        let chat = db.create_session("c", "ollama", "m", None, None).unwrap();
+        db.add_library_sources(SourceOwner::Session, &chat.id, &[a.id.clone(), b.id.clone()], &[]).unwrap();
+        let mut snap = db.snapshot().unwrap();
+        snap.data.library_items.iter_mut().find(|i| i.id == b.id).unwrap().media = "video".into();
+        snap.data.session_library_sources.iter_mut().find(|l| l.item_id.as_deref() == Some(a.id.as_str())).unwrap().item_id =
+            None;
+
+        let (db2, _dir2) = fresh_db();
+        db2.restore_snapshot(&snap).expect("restore");
+        let items: Vec<String> = db2.list_library_items(None).unwrap().into_iter().map(|i| i.id).collect();
+        assert_eq!(items, vec![a.id.clone()]);
+        // The target-less link is skipped, and the one to the skipped item
+        // is dropped as dangling.
+        assert!(db2.list_library_sources(SourceOwner::Session, &chat.id).unwrap().is_empty());
     }
 
     // Regression: the "embedded with this model" counts — per item in the

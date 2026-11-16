@@ -883,7 +883,11 @@ impl Database {
         conn.execute_batch(
             "CREATE INDEX IF NOT EXISTS idx_sessions_space ON sessions(space_id);
              CREATE INDEX IF NOT EXISTS idx_sessions_archived ON sessions(archived_at);
-             CREATE INDEX IF NOT EXISTS idx_sessions_folder ON sessions(folder_id);",
+             CREATE INDEX IF NOT EXISTS idx_sessions_folder ON sessions(folder_id);
+             -- The fork pointer's `ON DELETE SET NULL` looks up the chats
+             -- forked from each one deleted; unindexed, emptying the archive
+             -- scanned every chat once per chat removed.
+             CREATE INDEX IF NOT EXISTS idx_sessions_forked ON sessions(forked_from_session_id);",
         )?;
 
         // Add per-space default model + params columns if missing. Null =
@@ -1036,8 +1040,11 @@ impl Database {
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL
             );
-            CREATE INDEX IF NOT EXISTS idx_library_items_hash
-                ON library_items(content_hash);
+            -- Retired: nothing looks items up by hash (duplicates are found
+            -- from the listed metadata), so it only cost a write per insert
+            -- or edit. Dropped for databases that have it, as
+            -- `idx_mcp_servers_updated` was.
+            DROP INDEX IF EXISTS idx_library_items_hash;
             CREATE TABLE IF NOT EXISTS library_datasets (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
@@ -1079,6 +1086,23 @@ impl Database {
                 ON session_library_sources(owner_id, item_id) WHERE item_id IS NOT NULL;
             CREATE UNIQUE INDEX IF NOT EXISTS idx_session_library_sources_dataset
                 ON session_library_sources(owner_id, dataset_id) WHERE dataset_id IS NOT NULL;
+            -- Plain indexes beside the partial unique ones, which can serve
+            -- neither an `owner_id = ?` lookup (listing a chat's or Space's
+            -- links on every send, and the cascade when one is deleted) nor
+            -- `item_id = ?` / `dataset_id = ?` (the cascade when a Library
+            -- item or dataset is deleted): each was a scan of the table.
+            CREATE INDEX IF NOT EXISTS idx_space_library_sources_owner
+                ON space_library_sources(owner_id);
+            CREATE INDEX IF NOT EXISTS idx_space_library_sources_item_id
+                ON space_library_sources(item_id);
+            CREATE INDEX IF NOT EXISTS idx_space_library_sources_dataset_id
+                ON space_library_sources(dataset_id);
+            CREATE INDEX IF NOT EXISTS idx_session_library_sources_owner
+                ON session_library_sources(owner_id);
+            CREATE INDEX IF NOT EXISTS idx_session_library_sources_item_id
+                ON session_library_sources(item_id);
+            CREATE INDEX IF NOT EXISTS idx_session_library_sources_dataset_id
+                ON session_library_sources(dataset_id);
             -- Agent Skills switched on in a chat, by name (see `skills`). The
             -- skills themselves are folders on disk, not rows: a name whose
             -- folder is gone is simply skipped when the prompt is built.
@@ -3148,7 +3172,7 @@ impl Database {
     /// is a valid configuration), so the round-trip remains valid.
     pub fn snapshot(&self) -> Result<DatabaseSnapshot> {
         // Freeze writers for the duration. The export is assembled from
-        // eleven separate reads, and with the lock released between them a
+        // seventeen separate reads, and with the lock released between them a
         // streaming flush or a session create could commit halfway through —
         // producing a file whose `messages` reference a session absent from
         // `sessions`. A restore drops such orphans (`clear_dangling_refs`), so
@@ -3430,6 +3454,12 @@ impl Database {
         }
 
         for f in &d.space_files {
+            // `kind` decides how the file is chunked and sent; one outside
+            // the three the app writes reached neither path.
+            if !matches!(f.kind.as_str(), "text" | "image" | "file") {
+                tracing::warn!("restore: skipped Space file {} of unknown kind `{}`", f.id, f.kind);
+                continue;
+            }
             tx.execute(
                 "INSERT INTO space_files (id, space_id, name, mime, kind, data, size, position, created_at, enabled)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
@@ -3581,8 +3611,9 @@ impl Database {
     }
 
     /// Delete everything the user created (chats, spaces, snippets,
-    /// MCP servers) while leaving app settings intact. `messages` and
-    /// `space_files` fall via ON DELETE CASCADE.
+    /// MCP servers) while leaving app settings intact. FK enforcement is off
+    /// for the transaction, so nothing cascades: every table is emptied by
+    /// its own DELETE in [`Self::wipe_user_data_locked`].
     ///
     /// `PRAGMA foreign_keys = ON` is restored on every exit path so a mid-
     /// transaction failure can't leave the shared connection with FK
