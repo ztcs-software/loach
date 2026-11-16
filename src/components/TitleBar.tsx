@@ -100,7 +100,18 @@ export function TitleBar() {
       /* ignore */
     }
   };
-  const minimize = () => callWindow("minimize");
+  // With "Lock when minimized" on, lock first and let the lock screen paint
+  // before the window goes. Locked after (on `visibilitychange`), the window
+  // kept the open chat as its last frame: the taskbar preview, the Alt+Tab
+  // thumbnail and the restore animation all showed it.
+  const minimize = async () => {
+    const security = useSecurityStore.getState();
+    if (useSettingsStore.getState().lock_on_hide && security.status.configured && security.unlocked) {
+      security.lock();
+      await new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r())));
+    }
+    await callWindow("minimize");
+  };
   const toggleMax = () => callWindow("toggleMaximize");
   const close = () => callWindow("close");
 

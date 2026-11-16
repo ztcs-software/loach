@@ -113,6 +113,18 @@ describe("startAutoLock — idle", () => {
     stop();
   });
 
+  // X2-01: the clock jumps (a laptop slept) and the first activity lands
+  // before the poll runs — it used to reset the deadline and keep the app
+  // unlocked.
+  it("locks on the first activity after an overdue deadline", () => {
+    const stop = startAutoLock({ idleMs: IDLE_MS["5m"], onHide: false, lock });
+
+    vi.setSystemTime(Date.now() + 3_600_000);
+    win.fire("pointermove");
+    expect(lock).toHaveBeenCalled();
+    stop();
+  });
+
   it("stays disarmed when the timeout is off", () => {
     const stop = startAutoLock({ idleMs: IDLE_MS.off, onHide: false, lock });
 
@@ -141,6 +153,27 @@ describe("startAutoLock — hide", () => {
     doc.fire("visibilitychange");
 
     expect(lock).not.toHaveBeenCalled();
+  });
+
+  // X2-02: the tray announces a hide before it happens, so the lock screen —
+  // not the chat — is the window's last frame.
+  it("locks when the tray is about to hide the window, and stops listening on teardown", async () => {
+    let announce: (() => void) | null = null;
+    const off = vi.fn();
+    const stop = startAutoLock({
+      idleMs: 0,
+      onHide: true,
+      lock,
+      listenHiding: async (cb) => {
+        announce = cb;
+        return off;
+      },
+    });
+    await Promise.resolve();
+    announce!();
+    expect(lock).toHaveBeenCalledTimes(1);
+    stop();
+    expect(off).toHaveBeenCalled();
   });
 });
 

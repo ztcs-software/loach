@@ -207,7 +207,7 @@ struct LockConfig {
 }
 
 /// What the frontend gets to see — never the hashes themselves.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LockStatus {
     pub configured: bool,
     pub method: Option<LockMethod>,
@@ -226,6 +226,75 @@ fn load() -> Result<Option<LockConfig>> {
         Err(keyring::Error::NoEntry) => Ok(None),
         Err(e) => Err(e.into()),
     }
+}
+
+/// The marker's answer, if it disagrees with the lock actually stored: then
+/// the lock screen asks for the wrong things (a PIN only, of the wrong
+/// length, where a password is set) and no input can open it. A data folder
+/// restored from before the lock changed does that, or an older build that
+/// changed the lock without a marker. Rewritten here; true when a marker
+/// existed and was wrong — not when there's none, which a failed write
+/// leaves and which would otherwise refuse every attempt.
+fn correct_stale_marker(cfg: &LockConfig) -> bool {
+    let current = status_of(Some(cfg));
+    let stale = marker_disagrees(read_marker().as_ref(), &current);
+    if stale || read_marker().is_none() {
+        write_marker(&current);
+    }
+    stale
+}
+
+fn marker_disagrees(marker: Option<&LockStatus>, current: &LockStatus) -> bool {
+    marker.is_some_and(|m| m != current)
+}
+
+/// What `unlock` reports when the lock screen was built from a stale marker
+/// (see [`correct_stale_marker`]); the renderer re-reads the status on it.
+const STALE_LOCK_SCREEN: &str =
+    "The app lock was changed since this screen was set up. Enter your current credentials.";
+
+/// `load` for the destructive-action gate (`require_unlocked`). A keyring
+/// that can't be read can't prove there's no lock, so it refuses — except
+/// where nothing says a lock exists: a marker that says none is set, or no
+/// keyring service at all and no marker claiming a lock (a Linux desktop
+/// without a Secret Service, where no lock can be set; the launch check
+/// reads that as unlocked too). Refusing there left no restore, erase or
+/// reset anywhere in the app.
+fn load_for_gate() -> Result<Option<LockConfig>> {
+    let entry = match entry() {
+        Ok(e) => e,
+        Err(e) if gate_passes_unreadable_keyring(true, read_marker().as_ref()) => {
+            tracing::warn!("app-lock check: no keyring ({e:#}); no lock can be set, so none is required");
+            return Ok(None);
+        }
+        Err(e) => return Err(keyring_unreachable(e)),
+    };
+    match entry.get_password() {
+        Ok(json) => Ok(Some(serde_json::from_str(&json)?)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(e) if gate_passes_unreadable_keyring(false, read_marker().as_ref()) => {
+            tracing::warn!("app-lock check: keyring unreadable ({e}); the marker says no lock is set");
+            Ok(None)
+        }
+        Err(e) => Err(keyring_unreachable(e.into())),
+    }
+}
+
+/// Whether the gate lets an action through with the keyring unreadable:
+/// `no_service` when the keyring couldn't even be opened, else it couldn't
+/// be read (locked, access refused). See [`load_for_gate`].
+fn gate_passes_unreadable_keyring(no_service: bool, marker: Option<&LockStatus>) -> bool {
+    match marker {
+        Some(m) => !m.configured,
+        None => no_service,
+    }
+}
+
+fn keyring_unreachable(e: anyhow::Error) -> anyhow::Error {
+    anyhow!(
+        "Loach can't reach the system keyring to check the app lock ({e:#}). Unlock or start \
+         your keyring — GNOME Keyring, KWallet or your system's credential manager — and try again."
+    )
 }
 
 fn save(cfg: &LockConfig) -> Result<()> {
@@ -412,6 +481,7 @@ pub fn setup(
     // exponential cool-down. The initial-setup case (no existing config)
     // skips both checks because there's nothing to brute-force.
     if let Some(existing) = load()? {
+        correct_stale_marker(&existing);
         if !rate_limited(|| verify_against_config(&existing, current_pin, current_password))? {
             bail!("Current credentials are required to change the app lock.");
         }
@@ -499,6 +569,11 @@ pub fn unlock(pin: Option<&str>, password: Option<&str>) -> Result<bool> {
             return Ok(true);
         }
     };
+    // Built from a stale marker, the screen asked for the wrong factors, and
+    // nothing typed could pass. Not counted as an attempt.
+    if correct_stale_marker(&cfg) {
+        bail!(STALE_LOCK_SCREEN);
+    }
 
     rate_limited(|| verify_against_config(&cfg, pin, password))
 }
@@ -541,6 +616,7 @@ pub fn clear_with_credentials(
     current_password: Option<&str>,
 ) -> Result<()> {
     if let Some(cfg) = load()? {
+        correct_stale_marker(&cfg);
         if !rate_limited(|| verify_against_config(&cfg, current_pin, current_password))? {
             bail!("Current credentials are required to remove the app lock.");
         }
@@ -563,7 +639,8 @@ pub fn require_unlocked(
     current_pin: Option<&str>,
     current_password: Option<&str>,
 ) -> Result<()> {
-    if let Some(cfg) = load()? {
+    if let Some(cfg) = load_for_gate()? {
+        correct_stale_marker(&cfg);
         if !rate_limited(|| verify_against_config(&cfg, current_pin, current_password))? {
             bail!("Current app-lock credentials are required for this action.");
         }
@@ -593,6 +670,54 @@ mod tests {
     /// counter and intermittently fail. The hash/verify tests don't touch
     /// `UNLOCK_STATE` and run free.
     static LOCKOUT_TEST_LOCK: Lazy<PMutex<()>> = Lazy::new(|| PMutex::new(()));
+
+    /// X2-03: an unreadable keyring passes the destructive-action gate only
+    /// where nothing says a lock exists.
+    #[test]
+    fn the_gate_passes_an_unreadable_keyring_only_without_a_lock_on_record() {
+        let marker = |configured| LockStatus { configured, method: None, pin_length: None, has_hint: false };
+        // No keyring service: no lock can be set — unless a marker says one is.
+        assert!(gate_passes_unreadable_keyring(true, None));
+        assert!(gate_passes_unreadable_keyring(true, Some(&marker(false))));
+        assert!(!gate_passes_unreadable_keyring(true, Some(&marker(true))));
+        // A keyring that's there but can't be read (locked): only a marker
+        // saying no lock is set lets the action through.
+        assert!(!gate_passes_unreadable_keyring(false, None));
+        assert!(gate_passes_unreadable_keyring(false, Some(&marker(false))));
+        assert!(!gate_passes_unreadable_keyring(false, Some(&marker(true))));
+    }
+
+    /// X2-04: a marker that disagrees with the stored lock is caught; a
+    /// missing one isn't reported as stale (a failed write leaves none).
+    #[test]
+    fn a_marker_that_disagrees_with_the_stored_lock_is_stale() {
+        let password = LockConfig {
+            method: LockMethod::Password,
+            pin_length: None,
+            pin_hash: None,
+            password_hash: Some("unused".into()),
+            hint: None,
+        };
+        let pin4 = LockConfig {
+            method: LockMethod::Pin,
+            pin_length: Some(4),
+            pin_hash: Some("unused".into()),
+            password_hash: None,
+            hint: None,
+        };
+        let current = status_of(Some(&password));
+        assert!(marker_disagrees(Some(&status_of(Some(&pin4))), &current));
+        assert!(!marker_disagrees(Some(&status_of(Some(&password))), &current));
+        assert!(!marker_disagrees(None, &current));
+        let pin6 = LockConfig {
+            method: LockMethod::Pin,
+            pin_length: Some(6),
+            pin_hash: Some("unused".into()),
+            password_hash: None,
+            hint: None,
+        };
+        assert!(marker_disagrees(Some(&status_of(Some(&pin4))), &status_of(Some(&pin6))));
+    }
 
     #[test]
     fn status_answers_from_the_marker_without_the_keyring() {

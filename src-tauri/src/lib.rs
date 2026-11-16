@@ -27,6 +27,21 @@ use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use crate::db::Database;
 use crate::stream::StreamRegistry;
 
+/// Hide the main window for the tray — after telling the renderer, which
+/// locks first when "Lock when minimized" is on (`autoLock.ts`), and giving
+/// it a moment to paint the lock screen. Hidden at once, the window kept the
+/// open chat as its last frame, and showing it again drew that first. As the
+/// macOS close-to-hide arm below does.
+fn hide_main_window(w: &tauri::WebviewWindow) {
+    use tauri::Emitter;
+    let _ = w.emit("window://hiding", ());
+    let w = w.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        let _ = w.hide();
+    });
+}
+
 /// Show a blocking native error dialog and exit. Used during `setup` for
 /// failures we can't reasonably recover from (data dir unresolvable, DB
 /// corrupt, etc.) — much friendlier than the prior `panic!` which left
@@ -301,7 +316,7 @@ pub fn run() {
                     }
                     "hide" => {
                         if let Some(w) = app.get_webview_window("main") {
-                            let _ = w.hide();
+                            hide_main_window(&w);
                         }
                     }
                     "quit" => {
@@ -319,7 +334,7 @@ pub fn run() {
                         let app = tray.app_handle();
                         if let Some(w) = app.get_webview_window("main") {
                             if w.is_visible().unwrap_or(false) {
-                                let _ = w.hide();
+                                hide_main_window(&w);
                             } else {
                                 let _ = w.show();
                                 let _ = w.set_focus();

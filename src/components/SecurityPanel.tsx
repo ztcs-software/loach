@@ -310,7 +310,8 @@ function AutoLockCard() {
           <p className="mt-1 text-[11px] text-foreground/50">
             Locks as soon as the window is minimized or hidden. Save and file
             dialogs don't count, so exporting or attaching a file won't lock
-            you out mid-task.
+            you out mid-task. Minimized from outside Loach (Win+D, ⌘M, the
+            taskbar), the window's preview may still show the last screen.
           </p>
         </div>
         <Switch

@@ -651,6 +651,13 @@ export async function onWindowCloseHidden(cb: () => void): Promise<UnlistenFn> {
   return listen("window://close-hidden", () => cb());
 }
 
+/** The tray is about to hide the window; it waits a moment so a lock can
+ *  paint first (`lib.rs`, `hide_main_window`). */
+export async function onWindowHiding(cb: () => void): Promise<UnlistenFn> {
+  if (!isTauri) return (() => undefined) as UnlistenFn;
+  return listen("window://hiding", () => cb());
+}
+
 // ------------ host hardware ------------
 
 /** Installed RAM + free disk, used by onboarding to size its model

@@ -14,10 +14,10 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 
 vi.mock("@/lib/tauri", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/tauri")>();
-  return { ...actual, securityStatus: vi.fn() };
+  return { ...actual, securityStatus: vi.fn(), securityUnlock: vi.fn() };
 });
 
-import { securityStatus, type LockStatus } from "@/lib/tauri";
+import { securityStatus, securityUnlock, type LockStatus } from "@/lib/tauri";
 import { useSecurityStore, lockUntilHydrated } from "./securityStore";
 
 const probe = vi.mocked(securityStatus);
@@ -157,5 +157,22 @@ describe("securityStore.lock", () => {
     useSecurityStore.getState().lock();
 
     expect(useSecurityStore.getState().unlocked).toBe(true);
+  });
+});
+
+// X2-04: a lock screen built from a stale marker (a PIN where a password is
+// set) took no input at all. The backend corrects the marker and refuses
+// once; the store re-reads the status so the screen asks for the right thing.
+describe("unlocking with a stale lock screen", () => {
+  it("picks up the corrected status from the refusal", async () => {
+    const PASSWORD_LOCK: LockStatus = { configured: true, method: "password", pin_length: null, has_hint: false };
+    useSecurityStore.setState({ status: PIN_LOCK, hydrated: true, unlocked: false });
+    vi.mocked(securityUnlock).mockRejectedValueOnce(new Error("The app lock was changed since this screen was set up."));
+    probe.mockResolvedValueOnce(PASSWORD_LOCK);
+
+    await expect(useSecurityStore.getState().unlock({ pin: "1234" })).rejects.toThrow(/changed/);
+
+    expect(useSecurityStore.getState().status).toEqual(PASSWORD_LOCK);
+    expect(useSecurityStore.getState().unlocked).toBe(false);
   });
 });

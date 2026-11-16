@@ -17,7 +17,7 @@
 //! and the credentials were never in the renderer to begin with.
 
 import { useEffect } from "react";
-import { onWindowCloseHidden } from "@/lib/tauri";
+import { onWindowCloseHidden, onWindowHiding } from "@/lib/tauri";
 import { useSecurityStore } from "@/stores/securityStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import type { LockIdleTimeout } from "@/types";
@@ -51,7 +51,9 @@ const ACTIVITY_EVENTS = [
  *  unpredictably), and a machine that suspends mid-countdown resumes with the
  *  timer still owing its full remaining wall-clock. Comparing `Date.now()`
  *  against a stored deadline is immune to both — a laptop that sleeps for an
- *  hour is over any threshold the moment it wakes.
+ *  hour is over any threshold the moment it wakes. Activity checks the same
+ *  deadline before pushing it out, so the first touch after waking locks
+ *  rather than resetting the clock ahead of the poll.
  *
  *  The cost is granularity: the lock lands somewhere in
  *  `[idleMs, idleMs + IDLE_POLL_MS)`. Erring late is the safe direction and
@@ -77,16 +79,26 @@ export function startAutoLock({
   idleMs,
   onHide,
   lock,
+  listenHiding = onWindowHiding,
 }: {
   idleMs: number;
   onHide: boolean;
   lock: () => void;
+  /** Subscribes to the tray's hide-to-come; `onWindowHiding`. */
+  listenHiding?: (cb: () => void) => Promise<() => void>;
 }): () => void {
   const teardown: Array<() => void> = [];
 
   if (idleMs > 0) {
     let lastActivity = Date.now();
     const bump = () => {
+      // Already past the deadline, with the poll not yet run (a laptop just
+      // woken, a throttled timer): this is whoever came back, not the user
+      // who left. Resetting the clock here kept the app unlocked for them.
+      if (Date.now() - lastActivity >= idleMs) {
+        lock();
+        return;
+      }
       lastActivity = Date.now();
     };
     for (const type of ACTIVITY_EVENTS) {
@@ -118,6 +130,19 @@ export function startAutoLock({
     teardown.push(() =>
       document.removeEventListener("visibilitychange", onVisibility),
     );
+    // The tray says so before it hides the window, so the lock screen is the
+    // last frame the window shows rather than the chat. (The title bar's
+    // Minimize locks first itself.)
+    let offHiding: (() => void) | undefined;
+    let stopped = false;
+    void listenHiding(lock).then((u) => {
+      if (stopped) u();
+      else offHiding = u;
+    });
+    teardown.push(() => {
+      stopped = true;
+      offHiding?.();
+    });
   }
 
   return () => {
