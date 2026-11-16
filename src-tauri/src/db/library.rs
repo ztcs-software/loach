@@ -252,6 +252,21 @@ fn in_scope(param: &str) -> String {
     )
 }
 
+/// The indexer's next batch — see [`Database::rag_pending_embeddings`].
+const PENDING_SELECT: &str = "
+    SELECT c.id, c.text, COALESCE(li.title, sf.name, '')
+      FROM rag_chunks c
+      LEFT JOIN library_items li ON c.doc_kind = 'library' AND li.id = c.doc_id
+      LEFT JOIN space_files sf ON c.doc_kind = 'space_file' AND sf.id = c.doc_id
+     WHERE c.id IN (SELECT id FROM rag_chunks INDEXED BY idx_rag_chunks_doc_model
+                     WHERE embed_model IS NOT ?1 ORDER BY id LIMIT ?2)
+     ORDER BY c.id";
+
+/// Chunks in the index, and those done with a model — see
+/// [`Database::rag_counts`].
+const COUNTS_SELECT: &str =
+    "SELECT COUNT(*), COALESCE(SUM(embed_model = ?1), 0) FROM rag_chunks";
+
 const ITEM_META_SELECT: &str = "
     SELECT i.id, i.kind, i.title, i.mime, i.media, i.size,
            CASE WHEN i.media = 'text' THEN LENGTH(i.content) ELSE 0 END,
@@ -877,16 +892,17 @@ impl Database {
     }
 
     /// Up to `limit` chunks not yet embedded with `model`, oldest first.
+    ///
+    /// The ids come from `idx_rag_chunks_doc_model`. `embed_model` is stored
+    /// after the embedding BLOB, so finding it on the table itself read every
+    /// embedded chunk's vector, overflow pages and all, on every batch — the
+    /// indexer's whole first pass was quadratic in vector reads, and every
+    /// wake ended reading the whole index to learn nothing was pending. The
+    /// index holds `embed_model` and the id in a few dozen bytes; only the
+    /// chunks returned are read in full.
     pub fn rag_pending_embeddings(&self, model: &str, limit: usize) -> Result<Vec<PendingChunk>> {
         self.with_read(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT c.id, c.text, COALESCE(li.title, sf.name, '')
-                   FROM rag_chunks c
-                   LEFT JOIN library_items li ON c.doc_kind = 'library' AND li.id = c.doc_id
-                   LEFT JOIN space_files sf ON c.doc_kind = 'space_file' AND sf.id = c.doc_id
-                  WHERE c.embed_model IS NOT ?1
-                  ORDER BY c.id LIMIT ?2",
-            )?;
+            let mut stmt = conn.prepare(PENDING_SELECT)?;
             let rows = stmt
                 .query_map(params![model, limit as i64], |r| {
                     Ok(PendingChunk {
@@ -954,7 +970,7 @@ impl Database {
     pub fn rag_counts(&self, model: Option<&str>) -> Result<(i64, i64)> {
         self.with_read(|conn| {
             Ok(conn.query_row(
-                "SELECT COUNT(*), COALESCE(SUM(embed_model = ?1), 0) FROM rag_chunks",
+                COUNTS_SELECT,
                 params![model],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )?)
@@ -1557,9 +1573,12 @@ mod tests {
             "SELECT COUNT(*), COALESCE(SUM(embed_model IS NOT ?2), 0) FROM rag_chunks WHERE {}",
             in_scope("?1")
         );
-        let cases: [(&str, &[&dyn rusqlite::ToSql]); 2] = [
+        let cases: [(&str, &[&dyn rusqlite::ToSql]); 4] = [
             (ITEM_META_SELECT, params!["ollama:m1"]),
             (&rag_vectors_count, params!["[]", "ollama:m1"]),
+            // The indexer's per-batch reads (B2-01).
+            (PENDING_SELECT, params!["ollama:m1", 16]),
+            (COUNTS_SELECT, params!["ollama:m1"]),
         ];
         for (sql, args) in cases {
             let conn = db.conn.lock();
@@ -1570,6 +1589,11 @@ mod tests {
                 plan.iter().any(|d| d.contains("COVERING INDEX idx_rag_chunks_doc_model")),
                 "{sql}: {plan:?}"
             );
+            if sql == PENDING_SELECT {
+                // …and only the chunks picked are read whole.
+                assert!(plan.iter().all(|d| !d.starts_with("SCAN c")), "{plan:?}");
+                assert!(plan.iter().any(|d| d.starts_with("SEARCH c USING INTEGER PRIMARY KEY")), "{plan:?}");
+            }
         }
     }
 

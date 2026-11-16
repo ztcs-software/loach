@@ -3896,14 +3896,22 @@ fn build_snippet(text: &str, needle: &str) -> Option<String> {
 const REDACTED: &str = "REDACTED";
 
 /// Whether a flag, environment variable, header or query parameter called
-/// `name` holds a credential. `auth` only counts as a whole word (`--auth`,
-/// `--basic-auth`), so `--author` and `--authority` keep their values.
+/// `name` holds a credential. `auth`, `key`, `pat` and `bearer` only count as
+/// whole words (`--auth`, `--basic-auth`, `--key`, `GITHUB_PAT`), so
+/// `--author`, `--authority` and `--keyspace` keep their values — though a
+/// name *ending* in `key` counts too (`--privatekey`, `ACCESSKEY`,
+/// `OPENAI_KEY`). Erring this way costs a harmless value retyped after a
+/// restore; the other way, a key in a shared backup.
 fn is_secret_name(name: &str) -> bool {
     let n = name.to_ascii_lowercase();
-    ["token", "secret", "password", "passwd", "apikey", "api-key", "api_key", "authorization"]
-        .iter()
-        .any(|w| n.contains(w))
-        || n.split(['-', '_', '.']).any(|word| word == "auth")
+    [
+        "token", "secret", "password", "passwd", "apikey", "api-key", "api_key", "authorization",
+        "credential", "cookie",
+    ]
+    .iter()
+    .any(|w| n.contains(w))
+        || n.ends_with("key")
+        || n.split(['-', '_', '.']).any(|word| matches!(word, "auth" | "key" | "pat" | "bearer"))
 }
 
 /// A stdio server's `args_json` as it goes into an export: the value of a
@@ -4292,7 +4300,7 @@ mod tests {
     /// contain "auth" in a longer word keep their values.
     #[test]
     fn exported_arguments_lose_tokens_in_env_headers_and_queries() {
-        let args = serde_json::to_string(&[
+        let args = serde_json::to_string(&vec![
             "https://ghp_abc@github.com/org/repo",
             "-e",
             "GITHUB_TOKEN=ghp_abc",
@@ -4310,6 +4318,24 @@ mod tests {
             "--authority=ca.example.com",
             "--auth",
             "hunter2",
+            // `key`-named, and the rest of B2-03's shapes.
+            "--key",
+            "sk-live-1",
+            "-e",
+            "OPENAI_KEY=sk-2",
+            "--private-key",
+            "pk-3",
+            "--accesskey=ak-4",
+            "--credentials",
+            "c-5",
+            "-H",
+            "Cookie: session=c-6",
+            "-e",
+            "GITHUB_PAT=ghp_7",
+            "--keyspace",
+            "main",
+            "--sort-order",
+            "asc",
         ])
         .unwrap();
         let out: Vec<String> =
@@ -4334,6 +4360,23 @@ mod tests {
                 "--authority=ca.example.com",
                 "--auth",
                 "REDACTED",
+                "--key",
+                "REDACTED",
+                "-e",
+                "OPENAI_KEY=REDACTED",
+                "--private-key",
+                "REDACTED",
+                "--accesskey=REDACTED",
+                "--credentials",
+                "REDACTED",
+                "-H",
+                "Cookie: REDACTED",
+                "-e",
+                "GITHUB_PAT=REDACTED",
+                "--keyspace",
+                "main",
+                "--sort-order",
+                "asc",
             ]
         );
     }

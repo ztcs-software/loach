@@ -1127,9 +1127,9 @@ Environment variables are treated like headers: they hold API keys, so
 they are scrubbed from exports, exactly like HTTP headers. Arguments are
 exported as typed, except a URL's credentials (the password in
 `postgresql://user:…@host`, a token before the `@`, a `?api_key=` value),
-the value of a flag like `--token` or `--api-key=…`, and an environment
-assignment or header whose name says it holds a credential
-(`-e GITHUB_TOKEN=…`, `--header "Authorization: …"`), which read
+the value of a flag like `--token`, `--key` or `--api-key=…`, and an
+environment assignment or header whose name says it holds a credential
+(`-e GITHUB_TOKEN=…`, `-e OPENAI_KEY=…`, `--header "Authorization: …"`), which read
 `REDACTED`. An HTTP server's URL loses its user-info and every query
 value the same way, but keeps its path, so a token written into the path
 (`…/s/<token>/mcp`) is exported as it is. Re-enter them after an import.

@@ -184,10 +184,14 @@ async fn embed(
             .timeout(timeout)
             .json(&serde_json::json!({ "model": cfg.model, "input": inputs }));
         // Off the runtime — blocking OS-keyring read, as in the chat path.
-        let key = tokio::task::spawn_blocking(crate::secrets::get_openai_key)
+        // A keyring that can't be read counts as no key, as it does there
+        // and in model listing: on Linux without a Secret Service, failing
+        // here left a keyless LM Studio unable to embed anything — every
+        // search keyword-only — while chatting with it worked.
+        let key = tokio::task::spawn_blocking(|| crate::secrets::get_openai_key().ok().flatten())
             .await
-            .map_err(|e| e.to_string())?
-            .map_err(|e| e.to_string())?;
+            .ok()
+            .flatten();
         if let Some(key) = key.filter(|k| !k.is_empty()) {
             if crate::providers::openai::is_safe_for_bearer(&cfg.base_url) {
                 req = req.bearer_auth(key);
