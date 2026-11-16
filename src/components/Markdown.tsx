@@ -6,6 +6,7 @@ import "highlight.js/styles/github-dark.css";
 import { CodeBlock } from "./CodeBlock";
 import { cn } from "@/lib/utils";
 import { openExternal } from "@/lib/tauri";
+import { useToastStore } from "@/stores/toastStore";
 import { closesFence, openingFence, type Fence } from "@/lib/codeBlocks";
 import {
   getMathPlugins,
@@ -337,6 +338,38 @@ function shouldOpenExternally(href: string | undefined): href is string {
   return scheme === "http:" || scheme === "https:" || scheme === "mailto:";
 }
 
+/** Endings that make bare link text read as a web address. A short list on
+ *  purpose: `README.md`, `main.py` or `lib.rs` are file names in a reply far
+ *  more often than Moldovan, Paraguayan or Serbian sites. */
+const ADDRESS_TLDS = new Set(
+  "com net org io dev app ai co gov edu info biz me xyz us uk de pl fr eu ca au in jp cn ru nl es it ch se br".split(" "),
+);
+
+/** The host a link really goes to, when its text is an address of another
+ *  host — `[www.mybank.com](https://evil.example)` — else `null`. Text that
+ *  isn't an address (`[the docs](…)`, `[README.md](…)`) proves nothing. */
+function misleadingHost(text: string, href: string): string | null {
+  const host = (u: string) => {
+    try {
+      return new URL(u).hostname.toLowerCase().replace(/^www\./, "");
+    } catch {
+      return null;
+    }
+  };
+  const real = host(href);
+  const label = text.trim();
+  if (!real || /\s/.test(label)) return null;
+  let shown: string | null = null;
+  if (/^[a-z][a-z\d+.-]*:\/\//i.test(label)) {
+    shown = host(label);
+  } else if (/^[\w-]+(\.[\w-]+)+(:\d+)?([/?#]\S*)?$/.test(label)) {
+    const name = host(`https://${label}`);
+    const tld = name?.split(".").pop() ?? "";
+    if (/^www\./i.test(label) || ADDRESS_TLDS.has(tld)) shown = name;
+  }
+  return shown && shown !== real ? real : null;
+}
+
 const MARKDOWN_COMPONENTS: Components = {
   pre({ children }) {
     // Pull language from the inner <code class="language-xyz">
@@ -355,16 +388,33 @@ const MARKDOWN_COMPONENTS: Components = {
     );
   },
   a({ children, href, node: _node, ...props }) {
+    // Model output is untrusted — never let the webview navigate. A link
+    // whose scheme the OS handler won't get (javascript:, file:, a relative
+    // one) is plain text: drawn as a link, it did nothing when clicked.
+    if (!shouldOpenExternally(href)) return <span>{children}</span>;
     return (
       <a
         href={href}
         rel="noreferrer noopener"
+        // The webview has no status bar: without this, nothing ever showed
+        // where a link goes before it opened.
+        title={href}
         onClick={(e) => {
-          // Model output is untrusted — never let the webview navigate. Open
-          // only allow-listed schemes through the OS handler (see
-          // `shouldOpenExternally`); ignore everything else.
           e.preventDefault();
-          if (shouldOpenExternally(href)) void openExternal(href);
+          // Text that names another address than the link's — a fetched page
+          // can put one in a reply — opens only once the user has seen where.
+          const real = misleadingHost(extractRaw(children), href);
+          if (real) {
+            useToastStore.getState().push({
+              kind: "info",
+              title: "This link goes somewhere else",
+              body: `It shows one address but opens ${real}.`,
+              action: { label: `Open ${real}`, onClick: () => void openExternal(href) },
+              durationMs: 15_000,
+            });
+            return;
+          }
+          void openExternal(href);
         }}
         {...props}
       >
@@ -556,5 +606,6 @@ export const __testing = {
   texReplace,
   rehypeTexFallback,
   shouldOpenExternally,
+  misleadingHost,
   rehypeHighlightCapped,
 };

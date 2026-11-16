@@ -101,10 +101,20 @@ function Thumbnail({ image }: { image: Attachment }) {
   );
 }
 
+/** A message's stored metrics, or `null` when they aren't the shape the footer
+ *  reads. JSON of another shape — `{"eval_count":200}` from a hand-edited or
+ *  third-party backup — made the footer's `.toFixed` throw, and the error
+ *  boundary took the whole transcript with it, on every reopen. Same checks
+ *  as `/stats` (`commands/dispatch.ts`). */
 function parseMetrics(json: string | null): MessageMetrics | null {
   if (!json) return null;
   try {
-    return JSON.parse(json) as MessageMetrics;
+    const m = JSON.parse(json) as Partial<MessageMetrics> | null;
+    return typeof m?.tokens === "number" &&
+      typeof m.elapsed_ms === "number" &&
+      typeof m.tokens_per_second === "number"
+      ? (m as MessageMetrics)
+      : null;
   } catch {
     return null;
   }
@@ -456,7 +466,14 @@ function ExpandableUserText({ content }: { content: string }) {
     // whatever's currently rendered and trust the clamp class to land us
     // back in the right spot — `scrollHeight` ignores the line-clamp visual
     // truncation but reflects the height the element WOULD take.
-    setOverflowing(el.scrollHeight - el.clientHeight > 1);
+    const measure = () => setOverflowing(el.scrollHeight - el.clientHeight > 1);
+    measure();
+    // And again whenever its width changes: the code canvas opening or the
+    // window narrowing wraps the lines further, and a prompt measured as
+    // short got clamped with no toggle to expand it.
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
   }, [content, expanded]);
 
   return (
@@ -664,6 +681,7 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
   };
 
   const isUser = message.role === "user";
+  const hasText = message.content.length > 0;
   const isPinned = message.pinned_at != null;
   const togglePin = () =>
     void pinMessage(message.session_id, message.id, !isPinned);
@@ -953,6 +971,9 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
               <ExpandableUserText content={displayContent} />
             </div>
           )
+        ) : !hasText && !isStreaming && !message.thinking && toolCalls.length === 0 ? (
+          // Stopped before anything arrived: say so, not an empty gap.
+          <p className="py-1 text-[12px] italic text-muted-foreground">Stopped before replying.</p>
         ) : (
           <div ref={bodyRef} data-search-root>
             <MarkdownSourceProvider
@@ -1086,7 +1107,11 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
             </DropdownMenu>
           </div>
         )}
-        {!isUser && message.content.length > 0 && (
+        {/* Every finished reply gets its actions — one with no text too (a
+            Stop before the first token or at an approval card, a reply of
+            tool calls only), which used to show none, Regenerate included.
+            The items that need text are left out for it. */}
+        {!isUser && (hasText || !isStreaming) && (
           <div className="mt-1.5 flex items-center gap-2">
             {isPinned && (
               <span
@@ -1132,16 +1157,18 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
                 align="start"
                 className="min-w-[140px]"
               >
-                <DropdownMenuItem
-                  onSelect={() => void copyContent()}
-                  className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
-                >
-                  <Copy className="h-4 w-4 text-foreground/60" />
-                  Copy message
-                </DropdownMenuItem>
+                {hasText && (
+                  <DropdownMenuItem
+                    onSelect={() => void copyContent()}
+                    className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
+                  >
+                    <Copy className="h-4 w-4 text-foreground/60" />
+                    Copy message
+                  </DropdownMenuItem>
+                )}
                 {/* Not while this reply streams: it would read only what has
                     arrived so far. */}
-                {speechAvailable && (
+                {speechAvailable && hasText && (
                   <DropdownMenuItem
                     onSelect={() =>
                       speaking
@@ -1164,34 +1191,38 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
                     )}
                   </DropdownMenuItem>
                 )}
-                <DropdownMenuItem
-                  onSelect={() =>
-                    openShareDialog({
-                      role: "assistant",
-                      content: message.content,
-                    })
-                  }
-                  className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
-                >
-                  <Share2 className="h-4 w-4 text-foreground/60" />
-                  Share
-                </DropdownMenuItem>
-                <DropdownMenuItem
-                  onSelect={() =>
-                    void saveToLibrary({
-                      kind: "text",
-                      title: replyTitle(message.content),
-                      mime: "text/markdown",
-                      media: "text",
-                      content: message.content,
-                      size: new TextEncoder().encode(message.content).length,
-                    })
-                  }
-                  className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
-                >
-                  <BookmarkPlus className="h-4 w-4 text-foreground/60" />
-                  Save to Library
-                </DropdownMenuItem>
+                {hasText && (
+                  <DropdownMenuItem
+                    onSelect={() =>
+                      openShareDialog({
+                        role: "assistant",
+                        content: message.content,
+                      })
+                    }
+                    className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
+                  >
+                    <Share2 className="h-4 w-4 text-foreground/60" />
+                    Share
+                  </DropdownMenuItem>
+                )}
+                {hasText && (
+                  <DropdownMenuItem
+                    onSelect={() =>
+                      void saveToLibrary({
+                        kind: "text",
+                        title: replyTitle(message.content),
+                        mime: "text/markdown",
+                        media: "text",
+                        content: message.content,
+                        size: new TextEncoder().encode(message.content).length,
+                      })
+                    }
+                    className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
+                  >
+                    <BookmarkPlus className="h-4 w-4 text-foreground/60" />
+                    Save to Library
+                  </DropdownMenuItem>
+                )}
                 {/* Not offered for hidden imported rows: they render inside a
                     collapsed card, so a pin chip for one would scroll nowhere
                     when the card is shut. */}

@@ -295,14 +295,23 @@ export function ChatCanvas() {
     return () => cancelAnimationFrame(id);
   }, [searchOpen]);
 
-  // Scroll the active match into view whenever the cursor moves or the
-  // matches list changes (e.g. new query). `scrollIntoView` handles the
+  // What the two effects below run on, as strings: a streaming flush rebuilds
+  // `matchIds` and `messages` ~60 times a second, and keyed on those the
+  // finder snapped the view back to its match every frame — the user could
+  // neither scroll away nor follow the reply — and re-highlighted every
+  // matched message each time. These only change when the match does.
+  const currentMatchId = matchIds[matchCursor] ?? null;
+  const matchKey = matchIds.join("\n");
+  // The streaming bubble is always the last message in the streaming session.
+  const streamingMsgId =
+    streamingHere && messages.length > 0 ? messages[messages.length - 1].id : null;
+
+  // Scroll the active match into view whenever it changes: the cursor
+  // moves, or a new query finds another. `scrollIntoView` handles the
   // `overflow-hidden` parent + smooth animation for us.
   useEffect(() => {
-    if (!searchOpen) return;
-    const id = matchIds[matchCursor];
-    if (!id) return;
-    const el = messageRefs.current.get(id);
+    if (!searchOpen || !currentMatchId) return;
+    const el = messageRefs.current.get(currentMatchId);
     if (el) {
       // Off the bottom until the scroll lands, or the content observer below
       // pulls the view back down when opening the finder mounts older rows.
@@ -312,31 +321,24 @@ export function ChatCanvas() {
         block: "center",
       });
     }
-  }, [matchCursor, matchIds, searchOpen]);
+  }, [currentMatchId, searchOpen]);
 
   // Inline phrase highlighting. The cleanest abstraction here would be a
   // custom rehype plugin running inside react-markdown so React owns the
   // highlight nodes — but we'd still need a separate path for plain-text
   // user messages. A single DOM walker covers both, at the cost of being
-  // out-of-band of React's reconciliation: when messages re-render
-  // (streaming, new turn) our marks get wiped from the DOM and we
-  // re-apply on the next effect tick. The flicker is brief and only
-  // happens during active streaming, which is acceptable.
+  // out-of-band of React's reconciliation. Finished rows are memoised and
+  // keep their marks while a reply streams; the streaming one is left alone
+  // (below) and highlighted once it ends.
   //
-  // Tracks whether we currently have any marks in the DOM. The effect below
-  // runs on every messages change (including every streaming token), so we
-  // gate the unwrap pass on this flag — otherwise we'd run a
-  // querySelectorAll for every message bubble per token even when the finder
-  // is closed and there's nothing to strip.
+  // Tracks whether we currently have any marks in the DOM, so the strip pass
+  // below doesn't run a querySelectorAll over every message bubble when the
+  // finder is closed and there's nothing to strip.
   const hasMarksRef = useRef(false);
   useEffect(() => {
-    // Fast path for the common case during streaming: search panel is
-    // closed AND no marks were left in the DOM. Bail before doing any
-    // DOM work so the effect's per-token re-runs are essentially free.
-    // The slower path below still strips stale marks (e.g. search was
-    // open then closed and we haven't run since) — gated behind
-    // hasMarksRef so we never querySelectorAll across every message
-    // bubble per token when there's nothing to find.
+    // Fast path: search panel closed AND no marks were left in the DOM.
+    // The slower path below still strips stale marks (e.g. search was open
+    // then closed and we haven't run since).
     if (!searchOpen && !hasMarksRef.current) return;
 
     // Never touch the streaming message's DOM. The highlighter mutates text
@@ -344,12 +346,7 @@ export function ChatCanvas() {
     // React would reconcile against our detached nodes — freezing the text or
     // throwing NotFoundError into the chat ErrorBoundary. Skip it in BOTH the
     // strip and highlight passes; it gets highlighted normally once it stops
-    // streaming (this effect re-runs when `streamingHere` flips). The
-    // streaming bubble is always the last message in the streaming session.
-    const streamingMsgId =
-      streamingHere && messages.length > 0
-        ? messages[messages.length - 1].id
-        : null;
+    // streaming (this effect re-runs when `streamingMsgId` changes).
 
     if (hasMarksRef.current) {
       // Strip stale highlights — covers query changes, search close, message
@@ -366,27 +363,24 @@ export function ChatCanvas() {
     if (!searchOpen) return;
     const q = searchQuery.trim();
     if (!q) return;
-    const currentId = matchIds[matchCursor];
-    // Drive the highlighting from `matchIds` rather than re-deriving it from
-    // `messages`: the two filters have to agree, and they didn't. This loop
-    // marked any message with a DOM ref whose displayed text matched, while
-    // `matchIds` also excludes hidden imported rows — so expanding an import
-    // card produced highlights the counter didn't count and prev/next could
-    // never reach. Reusing the memoised list also drops a second full scan of
-    // every message body per keystroke.
-    for (const id of matchIds) {
+    // Drive the highlighting from `matchIds` (here as `matchKey`) rather than
+    // re-deriving it from `messages`: the two filters have to agree, and they
+    // didn't. This loop marked any message with a DOM ref whose displayed
+    // text matched, while `matchIds` also excludes hidden imported rows — so
+    // expanding an import card produced highlights the counter didn't count
+    // and prev/next could never reach. Reusing the memoised list also drops a
+    // second full scan of every message body per keystroke.
+    for (const id of matchKey ? matchKey.split("\n") : []) {
       if (id === streamingMsgId) continue;
       // Only the message body: the row also holds React-owned labels (code
       // block Copy, Show more, metrics) whose Text nodes React rewrites later —
       // swapping one for a mark made the next update throw NotFoundError.
       const el = messageRefs.current.get(id)?.querySelector("[data-search-root]");
       if (!el) continue;
-      highlightTextNodes(el, q, id === currentId);
+      highlightTextNodes(el, q, id === currentMatchId);
       hasMarksRef.current = true;
     }
-    // `messages` stays a dependency for the `streamingMsgId` read above. It
-    // adds no runs — `matchIds` is re-derived from it on every change.
-  }, [searchOpen, searchQuery, matchIds, matchCursor, messages, streamingHere]);
+  }, [searchOpen, searchQuery, matchKey, currentMatchId, streamingMsgId]);
 
   const closeSearch = () => {
     setSearchOpen(false);
