@@ -27,6 +27,27 @@ use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use crate::db::Database;
 use crate::stream::StreamRegistry;
 
+/// Whether `url` is one of the app's own pages: where the main window may
+/// navigate. Tauri serves them from `tauri://localhost` (macOS, Linux) and
+/// `http://tauri.localhost` (Windows; `https` with `useHttpsScheme`), and a
+/// debug build from the dev server, passed as `dev_url`. `about:blank` is
+/// harmless. Anything else — an injected link or form, a `location` write —
+/// would load an outside page with the IPC bridge in reach; markdown renders
+/// without raw HTML and the CSP holds, so this is defense in depth. Frames
+/// aren't covered (wry's hook sees the main frame only): the preview's is
+/// held by the CSP's `frame-src`.
+fn is_app_url(url: &tauri::Url, dev_url: Option<&tauri::Url>) -> bool {
+    match url.scheme() {
+        "tauri" => url.host_str() == Some("localhost"),
+        "http" | "https" => {
+            url.host_str() == Some("tauri.localhost")
+                || dev_url.is_some_and(|d| d.origin() == url.origin())
+        }
+        "about" => url.as_str() == "about:blank",
+        _ => false,
+    }
+}
+
 /// Hide the main window for the tray — after telling the renderer, which
 /// locks first when "Lock when minimized" is on (`autoLock.ts`), and giving
 /// it a moment to paint the lock screen. Hidden at once, the window kept the
@@ -150,6 +171,24 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        // Keeps the window on the app's own pages (`is_app_url`). Consulted
+        // on every main-frame navigation, the window's first load included.
+        .plugin(
+            tauri::plugin::Builder::<tauri::Wry, ()>::new("navigation-guard")
+                .on_navigation(|webview, url| {
+                    let dev_url = if cfg!(debug_assertions) {
+                        webview.config().build.dev_url.clone()
+                    } else {
+                        None
+                    };
+                    let allowed = is_app_url(url, dev_url.as_ref());
+                    if !allowed {
+                        tracing::warn!("kept the window from navigating to {url}");
+                    }
+                    allowed
+                })
+                .build(),
+        )
         .register_uri_scheme_protocol(sandbox::SCHEME, |_ctx, request| sandbox::handle(&request))
         .setup(|app| {
             // Replace the prior `.expect(...)` chain with explicit user-
@@ -567,6 +606,43 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    use super::is_app_url;
+    use tauri::Url;
+
+    fn url(s: &str) -> Url {
+        Url::parse(s).expect("url")
+    }
+
+    /// The window may load the app's own pages — on every platform, and the
+    /// dev server in a debug build — and nothing else.
+    #[test]
+    fn navigation_stays_on_the_app() {
+        let dev = url("http://localhost:1420");
+        for ok in [
+            "tauri://localhost/index.html",
+            "http://tauri.localhost/",
+            "https://tauri.localhost/assets/x.js",
+            "about:blank",
+        ] {
+            assert!(is_app_url(&url(ok), None), "{ok}");
+        }
+        assert!(is_app_url(&url("http://localhost:1420/?x=1"), Some(&dev)));
+        for refused in [
+            "https://example.com/",
+            "http://localhost:1420/",
+            "tauri://evil.example/",
+            "http://tauri.localhost.evil.example/",
+            "file:///C:/Windows/win.ini",
+            "javascript:alert(1)",
+            "data:text/html,hi",
+            "about:srcdoc",
+        ] {
+            assert!(!is_app_url(&url(refused), None), "{refused}");
+        }
+        // The dev server's own origin only: another port isn't it.
+        assert!(!is_app_url(&url("http://localhost:1421/"), Some(&dev)));
+    }
+
     /// macOS draws the tray icon as a template, from the alpha channel alone
     /// and 18 pt tall, so the file must stay black on transparent and 36 px
     /// (2x) tall. Off macOS this is also the only place the `include_image!`
