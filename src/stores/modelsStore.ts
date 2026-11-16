@@ -148,6 +148,9 @@ function loadThinkPrefs(): Record<string, boolean> {
  *  callers share one `/api/show` round-trip instead of each issuing their
  *  own — the cache below only de-duplicates once a load has *finished*. */
 const pendingDefaults = new Map<string, Promise<Partial<GenerationParams>>>();
+/** Bumped per model by `forgetModel`; a Modelfile load caches only if it's
+ *  unchanged since the load began. */
+const defaultsGeneration = new Map<string, number>();
 
 /** Drop what we've *derived* from one model's Modelfile.
  *
@@ -167,7 +170,11 @@ function forgetModel(
   // Under either spelling: a model saved as `x` is listed — and so cached by
   // the chats that picked it — as `x:latest`, and the other way round.
   const keys = new Set([name, fullOllamaTag(name), name.replace(/:latest$/, "")]);
-  for (const k of keys) pendingDefaults.delete(k);
+  for (const k of keys) {
+    pendingDefaults.delete(k);
+    // A load already out read the model as it was: it mustn't cache that.
+    defaultsGeneration.set(k, (defaultsGeneration.get(k) ?? 0) + 1);
+  }
   set((s) => {
     const modelDefaults = { ...s.modelDefaults };
     const modelCapabilities = { ...s.modelCapabilities };
@@ -294,6 +301,7 @@ export const useModelsStore = create<ModelsState>((set, get) => ({
     }
 
     const base = useSettingsStore.getState().ollama_base_url;
+    const generation = defaultsGeneration.get(modelId) ?? 0;
     const load = (async () => {
       let patch: Partial<GenerationParams>;
       let caps: string[];
@@ -309,6 +317,9 @@ export const useModelsStore = create<ModelsState>((set, get) => ({
         // caller (a send, opening the chat or the panel) asks again.
         return {};
       }
+      // The model was re-created (or deleted) while this read the old one:
+      // cached, its values came back over the new Modelfile's.
+      if ((defaultsGeneration.get(modelId) ?? 0) !== generation) return patch;
       set((s) => ({
         modelDefaults: { ...s.modelDefaults, [modelId]: patch },
         modelCapabilities: { ...s.modelCapabilities, [modelId]: caps },
@@ -319,7 +330,8 @@ export const useModelsStore = create<ModelsState>((set, get) => ({
     try {
       return await load;
     } finally {
-      pendingDefaults.delete(modelId);
+      // Only its own entry: a newer load for the same model may be there.
+      if (pendingDefaults.get(modelId) === load) pendingDefaults.delete(modelId);
     }
   },
 

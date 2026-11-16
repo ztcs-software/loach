@@ -282,6 +282,14 @@ export const usePrivateChatStore = create<PrivateChatState>((set, get) => ({
     );
     if (pcSendToken !== myToken) return;
 
+    // The Modelfile's defaults and capabilities, awaited as a regular send
+    // awaits them (`warmModelDefaults`): read straight from the cache, a cold
+    // or failed load sent the app's 8K context and no `think` — and a failed
+    // one was never asked again for this overlay. De-duplicated, `{}` on a
+    // failure (which caches nothing, so the next send retries).
+    await useModelsStore.getState().loadModelDefaults(state.model);
+    if (pcSendToken !== myToken) return;
+
     // Build the chat history snapshot from in-memory messages only. The user
     // turn we just appended is the trailing entry with images attached; all
     // prior turns flow in as plain text.

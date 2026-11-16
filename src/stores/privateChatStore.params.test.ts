@@ -58,7 +58,9 @@ describe("Private Chat request params", () => {
     otherIpc.length = 0;
     usePrivateChatStore.getState().wipe();
     usePrivateChatStore.setState({ model: "m" });
-    useModelsStore.setState({ modelDefaults: {}, modelCapabilities: { m: ["thinking"] } });
+    // A warm cache, as the send finds it once the model was looked at: a
+    // cold one is read first (see the Modelfile-wait test).
+    useModelsStore.setState({ modelDefaults: { m: {} }, modelCapabilities: { m: ["thinking"] } });
     useSettingsStore.setState({ thinking_default: false });
   });
 
@@ -85,6 +87,28 @@ describe("Private Chat request params", () => {
     const params = await sentParams();
     expect(params.num_ctx).toBe(16384);
     expect(params.temperature).toBe(0.2);
+  });
+
+  // Read straight from the cache, a cold one sent the app's 8K context and
+  // no `think`, whatever the Modelfile said.
+  it("waits for the model's Modelfile defaults when they aren't cached yet", async () => {
+    const original = useModelsStore.getState().loadModelDefaults;
+    useModelsStore.setState({
+      modelDefaults: {},
+      modelCapabilities: {},
+      loadModelDefaults: async () => {
+        await Promise.resolve();
+        useModelsStore.setState({ modelDefaults: { m: { num_ctx: 4096 } }, modelCapabilities: { m: ["thinking"] } });
+        return { num_ctx: 4096 };
+      },
+    });
+    try {
+      const params = await sentParams();
+      expect(params.num_ctx).toBe(4096);
+      expect(params.think).toBe(false);
+    } finally {
+      useModelsStore.setState({ loadModelDefaults: original });
+    }
   });
 
   it("is marked private, offers no tools and persists nothing", async () => {

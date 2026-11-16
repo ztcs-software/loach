@@ -619,26 +619,6 @@ export function parseOverrides(json: string | null): Partial<GenerationParams> {
   return out;
 }
 
-/**
- * Resolve the effective parameters for a session, layering in this order:
- *
- *   1. App defaults (`DEFAULT_PARAMS`) — the universal fallback.
- *   2. Model defaults (Ollama only) — parsed from the Modelfile via
- *      `modelsStore.loadModelDefaults`. Only present if the cache was
- *      warmed; otherwise this layer is empty and we fall back to (1).
- *   3. Per-model user prefs (Ollama only) — currently just the Thinking
- *      toggle from ModelsView (`modelThinkPrefs`). Layered above the
- *      Modelfile so a user who turns thinking off for a model overrides
- *      Ollama's "thinking on by default" for capable models.
- *   4. Session overrides — whatever the user persisted by touching a slider
- *      (`params_json`). When `params_json` is `null` the session inherits
- *      from layers 1 – 3 only.
- *
- * Read synchronously so the chat send path doesn't pay an async hop on
- * every message. Cache warming happens up-front in `newSession` /
- * `selectSession` / `setSessionModel`, and the request builders await
- * `warmModelDefaults` in case it hasn't landed yet.
- */
 /** Load the Modelfile defaults `readSessionParams` reads for an Ollama
  *  chat. Only `newSession`, a model switch and the parameter panel warmed
  *  that cache, so a chat reopened after a restart sent DEFAULT_PARAMS over
@@ -687,6 +667,17 @@ export function layerParams(l: {
   };
 }
 
+/**
+ * Resolve the effective parameters for a session: the layers
+ * [`layerParams`] stacks (app defaults, Modelfile defaults, the per-model
+ * Thinking choice, the Space's, then the chat's own), with `think` dropped
+ * for a model that doesn't list the capability.
+ *
+ * Read synchronously so the chat send path doesn't pay an async hop on
+ * every message. Cache warming happens up-front in `newSession` /
+ * `selectSession` / `setSessionModel`, and the request builders await
+ * `warmModelDefaults` in case it hasn't landed yet.
+ */
 function readSessionParams(session: Session | undefined): GenerationParams {
   if (!session) return { ...DEFAULT_PARAMS };
   const overrides = parseOverrides(session.params_json);
@@ -784,14 +775,6 @@ function chatHistory(messages: Message[], userText: string, images: string[]): C
 const COMPACT_KEEP_TAIL = 4;
 const COMPACT_MIN_TOTAL = 6;
 
-/**
- * Run the summarization model call shared by `compactContext` and
- * `exportCompactedContext`. Builds a transcript from `toSummarize`, folds in
- * any `priorSummary` so earlier rolled-up context survives, streams the
- * model, and resolves with the trimmed summary. Throws on stream error or an
- * empty summary so each caller can surface its own message. Does not touch
- * store state — callers own any persistence.
- */
 /** Sessions with a `sendUserMessage` in flight but not yet reflected in
  *  `runningTask` / `queue`. The gap between the busy check and the dispatch
  *  spans several awaits (history hydration, web fetch, message persist,
@@ -850,6 +833,14 @@ function summaryTranscript(messages: Message[]): string {
     .join("\n\n");
 }
 
+/**
+ * Run the summarization model call shared by `compactContext` and
+ * `exportCompactedContext`. Builds a transcript from `toSummarize`, folds in
+ * any `priorSummary` so earlier rolled-up context survives, streams the
+ * model, and resolves with the trimmed summary. Throws on stream error or an
+ * empty summary so each caller can surface its own message. Does not touch
+ * store state — callers own any persistence.
+ */
 async function generateSummary(
   session: Session,
   toSummarize: Message[],
@@ -878,6 +869,11 @@ ${transcript}
       : settings.openai_base_url;
   await warmModelDefaults(session);
   const params = readSessionParams(session);
+  // Only the answer is kept (`token` frames): reasoning would be generated
+  // and thrown away, inside the time limit and the token cap — a summary
+  // timed out, or came back empty or cut short. As the memory extractor
+  // does. Present only for a model that can think (`readSessionParams`).
+  if ("think" in params) params.think = false;
 
   let summary = "";
   let streamErr: string | null = null;
@@ -886,6 +882,10 @@ ${transcript}
     unlisten: null,
   };
   let timeoutId: number | null = null;
+  // Set once the outcome is in. A start that resolves after that — a fast
+  // error, or the timeout, beat the invoke's reply — found no one to stop
+  // its stream or remove its listener, and the listener stayed for good.
+  let settled = false;
   try {
     await new Promise<void>((resolve, reject) => {
       // Hard ceiling on wall-clock, mirroring the memory extractor. Without
@@ -921,6 +921,15 @@ ${transcript}
         },
       )
         .then((handle) => {
+          if (settled) {
+            try {
+              handle.unlisten();
+            } catch {
+              /* ignore */
+            }
+            void handle.stop().catch(() => undefined);
+            return;
+          }
           handleHolder.stop = handle.stop;
           handleHolder.unlisten = handle.unlisten;
         })
@@ -929,6 +938,7 @@ ${transcript}
   } catch (e) {
     streamErr = e instanceof Error ? e.message : String(e);
   } finally {
+    settled = true;
     if (timeoutId !== null) window.clearTimeout(timeoutId);
     const { stop, unlisten } = handleHolder;
     if (unlisten) {
@@ -1838,9 +1848,10 @@ async function startTask(task: QueueTask, get: Getter, set: Setter): Promise<boo
     // it backs). Best-effort — if the DB write fails too, the in-memory
     // patch still keeps the bubble informative until the next reload.
     const errorMsg = e instanceof Error ? e.message : String(e);
-    // Same provider-context formatting as in-stream errors. Most "connect
-    // refused" / TLS failures land here rather than in the `kind: error`
-    // branch because reqwest fails before the SSE handshake completes.
+    // Same provider-context formatting as in-stream errors. Only a request
+    // `chat_stream` refused lands here — params it can't read, an empty
+    // stream id: it returns before any HTTP, so connection, TLS and HTTP
+    // failures all arrive later as `kind: error` events.
     const friendly = formatProviderError({
       provider: task.request.provider,
       baseUrl: task.request.base_url,
@@ -1876,6 +1887,9 @@ async function startTask(task: QueueTask, get: Getter, set: Setter): Promise<boo
         streamingSessionId: null,
         runningTask: null,
         streamingByMessage: sbm,
+        // A failure in a chat nobody is looking at gets the dot, as
+        // `finishRunning` gives an error there.
+        ...(sessionId !== s.activeSessionId ? { unread: { ...s.unread, [sessionId]: true } } : {}),
         messages: {
           ...s.messages,
           [sessionId]: (s.messages[sessionId] ?? []).map((m) =>
@@ -2452,7 +2466,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
         title: "Moved to archive",
         body: title,
         durationMs: 7000,
-        action: { label: "Undo", onClick: () => void get().archive(id, false) },
+        action: {
+          label: "Undo",
+          onClick: () =>
+            void get()
+              .archive(id, false)
+              .catch((e) =>
+                useToastStore.getState().push({
+                  kind: "error",
+                  title: "Couldn't restore the chat",
+                  body: e instanceof Error ? e.message : String(e),
+                }),
+              ),
+        },
       });
     }
   },
@@ -2575,10 +2601,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
       .catch(() => {});
 
     // Unload the previous Ollama model from VRAM to free resources.
+    // Not while a reply — running or waiting, in any chat — is on it: Ollama
+    // would drop the runner as soon as the request ended, and the next one
+    // paid a cold load from disk.
+    const usesPrev = (t: QueueTask | null) =>
+      t?.request.provider === "ollama" &&
+      canonicalModel("ollama", t.request.model) === canonicalModel("ollama", prev.model);
     if (
       prev.provider === "ollama" &&
       prev.model &&
-      canonicalModel("ollama", prev.model) !== canonicalModel(provider, model)
+      canonicalModel("ollama", prev.model) !== canonicalModel(provider, model) &&
+      !usesPrev(get().runningTask) &&
+      !get().queue.some(usesPrev)
     ) {
       const baseUrl = useSettingsStore.getState().ollama_base_url;
       ollamaUnloadModel(baseUrl, prev.model).catch(() => {});
@@ -2647,7 +2681,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // Rows appended below a reply that is still streaming would push it off
     // the end of the transcript — and with it any approval card it shows,
     // while the backend stays parked on that card.
-    if (get().streamingSessionId === id) {
+    // Nor while a reply is waiting or being prepared: its request is already
+    // built, so it would be answered without the imported rows, and its reply
+    // would land below them.
+    if (
+      get().streamingSessionId === id ||
+      get().queue.some((t) => t.sessionId === id) ||
+      isPreparingSend(id)
+    ) {
       throw new Error("Wait for the reply to finish before importing context.");
     }
     // One round-trip inserts the whole batch under a shared `import_group`
@@ -2737,6 +2778,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (!session) throw new Error("This chat no longer exists. Start a new one.");
     if (!session.model) {
       throw new Error("No model selected. Pick one from the model dropdown.");
+    }
+    // A compaction here is a generation of its own on the same model.
+    if (get().compactingSessionId === sessionId) {
+      throw new Error("This chat is being compacted. Send once that finishes.");
     }
     // A model chosen during onboarding is routinely still downloading when the
     // user sends their first message — the wizard pins it and lets them carry
@@ -2979,13 +3024,27 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const history = (get().messages[sessionId] ?? []).filter(
         (m) => m.id !== userMsg.id && m.id !== last.id,
       );
-      const { request, preToolCalls } = await buildTaskRequest(
+      const { request, preToolCalls: sourceRecords } = await buildTaskRequest(
         session,
         sessionId,
         history,
         userMsg.content,
         triggerAttachments,
       );
+      // The pages fetched for the first answer are still in the user turn
+      // and reach the model again: the new reply keeps their chips, ahead of
+      // the source records as a send orders them.
+      const fetchRecords = ((): ToolCallRecord[] => {
+        try {
+          const v: unknown = JSON.parse(last.tool_calls_json ?? "[]");
+          return Array.isArray(v)
+            ? (v as ToolCallRecord[]).filter((r) => r?.server_id === "__builtin__" && r?.tool === "web_fetch")
+            : [];
+        } catch {
+          return [];
+        }
+      })();
+      const preToolCalls = [...fetchRecords, ...sourceRecords];
 
       const task: QueueTask = {
         id: `t_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
@@ -3107,17 +3166,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
       return;
     }
     if (state.compactingSessionId) return;
-    if (
-      state.runningTask?.sessionId === sessionId ||
-      state.queue.some((t) => t.sessionId === sessionId)
-    ) {
+    // Not beside another generation, in any chat: a summary of the whole
+    // transcript competes for the same model as a visible reply, and on a
+    // one-slot Ollama one of them stalls behind the other.
+    if (state.runningTask || state.queue.length > 0 || sendingSessions.size > 0) {
       useToastStore.getState().push({
         kind: "info",
-        title: "Chat is busy",
-        body: "Wait for the current reply before compacting.",
+        title: "A reply is running",
+        body: "Wait for it to finish before compacting.",
       });
       return;
     }
+    // Nor beside the memory extractor, for the same reason.
+    cancelMemoryExtraction();
 
     const all = state.messages[sessionId] ?? [];
     // Already-compacted rows have a summary representing them in the

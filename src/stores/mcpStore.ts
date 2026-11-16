@@ -123,6 +123,9 @@ function viewFromRow(row: McpServer): McpServerView {
   };
 }
 
+/** See `refresh`. */
+let refreshSeq = 0;
+
 export const useMcpStore = create<McpState>((set, get) => ({
   servers: [],
   loading: false,
@@ -133,11 +136,16 @@ export const useMcpStore = create<McpState>((set, get) => ({
   },
 
   refresh: async () => {
+    // Only the latest refresh lands: two in quick succession (two switches
+    // flipped) could resolve out of order, and the older list won.
+    const seq = ++refreshSeq;
     set({ loading: true, error: null });
     try {
       const rows = await mcpList();
+      if (seq !== refreshSeq) return;
       set({ servers: rows.map(viewFromRow), loading: false });
     } catch (e) {
+      if (seq !== refreshSeq) return;
       set({
         loading: false,
         error: e instanceof Error ? e.message : String(e),

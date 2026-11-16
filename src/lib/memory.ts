@@ -13,6 +13,7 @@ import {
   selectMemoriesForPrompt,
 } from "@/lib/memoryRules";
 import { useGlobalMemoryStore } from "@/stores/globalMemoryStore";
+import { useModelsStore } from "@/stores/modelsStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useToastStore } from "@/stores/toastStore";
@@ -86,6 +87,13 @@ const MAX_ADDS_PER_RUN = 5;
  * typical multi-paragraph reply.
  */
 const TURN_CHAR_BUDGET = 8_000;
+
+/** Turn text as the extractor reads it, its `<user>`/`<assistant>` tags
+ *  defused: text inside a turn — a fetched page, a tool's output — could
+ *  close the turn and write lines that read as the prompt's own. */
+function quoted(text: string): string {
+  return text.replace(/<(\/?)(user|assistant)>/gi, "‹$1$2›");
+}
 
 /** How long an Undo-bearing memory toast stays up. Matches the archive
  *  undo — long enough to read the fact and decide. */
@@ -174,9 +182,18 @@ export async function restoreMemoryTurns(
     return;
   }
   if (!Array.isArray(saved)) return;
-  const refs = (saved as QueuedTurnRef[]).filter(
-    (r) => findSession(r.sessionId) && rememberingIn(r.scope),
-  );
+  // Well-formed entries only: one `null` (a hand edit, a partial write)
+  // threw here and lost every queued turn from the last session.
+  const wellFormed = (r: unknown): r is QueuedTurnRef => {
+    const q = r as Partial<QueuedTurnRef> | null;
+    return (
+      typeof q?.sessionId === "string" &&
+      typeof q.userMessageId === "string" &&
+      typeof q.assistantMessageId === "string" &&
+      (q.scope?.kind === "global" || (q.scope?.kind === "space" && typeof q.scope.spaceId === "string"))
+    );
+  };
+  const refs = saved.filter(wellFormed).filter((r) => findSession(r.sessionId) && rememberingIn(r.scope));
   const transcripts = new Map<string, Message[]>();
   await Promise.all(
     [...new Set(refs.map((r) => r.sessionId))].map(async (id) => {
@@ -417,8 +434,8 @@ async function extractRun(
       .map(
         (t, i) =>
           `Conversation turn ${i + 1} of ${turns.length}:\n` +
-          `<user>\n${clip(t.userText, perSide)}\n</user>\n\n` +
-          `<assistant>\n${clip(t.assistantText, perSide)}\n</assistant>`,
+          `<user>\n${quoted(clip(t.userText, perSide))}\n</user>\n\n` +
+          `<assistant>\n${quoted(clip(t.assistantText, perSide))}\n</assistant>`,
       )
       .join("\n\n") +
     // The reminder sits last, where small models weigh instructions most;
@@ -671,10 +688,13 @@ async function runOneShotStream(
           max_tokens: 512,
           // Low temperature — we want deterministic-ish dedupe behaviour.
           temperature: 0.2,
-          // Suppress chain-of-thought when the model supports it; we only
-          // care about the final JSON. Models that don't support `think`
-          // ignore the field on the Rust side.
-          think: false,
+          // Suppress chain-of-thought; we only care about the final JSON.
+          // On Ollama only for a model that lists the capability: any other
+          // answers `think` with a 400, and the retry without it made every
+          // run two requests (`readSessionParams` avoids it the same way).
+          ...(provider !== "ollama" || useModelsStore.getState().modelCapabilities[model]?.includes("thinking")
+            ? { think: false }
+            : {}),
         },
         no_tools: true,
       },

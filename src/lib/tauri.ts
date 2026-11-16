@@ -856,9 +856,12 @@ export function updateSpace(args: {
   name: string;
   description: string;
   instructions: string;
-  default_provider?: string | null;
-  default_model?: string | null;
-  default_params_json?: string | null;
+  // Required: the backend writes all three as given, so one left out
+  // cleared the Space's pinned model and parameters. Pass the current value
+  // to keep it.
+  default_provider: string | null;
+  default_model: string | null;
+  default_params_json: string | null;
   memory_enabled?: boolean | null;
 }): Promise<void> {
   if (!isTauri) return notInTauri(undefined);

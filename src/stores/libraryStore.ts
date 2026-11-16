@@ -256,8 +256,17 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     // racing the startup one — wiped link lists loaded since and restarted
     // their version numbers under loads still in flight.
     try {
-      const { items, datasets } = await libraryList();
-      set({ items, datasets, hydrated: true, error: null });
+      // Read again if a write landed while the list was out, as
+      // `refreshItems` does: the send path re-runs this, and an older list
+      // landing last dropped an item just created.
+      for (;;) {
+        const { items: itemsBefore, datasets: datasetsBefore } = get();
+        const { items, datasets } = await libraryList();
+        if (get().items === itemsBefore && get().datasets === datasetsBefore) {
+          set({ items, datasets, hydrated: true, error: null });
+          break;
+        }
+      }
     } catch (e) {
       logger.error("library hydrate failed", e);
       set({ hydrated: true, error: errorText(e) });
