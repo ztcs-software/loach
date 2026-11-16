@@ -109,7 +109,18 @@ export const TONES: Tone[] = [
   },
 ];
 
+/** Tones known by another id before: the old Concise tone became Direct, and
+ *  a saved `concise` (the default, a chat's pick) matched nothing and was
+ *  silently dropped. */
+const RENAMED: Record<string, string> = { concise: "direct" };
+
+/** `id` as the tone list knows it now. */
+export function canonicalToneId(id: string): string {
+  return RENAMED[id] ?? id;
+}
+
 export function getTone(id: string | undefined | null): Tone | null {
   if (!id) return null;
-  return TONES.find((t) => t.id === id) ?? null;
+  const current = canonicalToneId(id);
+  return TONES.find((t) => t.id === current) ?? null;
 }

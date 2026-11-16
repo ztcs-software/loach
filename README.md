@@ -125,6 +125,8 @@ Builds target **glibc 2.35**, which makes **Ubuntu 22.04** and **Debian 12** the
 
 ### Install on macOS
 
+Requires **macOS 11 or later with Safari 16.4+** — on Big Sur or Monterey, update Safari first.
+
 The macOS build is **Apple Silicon (M-series CPUs) only** and is currently not notarized in the Apple Developer Program. On first launch macOS will block the app with a *"Loach is damaged and can't be opened"* or *"Apple cannot verify..."* warning. Bypass it once and the app runs normally:
 
 - For *"Apple cannot verify..."*: on macOS 14 and earlier, **right-click** `Loach.app` in **Applications** → **Open** → click **Open** in the prompt; on macOS 15 and later, try to open it once, then click **Open Anyway** in **System Settings → Privacy & Security**. Or, for either warning:
@@ -243,6 +245,8 @@ Only one OpenAI-compatible endpoint is active at a time — switch the base URL 
 | App-lock marker (whether a lock is set, its method, PIN length and whether it has a hint — no hashes) and failed-unlock count | `app_lock.json` and `app_lock_attempts.json` next to `loach.db` |
 | Skills you import | `skills` folder next to `loach.db`; skills in `~/.agents/skills` are read where they are |
 | Attached files (images, text, PDF, DOCX) and PDFs the pdf tool generates | Stored with their message in `loach.db`; no separate file store |
+| Layout, per-model Thinking defaults and references to memory turns waiting for extraction | The web view's local storage |
+| Code opened in VS Code from the canvas | `canvas` folder in the app cache directory |
 | App data dir on Windows | `%APPDATA%\dev.loach.app\` |
 | App data dir on Linux | `~/.local/share/dev.loach.app/` |
 | App data dir on macOS | `~/Library/Application Support/dev.loach.app/` |

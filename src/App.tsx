@@ -444,37 +444,37 @@ export default function App() {
               Space, model or chat the user moved to. */}
           {viewingSpaceId ? (
             <ErrorBoundary key={`space:${viewingSpaceId}`} name="Space">
-              <Suspense fallback={null}>
+              <Suspense fallback={<ViewLoading />}>
                 <SpaceView />
               </Suspense>
             </ErrorBoundary>
           ) : viewingModel ? (
             <ErrorBoundary key={`model:${viewingModel}`} name="Model details">
-              <Suspense fallback={null}>
+              <Suspense fallback={<ViewLoading />}>
                 <ModelsView />
               </Suspense>
             </ErrorBoundary>
           ) : sidebarTab === "spaces" ? (
             <ErrorBoundary key="spaces" name="Spaces library">
-              <Suspense fallback={null}>
+              <Suspense fallback={<ViewLoading />}>
                 <SpacesLibrary />
               </Suspense>
             </ErrorBoundary>
           ) : sidebarTab === "library" ? (
             <ErrorBoundary key="library" name="Library">
-              <Suspense fallback={null}>
+              <Suspense fallback={<ViewLoading />}>
                 <LibraryView />
               </Suspense>
             </ErrorBoundary>
           ) : sidebarTab === "snippets" ? (
             <ErrorBoundary key="snippets" name="Snippets library">
-              <Suspense fallback={null}>
+              <Suspense fallback={<ViewLoading />}>
                 <SnippetsLibrary />
               </Suspense>
             </ErrorBoundary>
           ) : sidebarTab === "models" ? (
             <ErrorBoundary key="models" name="Models library">
-              <Suspense fallback={null}>
+              <Suspense fallback={<ViewLoading />}>
                 <ModelsLibrary />
               </Suspense>
             </ErrorBoundary>
@@ -645,6 +645,19 @@ const HERO_GREETINGS = [
   "What are we working on?",
 ];
 
+/** The main pane while a view's code loads (a cold start, a click before
+ *  the idle prefetch): left blank, nothing said it was coming. */
+function ViewLoading() {
+  return (
+    <main className="flex min-w-0 flex-1 px-8 py-8" aria-busy aria-label="Loading">
+      <div className="mx-auto w-full max-w-6xl animate-pulse">
+        <div className="h-8 w-48 rounded-lg bg-foreground/[0.06]" />
+        <div className="mt-3 h-4 w-80 max-w-full rounded-full bg-foreground/[0.04]" />
+      </div>
+    </main>
+  );
+}
+
 /**
  * Centered, low-contrast "still loading" placeholder for the chat surface.
  * Shown for the ~100–300 ms window between unlock and `chatStore.hydrate()`
@@ -719,6 +732,9 @@ function ChatLoadError({ message }: { message: string }) {
 function HeroComposer() {
   const insertDraft = useUIStore((s) => s.insertComposerDraft);
   const bgStyle = useSettingsStore((s) => s.background_style);
+  // No model to send to (setup skipped, nothing installed): say so and where
+  // to get one — "Ask anything" over a Send that did nothing was a dead end.
+  const noModel = useChatStore((s) => !s.sessions.find((x) => x.id === s.activeSessionId)?.model);
 
   // Pick a greeting once per mount so it stays stable while this hero is
   // visible but re-rolls on every fresh empty-state visit (new chat etc.).
@@ -740,9 +756,39 @@ function HeroComposer() {
           >
             {headingText}
           </h1>
-          <p className="mt-3 text-sm text-foreground/55">
-            Ask anything. Loach runs your local models privately and securely.
-          </p>
+          {noModel ? (
+            <div className="mt-3 flex flex-col items-center gap-3">
+              <p className="text-sm text-foreground/65">
+                No model yet — pick one above, download one, or connect a provider.
+              </p>
+              <div className="flex gap-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="rounded-full"
+                  onClick={() => {
+                    useSpaceStore.getState().setViewingSpace(null);
+                    useModelsStore.getState().setViewingModel(null);
+                    useUIStore.getState().setSidebarTab("models");
+                  }}
+                >
+                  Get a model
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="rounded-full"
+                  onClick={() => useUIStore.getState().openSettingsTab("providers")}
+                >
+                  Connect a provider
+                </Button>
+              </div>
+            </div>
+          ) : (
+            <p className="mt-3 text-sm text-foreground/55">
+              Ask anything. Loach runs your local models privately and securely.
+            </p>
+          )}
         </div>
         <ChatInput centered />
         <div className="mt-6 flex flex-wrap items-center justify-center gap-2">

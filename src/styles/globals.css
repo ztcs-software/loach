@@ -51,10 +51,12 @@
        60%-lightness saturated hue chosen to read as a button/glow surface;
        as text on the near-white background it lands at 2.4:1. This is the
        same hue and saturation dropped to a lightness that clears 4.5:1, so
-       links stay recognisably "the accent" without failing AA. Dark mode
-       re-points it at `--primary` (see `.dark`), where the bright accent
-       already has ~8:1 against the near-black backdrop. */
-    --primary-text: 22 95% 38%;
+       links stay recognisably "the accent" without failing AA — on the
+       Aurora background's peach band too, where 38% came to about 3.4:1
+       (30% is about 4.8:1). Dark mode re-points it at `--primary` (see
+       `.dark`), where the bright accent already has ~8:1 against the
+       near-black backdrop. */
+    --primary-text: 22 95% 30%;
 
     /* Glass tokens flipped per theme */
     --glass-tint: 255 255 255;

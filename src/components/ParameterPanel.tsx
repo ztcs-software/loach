@@ -23,7 +23,7 @@ import {
   getPersona,
   type Persona,
 } from "@/lib/personas";
-import { DEFAULT_TONE_ID, TONES, type Tone } from "@/lib/tones";
+import { canonicalToneId, DEFAULT_TONE_ID, type Tone, TONES } from "@/lib/tones";
 import { cn } from "@/lib/utils";
 import { type GenerationParams, type ImageScaling, type Session } from "@/types";
 
@@ -69,7 +69,7 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
   );
   const setSessionTone = useUIStore((s) => s.setSessionTone);
   const defaultToneId = useSettingsStore((s) => s.default_tone_id);
-  const effectiveToneId = activeToneId ?? defaultToneId ?? DEFAULT_TONE_ID;
+  const effectiveToneId = canonicalToneId(activeToneId ?? defaultToneId ?? DEFAULT_TONE_ID);
 
   // Subscribe to the per-model patch so this component re-renders the moment
   // the lazy fetch lands. The selector returns the raw object reference, so

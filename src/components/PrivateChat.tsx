@@ -436,12 +436,12 @@ function PrivateChatBody() {
             <ShieldCheck className="h-6 w-6 text-zinc-300" />
           </div>
           <h2 className="text-2xl font-medium tracking-tight text-zinc-100">
-            We are private
+            This chat isn't saved
           </h2>
           <p className="mt-3 text-sm leading-relaxed text-zinc-400">
-            Private Chats are temporary conversations with nothing stored.
-            <br />
-            All messages are removed immediately when you close the chat.
+            {/* What Loach keeps, not a promise for the model server too: an
+                Ollama run with debug logging can still log prompts. */}
+            Loach keeps nothing after you close it.
             <br />
             {/* Sends go to whatever Ollama server is configured, so "local"
                 is only true when that's this machine. */}

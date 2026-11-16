@@ -1136,6 +1136,8 @@ export function ChatInput({ centered = false }: ChatInputProps) {
     placeholder = "This chat is waiting in the queue…";
     disabledTitle =
       "This chat already has a prompt waiting. Cancel it or wait for it to run before sending another.";
+  } else if (!text.trim() && attachments.length === 0) {
+    disabledTitle = "Type a message to send";
   }
 
   const primaryAriaLabel = streamingThisChat
@@ -1592,8 +1594,8 @@ function PrimaryButton({
         "shadow-[0_6px_24px_-4px_rgb(var(--primary-glow)/0.75)]",
         "transition-all duration-200",
         "hover:bg-primary/90 hover:shadow-[0_8px_28px_-4px_rgb(var(--primary-glow)/0.90)]",
-        "disabled:bg-primary/70 disabled:text-primary-foreground/85",
-        "disabled:shadow-[0_4px_18px_-6px_rgb(var(--primary-glow)/0.45)] disabled:cursor-not-allowed",
+        // Plainly off: a dimmed orange still read as a button to press.
+        "disabled:bg-foreground/10 disabled:text-foreground/40 disabled:shadow-none disabled:cursor-not-allowed",
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60 focus-visible:ring-offset-0",
       )}
     >

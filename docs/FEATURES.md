@@ -174,9 +174,10 @@ transcript of messages.
   answer in place of the previous reply, which goes once the new one starts —
   a regenerate cancelled while it waits for another chat keeps it). **Share** (§2.12) is on every
   bubble; **Pin this response** (§2.11), **Fork from here** (§2.6) and
-  **Save to Library** (§4) on assistant replies, and **Save attachments to
-  Library** on user prompts that carry files. A prompt with no text, only
-  attachments, gets just that last item.
+  **Save to Library** (§4) on assistant replies, and **Save attachment to
+  Library** (**attachments** for several) on user prompts that carry
+  readable files — text, PDF, Word, images. A prompt with no text, only
+  such attachments, gets just that last item.
 - **Read aloud** — in an assistant reply's `…` menu: reads the reply with
   your system's voices, skipping code blocks and display math, and turns
   into **Stop reading** while it plays (the `…` button shows a speaker).
@@ -351,8 +352,9 @@ pending restore.
   The fork carries a **"Forked from …"** badge in its header that jumps
   back to the source; the badge disappears if the source is deleted. Also
   available as **Fork from here** in an assistant reply's `…` menu (forks
-  up to and including that reply) and via the `/fork` command. Forking
-  waits for a running reply to finish. A fork cut before the last turn a
+  up to and including that reply) and via the `/fork` command. Forking is
+  unavailable while a reply is still streaming in that chat; wait for it to
+  finish. A fork cut before the last turn a
   compaction (§2.10) summarised leaves the summary behind and sends the
   turns it copied in full.
 - **Export context** — opens a dialog with the transcript rendered as
@@ -942,7 +944,7 @@ Style modifier appended *after* the persona / instructions:
 
 - **Default** — model's natural voice (no override).
 - **Direct** — leads with the point; drops hedges and preamble. Replaces
-  the old "Concise" tone.
+  the old "Concise" tone: a default or chat set to Concise uses Direct.
 - **Detailed** — thorough coverage with caveats and reasoning.
 - **Casual** — plain English, conversational.
 - **Formal** — business register.
@@ -987,7 +989,10 @@ The parameter merge order, top to bottom (later layers win):
    block; cached after the first chat with that model.
 4. **Per-model preferences** — currently the Models-editor Thinking
    toggle (kept on this device — §6.2).
-5. **Per-session overrides** — what the sliders in this panel save.
+5. **Space defaults** — parameters a Space carries for its chats. No
+   control sets these today; they arrive only with a backup made by a
+   version that had one.
+6. **Per-session overrides** — what the sliders in this panel save.
 
 A **Reset to defaults** button below the sliders (labelled
 **Reset to model defaults** when the model ships Modelfile defaults) clears
@@ -1078,7 +1083,7 @@ Loach speaks two MCP transports. Configure servers in **Settings → MCP**.
   quotes the last lines of its stderr so a failed launch says why (a
   timeout doesn't include them). In a chat the error stops short of the
   stderr — it can print anything, keys included, and the chat's text goes
-  to the model and into exports — and the full text is in Loach's log. On Windows a bare `npx` resolves to
+  to the model and into exports — and **Test connection** shows it in full. On Windows a bare `npx` resolves to
   `npx.cmd` through Loach's own `PATH`/`PATHEXT`, so commands work as
   typed; a `PATH` set in the server's environment isn't used for that
   lookup. On macOS and Linux the server gets the `PATH` your login shell
@@ -1711,8 +1716,11 @@ Below it sit the actions:
   variables and MCP servers that came in, then reloads. The stored OpenAI
   key is kept, and so is the current OpenAI base URL while a key is stored,
   so the key never goes to a server a backup names. Stdio MCP servers
-  arrive disabled (§9.2); a server name that breaks the naming rules is
-  fixed up rather than failing the import. Chats get back the skills they
+  arrive disabled (§9.2), and so do HTTP servers whose address can't be
+  looked up during the import or is link-local — re-save one to check it
+  again; a server name that breaks the naming rules is fixed up rather than
+  failing the import. Once it has reloaded, Loach lists the servers that
+  came back switched off or renamed. Chats get back the skills they
   had loaded, and skills switched off in the backup stay off; the skill
   folders on disk are left as they are. Requires
   current app-lock credentials when a lock is configured.

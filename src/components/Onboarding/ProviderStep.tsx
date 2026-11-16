@@ -1049,6 +1049,7 @@ function ModelCatalog({
                           key={v.tag}
                           label={v.label}
                           sizeGb={v.sizeGb}
+                          residentGb={v.residentGb}
                           tag={v.tag}
                           run={run}
                           fit={fit}
@@ -1141,6 +1142,7 @@ function RecommendationCard({
           <p className="font-mono text-[13.5px] font-medium">{variant.tag}</p>
           <p className="mt-0.5 text-[11.5px] text-foreground/60">
             ~{formatGb(variant.sizeGb)} download ·{" "}
+            {variant.residentGb !== undefined && `~${formatGb(variant.residentGb)} in memory · `}
             {fit.tier === "comfortable"
               ? basis.kind === "vram"
                 ? "fits entirely on your GPU"
@@ -1195,6 +1197,7 @@ function RecommendationCard({
 function VariantRow({
   label,
   sizeGb,
+  residentGb,
   tag,
   run,
   fit,
@@ -1202,6 +1205,9 @@ function VariantRow({
 }: {
   label: string;
   sizeGb: number;
+  /** What it holds in memory, when that's far less than the download (the
+   *  edge models) — the download alone made E2B look as heavy as a 12B. */
+  residentGb?: number;
   tag: string;
   run: AdminProgress | undefined;
   fit: FitVerdict | null;
@@ -1217,7 +1223,10 @@ function VariantRow({
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-2">
           <span className="font-medium">{label}</span>
-          <span className="text-[11px] text-foreground/45">~{formatGb(sizeGb)}</span>
+          <span className="text-[11px] text-foreground/45">
+            ~{formatGb(sizeGb)}
+            {residentGb !== undefined && ` download · ~${formatGb(residentGb)} in memory`}
+          </span>
           <FitBadge fit={fit} />
         </div>
         <p className="font-mono text-[11px] text-foreground/40">{tag}</p>

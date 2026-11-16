@@ -306,7 +306,9 @@ launch, turn on **Preload on startup** under **Settings → General → Default
 model** (available when the default model is an Ollama model). Only that
 model is warmed, at the cost of pinning VRAM as soon as Loach opens, and it
 stays loaded only as long as **Keep model loaded** allows (5 minutes by
-default).
+default). Loach also starts loading a chat's Ollama model as you begin
+typing, so the load usually overlaps your typing; a prompt pasted and sent
+at once still waits for it.
 
 ### Making Ollama generate faster
 
@@ -515,8 +517,8 @@ an error.
 **Problem.** **Test connection** on a stdio server fails, or a chat shows
 an error for it, with "couldn't start", "exited before replying", or a
 timeout. (Saving doesn't start the server — it first runs when you test
-it, with **Test connection** or `/tools`, or send a message with it
-enabled.)
+it, with **Test connection** or `/tools`, when you start typing in a chat's
+composer, or when you send a message with it enabled.)
 
 **Solution.**
 
@@ -1114,8 +1116,10 @@ snippets, snippet variables and MCP servers, but keeps app settings and
 your stored API key. To clear settings, the key and the app lock as well,
 use **Factory reset** instead.
 
-Neither removes skill folders, which live on disk outside the database:
-delete Loach's own from **Open folder** in **Settings → Skills**.
+Neither removes skill folders, which live on disk outside the database
+(delete Loach's own from **Open folder** in **Settings → Skills**), nor the
+copies of canvas code **Open in VS Code** wrote to the `canvas` folder in
+Loach's cache directory.
 
 ---
 
