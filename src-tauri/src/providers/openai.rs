@@ -67,6 +67,21 @@ struct OpenAIModel {
 }
 
 pub async fn list_models(http: &Client, base_url: &str) -> Result<Vec<ModelInfo>> {
+    // Off the runtime — blocking OS-keyring read (see chat_stream's note).
+    // A keyring that can't be read counts as no key, as it does there: on
+    // Linux without a Secret Service, failing here kept a keyless LM Studio
+    // from listing its models while chatting with it worked.
+    let key = tokio::task::spawn_blocking(|| secrets::get_openai_key().ok().flatten())
+        .await
+        .ok()
+        .flatten();
+    list_models_with(http, base_url, key.as_deref()).await
+}
+
+/// [`list_models`] with `key` in place of the stored one — onboarding checks
+/// a key the user just typed before it replaces the stored one. One body for
+/// both, so a hardening applied to one can't miss the other.
+pub async fn list_models_with(http: &Client, base_url: &str, key: Option<&str>) -> Result<Vec<ModelInfo>> {
     // Same defense-in-depth SSRF gate the chat-stream path uses. The
     // listing endpoint auto-fires from `modelsStore.refresh()` whenever
     // `openai_base_url` is moved off the public default — without this
@@ -83,16 +98,8 @@ pub async fn list_models(http: &Client, base_url: &str) -> Result<Vec<ModelInfo>
     // provider at an `http://` LAN host — or a corrupted / imported
     // `openai_base_url` — would ship the key in cleartext on every
     // model-list refresh, the exact leak the chat path already prevents.
-    // Off the runtime — blocking OS-keyring read (see chat_stream's note).
-    // A keyring that can't be read counts as no key, as it does there: on
-    // Linux without a Secret Service, failing here kept a keyless LM Studio
-    // from listing its models while chatting with it worked.
-    let key = tokio::task::spawn_blocking(|| secrets::get_openai_key().ok().flatten())
-        .await
-        .ok()
-        .flatten();
     let mut withheld = false;
-    if let Some(key) = key {
+    if let Some(key) = key.map(str::trim) {
         if !key.is_empty() {
             if is_safe_for_bearer(base_url) {
                 req = req.bearer_auth(key);
@@ -148,7 +155,7 @@ struct DeltaMsg {
     /// sending both doesn't show its reasoning twice.
     #[serde(default)]
     reasoning: Option<String>,
-    #[serde(default, deserialize_with = "null_as_empty")]
+    #[serde(default, deserialize_with = "super::null_as_empty")]
     tool_calls: Vec<DeltaToolCall>,
 }
 
@@ -176,7 +183,7 @@ struct DeltaToolFn {
 
 #[derive(Debug, Deserialize)]
 struct SseChunk {
-    #[serde(default, deserialize_with = "null_as_empty")]
+    #[serde(default, deserialize_with = "super::null_as_empty")]
     choices: Vec<Choice>,
     /// Some servers emit a final, choices-empty chunk that carries
     /// `usage: { completion_tokens, prompt_tokens, total_tokens }`. When
@@ -198,17 +205,6 @@ struct SseChunk {
 struct Usage {
     #[serde(default)]
     completion_tokens: Option<u32>,
-}
-
-/// `#[serde(default)]` for a list that also takes an explicit `null` as
-/// empty. Some compat servers send `"tool_calls": null` on every delta;
-/// failing those frames dropped every token of the reply.
-fn null_as_empty<'de, D, T>(d: D) -> std::result::Result<Vec<T>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    T: Deserialize<'de>,
-{
-    Ok(Option::<Vec<T>>::deserialize(d)?.unwrap_or_default())
 }
 
 /// The text of a mid-stream `error`: its `message` when it's the usual
@@ -328,10 +324,18 @@ pub async fn chat_stream(
     // cloud-metadata services (AWS / GCP / Azure / DigitalOcean / Oracle
     // all live at 169.254.169.254) and no realistic LLM endpoint is
     // there.
-    if let Err(e) = super::refuse_link_local_host(&req.base_url).await {
-        let _ = app.emit(&channel, StreamEvent::Error { message: e });
-        registry.finish_own(&req.stream_id, &cancel);
-        return Ok(());
+    match super::screen_host(&req.base_url, &cancel).await {
+        Some(Ok(())) => {}
+        Some(Err(e)) => {
+            let _ = app.emit(&channel, StreamEvent::Error { message: e });
+            registry.finish_own(&req.stream_id, &cancel);
+            return Ok(());
+        }
+        None => {
+            let _ = app.emit(&channel, StreamEvent::Cancelled);
+            registry.finish_own(&req.stream_id, &cancel);
+            return Ok(());
+        }
     }
 
     let mut messages = build_messages(&req);
@@ -507,6 +511,13 @@ pub async fn chat_stream(
                             let msg = format!(
                                 "unknown tool `{}` — server may have been disabled",
                                 call.name
+                            );
+                            super::emit_unknown_tool_call(
+                                &app,
+                                &channel,
+                                &event_id,
+                                &call.name,
+                                parse_args(&call.arguments),
                             );
                             let _ = app.emit(
                                 &channel,
@@ -720,7 +731,7 @@ async fn run_one_turn(
     // for the stream's later turns. Mirrors the Ollama path's `think` retry.
     // Metrics fall back to the chunk counter without `stream_options`.
     while resp.status() == reqwest::StatusCode::BAD_REQUEST {
-        let text = super::error_body(resp).await;
+        let text = redact_key(super::error_body(resp).await, api_key);
         let Some(field) = refused_field(&body, &text).filter(|f| !refused.contains(f)) else {
             // A 400 about something else. The body is already consumed, so
             // report it here rather than falling through to the block below.
@@ -762,7 +773,7 @@ async fn run_one_turn(
 
     if !resp.status().is_success() {
         let status = resp.status();
-        let text = super::error_body(resp).await;
+        let text = redact_key(super::error_body(resp).await, api_key);
         // If the server rejected the request for auth reasons AND we
         // deliberately withheld the bearer because the base URL is cleartext
         // to a non-loopback host, surface the *why* — a bare "401" against
@@ -994,7 +1005,11 @@ async fn run_one_turn(
                                         // pieces). Reading goes on only for
                                         // the `usage` frame, which comes
                                         // after this one.
-                                        match c.finish_reason.as_deref() {
+                                        // An empty one is no finish: some
+                                        // gateways send `""` on every
+                                        // chunk, and the reply ended after
+                                        // its first.
+                                        match c.finish_reason.as_deref().filter(|r| !r.is_empty()) {
                                             Some("error") => {
                                                 stream_error = Some(
                                                     "the server ended the reply with an error".into(),
@@ -1165,6 +1180,17 @@ fn parse_args(s: &str) -> Value {
     }
 }
 
+/// `text` with the API key taken out. An error body is kept in the
+/// transcript (and so in exports), and a small proxy may echo the key it was
+/// sent in its 401 — `Invalid API key: sk-…`. As the MCP path scrubs echoed
+/// credentials. Short keys aren't looked for: they'd match ordinary text.
+fn redact_key(text: String, key: Option<&str>) -> String {
+    match key.map(str::trim).filter(|k| k.len() >= 8) {
+        Some(k) if text.contains(k) => text.replace(k, "[redacted]"),
+        _ => text,
+    }
+}
+
 /// What to add to an endpoint's 401/403 when the key was withheld
 /// (`is_safe_for_bearer`): the chat stream and both model listings say it, or
 /// "Test connection" and onboarding blamed a key that was never sent.
@@ -1257,6 +1283,20 @@ fn sniff_image_mime(b64: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// B4-05: a key a proxy echoes in its error is taken out; a short key
+    /// isn't looked for.
+    #[test]
+    fn an_echoed_key_is_redacted() {
+        let key = Some("sk-live-1234567890");
+        assert_eq!(
+            redact_key("Invalid API key: sk-live-1234567890".into(), key),
+            "Invalid API key: [redacted]"
+        );
+        assert_eq!(redact_key("no key here".into(), key), "no key here");
+        assert_eq!(redact_key("abc in text".into(), Some("abc")), "abc in text");
+        assert_eq!(redact_key("anything".into(), None), "anything");
+    }
 
     // --- refused_field / apply_refusal ----------------------------------------
     // OpenAI's reasoning models (o-series, GPT-5) refuse `max_tokens` and a

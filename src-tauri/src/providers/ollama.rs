@@ -122,7 +122,7 @@ pub async fn delete_model(http: &Client, base_url: &str, name: &str) -> Result<(
         .await?;
     if !resp.status().is_success() {
         let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
+        let text = super::error_body(resp).await;
         return Err(anyhow!("ollama delete failed ({status}): {text}"));
     }
     Ok(())
@@ -150,7 +150,7 @@ pub async fn copy_model(
         .await?;
     if !resp.status().is_success() {
         let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
+        let text = super::error_body(resp).await;
         return Err(anyhow!("ollama copy failed ({status}): {text}"));
     }
     Ok(())
@@ -339,20 +339,33 @@ pub async fn pull_model(
     stream_id: String,
     cancel: Arc<tokio::sync::Notify>,
 ) -> Result<()> {
-    if let Err(e) = super::refuse_link_local_host(base_url).await {
-        // Mirror the shape of an in-flight admin failure: emit an Error
-        // event on the admin channel and finish the registry slot so the
-        // UI sees the same teardown path as a network failure.
-        let _ = app.emit(
-            &admin_channel(&stream_id),
-            AdminEvent::Error { message: e },
-        );
-        registry.finish_own(&stream_id, &cancel);
+    if !admin_host_ok(&app, &registry, base_url, &stream_id, &cancel).await {
         return Ok(());
     }
     let url = format!("{}/api/pull", base_url.trim_end_matches('/'));
     let body = serde_json::json!({ "name": name, "stream": true });
     drive_progress_stream(app, registry, stream_id, url, body, http, cancel).await
+}
+
+/// The link-local screen before a pull or create, raced against Stop.
+/// False when the run ends here — refused (an Error, as an in-flight admin
+/// failure is shown) or stopped (Cancelled) — with the registry slot
+/// finished.
+async fn admin_host_ok(
+    app: &AppHandle,
+    registry: &StreamRegistry,
+    base_url: &str,
+    stream_id: &str,
+    cancel: &Arc<tokio::sync::Notify>,
+) -> bool {
+    let event = match super::screen_host(base_url, cancel).await {
+        Some(Ok(())) => return true,
+        Some(Err(message)) => AdminEvent::Error { message },
+        None => AdminEvent::Cancelled,
+    };
+    let _ = app.emit(&admin_channel(stream_id), event);
+    registry.finish_own(stream_id, cancel);
+    false
 }
 
 pub async fn create_model(
@@ -365,12 +378,7 @@ pub async fn create_model(
     stream_id: String,
     cancel: Arc<tokio::sync::Notify>,
 ) -> Result<()> {
-    if let Err(e) = super::refuse_link_local_host(base_url).await {
-        let _ = app.emit(
-            &admin_channel(&stream_id),
-            AdminEvent::Error { message: e },
-        );
-        registry.finish_own(&stream_id, &cancel);
+    if !admin_host_ok(&app, &registry, base_url, &stream_id, &cancel).await {
         return Ok(());
     }
     let url = format!("{}/api/create", base_url.trim_end_matches('/'));
@@ -599,7 +607,7 @@ pub async fn unload_model(http: &Client, base_url: &str, model: &str) -> Result<
         .map_err(|e| anyhow!("couldn't reach Ollama to unload `{model}`: {e}"))?;
     if !resp.status().is_success() {
         let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
+        let text = super::error_body(resp).await;
         return Err(anyhow!("Ollama refused to unload `{model}` (HTTP {status}): {text}"));
     }
     Ok(())
@@ -691,8 +699,10 @@ struct OllamaChunkMsg {
     thinking: Option<String>,
     /// Tool calls a tool-capable model emits. Ollama places them on the
     /// final chunk (where `done: true`), not interleaved with content
-    /// tokens, so we only need to inspect them once per turn.
-    #[serde(default)]
+    /// tokens, so we only need to inspect them once per turn. An explicit
+    /// `null` (a proxy re-serialising the chunks) is no calls: failing it
+    /// dropped the whole line, content and all.
+    #[serde(default, deserialize_with = "super::null_as_empty")]
     tool_calls: Vec<OllamaToolCall>,
 }
 
@@ -704,6 +714,7 @@ struct OllamaToolCall {
 
 #[derive(Debug, Deserialize, Clone)]
 struct OllamaToolFn {
+    #[serde(default, deserialize_with = "super::null_as_empty")]
     name: String,
     /// Ollama returns this as a parsed JSON object; some forks return a
     /// stringified JSON. `Value` covers both shapes — we re-stringify if
@@ -749,10 +760,18 @@ pub async fn chat_stream(
     // Defense-in-depth SSRF guard. Identical rationale to the OpenAI
     // path — reject link-local addresses (cloud-metadata services live
     // there) while allowing loopback, RFC 1918, CGNAT, and public IPs.
-    if let Err(e) = super::refuse_link_local_host(&req.base_url).await {
-        let _ = app.emit(&channel, StreamEvent::Error { message: e });
-        registry.finish_own(&req.stream_id, &cancel);
-        return Ok(());
+    match super::screen_host(&req.base_url, &cancel).await {
+        Some(Ok(())) => {}
+        Some(Err(e)) => {
+            let _ = app.emit(&channel, StreamEvent::Error { message: e });
+            registry.finish_own(&req.stream_id, &cancel);
+            return Ok(());
+        }
+        None => {
+            let _ = app.emit(&channel, StreamEvent::Cancelled);
+            registry.finish_own(&req.stream_id, &cancel);
+            return Ok(());
+        }
     }
 
     // Seed the running conversation with system prompt + the messages the
@@ -906,6 +925,13 @@ pub async fn chat_stream(
                             let msg = format!(
                                 "unknown tool `{}` — server may have been disabled",
                                 func.name
+                            );
+                            super::emit_unknown_tool_call(
+                                &app,
+                                &channel,
+                                &call_id,
+                                &func.name,
+                                normalise_args(&func.arguments),
                             );
                             let _ = app.emit(
                                 &channel,
@@ -1470,6 +1496,22 @@ fn normalise_args(v: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// B4-08: a proxy's `"tool_calls": null` (or a `null` name) is no calls,
+    /// not a line to drop with its content.
+    #[test]
+    fn a_null_tool_call_list_keeps_the_line() {
+        let chunk: OllamaChunk =
+            serde_json::from_str(r#"{"message":{"content":"Hello","tool_calls":null},"done":false}"#).expect("parses");
+        let msg = chunk.message.expect("message");
+        assert_eq!(msg.content.as_deref(), Some("Hello"));
+        assert!(msg.tool_calls.is_empty());
+        let named: OllamaChunk = serde_json::from_str(
+            r#"{"message":{"tool_calls":[{"function":{"name":null,"arguments":{}}}]},"done":true}"#,
+        )
+        .expect("parses");
+        assert_eq!(named.message.unwrap().tool_calls[0].function.as_ref().unwrap().name, "");
+    }
 
     // --- create_fields --------------------------------------------------------
     // Ollama 0.5.5+ rejects `/api/create` without the structured fields, so

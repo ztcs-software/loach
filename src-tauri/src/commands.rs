@@ -1379,40 +1379,9 @@ pub async fn openai_list_models_with_key(
     base_url: String,
     api_key: String,
 ) -> Result<Vec<ModelInfo>, String> {
-    #[derive(Deserialize)]
-    struct Models {
-        data: Vec<Model>,
-    }
-    #[derive(Deserialize)]
-    struct Model {
-        id: String,
-    }
-
-    providers::refuse_link_local_host(&base_url).await?;
-    let url = format!("{}/models", base_url.trim_end_matches('/'));
-    let mut req = state.http.get(url).timeout(std::time::Duration::from_secs(30));
-    let key = api_key.trim();
-    let withheld = !key.is_empty() && !providers::openai::is_safe_for_bearer(&base_url);
-    if !key.is_empty() && !withheld {
-        req = req.bearer_auth(key);
-    }
-    let resp = req
-        .send()
+    providers::openai::list_models_with(&state.http, &base_url, Some(&api_key))
         .await
-        .and_then(|r| r.error_for_status())
-        .map_err(|e| format!("{e}{}", providers::openai::withheld_key_note(e.status(), withheld)))?;
-    let body: Models = resp.json().await.map_err(err)?;
-    Ok(body
-        .data
-        .into_iter()
-        .map(|m| ModelInfo {
-            id: m.id.clone(),
-            label: m.id,
-            provider: "openai".into(),
-            family: None,
-            size: None,
-        })
-        .collect())
+        .map_err(err)
 }
 
 // ---------- spaces ----------
@@ -3105,7 +3074,13 @@ pub async fn chat_stream(
         }
         request.tools.extend(skill_tools);
 
-        let res = match provider.as_str() {
+        // A panic in a provider (a tool dispatch, an MCP client path) ended
+        // the task with no terminal frame: the reply spun on, and the stream
+        // stayed registered until a reload. Caught here, it ends as an Error.
+        use futures_util::FutureExt as _;
+        let (on_panic_app, on_panic_registry, on_panic_cancel) = (app.clone(), registry.clone(), cancel.clone());
+        let (on_panic_id, on_panic_channel) = (request.stream_id.clone(), channel.clone());
+        let res = std::panic::AssertUnwindSafe(async move { match provider.as_str() {
             "ollama" => {
                 providers::ollama::chat_stream(app, http, registry, db, cancel, approvals, request)
                     .await
@@ -3134,9 +3109,22 @@ pub async fn chat_stream(
                 registry.finish_own(&request.stream_id, &cancel);
                 Ok(())
             }
-        };
-        if let Err(e) = res {
-            tracing::warn!("chat stream ended with error: {e:?}");
+        }})
+        .catch_unwind()
+        .await;
+        match res {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::warn!("chat stream ended with error: {e:?}"),
+            Err(_) => {
+                tracing::error!("chat stream {on_panic_id} panicked");
+                let _ = on_panic_app.emit(
+                    &on_panic_channel,
+                    crate::stream::StreamEvent::Error {
+                        message: "Loach hit an internal error and stopped this reply.".into(),
+                    },
+                );
+                on_panic_registry.finish_own(&on_panic_id, &on_panic_cancel);
+            }
         }
     });
 
@@ -3692,11 +3680,8 @@ pub async fn rag_reindex(state: State<'_, AppState>) -> Result<(), String> {
 /// inline into the user's prompt. See [`crate::tools::fetch_url`] for the
 /// hardening details (SSRF guard, timeout, body cap).
 #[tauri::command]
-pub async fn fetch_url(
-    state: State<'_, AppState>,
-    url: String,
-) -> Result<FetchedPage, String> {
-    fetch_url_tool::fetch(&state.http, &url).await
+pub async fn fetch_url(url: String) -> Result<FetchedPage, String> {
+    fetch_url_tool::fetch(&url).await
 }
 
 // ---------- data (export / import / wipe) ----------

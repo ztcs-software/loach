@@ -392,9 +392,53 @@ const MAX_ERROR_BODY_BYTES: usize = 4 * 1024;
 /// trickled the body held the turn open with it.
 const ERROR_BODY_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// `#[serde(default)]` that also takes an explicit `null` as the default —
+/// an empty list, an empty name. Some compat servers send
+/// `"tool_calls": null` on every frame; failing those frames dropped every
+/// token of the reply.
+pub(super) fn null_as_empty<'de, D, T>(d: D) -> std::result::Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
+}
+
+/// [`refuse_link_local_host`], raced against Stop. Its DNS lookup takes as
+/// long as an unreachable resolver makes it — 10 s or more on Windows — and
+/// a Stop pressed meanwhile did nothing until it returned. `None` when
+/// stopped.
+pub(super) async fn screen_host(base_url: &str, cancel: &Notify) -> Option<Result<(), String>> {
+    select! {
+        biased;
+        _ = cancel.notified() => None,
+        r = refuse_link_local_host(base_url) => Some(r),
+    }
+}
+
+/// The `ToolCall` that goes before the error result for a tool the model
+/// named but the catalogue lacks (its server switched off since, say), so
+/// the card shows the name and arguments it sent — the frontend otherwise
+/// drew a placeholder "(unknown)" with no arguments.
+pub(super) fn emit_unknown_tool_call(app: &AppHandle, channel: &str, id: &str, name: &str, arguments: Value) {
+    let _ = app.emit(
+        channel,
+        StreamEvent::ToolCall {
+            id: id.to_string(),
+            server_id: String::new(),
+            server_name: String::new(),
+            tool: name.to_string(),
+            arguments,
+            approval_required: false,
+            existing_bytes: None,
+            script_run: None,
+        },
+    );
+}
+
 /// The start of a failed response's body, for an error message: at most
 /// [`MAX_ERROR_BODY_BYTES`] of it, read for at most [`ERROR_BODY_TIMEOUT`].
-pub(super) async fn error_body(resp: reqwest::Response) -> String {
+pub(crate) async fn error_body(resp: reqwest::Response) -> String {
     let mut stream = resp.bytes_stream();
     let mut raw: Vec<u8> = Vec::new();
     let _ = tokio::time::timeout(ERROR_BODY_TIMEOUT, async {
@@ -597,6 +641,16 @@ pub(crate) async fn refuse_link_local_host(base_url: &str) -> Result<(), String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// B4-06: a Stop pressed during the host screen ends it there.
+    #[tokio::test]
+    async fn the_host_screen_gives_way_to_stop() {
+        let cancel = Notify::new();
+        cancel.notify_one();
+        assert!(screen_host("https://stop-wins.invalid/v1", &cancel).await.is_none());
+        // Unstopped, it answers as before.
+        assert_eq!(screen_host("http://127.0.0.1:11434", &Notify::new()).await, Some(Ok(())));
+    }
 
     #[tokio::test]
     async fn refuse_link_local_rejects_aws_metadata_v4() {

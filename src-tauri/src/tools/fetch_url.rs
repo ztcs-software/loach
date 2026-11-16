@@ -102,12 +102,11 @@ pub struct FetchedPage {
 
 /// Top-level fetch + clean pipeline.
 ///
-/// `_shared_http` is the long-lived client the rest of the app uses; we
-/// accept it for API symmetry but DO NOT use it here — the SSRF guard
-/// requires a private DNS table per request (see [`build_pinned_client`])
-/// to close the TOCTOU window between "we resolved a public IP" and
-/// "reqwest dials a now-private one".
-pub async fn fetch(_shared_http: &reqwest::Client, raw_url: &str) -> Result<FetchedPage, String> {
+/// It takes no client: the SSRF guard needs a private DNS table per request
+/// (see [`build_pinned_client`]) to close the window between "we resolved a
+/// public IP" and "reqwest dials a now-private one", so never the app's
+/// shared one.
+pub async fn fetch(raw_url: &str) -> Result<FetchedPage, String> {
     fetch_capped(raw_url, MAX_TEXT_CHARS).await
 }
 

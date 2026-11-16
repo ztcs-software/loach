@@ -73,13 +73,6 @@ impl StreamRegistry {
         }
     }
 
-    /// Retire `id` whoever holds it. Callers that have their handle use
-    /// [`finish_own`](Self::finish_own).
-    pub fn finish(&self, id: &str) {
-        self.chats.remove(id);
-        self.inner.remove(id);
-    }
-
     /// Retire `id` — but only while it is still `own`'s. After a collision
     /// (see [`register`](Self::register)) the old stream winds down and
     /// finishes too; removing by id alone took the newer stream's handle with
@@ -374,7 +367,7 @@ mod tests {
             .expect("the stored permit must wake the first poll");
     }
 
-    /// `finish()` retires the id. A cancel arriving after that (e.g. a Stop
+    /// `finish_own()` retires the id. A cancel arriving after that (e.g. a Stop
     /// click racing the final Done) must find nothing — in particular it
     /// must not park a permit that a future stream reusing the id would
     /// consume as a phantom cancel.
@@ -382,7 +375,7 @@ mod tests {
     async fn cancel_after_finish_is_a_noop() {
         let reg = StreamRegistry::new();
         let n = reg.register("s2".into());
-        reg.finish("s2");
+        reg.finish_own("s2", &n);
         reg.cancel("s2");
         let woke = timeout(Duration::from_millis(50), n.notified()).await;
         assert!(woke.is_err(), "no permit should exist after finish()");

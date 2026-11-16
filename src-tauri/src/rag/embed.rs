@@ -234,8 +234,11 @@ async fn embed(
 /// A short, readable reason from an error response (`{"error": "..."}` from
 /// Ollama, `{"error": {"message": ...}}` from OpenAI-style servers).
 async fn error_body(status: reqwest::StatusCode, resp: reqwest::Response) -> EmbedError {
-    let text = resp.text().await.unwrap_or_default();
-    let reason = serde_json::from_str::<serde_json::Value>(&text)
+    // Read capped (`providers::error_body`): a proxy's multi-MB HTML error
+    // page was buffered whole, and a JSON `error` of any length reached the
+    // Library status line in full.
+    let text = crate::providers::error_body(resp).await;
+    let reason: String = serde_json::from_str::<serde_json::Value>(&text)
         .ok()
         .and_then(|v| {
             let e = v.get("error")?;
@@ -243,7 +246,10 @@ async fn error_body(status: reqwest::StatusCode, resp: reqwest::Response) -> Emb
                 .map(str::to_string)
                 .or_else(|| e.get("message").and_then(|m| m.as_str()).map(str::to_string))
         })
-        .unwrap_or_else(|| text.chars().take(200).collect());
+        .unwrap_or(text)
+        .chars()
+        .take(200)
+        .collect();
     let reason = reason.trim();
     EmbedError {
         message: format!("HTTP {}: {}", status.as_u16(), reason),
