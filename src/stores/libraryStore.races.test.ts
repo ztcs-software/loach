@@ -96,6 +96,20 @@ describe("library store races", () => {
     expect(store().datasets[0].item_ids).toEqual(["a", "b", "c"]);
   });
 
+  // F8-01: a removal wrote the list as it stood at the click, so it put back
+  // a member removed just before, or dropped files an upload was adding.
+  it("removals queued behind other writes build on them too", async () => {
+    useLibraryStore.setState({
+      datasets: [{ id: "ds", name: "ds", description: "", item_ids: ["a", "b", "c"], created_at: 0, updated_at: 0 }],
+    });
+    await Promise.all([
+      store().removeFromDataset("ds", ["a"]),
+      store().addToDataset("ds", ["d"]),
+      store().removeFromDataset("ds", ["b"]),
+    ]);
+    expect(store().datasets[0].item_ids).toEqual(["c", "d"]);
+  });
+
   it("a refresh that already has the new item doesn't show it twice", async () => {
     const refresh = store().refreshItems();
     gate.list!({ items: [item("new", Date.now() + 1), item("old", 1)], datasets: [] });

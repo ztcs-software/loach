@@ -135,6 +135,16 @@ describe("sourceTokens", () => {
     expect(sourceTokens(Array.from({ length: 5 }, () => ({ chars: 3, text: "abc" })))).toBe(4);
     expect(sourceTokens([])).toBe(0);
   });
+
+  // X6-02: one ratio over a joined sample was set by the first few sources,
+  // so Japanese behind English was priced at English rates — and the send
+  // and the estimate, which list sources in different orders, disagreed.
+  it("prices each source by its own script, in any order", () => {
+    const english = Array.from({ length: 4 }, () => ({ chars: 2000, text: "a".repeat(500) }));
+    const japanese = { chars: 1000, text: "日本語".repeat(200) };
+    expect(sourceTokens([...english, japanese])).toBe(4 * 500 + 1000);
+    expect(sourceTokens([japanese, ...english])).toBe(4 * 500 + 1000);
+  });
 });
 
 describe("prompt blocks", () => {

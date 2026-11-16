@@ -214,18 +214,33 @@ interface Doc {
   preview?: string;
 }
 
-/** Characters per token across `docs`, judged from a slice of each. */
-function docsCharsPerToken(docs: { text?: string; preview?: string }[]): number {
-  return charsPerToken(docs.map((d) => (d.text ?? d.preview ?? "").slice(0, 500)).join(""));
+type Priced = { chars: number; text?: string; preview?: string };
+
+/** `docs`' cost before rounding, each source priced by its own sample. One
+ *  ratio over a joined sample was set by whichever sources came first, and
+ *  the send and the estimate list them in different orders: with Japanese
+ *  behind English, both priced it at English rates, and full text overflowed
+ *  the window. */
+function exactTokens(docs: Priced[]): number {
+  return docs.reduce(
+    (n, d) => n + (d.chars === 0 ? 0 : d.chars / charsPerToken((d.text ?? d.preview ?? "").slice(0, 500))),
+    0,
+  );
 }
 
 /** What a set of text sources costs in tokens, as the full-text-or-excerpts
  *  decision counts it — the send, the context bar and the Library picker's
  *  badge all go through this, so near the threshold they can't round apart.
  *  `text` (or else `preview`) is a sample of each, to tell its script by. */
-export function sourceTokens(docs: { chars: number; text?: string; preview?: string }[]): number {
-  const chars = docs.reduce((n, d) => n + d.chars, 0);
-  return chars === 0 ? 0 : Math.ceil(chars / docsCharsPerToken(docs));
+export function sourceTokens(docs: Priced[]): number {
+  return Math.ceil(exactTokens(docs));
+}
+
+/** Characters per token across `docs`, weighted by their size — what the
+ *  character budgets for full text and excerpts are sized with. */
+function docsCharsPerToken(docs: Priced[]): number {
+  const tokens = exactTokens(docs);
+  return tokens === 0 ? 4 : docs.reduce((n, d) => n + d.chars, 0) / tokens;
 }
 
 interface ImageSource {

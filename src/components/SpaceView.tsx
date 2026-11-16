@@ -149,10 +149,28 @@ export function SpaceView() {
   );
   const memories = storedMemories ?? EMPTY_MEMORIES;
 
+  // Why this Space's uploads or memories didn't load, kept per Space so a
+  // late failure from the last one shown doesn't land on this one. Without
+  // it a failed load read as "No sources yet" and "No memories yet".
+  const [loadFailed, setLoadFailed] = useState<{ space: string; files?: string; memories?: string } | null>(
+    null,
+  );
+  const load = (spaceId: string, what: "files" | "memories") =>
+    void (what === "files" ? loadFiles(spaceId) : loadMemories(spaceId)).then(
+      () => setLoadFailed((f) => (f?.space === spaceId ? { ...f, [what]: undefined } : f)),
+      (e) =>
+        setLoadFailed((f) => ({
+          ...(f?.space === spaceId ? f : {}),
+          space: spaceId,
+          [what]: e instanceof Error ? e.message : String(e),
+        })),
+    );
+  const failed = space && loadFailed?.space === space.id ? loadFailed : null;
+
   useEffect(() => {
     if (space) {
-      void loadFiles(space.id);
-      void loadMemories(space.id);
+      load(space.id, "files");
+      load(space.id, "memories");
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [space?.id]);
@@ -386,6 +404,9 @@ export function SpaceView() {
                 <SpaceSourcesTab
                   space={space}
                   files={files}
+                  filesLoaded={storedFiles !== undefined}
+                  filesError={failed?.files ?? null}
+                  onRetryFiles={() => load(space.id, "files")}
                   onUpload={async (fileList) => {
                     // Each file on its own, as the Library's `prepareFiles`
                     // reads them: one bad file doesn't stop the rest, and a
@@ -439,6 +460,8 @@ export function SpaceView() {
                 <MemoryTab
                   space={space}
                   memories={memories}
+                  loadError={failed?.memories ?? null}
+                  onRetry={() => load(space.id, "memories")}
                   onOpenSettings={() => setTab("settings")}
                   onAdd={(content) =>
                     doAddMemory({ space_id: space.id, content }).catch((e) => {
@@ -1099,6 +1122,8 @@ function SettingCard({
 function MemoryTab({
   space,
   memories,
+  loadError,
+  onRetry,
   onOpenSettings,
   onAdd,
   onUpdate,
@@ -1107,6 +1132,8 @@ function MemoryTab({
 }: {
   space: { id: string; memory_enabled: boolean };
   memories: SpaceMemory[];
+  loadError: string | null;
+  onRetry: () => void;
   onOpenSettings: () => void;
   onAdd: (content: string) => Promise<unknown>;
   onUpdate: (id: string, content: string) => Promise<unknown>;
@@ -1131,11 +1158,22 @@ function MemoryTab({
         </button>
       </div>
 
+      {loadError && (
+        <p className="text-xs text-destructive">
+          Couldn't load this Space's memories: {loadError}{" "}
+          <button type="button" onClick={onRetry} className="underline underline-offset-2 hover:text-foreground">
+            Retry
+          </button>
+        </p>
+      )}
+
       <MemoryList
         memories={memories}
         enabled={space.memory_enabled}
         emptyText={
-          space.memory_enabled
+          loadError
+            ? "Memories couldn't be loaded."
+            : space.memory_enabled
             ? "No memories yet — chat in this Space and the extractor will start saving durable facts here."
             : "Memory is off for this Space. Turn it on in Settings to start collecting facts."
         }

@@ -760,13 +760,16 @@ function DatasetDetail({
   onUpload: () => void;
 }) {
   const members = useMembers(dataset, items);
-  const setDatasetItems = useLibraryStore((s) => s.setDatasetItems);
+  const removeFromDataset = useLibraryStore((s) => s.removeFromDataset);
   const deleteDataset = useDeleteDataset();
   const tokens = members.reduce((n, i) => n + itemTokens(i), 0);
   const remove = (id: string) =>
-    void setDatasetItems(
-      dataset.id,
-      dataset.item_ids.filter((x) => x !== id),
+    void removeFromDataset(dataset.id, [id]).catch((e) =>
+      useToastStore.getState().push({
+        kind: "error",
+        title: "Couldn't remove from the dataset",
+        body: e instanceof Error ? e.message : String(e),
+      }),
     );
   // Laid out like SpaceView — breadcrumb, title row with its actions menu,
   // description and meta chips — so opening a dataset feels like opening a

@@ -69,6 +69,7 @@ import { useGlobalMemoryStore } from "./globalMemoryStore";
 import { useLibraryStore } from "./libraryStore";
 import { useSettingsStore } from "./settingsStore";
 import { useSpaceStore } from "./spaceStore";
+import { invalidateAllSpaceContext } from "@/lib/spaceContextCache";
 
 // The extractor and the toast store call `window.setTimeout`.
 vi.stubGlobal("window", {
@@ -141,6 +142,10 @@ beforeEach(() => {
   useSettingsStore.setState({ global_memory_enabled: true, temporal_awareness: false });
   useGlobalMemoryStore.setState({ memories: null });
   useSpaceStore.setState({ spaces: [space], spaceMemories: {}, viewingSpaceId: null, activeSpaceId: null });
+  // The cached Space context keeps the memories a test saved (a memory write
+  // patches it), while the mocked backend forgets them: start each test from
+  // the backend's state.
+  invalidateAllSpaceContext();
   useLibraryStore.setState({ hydrated: true, error: null, items: [], datasets: [], sources: {} });
   useChatStore.setState({
     sessions: [session("A", "sp1"), session("B", null)],

@@ -59,6 +59,8 @@ vi.mock("@/lib/tauri", async (importOriginal) => {
   };
 });
 
+import { getSpaceContext } from "@/lib/tauri";
+import { SPACE_BYTES_CAP } from "@/lib/files";
 import { useSpaceStore } from "./spaceStore";
 import { useChatStore } from "./chatStore";
 import { useLibraryStore } from "./libraryStore";
@@ -125,6 +127,32 @@ describe("loading a Space's context", () => {
     expect(store().spaceMemories.ctx.map((m) => m.content)).toEqual(["Prefers metric units"]);
     // …and what's cached is the fresh read, for the next send.
     expect((await store().loadSpaceContext("ctx")).memories).toHaveLength(1);
+  });
+});
+
+// X6-01: every memory write dropped the cached context, uploads and all, so
+// the send after each fact the extractor saved re-read every upload first.
+describe("a memory write", () => {
+  it("updates the cached context instead of re-reading it", async () => {
+    useSpaceStore.setState({ spaceMemories: {} });
+    await store().loadSpaceContext("kept");
+    const reads = vi.mocked(getSpaceContext).mock.calls.length;
+
+    await store().addMemory({ space_id: "kept", content: "Works in UTC" });
+    const ctx = await store().loadSpaceContext("kept");
+
+    expect(vi.mocked(getSpaceContext).mock.calls.length).toBe(reads);
+    expect(ctx.memories.map((m) => m.content)).toEqual(["Works in UTC"]);
+  });
+});
+
+// F8-05: with the list not loaded (or its load failed) the 200 MB cap
+// counted 0 bytes used.
+describe("adding an upload", () => {
+  it("checks the cap against the stored list when it hasn't been loaded", async () => {
+    mocks.files = [{ ...file("big"), size: SPACE_BYTES_CAP - 10 }];
+    useSpaceStore.setState({ spaceFiles: {} });
+    await expect(store().addFile("sp", "more.txt", "text/plain", "text", "x", 100)).rejects.toThrow(/200 MB/);
   });
 });
 

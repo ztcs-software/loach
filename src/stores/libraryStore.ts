@@ -187,8 +187,8 @@ interface LibraryState {
   deleteItems: (ids: string[]) => Promise<boolean>;
   createDataset: (name: string, description: string, itemIds?: string[]) => Promise<LibraryDataset>;
   updateDataset: (id: string, name: string, description: string) => Promise<void>;
-  setDatasetItems: (id: string, itemIds: string[]) => Promise<void>;
   addToDataset: (id: string, itemIds: string[]) => Promise<void>;
+  removeFromDataset: (id: string, itemIds: string[]) => Promise<void>;
   /** False when the delete failed (a toast already said why). */
   deleteDataset: (id: string) => Promise<boolean>;
   /** Save a body from elsewhere (an attachment, a Space file, a reply).
@@ -425,12 +425,15 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     }));
   },
 
-  setDatasetItems: (id, itemIds) => writeMembers(id, () => itemIds),
-
   // The members to add go onto the list as it stands once the writes queued
   // before this one have landed — not as it stood when it was asked for.
   addToDataset: (id, itemIds) =>
     writeMembers(id, (current) => current && [...current, ...itemIds.filter((i) => !current.includes(i))]),
+
+  // Likewise for removal. A list built at click time put back a member
+  // removed a moment earlier, or dropped files an upload was still adding.
+  removeFromDataset: (id, itemIds) =>
+    writeMembers(id, (current) => current?.filter((i) => !itemIds.includes(i))),
 
   deleteDataset: async (id) => {
     try {

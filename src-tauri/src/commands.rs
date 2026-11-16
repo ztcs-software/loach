@@ -1477,7 +1477,13 @@ pub async fn list_space_files(
     state: State<'_, AppState>,
     space_id: String,
 ) -> Result<Vec<SpaceFile>, String> {
-    state.db.list_space_files(&space_id).map_err(err)
+    // Every upload's body, up to the 200 MB cap — on the blocking pool, like
+    // the other DB-heavy reads.
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || db.list_space_files(&space_id))
+        .await
+        .map_err(err)?
+        .map_err(err)
 }
 
 #[derive(Debug, Deserialize)]
@@ -1545,17 +1551,23 @@ pub async fn get_space_context(
     state: State<'_, AppState>,
     space_id: String,
 ) -> Result<SpaceContext, String> {
-    let space = state
-        .db
-        .get_space(&space_id)
-        .map_err(err)?
-        .ok_or_else(|| "space not found".to_string())?;
-    let files = state.db.list_space_files(&space_id).map_err(err)?;
-    // Disabled memory still loads zero rows — the toggle gates writes, not
-    // reads. Pre-toggle memories stay readable so flipping it off doesn't
-    // silently strip context the user might still want.
-    let memories = state.db.list_space_memories(&space_id).map_err(err)?;
-    Ok(SpaceContext { space, files, memories })
+    // Reads every upload's body (see `list_space_files`), on the time-to-
+    // first-token path of a send — so on the blocking pool.
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || -> Result<SpaceContext, String> {
+        let space = db
+            .get_space(&space_id)
+            .map_err(err)?
+            .ok_or_else(|| "space not found".to_string())?;
+        let files = db.list_space_files(&space_id).map_err(err)?;
+        // Disabled memory still loads zero rows — the toggle gates writes, not
+        // reads. Pre-toggle memories stay readable so flipping it off doesn't
+        // silently strip context the user might still want.
+        let memories = db.list_space_memories(&space_id).map_err(err)?;
+        Ok(SpaceContext { space, files, memories })
+    })
+    .await
+    .map_err(err)?
 }
 
 // ---------- space memories ----------

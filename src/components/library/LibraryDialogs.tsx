@@ -31,6 +31,7 @@ import { dialogEnter } from "@/lib/shortcuts";
 import { libraryUsage, openExternal } from "@/lib/tauri";
 import { cn, formatBytes, relativeTime } from "@/lib/utils";
 import { safeImageMime } from "@/lib/files";
+import { sourceTokens } from "@/lib/sources";
 import { useLibraryStore } from "@/stores/libraryStore";
 import { useToastStore } from "@/stores/toastStore";
 import type { LibraryItem } from "@/types";
@@ -221,18 +222,31 @@ export function TextEditorDialog() {
     // into this item.
     setBody("");
     setLoading(true);
+    // This dialog stays mounted, so a load for an item since closed can land
+    // after the next one opened: its body under the new title, where Save
+    // would write it over the new item.
+    let stale = false;
     getContents([target])
       .then(([full]) => {
+        if (stale) return;
         const content = full?.content ?? "";
         setBody(content);
         setBaseline({ title: savedTitle, body: content });
       })
       .catch((e) => {
+        if (stale) return;
         setError(e instanceof Error ? e.message : String(e));
         setLoadFailed(true);
         setBaseline({ title: savedTitle, body: "" });
       })
-      .finally(() => setLoading(false));
+      .finally(() => {
+        if (!stale) setLoading(false);
+      });
+    return () => {
+      stale = true;
+      // Or "New text" opened next would wait on this load forever.
+      setLoading(false);
+    };
     // Re-seed only when a different item opens.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [target]);
@@ -279,7 +293,7 @@ export function TextEditorDialog() {
   };
 
   const canSave = !saving && !loading && !loadFailed && !!title.trim() && !!body.trim();
-  const tokens = Math.ceil(body.length / 4);
+  const tokens = sourceTokens([{ chars: body.length, text: body }]);
   return (
     <Dialog open={!!target} onOpenChange={(o) => !o && void requestClose()}>
       <DialogContent className="max-w-2xl">
@@ -586,9 +600,22 @@ export function ItemPreviewDialog() {
     setRenaming(false);
     if (!id) return;
     setLoading(true);
+    // As in the text editor: a slow load (a large image) for an item since
+    // closed landed in the next one's preview.
+    let stale = false;
     getContents([id])
-      .then(([it]) => setFull(it ?? null))
-      .finally(() => setLoading(false));
+      .then(([it]) => {
+        if (!stale) setFull(it?.id === id ? it : null);
+      })
+      // Left unloaded: "Couldn't load this item." says so.
+      .catch(() => {})
+      .finally(() => {
+        if (!stale) setLoading(false);
+      });
+    return () => {
+      stale = true;
+      setLoading(false);
+    };
     // `updated_at` re-reads the body after a refresh or an edit.
   }, [id, item?.updated_at, getContents]);
 

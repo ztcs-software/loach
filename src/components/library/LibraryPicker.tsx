@@ -10,7 +10,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { formatTokens } from "@/lib/contextUsage";
-import { sourcesVerdict } from "@/lib/sources";
+import { sourcesVerdict, sourceTokens } from "@/lib/sources";
 import { cn, formatBytes } from "@/lib/utils";
 import { expandSources, useLibraryStore } from "@/stores/libraryStore";
 import { useSpaceStore } from "@/stores/spaceStore";
@@ -119,9 +119,9 @@ export function LibraryPicker({
     return {
       items: new Set(expandSources(links, datasets, items).map((i) => i.id)),
       datasets: new Set(links.filter((l) => l.enabled && l.dataset_id).map((l) => l.dataset_id!)),
-      uploadTokens: (spaceFiles ?? [])
+      uploads: (spaceFiles ?? [])
         .filter((f) => f.enabled !== false && f.kind === "text")
-        .reduce((n, f) => n + Math.ceil(f.data.length / 4), 0),
+        .map((f) => ({ chars: f.data.length, text: f.data })),
     };
   }, [spaceLinks, spaceFiles, datasets, items]);
   /** Why a row can't be picked, or null when it can. */
@@ -168,13 +168,13 @@ export function LibraryPicker({
   // also inside a picked dataset — or already attached. `total` adds what's
   // attached already: together they decide full text or excerpts.
   const selection = useMemo(() => {
-    const tokensOf = (ids: Set<string>) => {
-      let n = 0;
+    const textOf = (ids: Set<string>) => {
+      const docs: LibraryItemMeta[] = [];
       for (const id of ids) {
         const it = byId.get(id);
-        if (it) n += itemTokens(it);
+        if (it?.media === "text") docs.push(it);
       }
-      return n;
+      return docs;
     };
     const attached = new Set<string>([...linkedItems, ...fromSpace.items]);
     for (const id of linkedDatasets) datasets.find((d) => d.id === id)?.item_ids.forEach((i) => attached.add(i));
@@ -194,13 +194,15 @@ export function LibraryPicker({
         add(id);
       }
     }
-    const tokens = tokensOf(reached);
+    const added = textOf(reached);
     return {
       itemIds,
       datasetIds,
-      tokens,
-      total: tokens + tokensOf(attached) + fromSpace.uploadTokens,
-      hasAttached: attached.size > 0 || fromSpace.uploadTokens > 0,
+      tokens: sourceTokens(added),
+      // One count over all of it, as the send counts it (chars/4 for the
+      // uploads, and a sum of rounded per-item counts, could disagree).
+      total: sourceTokens([...added, ...textOf(attached), ...fromSpace.uploads]),
+      hasAttached: attached.size > 0 || fromSpace.uploads.length > 0,
     };
   }, [picked, datasets, byId, linkedItems, linkedDatasets, fromSpace]);
 
