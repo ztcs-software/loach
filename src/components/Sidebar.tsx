@@ -49,6 +49,7 @@ import { useSpaceStore } from "@/stores/spaceStore";
 import { useUIStore } from "@/stores/uiStore";
 import type { SidebarTab } from "@/stores/uiStore";
 import { cn, relativeDay } from "@/lib/utils";
+import { useGrowingWindow } from "@/lib/useGrowingWindow";
 import type { Folder, Session } from "@/types";
 
 /**
@@ -640,6 +641,8 @@ function Group({
     (dragged) => !!onDropOut && dragged.folder_id !== null,
     (dragged) => onDropOut?.(dragged),
   );
+  // "Older" can hold thousands of chats: mounted as they're scrolled to.
+  const rows = useGrowingWindow(sessions.length, 60, label);
 
   return (
     <div>
@@ -657,7 +660,7 @@ function Group({
         {label}
       </div>
       <ul className="space-y-0.5">
-        {sessions.map((s) => (
+        {sessions.slice(0, rows.count).map((s) => (
           <SessionRow
             key={s.id}
             session={s}
@@ -666,6 +669,7 @@ function Group({
             onDropOnChat={onDropOnChat}
           />
         ))}
+        {rows.more && <li key={rows.count} ref={rows.sentinelRef} aria-hidden className="h-px" />}
       </ul>
     </div>
   );

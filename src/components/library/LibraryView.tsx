@@ -68,6 +68,7 @@ import {
   type LibraryTab,
 } from "./libraryUi";
 import { notifyOnFail } from "@/stores/toastStore";
+import { useGrowingWindow } from "@/lib/useGrowingWindow";
 
 const TAB_KEY = "loach.library.tab";
 const TABS: LibraryTab[] = ["datasets", "texts", "files", "links"];
@@ -222,6 +223,12 @@ export function LibraryView() {
   const visibleItems = useMemo(
     () => (tab === "datasets" ? [] : items.filter((i) => tabOf(i) === tab)),
     [items, tab],
+  );
+  // Mounted as they're scrolled to: a Library of thousands rendered every
+  // card and row at once (see `useGrowingWindow`).
+  const shownItems = useGrowingWindow(visibleItems.length, 60, tab);
+  const itemSentinel = shownItems.more && (
+    <div key={shownItems.count} ref={shownItems.sentinelRef} aria-hidden className="h-px" />
   );
   // A dataset gets its own page, like a Space; an id that no longer
   // resolves (deleted elsewhere) falls back to the list.
@@ -482,29 +489,35 @@ export function LibraryView() {
             ) : visibleItems.length === 0 ? (
               <EmptyTab tab={tab} action={primary} />
             ) : tab === "texts" ? (
-              <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-                {visibleItems.map((i) => (
-                  <TextCard
-                    key={i.id}
-                    item={i}
-                    selected={selected.has(i.id)}
-                    selecting={selecting}
-                    onToggle={() => toggleSelected(i.id)}
-                  />
-                ))}
-              </div>
+              <>
+                <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+                  {visibleItems.slice(0, shownItems.count).map((i) => (
+                    <TextCard
+                      key={i.id}
+                      item={i}
+                      selected={selected.has(i.id)}
+                      selecting={selecting}
+                      onToggle={() => toggleSelected(i.id)}
+                    />
+                  ))}
+                </div>
+                {itemSentinel}
+              </>
             ) : (
-              <ul className="divide-y divide-foreground/[0.06] overflow-hidden rounded-2xl border border-foreground/10 bg-foreground/[0.02]">
-                {visibleItems.map((i) => (
-                  <ItemRow
-                    key={i.id}
-                    item={i}
-                    selected={selected.has(i.id)}
-                    selecting={selecting}
-                    onToggle={() => toggleSelected(i.id)}
-                  />
-                ))}
-              </ul>
+              <>
+                <ul className="divide-y divide-foreground/[0.06] overflow-hidden rounded-2xl border border-foreground/10 bg-foreground/[0.02]">
+                  {visibleItems.slice(0, shownItems.count).map((i) => (
+                    <ItemRow
+                      key={i.id}
+                      item={i}
+                      selected={selected.has(i.id)}
+                      selecting={selecting}
+                      onToggle={() => toggleSelected(i.id)}
+                    />
+                  ))}
+                </ul>
+                {itemSentinel}
+              </>
             )}
 
             {uploadingNote}
