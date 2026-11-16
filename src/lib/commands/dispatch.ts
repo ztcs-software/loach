@@ -1235,7 +1235,8 @@ const PARAM_RULES: Partial<Record<keyof GenerationParams, ParamRule>> = {
   repeat_penalty: { integer: false, min: 0.8, max: 2 },
   frequency_penalty: { integer: false, min: -2, max: 2 },
   presence_penalty: { integer: false, min: -2, max: 2 },
-  num_gpu: { integer: true, min: 0 },
+  // The backend's `u32`: past it, every later send in the chat failed.
+  num_gpu: { integer: true, min: 0, max: 0xffff_ffff },
   seed: { integer: true },
 };
 

@@ -293,7 +293,10 @@ fn is_safe_preload_host(base_url: &str) -> bool {
 
 /// Rust port of `resolveDefaultModelChoice` in `src/stores/chatStore.ts`.
 /// The encoding lives in three places (this function, the TS one, and
-/// the picker UI in `SettingsDialog.tsx`) — keep them in lockstep.
+/// the picker UI in `SettingsDialog.tsx`) — keep them in lockstep. One
+/// deliberate gap: the TS `provider:` branch passes over chats whose model
+/// is no longer installed; this one has no model list, so it may pick a
+/// deleted model, whose preload just 404s quietly.
 ///
 /// Returns `None` only for future-proofing (no current branch produces
 /// it); callers must treat `None` as "skip the preload".

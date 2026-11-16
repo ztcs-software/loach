@@ -72,7 +72,7 @@ import { ConfirmDialogHost } from "@/components/ConfirmDialog";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { Button } from "@/components/ui/button";
 import { SquarePen } from "lucide-react";
-import { resolveDefaultModelChoice, useChatStore } from "@/stores/chatStore";
+import { installedIn, resolveDefaultModelChoice, useChatStore } from "@/stores/chatStore";
 import { useModelsStore } from "@/stores/modelsStore";
 import { useMcpStore } from "@/stores/mcpStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -316,6 +316,7 @@ export default function App() {
         s.default_provider,
         s.default_model ?? "",
         useChatStore.getState().sessions,
+        installedIn(useModelsStore.getState().models),
       );
       if (resolved.provider === "ollama" && resolved.model) {
         // Resolve the runner-affecting params a fresh chat with this model

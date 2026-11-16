@@ -370,6 +370,11 @@ function ModelTile({
       aria-label={`Customize model: ${model.id}`}
       onClick={onCustomize}
       onKeyDown={(e) => {
+        // Only keys pressed on the tile itself. The "New chat" button, the
+        // menu trigger and the menu's items (through React's portal
+        // bubbling) all send their Enter here too, and it opened the editor
+        // in place of starting a chat — or alongside a Delete.
+        if (e.target !== e.currentTarget) return;
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
           onCustomize();

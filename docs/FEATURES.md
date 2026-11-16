@@ -1906,9 +1906,12 @@ an example value (`{{USER_NAME}}` isn't in it).
 **Settings → General → Default model** controls which model new chats land
 in. Three modes:
 
-- **Use most recent** (default) — pick up wherever you left off.
+- **Use most recent** (default) — the model you last switched a chat to
+  or started one on (from the Models page, a snippet or a search result).
+  A Space's pinned model doesn't count.
 - **Pin to provider** — **Use last Ollama model** or **Use last OpenAI
-  model**.
+  model**: the model of your most recently active chat on that provider,
+  skipping models you've since deleted.
 - **A specific model** — pick one from the **Ollama models** / **OpenAI
   models** lists in the same menu to always start there.
 

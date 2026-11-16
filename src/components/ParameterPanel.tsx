@@ -8,13 +8,14 @@ import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ImageScalingControl } from "@/components/ImageScalingControl";
-import { useChatStore } from "@/stores/chatStore";
+import { layerParams, parseOverrides, useChatStore } from "@/stores/chatStore";
 import { useModelsStore } from "@/stores/modelsStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useToastStore } from "@/stores/toastStore";
 import { useUIStore } from "@/stores/uiStore";
 import { parseImageScaling, resolveImageScaling } from "@/lib/imageScaling";
+import { isU32 } from "@/lib/modelParams";
 import { setSessionImageScaling } from "@/lib/tauri";
 import {
   DEFAULT_PERSONA_ID,
@@ -24,16 +25,7 @@ import {
 } from "@/lib/personas";
 import { DEFAULT_TONE_ID, TONES, type Tone } from "@/lib/tones";
 import { cn } from "@/lib/utils";
-import { DEFAULT_PARAMS, type GenerationParams, type ImageScaling, type Session } from "@/types";
-
-function parseOverrides(json: string | null): Partial<GenerationParams> {
-  if (!json) return {};
-  try {
-    return JSON.parse(json) as Partial<GenerationParams>;
-  } catch {
-    return {};
-  }
-}
+import { type GenerationParams, type ImageScaling, type Session } from "@/types";
 
 /** Save a chat's own image scaling, or `null` to inherit again. */
 async function saveImageScaling(sessionId: string, scaling: ImageScaling | null) {
@@ -130,22 +122,22 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
   );
   const appImageScaling = useSettingsStore((s) => s.image_scaling);
 
-  // The merge order mirrors `chatStore.readSessionParams` exactly so the
-  // sliders (and the Thinking toggle) show the same values the request
-  // will actually use. The space layer matters twice over: without it the
-  // panel shows values the request won't use for any chat in a Space with
-  // pinned params, AND `update()` below snapshots what's displayed into the
-  // per-chat override — so one slider touch would quietly overwrite the
-  // Space's settings with the space-less merge.
+  // The same merge `chatStore.readSessionParams` sends (`layerParams`), so the
+  // sliders (and the Thinking toggle) show the values the request will use.
+  // The space layer matters twice over: without it the panel shows values the
+  // request won't use for any chat in a Space with pinned params, AND
+  // `update()` below snapshots what's displayed into the per-chat override —
+  // so one slider touch would quietly overwrite the Space's settings.
   const initial = useMemo<GenerationParams>(
-    () => ({
-      ...DEFAULT_PARAMS,
-      ...(session?.provider === "ollama" ? { think: thinkingDefault } : {}),
-      ...(modelDefaults ?? {}),
-      ...(modelThinkPref === undefined ? {} : { think: modelThinkPref }),
-      ...spaceLayer,
-      ...overrides,
-    }),
+    () =>
+      layerParams({
+        provider: session?.provider,
+        modelDefaults,
+        thinkingDefault,
+        thinkPref: modelThinkPref,
+        spaceLayer,
+        overrides,
+      }),
     [
       overrides,
       spaceLayer,
@@ -227,12 +219,23 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
   }, [session?.system_prompt, systemPrompt]);
 
   // Defensive — newSession / setSessionModel already prefetch, but the panel
-  // can also be opened on a session created before this code shipped.
+  // can also be opened on a session created before this code shipped. A load
+  // that fails (Ollama not running) caches nothing, so `modelDefaults` stays
+  // undefined: noted here, or the label said "Loading…" for good.
+  const [defaultsFailedFor, setDefaultsFailedFor] = useState<string | null>(null);
   useEffect(() => {
     if (session?.provider === "ollama" && session.model && !modelDefaults) {
-      void loadModelDefaults(session.model);
+      const model = session.model;
+      void loadModelDefaults(model).then(() => {
+        if (useModelsStore.getState().modelDefaults[model] === undefined) setDefaultsFailedFor(model);
+      });
     }
   }, [session?.provider, session?.model, modelDefaults, loadModelDefaults]);
+
+  // An Ollama model whose Modelfile defaults haven't loaded: what the sliders
+  // show for the untouched keys is app defaults standing in for them.
+  const defaultsUnknown =
+    session?.provider === "ollama" && !!session.model && modelDefaults === undefined;
 
   const update = (patch: Partial<GenerationParams>) => {
     if (!session) return;
@@ -240,7 +243,12 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
     // edits — not a snapshot taken at mount. Touching any slider still
     // persists the whole effective set into the session's overrides, so a
     // later model swap doesn't silently shift values the user was looking at.
-    const next = { ...params, ...patch };
+    // Not while the Modelfile's defaults are unknown, though: then the set
+    // is app defaults standing in for them, and saving it wrote num_ctx 8192
+    // over a 32K model's window for good. Only what was touched goes then.
+    const next = defaultsUnknown
+      ? { ...overrides, ...touched, ...patch }
+      : { ...params, ...patch };
     setTouched((t) => ({ ...t, ...patch }));
     setSessionParams(session.id, next);
   };
@@ -296,7 +304,9 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
         : noModel
           ? "Using app defaults — no model selected yet."
           : modelDefaults === undefined
-            ? "Loading model defaults…"
+            ? defaultsFailedFor === session?.model
+              ? "Couldn't read the model's defaults — is Ollama running? Until it answers, a change here saves only what you change."
+              : "Loading model defaults…"
             : "Using app defaults — this model lists no overrides.";
 
   // Context-length stops — powers of two are the grid models are trained on
@@ -911,7 +921,11 @@ function GpuLayersRow({
       return;
     }
     const n = Number(trimmed);
-    if (Number.isFinite(n) && Number.isInteger(n) && n >= 0) onChange(n);
+    // A layer count the backend can hold (`u32`); anything else — `abc`,
+    // `-1`, `1.5`, a mistyped 99999999999 — goes back to what's in effect
+    // rather than staying on screen as if it were.
+    if (isU32(n)) onChange(n);
+    else setDraft(value === null ? "" : String(value));
   };
 
   const readout =

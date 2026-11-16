@@ -6,7 +6,7 @@
 // `buildModelfile` and `parseParamsBlock` (which reads /api/show output).
 
 import { describe, it, expect } from "vitest";
-import { buildModelfile, parseParamsBlock } from "./modelfile";
+import { buildModelfile, escapeStop, parseParamsBlock, unescapeStop } from "./modelfile";
 import type { ModelfileForm } from "@/types";
 
 const form = (over: Partial<ModelfileForm> = {}): ModelfileForm => ({
@@ -86,10 +86,17 @@ describe("buildModelfile", () => {
     expect(out).not.toMatch(/top_p|top_k|num_ctx|seed/);
   });
 
-  it("skips blank stop entries and trims the rest", () => {
+  it("skips blank stop entries and keeps the rest as written", () => {
+    // F3-03: a stop like " User:" means its space — trimming changed it.
     const out = buildModelfile(form({ params: { stop: ["  <|end|> ", "   ", ""] } }));
-    expect(out).toContain('PARAMETER stop "<|end|>"');
+    expect(out).toContain('PARAMETER stop "  <|end|> "');
     expect(out.match(/PARAMETER stop/g)).toHaveLength(1);
+  });
+
+  it("writes newlines and tabs in a stop as escapes, keeping it on its line", () => {
+    const out = buildModelfile(form({ params: { stop: ["\n\nUser:", "a\tb"] } }));
+    expect(out).toContain('PARAMETER stop "\\n\\nUser:"');
+    expect(out).toContain('PARAMETER stop "a\\tb"');
   });
 
   it("escape round-trips stop strings through parseParamsBlock", () => {
@@ -136,5 +143,32 @@ describe("parseParamsBlock", () => {
   it("strips single or double quotes from stop values", () => {
     const p = parseParamsBlock("stop \"<|a|>\"\nstop '<|b|>'\nstop <|c|>");
     expect(p.stop).toEqual(["<|a|>", "<|b|>", "<|c|>"]);
+  });
+
+  // F3-03: Ollama prints stops Go-quoted. `\n` stayed a literal
+  // backslash-n, so a re-saved model no longer stopped at the turn boundary.
+  it("decodes the escapes in a Go-quoted stop", () => {
+    const p = parseParamsBlock('stop "\\n\\nUser:"\nstop "\\u001b[0m"\nstop "odd \\x41"');
+    expect(p.stop).toEqual(["\n\nUser:", "\u001b[0m", "odd \\x41"]);
+  });
+
+  it("round-trips a newline stop and a leading space through the builder", () => {
+    const stops = ["\n\nUser:", " Assistant:"];
+    const built = buildModelfile(form({ params: { stop: stops } }));
+    const showBlock = built
+      .split("\n")
+      .filter((l) => l.startsWith("PARAMETER stop "))
+      .map((l) => l.replace(/^PARAMETER /, ""))
+      .join("\n");
+    expect(parseParamsBlock(showBlock).stop).toEqual(stops);
+  });
+});
+
+describe("escapeStop / unescapeStop", () => {
+  it("shows control characters as escapes and reads them back", () => {
+    expect(escapeStop("\n\nUser:\t\\")).toBe("\\n\\nUser:\\t\\\\");
+    expect(unescapeStop("\\n\\nUser:\\t\\\\")).toBe("\n\nUser:\t\\");
+    expect(unescapeStop(escapeStop("a\\nb"))).toBe("a\\nb");
+    expect(unescapeStop("<|eot|>")).toBe("<|eot|>");
   });
 });

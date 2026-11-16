@@ -164,12 +164,17 @@ function forgetModel(
   set: (fn: (s: ModelsState) => Partial<ModelsState>) => void,
   name: string,
 ) {
-  pendingDefaults.delete(name);
+  // Under either spelling: a model saved as `x` is listed — and so cached by
+  // the chats that picked it — as `x:latest`, and the other way round.
+  const keys = new Set([name, fullOllamaTag(name), name.replace(/:latest$/, "")]);
+  for (const k of keys) pendingDefaults.delete(k);
   set((s) => {
     const modelDefaults = { ...s.modelDefaults };
     const modelCapabilities = { ...s.modelCapabilities };
-    delete modelDefaults[name];
-    delete modelCapabilities[name];
+    for (const k of keys) {
+      delete modelDefaults[k];
+      delete modelCapabilities[k];
+    }
     return { modelDefaults, modelCapabilities };
   });
 }
@@ -611,15 +616,21 @@ async function unpinAbandonedPull(streamId: string) {
  *  place, each new chat started on a tag Ollama no longer has. */
 async function unpinDeletedModel(name: string) {
   const settings = useSettingsStore.getState();
+  // Compared with the tag filled in, as `unpinAbandonedPull` does: a default
+  // typed bare in onboarding (`llama3.2`) is the listed `llama3.2:latest`,
+  // and an exact match left it pinned to a model that's gone.
+  const deleted = fullOllamaTag(name);
+  const isDeleted = (model: string | null | undefined) => !!model && fullOllamaTag(model) === deleted;
   // `update` reports a failed write itself (a toast) and reverts.
-  if (settings.default_model_choice === `model:ollama:${name}`) {
+  const choice = settings.default_model_choice;
+  if (choice.startsWith("model:ollama:") && isDeleted(choice.slice("model:ollama:".length))) {
     await settings.update("default_model_choice", "recent");
   }
-  if (settings.default_provider === "ollama" && settings.default_model === name) {
+  if (settings.default_provider === "ollama" && isDeleted(settings.default_model)) {
     await settings.update("default_model", "");
   }
   for (const space of useSpaceStore.getState().spaces) {
-    if (space.default_provider !== "ollama" || space.default_model !== name) continue;
+    if (space.default_provider !== "ollama" || !isDeleted(space.default_model)) continue;
     try {
       await useSpaceStore.getState().updateSpace(space.id, {
         name: space.name,

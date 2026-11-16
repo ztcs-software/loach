@@ -18,7 +18,7 @@ vi.mock("@/lib/tauri", async (importOriginal) => {
   };
 });
 
-import { __testing } from "./chatStore";
+import { __testing, layerParams, parseOverrides } from "./chatStore";
 import { useSettingsStore } from "./settingsStore";
 import { useSpaceStore } from "./spaceStore";
 
@@ -82,5 +82,19 @@ describe("stored parameter overrides", () => {
 
   it("let an invalid chat seed fall through to the Space's", async () => {
     expect((await paramsFor(chat({ seed: 1.5 }, "space-1"))).seed).toBe(7);
+  });
+});
+
+// F7-01 / F7-03: the Parameters panel had its own merge and parse. It now
+// uses these, so it shows (and saves) what a send uses.
+describe("the panel's merge", () => {
+  const base = { modelDefaults: undefined, thinkingDefault: true, thinkPref: undefined, spaceLayer: {}, overrides: {} };
+  it("gives an OpenAI chat the window a send assumes, not the app's 8K", async () => {
+    expect(layerParams({ ...base, provider: "openai" }).num_ctx).toBe(OPENAI_COMPAT_NUM_CTX);
+    expect((await paramsFor(chat({}))).num_ctx).toBe(OPENAI_COMPAT_NUM_CTX);
+  });
+  it("drops wrong-typed stored values instead of handing them to a slider", () => {
+    expect(parseOverrides(JSON.stringify({ temperature: "0.7", top_k: 20 }))).toEqual({ top_k: 20 });
+    expect(parseOverrides("null")).toEqual({});
   });
 });

@@ -123,14 +123,31 @@ function paramsToLines(p: ModelfileParams): string[] {
 
   if (p.stop && p.stop.length > 0) {
     for (const s of p.stop) {
-      const trimmed = s.trim();
-      if (!trimmed) continue;
-      const escaped = trimmed.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-      out.push(`PARAMETER stop "${escaped}"`);
+      if (!s.trim()) continue;
+      // Not trimmed: a stop like " User:" means its space. Quoted as a JSON
+      // string, which the backend decodes the same way (`unquote`), so a
+      // newline or tab in it stays one instead of breaking the line.
+      out.push(`PARAMETER stop ${JSON.stringify(s)}`);
     }
   }
 
   return out;
+}
+
+const STOP_ESCAPES: Record<string, string> = { "\\": "\\\\", "\n": "\\n", "\t": "\\t", "\r": "\\r" };
+const STOP_UNESCAPES: Record<string, string> = { "\\": "\\", n: "\n", t: "\t", r: "\r" };
+
+/** A stop sequence as the editor shows it: newline, tab and CR as `\n`,
+ *  `\t`, `\r`, a backslash as `\\`. The stops models ship (`"\n\nUser:"`)
+ *  are full of them, and as raw characters a chip showed blank space. */
+export function escapeStop(s: string): string {
+  return s.replace(/[\\\n\t\r]/g, (c) => STOP_ESCAPES[c]);
+}
+
+/** What the editor's stop field means, read back: `\n` is a newline, so a
+ *  stop can be typed the way `escapeStop` shows one. */
+export function unescapeStop(s: string): string {
+  return s.replace(/\\([\\ntr])/g, (_, c: string) => STOP_UNESCAPES[c]);
 }
 
 /** Parse the `parameters` block returned by `/api/show` into our editor
@@ -185,15 +202,29 @@ export function parseParamsBlock(block: string | null | undefined): ModelfilePar
     if (!key) continue;
 
     if (key === "stop") {
-      // Strip surrounding quotes if present, unescape \" and \\.
-      if (
-        (value.startsWith('"') && value.endsWith('"')) ||
-        (value.startsWith("'") && value.endsWith("'"))
-      ) {
-        value = value.slice(1, -1);
+      // Ollama prints each value Go-quoted (`%#v`): a newline in a stop is
+      // `\n`. Read as a JSON string, which covers \n \t \" \\ \uXXXX; left as
+      // text, `\n` became a literal backslash-n, and a model re-saved in the
+      // editor stopped at text it never meets instead of the turn boundary.
+      let decoded: string | null = null;
+      if (value.length >= 2 && value.startsWith('"') && value.endsWith('"')) {
+        try {
+          decoded = JSON.parse(value) as string;
+        } catch {
+          decoded = null;
+        }
       }
-      value = value.replace(/\\"/g, '"').replace(/\\\\/g, "\\");
-      (out.stop ??= []).push(value);
+      if (decoded === null) {
+        // Strip surrounding quotes if present, unescape \" and \\.
+        if (
+          (value.startsWith('"') && value.endsWith('"')) ||
+          (value.startsWith("'") && value.endsWith("'"))
+        ) {
+          value = value.slice(1, -1);
+        }
+        decoded = value.replace(/\\"/g, '"').replace(/\\\\/g, "\\");
+      }
+      (out.stop ??= []).push(decoded);
       continue;
     }
 

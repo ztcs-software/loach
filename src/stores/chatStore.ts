@@ -63,6 +63,7 @@ import {
 } from "@/lib/contextUsage";
 import { CUT_OFF_NOTE, formatProviderError, replayableReply } from "@/lib/providerErrors";
 import { isU32 } from "@/lib/modelParams";
+import { fullOllamaTag } from "@/lib/modelChoice";
 import { getPersona } from "@/lib/personas";
 import { getTone } from "@/lib/tones";
 import { applyTemporalAwareness } from "@/lib/temporal";
@@ -84,6 +85,7 @@ import {
   type GenerationParams,
   type Message,
   type MessageMetrics,
+  type ModelInfo,
   type ProviderId,
   type Session,
   type SpaceContext,
@@ -583,7 +585,11 @@ const PARAM_GUARDS: {
   num_gpu: (v) => (isU32(v) ? v : undefined),
 };
 
-function parseOverrides(json: string | null): Partial<GenerationParams> {
+/** A stored parameter override (`params_json`, a Space's
+ *  `default_params_json`), every value through `PARAM_GUARDS`. Shared with the
+ *  Parameters panel, whose own unguarded parse crashed on a restored
+ *  `{"temperature":"0.7"}` — taking its Reset button down with it. */
+export function parseOverrides(json: string | null): Partial<GenerationParams> {
   if (!json) return {};
   let raw: unknown;
   try {
@@ -643,26 +649,47 @@ async function warmModelDefaults(session: Session): Promise<void> {
   }
 }
 
+/** A chat's parameters from their layers, bottom to top: app defaults, the
+ *  global Thinking default, the model's (Modelfile) defaults, the per-model
+ *  Thinking pref, the Space's, the chat's own. One merge for the send
+ *  (`readSessionParams`) and the Parameters panel, which kept its own copy
+ *  and drifted — an OpenAI chat's panel read and, on any touch, saved a
+ *  context length of 8K where the send assumed 32K. */
+export function layerParams(l: {
+  provider: ProviderId | undefined;
+  /** Ollama's Modelfile values; `undefined` while not loaded. */
+  modelDefaults: Partial<GenerationParams> | undefined;
+  thinkingDefault: boolean;
+  thinkPref: boolean | undefined;
+  spaceLayer: Partial<GenerationParams>;
+  overrides: Partial<GenerationParams>;
+}): GenerationParams {
+  const isOllama = l.provider === "ollama";
+  return {
+    ...DEFAULT_PARAMS,
+    // Global Thinking default (Settings → Features). Sits below model +
+    // per-model prefs and the per-chat override so an explicit per-model or
+    // per-chat setting still wins.
+    ...(isOllama ? { think: l.thinkingDefault } : {}),
+    // An OpenAI-compatible model has no Modelfile; its stand-in default is
+    // the assumed window, which only sizes sources (the provider ignores it).
+    ...(isOllama
+      ? (l.modelDefaults ?? {})
+      : l.provider === "openai"
+        ? { num_ctx: OPENAI_COMPAT_NUM_CTX }
+        : {}),
+    ...(l.thinkPref === undefined ? {} : { think: l.thinkPref }),
+    ...l.spaceLayer,
+    ...l.overrides,
+  };
+}
+
 function readSessionParams(session: Session | undefined): GenerationParams {
   if (!session) return { ...DEFAULT_PARAMS };
   const overrides = parseOverrides(session.params_json);
   const isOllama = session.provider === "ollama";
   const modelsState = isOllama ? useModelsStore.getState() : null;
-  // An OpenAI-compatible model has no Modelfile; its stand-in default is
-  // the assumed window, which only sizes sources (the provider ignores it).
-  const modelDefaults: Partial<GenerationParams> = isOllama
-    ? (modelsState?.modelDefaults[session.model] ?? {})
-    : { num_ctx: OPENAI_COMPAT_NUM_CTX };
   const settingsState = useSettingsStore.getState();
-  // Global Thinking default (Settings → Features). Sits below model + per-model
-  // prefs and the per-chat override so an explicit per-model or per-chat
-  // setting still wins.
-  const globalThinkLayer: Partial<GenerationParams> = isOllama
-    ? { think: settingsState.thinking_default }
-    : {};
-  const thinkPref = modelsState?.modelThinkPrefs[session.model];
-  const thinkLayer: Partial<GenerationParams> =
-    thinkPref === undefined ? {} : { think: thinkPref };
   // Space-level defaults sit between model defaults and per-session
   // overrides — that way a per-chat slider edit still wins, but a fresh
   // chat in a space starts from the space's pinned settings rather than
@@ -680,14 +707,14 @@ function readSessionParams(session: Session | undefined): GenerationParams {
     // instead of the guard quietly dropping the bad key.
     spaceLayer = parseOverrides(space?.default_params_json ?? null);
   }
-  const merged: GenerationParams = {
-    ...DEFAULT_PARAMS,
-    ...globalThinkLayer,
-    ...modelDefaults,
-    ...thinkLayer,
-    ...spaceLayer,
-    ...overrides,
-  };
+  const merged = layerParams({
+    provider: session.provider,
+    modelDefaults: modelsState?.modelDefaults[session.model],
+    thinkingDefault: settingsState.thinking_default,
+    thinkPref: modelsState?.modelThinkPrefs[session.model],
+    spaceLayer,
+    overrides,
+  });
   // `think` goes only to a model whose capabilities list "thinking": Ollama
   // answers any other model (llama3, gemma, …) with a 400, and the retry
   // without the field cost a second request on every message. Capabilities
@@ -1881,6 +1908,27 @@ function resetForTests() {
 }
 export const __testing = { startTask, resetForTests, buildTaskRequest };
 
+/** An Ollama model as chats store it: with its tag, as Ollama lists it (`x`
+ *  is `x:latest`). Stored bare, a chat looked its Thinking pref, Modelfile
+ *  defaults and capabilities up under another name than the Models page and
+ *  pickers set them by. */
+function canonicalModel(provider: ProviderId, model: string): string {
+  return provider === "ollama" && model ? fullOllamaTag(model) : model;
+}
+
+/** `resolveDefaultModelChoice`'s `isInstalled` over a listed catalog. A
+ *  provider that lists nothing (not loaded yet, unreachable) gives no grounds
+ *  to pass a model over, or an offline Ollama blanked the default. */
+export function installedIn(models: ModelInfo[]) {
+  return (provider: ProviderId, model: string) => {
+    const listed = models.filter((x) => x.provider === provider);
+    return (
+      listed.length === 0 ||
+      listed.some((x) => canonicalModel(provider, x.id) === canonicalModel(provider, model))
+    );
+  };
+}
+
 /**
  * Resolve the user's "Default model" preference into a concrete
  * (provider, model) pair for a brand-new chat.
@@ -1893,12 +1941,17 @@ export const __testing = { startTask, resetForTests, buildTaskRequest };
  *
  * Anything unrecognised falls back to the recent pair so we never block a
  * "New chat" click on a malformed setting.
+ *
+ * `isInstalled`: whether a provider still has a model. "provider:<id>"
+ * passes over chats on one that isn't — deleted, it kept starting new chats
+ * on a tag that 404s — for the next most recent.
  */
 export function resolveDefaultModelChoice(
   choice: string,
   recentProvider: ProviderId,
   recentModel: string,
   sessions: Session[],
+  isInstalled?: (provider: ProviderId, model: string) => boolean,
 ): { provider: ProviderId; model: string } {
   if (choice && choice.startsWith("model:")) {
     const rest = choice.slice("model:".length);
@@ -1919,7 +1972,7 @@ export function resolveDefaultModelChoice(
       // — sessions in memory aren't guaranteed to be recency-ordered after
       // a model swap.
       const candidates = sessions
-        .filter((s) => s.provider === p && s.model)
+        .filter((s) => s.provider === p && s.model && (isInstalled?.(p, s.model) ?? true))
         .sort((a, b) => b.updated_at - a.updated_at);
       if (candidates.length > 0) {
         return { provider: p, model: candidates[0]!.model };
@@ -2161,9 +2214,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         settings.default_provider,
         settings.default_model ?? "",
         get().sessions,
+        installedIn(useModelsStore.getState().models),
       );
     const p: ProviderId = opts?.provider ?? resolved.provider;
-    const m = opts?.model ?? resolved.model;
+    const m = canonicalModel(p, opts?.model ?? resolved.model);
     // If the user picked a persona on the welcome screen (where no session
     // existed yet), `pendingPersonaId` carries the id across — but persona
     // text is now layered in at send time, not seeded into `system_prompt`.
@@ -2183,6 +2237,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }));
     if (pendingPersonaId) {
       useUIStore.getState().setSessionPersona(session.id, pendingPersonaId);
+    }
+    // A model picked for this chat (the Models page, a snippet, a search
+    // result) is the most recent one, as a header switch is: only those used
+    // to count, so "Use most recent" kept opening chats — and preloading — a
+    // model untouched for days. Not a Space's pin, which belongs to the Space.
+    if (opts?.model && m) {
+      void settings.setProviderDefault(p, m).catch(() => {});
     }
     // Warm the model-defaults cache for the session's model so the parameter
     // panel and the first send already see Modelfile values without having
@@ -2462,9 +2523,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
     return n;
   },
 
-  setSessionModel: async (id, provider, model) => {
+  setSessionModel: async (id, provider, picked) => {
     const prev = get().sessions.find((x) => x.id === id);
     if (!prev) return;
+    const model = canonicalModel(provider, picked);
 
     // Persist FIRST. A failed write must not flip the dropdown — otherwise
     // the user thinks the model changed when in fact the next chat send
@@ -2495,7 +2557,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
       .catch(() => {});
 
     // Unload the previous Ollama model from VRAM to free resources.
-    if (prev.provider === "ollama" && prev.model && prev.model !== model) {
+    if (
+      prev.provider === "ollama" &&
+      prev.model &&
+      canonicalModel("ollama", prev.model) !== canonicalModel(provider, model)
+    ) {
       const baseUrl = useSettingsStore.getState().ollama_base_url;
       ollamaUnloadModel(baseUrl, prev.model).catch(() => {});
     }

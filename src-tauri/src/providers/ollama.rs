@@ -426,9 +426,15 @@ fn create_fields(modelfile: &str) -> std::result::Result<serde_json::Map<String,
                 let after = after.trim_start_matches([' ', '\t']);
                 let (value, next) = match after.strip_prefix("\"\"\"") {
                     Some(block) => {
-                        let end = block
+                        let first = block
                             .find("\"\"\"")
                             .ok_or_else(|| format!("{d} block has no closing \"\"\""))?;
+                        // The close is the last `"""` of a run of quotes: a
+                        // body ending in `"` (`Answer with "OK"`) makes
+                        // `""""`, and closing at the first one cut the body's
+                        // quote off and read it as a directive.
+                        let run = block[first..].bytes().take_while(|&b| b == b'"').count();
+                        let end = first + run - 3;
                         (&block[..end], &block[end + 3..])
                     }
                     None => {
@@ -479,8 +485,16 @@ fn take_line(s: &str) -> (&str, &str) {
     }
 }
 
-/// `"a\"b"` → `a"b`: reverses the quoting `buildModelfile` applies to `stop`.
+/// `"a\"b"` → `a"b`: reverses the quoting `buildModelfile` applies to `stop`
+/// — a JSON string, so `"\n\nUser:"` is two newlines and `User:`, as the
+/// model's own Modelfile meant it. Taking `\n` for a plain `n` turned a
+/// re-saved model's turn-boundary stop into text it never meets.
 fn unquote(v: &str) -> String {
+    if v.starts_with('"') {
+        if let Ok(s) = serde_json::from_str::<String>(v) {
+            return s;
+        }
+    }
     let inner = v
         .strip_prefix('"')
         .and_then(|s| s.strip_suffix('"'))
@@ -1482,6 +1496,18 @@ mod tests {
                 "stop": ["<|end|>", "say \"hi\" \\ bye"],
             })
         );
+    }
+
+    /// F3-02: a body ending in `"` closed one quote early, and the stray `"`
+    /// failed every save. F3-03: escapes in a stop came through as letters.
+    #[test]
+    fn create_fields_keeps_a_closing_quote_and_decodes_stop_escapes() {
+        let modelfile = "FROM m\n\nSYSTEM \"\"\"Always answer with \"OK\"\"\"\"\n\n\
+            PARAMETER stop \"\\n\\nUser:\"\n\
+            PARAMETER stop \" Assistant:\\t\"\n";
+        let fields = create_fields(modelfile).expect("parses");
+        assert_eq!(fields["system"], "Always answer with \"OK\"");
+        assert_eq!(fields["parameters"]["stop"], json!(["\n\nUser:", " Assistant:\t"]));
     }
 
     #[test]

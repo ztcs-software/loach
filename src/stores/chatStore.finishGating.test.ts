@@ -164,9 +164,9 @@ describe("newSession in a Space that pins a model", () => {
 
   beforeEach(() => {
     useSettingsStore.setState({
-      default_model_choice: "model:ollama:global-model",
+      default_model_choice: "model:ollama:global-model:1b",
       default_provider: "ollama",
-      default_model: "global-model",
+      default_model: "global-model:1b",
     });
     useChatStore.setState({ sessions: [] as Session[], activeSessionId: null, messages: {} });
   });
@@ -180,12 +180,12 @@ describe("newSession in a Space that pins a model", () => {
   it("falls through to the global default when the pin is half set", async () => {
     useSpaceStore.setState({ spaces: [space({ default_provider: "openai", default_model: null })] });
     const s = await get().newSession({ spaceId: "sp" });
-    expect([s.provider, s.model]).toEqual(["ollama", "global-model"]);
+    expect([s.provider, s.model]).toEqual(["ollama", "global-model:1b"]);
   });
 
   it("lets a model named by the caller win over the pin", async () => {
     useSpaceStore.setState({ spaces: [space({ default_provider: "openai", default_model: "gpt-4o" })] });
-    const s = await get().newSession({ spaceId: "sp", provider: "ollama", model: "picked" });
-    expect([s.provider, s.model]).toEqual(["ollama", "picked"]);
+    const s = await get().newSession({ spaceId: "sp", provider: "ollama", model: "picked:8b" });
+    expect([s.provider, s.model]).toEqual(["ollama", "picked:8b"]);
   });
 });

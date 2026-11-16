@@ -24,9 +24,10 @@ import { Textarea } from "@/components/ui/textarea";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { useChatStore } from "@/stores/chatStore";
 import { useModelsStore } from "@/stores/modelsStore";
+import { useSettingsStore } from "@/stores/settingsStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useUIStore } from "@/stores/uiStore";
-import { buildModelfile, parseParamsBlock } from "@/lib/modelfile";
+import { buildModelfile, escapeStop, parseParamsBlock, unescapeStop } from "@/lib/modelfile";
 import { formatBytes } from "@/lib/utils";
 import type {
   ModelInfo,
@@ -185,8 +186,14 @@ export function ModelsView() {
       const run = await createModel(targetName, modelfile);
       if (run?.finished === "ok") {
         // Land the user on the freshly-created model so they can immediately
-        // iterate on it or try it in a new chat.
-        if (stillHere()) setViewingModel(targetName);
+        // iterate on it or try it in a new chat — under the id Ollama lists
+        // it by (`x:latest`), as everything else names it. Landing on the
+        // bare name as typed filed this page's Thinking pref, and its "New
+        // chat", under a name no listed model has.
+        const listed = useModelsStore
+          .getState()
+          .models.find((m) => m.provider === "ollama" && fullTag(m.id) === fullTag(targetName));
+        if (stillHere()) setViewingModel(listed?.id ?? fullTag(targetName));
       } else if (run?.finished === "error") {
         // The create reached a terminal error — surface the real reason
         // instead of navigating to a model that was never created.
@@ -613,14 +620,15 @@ const NUMERIC_FIELDS: {
  *   - **Model doesn't support thinking** — toggle disabled with a
  *     "this model doesn't support thinking" explanation. Common case for
  *     non-reasoning models like llama3.x or mistral.
- *   - **Model supports thinking** — toggle live. Off-state means the user
- *     has explicitly disabled thinking; on-state means either an explicit
- *     pref or the model's natural default (Ollama's behaviour for
- *     thinking-capable models is to think unless told otherwise).
+ *   - **Model supports thinking** — toggle live. With no pref of its own it
+ *     shows the app-wide Thinking default (Settings → Features), which is
+ *     what a new chat sends: it used to read ON regardless, so with the
+ *     default off, flipping it "off" recorded a pref that changed nothing.
  *
- * The pref is stored in modelsStore (in-memory) and feeds into
- * `chatStore.readSessionParams` so all new chats with this model pick
- * it up. Per-chat overrides via the Parameter sidebar still win.
+ * The pref is stored in modelsStore (persisted to localStorage,
+ * `loach:model-think-prefs`) and feeds into `chatStore.readSessionParams`
+ * so all new chats with this model pick it up. Per-chat overrides via the
+ * Parameter sidebar still win.
  */
 function ThinkingSection({
   capabilities,
@@ -633,15 +641,16 @@ function ThinkingSection({
 }) {
   const loading = capabilities === null;
   const supports = !loading && capabilities.includes("thinking");
-  // When the user hasn't set a preference, the natural default for
-  // thinking-capable models is ON; for everything else we just show the
-  // toggle as off (and disabled).
-  const checked = pref ?? supports;
+  const thinkingDefault = useSettingsStore((s) => s.thinking_default);
+  // Without a preference of its own the model follows the app-wide Thinking
+  // default, as `readSessionParams` layers it; a model that can't think just
+  // shows the toggle off (and disabled).
+  const checked = pref ?? (supports && thinkingDefault);
   const hint = loading
     ? "Reading model capabilities…"
     : supports
       ? pref === undefined
-        ? "Using this model's default. Toggle to record an explicit preference for new chats."
+        ? "Following the app-wide Thinking default (Settings → Features). Toggle to set it for this model."
         : "Default for new chats with this model. Per-chat overrides still apply via the Parameters sidebar."
       : "This model doesn't list a thinking capability — flipping the toggle would have no effect.";
 
@@ -657,7 +666,7 @@ function ThinkingSection({
               type="button"
               onClick={() => onChange(null)}
               className="rounded-md px-2 py-0.5 text-[11px] font-medium text-foreground/55 transition-colors hover:bg-foreground/[0.06] hover:text-foreground"
-              title="Clear the override and follow the model's natural default"
+              title="Clear the override and follow the app-wide Thinking default"
             >
               Reset
             </button>
@@ -801,7 +810,8 @@ function StopEditor({
 }) {
   const [draft, setDraft] = useState("");
   const add = () => {
-    const v = draft.trim();
+    // Typed as the chips show stops: `\n` for a newline (`escapeStop`).
+    const v = unescapeStop(draft.trim());
     if (!v) return;
     if (values.includes(v)) {
       setDraft("");
@@ -818,14 +828,14 @@ function StopEditor({
             key={`${v}-${idx}`}
             className="inline-flex items-center gap-1 rounded-full bg-foreground/[0.08] px-2.5 py-1 font-mono text-[11px] text-foreground/80"
           >
-            {v}
+            {escapeStop(v)}
             <button
               type="button"
               onClick={() =>
                 onChange(values.filter((_, i) => i !== idx))
               }
               className="text-foreground/50 hover:text-foreground"
-              aria-label={`Remove stop sequence ${v}`}
+              aria-label={`Remove stop sequence ${escapeStop(v)}`}
             >
               <X className="h-3 w-3" />
             </button>
@@ -862,7 +872,8 @@ function StopEditor({
       </div>
       <p className="mt-1 text-[10px] text-foreground/40">
         Each entry becomes a{" "}
-        <span className="font-mono">PARAMETER stop &quot;…&quot;</span> line.
+        <span className="font-mono">PARAMETER stop &quot;…&quot;</span> line. Type{" "}
+        <span className="font-mono">\n</span> for a new line.
       </p>
     </div>
   );

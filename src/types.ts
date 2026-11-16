@@ -541,8 +541,9 @@ export interface Settings {
    *  Keyed `global_system_prompt` for backwards compat with the on-disk KV
    *  table; the UI now surfaces it as "Custom instructions". */
   global_system_prompt: string;
-  /** Last-used provider+model. Always tracked so "Use most recent" can resolve
-   *  to a concrete pair. Not surfaced directly in the UI. */
+  /** Last-used provider+model, so "Use most recent" can resolve to a
+   *  concrete pair: set when a chat switches model or starts on a chosen one
+   *  (not a Space's pin). Not surfaced directly in the UI. */
   default_provider: ProviderId;
   default_model: string;
   /** How `New chat` picks its initial model. Encoded as one of:

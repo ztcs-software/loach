@@ -64,6 +64,8 @@ describe("/set", () => {
     ["a missing value", "/set seed"],
     ["an unknown param", "/set warmth 3"],
     ["an Object.prototype key", "/set constructor 1"],
+    // F3-05: past the backend's u32, every later send in the chat failed.
+    ["a GPU layer count the backend can't hold", "/set num_gpu 99999999999"],
   ])("rejects %s", async (_label, input) => {
     openChat(null);
     const outcome = await dispatch(input, deps);

@@ -17,7 +17,7 @@ import { formatTokens } from "@/lib/contextUsage";
 import { setSessionRetrievalMode } from "@/lib/tauri";
 import { chatRetrievalMode, estimateChatSources, spaceSourceCount } from "@/lib/sources";
 import { cn } from "@/lib/utils";
-import { resolveDefaultModelChoice, useChatStore } from "@/stores/chatStore";
+import { installedIn, resolveDefaultModelChoice, useChatStore } from "@/stores/chatStore";
 import { useLibraryStore } from "@/stores/libraryStore";
 import { useModelsStore } from "@/stores/modelsStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -236,6 +236,7 @@ export function useNewChatModelCtx(
   const recentProvider = useSettingsStore((s) => s.default_provider);
   const recentModel = useSettingsStore((s) => s.default_model);
   const sessions = useChatStore((s) => s.sessions);
+  const models = useModelsStore((s) => s.models);
   const loadModelDefaults = useModelsStore((s) => s.loadModelDefaults);
   const pinnedProvider = space?.default_provider;
   const pinnedModel = space?.default_model;
@@ -243,8 +244,8 @@ export function useNewChatModelCtx(
     () =>
       pinnedProvider && pinnedModel
         ? { provider: pinnedProvider, model: pinnedModel }
-        : resolveDefaultModelChoice(defaultChoice, recentProvider, recentModel ?? "", sessions),
-    [pinnedProvider, pinnedModel, defaultChoice, recentProvider, recentModel, sessions],
+        : resolveDefaultModelChoice(defaultChoice, recentProvider, recentModel ?? "", sessions, installedIn(models)),
+    [pinnedProvider, pinnedModel, defaultChoice, recentProvider, recentModel, sessions, models],
   );
   useEffect(() => {
     if (chatModel.provider === "ollama" && chatModel.model) void loadModelDefaults(chatModel.model);

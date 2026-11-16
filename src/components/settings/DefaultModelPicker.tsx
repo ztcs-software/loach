@@ -9,7 +9,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
-import { resolveDefaultModelChoice, useChatStore } from "@/stores/chatStore";
+import { installedIn, resolveDefaultModelChoice, useChatStore } from "@/stores/chatStore";
 import { useMemo } from "react";
 import { useModelsStore } from "@/stores/modelsStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -190,6 +190,7 @@ export function DefaultModelPreloadToggle({ className }: { className?: string })
   const recentModel = useSettingsStore((s) => s.default_model);
   const update = useSettingsStore((s) => s.update);
   const sessions = useChatStore((s) => s.sessions);
+  const models = useModelsStore((s) => s.models);
 
   const resolved = useMemo(
     () =>
@@ -198,8 +199,9 @@ export function DefaultModelPreloadToggle({ className }: { className?: string })
         recentProvider,
         recentModel ?? "",
         sessions,
+        installedIn(models),
       ),
-    [choice, recentProvider, recentModel, sessions],
+    [choice, recentProvider, recentModel, sessions, models],
   );
 
   const isOllama = resolved.provider === "ollama" && !!resolved.model;
