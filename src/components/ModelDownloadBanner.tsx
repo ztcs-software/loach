@@ -1,6 +1,9 @@
-import { Download } from "lucide-react";
+import { AlertCircle, Download } from "lucide-react";
+import { Button } from "@/components/ui/button";
 import { useChatStore } from "@/stores/chatStore";
-import { useLivePullFor, pullPercent } from "@/lib/usePullRuns";
+import { useModelsStore } from "@/stores/modelsStore";
+import { useUIStore } from "@/stores/uiStore";
+import { useFailedPullFor, useLivePullFor, pullPercent } from "@/lib/usePullRuns";
 
 /**
  * "Your model is still downloading" bar, shown above the composer whenever
@@ -14,6 +17,9 @@ import { useLivePullFor, pullPercent } from "@/lib/usePullRuns";
  * debug a URL that was never wrong. `chatStore.sendUserMessage` blocks the send
  * with an accurate message; this is the part that stops them trying at all.
  *
+ * A download that failed or was cancelled gets its own variant, with a retry:
+ * the chat is still on a tag that never landed.
+ *
  * Renders nothing in the normal case (no pull, or a pull for some other model).
  */
 export function ModelDownloadBanner() {
@@ -24,6 +30,34 @@ export function ModelDownloadBanner() {
     (s) => s.sessions.find((x) => x.id === s.activeSessionId)?.provider ?? null,
   );
   const pull = useLivePullFor(provider, model);
+  const failed = useFailedPullFor(provider, model);
+  const pullModel = useModelsStore((s) => s.pullModel);
+  const openModelPicker = useUIStore((s) => s.setPendingOpenModelPicker);
+  if (!pull && failed) {
+    return (
+      <div className="mb-3 flex items-center gap-3 rounded-2xl border border-destructive/30 bg-destructive/[0.06] px-3.5 py-2.5">
+        <AlertCircle className="h-4 w-4 shrink-0 text-destructive" />
+        <p className="min-w-0 flex-1 text-[12.5px] text-foreground/85">
+          {failed.finished === "cancelled" ? (
+            <>
+              Downloading <span className="font-mono">{failed.target}</span> was cancelled.
+            </>
+          ) : (
+            <>
+              Downloading <span className="font-mono">{failed.target}</span> failed
+              {failed.error ? `: ${failed.error}` : "."}
+            </>
+          )}
+        </p>
+        <Button size="sm" variant="ghost" className="shrink-0" onClick={() => openModelPicker(true)}>
+          Pick another model
+        </Button>
+        <Button size="sm" className="shrink-0" onClick={() => void pullModel(failed.target)}>
+          Retry
+        </Button>
+      </div>
+    );
+  }
   if (!pull) return null;
 
   const pct = pullPercent(pull);

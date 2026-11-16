@@ -254,9 +254,15 @@ export function ProviderStep({
             }}
           />
           {phase === "ollama" ? (
-            <OllamaPath onProvisioned={() => setProvisioned(true)} />
+            <OllamaPath
+              onProvisioned={() => setProvisioned(true)}
+              onUnprovisioned={() => setProvisioned(false)}
+            />
           ) : (
-            <OpenAIPath onProvisioned={() => setProvisioned(true)} />
+            <OpenAIPath
+              onProvisioned={() => setProvisioned(true)}
+              onUnprovisioned={() => setProvisioned(false)}
+            />
           )}
         </div>
       )}
@@ -347,7 +353,13 @@ type OllamaProbe =
  *  otherwise sit in front of a warning that is no longer true. */
 const REPROBE_MS = 3000;
 
-function OllamaPath({ onProvisioned }: { onProvisioned: () => void }) {
+function OllamaPath({
+  onProvisioned,
+  onUnprovisioned,
+}: {
+  onProvisioned: () => void;
+  onUnprovisioned: () => void;
+}) {
   const baseUrl = useSettingsStore((s) => s.ollama_base_url);
   const update = useSettingsStore((s) => s.update);
   const setProviderDefault = useSettingsStore((s) => s.setProviderDefault);
@@ -397,6 +409,15 @@ function OllamaPath({ onProvisioned }: { onProvisioned: () => void }) {
         if (!alreadyPinned) await setProviderDefault("ollama", list[0].id);
         await refreshModels();
         onProvisioned();
+      } else if (
+        !Object.values(useModelsStore.getState().runs).some(
+          (r) => r.kind === "pull" && r.finished === null,
+        )
+      ) {
+        // Nothing installed and nothing downloading: the pull that unlocked
+        // Continue failed or was cancelled, and Continue led on to "You're
+        // all set" with no model to chat with.
+        onUnprovisioned();
       }
     } catch (e) {
       setProbe({
@@ -1272,7 +1293,18 @@ function fmtPct(run: AdminProgress) {
 
 /* ───────────────────────── OpenAI path ───────────────────────── */
 
-function OpenAIPath({ onProvisioned }: { onProvisioned: () => void }) {
+/** A reachable endpoint with nothing to chat with — LM Studio with no model
+ *  loaded answers `{"data":[]}`. "You're ready to chat" there ended the wizard
+ *  with no model. */
+const NO_OPENAI_MODELS = "Connected, but this server lists no models — load one, then verify again.";
+
+function OpenAIPath({
+  onProvisioned,
+  onUnprovisioned,
+}: {
+  onProvisioned: () => void;
+  onUnprovisioned: () => void;
+}) {
   const baseUrl = useSettingsStore((s) => s.openai_base_url);
   const keySet = useSettingsStore((s) => s.openai_key_set);
   const pinnedModel = useSettingsStore((s) => s.default_model);
@@ -1319,7 +1351,12 @@ function OpenAIPath({ onProvisioned }: { onProvisioned: () => void }) {
     void openaiListModels(baseUrl)
       .then((list) => {
         if (superseded.current) return;
-        setCatalog(rankChatModels(list));
+        const ranked = rankChatModels(list);
+        setCatalog(ranked);
+        if (ranked.length === 0) {
+          setError(NO_OPENAI_MODELS);
+          return;
+        }
         setVerified(true);
         onProvisioned();
       })
@@ -1357,12 +1394,22 @@ function OpenAIPath({ onProvisioned }: { onProvisioned: () => void }) {
       if (newKey) await setOpenAIKey(newKey);
       const ranked = rankChatModels(list);
       setCatalog(ranked);
-      if (ranked.length > 0) {
-        // Pin the best chat candidate rather than whatever `/v1/models`
-        // listed first — on api.openai.com that's frequently an embedding
-        // or audio model. The picker below shows the result either way.
-        await setProviderDefault("openai", ranked[0].id);
+      if (ranked.length === 0) {
+        setKey("");
+        setVerified(false);
+        setError(NO_OPENAI_MODELS);
+        onUnprovisioned();
+        return;
       }
+      // Pin the best chat candidate rather than whatever `/v1/models`
+      // listed first — on api.openai.com that's frequently an embedding
+      // or audio model. The picker below shows the result either way.
+      // Not over a pick from that picker, though, as OllamaPath doesn't:
+      // re-verifying (after fixing the key, say) stamped it back to the top.
+      const settings = useSettingsStore.getState();
+      const alreadyPinned =
+        settings.default_provider === "openai" && ranked.some((m) => m.id === settings.default_model);
+      if (!alreadyPinned) await setProviderDefault("openai", ranked[0].id);
       await refreshModels();
       setVerified(true);
       setKey("");

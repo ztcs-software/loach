@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { AlertTriangle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useOnboardingStore } from "@/stores/onboardingStore";
@@ -61,6 +61,16 @@ export function Onboarding() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [step, confirming]);
 
+  // Keep keyboard focus in the wizard. It opened with focus left on <body>,
+  // and every step change (or closing the skip confirm) unmounted the focused
+  // button, so Tab started from outside the wizard. A step that focuses its
+  // own field keeps it.
+  const panelRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const panel = panelRef.current;
+    if (panel && !panel.contains(document.activeElement)) panel.focus();
+  }, [step, confirming]);
+
   return (
     <div
       className={cn(
@@ -75,9 +85,11 @@ export function Onboarding() {
       aria-label="Onboarding"
     >
       <div
+        ref={panelRef}
+        tabIndex={-1}
         className={cn(
           "glass-panel",
-          "relative flex max-h-[88vh] w-[min(880px,94vw)] flex-col",
+          "relative flex max-h-[88vh] w-[min(880px,94vw)] flex-col outline-none",
           // Match SettingsDialog's surface: gradient-tinted glass with
           // backdrop blur + saturation. A darkening underlay (below) gives
           // it the same deep tone as the Settings reference instead of the
@@ -94,7 +106,7 @@ export function Onboarding() {
           aria-hidden
           className="pointer-events-none absolute inset-0 bg-background/55"
         />
-        <div className="relative z-10 flex flex-1 min-h-0 flex-col">
+        <div className="relative z-10 flex flex-1 min-h-0 flex-col" inert={confirming}>
           {step === "welcome" && <WelcomeStep onClose={handleClose} />}
           {step === "provider" && <ProviderStep onClose={handleClose} />}
           {step === "features" && <FeaturesStep onClose={handleClose} />}
@@ -109,14 +121,20 @@ export function Onboarding() {
             where they were). */}
         {confirming && (
           <div className="absolute inset-0 z-20 flex items-center justify-center bg-background/75 backdrop-blur-sm">
-            <div className="mx-6 max-w-sm rounded-2xl border border-foreground/10 bg-background/95 p-5 shadow-xl">
+            <div
+              role="alertdialog"
+              aria-modal="true"
+              aria-labelledby="onboarding-skip-title"
+              aria-describedby="onboarding-skip-desc"
+              className="mx-6 max-w-sm rounded-2xl border border-foreground/10 bg-background/95 p-5 shadow-xl"
+            >
               <div className="flex items-start gap-3">
                 <span className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-amber-500/15 text-amber-400">
                   <AlertTriangle className="h-4 w-4" />
                 </span>
                 <div className="min-w-0 flex-1">
-                  <h3 className="text-[14.5px] font-semibold">Skip setup?</h3>
-                  <p className="mt-1 text-[12.5px] leading-relaxed text-foreground/60">
+                  <h3 id="onboarding-skip-title" className="text-[14.5px] font-semibold">Skip setup?</h3>
+                  <p id="onboarding-skip-desc" className="mt-1 text-[12.5px] leading-relaxed text-foreground/60">
                     You'll need to configure a provider before you can chat.
                     You can do it any time from Settings → Providers.
                   </p>

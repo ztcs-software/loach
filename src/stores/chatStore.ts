@@ -99,7 +99,7 @@ import { useUIStore } from "./uiStore";
 import { useLibraryStore } from "./libraryStore";
 import { useModelsStore } from "./modelsStore";
 import { useSkillStore } from "./skillStore";
-import { getLivePullFor, pullPercent } from "@/lib/usePullRuns";
+import { getFailedPullFor, getLivePullFor, pullPercent } from "@/lib/usePullRuns";
 
 interface ActiveStream {
   /** Backend stream id — the key `tool_approval_respond` needs. */
@@ -2733,6 +2733,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const pct = pullPercent(pull);
       throw new Error(
         `${session.model} is still downloading${pct === null ? "" : ` (${pct}%)`}. It'll be ready shortly.`,
+      );
+    }
+    // Nor once that download failed or was cancelled — same 404 otherwise.
+    const failed = getFailedPullFor(session.provider, session.model);
+    if (failed) {
+      throw new Error(
+        `${session.model} didn't finish downloading${failed.error ? ` (${failed.error})` : ""}. Retry the download, or pick another model.`,
       );
     }
 

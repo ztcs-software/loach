@@ -433,8 +433,9 @@ export default function App() {
             it's open so Tab can't walk focus out of the overlay into the
             regular chat's composer behind it — text typed there, unseen,
             would be sent to that chat, saved, and read by its memory
-            extractor. */}
-        <div className="flex min-h-0 flex-1" inert={privateChatOpen}>
+            extractor. The same while onboarding is up: a message typed
+            behind the wizard went out to a provider not yet set up. */}
+        <div className="flex min-h-0 flex-1" inert={privateChatOpen || showOnboarding}>
           <Sidebar />
           {/* Every boundary in this slot is keyed by what it shows. They all
               sit at the same position, so unkeyed React kept one instance

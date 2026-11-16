@@ -592,7 +592,8 @@ async function unpinAbandonedPull(streamId: string) {
   const run = models.runs[streamId];
   if (!run || run.kind !== "pull" || run.finished === "ok") return;
   // Ollama lists a bare tag the user typed as `<name>:latest`.
-  if (models.models.some((m) => fullOllamaTag(m.id) === fullOllamaTag(run.target))) return;
+  const installed = (tag: string) => models.models.some((m) => fullOllamaTag(m.id) === fullOllamaTag(tag));
+  if (installed(run.target)) return;
 
   const settings = useSettingsStore.getState();
   if (
@@ -601,10 +602,20 @@ async function unpinAbandonedPull(streamId: string) {
   ) {
     return;
   }
-  // "" is the no-pin state a fresh install starts from — new chats fall back
-  // to the most recently used model instead of a tag that doesn't exist.
+  // Onboarding pins every pull it starts, so this one may have displaced an
+  // earlier pick: hand the pin back to another pull's model, one that landed
+  // before one still running (latest first). Clearing it outright left no
+  // default although the first download had finished fine.
+  const others = Object.entries(models.runs)
+    .filter(([id, r]) => id !== streamId && r.kind === "pull")
+    .map(([, r]) => r);
+  const fallback =
+    others.filter((r) => r.finished === "ok" && installed(r.target)).at(-1) ??
+    others.filter((r) => r.finished === null).at(-1);
+  // Else "", the no-pin state a fresh install starts from — new chats fall
+  // back to the most recently used model instead of a tag that doesn't exist.
   try {
-    await settings.update("default_model", "");
+    await settings.update("default_model", fallback?.target ?? "");
   } catch (e) {
     logger.warn("could not clear the default model after an abandoned pull", e);
   }
