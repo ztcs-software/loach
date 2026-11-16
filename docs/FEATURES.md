@@ -101,6 +101,11 @@ transcript of messages.
 
 - **Streaming tokens** — assistant replies render token-by-token, batched on
   `requestAnimationFrame` so the UI stays smooth even on fast local models.
+  A reply is saved as it streams (every couple of seconds, and at each tool
+  call), so one cut short by Loach closing, reloading or crashing keeps what
+  had arrived and the tools it ran, ending in *Reply interrupted*. A reply
+  that reaches the **Max Tokens** limit ends in a line saying it was cut
+  off. Neither line, nor an error line, is sent back to the model.
 - **Thinking traces** — for reasoning-capable models the chain-of-thought
   stream is rendered into a separate collapsible block above the answer.
 - **Tool-call blocks** — when the model calls a tool (a built-in utility
@@ -109,8 +114,8 @@ transcript of messages.
   more — styled like the Thinking block. Expand it to
   see each call's name, arguments, and result (or error, *Denied*, or
   *No answer*).
-  A call still open when the reply ends — you pressed Stop, or it failed —
-  is marked *Interrupted*, saying whether it can have run: one stopped
+  A call still open when the reply ends — you pressed Stop, it failed, or
+  Loach closed — is marked *Interrupted*, saying whether it can have run: one stopped
   while running may still have finished (a workspace write that was under
   way completes on disk regardless).
   A call that needs your approval — an MCP tool (§9.2), a workspace change
@@ -165,8 +170,9 @@ transcript of messages.
 - **Per-message action menu** — a `…` button below each bubble exposes the
   deliberate full-message actions: **Copy message** on every bubble,
   **Save as Snippet** on user prompts, and **Regenerate** on the *last*
-  assistant message (drops the previous reply, re-sends the preceding user
-  turn, and streams a fresh answer in place). **Share** (§2.12) is on every
+  assistant message (re-sends the preceding user turn and streams a fresh
+  answer in place of the previous reply, which goes once the new one starts —
+  a regenerate cancelled while it waits for another chat keeps it). **Share** (§2.12) is on every
   bubble; **Pin this response** (§2.11), **Fork from here** (§2.6) and
   **Save to Library** (§4) on assistant replies, and **Save attachments to
   Library** on user prompts that carry files. A prompt with no text, only

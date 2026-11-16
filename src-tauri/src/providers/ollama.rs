@@ -663,6 +663,10 @@ struct OllamaChunk {
     /// that cut-off reply ended as a normal completion.
     #[serde(default)]
     error: Option<String>,
+    /// Why the final `done: true` chunk ended the reply: `stop`, or `length`
+    /// when it reached `num_predict` (the Max tokens setting).
+    #[serde(default)]
+    done_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -816,6 +820,8 @@ pub async fn chat_stream(
         // What the model says this turn, kept for the history should the
         // turn end in tool calls.
         let mut turn_text = String::new();
+        // Whether this turn stopped at the max-tokens limit.
+        let mut cut_off = false;
         let outcome = match run_one_turn(
             &app,
             &http,
@@ -828,6 +834,7 @@ pub async fn chat_stream(
             &mut reported_eval_ns,
             &mut think_already_drop,
             &mut turn_text,
+            &mut cut_off,
             &req.stream_id,
             &registry,
         )
@@ -849,7 +856,7 @@ pub async fn chat_stream(
                     start,
                     tool_ctx.approval_wait(),
                 );
-                let _ = app.emit(&channel, StreamEvent::Done);
+                let _ = app.emit(&channel, StreamEvent::Done { cut_off });
                 registry.finish_own(&req.stream_id, &cancel);
                 return Ok(());
             }
@@ -983,6 +990,7 @@ async fn run_one_turn(
     reported_eval_ns: &mut Option<u64>,
     think_already_drop: &mut bool,
     turn_text: &mut String,
+    cut_off: &mut bool,
     stream_id: &str,
     registry: &StreamRegistry,
 ) -> Result<Option<TurnOutcome>> {
@@ -1179,6 +1187,9 @@ async fn run_one_turn(
                                         }
                                     }
                                     if parsed.done {
+                                        // `length`: stopped at `num_predict`,
+                                        // not at the end of the answer.
+                                        *cut_off = parsed.done_reason.as_deref() == Some("length");
                                         finished = true;
                                         break;
                                     }
@@ -1568,6 +1579,26 @@ mod tests {
     }
 
     // --- OllamaChunk ------------------------------------------------------------
+
+    /// X4-04: a reply stopped at `num_predict` passed for a finished one.
+    #[test]
+    fn the_done_reason_is_read_and_a_cut_off_done_says_so() {
+        let chunk: OllamaChunk =
+            serde_json::from_str(r#"{"done":true,"done_reason":"length","eval_count":4096}"#).expect("parses");
+        assert_eq!(chunk.done_reason.as_deref(), Some("length"));
+        let plain: OllamaChunk = serde_json::from_str(r#"{"done":true}"#).expect("parses");
+        assert_eq!(plain.done_reason, None);
+
+        // An ordinary end is the same event as ever; a cut-off one says so.
+        assert_eq!(
+            serde_json::to_value(StreamEvent::Done { cut_off: false }).unwrap(),
+            json!({ "kind": "done" })
+        );
+        assert_eq!(
+            serde_json::to_value(StreamEvent::Done { cut_off: true }).unwrap(),
+            json!({ "kind": "done", "cut_off": true })
+        );
+    }
 
     #[test]
     fn a_mid_stream_error_line_is_read_as_an_error() {

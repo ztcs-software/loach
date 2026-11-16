@@ -115,7 +115,8 @@ error line starting with ⚠.
 **Solution.** Whatever streamed before the failure is kept — open the
 message's `…` menu and use **Copy message** if you want to preserve it. To get a
 full answer, send the same prompt again, or click **Regenerate** if it's
-visible. If errors repeat, see the connection section above or the VRAM
+visible. The error line itself isn't sent back to the model with the rest
+of the chat. If errors repeat, see the connection section above or the VRAM
 section below.
 
 ### I see no "thinking" trace even though the model supports reasoning
@@ -181,7 +182,10 @@ includes any queueing or model-load time.
 Tokens** and **Repeat Penalty** only appear in its **Advanced** view:
 
 - Lower **Temperature** for more focused answers, raise it for more variety.
-- Raise **Max Tokens** if the answer keeps cutting off.
+- Raise **Max Tokens** if the answer keeps cutting off — a reply that hit
+  the limit ends with a "Cut off at the Max Tokens limit" line. On a
+  thinking model the limit covers the reasoning too, so a long chain of
+  thought can leave little room for the answer.
 - Raise **Context Length** if the model is forgetting earlier turns. A
   longer context uses more VRAM.
 - Increase **Repeat Penalty** (default 1.1; try up to 1.3) if the model

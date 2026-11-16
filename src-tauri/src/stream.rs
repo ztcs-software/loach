@@ -98,7 +98,15 @@ pub enum StreamEvent {
     Thinking { delta: String },
     /// Stream ended normally (provider emitted EOF / `[DONE]`). Carries
     /// the same closing semantics as the prior version of this enum.
-    Done,
+    ///
+    /// `cut_off`: the model stopped because it reached the max-tokens limit
+    /// (Ollama's `done_reason: "length"`, OpenAI's `finish_reason:
+    /// "length"`), not because it was done — the UI says so, where the cut
+    /// used to pass for a finished reply. Left out of the event when false.
+    Done {
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        cut_off: bool,
+    },
     /// Stream was cancelled by the user (or by another command stopping
     /// the runner). Distinct from `Done` so the frontend can avoid
     /// pretending an interrupted generation finished naturally — useful

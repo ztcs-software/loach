@@ -132,6 +132,16 @@ describe("finishRunning", () => {
     await expect(runnerOptions?.("bg")).resolves.toEqual({ num_ctx: 32768, num_gpu: 20 });
   });
 
+  // X4-04: a reply the max-tokens limit ended passed for a finished one.
+  it("on a cut-off done, says so and marks the chat unread, but remembers nothing", async () => {
+    await runTo({ kind: "done", cut_off: true } as never);
+    const reply = get().messages.bg.at(-1)!;
+    expect(reply.content).toMatch(/^Noted\.\n\n_⚠ Cut off at the Max Tokens limit/);
+    expect(mocks.queueMemoryTurn).not.toHaveBeenCalled();
+    expect(mocks.extractMemories).not.toHaveBeenCalled();
+    expect(get().unread).toEqual({ bg: true });
+  });
+
   it("on cancel, does neither", async () => {
     await runTo({ kind: "cancelled" });
     expect(mocks.queueMemoryTurn).not.toHaveBeenCalled();

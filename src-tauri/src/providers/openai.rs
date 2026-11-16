@@ -225,20 +225,48 @@ fn build_messages(req: &ChatRequest) -> Vec<Value> {
             out.push(json!({ "role": "system", "content": sys }));
         }
     }
+    // Strict servers want turns that alternate, and assistant turns with
+    // something in them: the Gemma and older Mistral chat templates
+    // llama.cpp, LM Studio and vLLM run raise "Conversation roles must
+    // alternate", and some gateways 400 on an empty string. The history
+    // can hold both — a cancelled or failed send leaves a user turn with no
+    // reply, a Stop before the first token an empty one — and then every
+    // later send in the chat failed. So empty assistant turns are dropped
+    // and a run of turns in one role becomes one turn. (Ollama's own API
+    // takes either shape; this is only the OpenAI-compatible path.)
+    let mut turns: Vec<(&str, String, Vec<&str>)> = Vec::new();
     for m in &req.messages {
         let role = match m.role.as_str() {
             "assistant" => "assistant",
             "system" => "system",
             _ => "user",
         };
-        let content: Value = if m.images.is_empty() {
-            Value::String(m.content.clone())
+        if role == "assistant" && m.content.trim().is_empty() && m.images.is_empty() {
+            continue;
+        }
+        let images = m.images.iter().map(String::as_str);
+        match turns.last_mut() {
+            Some((last, text, imgs)) if *last == role && role != "system" => {
+                if !m.content.is_empty() {
+                    if !text.is_empty() {
+                        text.push_str("\n\n");
+                    }
+                    text.push_str(&m.content);
+                }
+                imgs.extend(images);
+            }
+            _ => turns.push((role, m.content.clone(), images.collect())),
+        }
+    }
+    for (role, text, images) in turns {
+        let content: Value = if images.is_empty() {
+            Value::String(text)
         } else {
             let mut parts: Vec<Value> = Vec::new();
-            if !m.content.is_empty() {
-                parts.push(json!({ "type": "text", "text": m.content }));
+            if !text.is_empty() {
+                parts.push(json!({ "type": "text", "text": text }));
             }
-            for img in &m.images {
+            for img in images {
                 let mime = sniff_image_mime(img);
                 parts.push(json!({
                     "type": "image_url",
@@ -384,6 +412,8 @@ pub async fn chat_stream(
         // What the model says this turn, kept for the history should the
         // turn end in tool calls.
         let mut turn_text = String::new();
+        // Whether this turn stopped at the max-tokens limit.
+        let mut cut_off = false;
         let outcome = match run_one_turn(
             &app,
             &http,
@@ -396,6 +426,7 @@ pub async fn chat_stream(
             &mut total_tokens,
             &mut reported_tokens,
             &mut turn_text,
+            &mut cut_off,
             &req.stream_id,
             &registry,
         )
@@ -412,7 +443,7 @@ pub async fn chat_stream(
                 // for compat shims that don't honour `include_usage`.
                 let tokens_for_metrics = reported_tokens.unwrap_or(total_tokens);
                 emit_metrics(&app, &channel, tokens_for_metrics, start, tool_ctx.approval_wait());
-                let _ = app.emit(&channel, StreamEvent::Done);
+                let _ = app.emit(&channel, StreamEvent::Done { cut_off });
                 registry.finish_own(&req.stream_id, &cancel);
                 return Ok(());
             }
@@ -599,6 +630,7 @@ async fn run_one_turn(
     total_tokens: &mut u32,
     reported_tokens: &mut Option<u32>,
     turn_text: &mut String,
+    cut_off: &mut bool,
     stream_id: &str,
     registry: &StreamRegistry,
 ) -> Result<Option<TurnOutcome>> {
@@ -964,6 +996,12 @@ async fn run_one_turn(
                                                     "the server ended the reply with an error".into(),
                                                 );
                                             }
+                                            // The max-tokens limit, not the
+                                            // end of what the model meant.
+                                            Some("length") => {
+                                                finish_seen = true;
+                                                *cut_off = true;
+                                            }
                                             Some(_) => finish_seen = true,
                                             None => {}
                                         }
@@ -1218,6 +1256,37 @@ mod tests {
             "temperature": 0.7,
             "max_tokens": 4096,
         })
+    }
+
+    // --- build_messages -------------------------------------------------------
+    // X4-03: a turn with no reply, or an empty reply, left a history strict
+    // servers refuse on every later send.
+
+    #[test]
+    fn history_alternates_and_has_no_empty_replies() {
+        let req: ChatRequest = serde_json::from_value(json!({
+            "stream_id": "s", "provider": "openai", "model": "m", "base_url": "http://x",
+            "system_prompt": "Be brief.",
+            "params": {},
+            "messages": [
+                { "role": "user", "content": "first, cancelled" },
+                { "role": "user", "content": "first again" },
+                { "role": "assistant", "content": "" },
+                { "role": "user", "content": "", "images": ["iVBORw0KGgo="] },
+                { "role": "assistant", "content": "an answer" },
+                { "role": "assistant", "content": "  \n" },
+                { "role": "user", "content": "next" },
+            ],
+        }))
+        .unwrap();
+        let msgs = build_messages(&req);
+        let roles: Vec<&str> = msgs.iter().map(|m| m["role"].as_str().unwrap()).collect();
+        assert_eq!(roles, ["system", "user", "assistant", "user"]);
+        let parts = msgs[1]["content"].as_array().expect("text and the image in one turn");
+        assert_eq!(parts[0]["text"], "first, cancelled\n\nfirst again");
+        assert_eq!(parts[1]["type"], "image_url");
+        assert_eq!(msgs[2]["content"], "an answer");
+        assert_eq!(msgs[3]["content"], "next");
     }
 
     #[test]

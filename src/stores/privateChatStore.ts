@@ -11,7 +11,7 @@ import {
 import { resolveImageScaling } from "@/lib/imageScaling";
 import { cancelMemoryExtraction } from "@/lib/memory";
 import { getPersona } from "@/lib/personas";
-import { formatProviderError } from "@/lib/providerErrors";
+import { CUT_OFF_NOTE, formatProviderError, replayableReply } from "@/lib/providerErrors";
 import { getTone } from "@/lib/tones";
 import { useModelsStore } from "./modelsStore";
 import { useSettingsStore } from "./settingsStore";
@@ -285,9 +285,16 @@ export const usePrivateChatStore = create<PrivateChatState>((set, get) => ({
     // Build the chat history snapshot from in-memory messages only. The user
     // turn we just appended is the trailing entry with images attached; all
     // prior turns flow in as plain text.
+    // A reply goes back without Loach's notes (an error), and an empty one
+    // not at all — as in the regular chat's `chatHistory`.
     const history: ChatMessageIn[] = get()
       .messages.filter((m) => m.id !== userMsg.id && m.id !== assistantMsg.id)
-      .map((m) => ({ role: m.role, content: m.content, images: [] }));
+      .map((m) => ({
+        role: m.role,
+        content: m.role === "assistant" ? replayableReply(m.content) : m.content,
+        images: [],
+      }))
+      .filter((m) => m.role !== "assistant" || m.content !== "");
     history.push({ role: "user", content: inlinedContent, images });
 
     const streamId = makeRequestId();
@@ -412,6 +419,11 @@ export const usePrivateChatStore = create<PrivateChatState>((set, get) => ({
             pcFlush();
             teardown();
           } else if (ev.kind === "cancelled" || ev.kind === "done") {
+            // Stopped at the max-tokens limit: say so, as the regular chat does.
+            if (ev.kind === "done" && ev.cut_off && pcBuffer) {
+              pcBuffer.content += `\n\n${CUT_OFF_NOTE}`;
+              pcBuffer.contentDirty = true;
+            }
             // Sync-flush the last buffered tokens before tearing down so the
             // final frame of the reply doesn't vanish.
             pcFlush();

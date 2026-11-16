@@ -358,7 +358,12 @@ function bigramSet(s: string): Set<string> {
   return out;
 }
 
+/** `text` cut to `max` UTF-16 units, with an ellipsis. Never between the
+ *  halves of an emoji: a lone surrogate fails the extraction request's IPC
+ *  (JSON decode), and the turns waiting in it were lost (`files.ts::cutText`
+ *  guards attachments the same way). */
 export function clip(text: string, max: number): string {
   if (text.length <= max) return text;
-  return text.slice(0, max) + "…";
+  const cut = text.slice(0, max);
+  return (/[\uD800-\uDBFF]$/.test(cut) ? cut.slice(0, -1) : cut) + "…";
 }

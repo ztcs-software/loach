@@ -30,6 +30,13 @@ const KEY_MAP: Record<string, keyof GenerationParams> = {
  *  all mean "use the default", which leaving the field out already does. */
 const U32_FIELDS = new Set<keyof GenerationParams>(["top_k", "max_tokens", "num_ctx", "num_gpu"]);
 
+/** A value one of [`U32_FIELDS`] can hold — shared with the stored-override
+ *  guards in chatStore, which let `4096.5` or `-1` through to a send that
+ *  then failed every time. */
+export function isU32(v: unknown): v is number {
+  return typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= 0xffff_ffff;
+}
+
 /**
  * Parse the multiline `parameters` block from `ollama_show_model` into a
  * sparse `GenerationParams` patch. Returns `{}` for empty / null inputs so
@@ -71,7 +78,7 @@ export function parseModelParameters(
       continue;
     }
     const n = parseFloat(value);
-    if (U32_FIELDS.has(target) && !(Number.isInteger(n) && n >= 0 && n <= 0xffff_ffff)) continue;
+    if (U32_FIELDS.has(target) && !isU32(n)) continue;
     if (Number.isFinite(n)) {
       // The numeric fields all share `number` as their type, so the cast
       // here is the narrowest indirection that keeps TS happy without

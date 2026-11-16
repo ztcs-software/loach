@@ -449,8 +449,10 @@ export interface ChatRequest {
 export type StreamEvent =
   | { kind: "token"; delta: string }
   | { kind: "thinking"; delta: string }
-  /** Stream ended naturally — provider emitted its EOF / `[DONE]` marker. */
-  | { kind: "done" }
+  /** Stream ended naturally — provider emitted its EOF / `[DONE]` marker.
+   *  `cut_off`: it stopped at the max-tokens limit rather than at the end
+   *  of the answer. */
+  | { kind: "done"; cut_off?: boolean }
   /** Stream was cancelled mid-flight. Distinct from `done` so callers
    *  can avoid the "real completion" side-effects (memory extraction,
    *  unread dot) on an interrupted reply. Mirrors

@@ -61,7 +61,8 @@ import {
   SUMMARY_END_TAG,
   SUMMARY_START_TAG,
 } from "@/lib/contextUsage";
-import { formatProviderError } from "@/lib/providerErrors";
+import { CUT_OFF_NOTE, formatProviderError, replayableReply } from "@/lib/providerErrors";
+import { isU32 } from "@/lib/modelParams";
 import { getPersona } from "@/lib/personas";
 import { getTone } from "@/lib/tones";
 import { applyTemporalAwareness } from "@/lib/temporal";
@@ -141,6 +142,11 @@ interface QueueTask {
    *  the pin silently discarded a curated mark they'd have to notice was
    *  gone before they could restore it. */
   carryPin?: boolean;
+  /** The reply a regenerate replaces. `startTask` deletes it only once the
+   *  new reply's row exists: deleted up front, a regenerate cancelled while
+   *  it waited behind another chat — or failing to start — lost the
+   *  original for good, pin and tool records with it. */
+  replacesMessageId?: string;
   /** Where facts from this turn are remembered — the chat's Space, or
    *  global memory — as of the send. A chat can move to another Space while
    *  its reply waits or streams; the turn belongs with the Space whose
@@ -355,8 +361,10 @@ let runningBuffers: {
   /** Ordered list of tool calls + results made during this turn. Appended
    *  on `tool_call`; the matching entry's `result` / `is_error` are
    *  filled in on `tool_result`. Persisted as JSON on the assistant
-   *  message only at `finishRunning` — a cancel mid-loop goes through it
-   *  too, so the calls made so far are saved with the partial reply. */
+   *  message at each call and result (`saveReplySoFar`, open calls settled
+   *  as interrupted) and finally at `finishRunning` — a cancel mid-loop
+   *  goes through it too, so the calls made so far are saved with the
+   *  partial reply. */
   toolCalls: ToolCallRecord[];
   /** Attachments produced by built-in tools mid-turn (today only `pdf`).
    *  Accumulated across `tool_result` events with non-empty `attachments`
@@ -387,6 +395,87 @@ const pendingDirty = {
   toolCalls: false,
   attachments: false,
 };
+
+/** `c` as it reads once its reply has ended. A call still open gets a result
+ *  saying whether it can have run — a workspace write under way when the
+ *  reply stopped finishes on disk regardless — and loses its pending prompt,
+ *  or the transcript shows a spinner or a consent card nobody can answer. */
+function settledCall(c: ToolCallRecord): ToolCallRecord {
+  const { awaiting_approval, ...rest } = c;
+  if (c.result !== null) return rest;
+  return {
+    ...rest,
+    result: awaiting_approval
+      ? "Not run — the reply ended before you answered."
+      : "The reply ended while this was running, so it may or may not have completed.",
+    is_error: false,
+    interrupted: true,
+  };
+}
+
+/** The running reply is also saved while it streams (X4-01): the one full
+ *  write used to be `finishRunning`'s, so a quit, reload, crash or update
+ *  mid-reply left an empty row, with no trace of the tools it ran — files
+ *  written included. Each interim save is the row as it should read if Loach
+ *  stopped right then: the text so far and `INTERRUPTED_NOTE`, open tool
+ *  calls settled. `finishRunning`'s write replaces it. */
+const INTERIM_SAVE_MS = 2000;
+const INTERRUPTED_NOTE = "_⚠ Reply interrupted — Loach closed before it finished._";
+let interimTimer: ReturnType<typeof setTimeout> | null = null;
+/** Changed since the last interim save. Content and thinking go every time;
+ *  these are left out otherwise (the backend keeps a column sent as null). */
+const interimDirty = { toolCalls: false, attachments: false };
+/** Every write of the running reply, one after another: Tauri runs commands
+ *  concurrently, and an interim save landing after the final one would put
+ *  the interrupted note back on a finished reply. */
+let replyWrites: Promise<void> = Promise.resolve();
+
+function queueReplyWrite(write: () => Promise<void>): void {
+  replyWrites = replyWrites.then(write);
+}
+
+/** Save the running reply now, or within `INTERIM_SAVE_MS` (`soon`). */
+function saveReplySoFar(get: Getter, soon = false) {
+  if (soon) {
+    if (interimTimer === null) {
+      interimTimer = setTimeout(() => {
+        interimTimer = null;
+        saveReplySoFar(get);
+      }, INTERIM_SAVE_MS);
+    }
+    return;
+  }
+  if (interimTimer !== null) {
+    clearTimeout(interimTimer);
+    interimTimer = null;
+  }
+  const buf = runningBuffers;
+  const task = get().runningTask;
+  if (!buf || !task) return;
+  const args = {
+    id: buf.assistantMsgId,
+    session_id: task.sessionId,
+    content: buf.content ? `${buf.content}\n\n${INTERRUPTED_NOTE}` : INTERRUPTED_NOTE,
+    thinking: buf.thinking || null,
+    tool_calls_json: interimDirty.toolCalls ? JSON.stringify(buf.toolCalls.map(settledCall)) : null,
+    attachments_json: interimDirty.attachments ? JSON.stringify(buf.attachments) : null,
+  };
+  interimDirty.toolCalls = false;
+  interimDirty.attachments = false;
+  queueReplyWrite(() =>
+    updateMessage(args).catch((e) => logger.warn("couldn't save the reply so far", e)),
+  );
+}
+
+/** No more interim saves for the reply that just ended. */
+function stopSavingReplySoFar() {
+  if (interimTimer !== null) {
+    clearTimeout(interimTimer);
+    interimTimer = null;
+  }
+  interimDirty.toolCalls = false;
+  interimDirty.attachments = false;
+}
 
 function scheduleFlush(get: Getter, set: Setter) {
   if (pendingFrame !== null) return;
@@ -471,12 +560,15 @@ const PARAM_GUARDS: {
 } = {
   temperature: (v) => (typeof v === "number" && Number.isFinite(v) ? v : undefined),
   top_p: (v) => (typeof v === "number" && Number.isFinite(v) ? v : undefined),
-  top_k: (v) => (typeof v === "number" && Number.isFinite(v) ? v : undefined),
+  // The backend reads these four as `u32` (and `seed` as `i64`): a value it
+  // can't hold — `4096.5`, `-1` from an import or a hand edit — failed the
+  // whole `chat_stream` request, so every send in the chat did.
+  top_k: (v) => (isU32(v) ? v : undefined),
   min_p: (v) => (typeof v === "number" && Number.isFinite(v) ? v : undefined),
-  max_tokens: (v) => (typeof v === "number" && Number.isFinite(v) ? v : undefined),
+  max_tokens: (v) => (isU32(v) ? v : undefined),
   // No window at all isn't a window: unset, so the layer below applies — as
   // `chatNumCtx` already reads it when sizing this chat's sources.
-  num_ctx: (v) => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : undefined),
+  num_ctx: (v) => (isU32(v) && v > 0 ? v : undefined),
   repeat_penalty: (v) =>
     typeof v === "number" && Number.isFinite(v) ? v : undefined,
   frequency_penalty: (v) =>
@@ -485,10 +577,10 @@ const PARAM_GUARDS: {
     typeof v === "number" && Number.isFinite(v) ? v : undefined,
   seed: (v) => {
     if (v === null) return null;
-    return typeof v === "number" && Number.isFinite(v) ? v : undefined;
+    return typeof v === "number" && Number.isSafeInteger(v) ? v : undefined;
   },
   think: (v) => (typeof v === "boolean" ? v : undefined),
-  num_gpu: (v) => (typeof v === "number" && Number.isFinite(v) ? v : undefined),
+  num_gpu: (v) => (isU32(v) ? v : undefined),
 };
 
 function parseOverrides(json: string | null): Partial<GenerationParams> {
@@ -508,9 +600,10 @@ function parseOverrides(json: string | null): Partial<GenerationParams> {
     if (!(key in source)) continue;
     const guard = PARAM_GUARDS[key];
     const checked = guard?.(source[key]);
-    if (checked !== undefined || key === "seed") {
-      // `seed: null` is intentional; every other field treats `undefined`
-      // as "drop", so we don't set the key at all in that branch.
+    // `undefined` drops the key, so the layer below applies — for a bad
+    // `seed` too, which used to be copied as `undefined` and spread over a
+    // valid Space seed. `seed: null` ("random each run") is kept.
+    if (checked !== undefined) {
       (out as Record<string, unknown>)[key] = checked;
     }
   }
@@ -638,14 +731,17 @@ function chatHistory(messages: Message[], userText: string, images: string[]): C
   // model's substitute for them, and re-sending the originals would
   // defeat the whole point of compaction. System rows are dropped here
   // because they're sent via the dedicated `system_prompt` field, not as
-  // chat turns.
+  // chat turns. A reply goes back without the notes Loach added for the
+  // user (an error, an interruption), and one with nothing else in it — a
+  // failed turn, a Stop before the first token — doesn't go at all.
   const history: ChatMessageIn[] = messages
     .filter((m) => m.role !== "system" && m.compacted_at == null)
     .map((m) => ({
       role: m.role,
-      content: m.content,
+      content: m.role === "assistant" ? replayableReply(m.content) : m.content,
       images: [],
-    }));
+    }))
+    .filter((m) => m.role !== "assistant" || m.content !== "");
   history.push({ role: "user", content: userText, images });
   return history;
 }
@@ -1055,8 +1151,9 @@ type Setter = (
 /** How the stream ended. Used to gate "real completion" side-effects
  *  (memory extraction, the unread sidebar dot) so a user-initiated cancel
  *  doesn't act like a natural reply and pollute long-term state with a
- *  half-written turn. */
-type FinishReason = "done" | "cancelled" | "error";
+ *  half-written turn. `cut_off`: done, but at the max-tokens limit — a
+ *  reply to see (the dot), not a finished turn to remember. */
+type FinishReason = "done" | "cut_off" | "cancelled" | "error";
 
 /** A tool call is waiting for an answer in a chat the user isn't looking
  *  at. Every other chat's reply queues behind it until it's answered or the
@@ -1106,6 +1203,7 @@ function finishRunning(
   // early, which is harmless.
   flushPendingFrame(get, set);
   if (get().runningTask?.id !== forTask) return;
+  stopSavingReplySoFar();
   const running = get().runningTask;
   const buf = runningBuffers;
   let settledToolsJson: string | null = null;
@@ -1113,29 +1211,17 @@ function finishRunning(
     // A stream that ends (Stop, error) with a call still open leaves it
     // without a result forever: a consent prompt nobody can answer any
     // more, or a tool whose result will never be delivered (the listener
-    // is already gone). Settle each one, or the bubble — and the transcript
-    // after a reload — shows a dead prompt or a spinner that never stops.
-    // Say plainly whether it can have run: a workspace write that was under
-    // way when Stop landed finishes on disk regardless.
-    let settled = false;
-    for (const c of buf.toolCalls) {
-      if (c.result === null) {
-        c.result = c.awaiting_approval
-          ? "Not run — the reply ended before you answered."
-          : "The reply ended while this was running, so it may or may not have completed.";
-        c.is_error = false;
-        c.interrupted = true;
-        settled = true;
-      }
-      delete c.awaiting_approval;
-    }
+    // is already gone). Settle each one (`settledCall`).
+    const settled = buf.toolCalls.some((c) => c.result === null);
+    buf.toolCalls = buf.toolCalls.map(settledCall);
     if (settled) settledToolsJson = JSON.stringify(buf.toolCalls);
-    // Persist the partial assistant reply. If the DB write fails (disk
-    // full, lock contention, file permissions, …) the bubble we just
-    // streamed exists in memory but won't survive a reload — so surface
-    // it via a toast instead of swallowing silently. Includes the error
-    // message so the user has a starting point if they want to debug.
-    void updateMessage({
+    // Persist the partial assistant reply, after any interim save still
+    // under way (`replyWrites`). If the DB write fails (disk full, lock
+    // contention, file permissions, …) the bubble we just streamed exists
+    // in memory but won't survive a reload — so surface it via a toast
+    // instead of swallowing silently. Includes the error message so the
+    // user has a starting point if they want to debug.
+    const final = {
       id: buf.assistantMsgId,
       session_id: running.sessionId,
       content: buf.content,
@@ -1145,15 +1231,18 @@ function finishRunning(
         buf.toolCalls.length > 0 ? JSON.stringify(buf.toolCalls) : null,
       attachments_json:
         buf.attachments.length > 0 ? JSON.stringify(buf.attachments) : null,
-    }).catch((e) => {
-      const detail = e instanceof Error ? e.message : String(e);
-      logger.error("failed to persist assistant reply", e);
-      useToastStore.getState().push({
-        kind: "error",
-        title: "Couldn't save reply",
-        body: `${detail} — reload will lose this reply.`,
-      });
-    });
+    };
+    queueReplyWrite(() =>
+      updateMessage(final).catch((e) => {
+        const detail = e instanceof Error ? e.message : String(e);
+        logger.error("failed to persist assistant reply", e);
+        useToastStore.getState().push({
+          kind: "error",
+          title: "Couldn't save reply",
+          body: `${detail} — reload will lose this reply.`,
+        });
+      }),
+    );
   }
 
   // If the chat that just finished streaming isn't the one the user is
@@ -1168,7 +1257,7 @@ function finishRunning(
   const producedContent = !!buf && buf.content.trim().length > 0;
   let unreadPatch: Record<string, boolean> | null = null;
   if (
-    reason === "done" &&
+    (reason === "done" || reason === "cut_off") &&
     finishedId &&
     producedContent &&
     finishedId !== activeId
@@ -1436,6 +1525,27 @@ async function startTask(task: QueueTask, get: Getter, set: Setter): Promise<boo
     );
     return true;
   }
+  // A regenerate's original goes now, its replacement's row written (see
+  // `QueueTask.replacesMessageId`). Not awaited, like the writes around it:
+  // a wait here would open another gap for a cancel to fall into. A failed
+  // delete leaves the original to reappear on reload beside the new reply.
+  const replaced = task.replacesMessageId;
+  if (replaced) {
+    void deleteMessage(replaced, sessionId).catch((e) =>
+      logger.warn("couldn't remove the reply a regenerate replaced", e),
+    );
+    set((s) => {
+      const sbm = { ...s.streamingByMessage };
+      delete sbm[replaced];
+      return {
+        messages: {
+          ...s.messages,
+          [sessionId]: (s.messages[sessionId] ?? []).filter((m) => m.id !== replaced),
+        },
+        streamingByMessage: sbm,
+      };
+    });
+  }
 
   // Seed pre-stream tool-call records (e.g. web-fetch outcomes) onto
   // the assistant bubble before any token arrives. The optimistic
@@ -1456,13 +1566,14 @@ async function startTask(task: QueueTask, get: Getter, set: Setter): Promise<boo
   if (preCalls.length > 0) {
     const preCallsJson = JSON.stringify(preCalls);
     assistantMsg = { ...assistantMsg, tool_calls_json: preCallsJson };
-    void updateMessage({
+    const preArgs = {
       id: assistantMsg.id,
       session_id: sessionId,
       content: "",
       tool_calls_json: preCallsJson,
-    }).catch((e) =>
-      logger.warn("persist pre-stream tool records failed", e),
+    };
+    queueReplyWrite(() =>
+      updateMessage(preArgs).catch((e) => logger.warn("persist pre-stream tool records failed", e)),
     );
   }
 
@@ -1536,10 +1647,12 @@ async function startTask(task: QueueTask, get: Getter, set: Setter): Promise<boo
           buf.thinking += ev.delta;
           pendingDirty.thinking = true;
           scheduleFlush(get, set);
+          saveReplySoFar(get, true);
         } else if (ev.kind === "token") {
           buf.content += ev.delta;
           pendingDirty.content = true;
           scheduleFlush(get, set);
+          saveReplySoFar(get, true);
         } else if (ev.kind === "metrics") {
           buf.metrics = {
             tokens: ev.tokens,
@@ -1563,6 +1676,9 @@ async function startTask(task: QueueTask, get: Getter, set: Setter): Promise<boo
           });
           pendingDirty.toolCalls = true;
           scheduleFlush(get, set);
+          // On record at once: a pre-approved write runs right after this.
+          interimDirty.toolCalls = true;
+          saveReplySoFar(get);
           if (ev.approval_required) announceApprovalElsewhere(task.sessionId, get);
         } else if (ev.kind === "tool_result") {
           const existing = buf.toolCalls.find((c) => c.id === ev.id);
@@ -1604,8 +1720,11 @@ async function startTask(task: QueueTask, get: Getter, set: Setter): Promise<boo
           if (ev.attachments && ev.attachments.length > 0) {
             buf.attachments.push(...ev.attachments);
             pendingDirty.attachments = true;
+            interimDirty.attachments = true;
           }
           scheduleFlush(get, set);
+          interimDirty.toolCalls = true;
+          saveReplySoFar(get);
         } else if (ev.kind === "error") {
           // Wrap raw provider error in a sentence the user can act on. We
           // know the provider + URL here from `task.request`, so the result
@@ -1628,7 +1747,14 @@ async function startTask(task: QueueTask, get: Getter, set: Setter): Promise<boo
           // `finishRunning` skips the memory + unread side-effects.
           finishRunning(get, set, "cancelled", task.id);
         } else if (ev.kind === "done") {
-          finishRunning(get, set, "done", task.id);
+          if (ev.cut_off) {
+            // The limit, not the model, ended it: say so, persisted like an
+            // error line, instead of passing it off as a finished reply.
+            buf.content += `\n\n${CUT_OFF_NOTE}`;
+            pendingDirty.content = true;
+            flushPendingFrame(get, set);
+          }
+          finishRunning(get, set, ev.cut_off ? "cut_off" : "done", task.id);
         }
       },
     );
@@ -1640,6 +1766,9 @@ async function startTask(task: QueueTask, get: Getter, set: Setter): Promise<boo
           unlisten: handle.unlisten,
         },
       });
+      // Saved once now, not only at the first token: a model can take a
+      // long while to load, and Loach closed meanwhile left an empty row.
+      saveReplySoFar(get);
     } else {
       // Cancelled or superseded during the connect window: the backend stream
       // is live but orphaned. Tear it down rather than installing a handle
@@ -1675,21 +1804,24 @@ async function startTask(task: QueueTask, get: Getter, set: Setter): Promise<boo
       raw: errorMsg,
     });
     const errorContent = `_⚠ ${friendly}_`;
-    updateMessage({
+    const errorArgs = {
       id: assistantMsg.id,
       session_id: sessionId,
       content: errorContent,
       thinking: null,
       metrics_json: null,
-    }).catch((upErr) => {
-      const detail = upErr instanceof Error ? upErr.message : String(upErr);
-      logger.error("failed to persist startup-error placeholder", upErr);
-      useToastStore.getState().push({
-        kind: "error",
-        title: "Couldn't save error placeholder",
-        body: `${detail} — the bubble will revert on reload.`,
-      });
-    });
+    };
+    queueReplyWrite(() =>
+      updateMessage(errorArgs).catch((upErr) => {
+        const detail = upErr instanceof Error ? upErr.message : String(upErr);
+        logger.error("failed to persist startup-error placeholder", upErr);
+        useToastStore.getState().push({
+          kind: "error",
+          title: "Couldn't save error placeholder",
+          body: `${detail} — the bubble will revert on reload.`,
+        });
+      }),
+    );
 
     runningBuffers = null;
     set((s) => {
@@ -1743,6 +1875,8 @@ function resetForTests() {
   pendingDirty.metrics = false;
   pendingDirty.toolCalls = false;
   pendingDirty.attachments = false;
+  stopSavingReplySoFar();
+  replyWrites = Promise.resolve();
   lastTypingWarm = null;
 }
 export const __testing = { startTask, resetForTests, buildTaskRequest };
@@ -2594,6 +2728,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
           name: a.name,
           mime: a.mime,
           data: a.data,
+          // The original file — a PDF's preview, Save of the file itself —
+          // and the mark that the model read only part of it. This list
+          // predates both fields, so a sent PDF lost its preview and pill.
+          // Transcript listings leave `bytes` out (`omit_attachment_contents`).
+          ...(a.bytes ? { bytes: a.bytes } : {}),
+          ...(a.truncated ? { truncated: true } : {}),
         })),
       );
 
@@ -2724,19 +2864,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const session = state.sessions.find((s) => s.id === sessionId);
       if (!session || !session.model) return;
 
-      // Drop the assistant turn from DB + store first. Same model as
-      // `sendUserMessage`'s placeholder: a fresh assistant row is created
-      // when the task actually starts streaming (inside `startTask`), so
-      // a cancel-while-waiting doesn't leave an empty bubble behind.
+      // The reply stays until its replacement starts: `startTask` deletes it
+      // (`replacesMessageId`) once the new row exists, so a regenerate that
+      // is cancelled while it waits, or never starts, leaves it in place.
       //
-      // Before that, re-read the original user turn's attachments so the new
-      // request reaches the model with the same images as the original send —
-      // their contents fetched, as a chat loaded from disk lists them
-      // without. A failed read then leaves the reply in place.
+      // Re-read the original user turn's attachments so the new request
+      // reaches the model with the same images as the original send — their
+      // contents fetched, as a chat loaded from disk lists them without.
       let triggerAttachments: Attachment[];
       try {
         triggerAttachments = await loadAttachments(userMsg);
-        await deleteMessage(last.id, sessionId);
       } catch (e) {
         useToastStore.getState().push({
           kind: "error",
@@ -2745,22 +2882,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
         });
         return;
       }
-      set((s) => {
-        const sbm = { ...s.streamingByMessage };
-        delete sbm[last.id];
-        return {
-          messages: {
-            ...s.messages,
-            [sessionId]: (s.messages[sessionId] ?? []).filter(
-              (m) => m.id !== last.id,
-            ),
-          },
-          streamingByMessage: sbm,
-        };
-      });
 
+      // Neither the turn being answered (it's the trigger) nor the answer
+      // being replaced belongs in the history.
       const history = (get().messages[sessionId] ?? []).filter(
-        (m) => m.id !== userMsg.id,
+        (m) => m.id !== userMsg.id && m.id !== last.id,
       );
       const { request, preToolCalls } = await buildTaskRequest(
         session,
@@ -2776,9 +2902,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         userMsgId: userMsg.id,
         request,
         preToolCalls: preToolCalls.length > 0 ? preToolCalls : undefined,
-        // The row we just deleted may have been pinned; `startTask` restores
-        // the mark on its replacement rather than silently dropping it.
+        // The row this replaces may be pinned; `startTask` restores the mark
+        // on its replacement rather than silently dropping it.
         carryPin: last.pinned_at != null,
+        replacesMessageId: last.id,
         memoryScope: memoryScopeOf(session),
       };
 

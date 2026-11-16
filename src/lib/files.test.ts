@@ -5,7 +5,7 @@
 
 import { describe, it, expect } from "vitest";
 import type { Attachment } from "@/types";
-import { decodeTextBytes, inlineTextAttachments } from "./files";
+import { decodeTextBytes, fileToAttachment, inlineTextAttachments, looksLikeText } from "./files";
 import { computeContextUsage } from "./contextUsage";
 
 const PL = "Zażółć gęślą jaźń";
@@ -51,6 +51,40 @@ describe("decodeTextBytes", () => {
 
 // An attached Markdown file with a code block closed the fixed ``` fence
 // early, and the rest of it read as the user's own words.
+// F3-06: text with an extension nothing lists, and no MIME type (Windows
+// often gives none), was stored as a binary the model couldn't read.
+describe("looksLikeText", () => {
+  const utf8 = (s: string) => new TextEncoder().encode(s);
+  it("takes UTF-8 and UTF-16 text, even cut mid-character", () => {
+    expect(looksLikeText(utf8('{"a":1}\n{"b":"zażółć"}\n'))).toBe(true);
+    expect(looksLikeText(utf8("diff --git a/x b/x\n"))).toBe(true);
+    expect(looksLikeText(utf8("zażółć").slice(0, 4))).toBe(true); // ends inside "ż"
+    expect(looksLikeText(new Uint8Array([0xff, 0xfe, 0x68, 0x00]))).toBe(true);
+    expect(looksLikeText(new Uint8Array([0x68, 0, 0x69, 0, 0x21, 0]))).toBe(true);
+    expect(looksLikeText(new Uint8Array(0))).toBe(true);
+  });
+  it("refuses binaries", () => {
+    expect(looksLikeText(new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0x14, 0x00, 0x00, 0x00]))).toBe(false);
+    expect(looksLikeText(new Uint8Array([0xc3, 0x28, 0x41]))).toBe(false); // invalid UTF-8
+  });
+});
+
+describe("fileToAttachment", () => {
+  it("reads an unlisted text file as text (F3-06)", async () => {
+    const a = await fileToAttachment(new File(['{"a":1}\n'], "data.jsonl"));
+    expect(a.kind).toBe("text");
+    expect(a.data).toBe('{"a":1}\n');
+  });
+  // F3-01: the cut left half an emoji ahead of the marker, and the lone
+  // surrogate failed every send carrying the attachment.
+  it("never truncates between the halves of an emoji", async () => {
+    const a = await fileToAttachment(new File(["a".repeat(199_999) + "😀".repeat(10)], "long.txt"));
+    expect(a.truncated).toBe(true);
+    expect(a.data.startsWith("a".repeat(199_999) + "\n\n[…file truncated")).toBe(true);
+    expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(a.data)).toBe(false);
+  });
+});
+
 describe("inlineTextAttachments", () => {
   const readme: Attachment = {
     kind: "text",
