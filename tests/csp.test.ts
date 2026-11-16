@@ -15,15 +15,25 @@ const conf = JSON.parse(
   readFileSync(path.join(root, "src-tauri", "tauri.conf.json"), "utf8"),
 ) as { app: { security: { csp: string } } };
 
-const directives = new Map(
-  conf.app.security.csp
-    .split(";")
-    .map((d) => d.trim().split(/\s+/))
-    .filter((parts) => parts[0])
-    .map(([name, ...sources]) => [name, sources] as const),
-);
+const parsed = conf.app.security.csp
+  .split(";")
+  .map((d) => d.trim().split(/\s+/))
+  .filter((parts) => parts[0]);
+const directives = new Map(parsed.map(([name, ...sources]) => [name, sources] as const));
 
 describe("window CSP", () => {
+  // The checks below read one value per directive. A repeated one would be
+  // read last here but enforced first by the webview; an `-elem`/`-attr`
+  // variant (or worker-src) overrides the directive pinned below for its
+  // case. Either way the test would pass over a wider policy.
+  it("names each directive once, with no element or attribute overrides", () => {
+    const names = parsed.map(([name]) => name);
+    expect(names.filter((n, i) => names.indexOf(n) !== i)).toEqual([]);
+    for (const name of ["script-src-elem", "script-src-attr", "style-src-elem", "style-src-attr", "worker-src"]) {
+      expect(directives.has(name), name).toBe(false);
+    }
+  });
+
   it("frames only the loach-sandbox protocol", () => {
     expect(directives.get("frame-src")).toEqual([
       "loach-sandbox:",

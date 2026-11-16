@@ -57,7 +57,7 @@ jobs:
           set -euo pipefail
           PKG=$(node -p "require('./package.json').version")
           TAURI=$(node -p "require('./src-tauri/tauri.conf.json').version")
-          CARGO=$(grep -m1 '^version' src-tauri/Cargo.toml | sed -E 's/version = "(.*)"/\1/')
+          CARGO=$(grep -m1 '^version' src-tauri/Cargo.toml | sed -E 's/^version *= *"(.*)"/\1/')
 
           # Hard fail on version drift — that's a release-blocker bug, not a
           # "not a release" signal. The three files must agree before we ship.

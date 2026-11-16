@@ -26,7 +26,14 @@ const commandsRs = readFileSync(
 const block = /const WRITABLE_SETTING_KEYS:[^=]*=\s*&\[([\s\S]*?)\];/.exec(
   commandsRs,
 )?.[1];
-const allowlist = [...(block ?? "").matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+// Comments out first: a key commented out (`// "lock_on_hide",`) or named
+// in a comment would otherwise count as allowlisted.
+const allowlist = [
+  ...(block ?? "")
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/\/\/.*$/gm, "")
+    .matchAll(/"([^"]+)"/g),
+].map((m) => m[1]);
 
 // The tool toggles' half of the allowlist: every `setting_key` in the
 // `BUILTINS` registry (src-tauri/src/tools/builtin.rs), either a literal or a

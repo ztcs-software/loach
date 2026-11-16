@@ -53,6 +53,12 @@ jobs:
 
       - run: npm ci
       - run: npm run build
+      # The Windows release builds for `chrome105`, not `safari13`, and the
+      # minifier's output differs by target: tests/backdropFilter.test.ts
+      # reads this one too.
+      - run: npx vite build --outDir dist-windows
+        env:
+          TAURI_ENV_PLATFORM: windows
       - run: npm test
       # React hooks rules only (rules-of-hooks, exhaustive-deps) — see
       # .oxlintrc.json. oxlint rather than ESLint: typescript-eslint can't
