@@ -100,6 +100,7 @@ import { useLibraryStore } from "./libraryStore";
 import { useModelsStore } from "./modelsStore";
 import { useSkillStore } from "./skillStore";
 import { getFailedPullFor, getLivePullFor, pullPercent } from "@/lib/usePullRuns";
+import { noticeRecord } from "@/lib/notices";
 
 interface ActiveStream {
   /** Backend stream id — the key `tool_approval_respond` needs. */
@@ -1714,6 +1715,10 @@ async function startTask(task: QueueTask, get: Getter, set: Setter): Promise<boo
           pendingDirty.content = true;
           scheduleFlush(get, set);
           saveReplySoFar(get, true);
+        } else if (ev.kind === "notice") {
+          buf.toolCalls.push(noticeRecord(ev.text));
+          pendingDirty.toolCalls = true;
+          scheduleFlush(get, set);
         } else if (ev.kind === "metrics") {
           buf.metrics = {
             tokens: ev.tokens,

@@ -85,6 +85,13 @@ impl StreamRegistry {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum StreamEvent {
     Token { delta: String },
+    /// Something the user should know about this reply that isn't part of
+    /// it — today, MCP servers that couldn't be reached. Shown beside the
+    /// reply as a chip, never added to its text: sent as a `Token` it was
+    /// rendered as Markdown (a server's error text could add a link styled
+    /// as Loach's own), saved as the reply, replayed to the model as its own
+    /// words, and read by the memory extractor.
+    Notice { text: String },
     Thinking { delta: String },
     /// Stream ended normally (provider emitted EOF / `[DONE]`). Carries
     /// the same closing semantics as the prior version of this enum.

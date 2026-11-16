@@ -451,6 +451,10 @@ export interface ChatRequest {
 
 export type StreamEvent =
   | { kind: "token"; delta: string }
+  /** Something to tell the user beside the reply, never part of it (MCP
+   *  servers that couldn't be reached). Kept as a notice record on the
+   *  reply — see `lib/notices.ts`. */
+  | { kind: "notice"; text: string }
   | { kind: "thinking"; delta: string }
   /** Stream ended naturally — provider emitted its EOF / `[DONE]` marker.
    *  `cut_off`: it stopped at the max-tokens limit rather than at the end

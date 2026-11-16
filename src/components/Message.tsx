@@ -53,6 +53,7 @@ import { useToastStore } from "@/stores/toastStore";
 import { useLibraryStore } from "@/stores/libraryStore";
 import { speechAvailable, useSpeechStore } from "@/stores/speechStore";
 import { SOURCES_TOOL } from "@/lib/sources";
+import { NOTICE_TOOL } from "@/lib/notices";
 import { SourcesUsedChip } from "./library/SourcesUsedChip";
 
 interface MessageProps {
@@ -714,10 +715,12 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
     () => (!isUser ? parseToolCalls(message.tool_calls_json) : []),
     [isUser, message.tool_calls_json],
   );
-  // The Library sources record renders as its own chip, not as a tool call.
+  // The Library sources record and any notices render as their own chips,
+  // not as tool calls.
   const sourcesRecord = allToolCalls.find((c) => c.tool === SOURCES_TOOL) ?? null;
+  const notices = useMemo(() => allToolCalls.filter((c) => c.tool === NOTICE_TOOL), [allToolCalls]);
   const toolCalls = useMemo(
-    () => allToolCalls.filter((c) => c.tool !== SOURCES_TOOL),
+    () => allToolCalls.filter((c) => c.tool !== SOURCES_TOOL && c.tool !== NOTICE_TOOL),
     [allToolCalls],
   );
   const saveToLibrary = useLibraryStore((s) => s.saveToLibrary);
@@ -983,6 +986,13 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
             isStreaming={isStreaming && message.content.length === 0}
           />
         )}
+        {!isUser &&
+          notices.map((n) => (
+            <p key={n.id} className="mb-2 flex items-start gap-1.5 text-xs text-amber-700 dark:text-amber-300">
+              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              <span className="[overflow-wrap:anywhere]">{n.result}</span>
+            </p>
+          ))}
         {!isUser && sourcesRecord && <SourcesUsedChip record={sourcesRecord} />}
         {!isUser && toolCalls.length > 0 && (
           <ToolCallsBlock calls={toolCalls} interactive={!!isStreaming} />

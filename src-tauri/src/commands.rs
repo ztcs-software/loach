@@ -2032,11 +2032,11 @@ impl McpServerInput {
     }
 }
 
-/// Render an upstream error string safe to splice into a chat-bubble
-/// notice. Collapses whitespace / control chars to single spaces and
-/// truncates on a char boundary so a misbehaving server can't:
-///   - inject newlines that break the surrounding markdown wrap
-///   - bloat the message body with a multi-KB stack trace
+/// Render an upstream error string safe for the chat's notice chip.
+/// Collapses whitespace / control chars to single spaces and truncates on a
+/// char boundary so a misbehaving server can't:
+///   - inject newlines into the one-line notice
+///   - bloat the saved reply with a multi-KB stack trace
 ///
 /// The cut doesn't keep a short secret out of the persisted transcript (and
 /// from there snapshots / shared exports). A server echoing the session's
@@ -2055,24 +2055,10 @@ fn sanitize_chat_error(s: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ");
     if collapsed.chars().count() <= MAX_CHARS {
-        return escape_markdown(&collapsed);
+        return collapsed;
     }
     let cut: String = collapsed.chars().take(MAX_CHARS).collect();
-    format!("{}…", escape_markdown(&cut))
-}
-
-/// `s` with the Markdown it could carry made literal. The MCP notice goes
-/// out as reply text, rendered as Markdown: an error body could close its
-/// italics and add a link styled as Loach's own warning.
-fn escape_markdown(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        if matches!(c, '\\' | '`' | '*' | '_' | '[' | ']' | '(' | ')' | '<' | '>' | '!' | '#' | '~' | '|') {
-            out.push('\\');
-        }
-        out.push(c);
-    }
-    out
+    format!("{cut}…")
 }
 
 /// Header-name syntax: RFC 7230 token = 1*tchar, with `tchar` being
@@ -2876,29 +2862,29 @@ pub async fn chat_stream(
                 .collect::<Vec<_>>()
                 .join("; ");
             tracing::warn!("MCP aggregate errors — {log_summary}");
-            // The chat-bubble notice is sanitised: every error string is
-            // collapsed to a single line and truncated, since it lands in
-            // the persisted message — and from there in snapshots and
-            // shared exports. Secrets a server echoes back (its 401 body
+            // The notice is sanitised: every error string is collapsed to a
+            // single line and truncated, since it's saved with the reply (as
+            // its notice chip) — and from there goes into snapshots and
+            // exports. Secrets a server echoes back (its 401 body
             // quoting our `Authorization` header) were already scrubbed by
             // the MCP client; see `sanitize_chat_error`. The operator still
             // has the full text in the log above.
             let ui_summary = errors
                 .iter()
-                .map(|e| format!("{}: {}", escape_markdown(&e.name), sanitize_chat_error(&e.error)))
+                .map(|e| format!("{}: {}", e.name, sanitize_chat_error(&e.error)))
                 .collect::<Vec<_>>()
                 .join("; ");
             // Surface to the user so a totally-broken MCP config isn't
-            // silently invisible. We prepend ONE notice (not a sequence of
-            // Error events — those trigger teardown in the frontend) as a
-            // Token, so it lands at the head of the assistant bubble and
-            // the chat continues normally with whatever tools survived.
-            let notice = format!(
-                "_⚠ Some MCP servers couldn't be reached: {ui_summary}. Continuing with the rest._\n\n"
-            );
+            // silently invisible: ONE notice (not Error events — those tear
+            // the reply down), beside the reply rather than in it, and the
+            // chat continues with whatever tools survived.
             let _ = app.emit(
                 &channel,
-                crate::stream::StreamEvent::Token { delta: notice },
+                crate::stream::StreamEvent::Notice {
+                    text: format!(
+                        "Some MCP servers couldn't be reached: {ui_summary}. Continuing with the rest."
+                    ),
+                },
             );
         }
         request.tools = tools;
@@ -4944,22 +4930,11 @@ mod tests {
     fn chat_error_notice_is_one_line_without_a_bearer_token() {
         assert_eq!(
             sanitize_chat_error("HTTP 401:\n  Authorization: Bearer ghp_abc123 (bearer: x)"),
-            r"HTTP 401: Authorization: Bearer \[redacted\] \(bearer: \[redacted\]"
+            "HTTP 401: Authorization: Bearer [redacted] (bearer: [redacted]"
         );
         let long = sanitize_chat_error(&"word ".repeat(40));
         assert_eq!(long.chars().count(), 121);
         assert!(long.ends_with('…'));
-    }
-
-    /// A server's error body can't put Markdown in the notice: no closed
-    /// italics, no link styled as Loach's own warning.
-    #[test]
-    fn chat_error_notice_carries_no_markdown() {
-        let shown = sanitize_chat_error("_ **Loach: sign in again** [open](https://evil.example/l)");
-        assert_eq!(
-            shown,
-            r"\_ \*\*Loach: sign in again\*\* \[open\]\(https://evil.example/l\)"
-        );
     }
 
     /// A disabled HTTP row isn't DNS-screened, so it can be switched off or
