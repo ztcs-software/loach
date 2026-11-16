@@ -1141,10 +1141,14 @@ exported as typed, except a URL's credentials (the password in
 `postgresql://user:…@host`, a token before the `@`, a `?api_key=` value),
 the value of a flag like `--token`, `--key` or `--api-key=…`, and an
 environment assignment or header whose name says it holds a credential
-(`-e GITHUB_TOKEN=…`, `-e OPENAI_KEY=…`, `--header "Authorization: …"`), which read
-`REDACTED`. An HTTP server's URL loses its user-info and every query
-value the same way, but keeps its path, so a token written into the path
-(`…/s/<token>/mcp`) is exported as it is. Re-enter them after an import.
+(`-e GITHUB_TOKEN=…`, `-e OPENAI_KEY=…`, `--header "Authorization: …"`), and
+an argument shaped like a key on its own (`sk-…`, `ghp_…`, a long run of
+letters and digits), which read `REDACTED` — as the settings list shows
+them masked on screen. An HTTP server's URL loses its user-info and every
+query value the same way, but keeps its path, so a token written into the
+path (`…/s/<token>/mcp`) is exported as it is. Re-enter them after an
+import: a server that came back with a `REDACTED` value is switched off
+until then.
 A header or an environment variable is still the better place for a
 secret.
 

@@ -4097,6 +4097,13 @@ pub async fn import_data_with_dialog(
         if drop_imported_mcp_consent(row, &installed_mcp) {
             consent_dropped.push(row.name.clone());
         }
+        // A credential the export replaced (`REDACTED` in its URL or
+        // arguments) has to be entered again before the server can work:
+        // left on, it would run with the placeholder as its key.
+        if row.enabled && crate::db::carries_redaction(row) {
+            row.enabled = false;
+            switched_off.push(row.name.clone());
+        }
     }
     // Stage 2.6 — screen message roles and session providers. `append_message`
     // and `import_messages` both run `validate_role`, precisely so a crafted

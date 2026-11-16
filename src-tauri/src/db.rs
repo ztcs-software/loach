@@ -3957,7 +3957,7 @@ fn build_snippet(text: &str, needle: &str) -> Option<String> {
 }
 
 /// Stands in for a secret [`redact_args_json`] leaves out of an export.
-const REDACTED: &str = "REDACTED";
+pub(crate) const REDACTED: &str = "REDACTED";
 
 /// Whether a flag, environment variable, header or query parameter called
 /// `name` holds a credential. `auth`, `key`, `pat` and `bearer` only count as
@@ -4034,7 +4034,38 @@ fn redact_arg_value(arg: &str) -> String {
             }
         }
     }
+    if looks_like_token(arg) {
+        return REDACTED.to_string();
+    }
     redact_url_credentials(arg)
+}
+
+/// An argument shaped like a key on its own, with no flag naming it: a known
+/// key prefix (`sk-…`, `ghp_…`, `xoxb-…`) or a long run of key characters
+/// holding both letters and digits. The same rule as the on-screen masking
+/// (`redactArgs` in src/stores/mcpStore.ts).
+fn looks_like_token(arg: &str) -> bool {
+    const PREFIXES: [&str; 13] = [
+        "sk", "pk", "rk", "ghp", "gho", "ghs", "github_pat", "glpat", "xoxa", "xoxb", "xoxp", "xoxr", "xoxs",
+    ];
+    let lower = arg.to_ascii_lowercase();
+    let prefixed = PREFIXES.iter().any(|p| {
+        lower
+            .strip_prefix(p)
+            .and_then(|rest| rest.strip_prefix(['-', '_']))
+            .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_'))
+    });
+    prefixed
+        || (arg.len() >= 32
+            && arg.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            && arg.chars().any(|c| c.is_ascii_digit())
+            && arg.chars().any(|c| c.is_ascii_alphabetic()))
+}
+
+/// Whether an MCP row came out of an export with a credential replaced by
+/// [`REDACTED`] — it can't run as it stands until the value is entered again.
+pub(crate) fn carries_redaction(row: &McpServer) -> bool {
+    row.url.contains(REDACTED) || row.args_json.as_deref().is_some_and(|a| a.contains(REDACTED))
 }
 
 /// `text` with the credentials of any URL in it replaced by [`REDACTED`]:
@@ -4377,6 +4408,56 @@ mod tests {
             ]
         );
         assert_eq!(redact_args_json("not json"), None);
+    }
+
+    /// A row whose export replaced a credential is recognised as such, so an
+    /// import can switch it off until the value is entered again; one with
+    /// nothing masked isn't.
+    #[test]
+    fn masked_rows_are_recognised() {
+        let (db, _dir) = fresh_db();
+        let mut keyed = mcp_draft("pg", "stdio");
+        keyed.args_json = Some(r#"["postgresql://app:hunter2@db/shop"]"#.into());
+        db.upsert_mcp_server(&keyed).expect("insert");
+        db.upsert_mcp_server(&mcp_draft("fs", "stdio")).expect("insert");
+        let snap = db.snapshot().expect("snapshot");
+        let row = |name: &str| snap.data.mcp_servers.iter().find(|r| r.name == name).expect("row");
+        assert!(carries_redaction(row("pg")));
+        assert!(!carries_redaction(row("fs")));
+    }
+
+    /// A key passed on its own, with no flag naming it, goes too — as the
+    /// settings list masks it on screen — while ordinary arguments stay.
+    #[test]
+    fn exported_arguments_lose_bare_tokens() {
+        let args = serde_json::to_string(&[
+            "sk-proj-abc123",
+            "ghp_abcdef",
+            "xoxb-1-2",
+            "0123456789abcdef0123456789abcdef",
+            "@modelcontextprotocol/server-filesystem",
+            "C:\\Users\\you\\Documents",
+            "skills",
+            "sk",
+            "--port=8080",
+        ])
+        .unwrap();
+        let out: Vec<String> =
+            serde_json::from_str(&redact_args_json(&args).expect("a list of strings")).unwrap();
+        assert_eq!(
+            out,
+            [
+                "REDACTED",
+                "REDACTED",
+                "REDACTED",
+                "REDACTED",
+                "@modelcontextprotocol/server-filesystem",
+                "C:\\Users\\you\\Documents",
+                "skills",
+                "sk",
+                "--port=8080",
+            ]
+        );
     }
 
     /// The other places a stdio command line carries a credential — a token
