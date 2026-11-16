@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useRef } from "react";
+import { useEffect, useRef } from "react";
 import { cn } from "@/lib/utils";
 import type { PaletteEntry } from "@/lib/commands/parser";
 
@@ -11,6 +11,9 @@ interface CommandPaletteProps {
   highlightIndex: number;
   onHighlightChange: (index: number) => void;
   onSelect: (entry: PaletteEntry) => void;
+  /** The listbox's id; option `i` is `${listId}-${i}`. The composer points
+   *  `aria-controls` / `aria-activedescendant` at them. */
+  listId: string;
 }
 
 /** Floating autocomplete drop-up anchored above ChatInput. Pure presentation —
@@ -21,6 +24,7 @@ export function CommandPalette({
   highlightIndex,
   onHighlightChange,
   onSelect,
+  listId,
 }: CommandPaletteProps) {
   const listRef = useRef<HTMLDivElement>(null);
 
@@ -41,7 +45,39 @@ export function CommandPalette({
   // sub-entries) a lone header is pure noise, so headers only appear once
   // two or more groups are on screen.
   const groupOf = (e: PaletteEntry) => e.groupOverride ?? e.cmd.group ?? "Other";
-  const showHeaders = new Set(entries.map(groupOf)).size > 1;
+  const groups: { name: string; items: { entry: PaletteEntry; i: number }[] }[] = [];
+  entries.forEach((entry, i) => {
+    const last = groups.at(-1);
+    if (last?.name === groupOf(entry)) last.items.push({ entry, i });
+    else groups.push({ name: groupOf(entry), items: [{ entry, i }] });
+  });
+  const showHeaders = groups.length > 1;
+
+  const option = ({ entry, i }: { entry: PaletteEntry; i: number }) => (
+    <button
+      key={entry.display + ":" + i}
+      type="button"
+      role="option"
+      id={`${listId}-${i}`}
+      aria-selected={i === highlightIndex}
+      data-palette-index={i}
+      onMouseEnter={() => onHighlightChange(i)}
+      onClick={() => onSelect(entry)}
+      className={cn(
+        "flex w-full items-center gap-3 rounded-xl px-3 py-2 text-left text-sm transition-colors",
+        i === highlightIndex
+          ? "bg-foreground/10 text-foreground"
+          : "text-foreground/85 hover:bg-foreground/[0.06]",
+      )}
+    >
+      <span className="font-mono text-[13px] text-foreground">
+        {entry.display}
+      </span>
+      <span className="ml-auto truncate text-xs text-foreground/55">
+        {entry.description}
+      </span>
+    </button>
+  );
 
   return (
     <div
@@ -53,50 +89,37 @@ export function CommandPalette({
       onMouseDown={(e) => e.preventDefault()}
     >
       <div
-        ref={listRef}
-        role="listbox"
         className={cn(
-          "mx-auto w-full max-w-3xl",
-          "max-h-[260px] overflow-y-auto rounded-2xl border border-foreground/10",
+          "mx-auto w-full max-w-3xl rounded-2xl border border-foreground/10",
           "bg-popover/95 p-1.5 text-popover-foreground shadow-xl backdrop-blur-xl",
         )}
       >
-        {entries.map((entry, i) => (
-          <Fragment key={entry.display + ":" + i}>
-            {showHeaders && (i === 0 || groupOf(entries[i - 1]) !== groupOf(entry)) && (
-              <div
-                role="presentation"
-                className={cn(
-                  "px-3 pb-1 text-[10px] font-semibold uppercase tracking-wider text-foreground/40",
-                  i === 0 ? "pt-1.5" : "pt-2.5",
-                )}
-              >
-                {groupOf(entry)}
-              </div>
-            )}
-            <button
-              type="button"
-              role="option"
-              aria-selected={i === highlightIndex}
-              data-palette-index={i}
-              onMouseEnter={() => onHighlightChange(i)}
-              onClick={() => onSelect(entry)}
-              className={cn(
-                "flex w-full items-center gap-3 rounded-xl px-3 py-2 text-left text-sm transition-colors",
-                i === highlightIndex
-                  ? "bg-foreground/10 text-foreground"
-                  : "text-foreground/85 hover:bg-foreground/[0.06]",
-              )}
-            >
-              <span className="font-mono text-[13px] text-foreground">
-                {entry.display}
-              </span>
-              <span className="ml-auto truncate text-xs text-foreground/55">
-                {entry.description}
-              </span>
-            </button>
-          </Fragment>
-        ))}
+        {/* Options and labelled groups only: a header or the key hint
+            inside a listbox is read as part of it. */}
+        <div
+          ref={listRef}
+          id={listId}
+          role="listbox"
+          aria-label="Commands"
+          className="max-h-[260px] overflow-y-auto"
+        >
+          {showHeaders
+            ? groups.map((g, gi) => (
+                <div key={g.name + ":" + gi} role="group" aria-label={g.name}>
+                  <div
+                    aria-hidden
+                    className={cn(
+                      "px-3 pb-1 text-[10px] font-semibold uppercase tracking-wider text-foreground/40",
+                      gi === 0 ? "pt-1.5" : "pt-2.5",
+                    )}
+                  >
+                    {g.name}
+                  </div>
+                  {g.items.map(option)}
+                </div>
+              ))
+            : groups.flatMap((g) => g.items).map(option)}
+        </div>
         <div className="mt-1 border-t border-foreground/10 px-3 py-1.5 text-[11px] text-foreground/40">
           <kbd className="font-mono">↑↓</kbd> navigate ·{" "}
           <kbd className="font-mono">Tab</kbd> /{" "}

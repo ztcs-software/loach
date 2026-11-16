@@ -426,11 +426,14 @@ export function MentionPalette({
   highlightIndex,
   onHighlightChange,
   onSelect,
+  listId,
 }: {
   entries: MentionEntry[];
   highlightIndex: number;
   onHighlightChange: (i: number) => void;
   onSelect: (e: MentionEntry) => void;
+  /** As `CommandPalette`'s: option `i` is `${listId}-${i}`. */
+  listId: string;
 }) {
   const listRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -440,23 +443,27 @@ export function MentionPalette({
   }, [highlightIndex]);
   return (
     <div className="absolute bottom-full left-0 right-0 z-30 mb-2" onMouseDown={(e) => e.preventDefault()}>
-      <div
-        ref={listRef}
-        role="listbox"
-        aria-label="Attach from your Library"
-        className="mx-auto max-h-[300px] w-full max-w-3xl overflow-y-auto rounded-2xl border border-foreground/10 bg-popover/95 p-1.5 text-popover-foreground shadow-xl backdrop-blur-xl"
-      >
+      <div className="mx-auto w-full max-w-3xl rounded-2xl border border-foreground/10 bg-popover/95 p-1.5 text-popover-foreground shadow-xl backdrop-blur-xl">
+        {/* Outside the listbox, which holds options only. */}
         <div className="flex items-baseline justify-between px-3 pb-1 pt-1.5">
           <span className="text-[10px] font-semibold uppercase tracking-wider text-foreground/40">
             Attach from Library
           </span>
           <span className="text-[10.5px] text-foreground/40">Tab to attach · Enter sends</span>
         </div>
+        <div
+          ref={listRef}
+          id={listId}
+          role="listbox"
+          aria-label="Attach from your Library"
+          className="max-h-[268px] overflow-y-auto"
+        >
         {entries.map((e, i) => (
           <button
             key={`${e.kind}:${e.id}`}
             type="button"
             role="option"
+            id={`${listId}-${i}`}
             aria-selected={i === highlightIndex}
             data-mention-index={i}
             onMouseEnter={() => onHighlightChange(i)}
@@ -473,6 +480,7 @@ export function MentionPalette({
             </span>
           </button>
         ))}
+        </div>
       </div>
     </div>
   );

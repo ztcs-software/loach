@@ -34,6 +34,7 @@ import { FileChip } from "./FileChip";
 import { ChipDivider, PersonaChip, ToneChip } from "./ComposerChip";
 import { Markdown, StreamingMarkdown } from "./Markdown";
 import { fileToAttachment, FileTooLargeError } from "@/lib/files";
+import { logger } from "@/lib/logger";
 import { ollamaListModels, ollamaProbe } from "@/lib/tauri";
 import {
   DEFAULT_PERSONA_ID,
@@ -536,7 +537,7 @@ function PrivateMessageBubble({
           />
         )}
         {message.metrics && !isStreaming && (
-          <div className="mt-1 text-[11px] text-zinc-500">
+          <div className="mt-1 text-[11px] text-zinc-400">
             {message.metrics.tokens} tokens ·{" "}
             {Math.round(message.metrics.tokens_per_second)} tok/s
           </div>
@@ -750,7 +751,7 @@ function PrivateParamsPanel() {
                 />
               ))}
             </div>
-            <p className="mt-1.5 text-[11px] leading-relaxed text-zinc-500">
+            <p className="mt-1.5 text-[11px] leading-relaxed text-zinc-400">
               Defines the assistant's role. Layered into the system prompt at send time.
             </p>
           </div>
@@ -773,7 +774,7 @@ function PrivateParamsPanel() {
                 />
               ))}
             </div>
-            <p className="mt-1.5 text-[11px] leading-relaxed text-zinc-500">
+            <p className="mt-1.5 text-[11px] leading-relaxed text-zinc-400">
               Style modifier appended after the system prompt. Falls back to your global default in Settings → General when not set here.
             </p>
           </div>
@@ -793,7 +794,7 @@ function PrivateParamsPanel() {
               value={additional}
               onChange={(e) => setAdditional(e.target.value)}
             />
-            <p className="mt-1.5 text-[11px] leading-relaxed text-zinc-500">
+            <p className="mt-1.5 text-[11px] leading-relaxed text-zinc-400">
               Free-form per-chat instructions. Wiped along with everything else when the chat closes.
             </p>
           </div>
@@ -855,7 +856,7 @@ function ThinkingRow({
           aria-label={checked ? "Disable thinking" : "Enable thinking"}
         />
       </div>
-      <p className="mt-1.5 text-[10.5px] leading-snug text-zinc-500">
+      <p className="mt-1.5 text-[10.5px] leading-snug text-zinc-400">
         {disabled
           ? disabledHint
           : "Let the model reason step-by-step before replying. Adds latency for long answers but may improve quality on complex prompts."}
@@ -915,7 +916,7 @@ function SliderRow({
         onValueChange={(v) => onChange(stops[v[0]])}
       />
       {hint && (
-        <p className="mt-1.5 text-[10.5px] leading-snug text-zinc-500">
+        <p className="mt-1.5 text-[10.5px] leading-snug text-zinc-400">
           {hint}
         </p>
       )}
@@ -1032,7 +1033,12 @@ function PrivateChatComposer() {
         if (e instanceof FileTooLargeError) {
           setError(`${e.name} is larger than 20 MB.`);
         } else {
-          setError("Failed to read file");
+          // Named, with the reason, as the main composer has it: a bare
+          // "Failed to read file" read the same for a corrupt upload and a
+          // pdfjs fault that needs a different fix.
+          logger.error("attachment read failed", f.name, e);
+          const reason = e instanceof Error ? e.message : String(e);
+          setError(`Couldn't read ${f.name}: ${reason}`);
         }
       }
     }
@@ -1165,7 +1171,7 @@ function PrivateChatComposer() {
             // unless explicitly nulled. Without these overrides, focusing
             // the field flashed a translucent inner panel inside our
             // flat pill. Mirrors the regular ChatInput's overrides.
-            className="min-h-[28px] max-h-[220px] flex-1 resize-none border-none bg-transparent backdrop-blur-none px-1 py-1.5 text-[15px] leading-relaxed text-zinc-100 placeholder:text-zinc-500 shadow-none outline-none focus-visible:ring-0 focus-visible:border-none focus-visible:bg-transparent focus-visible:outline-none"
+            className="min-h-[28px] max-h-[220px] flex-1 resize-none border-none bg-transparent backdrop-blur-none px-1 py-1.5 text-[15px] leading-relaxed text-zinc-100 placeholder:text-zinc-400 shadow-none outline-none focus-visible:ring-0 focus-visible:border-none focus-visible:bg-transparent focus-visible:outline-none"
             rows={1}
           />
           {/* No voice-dictation button here, deliberately: the regular

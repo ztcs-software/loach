@@ -14,7 +14,7 @@
 /** True when running on macOS — detected from `navigator.userAgentData`
  *  (Chromium) or the legacy `navigator.platform`. Picks the key labels and
  *  which key `primaryMod` reads. */
-const IS_MAC =
+export const IS_MAC =
   typeof navigator !== "undefined" &&
   /mac/i.test(
     (navigator as Navigator & { userAgentData?: { platform?: string } })

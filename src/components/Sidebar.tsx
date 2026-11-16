@@ -4,9 +4,12 @@ import {
   ChevronDown,
   ChevronRight,
   Cpu,
+  Check,
   Folder as FolderIcon,
+  FolderInput,
   FolderMinus,
   FolderOpen,
+  FolderPlus,
   GitFork,
   Layers,
   Library,
@@ -26,6 +29,9 @@ import {
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { ChatLabelDot, ChatLabelSubmenu } from "@/components/ChatLabelMenu";
@@ -37,6 +43,7 @@ import { deleteChatConfirm } from "@/lib/confirmations";
 import { findChatLabel } from "@/lib/labels";
 import { useChatStore } from "@/stores/chatStore";
 import { useLibraryStore } from "@/stores/libraryStore";
+import { useToastStore } from "@/stores/toastStore";
 import { useModelsStore } from "@/stores/modelsStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useUIStore } from "@/stores/uiStore";
@@ -47,13 +54,14 @@ import type { Folder, Session } from "@/types";
 /**
  * ChatGPT-style sidebar with two states. The sidebar is ALWAYS rendered —
  * primary navigation is always one click away. The collapse/expand toggle
- * lives in the chat title bar (`ChatHeader`), so neither state of the
+ * lives in the window's title bar (`TitleBar`), so neither state of the
  * sidebar carries a toggle itself — items start flush at the top.
  *
  *   Expanded (w-64)              Collapsed rail (w-14)
  *   ┌────────────────────────┐   ┌────┐
  *   │  ✎  New chat           │   │ ✎  │
  *   │  ▢  Spaces             │   │ ▢  │
+ *   │  ▥  Library            │   │ ▥  │
  *   │  ▤  Snippets           │   │ ▤  │
  *   │  ⌘  Models             │   │ ⌘  │
  *   │                        │   │    │
@@ -89,8 +97,8 @@ export function Sidebar() {
 // ---------------------------------------------------------------------------
 // Collapsed rail — narrow icon-only column shown when `sidebarOpen` is false.
 // Mirrors the expanded layout's regions: primary actions, tab navigators,
-// settings on the bottom. The collapse/expand toggle now lives in the chat
-// title bar, so neither state of the sidebar carries it itself — both
+// settings on the bottom. The collapse/expand toggle now lives in the
+// window's title bar (`TitleBar`), so neither state of the sidebar carries it itself — both
 // states' navigation starts flush at the top.
 // ---------------------------------------------------------------------------
 
@@ -506,6 +514,16 @@ function ChatList() {
     });
   }, []);
 
+  // A folder made from a chat's menu (`ChatFolderSubmenu`) opens too.
+  useEffect(() => {
+    const openFolder = (e: Event) => {
+      const id = (e as CustomEvent<string>).detail;
+      setOpenFolders((prev) => new Set(prev).add(id));
+    };
+    window.addEventListener("loach:open-folder", openFolder);
+    return () => window.removeEventListener("loach:open-folder", openFolder);
+  }, []);
+
   /** Chat dropped on another chat. If the target already lives in a folder
    *  the dragged chat joins it; otherwise this is the create-a-folder
    *  gesture and we ask for a name first. */
@@ -872,6 +890,76 @@ function FolderRow({
   );
 }
 
+/** "Move to folder ▸": every folder, a new one, and out of the one it's in.
+ *  Dragging and `/folder` were the only ways in, neither of them from the
+ *  keyboard or the menu. Mounted only while the menu is open, so the rows
+ *  don't each subscribe to the folder list. */
+function ChatFolderSubmenu({ session }: { session: Pick<Session, "id" | "title" | "folder_id"> }) {
+  const folders = useChatStore((s) => s.folders);
+  const { prompt } = useConfirm();
+
+  const move = async (folderId: string | null) => {
+    if (folderId === session.folder_id) return;
+    try {
+      await useChatStore.getState().moveToFolder(session.id, folderId);
+    } catch (e) {
+      useToastStore.getState().push({
+        kind: "error",
+        title: "Couldn't move this chat",
+        body: e instanceof Error ? e.message : String(e),
+      });
+    }
+  };
+  const newFolder = async () => {
+    const name = await prompt({
+      title: "New folder",
+      body: `“${session.title || "Untitled"}” will be moved into it.`,
+      defaultValue: "New folder",
+      placeholder: "Folder name",
+      confirmLabel: "Create folder",
+    });
+    const trimmed = name?.trim();
+    if (!trimmed) return;
+    try {
+      const folder = await useChatStore.getState().createFolderWith(trimmed, [session.id]);
+      // Opened, as one made by dropping a chat on another is (`ChatList`).
+      window.dispatchEvent(new CustomEvent("loach:open-folder", { detail: folder.id }));
+    } catch (e) {
+      useToastStore.getState().push({
+        kind: "error",
+        title: "Couldn't create the folder",
+        body: e instanceof Error ? e.message : String(e),
+      });
+    }
+  };
+
+  return (
+    <DropdownMenuSub>
+      <DropdownMenuSubTrigger>
+        <FolderInput className="h-4 w-4" />
+        Move to folder
+      </DropdownMenuSubTrigger>
+      <DropdownMenuSubContent className="max-h-72 min-w-[180px] overflow-y-auto">
+        {folders.map((f) => (
+          <DropdownMenuItem key={f.id} onSelect={() => void move(f.id)}>
+            <span className="min-w-0 truncate">{f.name}</span>
+            {session.folder_id === f.id && <Check className="ml-auto h-3.5 w-3.5 shrink-0" />}
+          </DropdownMenuItem>
+        ))}
+        {folders.length > 0 && <DropdownMenuSeparator />}
+        <DropdownMenuItem onSelect={() => void newFolder()}>
+          <FolderPlus className="h-4 w-4" /> New folder…
+        </DropdownMenuItem>
+        {session.folder_id && (
+          <DropdownMenuItem onSelect={() => void move(null)}>
+            <FolderMinus className="h-4 w-4" /> Remove from folder
+          </DropdownMenuItem>
+        )}
+      </DropdownMenuSubContent>
+    </DropdownMenuSub>
+  );
+}
+
 const SessionRow = memo(function SessionRowImpl({
   session,
   active,
@@ -883,13 +971,10 @@ const SessionRow = memo(function SessionRowImpl({
   onSelect: (id: string) => void;
   onDropOnChat: (dragged: Session, target: Session) => void;
 }) {
-  const rename = useChatStore((s) => s.rename);
-  const pinChat = useChatStore((s) => s.pin);
-  const setLabel = useChatStore((s) => s.setLabel);
+  // Actions, read without subscribing: every subscription's selector runs
+  // on each store write (each streaming flush), times every row.
+  const { rename, pin: pinChat, setLabel, archive: archiveChat, remove } = useChatStore.getState();
   const labelDef = findChatLabel(session.label);
-  const archiveChat = useChatStore((s) => s.archive);
-  const moveToFolder = useChatStore((s) => s.moveToFolder);
-  const remove = useChatStore((s) => s.remove);
   const { confirm } = useConfirm();
   const [dragging, setDragging] = useState(false);
   const { over, dropProps } = useChatDrop(
@@ -1110,13 +1195,7 @@ const SessionRow = memo(function SessionRowImpl({
             <DropdownMenuItem onSelect={beginRename}>
               <Pencil className="h-4 w-4" /> Rename
             </DropdownMenuItem>
-            {session.folder_id && (
-              <DropdownMenuItem
-                onSelect={() => void moveToFolder(session.id, null)}
-              >
-                <FolderMinus className="h-4 w-4" /> Remove from folder
-              </DropdownMenuItem>
-            )}
+            <ChatFolderSubmenu session={session} />
             <DropdownMenuSeparator />
             <DropdownMenuItem onSelect={() => void archiveChat(session.id, true)}>
               <Archive className="h-4 w-4" /> Move to archive

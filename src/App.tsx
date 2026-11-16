@@ -646,13 +646,6 @@ const HERO_GREETINGS = [
 ];
 
 /**
- * Shown when the user has no active chat — typically because they just
- * deleted or archived their last one. Unlike HeroComposer (which still has
- * a working composer because a fresh empty session is already open), there
- * is no session to send into here, so we surface a single "New chat" CTA
- * that calls into the same `newSession` the sidebar uses.
- */
-/**
  * Centered, low-contrast "still loading" placeholder for the chat surface.
  * Shown for the ~100–300 ms window between unlock and `chatStore.hydrate()`
  * completing. We intentionally don't use a spinner — most loads are too fast
@@ -674,6 +667,13 @@ function ChatLoadingSkeleton() {
   );
 }
 
+/**
+ * Shown when the user has no active chat — typically because they just
+ * deleted or archived their last one. Unlike HeroComposer (which still has
+ * a working composer because a fresh empty session is already open), there
+ * is no session to send into here, so we surface a single "New chat" CTA
+ * that calls into the same `newSession` the sidebar uses.
+ */
 function NoChatState() {
   const newSession = useChatStore((s) => s.newSession);
   const start = () => void newSession({ spaceId: null });

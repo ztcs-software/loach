@@ -545,7 +545,10 @@ html.font-size-large   { --font-scale: 1.05; }
 .text-\[13px\]    { font-size: calc(13px   * var(--font-scale, 0.93)); }
 .text-\[13\.5px\] { font-size: calc(13.5px * var(--font-scale, 0.93)); }
 .text-\[14px\]    { font-size: calc(14px   * var(--font-scale, 0.93)); }
+.text-\[14\.5px\] { font-size: calc(14.5px * var(--font-scale, 0.93)); }
 .text-\[15px\]    { font-size: calc(15px   * var(--font-scale, 0.93)); }
+.text-\[20px\]    { font-size: calc(20px   * var(--font-scale, 0.93)); }
+.text-\[22px\]    { font-size: calc(22px   * var(--font-scale, 0.93)); }
 
 /* =========================================================================
    Contrast lift for `text-foreground/<opacity>` utilities

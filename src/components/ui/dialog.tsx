@@ -21,6 +21,14 @@ const DialogOverlay = React.forwardRef<
 ));
 DialogOverlay.displayName = DialogPrimitive.Overlay.displayName;
 
+/** For a dialog's `onPointerDownOutside`: a press on the title bar isn't a
+ *  dismissal. The bar sits above the overlay, and on Windows and Linux it is
+ *  the only way to move or minimise the window — a drag there closed the
+ *  dialog instead. */
+export function keepOpenOnTitleBar(e: { target: EventTarget | null; preventDefault: () => void }) {
+  if (e.target instanceof Element && e.target.closest("[data-titlebar]")) e.preventDefault();
+}
+
 const DialogContent = React.forwardRef<
   React.ElementRef<typeof DialogPrimitive.Content>,
   React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content> & {
@@ -28,7 +36,7 @@ const DialogContent = React.forwardRef<
      *  (e.g. mid-install), where a visible-but-inert X is a lie. */
     hideClose?: boolean;
   }
->(({ className, children, hideClose, ...props }, ref) => (
+>(({ className, children, hideClose, onPointerDownOutside, ...props }, ref) => (
   <DialogPortal>
     <DialogOverlay />
     <DialogPrimitive.Content
@@ -37,6 +45,10 @@ const DialogContent = React.forwardRef<
         "glass-panel fixed left-1/2 top-1/2 z-50 grid w-full max-w-lg -translate-x-1/2 -translate-y-1/2 gap-4 rounded-3xl p-6 text-foreground",
         className,
       )}
+      onPointerDownOutside={(e) => {
+        keepOpenOnTitleBar(e);
+        onPointerDownOutside?.(e);
+      }}
       {...props}
     >
       {children}

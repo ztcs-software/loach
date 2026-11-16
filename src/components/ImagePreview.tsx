@@ -1,5 +1,6 @@
 import { useState } from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
+import { keepOpenOnTitleBar } from "@/components/ui/dialog";
 import { Download, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { saveBinaryToFile } from "@/lib/tauri";
@@ -54,6 +55,7 @@ export function ImagePreview({ open, onOpenChange, data, mime, name }: ImagePrev
         <DialogPrimitive.Overlay className="fixed inset-x-0 bottom-0 top-9 z-[95] bg-black/75 backdrop-blur-md data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
         <DialogPrimitive.Content
           aria-describedby={undefined}
+          onPointerDownOutside={keepOpenOnTitleBar}
           onClick={(e) => {
             // Content fills the whole dim area, so Radix's built-in "click
             // outside" never fires. Treat any click that lands directly on

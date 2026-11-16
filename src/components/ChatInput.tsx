@@ -89,6 +89,11 @@ interface ChatInputProps {
  *  one chat with the next chat's message. Kept out here, in memory only. */
 const drafts = new Map<string, { text: string; attachments: Attachment[] }>();
 
+/** The slash-command and `#` palettes' listbox ids (see the textarea's
+ *  `aria-activedescendant`). One composer is mounted at a time. */
+const COMMAND_LIST_ID = "composer-commands";
+const MENTION_LIST_ID = "composer-mentions";
+
 /** The `composerInsertSeq` last applied. One composer is mounted at a time,
  *  so a newer one at mount is a primer (a snippet's Run, a failed send put
  *  back) that landed while none was. */
@@ -1191,6 +1196,7 @@ export function ChatInput({ centered = false }: ChatInputProps) {
             highlightIndex={mentionIndex}
             onHighlightChange={setMentionIndex}
             onSelect={acceptMention}
+            listId={MENTION_LIST_ID}
           />
         )}
         {paletteOpen && (
@@ -1199,6 +1205,7 @@ export function ChatInput({ centered = false }: ChatInputProps) {
             highlightIndex={paletteIndex}
             onHighlightChange={setPaletteIndex}
             onSelect={acceptPaletteEntry}
+            listId={COMMAND_LIST_ID}
           />
         )}
         <div
@@ -1317,6 +1324,18 @@ export function ChatInput({ centered = false }: ChatInputProps) {
               // under the user. A fixed label keeps it stable; the placeholder
               // stays as the visible status hint.
               aria-label="Message"
+              // The open palette and its highlighted entry, for screen
+              // readers: arrowing through it said nothing. The caret stays
+              // here, so the entry is named through the textbox.
+              aria-autocomplete={paletteOpen || mentionOpen ? "list" : undefined}
+              aria-controls={paletteOpen ? COMMAND_LIST_ID : mentionOpen ? MENTION_LIST_ID : undefined}
+              aria-activedescendant={
+                paletteOpen
+                  ? `${COMMAND_LIST_ID}-${paletteIndex}`
+                  : mentionOpen
+                    ? `${MENTION_LIST_ID}-${mentionIndex}`
+                    : undefined
+              }
               value={text}
               onChange={(e) => {
                 setText(e.target.value);

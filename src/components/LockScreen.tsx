@@ -184,6 +184,9 @@ export function LockScreen() {
 
           {error && (
             <div
+              // Announced: focus goes back to the emptied field, and a
+              // screen reader said nothing about why.
+              role="alert"
               className={cn(
                 "rounded-lg border border-destructive/30 bg-destructive/[0.06] px-3 py-2 text-[12px] text-destructive",
               )}

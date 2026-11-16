@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Minus, Square, X, Copy, Ghost, PanelLeft, Search } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { isTauri } from "@/lib/tauri";
+import { formatShortcut, IS_MAC, SHORTCUTS } from "@/lib/shortcuts";
 import { useChatStore } from "@/stores/chatStore";
 import { usePrivateChatStore } from "@/stores/privateChatStore";
 import { useUIStore } from "@/stores/uiStore";
@@ -9,22 +10,15 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { useSecurityStore } from "@/stores/securityStore";
 import topBarLogo from "@/assets/loach-icon.png";
 
-// Detect macOS so we can label the Ctrl/Cmd+K shortcut with the right
-// modifier. The keybinding itself is SearchBar's (`primaryMod`) — this
-// is purely visual.
-const isMac =
-  typeof navigator !== "undefined" &&
-  /mac/i.test(
-    (navigator as Navigator & { userAgentData?: { platform?: string } })
-      .userAgentData?.platform || navigator.platform,
-  );
+// The search pill's key label, from the binding SearchBar listens for.
+const SEARCH_SHORTCUT = formatShortcut(SHORTCUTS.find((s) => s.action === "global-search")!);
 
 // On macOS the window keeps its system title bar in overlay mode
 // (src-tauri/tauri.macos.conf.json), so macOS draws its own close /
 // minimise / full-screen buttons over the left end of this bar. We leave
 // them room and drop our own. Tauri only: a Mac browser previewing the
 // frontend has no such buttons.
-const nativeControls = isTauri && isMac;
+const nativeControls = isTauri && IS_MAC;
 
 export function TitleBar() {
   const [isMaximized, setIsMaximized] = useState(false);
@@ -133,8 +127,13 @@ export function TitleBar() {
   return (
     <div
       data-tauri-drag-region
+      // Marks the bar for `keepOpenOnTitleBar`. `pointer-events-auto`: a
+      // modal dialog sets `pointer-events: none` on <body>, and the bar —
+      // drawn above its overlay — inherited it, so its window controls and
+      // drag area went dead while one was open.
+      data-titlebar
       className={cn(
-        "relative z-[70] flex h-9 items-center gap-2 border-b border-foreground/8 bg-foreground/[0.03] pr-0 select-none backdrop-blur-2xl",
+        "pointer-events-auto relative z-[70] flex h-9 items-center gap-2 border-b border-foreground/8 bg-foreground/[0.03] pr-0 select-none backdrop-blur-2xl",
         // 76px: the native buttons sit at x = 14 and span 54px
         // (`trafficLightPosition` in tauri.macos.conf.json), plus a gap.
         nativeControls && !isFullscreen ? "pl-[76px]" : "pl-1.5",
@@ -220,7 +219,7 @@ export function TitleBar() {
               Search chats, messages, Spaces…
             </span>
             <kbd className="rounded border border-foreground/10 bg-foreground/[0.05] px-1 py-px font-mono text-[10px] tracking-wider text-foreground/40">
-              {isMac ? "⌘K" : "Ctrl K"}
+              {SEARCH_SHORTCUT}
             </kbd>
           </button>
         </div>

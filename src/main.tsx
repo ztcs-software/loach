@@ -4,6 +4,7 @@ import App from "./App";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { useToastStore } from "./stores/toastStore";
 import { logger } from "./lib/logger";
+import { primaryMod } from "./lib/shortcuts";
 import "./styles/globals.css";
 
 // Suppress the WebView's native context menu globally, EXCEPT inside form
@@ -35,12 +36,13 @@ window.addEventListener("contextmenu", (e) => {
   e.preventDefault();
 });
 
-// Suppress the WebView's built-in find-in-page accelerators we don't bind
-// ourselves. On Windows (WebView2) F3 and Ctrl+G pop a Chrome-style
-// toolbar that doesn't match the app's chrome and isn't wired to any
-// Loach search surface. Ctrl+F is intentionally NOT suppressed here —
-// the global shortcut handler (`KeyboardShortcuts`) binds it to the
-// in-chat finder overlay.
+// Suppress the WebView's built-in find-in-page accelerators. On Windows
+// (WebView2) F3, Ctrl+G and Ctrl+F pop a Chrome-style toolbar that doesn't
+// match the app's chrome and isn't wired to any Loach search surface.
+// Ctrl+F is only kept from the WebView, not stopped: `KeyboardShortcuts`
+// still gets it and opens the in-chat finder where its gates allow — where
+// they don't (Private Chat, a dialog, the lock screen) the toolbar opened.
+// Through `primaryMod`: on macOS Ctrl+F belongs to the text field.
 window.addEventListener(
   "keydown",
   (e) => {
@@ -48,6 +50,8 @@ window.addEventListener(
     if (((e.ctrlKey || e.metaKey) && k === "g") || e.key === "F3") {
       e.preventDefault();
       e.stopPropagation();
+    } else if (k === "f" && primaryMod(e) && !e.shiftKey && !e.altKey) {
+      e.preventDefault();
     }
   },
   { capture: true },

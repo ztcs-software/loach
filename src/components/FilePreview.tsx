@@ -1,5 +1,6 @@
 import { useState } from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
+import { keepOpenOnTitleBar } from "@/components/ui/dialog";
 import { Download, File, FileText, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { saveAttachment } from "@/lib/files";
@@ -47,6 +48,7 @@ export function FilePreview({ open, onOpenChange, attachment }: FilePreviewProps
         <DialogPrimitive.Overlay className="fixed inset-x-0 bottom-0 top-9 z-[95] bg-black/75 backdrop-blur-md data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
         <DialogPrimitive.Content
           aria-describedby={undefined}
+          onPointerDownOutside={keepOpenOnTitleBar}
           onClick={(e) => {
             // Match ImagePreview — clicking outside the centered card closes
             // the dialog, but clicks on the card itself stay live so the
