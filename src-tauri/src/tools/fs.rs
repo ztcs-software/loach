@@ -844,6 +844,47 @@ pub fn touches_git_dir(root: &Path, args: &Value) -> bool {
         })
 }
 
+/// Whether a call's `path` — or either end of a move — is a file that is read
+/// in as instructions, as written or once links are resolved: `LOACHFILE.md`
+/// at the workspace root (in the system prompt of every turn), a `CLAUDE.md`
+/// or `AGENTS.md` at any depth (what Claude Code and Codex load as project
+/// instructions, nested ones included), or anything under one of
+/// `skill_dirs` (a new skill there joins every chat's catalogue). Like
+/// [`touches_git_dir`], a standing "Allow … for this chat" never covers
+/// these: given for ordinary edits, it let the model rewrite its own
+/// instructions — for every later turn and every chat on the folder — with
+/// no card.
+pub fn touches_instructions(root: &Path, args: &Value, skill_dirs: &[PathBuf]) -> bool {
+    let canon_root = root.canonicalize().ok();
+    let skill_dirs: Vec<PathBuf> = skill_dirs.iter().filter_map(|d| d.canonicalize().ok()).collect();
+    ["path", "from", "to"]
+        .iter()
+        .filter_map(|key| args.get(*key)?.as_str())
+        .any(|rel| {
+            names_instructions(Path::new(rel.trim()))
+                || resolve_target(root, rel).ok().is_some_and(|p| {
+                    let p = dunce::simplified(&p);
+                    canon_root
+                        .as_deref()
+                        .and_then(|r| p.strip_prefix(dunce::simplified(r)).ok())
+                        .is_some_and(names_instructions)
+                        || skill_dirs.iter().any(|d| p.starts_with(dunce::simplified(d)))
+                })
+        })
+}
+
+/// Whether `rel`, relative to the workspace root, names one of
+/// [`INSTRUCTIONS_FILES`] where it's read: `LOACHFILE.md` only at the root
+/// (all Loach reads), the others anywhere. Any case.
+fn names_instructions(rel: &Path) -> bool {
+    let Some(name) = rel.file_name().map(|n| n.to_string_lossy()) else {
+        return false;
+    };
+    let at_root = rel.components().filter(|c| matches!(c, Component::Normal(_))).count() == 1;
+    (at_root && name.eq_ignore_ascii_case(INSTRUCTIONS_FILES[0]))
+        || INSTRUCTIONS_FILES[1..].iter().any(|f| name.eq_ignore_ascii_case(f))
+}
+
 /// Names git, or the hook manager it calls, takes commands from — see
 /// [`touches_git_dir`].
 const GIT_RUN_NAMES: &[&str] = &[".git", ".husky", ".githooks", ".pre-commit-config.yaml"];
@@ -2607,6 +2648,28 @@ mod tests {
             assert_eq!(fs::read_to_string(&path).unwrap(), "TOKEN=new\n");
             assert_eq!(acl(), before, "{name}");
         }
+    }
+
+    /// Nor the files read in as instructions: LOACHFILE.md at the root,
+    /// CLAUDE.md / AGENTS.md at any depth, and anything in a skills folder.
+    #[test]
+    fn calls_on_instruction_files_are_recognised() {
+        let (_d, root) = workspace();
+        let skills = root.join("home/.agents/skills");
+        fs::create_dir_all(&skills).unwrap();
+        let dirs = [skills];
+        let hit = |args: Value| touches_instructions(&root, &args, &dirs);
+
+        assert!(hit(json!({ "path": "LOACHFILE.md" })));
+        assert!(hit(json!({ "path": "./loachfile.MD" })));
+        assert!(hit(json!({ "path": "CLAUDE.md" })));
+        assert!(hit(json!({ "path": "src/AGENTS.md" })));
+        assert!(hit(json!({ "from": "notes.md", "to": "docs/claude.md" })));
+        assert!(hit(json!({ "path": "home/.agents/skills/helper/SKILL.md" })));
+        // Loach reads only the root's LOACHFILE.md.
+        assert!(!hit(json!({ "path": "docs/LOACHFILE.md" })));
+        assert!(!hit(json!({ "path": "README.md" })));
+        assert!(!hit(json!({ "path": "src/main.rs" })));
     }
 
     /// No standing grant covers `.git`: hooks and config there run commands.

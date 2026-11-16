@@ -2623,6 +2623,27 @@ fn save_changes_what_runs(db: &crate::db::Database, draft: &McpServer) -> bool {
         || existing.stdio_fingerprint() != draft.stdio_fingerprint()
 }
 
+/// Drop the consent an imported MCP row carries — `auto_approve` and the
+/// "Always allow" list — unless this install already has the row, pointed at
+/// the same program or endpoint. They're answers given for that program on
+/// the machine that made the backup; a restore asks no one, so a shared or
+/// crafted backup could otherwise install an endpoint whose tools run with no
+/// card. As `mcp_save` starts the list over when a row is repointed. True
+/// when something was dropped.
+fn drop_imported_mcp_consent(row: &mut McpServer, installed: &[McpServer]) -> bool {
+    if installed.iter().any(|s| s.id == row.id && !runs_something_else(s, row)) {
+        return false;
+    }
+    let allowed_any = row
+        .allowed_tools_json
+        .as_deref()
+        .is_some_and(|j| serde_json::from_str::<Vec<String>>(j).map_or(true, |v| !v.is_empty()));
+    let dropped = row.auto_approve || allowed_any;
+    row.auto_approve = false;
+    row.allowed_tools_json = None;
+    dropped
+}
+
 /// Whether `draft` points a saved row at a different program or endpoint:
 /// another transport, command line or environment, or URL.
 fn runs_something_else(existing: &McpServer, draft: &McpServer) -> bool {
@@ -3923,6 +3944,10 @@ pub async fn import_data_with_dialog(
     // importing a tampered file.
     let mut quarantined: Vec<String> = Vec::new();
     let mut stdio_parked: Vec<String> = Vec::new();
+    let mut consent_dropped: Vec<String> = Vec::new();
+    // What this install already has, to tell whose consent a row carries. A
+    // listing that fails counts as none: every row's consent is dropped.
+    let installed_mcp = state.db.list_mcp_servers().unwrap_or_default();
     let mut renamed: Vec<String> = Vec::new();
     let mut taken: std::collections::HashSet<String> =
         snap.data.mcp_servers.iter().map(|r| r.name.clone()).collect();
@@ -4000,6 +4025,9 @@ pub async fn import_data_with_dialog(
                 ));
             }
         }
+        if drop_imported_mcp_consent(row, &installed_mcp) {
+            consent_dropped.push(row.name.clone());
+        }
     }
     // Stage 2.6 — screen message roles and session providers. `append_message`
     // and `import_messages` both run `validate_role`, precisely so a crafted
@@ -4041,6 +4069,14 @@ pub async fn import_data_with_dialog(
             "import: {} stdio MCP server(s) imported disabled pending consent: {}",
             stdio_parked.len(),
             stdio_parked.join(", ")
+        );
+    }
+    if !consent_dropped.is_empty() {
+        tracing::info!(
+            "import: {} MCP server(s) imported asking before each tool call (the backup's \
+             auto-approve / always-allow answers weren't given on this install): {}",
+            consent_dropped.len(),
+            consent_dropped.join(", ")
         );
     }
 
@@ -4659,6 +4695,37 @@ mod tests {
         assert!(!runs_something_else(&a, &renamed));
         assert!(runs_something_else(&a, &stdio_input("npx", &["-y", "server-b"], &[]).to_draft()));
         assert!(runs_something_else(&a, &stdio_input("npx", &["-y", "server-a"], &[("K", "v")]).to_draft()));
+    }
+
+    /// A backup's auto-approve and "Always allow" answers survive a restore
+    /// only for a row this install has, still running the same thing.
+    #[test]
+    fn a_restore_keeps_mcp_consent_only_for_a_row_answered_here() {
+        let mut installed = stdio_input("npx", &["-y", "server-a"], &[]).to_draft();
+        installed.id = "row-1".into();
+        let consented = |base: &McpServer| McpServer {
+            auto_approve: true,
+            allowed_tools_json: Some(r#"["write_file"]"#.into()),
+            ..base.clone()
+        };
+
+        let mut same = consented(&installed);
+        assert!(!drop_imported_mcp_consent(&mut same, std::slice::from_ref(&installed)));
+        assert!(same.auto_approve && same.allowed_tools_json.is_some());
+
+        let mut repointed = consented(&McpServer {
+            id: "row-1".into(),
+            ..stdio_input("npx", &["-y", "server-b"], &[]).to_draft()
+        });
+        assert!(drop_imported_mcp_consent(&mut repointed, std::slice::from_ref(&installed)));
+        assert!(!repointed.auto_approve && repointed.allowed_tools_json.is_none());
+
+        let mut unknown = consented(&McpServer { id: "row-2".into(), ..installed.clone() });
+        assert!(drop_imported_mcp_consent(&mut unknown, std::slice::from_ref(&installed)));
+
+        // Nothing to drop is reported as nothing.
+        let mut plain = McpServer { id: "row-3".into(), allowed_tools_json: Some("[]".into()), ..installed.clone() };
+        assert!(!drop_imported_mcp_consent(&mut plain, &[]));
     }
 
     /// Line separators render as line breaks in the dialog and tag

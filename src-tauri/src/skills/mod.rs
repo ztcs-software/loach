@@ -107,6 +107,11 @@ impl Roots {
     pub fn loach_dir(&self) -> &Path {
         &self.dirs[0].1
     }
+
+    /// Every folder skills are read from.
+    pub fn dirs(&self) -> impl Iterator<Item = &Path> {
+        self.dirs.iter().map(|(_, d)| d.as_path())
+    }
 }
 
 /// One installed skill, as Settings lists it.

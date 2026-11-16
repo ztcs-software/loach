@@ -24,7 +24,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { AttachmentActions } from "./AttachmentActions";
-import { BUILTIN_SERVER_ID, workspaceApproval } from "./WorkspaceApproval";
+import { BUILTIN_SERVER_ID, Revealed, workspaceApproval } from "./WorkspaceApproval";
 import { Markdown, StreamingMarkdown } from "./Markdown";
 import { MarkdownSourceProvider } from "./markdownSource";
 import { lastCodeBlock } from "@/lib/codeBlocks";
@@ -227,8 +227,11 @@ function ApprovalCard({ call }: { call: ToolCallRecord }) {
       {preview ? (
         preview.body
       ) : (
+        // Revealed: this card is the only consent for an MCP tool, and a
+        // payload hidden in invisible characters (tag characters, bidi
+        // controls) read here as text that looks harmless.
         <pre className="mt-2 max-h-40 overflow-auto rounded border border-foreground/10 bg-foreground/[0.04] px-2 py-1.5 font-mono text-[11px] leading-snug text-foreground/80 whitespace-pre-wrap break-words">
-          {formatArgs(call.arguments) || "{}"}
+          <Revealed text={formatArgs(call.arguments) || "{}"} />
         </pre>
       )}
       <div className="mt-2.5 flex flex-wrap items-center gap-2">
@@ -337,7 +340,7 @@ function ToolCallItem({ call }: { call: ToolCallRecord }) {
                 Arguments
               </div>
               <pre className="max-h-40 overflow-auto rounded border border-foreground/10 bg-foreground/[0.04] px-2 py-1.5 font-mono text-[11px] leading-snug text-foreground/80 whitespace-pre-wrap break-words">
-                {argsText || "{}"}
+                <Revealed text={argsText || "{}"} />
               </pre>
             </div>
           )}

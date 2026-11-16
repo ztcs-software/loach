@@ -313,8 +313,9 @@ function Mono({ children }: { children: ReactNode }) {
 
 /** `text` with every character that would otherwise display as nothing —
  *  or reorder what's around it — drawn as a visible `U+202E` tag
- *  (`splitHidden`), so what the user approves reads the way it's written. */
-function Revealed({ text }: { text: string }) {
+ *  (`splitHidden`), so what the user approves reads the way it's written.
+ *  Also the generic card's (`Message.tsx`), for every MCP tool's arguments. */
+export function Revealed({ text }: { text: string }) {
   const pieces = splitHidden(text);
   if (pieces.length === 1 && typeof pieces[0] === "string") return <>{text}</>;
   return (

@@ -117,7 +117,8 @@ pub(super) async fn execute_tool_call(
     // What a workspace tool that changes files is about to touch, read off
     // the disk once: for a write, whether it replaces a file and how big
     // that is (so the card can't pass an overwrite off as a new file), and
-    // for any of them whether it reaches into a `.git` directory.
+    // for any of them whether it reaches into a `.git` directory or a file
+    // read in as instructions (`touches_instructions`).
     //
     // Raced against Stop, like the call itself: on a network share these
     // reads can stall for as long as the share takes to fail.
@@ -126,11 +127,16 @@ pub(super) async fn execute_tool_call(
         Some(root) if builtin && crate::tools::fs::requires_approval(tool_name) => {
             let (root, args) = (root.to_path_buf(), args.clone());
             let is_write = tool_name == crate::tools::fs::WRITE_FILE;
+            let skill_dirs: Vec<std::path::PathBuf> = tauri::Manager::try_state::<crate::AppState>(ctx.app)
+                .map(|s| s.skill_roots.dirs().map(|d| d.to_path_buf()).collect())
+                .unwrap_or_default();
             let probe = tokio::task::spawn_blocking(move || {
                 let size = is_write
                     .then(|| crate::tools::fs::write_target_size(&root, &args))
                     .flatten();
-                (size, crate::tools::fs::touches_git_dir(&root, &args))
+                let always_ask = crate::tools::fs::touches_git_dir(&root, &args)
+                    || crate::tools::fs::touches_instructions(&root, &args, &skill_dirs);
+                (size, always_ask)
             });
             select! {
                 biased;
@@ -171,7 +177,8 @@ pub(super) async fn execute_tool_call(
     // the server id, so an MCP tool named like a built-in (`write_file`)
     // can't match a built-in's grant. It carries the folder too, so an
     // answer given to a turn still working in the chat's previous folder
-    // can't cover the next one; and it never covers `.git`.
+    // can't cover the next one; and it never covers `.git` or the files read
+    // in as instructions.
     let scope = ctx.workspace_root.map(|p| p.to_string_lossy()).unwrap_or_default();
     let already_granted = !in_git_dir
         && ctx.session_id.is_some_and(|sid| {
