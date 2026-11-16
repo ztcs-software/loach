@@ -243,8 +243,17 @@ fn inputs(args: &Value) -> Result<(Vec<String>, Option<String>), String> {
     if extra.len() > MAX_ARGS || extra.iter().map(String::len).sum::<usize>() > MAX_ARGS_BYTES {
         return Err(format!("too many arguments (at most {MAX_ARGS}, 16 KB in all)"));
     }
-    if extra.iter().any(|a| a.contains('\0')) {
-        return Err("arguments can't contain NUL characters".into());
+    // The card shows these as the exact command. A newline, a bidi
+    // override or a zero-width character made it read differently from what
+    // runs — refused, as the stdio MCP dialog refuses them. Text like that
+    // can go through `stdin`.
+    if extra.iter().any(|a| a.chars().any(crate::tools::fs::unreviewable_char)) {
+        return Err(
+            "arguments can't contain control, invisible or text-direction characters (a newline, \
+             a bidi override…): the approval card couldn't show them as they'd run. Pass text like \
+             that through `stdin`."
+                .into(),
+        );
     }
     let stdin = match args.get("stdin") {
         None | Some(Value::Null) => None,
@@ -350,13 +359,47 @@ impl Capture {
     }
 }
 
+/// The code's temporary folder, removed when dropped — retried for a few
+/// seconds on a thread of its own when the first try fails. On Windows a
+/// process just told to stop (Stop, the timeout) or one it started can still
+/// have the folder as its working directory, or the script open: `TempDir`'s
+/// own drop gave up silently and left the model's code behind.
+struct SavedCode(Option<tempfile::TempDir>);
+
+impl SavedCode {
+    fn path(&self) -> Option<&Path> {
+        self.0.as_ref().map(tempfile::TempDir::path)
+    }
+}
+
+impl Drop for SavedCode {
+    fn drop(&mut self) {
+        let Some(dir) = self.0.take() else {
+            return;
+        };
+        let path = dir.keep();
+        if std::fs::remove_dir_all(&path).is_ok() {
+            return;
+        }
+        std::thread::spawn(move || {
+            for _ in 0..20 {
+                std::thread::sleep(std::time::Duration::from_millis(250));
+                if std::fs::remove_dir_all(&path).is_ok() || !path.exists() {
+                    return;
+                }
+            }
+            tracing::warn!("couldn't remove the script's temporary folder {}", path.display());
+        });
+    }
+}
+
 pub async fn run(plan: Plan) -> McpCallResult {
     // Code goes in a folder of its own, removed when `saved` drops: when the
     // run ends, however it ends — Stop drops this future, the process first.
     let (script, saved) = match &plan.script {
-        Script::File(path) => (crate::tools::fs::display_path(path), None),
+        Script::File(path) => (crate::tools::fs::display_path(path), SavedCode(None)),
         Script::Code { name, text } => match save_code(name, text) {
-            Ok(dir) => (dir.path().join(name).to_string_lossy().into_owned(), Some(dir)),
+            Ok(dir) => (dir.path().join(name).to_string_lossy().into_owned(), SavedCode(Some(dir))),
             Err(e) => return failed(format!("Couldn't save the code to a temporary file: {e}")),
         },
     };
@@ -377,7 +420,7 @@ pub async fn run(plan: Plan) -> McpCallResult {
             cmd.env("PATH", path);
         }
     }
-    if let Some(cwd) = plan.cwd.as_deref().or(saved.as_ref().map(tempfile::TempDir::path)) {
+    if let Some(cwd) = plan.cwd.as_deref().or(saved.path()) {
         cmd.current_dir(cwd);
     }
     cmd.stdin(if plan.stdin.is_some() { Stdio::piped() } else { Stdio::null() })
@@ -626,7 +669,11 @@ mod tests {
         fs::write(tmp.path().join("ok.py"), "").unwrap();
         assert!(refuse(json!({ "script": "ok.py", "args": "x" })).contains("array"));
         assert!(refuse(json!({ "script": "ok.py", "args": [{}] })).contains("string"));
-        assert!(refuse(json!({ "script": "ok.py", "args": ["a\0b"] })).contains("NUL"));
+        // B3-07: anything the card couldn't show as it would run — NUL, a
+        // line break, a bidi override, a zero-width space.
+        for hidden in ["a\0b", "a\nb", "a\u{202E}b", "a\u{200B}b"] {
+            assert!(refuse(json!({ "script": "ok.py", "args": [hidden] })).contains("stdin"), "{hidden:?}");
+        }
         assert!(refuse(json!({ "script": "ok.py", "stdin": 5 })).contains("string"));
     }
 

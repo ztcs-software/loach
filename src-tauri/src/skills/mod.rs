@@ -163,15 +163,32 @@ pub fn disabled(db: &Database) -> HashSet<String> {
 /// flipped in quick succession would otherwise both read the old list.
 static DISABLED_LOCK: parking_lot::Mutex<()> = parking_lot::const_mutex(());
 
-pub fn set_enabled(db: &Database, name: &str, enabled: bool) -> anyhow::Result<()> {
+/// Switch the skill `name` on or off. Off is recorded under its name and its
+/// folder's: the name is what its own `SKILL.md` declares, so an update
+/// that renamed the skill there brought it back on, unasked. A skill counts
+/// as off when either key is listed (see [`discover`]).
+pub fn set_enabled(db: &Database, roots: &Roots, name: &str, enabled: bool) -> anyhow::Result<()> {
+    let folder = discover(roots, &HashSet::new())
+        .skills
+        .into_iter()
+        .find(|s| s.name == name)
+        .and_then(|s| folder_name(&s.dir))
+        .filter(|f| f != name);
     let _guard = DISABLED_LOCK.lock();
     let mut names: BTreeSet<String> = disabled(db).into_iter().collect();
-    if enabled {
-        names.remove(name);
-    } else {
-        names.insert(name.to_string());
+    for key in std::iter::once(name.to_string()).chain(folder) {
+        if enabled {
+            names.remove(&key);
+        } else {
+            names.insert(key);
+        }
     }
     db.set_setting(DISABLED_KEY, &serde_json::to_string(&names)?)
+}
+
+/// A skill folder's name, when it would pass as a skill name.
+fn folder_name(dir: &Path) -> Option<String> {
+    dir.file_name().map(|f| f.to_string_lossy().into_owned()).filter(|f| is_valid_name(f))
 }
 
 /// A backup's [`DISABLED_KEY`] value as a restore may write it: the names
@@ -186,11 +203,20 @@ pub fn screen_disabled(value: &str) -> Option<String> {
     serde_json::to_string(&names).ok()
 }
 
-/// The skill-name rule: lowercase letters, digits and hyphens. The name goes
-/// into prompts, a tool schema and the `/skill` command, so it must not
-/// carry markup or spaces.
+/// The skill-name rule: lowercase ASCII letters, digits and hyphens. The
+/// name goes into prompts, a tool schema and the `/skill` command, so it must
+/// not carry markup or spaces. ASCII only: any lowercase letter let a
+/// Cyrillic `рdf` stand beside `pdf`, looking the same. Nor a Windows device
+/// name (`con`, `nul`, `com1`…): imported, it became a folder Explorer can't
+/// open or delete.
 pub fn is_valid_name(name: &str) -> bool {
-    !name.is_empty() && name.chars().all(|c| c == '-' || (c.is_alphanumeric() && !c.is_uppercase()))
+    let device = matches!(name, "con" | "prn" | "aux" | "nul")
+        || (name.len() == 4
+            && (name.starts_with("com") || name.starts_with("lpt"))
+            && name.as_bytes()[3].is_ascii_digit());
+    !name.is_empty()
+        && name.chars().all(|c| c == '-' || c.is_ascii_lowercase() || c.is_ascii_digit())
+        && !device
 }
 
 /// Every skill in `roots`, plus the folders that couldn't be loaded.
@@ -228,7 +254,8 @@ pub fn discover(roots: &Roots, disabled: &HashSet<String>) -> Catalog {
                         });
                         continue;
                     }
-                    skill.enabled = !disabled.contains(&skill.name);
+                    skill.enabled = !disabled.contains(&skill.name)
+                        && !folder_name(&skill.dir).is_some_and(|f| disabled.contains(&f));
                     catalog.skills.push(skill);
                 }
                 Err(message) => catalog.problems.push(Problem {
@@ -1073,9 +1100,42 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let db = Database::open(&tmp.path().join("loach.db")).unwrap();
         db.migrate().unwrap();
-        set_enabled(&db, "pdf", false).unwrap();
-        set_enabled(&db, "docx", false).unwrap();
-        set_enabled(&db, "pdf", true).unwrap();
+        let roots = Roots::new(tmp.path(), None);
+        set_enabled(&db, &roots, "pdf", false).unwrap();
+        set_enabled(&db, &roots, "docx", false).unwrap();
+        set_enabled(&db, &roots, "pdf", true).unwrap();
         assert_eq!(disabled(&db), ["docx".to_string()].into());
+    }
+
+    /// B3-11: a skill switched off stays off when an update renames it in
+    /// its own SKILL.md.
+    #[test]
+    fn a_skill_switched_off_stays_off_when_renamed() {
+        let tmp = TempDir::new().unwrap();
+        let db = Database::open(&tmp.path().join("loach.db")).unwrap();
+        db.migrate().unwrap();
+        let roots = Roots::new(tmp.path(), None);
+        let dir = write_skill(roots.loach_dir(), "scraper", &md("web-scraper", "Scrapes"));
+        set_enabled(&db, &roots, "web-scraper", false).unwrap();
+
+        fs::write(dir.join(SKILL_FILE), md("web-scraper-2", "Scrapes, renamed")).unwrap();
+        let skill = discover(&roots, &disabled(&db)).skills.into_iter().find(|s| s.name == "web-scraper-2").unwrap();
+        assert!(!skill.enabled);
+
+        // Switching it back on clears both keys.
+        set_enabled(&db, &roots, "web-scraper-2", true).unwrap();
+        set_enabled(&db, &roots, "web-scraper", true).unwrap();
+        assert!(discover(&roots, &disabled(&db)).skills.iter().all(|s| s.enabled));
+    }
+
+    /// B3-12: ASCII only, and no Windows device names.
+    #[test]
+    fn skill_names_are_ascii_and_never_a_device() {
+        for ok in ["pdf", "web-scraper-2", "com", "console", "com10"] {
+            assert!(is_valid_name(ok), "{ok}");
+        }
+        for bad in ["рdf", "pdfé", "Pdf", "con", "nul", "aux", "com1", "lpt9", "", "a b"] {
+            assert!(!is_valid_name(bad), "{bad}");
+        }
     }
 }

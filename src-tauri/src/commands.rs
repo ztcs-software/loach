@@ -427,7 +427,12 @@ pub async fn skill_set_enabled(
     name: String,
     enabled: bool,
 ) -> Result<(), String> {
-    crate::skills::set_enabled(&state.db, &name, enabled).map_err(err)
+    // Reads the skill folders to find this one's — on the blocking pool.
+    let (roots, db) = (state.skill_roots.clone(), state.db.clone());
+    tokio::task::spawn_blocking(move || crate::skills::set_enabled(&db, &roots, &name, enabled))
+        .await
+        .map_err(err)?
+        .map_err(err)
 }
 
 /// Pick a skill folder and copy it into Loach's skills folder. `None` when
@@ -3089,8 +3094,10 @@ pub async fn chat_stream(
                 request.workspace_root.is_some(),
             ));
             // Not in the registry: a run is a process, asked about every
-            // time (`tools::run_script`).
-            if crate::tools::run_script::enabled(&db) {
+            // time (`tools::run_script`). Never in a private request, which
+            // promises nothing leaves this machine: a process can reach the
+            // network, and only the renderer's `no_tools` kept it out.
+            if !request.private && crate::tools::run_script::enabled(&db) {
                 request
                     .tools
                     .push(crate::tools::run_script::tool_def(request.workspace_root.is_some()));
@@ -4484,17 +4491,14 @@ fn open_in_vscode_blocking(
         // failing to spawn), so confirm presence with `where` first.
         // CREATE_NO_WINDOW stops a console from flashing on screen.
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        let present = Command::new("where")
-            .arg("code")
-            .creation_flags(CREATE_NO_WINDOW)
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-        if !present {
+        // `code.cmd` found on PATH and run as itself: Rust escapes a batch
+        // file's arguments. Through `cmd /C code <path>`, cmd re-parsed the
+        // line, and a profile folder with `&` or `^` in its name (it's in the
+        // path) split the command.
+        let Some(code) = std::env::var_os("PATH").and_then(|p| find_on_path(&p, "code.cmd")) else {
             return Err(not_found);
-        }
-        Command::new("cmd")
-            .args(["/C", "code"])
+        };
+        Command::new(code)
             .arg(&path)
             .creation_flags(CREATE_NO_WINDOW)
             .spawn()
@@ -4531,6 +4535,12 @@ fn open_in_vscode_blocking(
     }
 
     Ok(())
+}
+
+/// The first `file` in one of `path`'s folders.
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+fn find_on_path(path: &std::ffi::OsStr, file: &str) -> Option<std::path::PathBuf> {
+    std::env::split_paths(path).map(|dir| dir.join(file)).find(|p| p.is_file())
 }
 
 // ---------- updater support ----------
@@ -4784,6 +4794,15 @@ mod tests {
         assert!(!runs_something_else(&a, &renamed));
         assert!(runs_something_else(&a, &stdio_input("npx", &["-y", "server-b"], &[]).to_draft()));
         assert!(runs_something_else(&a, &stdio_input("npx", &["-y", "server-a"], &[("K", "v")]).to_draft()));
+    }
+
+    #[test]
+    fn find_on_path_takes_the_first_folder_holding_the_file() {
+        let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        std::fs::write(b.path().join("code.cmd"), "").unwrap();
+        let path = std::env::join_paths([a.path(), b.path()]).unwrap();
+        assert_eq!(find_on_path(&path, "code.cmd"), Some(b.path().join("code.cmd")));
+        assert_eq!(find_on_path(&path, "missing.cmd"), None);
     }
 
     /// B1-05: chats are stored only with a provider the app can send to.

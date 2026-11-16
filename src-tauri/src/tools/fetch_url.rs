@@ -31,6 +31,8 @@ pub const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 pub const MAX_BODY_BYTES: usize = 5 * 1024 * 1024; // 5 MB
 pub const MAX_TEXT_CHARS: usize = 12_000; // ~3-4k tokens, plenty for inlining
 pub const MAX_REDIRECTS: usize = 10;
+/// Characters of a page's title kept (see `html_to_text`).
+const MAX_TITLE_CHARS: usize = 300;
 /// Wall-clock for the TCP connect phase. The whole-request `FETCH_TIMEOUT`
 /// only fires once the response starts arriving — a SYN sent to a black-
 /// holed address waits for the OS TCP retransmit budget (~75 s on Linux,
@@ -753,7 +755,12 @@ fn html_to_text(html: &str) -> (Option<String>, String) {
         .map(|raw| {
             // Skip past the opening tag's `>`
             let start = raw.find('>').map(|i| i + 1).unwrap_or(0);
-            decode_entities(&raw[start..]).trim().to_string()
+            // Capped, on one line: a `<title>` running on for megabytes was
+            // stored whole in the message's web-fetch tool record. Decoded
+            // from a bounded slice — entities only shorten text.
+            let head: String = raw[start..].chars().take(MAX_TITLE_CHARS * MAX_ENTITY_LEN).collect();
+            let one_line = decode_entities(&head).split_whitespace().collect::<Vec<_>>().join(" ");
+            one_line.chars().take(MAX_TITLE_CHARS).collect::<String>()
         })
         .filter(|s| !s.is_empty());
 

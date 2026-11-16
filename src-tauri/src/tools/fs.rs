@@ -665,7 +665,20 @@ fn replace_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => return Err(e),
     };
-    if existing.as_ref().is_some_and(|m| m.permissions().readonly()) {
+    // `readonly()` says only that no write bit is set at all. A root-owned
+    // `0644` file (left by a container run) isn't "read-only", yet this user
+    // can't write it — and the rename below needs only the folder's write
+    // permission, so it replaced the file, now owned by the user. Asking the
+    // OS to open it for writing (nothing truncated) answers as an in-place
+    // write would. Only a refusal counts: a file busy elsewhere goes on.
+    let not_writable = |m: &fs::Metadata| {
+        m.permissions().readonly()
+            || matches!(
+                fs::OpenOptions::new().write(true).open(path),
+                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied
+            )
+    };
+    if existing.as_ref().is_some_and(not_writable) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
             "the file is read-only",
@@ -881,8 +894,8 @@ fn names_instructions(rel: &Path) -> bool {
         return false;
     };
     let at_root = rel.components().filter(|c| matches!(c, Component::Normal(_))).count() == 1;
-    (at_root && name.eq_ignore_ascii_case(INSTRUCTIONS_FILES[0]))
-        || INSTRUCTIONS_FILES[1..].iter().any(|f| name.eq_ignore_ascii_case(f))
+    (at_root && same_name(&name, INSTRUCTIONS_FILES[0]))
+        || INSTRUCTIONS_FILES[1..].iter().any(|f| same_name(&name, f))
 }
 
 /// Names git, or the hook manager it calls, takes commands from — see
@@ -895,15 +908,27 @@ fn runs_with_git(p: &Path) -> bool {
     p.components().any(|c| {
         matches!(c, Component::Normal(n) if {
             let n = n.to_string_lossy();
-            GIT_RUN_NAMES.iter().any(|name| n.eq_ignore_ascii_case(name)) || is_lefthook_config(&n)
+            GIT_RUN_NAMES.iter().any(|name| same_name(&n, name)) || is_lefthook_config(&n)
         })
     })
+}
+
+/// `name` folded as a case-insensitive volume compares names: by Unicode
+/// case, not ASCII alone. NTFS and APFS take `ı` (dotless i) for `I` and `ſ`
+/// (long s) for `S`, so `.pre-commıt-config.yaml` passed an ASCII check and
+/// then opened as `.pre-commit-config.yaml`.
+fn folded(name: &str) -> String {
+    name.chars().flat_map(char::to_uppercase).flat_map(char::to_lowercase).collect()
+}
+
+fn same_name(a: &str, b: &str) -> bool {
+    folded(a) == folded(b)
 }
 
 /// `lefthook.yml`, `.lefthook.yaml`, `lefthook-local.toml` and the rest of
 /// the names lefthook reads its commands from.
 fn is_lefthook_config(name: &str) -> bool {
-    let name = name.to_ascii_lowercase();
+    let name = folded(name);
     let name = name.strip_prefix('.').unwrap_or(&name);
     name.rsplit_once('.').is_some_and(|(stem, ext)| {
         matches!(stem, "lefthook" | "lefthook-local") && matches!(ext, "yml" | "yaml" | "toml" | "json")
@@ -1351,13 +1376,18 @@ fn walk_listing(
         return false;
     }
     let mut entries: Vec<fs::DirEntry> = match fs::read_dir(dir) {
-        Ok(rd) => rd.flatten().collect(),
+        // Bounded like `find_files`: a folder of a million files was read
+        // whole (a ~600-byte entry each on Windows) before the 500-line cap
+        // applied. A folder past the bound overruns that cap anyway, so the
+        // listing says it stopped.
+        Ok(rd) => rd.flatten().take(MAX_FIND_VISITED).collect(),
         // An unreadable subdirectory shouldn't abort the whole listing.
         Err(_) => return false,
     };
     // Directories first, then files, each alphabetical — the order a person
     // would write the tree in, and stable across platforms (read_dir is not).
-    entries.sort_by_key(|e| {
+    // Each key built once, not on every comparison.
+    entries.sort_by_cached_key(|e| {
         let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
         (!is_dir, e.file_name().to_string_lossy().to_lowercase())
     });
@@ -2670,6 +2700,55 @@ mod tests {
         assert!(!hit(json!({ "path": "docs/LOACHFILE.md" })));
         assert!(!hit(json!({ "path": "README.md" })));
         assert!(!hit(json!({ "path": "src/main.rs" })));
+    }
+
+    /// B3-14: a junction — the link Windows makes without privilege (pnpm
+    /// makes them) — is no way out of the workspace either. Pinned here
+    /// because every other link test needs a symlink, which CI can't make.
+    #[cfg(windows)]
+    #[test]
+    fn a_junction_out_of_the_workspace_is_not_followed() {
+        let (_d, root) = workspace();
+        let outside = tempfile::TempDir::new().unwrap();
+        fs::write(outside.path().join("secret.txt"), "SUPERSECRETTOKEN\n").unwrap();
+        let link = dunce::simplified(&root).join("link");
+        let made = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(dunce::simplified(outside.path()))
+            .output()
+            .expect("cmd");
+        assert!(made.status.success(), "{}", String::from_utf8_lossy(&made.stdout));
+
+        let r = dispatch_read_file(&root, &json!({ "path": "link/secret.txt" }));
+        assert!(r.is_error && !r.content_text.contains("SUPERSECRETTOKEN"), "{}", r.content_text);
+        let w = dispatch_write_file(&root, &json!({ "path": "link/planted.txt", "content": "x" }));
+        assert!(w.is_error, "{}", w.content_text);
+        assert!(!outside.path().join("planted.txt").exists());
+        let m = dispatch_move_file(&root, &json!({ "from": "README.md", "to": "link/moved.md" }));
+        assert!(m.is_error, "{}", m.content_text);
+        assert!(root.join("README.md").exists());
+        let s = dispatch_search_files(&root, &json!({ "pattern": "SUPERSECRETTOKEN" }));
+        assert!(s.content_text.contains("No matches"), "{}", s.content_text);
+        let l = dispatch_list_directory(&root, &json!({ "path": ".", "depth": 3 }));
+        assert!(!l.content_text.contains("secret.txt"), "{}", l.content_text);
+
+        let d = dispatch_delete_file(&root, &json!({ "path": "link" }));
+        assert!(!d.is_error, "{}", d.content_text);
+        assert!(fs::symlink_metadata(&link).is_err(), "the junction is still there");
+        assert!(outside.path().join("secret.txt").exists(), "the junction's target was emptied");
+    }
+
+    /// B3-08: names are compared by Unicode case, as NTFS and APFS fold them.
+    #[test]
+    fn git_and_instruction_names_match_unicode_lookalikes() {
+        let (_d, root) = workspace();
+        assert!(touches_git_dir(&root, &json!({ "path": ".pre-commıt-config.yaml" })));
+        assert!(touches_git_dir(&root, &json!({ "path": ".githookſ/pre-push" })));
+        assert!(is_lefthook_config("Lefthook-Local.YML"));
+        assert!(touches_instructions(&root, &json!({ "path": "AGENTſ.md" }), &[]));
+        assert!(touches_instructions(&root, &json!({ "path": "LOACHFıLE.md" }), &[]));
+        assert!(!touches_git_dir(&root, &json!({ "path": "src/main.rs" })));
     }
 
     /// No standing grant covers `.git`: hooks and config there run commands.
