@@ -130,7 +130,11 @@ export function CodeCanvas() {
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1500);
     } catch {
-      /* ignore */
+      useToastStore.getState().push({
+        kind: "error",
+        title: "Couldn't copy",
+        body: "Clipboard isn't available in this window.",
+      });
     }
   };
 
@@ -185,6 +189,16 @@ export function CodeCanvas() {
     handle.addEventListener("pointercancel", onUp);
   };
 
+  // The same from the keyboard: the handle was named but not reachable by
+  // Tab, and keys did nothing. Left widens, as dragging left does.
+  const onResizeKey = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    const step = e.shiftKey ? 64 : 16;
+    const delta = e.key === "ArrowLeft" ? step : e.key === "ArrowRight" ? -step : 0;
+    if (delta === 0) return;
+    e.preventDefault();
+    setWidth(width + delta);
+  };
+
   return (
     <aside
       style={{ width: dragWidth ?? width, minWidth: CANVAS_MIN_WIDTH }}
@@ -203,12 +217,17 @@ export function CodeCanvas() {
           hit area makes it easy to grab without a visible bar. */}
       <div
         onPointerDown={onResizeStart}
+        onKeyDown={onResizeKey}
+        tabIndex={0}
         role="separator"
         aria-orientation="vertical"
         aria-label="Resize canvas"
-        className="group absolute left-0 top-0 z-30 h-full w-1.5 -translate-x-1/2 cursor-col-resize"
+        aria-valuenow={dragWidth ?? width}
+        aria-valuemin={CANVAS_MIN_WIDTH}
+        aria-valuemax={clampCanvasWidth(Number.POSITIVE_INFINITY)}
+        className="group absolute left-0 top-0 z-30 h-full w-1.5 -translate-x-1/2 cursor-col-resize outline-none"
       >
-        <div className="mx-auto h-full w-px bg-transparent transition-colors group-hover:bg-primary/40" />
+        <div className="mx-auto h-full w-px bg-transparent transition-colors group-hover:bg-primary/40 group-focus-visible:bg-primary/70" />
       </div>
 
       <header className="flex h-12 shrink-0 items-center justify-between gap-2 border-b border-foreground/[0.06] px-3">

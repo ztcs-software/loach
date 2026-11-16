@@ -94,6 +94,17 @@ const drafts = new Map<string, { text: string; attachments: Attachment[] }>();
  *  back) that landed while none was. */
 let appliedInsertSeq = 0;
 
+// A deleted chat's draft goes with it: kept, it held the text and files (up
+// to 20 MB each) until restart. A Space page's draft is keyed `space:<id>`.
+useChatStore.subscribe((state, prev) => {
+  if (state.sessions === prev.sessions) return;
+  for (const key of drafts.keys()) {
+    if (key && !key.startsWith("space:") && !state.sessions.some((s) => s.id === key)) {
+      drafts.delete(key);
+    }
+  }
+});
+
 export function ChatInput({ centered = false }: ChatInputProps) {
   // "Streaming in this chat" means the global runner is currently producing
   // tokens for the active session. "Waiting in this chat" means this chat
@@ -489,7 +500,15 @@ export function ChatInput({ centered = false }: ChatInputProps) {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") setCtxMenu(null);
     };
-    const onScroll = () => setCtxMenu(null);
+    // Only a scroll that moves the composer: the transcript's own scroll to
+    // follow a streaming reply fired here too, and closed the menu on the
+    // next token.
+    const onScroll = (e: Event) => {
+      const ta = textareaRef.current;
+      if (e.target === document || (ta && e.target instanceof Node && e.target.contains(ta))) {
+        setCtxMenu(null);
+      }
+    };
     // Use mousedown so we close before a focus-stealing click lands.
     window.addEventListener("mousedown", dismiss);
     window.addEventListener("keydown", onKey);
@@ -954,6 +973,9 @@ export function ChatInput({ centered = false }: ChatInputProps) {
     // fall through to the normal send path so the user's literal text still
     // reaches the model (the "ignore unknown" rule).
     if (trimmed && isCommandInput(trimmed)) {
+      // Its text stays in the box while it runs: a second Enter ran it
+      // again (two fetches, two confirmations).
+      if (runningCommand !== null) return;
       const insertSeq = useUIStore.getState().composerInsertSeq;
       const key = draftKey;
       setRunningCommand(text);
@@ -1287,6 +1309,8 @@ export function ChatInput({ centered = false }: ChatInputProps) {
 
             <Textarea
               ref={textareaRef}
+              // Where the chat finder hands focus back when it closes.
+              data-composer=""
               // Not left to the placeholder: it is the only thing naming this
               // control, and it swaps to "Replying — press the Stop button…"
               // mid-stream, so the composer's accessible name would change
@@ -1381,6 +1405,10 @@ export function ChatInput({ centered = false }: ChatInputProps) {
               }}
               onPaste={(e) => void onPaste(e)}
               onContextMenu={(e) => {
+                // Opened from the keyboard (the Menu key, Shift+F10), the
+                // native menu stays: this one is for the mouse — its items
+                // act on mousedown, and nothing moves focus into it.
+                if (e.button !== 2) return;
                 e.preventDefault();
                 e.stopPropagation();
                 const el = textareaRef.current;
@@ -1419,7 +1447,7 @@ export function ChatInput({ centered = false }: ChatInputProps) {
                 className={cn(
                   "relative rounded-full transition-colors",
                   listening
-                    ? "bg-rose-500/15 text-rose-300 hover:bg-rose-500/25 hover:text-rose-200"
+                    ? "bg-rose-500/15 text-rose-700 hover:bg-rose-500/25 hover:text-rose-800 dark:text-rose-300 dark:hover:text-rose-200"
                     : "text-foreground/65 hover:bg-foreground/10 hover:text-foreground",
                 )}
               >
@@ -1449,7 +1477,7 @@ export function ChatInput({ centered = false }: ChatInputProps) {
 
         </div>
         {error && (
-          <p className="mt-2 text-xs text-rose-300">{error}</p>
+          <p className="mt-2 text-xs text-rose-700 dark:text-rose-300">{error}</p>
         )}
         {!centered && <ContextUsageBar />}
       </div>

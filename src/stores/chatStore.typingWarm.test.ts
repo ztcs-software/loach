@@ -2,7 +2,8 @@
 // (`warmModelForTyping`):
 //
 //   - sized with the runner options the send will carry, so the send doesn't
-//     reload it — and once per stretch of typing, not per keystroke;
+//     reload it — and once per stretch of typing, not per keystroke, also
+//     when the model's Modelfile can't be read;
 //   - never while a reply streams, nor for an OpenAI-compatible chat.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
@@ -10,11 +11,14 @@ import type { Session } from "@/types";
 
 const mocks = vi.hoisted(() => ({
   preload: vi.fn<typeof import("@/lib/tauri").ollamaPreloadModel>(() => Promise.resolve()),
+  show: vi.fn<typeof import("@/lib/tauri").ollamaShowModel>(() =>
+    Promise.reject(new Error("connection refused")),
+  ),
 }));
 
 vi.mock("@/lib/tauri", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/tauri")>();
-  return { ...actual, ollamaPreloadModel: mocks.preload };
+  return { ...actual, ollamaPreloadModel: mocks.preload, ollamaShowModel: mocks.show };
 });
 
 import { useChatStore, warmModelForTyping, __testing } from "./chatStore";
@@ -34,6 +38,7 @@ const chat = (fields: Partial<Session>) =>
 describe("warmModelForTyping", () => {
   beforeEach(() => {
     mocks.preload.mockClear();
+    mocks.show.mockClear();
     __testing.resetForTests();
     useSettingsStore.setState({ ollama_base_url: "http://localhost:11434" });
     useModelsStore.setState({ modelDefaults: { "test-model": { num_ctx: 32768 } } });
@@ -58,6 +63,17 @@ describe("warmModelForTyping", () => {
       4096,
       undefined,
     );
+  });
+
+  // That read caches nothing when it fails (Ollama down, the model removed):
+  // throttled only after it, every keystroke sent another `/api/show`.
+  it("asks for an unreadable Modelfile once across keystrokes", async () => {
+    useModelsStore.setState({ modelDefaults: {} });
+    await warmModelForTyping("c1");
+    await warmModelForTyping("c1");
+    await warmModelForTyping("c1");
+    expect(mocks.show).toHaveBeenCalledTimes(1);
+    expect(mocks.preload).toHaveBeenCalledTimes(1);
   });
 
   it("does nothing while a reply streams", async () => {

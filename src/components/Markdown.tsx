@@ -1,10 +1,10 @@
-import { memo, useEffect, useMemo, useSyncExternalStore, type ReactNode } from "react";
+import { memo, useEffect, useId, useMemo, useSyncExternalStore, type ReactNode } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import "highlight.js/styles/github-dark.css";
 import { CodeBlock } from "./CodeBlock";
-import { cn } from "@/lib/utils";
+import { cn, prefersReducedMotion } from "@/lib/utils";
 import { openExternal } from "@/lib/tauri";
 import { useToastStore } from "@/stores/toastStore";
 import { closesFence, openingFence, type Fence } from "@/lib/codeBlocks";
@@ -207,6 +207,34 @@ function rehypeTexFallback() {
   };
 }
 
+/** This render's prefix for the ids remark-gfm writes (footnotes and their
+ *  back-links). The default, `user-content-`, was the same in every reply, so
+ *  the transcript repeated ids and a footnote link had no one target. */
+function useIdPrefix(): string {
+  return `md${useId().replace(/[^\w-]/g, "")}-`;
+}
+
+/** remark-gfm names the footnotes heading `footnote-label` whatever the
+ *  prefix, and every reference is described by that id: prefixed here too. */
+function rehypeFootnoteLabel(prefix: string) {
+  const label = `${prefix}footnote-label`;
+  return () => (tree: unknown) => {
+    const visit = (node: unknown): void => {
+      if (!node || typeof node !== "object") return;
+      const n = node as { type?: string; properties?: Record<string, unknown>; children?: unknown[] };
+      const p = n.type === "element" ? n.properties : undefined;
+      if (p) {
+        if (p.id === "footnote-label") p.id = label;
+        if (Array.isArray(p.ariaDescribedBy)) {
+          p.ariaDescribedBy = p.ariaDescribedBy.map((v) => (v === "footnote-label" ? label : v));
+        }
+      }
+      if (Array.isArray(n.children)) for (const child of n.children) visit(child);
+    };
+    visit(tree);
+  };
+}
+
 // ---------------------------------------------------------------------------
 // CodeBlock helper — pull the raw text out of the React tree so the "Copy"
 // button gets the un-highlighted source, not a soup of <span>s.
@@ -319,14 +347,11 @@ function useMathPipeline(
   return { math, source };
 }
 
-// Open a link from rendered (untrusted) markdown through the OS browser / mail
-// client. Mirrors the helper used by Settings / Onboarding / Updates; the
-// scheme allow-listing happens at the call site in the `a` component below.
 // Decide whether a markdown link href is safe to hand to the OS handler. Model
 // output is untrusted: allow only absolute http / https / mailto URLs — the
 // schemes `shell:allow-open` grants — and reject javascript:, file:, data:,
 // etc. Relative / fragment hrefs don't parse as absolute URLs and return false
-// (there's nowhere to navigate inside the chat anyway).
+// (a footnote's `#` link is handled before this, in the `a` component).
 function shouldOpenExternally(href: string | undefined): href is string {
   if (!href) return false;
   let scheme: string;
@@ -388,6 +413,25 @@ const MARKDOWN_COMPONENTS: Components = {
     );
   },
   a({ children, href, node: _node, ...props }) {
+    // A footnote's reference and its back-link jump within the reply. By id:
+    // each render prefixes its own (`useIdPrefix`), so it's this reply's.
+    if (href?.startsWith("#") && ("data-footnote-ref" in props || "data-footnote-backref" in props)) {
+      return (
+        <a
+          {...props}
+          href={href}
+          onClick={(e) => {
+            e.preventDefault();
+            document.getElementById(href.slice(1))?.scrollIntoView({
+              behavior: prefersReducedMotion() ? "auto" : "smooth",
+              block: "center",
+            });
+          }}
+        >
+          {children}
+        </a>
+      );
+    }
     // Model output is untrusted — never let the webview navigate. A link
     // whose scheme the OS handler won't get (javascript:, file:, a relative
     // one) is plain text: drawn as a link, it did nothing when clicked.
@@ -443,10 +487,13 @@ const MarkdownBody = memo(function MarkdownBody({
   content,
   highlight,
   math,
+  idPrefix,
 }: {
   content: string;
   highlight: boolean;
   math: MathPlugins | null;
+  /** See `useIdPrefix`. */
+  idPrefix: string;
 }) {
   // `math` is a stable reference (null, then the one loaded plugin pair), so
   // these memos settle immediately and react-markdown keeps seeing the same
@@ -456,24 +503,30 @@ const MarkdownBody = memo(function MarkdownBody({
       math ? [...MARKDOWN_PLUGINS_REMARK, ...math.remark] : MARKDOWN_PLUGINS_REMARK,
     [math],
   );
+  const footnotes = content.includes("[^");
   const rehypePlugins = useMemo(() => {
-    if (!math) {
-      return highlight ? MARKDOWN_PLUGINS_REHYPE : MARKDOWN_PLUGINS_REHYPE_NOHL;
-    }
-    // KaTeX has to run before `rehypeHighlight` *and* before the `pre` →
-    // CodeBlock mapping: `remark-math` hands display math over as
-    // `<pre><code class="language-math math-display">`, which both would
-    // otherwise treat as a fenced code block, Copy button and all.
-    // `rehype-katex` swaps the whole `<pre>` out before either gets a look.
-    return highlight
-      ? [rehypeTexFallback, ...math.rehype, rehypeHighlightCapped]
-      : [rehypeTexFallback, ...math.rehype];
-  }, [math, highlight]);
+    const base = (() => {
+      if (!math) {
+        return highlight ? MARKDOWN_PLUGINS_REHYPE : MARKDOWN_PLUGINS_REHYPE_NOHL;
+      }
+      // KaTeX has to run before `rehypeHighlight` *and* before the `pre` →
+      // CodeBlock mapping: `remark-math` hands display math over as
+      // `<pre><code class="language-math math-display">`, which both would
+      // otherwise treat as a fenced code block, Copy button and all.
+      // `rehype-katex` swaps the whole `<pre>` out before either gets a look.
+      return highlight
+        ? [rehypeTexFallback, ...math.rehype, rehypeHighlightCapped]
+        : [rehypeTexFallback, ...math.rehype];
+    })();
+    return footnotes ? [rehypeFootnoteLabel(idPrefix), ...base] : base;
+  }, [math, highlight, footnotes, idPrefix]);
+  const remarkRehypeOptions = useMemo(() => ({ clobberPrefix: idPrefix }), [idPrefix]);
 
   return (
     <ReactMarkdown
       remarkPlugins={remarkPlugins}
       rehypePlugins={rehypePlugins}
+      remarkRehypeOptions={remarkRehypeOptions}
       components={MARKDOWN_COMPONENTS}
     >
       {content}
@@ -489,9 +542,10 @@ export const Markdown = memo(function Markdown({
   math: allowMath = false,
 }: MarkdownProps) {
   const { math, source } = useMathPipeline(content, allowMath);
+  const idPrefix = useIdPrefix();
   return (
     <div className={cn(PROSE_CLASS, className)}>
-      <MarkdownBody content={source} highlight math={math} />
+      <MarkdownBody content={source} highlight math={math} idPrefix={idPrefix} />
     </div>
   );
 });
@@ -588,12 +642,13 @@ export const StreamingMarkdown = memo(function StreamingMarkdown({
   // Keyed by position: a completed block keeps its index and its text, so
   // its memoised body skips the re-parse when the prefix grows past it.
   const blocks = useMemo(() => stableBlocks(stable), [stable]);
+  const idPrefix = useIdPrefix();
   return (
     <div className={cn(PROSE_CLASS, className)}>
       {blocks.map((block, i) => (
-        <MarkdownBody key={i} content={block} highlight math={math} />
+        <MarkdownBody key={i} content={block} highlight math={math} idPrefix={idPrefix} />
       ))}
-      <MarkdownBody content={tail} highlight={false} math={math} />
+      <MarkdownBody content={tail} highlight={false} math={math} idPrefix={idPrefix} />
     </div>
   );
 });

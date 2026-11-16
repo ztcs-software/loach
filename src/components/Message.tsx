@@ -602,6 +602,15 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
     }
   };
 
+  /** An action's failure as a toast: rejected with nothing to catch it, the
+   *  click did nothing and only the console heard why. */
+  const failed = (title: string) => (e: unknown) =>
+    useToastStore.getState().push({
+      kind: "error",
+      title,
+      body: e instanceof Error ? e.message : String(e),
+    });
+
   // Copy the raw assistant content — full markdown, untouched — so pasting
   // into a code editor keeps fences / tables / headings intact.
   const copyContent = async () => {
@@ -687,7 +696,9 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
   const hasText = message.content.length > 0;
   const isPinned = message.pinned_at != null;
   const togglePin = () =>
-    void pinMessage(message.session_id, message.id, !isPinned);
+    void pinMessage(message.session_id, message.id, !isPinned).catch(
+      failed(isPinned ? "Couldn't unpin the response" : "Couldn't pin the response"),
+    );
   // Memoise the JSON parses on their source strings. chatStore only swaps these
   // strings when their dirty flags fire, so during a content-only streaming
   // flush they stay reference-equal and the parse is skipped — otherwise the
@@ -782,6 +793,18 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
     if (isUser || !isStreaming) return null;
     return lastCodeBlock(message.content)?.code ?? null;
   }, [isUser, isStreaming, message.content]);
+  // One object per change, not per render: a fresh literal re-rendered every
+  // finished code block of the streaming reply on each flush — context gets
+  // past their `memo`.
+  const markdownSource = useMemo(
+    () => ({
+      sessionId: message.session_id,
+      messageId: message.id,
+      streaming: !!isStreaming,
+      lastBlockRaw,
+    }),
+    [message.session_id, message.id, isStreaming, lastBlockRaw],
+  );
 
   // Below every hook, deliberately. This used to sit above four `useMemo`
   // calls, which breaks the rules of hooks — safe only because a row's role
@@ -979,14 +1002,7 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
           <p className="py-1 text-[12px] italic text-muted-foreground">Stopped before replying.</p>
         ) : (
           <div ref={bodyRef} data-search-root>
-            <MarkdownSourceProvider
-              value={{
-                sessionId: message.session_id,
-                messageId: message.id,
-                streaming: !!isStreaming,
-                lastBlockRaw,
-              }}
-            >
+            <MarkdownSourceProvider value={markdownSource}>
               {/* While streaming, only the trailing block re-parses per flush
                   (and skips highlighting) — completed blocks render once. Once
                   done, fall back to the plain whole-message render so the
@@ -1099,7 +1115,9 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
                 )}
                 {attachments.some((a) => a.kind !== "file") && (
                   <DropdownMenuItem
-                    onSelect={() => void saveAttachmentsToLibrary()}
+                    onSelect={() =>
+                      void saveAttachmentsToLibrary().catch(failed("Couldn't save to Library"))
+                    }
                     className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
                   >
                     <BookmarkPlus className="h-4 w-4 text-foreground/60" />
@@ -1194,6 +1212,9 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
                     )}
                   </DropdownMenuItem>
                 )}
+                {/* Nor these two: they'd share or store what has arrived so
+                    far, and saving the finished reply later made a second
+                    Library item. */}
                 {hasText && (
                   <DropdownMenuItem
                     onSelect={() =>
@@ -1202,6 +1223,8 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
                         content: message.content,
                       })
                     }
+                    disabled={isStreaming}
+                    title={isStreaming ? "Wait for the reply to finish" : undefined}
                     className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
                   >
                     <Share2 className="h-4 w-4 text-foreground/60" />
@@ -1220,6 +1243,8 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
                         size: new TextEncoder().encode(message.content).length,
                       })
                     }
+                    disabled={isStreaming}
+                    title={isStreaming ? "Wait for the reply to finish" : undefined}
                     className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
                   >
                     <BookmarkPlus className="h-4 w-4 text-foreground/60" />
@@ -1260,7 +1285,7 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
                     until the stream finishes, and that's what a fork copies. */}
                 <DropdownMenuItem
                   onSelect={() =>
-                    void forkChat(message.session_id, message.id)
+                    void forkChat(message.session_id, message.id).catch(failed("Couldn't fork the chat"))
                   }
                   disabled={isStreaming}
                   title={isStreaming ? "Wait for the reply to finish" : undefined}

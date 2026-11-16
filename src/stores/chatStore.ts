@@ -736,13 +736,21 @@ export async function warmModelForTyping(sessionId: string): Promise<void> {
   if (state.isStreaming) return;
   const session = state.sessions.find((s) => s.id === sessionId);
   if (!session || session.provider !== "ollama" || !session.model) return;
-  await warmModelDefaults(session);
-  const { num_ctx, num_gpu } = readSessionParams(session);
   const baseUrl = useSettingsStore.getState().ollama_base_url;
-  const key = JSON.stringify([baseUrl, session.model, num_ctx, num_gpu]);
-  const now = Date.now();
-  if (lastTypingWarm?.key === key && now - lastTypingWarm.at < TYPING_WARM_INTERVAL_MS) return;
-  lastTypingWarm = { key, at: now };
+  const sized = () => {
+    const { num_ctx, num_gpu } = readSessionParams(session);
+    return { num_ctx, num_gpu, key: JSON.stringify([baseUrl, session.model, num_ctx, num_gpu]) };
+  };
+  const recent = (key: string) =>
+    lastTypingWarm?.key === key && Date.now() - lastTypingWarm.at < TYPING_WARM_INTERVAL_MS;
+  // Before the Modelfile load as well as after it: that load caches nothing
+  // when it fails (Ollama down, the model removed), so checked only after it,
+  // every keystroke sent another `/api/show`.
+  if (recent(sized().key)) return;
+  await warmModelDefaults(session);
+  const { num_ctx, num_gpu, key } = sized();
+  if (recent(key)) return;
+  lastTypingWarm = { key, at: Date.now() };
   await ollamaPreloadModel(baseUrl, session.model, num_ctx, num_gpu).catch(() => {});
 }
 

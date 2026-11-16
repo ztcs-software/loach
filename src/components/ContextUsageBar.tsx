@@ -1,6 +1,6 @@
-import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { Gauge, Loader2, Maximize2, Sparkles, X } from "lucide-react";
-import { useChatStore } from "@/stores/chatStore";
+import { parseOverrides, useChatStore } from "@/stores/chatStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useModelsStore } from "@/stores/modelsStore";
 import { useSpaceStore } from "@/stores/spaceStore";
@@ -42,27 +42,13 @@ function effectiveParams(
   modelDefaults: Partial<GenerationParams> | undefined,
   spaceParamsJson: string | null,
 ): GenerationParams {
-  let overrides: Partial<GenerationParams> = {};
-  if (paramsJson) {
-    try {
-      overrides = JSON.parse(paramsJson) as Partial<GenerationParams>;
-    } catch {
-      /* ignore — fall back to layered defaults */
-    }
-  }
-  let spaceLayer: Partial<GenerationParams> = {};
-  if (spaceParamsJson) {
-    try {
-      spaceLayer = JSON.parse(spaceParamsJson) as Partial<GenerationParams>;
-    } catch {
-      /* ignore */
-    }
-  }
+  // Through the send's own guard: a wrong-typed `num_ctx` the send drops
+  // (hand-edited, imported) overrode the model's window here.
   return {
     ...DEFAULT_PARAMS,
     ...(modelDefaults ?? {}),
-    ...spaceLayer,
-    ...overrides,
+    ...parseOverrides(spaceParamsJson),
+    ...parseOverrides(paramsJson),
   };
 }
 
@@ -139,6 +125,13 @@ export function ContextUsageBar() {
   const [open, setOpen] = useState(false);
   const popoverRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
+  // Closed from inside (Escape, its X), focus goes back to the trigger: it
+  // unmounted with the popover, and fell to <body>.
+  const close = useCallback(() => {
+    const inside = popoverRef.current?.contains(document.activeElement) ?? false;
+    setOpen(false);
+    if (inside) triggerRef.current?.focus();
+  }, []);
 
   // Close popover on outside click / Esc. Same pattern as the textarea
   // context menu in ChatInput.
@@ -152,7 +145,7 @@ export function ContextUsageBar() {
       setOpen(false);
     };
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
+      if (e.key === "Escape") close();
     };
     window.addEventListener("mousedown", onDown);
     window.addEventListener("keydown", onKey);
@@ -160,6 +153,10 @@ export function ContextUsageBar() {
       window.removeEventListener("mousedown", onDown);
       window.removeEventListener("keydown", onKey);
     };
+  }, [open, close]);
+  // Focus moves in when it opens.
+  useEffect(() => {
+    if (open) popoverRef.current?.querySelector<HTMLElement>("button:not(:disabled)")?.focus();
   }, [open]);
 
   const params = useMemo(
@@ -329,22 +326,13 @@ export function ContextUsageBar() {
             // pinned params into this chat as if the user had set them. A
             // later Modelfile edit or Space change then silently stopped
             // applying here. Only `num_ctx` is the user's intent.
-            let overrides: Partial<GenerationParams> = {};
-            if (session.params_json) {
-              try {
-                overrides = JSON.parse(
-                  session.params_json,
-                ) as Partial<GenerationParams>;
-              } catch {
-                /* malformed — start from an empty override */
-              }
-            }
+            // Guarded like the send reads it: unchecked keys were written back.
             void setSessionParams(session.id, {
-              ...overrides,
+              ...parseOverrides(session.params_json),
               num_ctx: usage.total * 2,
             } as GenerationParams);
           }}
-          onClose={() => setOpen(false)}
+          onClose={close}
         />
       )}
     </div>

@@ -148,6 +148,9 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
   const [exportError, setExportError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const exportText = exportMode === "full" ? fullText : compactedText;
+  /** The chat whose compacted export is being made: Compact switched off and
+   *  on again while it ran started a second model run. */
+  const compactingFor = useRef<string | null>(null);
 
   /** Marks the "Search in chat" path so we can skip Radix's
    *  `onCloseAutoFocus` for that one menu item. Without this, Radix
@@ -287,6 +290,8 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
     // rather than spending another model round-trip.
     if (compactedText !== null || !session) return;
     const sessionId = session.id;
+    if (compactingFor.current === sessionId) return;
+    compactingFor.current = sessionId;
     try {
       const md = await exportCompactedContext(sessionId);
       if (currentSessionId.current !== sessionId) return;
@@ -294,6 +299,8 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
     } catch (e) {
       if (currentSessionId.current !== sessionId) return;
       setExportError(e instanceof Error ? e.message : String(e));
+    } finally {
+      if (compactingFor.current === sessionId) compactingFor.current = null;
     }
   };
 
@@ -469,16 +476,19 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
           <DropdownMenuContent align="end" className="min-w-[280px]">
             <div className="flex items-center justify-between px-2 py-1.5">
               <DropdownMenuLabel className="p-0">Models</DropdownMenuLabel>
-              <button
-                className="rounded p-1 hover:bg-accent"
-                onClick={(e) => {
+              {/* An item, not a bare button: the menu moves focus only between
+                  its items and swallows Tab, so a button was mouse-only.
+                  Kept open on select, as the button kept it. */}
+              <DropdownMenuItem
+                className="rounded p-1"
+                onSelect={(e) => {
                   e.preventDefault();
                   refresh();
                 }}
                 aria-label="Refresh models"
               >
                 <RefreshCw className={loading ? "h-3.5 w-3.5 animate-spin" : "h-3.5 w-3.5"} />
-              </button>
+              </DropdownMenuItem>
             </div>
             <DropdownMenuSeparator />
             <DropdownMenuLabel className="flex items-center gap-1.5">
@@ -728,7 +738,15 @@ export function ChatHeader({ session }: { session: Session | undefined }) {
         </DialogContent>
       </Dialog>
 
-      <Dialog open={importOpen} onOpenChange={setImportOpen}>
+      {/* Not closed while an import runs (Esc, the overlay, the X): a
+          failure then landed on a closed dialog, and the next open cleared it. */}
+      <Dialog
+        open={importOpen}
+        onOpenChange={(next) => {
+          if (!next && importBusy) return;
+          setImportOpen(next);
+        }}
+      >
         <DialogContent className="max-w-2xl">
           <DialogHeader>
             <DialogTitle>Import context</DialogTitle>

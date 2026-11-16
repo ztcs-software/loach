@@ -1,4 +1,4 @@
-import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ArrowDown, ChevronDown, ChevronUp, Hourglass, Import, Pin, Search, ShieldAlert, Sparkles, Trash2, Zap, X } from "lucide-react";
 import { MessageItem } from "./Message";
 import { Button } from "@/components/ui/button";
@@ -106,6 +106,9 @@ export function ChatCanvas() {
   const approvalBlocking = useChatStore((s) => {
     const sid = s.streamingSessionId;
     if (!sid || sid === s.activeSessionId) return null;
+    // Only read while this chat waits: the parse below ran on every store
+    // update (each token flush) whenever another chat streamed.
+    if (!s.queue.some((t) => t.sessionId === s.activeSessionId)) return null;
     const json = s.messages[sid]?.at(-1)?.tool_calls_json;
     if (!json) return null;
     try {
@@ -224,6 +227,8 @@ export function ChatCanvas() {
   const [searchQuery, setSearchQuery] = useState("");
   const [matchCursor, setMatchCursor] = useState(0);
   const searchInputRef = useRef<HTMLInputElement>(null);
+  /** What had focus when the finder opened (see `closeSearch`). */
+  const finderReturnFocus = useRef<HTMLElement | null>(null);
   // Per-message DOM refs so we can scrollIntoView the current match without
   // computing offsets manually. Cleaned up via callback ref so removed
   // messages don't keep dangling entries in the map.
@@ -273,6 +278,10 @@ export function ChatCanvas() {
     const open = (e: Event) => {
       const query = (e as CustomEvent<{ query?: string } | null>).detail?.query;
       if (query) setSearchQuery(query);
+      const active = document.activeElement;
+      if (active instanceof HTMLElement && active !== searchInputRef.current) {
+        finderReturnFocus.current = active;
+      }
       setSearchOpen(true);
     };
     window.addEventListener("loach:open-chat-search", open);
@@ -386,6 +395,12 @@ export function ChatCanvas() {
     setSearchOpen(false);
     setSearchQuery("");
     setMatchCursor(0);
+    // Back where it was before the finder opened — the composer when that
+    // is gone (a menu item) — not dropped to <body> with the input.
+    const back = finderReturnFocus.current;
+    finderReturnFocus.current = null;
+    const target = back?.isConnected ? back : document.querySelector<HTMLElement>("[data-composer]");
+    target?.focus({ preventScroll: true });
   };
 
   const stepMatch = (delta: 1 | -1) => {
@@ -531,7 +546,8 @@ export function ChatCanvas() {
     [],
   );
 
-  const jumpToMessage = (id: string) => {
+  // Stable, so the memoised pinned chips skip the re-render each flush.
+  const jumpToMessage = useCallback((id: string) => {
     // Only reach past the window when the target actually sits above it.
     // Expanding unconditionally would mount (and markdown-parse) the whole
     // transcript on every chip click — and because `visibleCount` only ever
@@ -541,7 +557,7 @@ export function ChatCanvas() {
     // Both updates batch into one render, so the effect below runs after any
     // revealed rows have committed their refs.
     setJumpTarget(id);
-  };
+  }, []);
 
   // Deliberately no cleanup function: clearing `jumpTarget` re-runs this
   // effect immediately, and a cleanup would cancel the highlight timer we
@@ -581,7 +597,7 @@ export function ChatCanvas() {
     if (!messages.some((m) => m.id === pendingJumpMessageId)) return;
     consumePendingJumpMessage();
     jumpToMessage(pendingJumpMessageId);
-  }, [pendingJumpMessageId, messages, consumePendingJumpMessage]);
+  }, [pendingJumpMessageId, messages, consumePendingJumpMessage, jumpToMessage]);
 
   // Reveal the next batch of older rows. Snapshot the scroller geometry first
   // so the layout effect above can re-anchor once the prepended rows mount.

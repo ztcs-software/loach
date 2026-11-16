@@ -6,8 +6,8 @@ import { createContext, useContext } from "react";
  * streaming code block instead of a dead snapshot.
  *
  * `lastBlockRaw` is the source text of the message's LAST fenced block (the
- * only one that grows mid-stream), pre-processed the same way `Markdown` pre-
- * processes its input so a `CodeBlock`'s `raw` compares apples-to-apples.
+ * only one that grows mid-stream), taken verbatim — as a `CodeBlock`'s `raw`
+ * is — so the two compare apples-to-apples.
  * Null context (the default) means "not inside a streamed message" — e.g. the
  * snippet preview — and `CodeBlock` falls back to a static snapshot.
  */
