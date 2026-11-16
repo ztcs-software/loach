@@ -49,10 +49,12 @@ fn hide_main_window(w: &tauri::WebviewWindow) {
 /// stderr if the dialog itself can't be shown.
 fn fatal_setup_error(app: &tauri::AppHandle, what: &str, err: impl std::fmt::Display) -> ! {
     let body = format!(
-        "Loach can't start because {what}.\n\nDetails: {err}\n\n\
+        "Loach can't start because {what}.\n\nDetails: {err:#}\n\n\
          If this keeps happening, please file an issue with the details above."
     );
-    eprintln!("[fatal] {what}: {err}");
+    // `{:#}`: for an anyhow error the whole cause chain — `{}` showed only
+    // the outermost context, "open sqlite", and lost the OS error under it.
+    eprintln!("[fatal] {what}: {err:#}");
     // `blocking_show` returns once the user clicks "OK". On platforms where
     // the dialog can't be shown (very headless CI, broken display) this
     // returns immediately — we still exit afterwards so the app doesn't
@@ -274,76 +276,85 @@ pub fn run() {
             // the full rationale and the JS/Rust handoff story.
             preload::try_warm_default_model(preload_db, preload_http);
 
-            // System tray
-            let show_i = MenuItem::with_id(app, "show", "Show Loach", true, None::<&str>)?;
-            let hide_i = MenuItem::with_id(app, "hide", "Hide to tray", true, None::<&str>)?;
-            let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show_i, &hide_i, &quit_i])?;
+            // System tray. Not essential: where it can't be built (a Linux
+            // desktop with no working tray or appindicator), Loach starts
+            // without one. As an error out of `setup`, Tauri turned it into a
+            // panic — the silent crash `fatal_setup_error` exists to replace.
+            let tray = (|| -> tauri::Result<()> {
+                let show_i = MenuItem::with_id(app, "show", "Show Loach", true, None::<&str>)?;
+                let hide_i = MenuItem::with_id(app, "hide", "Hide to tray", true, None::<&str>)?;
+                let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+                let menu = Menu::with_items(app, &[&show_i, &hide_i, &quit_i])?;
 
-            // macOS menu-bar icons render as template images — single-channel
-            // masks taken from the alpha channel — so they auto-invert in
-            // light vs. dark menu bars. That rules out the app icon there: it
-            // is an opaque rounded square, so its mask is a solid blob. macOS
-            // gets `icons/tray-template.png` instead, the fish line art in
-            // black on transparent. It is 36 px tall because tray-icon draws
-            // the image 18 pt tall, so it maps 2:1 onto a Retina menu bar.
-            let _tray = {
-                let builder = TrayIconBuilder::with_id("loach-tray")
-                    .menu(&menu)
-                    .show_menu_on_left_click(false)
-                    .tooltip("Loach");
-                // `default_window_icon()` is Some in any normal bundled build,
-                // but guard rather than `unwrap()` so a packaging slip that
-                // ships without the icon degrades to an icon-less tray instead
-                // of panicking the whole `setup` (which would bypass the
-                // friendly `fatal_setup_error` dialog the rest of setup uses).
-                #[cfg(not(target_os = "macos"))]
-                let builder = match app.default_window_icon() {
-                    Some(icon) => builder.icon(icon.clone()),
-                    None => builder,
-                };
-                #[cfg(target_os = "macos")]
-                let builder = builder
-                    .icon(tauri::include_image!("icons/tray-template.png"))
-                    .icon_as_template(true);
-                builder
-                .on_menu_event(|app, event| match event.id.as_ref() {
-                    "show" => {
-                        if let Some(w) = app.get_webview_window("main") {
-                            let _ = w.show();
-                            let _ = w.set_focus();
-                        }
-                    }
-                    "hide" => {
-                        if let Some(w) = app.get_webview_window("main") {
-                            hide_main_window(&w);
-                        }
-                    }
-                    "quit" => {
-                        app.exit(0);
-                    }
-                    _ => {}
-                })
-                .on_tray_icon_event(|tray, event| {
-                    if let TrayIconEvent::Click {
-                        button: MouseButton::Left,
-                        button_state: MouseButtonState::Up,
-                        ..
-                    } = event
-                    {
-                        let app = tray.app_handle();
-                        if let Some(w) = app.get_webview_window("main") {
-                            if w.is_visible().unwrap_or(false) {
-                                hide_main_window(&w);
-                            } else {
+                // macOS menu-bar icons render as template images — single-channel
+                // masks taken from the alpha channel — so they auto-invert in
+                // light vs. dark menu bars. That rules out the app icon there: it
+                // is an opaque rounded square, so its mask is a solid blob. macOS
+                // gets `icons/tray-template.png` instead, the fish line art in
+                // black on transparent. It is 36 px tall because tray-icon draws
+                // the image 18 pt tall, so it maps 2:1 onto a Retina menu bar.
+                let _tray = {
+                    let builder = TrayIconBuilder::with_id("loach-tray")
+                        .menu(&menu)
+                        .show_menu_on_left_click(false)
+                        .tooltip("Loach");
+                    // `default_window_icon()` is Some in any normal bundled build,
+                    // but guard rather than `unwrap()` so a packaging slip that
+                    // ships without the icon degrades to an icon-less tray instead
+                    // of panicking the whole `setup` (which would bypass the
+                    // friendly `fatal_setup_error` dialog the rest of setup uses).
+                    #[cfg(not(target_os = "macos"))]
+                    let builder = match app.default_window_icon() {
+                        Some(icon) => builder.icon(icon.clone()),
+                        None => builder,
+                    };
+                    #[cfg(target_os = "macos")]
+                    let builder = builder
+                        .icon(tauri::include_image!("icons/tray-template.png"))
+                        .icon_as_template(true);
+                    builder
+                    .on_menu_event(|app, event| match event.id.as_ref() {
+                        "show" => {
+                            if let Some(w) = app.get_webview_window("main") {
                                 let _ = w.show();
                                 let _ = w.set_focus();
                             }
                         }
-                    }
-                })
-                .build(app)?
-            };
+                        "hide" => {
+                            if let Some(w) = app.get_webview_window("main") {
+                                hide_main_window(&w);
+                            }
+                        }
+                        "quit" => {
+                            app.exit(0);
+                        }
+                        _ => {}
+                    })
+                    .on_tray_icon_event(|tray, event| {
+                        if let TrayIconEvent::Click {
+                            button: MouseButton::Left,
+                            button_state: MouseButtonState::Up,
+                            ..
+                        } = event
+                        {
+                            let app = tray.app_handle();
+                            if let Some(w) = app.get_webview_window("main") {
+                                if w.is_visible().unwrap_or(false) {
+                                    hide_main_window(&w);
+                                } else {
+                                    let _ = w.show();
+                                    let _ = w.set_focus();
+                                }
+                            }
+                        }
+                    })
+                    .build(app)?
+                };
+                Ok(())
+            })();
+            if let Err(e) = tray {
+                tracing::warn!("couldn't create the tray icon, starting without one: {e}");
+            }
 
             // macOS: closing the window (red button, ⌘W) hides it and Loach
             // stays in the Dock, like other Mac apps; the Dock icon (the

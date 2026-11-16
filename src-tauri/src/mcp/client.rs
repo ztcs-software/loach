@@ -656,9 +656,14 @@ async fn post_rpc_raw(
             .get("location")
             .and_then(|v| v.to_str().ok())
             .map(str::to_string);
-        let text = read_capped_text(resp)
-            .await
-            .context("read MCP server response")?;
+        // Bounded by the request's deadline, as the success path is: a 502
+        // whose body stalled held the call — and the server's session slot,
+        // so every other call to it queued behind — for up to the 10-minute
+        // ceiling a progress-reporting call gets.
+        let text = match tokio::time::timeout_at(deadline, read_capped_text(resp)).await {
+            Ok(text) => text.context("read MCP server response")?,
+            Err(_) => String::from("(the server didn't finish sending its error)"),
+        };
         // Redirects aren't followed — the client is pinned to the address
         // it resolved — so a bare "HTTP 307" left the user guessing where
         // the server wanted them. Usually it's a missing trailing `/`.

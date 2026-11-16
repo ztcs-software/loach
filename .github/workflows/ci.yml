@@ -22,6 +22,13 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# Read-only token, the checkout not keeping it, and actions pinned to commits
+# (as release.yml does): `npm ci` runs every dependency's install script,
+# and on a push to main a compromised one could otherwise push with the
+# token git kept.
+permissions:
+  contents: read
+
 # One in-flight run per event+ref: a new push to a PR branch obsoletes the
 # previous run, so cancel it. On main itself, never cancel — a superseded
 # main run that gets cancelled would leave that (possibly released) merge
@@ -35,9 +42,11 @@ jobs:
     name: tsc + vite build + vitest
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
           cache: npm
@@ -54,7 +63,9 @@ jobs:
     name: cargo test
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       # Same link-time deps as release.yml, minus the packaging-only tools
       # (patchelf, rpm) — cargo test compiles the Tauri app but bundles
@@ -70,9 +81,9 @@ jobs:
       # Pinned to the same toolchain as release.yml so a surprise rustc
       # release can't make CI and the release build disagree. Bump both
       # together.
-      - uses: dtolnay/rust-toolchain@1.90.0
+      - uses: dtolnay/rust-toolchain@7dcc700092a1a8b9c17ba0e140b4e34e93000946 # 1.90.0
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: src-tauri
 
@@ -95,11 +106,13 @@ jobs:
     name: cargo check (windows)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@1.90.0
+      - uses: dtolnay/rust-toolchain@7dcc700092a1a8b9c17ba0e140b4e34e93000946 # 1.90.0
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: src-tauri
 
@@ -127,11 +140,13 @@ jobs:
     name: cargo check (macos)
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@1.90.0
+      - uses: dtolnay/rust-toolchain@7dcc700092a1a8b9c17ba0e140b4e34e93000946 # 1.90.0
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: src-tauri
 

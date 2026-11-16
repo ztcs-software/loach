@@ -34,6 +34,13 @@ CLAUDE.md
 *.key
 *.pem
 *.pfx
+*.p12
+*.crt
+*.cer
+.env
+.env.*
+id_rsa*
+id_ed25519*
 loach.key
 loach.key.pub
 .tauri

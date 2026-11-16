@@ -2091,15 +2091,6 @@ fn is_valid_header_value(value: &str) -> bool {
         && value.len() <= 4096
 }
 
-/// Validate an MCP server input and return the resolved, SSRF-screened
-/// SocketAddrs for its host. The addresses are used by `mcp_test` to build
-/// a DNS-pinned reqwest client so the connect-time resolver can't bypass
-/// the screen with DNS rebinding. `mcp_save` discards them.
-///
-/// Async because hostnames have to be DNS-resolved before screening — the
-/// previous version only checked literal IPs, so `evil.example.com` →
-/// `10.0.0.1` slipped through and the request was sent against the
-/// internal address with whatever auth headers the user configured.
 /// Why a server row failed validation: a structural fault (`Rejected`), a
 /// host DNS couldn't answer for (`Unscreenable`), or a host that is
 /// link-local (`Blocked`). The split exists so snapshot import can keep a
@@ -2132,6 +2123,16 @@ impl From<McpImportRejection> for String {
 /// one short line that reads as what it is.
 const MAX_MCP_NAME_CHARS: usize = 100;
 
+/// Validate an MCP server input and return the resolved, SSRF-screened
+/// SocketAddrs for its host. The addresses are used by `mcp_test` to build
+/// a DNS-pinned reqwest client so the connect-time resolver can't bypass
+/// the screen with DNS rebinding. `mcp_save` discards them.
+///
+/// Async because hostnames have to be DNS-resolved before screening — the
+/// previous version only checked literal IPs, so `evil.example.com` →
+/// `10.0.0.1` slipped through and the request was sent against the
+/// internal address with whatever auth headers the user configured.
+///
 /// `screen_host: false` skips resolving and screening an HTTP server's host,
 /// returning no addresses — for a row saved disabled, which connects to
 /// nothing (see `mcp_save`). Every structural check still runs.
@@ -3704,15 +3705,6 @@ pub struct DialogFilter {
     pub extensions: Vec<String>,
 }
 
-/// Open a native save dialog and write `content` to whichever path the
-/// user picks. Returns the chosen path (string), or `None` if the user
-/// cancelled.
-///
-/// Replaces the previous `write_text_file(path, content)` + frontend
-/// `dialog.save` pair. Moving the dialog INTO the backend closes the gap
-/// where a compromised renderer could skip the dialog entirely and write
-/// to an arbitrary path (e.g. `~/.bashrc`): now the only path the backend
-/// will write to is one the user just clicked through a native picker.
 /// Hard ceiling on what the renderer can ask us to save. Real exports
 /// (full DB snapshots) are in the low MBs; this cap is generous enough
 /// for any realistic dump while rejecting a compromised renderer that
@@ -3786,6 +3778,15 @@ async fn save_bytes_via_dialog(
     Ok(Some(returned_path.to_string_lossy().to_string()))
 }
 
+/// Open a native save dialog and write `content` to whichever path the
+/// user picks. Returns the chosen path (string), or `None` if the user
+/// cancelled.
+///
+/// Replaces the previous `write_text_file(path, content)` + frontend
+/// `dialog.save` pair. Moving the dialog INTO the backend closes the gap
+/// where a compromised renderer could skip the dialog entirely and write
+/// to an arbitrary path (e.g. `~/.bashrc`): now the only path the backend
+/// will write to is one the user just clicked through a native picker.
 #[tauri::command]
 pub async fn save_text_to_file(
     app: AppHandle,

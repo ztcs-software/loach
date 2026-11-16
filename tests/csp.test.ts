@@ -47,6 +47,15 @@ describe("window CSP", () => {
     expect(directives.get("default-src")).toEqual(["'self'"]);
     expect(directives.get("img-src")).toEqual(["'self'", "data:", "blob:"]);
   });
+
+  // These don't fall back to default-src (object-src would, but only to
+  // 'self'): unset, an injected <base href> or <form action> could send the
+  // window to another origin. The app uses neither, and no plugin objects.
+  it("shuts what default-src doesn't cover", () => {
+    expect(directives.get("object-src")).toEqual(["'none'"]);
+    expect(directives.get("base-uri")).toEqual(["'none'"]);
+    expect(directives.get("form-action")).toEqual(["'none'"]);
+  });
 });
 
 // An inline <style> in index.html makes Tauri add a style nonce to the CSP at

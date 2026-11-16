@@ -23,10 +23,13 @@
 //! Every outbound HTTP request goes through a DNS-pinned reqwest client
 //! built from [`crate::tools::fetch_url::resolve_lan_addrs`] +
 //! [`crate::tools::fetch_url::build_pinned_client`], so a malicious or
-//! misconfigured MCP server URL can't be aimed at the cloud-metadata
-//! service. Self-hosted servers on loopback or the local network are
-//! allowed — that's the common MCP deployment — only link-local
-//! (cloud-metadata) addresses are refused. stdio servers are gated
+//! misconfigured MCP server URL can't reach a link-local address — which is
+//! where most clouds' metadata service lives (169.254.169.254). Self-hosted
+//! servers on loopback or the local network are allowed — that's the common
+//! MCP deployment — so only link-local addresses (169.254/16, fe80::/10, and
+//! IPv6 forms carrying one) are refused. Not every metadata endpoint is
+//! link-local: AWS's IPv6 one (`fd00:ec2::254`) and Alibaba's
+//! (`100.100.100.200`) sit in ranges a LAN server can use too. stdio servers are gated
 //! differently: the exact command line has to be confirmed in a native
 //! dialog before it is ever saved or started (see
 //! `commands::confirm_stdio_spawn`).
@@ -174,6 +177,9 @@ pub struct CachedTools {
     cached_at: Instant,
     tools: Vec<McpToolDef>,
     errors: Vec<(String, String)>,
+    /// A server was skipped as busy: served once, then re-probed, rather
+    /// than missing its tools for the whole TTL.
+    stale: bool,
 }
 
 /// Process-lifetime cache of the aggregated MCP tool catalogue, parked on
@@ -197,7 +203,8 @@ impl ToolsCacheState {
     /// Keep a probe's catalogue, unless the config changed while it ran.
     fn keep(&mut self, generation: u64, tools: Vec<McpToolDef>, errors: Vec<(String, String)>) {
         if self.generation == generation {
-            self.entry = Some(CachedTools { cached_at: Instant::now(), tools, errors });
+            let stale = errors.iter().any(|(_, e)| e == SLOT_BUSY);
+            self.entry = Some(CachedTools { cached_at: Instant::now(), tools, errors, stale });
         }
     }
 }
@@ -231,7 +238,7 @@ pub async fn aggregate_tools_cached(
         let generation = guard.generation;
         if let Some(entry) = guard.entry.as_ref() {
             let answer = (entry.tools.clone(), entry.errors.clone());
-            if entry.cached_at.elapsed() >= TOOLS_CACHE_TTL && !guard.refreshing {
+            if (entry.stale || entry.cached_at.elapsed() >= TOOLS_CACHE_TTL) && !guard.refreshing {
                 guard.refreshing = true;
                 let (db, cache) = (db.clone(), cache.clone());
                 tauri::async_runtime::spawn(async move {
@@ -263,6 +270,11 @@ pub async fn invalidate_tools_cache(cache: &ToolsCache) {
     guard.generation += 1;
 }
 
+/// How long a tool probe waits for a server's session while another chat's
+/// call has it, and what it reports when that runs out.
+const SLOT_WAIT: Duration = Duration::from_secs(3);
+const SLOT_BUSY: &str = "busy with a tool call in another chat — its tools are back on your next message";
+
 /// Most tools one server may add to the catalogue. Large gateways expose a
 /// few dozen; past this the definitions crowd out the conversation.
 const MAX_TOOLS_PER_SERVER: usize = 200;
@@ -279,7 +291,13 @@ async fn collect_one(server: &McpServer, slug: &str) -> Result<Vec<McpToolDef>> 
     // HTTP server was handshaken afresh on every send, leaving a session
     // behind on the server each time.
     let slot = session_slot(&server.id);
-    let mut pooled = slot.lock().await;
+    // Not for long: another chat's call can hold the session for minutes (a
+    // progress-reporting `tools/call`), and the send this probe is for
+    // showed nothing until it ended. Skipped as busy, the server is back on
+    // the next send (see `ToolsCacheState::keep`).
+    let Ok(mut pooled) = tokio::time::timeout(SLOT_WAIT, slot.lock()).await else {
+        bail!(SLOT_BUSY);
+    };
     let mut retried = false;
     let raws = loop {
         let reused = pooled
@@ -1183,6 +1201,17 @@ mod tests {
         assert!(!e.contains("token-123"), "{e}");
     }
 
+    /// B5-07: a catalogue with a server skipped as busy is kept stale — used
+    /// once, then re-probed — not cached without that server for the TTL.
+    #[test]
+    fn a_busy_server_leaves_the_catalogue_stale() {
+        let mut state = ToolsCacheState::default();
+        state.keep(0, Vec::new(), vec![("gh".into(), SLOT_BUSY.into())]);
+        assert!(state.entry.as_ref().unwrap().stale);
+        state.keep(0, Vec::new(), vec![("gh".into(), "connection refused".into())]);
+        assert!(!state.entry.as_ref().unwrap().stale);
+    }
+
     /// An expired catalogue is still the answer while a background probe
     /// replaces it: a send after a quiet spell doesn't wait on every server.
     #[tokio::test]
@@ -1197,6 +1226,7 @@ mod tests {
                 .expect("uptime past the TTL"),
             tools: Vec::new(),
             errors: old.clone(),
+            stale: false,
         });
 
         let (_, errors) = aggregate_tools_cached(&db, &cache).await;

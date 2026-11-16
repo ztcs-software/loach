@@ -352,11 +352,29 @@ fn verify(secret: &str, phc: &str) -> bool {
 // Public API — wired through `commands.rs` to the frontend.
 // ---------------------------------------------------------------------------
 
-/// Whether a lock is configured, for the startup probe. Answers from the
-/// marker when there is one; see the "Lock marker" note above.
+/// Whether a lock is configured, for the startup probe. Answers from a
+/// marker saying one is; see the "Lock marker" note above.
 pub fn status() -> Result<LockStatus> {
-    if let Some(marker) = read_marker() {
-        return Ok(marker);
+    match read_marker() {
+        // A lock on record is enough to put the lock screen up — no keyring
+        // read, so no Keychain prompt, before anything is shown.
+        Some(marker) if marker.configured => return Ok(marker),
+        // "No lock" is checked against the keyring: a data folder restored
+        // from before the lock was set left a marker saying none, and every
+        // launch opened unlocked. Finding no entry is one quick lookup with
+        // no prompt. A keyring that can't be read keeps the marker's answer:
+        // no lock can have been stored without one.
+        Some(marker) => {
+            return Ok(match load() {
+                Ok(Some(cfg)) => {
+                    let actual = status_of(Some(&cfg));
+                    write_marker(&actual);
+                    actual
+                }
+                _ => marker,
+            })
+        }
+        None => {}
     }
     let status = status_of(load()?.as_ref());
     write_marker(&status);
