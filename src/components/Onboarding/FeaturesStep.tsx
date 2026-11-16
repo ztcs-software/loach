@@ -129,7 +129,7 @@ function FeatureRow({
       <Switch
         checked={checked}
         onCheckedChange={onChange}
-        aria-label={checked ? `Disable ${title}` : `Enable ${title}`}
+        aria-label={title}
         className="mt-1 shrink-0"
       />
     </div>

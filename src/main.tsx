@@ -5,6 +5,7 @@ import { ErrorBoundary } from "./components/ErrorBoundary";
 import { useToastStore } from "./stores/toastStore";
 import { logger } from "./lib/logger";
 import { primaryMod } from "./lib/shortcuts";
+import { showImportNotice } from "./lib/importNotice";
 import "./styles/globals.css";
 
 // Suppress the WebView's native context menu globally, EXCEPT inside form
@@ -71,6 +72,9 @@ window.addEventListener("unhandledrejection", (e) => {
     body: reason instanceof Error ? reason.message : String(reason),
   });
 });
+
+// What an import just changed, from the page before its reload.
+showImportNotice();
 
 ReactDOM.createRoot(document.getElementById("root")!, {
   // React 19 stopped re-throwing render errors: uncaught ones go to

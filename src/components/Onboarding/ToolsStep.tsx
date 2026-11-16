@@ -184,7 +184,7 @@ export function ToolsStep({ onClose }: { onClose: () => void }) {
                     <Switch
                       checked={on}
                       onCheckedChange={(v) => setTool(t.key, v)}
-                      aria-label={on ? t.ariaOff : t.ariaOn}
+                      aria-label={t.title}
                       className="shrink-0"
                     />
                   </div>
@@ -285,7 +285,7 @@ function ToolRow({
       <Switch
         checked={checked}
         onCheckedChange={onChange}
-        aria-label={checked ? `Disable ${title}` : `Enable ${title}`}
+        aria-label={title}
         className="mt-1 shrink-0"
       />
     </div>

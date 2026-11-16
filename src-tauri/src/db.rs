@@ -3579,6 +3579,9 @@ impl Database {
             settings: d.settings.len(),
             library_items: d.library_items.len(),
             library_datasets: d.library_datasets.len(),
+            mcp_disabled: Vec::new(),
+            mcp_renamed: Vec::new(),
+            openai_base_url_kept: false,
         };
 
         tx.commit()?;
@@ -3855,6 +3858,13 @@ pub struct ImportStats {
     pub settings: usize,
     pub library_items: usize,
     pub library_datasets: usize,
+    /// MCP servers brought back switched off (stdio awaiting consent, hosts
+    /// that couldn't be screened). Filled by `import_data_with_dialog`.
+    pub mcp_disabled: Vec<String>,
+    /// MCP servers renamed to fit the name rule, as `"old" → "new"`.
+    pub mcp_renamed: Vec<String>,
+    /// The backup's OpenAI base URL was set aside for the current one.
+    pub openai_base_url_kept: bool,
 }
 
 /// How much text `search_messages` keeps around a hit, in characters: the

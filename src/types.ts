@@ -950,6 +950,14 @@ export interface ImportStats {
   settings: number;
   library_items: number;
   library_datasets: number;
+  /** MCP servers brought back switched off: stdio ones waiting for this
+   *  install's consent, and hosts that couldn't be screened. */
+  mcp_disabled: string[];
+  /** MCP servers renamed to fit the naming rule, as `"old" → "new"`. */
+  mcp_renamed: string[];
+  /** The backup's OpenAI-compatible URL was set aside: a key is stored for
+   *  the current one. */
+  openai_base_url_kept: boolean;
 }
 
 /** Storage usage for the Settings → Data tile, from `storage_stats`.

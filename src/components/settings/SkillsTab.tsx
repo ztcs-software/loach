@@ -203,7 +203,7 @@ export function SkillsTab() {
                   checked={skill.enabled}
                   onCheckedChange={(next) => void toggle(skill.name, next)}
                   className="mt-0.5 shrink-0"
-                  aria-label={skill.enabled ? `Disable ${skill.name}` : `Enable ${skill.name}`}
+                  aria-label={skill.name}
                 />
               </li>
             ))}

@@ -22,6 +22,10 @@ export type ConnTestState =
  *  provider: Ollama is asked for /api/tags and is sent no API key. */
 export function classifyConnError(msg: string, provider: ProviderId): { hint: string } {
   const m = msg.toLowerCase();
+  // A status as a status: the message carries the URL, and digits in a port
+  // (4040) or a host (gpu-403.lan) read as a 403 or a 404.
+  const noUrl = m.replace(/https?:\/\/[^\s)]*/g, "");
+  const status = (code: string) => new RegExp(`(?:^|[\\s(])${code}(?:[\\s)]|$)`).test(noUrl);
   if (m.includes("refusing to connect")) {
     return {
       hint: "Loach blocks this address range — link-local hosts cloud-metadata services that shouldn't see LLM traffic. Use a public host or a private LAN address instead.",
@@ -48,10 +52,10 @@ export function classifyConnError(msg: string, provider: ProviderId): { hint: st
     };
   }
   if (
-    m.includes("401") ||
-    m.includes("unauthorized") ||
-    m.includes("403") ||
-    m.includes("forbidden")
+    status("401") ||
+    noUrl.includes("unauthorized") ||
+    status("403") ||
+    noUrl.includes("forbidden")
   ) {
     return {
       hint:
@@ -60,7 +64,7 @@ export function classifyConnError(msg: string, provider: ProviderId): { hint: st
           : "The server rejected the request as unauthorized. Check that the API key is set and valid for this endpoint.",
     };
   }
-  if (m.includes("404") || m.includes("not found")) {
+  if (status("404") || noUrl.includes("not found")) {
     return {
       hint:
         provider === "ollama"

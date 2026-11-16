@@ -3968,12 +3968,15 @@ pub async fn import_data_with_dialog(
 
     // Stage 1 — file read + JSON parse on the blocking pool. The IO + serde
     // pass blocks for as long as the file is large, so we don't want it on
-    // the tokio runtime.
+    // the tokio runtime. Parsed from the file as it's read: read into a
+    // `String` first, the whole file sat in memory beside the snapshot built
+    // from it — twice the backup at the peak, so one that exported could
+    // fail to restore on the same machine.
     let mut snap: DatabaseSnapshot =
         tokio::task::spawn_blocking(move || -> Result<DatabaseSnapshot, String> {
-            let text = std::fs::read_to_string(&path)
+            let file = std::fs::File::open(&path)
                 .map_err(|e| format!("couldn't read {}: {e}", path.display()))?;
-            let snap: DatabaseSnapshot = serde_json::from_str(&text)
+            let snap: DatabaseSnapshot = serde_json::from_reader(std::io::BufReader::new(file))
                 .map_err(|e| format!("file doesn't look like a Loach export: {e}"))?;
             if !crate::db::is_supported_snapshot_schema(&snap.schema) {
                 return Err(format!(
@@ -3997,6 +4000,8 @@ pub async fn import_data_with_dialog(
     // importing a tampered file.
     let mut quarantined: Vec<String> = Vec::new();
     let mut stdio_parked: Vec<String> = Vec::new();
+    // Names only, for the user: both kinds above come back switched off.
+    let mut switched_off: Vec<String> = Vec::new();
     let mut consent_dropped: Vec<String> = Vec::new();
     // What this install already has, to tell whose consent a row carries. A
     // listing that fails counts as none: every row's consent is dropped.
@@ -4048,6 +4053,7 @@ pub async fn import_data_with_dialog(
                 if row.is_stdio() && row.enabled {
                     row.enabled = false;
                     stdio_parked.push(row.name.clone());
+                    switched_off.push(row.name.clone());
                 }
             }
             // The host couldn't be screened because DNS didn't answer — the
@@ -4065,6 +4071,9 @@ pub async fn import_data_with_dialog(
             // another network; refusing those cost the whole backup. Parked
             // disabled it connects to nothing, and enabling it re-screens.
             Err(McpImportRejection::Unscreenable(msg) | McpImportRejection::Blocked(msg)) => {
+                if row.enabled {
+                    switched_off.push(row.name.clone());
+                }
                 row.enabled = false;
                 quarantined.push(format!("{} ({msg})", row.name));
             }
@@ -4160,9 +4169,11 @@ pub async fn import_data_with_dialog(
         tokio::task::spawn_blocking(|| !matches!(secrets::get_openai_key(), Ok(None)))
             .await
             .unwrap_or(true);
+    let mut openai_base_url_kept = false;
     if key_may_exist {
         let current = state.db.get_setting(OPENAI_BASE_URL_KEY).map_err(err)?;
         if keep_current_openai_base_url(&mut snap.data.settings, current) {
+            openai_base_url_kept = true;
             tracing::warn!(
                 "import: kept the current OpenAI base URL — an API key is stored for it \
                  and the backup named a different server"
@@ -4177,7 +4188,7 @@ pub async fn import_data_with_dialog(
     // blocking pool too.
     state.streams.cancel_chats();
     let db = state.db.clone();
-    let stats = tokio::task::spawn_blocking(move || -> Result<ImportStats, String> {
+    let mut stats = tokio::task::spawn_blocking(move || -> Result<ImportStats, String> {
         let stats = db.restore_snapshot(&snap).map_err(|e| format!("{e:#}"))?;
         // The replaced data's pages, compacted away as after an erase.
         db.compact();
@@ -4185,6 +4196,11 @@ pub async fn import_data_with_dialog(
     })
     .await
     .map_err(|e| format!("import restore task panicked: {e}"))??;
+    // What the restore changed on the way in, for the user (the logs above
+    // reach nobody in a release build).
+    stats.mcp_disabled = switched_off;
+    stats.mcp_renamed = renamed;
+    stats.openai_base_url_kept = openai_base_url_kept;
 
     // The restore rewrote the mcp_servers table — drop any cached catalogue
     // and retire every pooled session (stdio processes included).

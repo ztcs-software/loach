@@ -25,7 +25,7 @@ type State =
   | { kind: "uptodate" }
   | { kind: "available"; info: UpdateInfo }
   | { kind: "installing"; info: UpdateInfo; progress: DownloadProgress }
-  | { kind: "error"; message: string };
+  | { kind: "error"; message: string; phase: "check" | "install" };
 
 export function UpdatesPanel() {
   const [supported, setSupported] = useState<boolean | null>(null);
@@ -70,7 +70,7 @@ export function UpdatesPanel() {
       const info = await checkForUpdate();
       setState(info ? { kind: "available", info } : { kind: "uptodate" });
     } catch (e) {
-      setState({ kind: "error", message: e instanceof Error ? e.message : String(e) });
+      setState({ kind: "error", message: e instanceof Error ? e.message : String(e), phase: "check" });
     }
   };
 
@@ -81,7 +81,7 @@ export function UpdatesPanel() {
       // If we reach this line, relaunch() was awaited but the process is
       // already on its way down — nothing more to render.
     } catch (e) {
-      setState({ kind: "error", message: e instanceof Error ? e.message : String(e) });
+      setState({ kind: "error", message: e instanceof Error ? e.message : String(e), phase: "install" });
     }
   };
 
@@ -167,7 +167,10 @@ export function UpdatesPanel() {
         <div className="space-y-3">
           <div className="flex items-start gap-2 text-sm text-foreground/85">
             <XCircle className="mt-0.5 h-4 w-4 shrink-0 text-rose-500" />
-            <span>Update failed: {shown.message}</span>
+            {/* A failed check (offline, say) isn't a broken install. */}
+            <span>
+              {shown.phase === "check" ? "Couldn't check for updates" : "Update failed"}: {shown.message}
+            </span>
           </div>
           <Button variant="outline" onClick={onCheck} className="gap-2">
             <RefreshCw className="h-4 w-4" />

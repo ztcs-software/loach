@@ -36,8 +36,10 @@ export function KeepAliveSwitch({
   onChange: (next: OllamaKeepAlive) => void;
 }) {
   return (
+    // Toggle buttons in a group, not a radiogroup: that owes arrow-key roving
+    // focus, which these never had (see ProviderStep's `ProviderSwitch`).
     <div
-      role="radiogroup"
+      role="group"
       aria-label="Keep model loaded"
       className="mt-3 grid grid-cols-4 gap-2 rounded-2xl border border-foreground/10 bg-foreground/[0.03] p-1"
     >
@@ -47,8 +49,7 @@ export function KeepAliveSwitch({
           <button
             key={opt.value}
             type="button"
-            role="radio"
-            aria-checked={selected}
+            aria-pressed={selected}
             onClick={() => onChange(opt.value)}
             className={cn(
               "flex items-center justify-center rounded-xl px-3 py-2 text-[12px] font-medium transition-colors",
@@ -74,7 +75,7 @@ export function FontSizeSwitch({
 }) {
   return (
     <div
-      role="radiogroup"
+      role="group"
       aria-label="Font size"
       className="mt-3 grid grid-cols-3 gap-2 rounded-2xl border border-foreground/10 bg-foreground/[0.03] p-1"
     >
@@ -84,8 +85,7 @@ export function FontSizeSwitch({
           <button
             key={opt.value}
             type="button"
-            role="radio"
-            aria-checked={selected}
+            aria-pressed={selected}
             onClick={() => onChange(opt.value)}
             className={cn(
               "flex flex-col items-center justify-center gap-1 rounded-xl px-3 py-2.5 transition-colors",

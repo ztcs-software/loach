@@ -6,6 +6,7 @@
 //! import-confirmation sheet.
 
 import type { ImportStats } from "@/types";
+import { stashImportNotice } from "@/lib/importNotice";
 import { AlertTriangle, Archive, Download, Loader2, RotateCcw, Trash2, Upload } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
@@ -161,7 +162,10 @@ export function DataPanel() {
   // Stage 2 of import: armed by the ImportConfirm dialog, runs after the
   // user has confirmed AND (when a lock is configured) supplied their
   // current credentials. The Rust side handles the dialog and the read.
-  const runImport = async (auth?: DestructiveAuth) => {
+  // Resolves with the failure's text, for the confirm sheet to show — it
+  // stays open with the credentials typed (a wrong PIN comes back from the
+  // backend, after the sheet used to be gone) — or null once it's settled.
+  const runImport = async (auth?: DestructiveAuth): Promise<string | null> => {
     setBusy("import");
     const resume = await stopWritersForReplace();
     try {
@@ -170,14 +174,16 @@ export function DataPanel() {
         // User cancelled the file picker on the backend side.
         resume();
         setBusy(null);
-        return;
+        return null;
       }
       flash("info", formatImportSummary(stats));
+      stashImportNotice(stats);
       reloadAfterDestructiveAction();
+      return null;
     } catch (e) {
       resume();
-      report("error", "Import failed", errorText(e));
       setBusy(null);
+      return errorText(e);
     }
   };
 
@@ -231,7 +237,7 @@ export function DataPanel() {
         <DataRow
           icon={<Download className="h-4 w-4" />}
           title="Export data"
-          description="Save a full database dump (including chats, spaces, your Library, memories, snippets and settings) to a JSON file."
+          description="Save a full database dump (including chats, spaces, your Library, memories, snippets and settings) to a JSON file. The file isn't encrypted: anyone with it can read your chats, even with the app lock on."
           action={
             <Button
               variant="outline"
@@ -370,8 +376,9 @@ export function DataPanel() {
         lockMethod={lockStatus.method}
         pinLength={lockStatus.pin_length}
         onConfirm={async (auth) => {
-          setImportPromptOpen(false);
-          await runImport(auth);
+          const failure = await runImport(auth);
+          if (failure === null) setImportPromptOpen(false);
+          return failure;
         }}
       />
     </>
@@ -473,11 +480,13 @@ function EraseDialog({
   // Reset the form whenever the dialog is opened — never carry state across
   // mount/unmount cycles for a destructive action.
   useEffect(() => {
+    // On close as well: the dialog stays mounted with the Data tab, and a
+    // PIN or password typed and then cancelled stayed in its state.
+    setPin("");
+    setPassword("");
     if (open) {
       setMode("user-data");
       setConfirmText("");
-      setPin("");
-      setPassword("");
       setBusy(false);
       setError(null);
     }
@@ -505,6 +514,11 @@ function EraseDialog({
         onDone("All chats, Spaces, Library items, memories, snippets, and MCP servers deleted. Reloading…");
       } else {
         await factoryReset(auth);
+        // This device's own state too — per-model Thinking defaults, layout,
+        // the queued memory turns — so the reset is the fresh start it says.
+        for (const key of Object.keys(localStorage)) {
+          if (key.startsWith("loach") || key === "parameterPanel.viewMode") localStorage.removeItem(key);
+        }
         onDone("Loach has been reset to factory defaults. Reloading…");
       }
       onOpenChange(false);
@@ -553,9 +567,10 @@ function EraseDialog({
             emphasis="danger"
             body={
               <>
-                Everything above, <strong>plus</strong> all app settings and
-                your stored <strong>OpenAI API key</strong>. The app will
-                look like a fresh install.
+                Everything above, <strong>plus</strong> all app settings, the{" "}
+                <strong>app lock</strong> and your stored{" "}
+                <strong>OpenAI API key</strong>. The app will look like a
+                fresh install; skill folders on disk stay.
               </>
             }
           />
@@ -757,11 +772,14 @@ function ImportConfirm({
   lockConfigured: boolean;
   lockMethod: LockMethod | null;
   pinLength: number | null;
-  onConfirm: (auth?: DestructiveAuth) => Promise<void>;
+  /** Resolves with a failure to show here, or null once the parent has
+   *  closed the sheet (imported, or the picker cancelled). */
+  onConfirm: (auth?: DestructiveAuth) => Promise<string | null>;
 }) {
   const [pin, setPin] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const usesPin =
     lockConfigured && (lockMethod === "pin" || lockMethod === "both");
@@ -770,10 +788,12 @@ function ImportConfirm({
   const requiredPinLen = (pinLength ?? 4) as 4 | 6 | 8;
 
   useEffect(() => {
+    // On close as well, as in `EraseDialog`.
+    setPin("");
+    setPassword("");
     if (open) {
-      setPin("");
-      setPassword("");
       setBusy(false);
+      setError(null);
     }
   }, [open]);
 
@@ -790,8 +810,14 @@ function ImportConfirm({
         }
       : undefined;
     setBusy(true);
-    await onConfirm(auth);
-    // Parent flips `open` to false on success / cancel; we just stop here.
+    setError(null);
+    const failure = await onConfirm(auth);
+    // The parent closes the sheet on success or a cancelled picker; a
+    // failure stays here, credentials and all, to be fixed and retried.
+    if (failure !== null) {
+      setError(failure);
+      setBusy(false);
+    }
   };
 
   return (
@@ -807,7 +833,9 @@ function ImportConfirm({
             files, links and datasets), memories, snippets, MCP servers, and
             settings with the contents of the file you select next — a backup
             made before the Library existed leaves it empty. Your stored
-            OpenAI API key is not touched.
+            OpenAI API key is not touched. MCP servers come back without
+            their sign-in headers and environment variables, which a backup
+            doesn't carry.
           </DialogDescription>
         </div>
 
@@ -854,6 +882,15 @@ function ImportConfirm({
                 />
               </div>
             )}
+          </div>
+        )}
+
+        {error && (
+          <div
+            role="alert"
+            className="rounded-xl border border-destructive/40 bg-destructive/10 px-3 py-2 text-[12px] text-destructive"
+          >
+            {error}
           </div>
         )}
 

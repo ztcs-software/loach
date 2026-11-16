@@ -271,8 +271,9 @@ function AutoLockCard() {
           long. Anything already streaming keeps running behind the lock
           screen.
         </p>
+        {/* Toggle buttons, not a radiogroup: see `KeepAliveSwitch`. */}
         <div
-          role="radiogroup"
+          role="group"
           aria-label="Lock after inactivity"
           className="mt-3 grid grid-cols-5 gap-2 rounded-2xl border border-foreground/10 bg-foreground/[0.03] p-1"
         >
@@ -282,8 +283,7 @@ function AutoLockCard() {
               <button
                 key={opt.value}
                 type="button"
-                role="radio"
-                aria-checked={selected}
+                aria-pressed={selected}
                 onClick={() => void update("lock_idle_timeout", opt.value)}
                 className={cn(
                   "flex items-center justify-center rounded-xl px-2 py-2 text-[12px] font-medium transition-colors",
@@ -657,6 +657,7 @@ function SetupWizard({
                   <button
                     key={n}
                     type="button"
+                    aria-pressed={pinLength === n}
                     onClick={() => setPinLength(n)}
                     className={cn(
                       "h-9 w-14 rounded-lg border text-sm font-medium transition-colors",
@@ -806,6 +807,7 @@ function MethodTile({
   return (
     <button
       type="button"
+      aria-pressed={selected}
       onClick={onClick}
       className={cn(
         "flex flex-col items-start gap-0.5 rounded-xl border px-3 py-2.5 text-left transition-colors",

@@ -675,9 +675,7 @@ function ThinkingSection({
             checked={checked}
             disabled={!supports || loading}
             onCheckedChange={(next) => onChange(next)}
-            aria-label={
-              checked ? "Disable thinking for this model" : "Enable thinking for this model"
-            }
+            aria-label="Thinking for this model"
           />
         </div>
       </div>

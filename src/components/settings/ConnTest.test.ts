@@ -39,6 +39,18 @@ describe("classifyConnError", () => {
     expect(hint).not.toMatch(/set and valid/);
   });
 
+  // F6-07: a port or host with the digits in it isn't a status.
+  it("reads a status only as a status, not from the URL", () => {
+    for (const msg of [
+      "error sending request for url (http://localhost:4040/api/tags): connection refused",
+      "error sending request for url (http://gpu-403.lan:11434/api/tags): dns error",
+      "error sending request for url (http://localhost:8404/v1/models): operation timed out",
+    ]) {
+      expect(classifyConnError(msg, "openai").hint, msg).toMatch(/reach/i);
+    }
+    expect(classifyConnError("HTTP status client error (403 Forbidden)", "openai").hint).toMatch(/unauthorized/);
+  });
+
   // F6-02: what reqwest says about a URL with a space in it or no scheme.
   it("reads reqwest's URL errors as a URL problem", () => {
     for (const msg of ["builder error", "error sending request: URL scheme is not allowed"]) {

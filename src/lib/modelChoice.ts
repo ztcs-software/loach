@@ -13,7 +13,7 @@
 //      audio model).
 //   3. Comparing a typed Ollama tag with the ones being pulled or installed.
 
-import type { ModelInfo } from "@/types";
+import type { ModelInfo, ProviderId } from "@/types";
 
 const BYTES_PER_GB = 1024 ** 3;
 
@@ -243,6 +243,35 @@ export function rankChatModels(models: ModelInfo[]): ModelInfo[] {
  *  `llama3` and `llama3:latest` compare equal — one is already installed, or
  *  already downloading, when the other is. Only the last path segment counts:
  *  a registry host's `:port` isn't a tag. */
+/** The default-model setting (Settings → General) decoded: "recent",
+ *  "provider:<id>" or "model:<provider>:<id>". One decoder for the picker
+ *  that writes it and the new chat that reads it, which each had a copy. */
+export function decodeModelChoice(
+  choice: string,
+):
+  | { kind: "recent" }
+  | { kind: "provider"; provider: ProviderId }
+  | { kind: "model"; provider: ProviderId; model: string } {
+  if (choice.startsWith("model:")) {
+    const rest = choice.slice("model:".length);
+    const sep = rest.indexOf(":");
+    if (sep > 0) {
+      const p = rest.slice(0, sep);
+      const m = rest.slice(sep + 1);
+      if ((p === "ollama" || p === "openai") && m) {
+        return { kind: "model", provider: p, model: m };
+      }
+    }
+  }
+  if (choice.startsWith("provider:")) {
+    const p = choice.slice("provider:".length);
+    if (p === "ollama" || p === "openai") {
+      return { kind: "provider", provider: p };
+    }
+  }
+  return { kind: "recent" };
+}
+
 export function fullOllamaTag(tag: string): string {
   const t = tag.trim();
   return t.slice(t.lastIndexOf("/") + 1).includes(":") ? t : `${t}:latest`;

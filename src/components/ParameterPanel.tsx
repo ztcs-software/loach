@@ -754,7 +754,7 @@ function ThinkingRow({
           checked={checked}
           disabled={disabled}
           onCheckedChange={onChange}
-          aria-label={checked ? "Disable thinking" : "Enable thinking"}
+          aria-label="Thinking"
         />
       </div>
       <p className="mt-1.5 text-[10.5px] leading-snug text-foreground/50">

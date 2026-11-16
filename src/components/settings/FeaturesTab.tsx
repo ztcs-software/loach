@@ -56,11 +56,7 @@ export function FeaturesTab() {
                         settings.update("thinking_default", next)
                       }
                       className="shrink-0"
-                      aria-label={
-                        settings.thinking_default
-                          ? "Disable LLM Thinking by default"
-                          : "Enable LLM Thinking by default"
-                      }
+                      aria-label="LLM Thinking by default"
                     />
                   </div>
                 </div>
@@ -86,11 +82,7 @@ export function FeaturesTab() {
                         settings.update("temporal_awareness", next)
                       }
                       className="shrink-0"
-                      aria-label={
-                        settings.temporal_awareness
-                          ? "Disable temporal awareness"
-                          : "Enable temporal awareness"
-                      }
+                      aria-label="Temporal awareness"
                     />
                   </div>
                   <div className="mt-3 rounded-xl border border-foreground/10 bg-foreground/[0.03] p-3 text-[11px] leading-relaxed text-foreground/60">
@@ -151,11 +143,7 @@ export function FeaturesTab() {
                         settings.update("global_memory_enabled", next)
                       }
                       className="shrink-0"
-                      aria-label={
-                        settings.global_memory_enabled
-                          ? "Disable global memories"
-                          : "Enable global memories"
-                      }
+                      aria-label="Global memories"
                     />
                   </div>
                   <Button

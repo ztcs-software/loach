@@ -27,9 +27,6 @@ export const TOOL_TOGGLES: {
   /** One-line summary for compact surfaces (the onboarding tools step).
    *  `description` below stays the full Settings copy. */
   blurb: string;
-  /** Verb phrase for the switch's accessible name in each direction. */
-  ariaOn: string;
-  ariaOff: string;
   description: React.ReactNode;
 }[] = [
   {
@@ -37,8 +34,6 @@ export const TOOL_TOGGLES: {
     icon: Globe,
     title: "Web fetch",
     blurb: "Read pages from URLs in your message",
-    ariaOn: "Enable web fetch",
-    ariaOff: "Disable web fetch",
     description: (
       <>
         When your message contains an{" "}
@@ -55,8 +50,6 @@ export const TOOL_TOGGLES: {
     icon: Calculator,
     title: "Calculator",
     blurb: "Exact math instead of guessed arithmetic",
-    ariaOn: "Enable calculator tool",
-    ariaOff: "Disable calculator tool",
     description: (
       <>
         Exposes a built-in{" "}
@@ -74,8 +67,6 @@ export const TOOL_TOGGLES: {
     icon: CalendarClock,
     title: "Date & time",
     blurb: "Date maths, timezones, business days",
-    ariaOn: "Enable datetime tool",
-    ariaOff: "Disable datetime tool",
     description: (
       <>
         Exposes a{" "}
@@ -92,8 +83,6 @@ export const TOOL_TOGGLES: {
     icon: Hash,
     title: "Count",
     blurb: "Exact character, word, and line counts",
-    ariaOn: "Enable count tool",
-    ariaOff: "Disable count tool",
     description: (
       <>
         Exposes a <span className="font-mono">count</span>{" "}
@@ -109,8 +98,6 @@ export const TOOL_TOGGLES: {
     icon: Fingerprint,
     title: "Hash",
     blurb: "Real SHA-2 digests, never fabricated",
-    ariaOn: "Enable hash tool",
-    ariaOff: "Disable hash tool",
     description: (
       <>
         Exposes a <span className="font-mono">hash</span>{" "}
@@ -126,8 +113,6 @@ export const TOOL_TOGGLES: {
     icon: KeyRound,
     title: "UUID",
     blurb: "Generate real v4 / v7 UUIDs",
-    ariaOn: "Enable uuid tool",
-    ariaOff: "Disable uuid tool",
     description: (
       <>
         Exposes a <span className="font-mono">uuid</span>{" "}
@@ -144,8 +129,6 @@ export const TOOL_TOGGLES: {
     icon: Binary,
     title: "Base64",
     blurb: "Encode and decode without garbling",
-    ariaOn: "Enable base64 tool",
-    ariaOff: "Disable base64 tool",
     description: (
       <>
         Exposes a <span className="font-mono">base64</span>{" "}
@@ -160,8 +143,6 @@ export const TOOL_TOGGLES: {
     icon: Braces,
     title: "JSON",
     blurb: "Validate, pretty-print, extract values",
-    ariaOn: "Enable json tool",
-    ariaOff: "Disable json tool",
     description: (
       <>
         Exposes a <span className="font-mono">json</span>{" "}
@@ -177,8 +158,6 @@ export const TOOL_TOGGLES: {
     icon: Ruler,
     title: "Unit conversion",
     blurb: "Exact factors, from km↔mi to parsecs",
-    ariaOn: "Enable unit conversion tool",
-    ariaOff: "Disable unit conversion tool",
     description: (
       <>
         Exposes a{" "}
@@ -196,8 +175,6 @@ export const TOOL_TOGGLES: {
     icon: Diff,
     title: "Text diff",
     blurb: "Unified diffs by line, word, or character",
-    ariaOn: "Enable text diff tool",
-    ariaOff: "Disable text diff tool",
     description: (
       <>
         Exposes a <span className="font-mono">diff_text</span>{" "}
@@ -213,8 +190,6 @@ export const TOOL_TOGGLES: {
     icon: ArrowDownAZ,
     title: "Sort",
     blurb: "Lexical, natural, and numeric sorting",
-    ariaOn: "Enable sort tool",
-    ariaOff: "Disable sort tool",
     description: (
       <>
         Exposes a <span className="font-mono">sort</span>{" "}
@@ -231,8 +206,6 @@ export const TOOL_TOGGLES: {
     icon: Network,
     title: "IP / CIDR",
     blurb: "CIDR containment and subnet info",
-    ariaOn: "Enable IP / CIDR tool",
-    ariaOff: "Disable IP / CIDR tool",
     description: (
       <>
         Exposes an <span className="font-mono">ip</span>{" "}
@@ -249,8 +222,6 @@ export const TOOL_TOGGLES: {
     icon: FileText,
     title: "PDF",
     blurb: "Generate downloadable PDF documents",
-    ariaOn: "Enable PDF tool",
-    ariaOff: "Disable PDF tool",
     description: (
       <>
         Exposes a <span className="font-mono">pdf</span>{" "}
@@ -273,8 +244,6 @@ export const TOOL_TOGGLES: {
     icon: FolderOpen,
     title: "Workspace files",
     blurb: "Let the model work in a folder you pick",
-    ariaOn: "Enable workspace file tools",
-    ariaOff: "Disable workspace file tools",
     description: (
       <>
         Exposes{" "}
@@ -309,8 +278,6 @@ export const RUN_SCRIPT_TOGGLE: (typeof TOOL_TOGGLES)[number] = {
   icon: Terminal,
   title: "Run scripts",
   blurb: "Run code the model writes, asking every time",
-  ariaOn: "Enable running scripts",
-  ariaOff: "Disable running scripts",
   description: (
     <>
       Exposes a <span className="font-mono">run_script</span> tool: the model
@@ -359,7 +326,9 @@ export function ToolToggleRow({
           checked={enabled}
           onCheckedChange={(next) => void update(tool.key, next)}
           className="shrink-0"
-          aria-label={enabled ? tool.ariaOff : tool.ariaOn}
+          // A stable name: the switch announces its own state. "Enable X"
+          // / "Disable X" flipped with it, and read as the opposite.
+          aria-label={tool.title}
         />
       </div>
       {children}

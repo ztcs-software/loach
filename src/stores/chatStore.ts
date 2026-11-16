@@ -63,7 +63,7 @@ import {
 } from "@/lib/contextUsage";
 import { CUT_OFF_NOTE, formatProviderError, replayableReply } from "@/lib/providerErrors";
 import { isU32 } from "@/lib/modelParams";
-import { fullOllamaTag } from "@/lib/modelChoice";
+import { decodeModelChoice, fullOllamaTag } from "@/lib/modelChoice";
 import { getPersona } from "@/lib/personas";
 import { getTone } from "@/lib/tones";
 import { applyTemporalAwareness } from "@/lib/temporal";
@@ -1991,37 +1991,26 @@ export function resolveDefaultModelChoice(
   sessions: Session[],
   isInstalled?: (provider: ProviderId, model: string) => boolean,
 ): { provider: ProviderId; model: string } {
-  if (choice && choice.startsWith("model:")) {
-    const rest = choice.slice("model:".length);
-    const sep = rest.indexOf(":");
-    if (sep > 0) {
-      const p = rest.slice(0, sep);
-      const m = rest.slice(sep + 1);
-      if ((p === "ollama" || p === "openai") && m) {
-        return { provider: p, model: m };
-      }
+  const decoded = decodeModelChoice(choice ?? "");
+  if (decoded.kind === "model") return { provider: decoded.provider, model: decoded.model };
+  if (decoded.kind === "provider") {
+    const p = decoded.provider;
+    // Pick the user's most recent model for that provider so a
+    // provider-only pin still lands in something familiar. Sort defensively
+    // — sessions in memory aren't guaranteed to be recency-ordered after
+    // a model swap.
+    const candidates = sessions
+      .filter((s) => s.provider === p && s.model && (isInstalled?.(p, s.model) ?? true))
+      .sort((a, b) => b.updated_at - a.updated_at);
+    if (candidates.length > 0) {
+      return { provider: p, model: candidates[0]!.model };
     }
-  }
-  if (choice && choice.startsWith("provider:")) {
-    const p = choice.slice("provider:".length);
-    if (p === "ollama" || p === "openai") {
-      // Pick the user's most recent model for that provider so a
-      // provider-only pin still lands in something familiar. Sort defensively
-      // — sessions in memory aren't guaranteed to be recency-ordered after
-      // a model swap.
-      const candidates = sessions
-        .filter((s) => s.provider === p && s.model && (isInstalled?.(p, s.model) ?? true))
-        .sort((a, b) => b.updated_at - a.updated_at);
-      if (candidates.length > 0) {
-        return { provider: p, model: candidates[0]!.model };
-      }
-      // No history yet — preserve the recent model only if it matches the
-      // pinned provider, otherwise leave the model blank for the header to fill.
-      return {
-        provider: p,
-        model: recentProvider === p ? recentModel : "",
-      };
-    }
+    // No history yet — preserve the recent model only if it matches the
+    // pinned provider, otherwise leave the model blank for the header to fill.
+    return {
+      provider: p,
+      model: recentProvider === p ? recentModel : "",
+    };
   }
   return { provider: recentProvider, model: recentModel };
 }

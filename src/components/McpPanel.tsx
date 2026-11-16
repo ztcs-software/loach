@@ -238,7 +238,7 @@ function ServerRow({
             setToggling(false);
           }
         }}
-        aria-label={server.enabled ? "Disable server" : "Enable server"}
+        aria-label={server.name}
       />
       <Button
         variant="ghost"
@@ -627,7 +627,7 @@ function McpEditor({ initial, onCancel, onSaved }: EditorProps) {
           checked={enabled}
           onCheckedChange={setEnabled}
           className="shrink-0"
-          aria-label={enabled ? "Disable server" : "Enable server"}
+          aria-label="Server enabled"
         />
       </div>
 

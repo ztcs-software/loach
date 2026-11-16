@@ -93,6 +93,7 @@ export function GeneralTab({ open }: { open: boolean }) {
                         <button
                           key={t.id}
                           type="button"
+                          aria-pressed={active}
                           onClick={() =>
                             settings.update("default_tone_id", t.id)
                           }

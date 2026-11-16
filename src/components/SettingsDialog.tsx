@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Archive,
   BookOpen,
@@ -70,6 +70,7 @@ import {
   ollamaListModels,
   openaiListModels,
 } from "@/lib/tauri";
+import { useConfirm } from "@/components/ConfirmDialog";
 
 const API_BASE_URL_PRESETS: ReadonlyArray<{ label: string; url: string }> = [
   { label: "OpenAI", url: "https://api.openai.com/v1" },
@@ -112,8 +113,21 @@ export function SettingsDialog() {
 
   const [pendingKey, setPendingKey] = useState("");
   const [busy, setBusy] = useState(false);
-  const [ollamaTest, setOllamaTest] = useState<ConnTestState>({ kind: "idle" });
-  const [openaiTest, setOpenaiTest] = useState<ConnTestState>({ kind: "idle" });
+  const [ollamaTest, setOllamaTestState] = useState<ConnTestState>({ kind: "idle" });
+  const [openaiTest, setOpenaiTestState] = useState<ConnTestState>({ kind: "idle" });
+  // Bumped by every change to a card, so a test's result lands only on the
+  // card its run set to "testing": editing the URL (or key) resets the card,
+  // and the old URL's answer arrived after it as if current.
+  const testSeq = useRef({ ollama: 0, openai: 0 });
+  const setOllamaTest = useCallback((s: ConnTestState) => {
+    testSeq.current.ollama++;
+    setOllamaTestState(s);
+  }, []);
+  const setOpenaiTest = useCallback((s: ConnTestState) => {
+    testSeq.current.openai++;
+    setOpenaiTestState(s);
+  }, []);
+  const { confirm } = useConfirm();
 
   // Clear transient state when the dialog closes. Radix unmounts only the
   // CONTENT, so these live on for the app's lifetime: a typed-but-never-saved
@@ -124,7 +138,7 @@ export function SettingsDialog() {
     setPendingKey("");
     setOllamaTest({ kind: "idle" });
     setOpenaiTest({ kind: "idle" });
-  }, [open]);
+  }, [open, setOllamaTest, setOpenaiTest]);
 
   // Free-text settings are buffered locally and persisted on a pause / blur
   // / unmount rather than on every keystroke — see `useBufferedSetting`.
@@ -143,10 +157,12 @@ export function SettingsDialog() {
 
   const runOllamaTest = async () => {
     setOllamaTest({ kind: "testing" });
+    const seq = testSeq.current.ollama;
     try {
       const models = await ollamaListModels(settings.ollama_base_url);
-      setOllamaTest({ kind: "ok", modelCount: models.length });
+      if (testSeq.current.ollama === seq) setOllamaTest({ kind: "ok", modelCount: models.length });
     } catch (e) {
+      if (testSeq.current.ollama !== seq) return;
       setOllamaTest({
         kind: "error",
         error: e instanceof Error ? e.message : String(e),
@@ -156,10 +172,12 @@ export function SettingsDialog() {
 
   const runOpenAITest = async () => {
     setOpenaiTest({ kind: "testing" });
+    const seq = testSeq.current.openai;
     try {
       const models = await openaiListModels(settings.openai_base_url);
-      setOpenaiTest({ kind: "ok", modelCount: models.length });
+      if (testSeq.current.openai === seq) setOpenaiTest({ kind: "ok", modelCount: models.length });
     } catch (e) {
+      if (testSeq.current.openai !== seq) return;
       setOpenaiTest({
         kind: "error",
         error: e instanceof Error ? e.message : String(e),
@@ -420,6 +438,16 @@ export function SettingsDialog() {
                         variant="outline"
                         disabled={busy}
                         onClick={async () => {
+                          // Loach never shows a stored key, and most hosted
+                          // providers won't show it again either: right
+                          // beside Save, one slip cost a new key.
+                          const ok = await confirm({
+                            title: "Remove the stored API key?",
+                            body: "Loach can't show it again: you'll need to paste it in again to use this endpoint.",
+                            confirmLabel: "Remove key",
+                            destructive: true,
+                          });
+                          if (!ok) return;
                           setBusy(true);
                           try {
                             await settings.clearOpenAIKey();

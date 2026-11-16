@@ -37,6 +37,7 @@ describe("buildModelfile", () => {
       "library/qwen2.5:7b",
       "hf.co/bartowski/Llama-3.2-3B-Instruct-GGUF:Q4_K_M", // Hugging Face pull
       "registry.example.com/team/model:latest",
+      "localhost:5000/team/model:tag", // private registry with a port
       "gemma3",
       "x_y-z.0",
     ]) {
@@ -57,7 +58,8 @@ describe("buildModelfile", () => {
       "/a", // leading slash
       "a/", // trailing slash
       "a:b:c", // at most one tag separator
-      "a:b/c", // path after the tag
+      "a:b/c", // path after the tag (a port is digits only)
+      "localhost:5000:1/model", // one port
       "x".repeat(256), // length cap
     ]) {
       expect(() => buildModelfile(form({ from: tag })), tag).toThrow();
