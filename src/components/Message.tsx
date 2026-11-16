@@ -42,7 +42,7 @@ import type {
   ToolCallRecord,
 } from "@/types";
 import { cn } from "@/lib/utils";
-import { NO_DOCX_TEXT, NO_PDF_TEXT, safeImageMime, stripInlinedAttachments } from "@/lib/files";
+import { hasReadableText, safeImageMime, stripInlinedAttachments } from "@/lib/files";
 import { loadAttachments, parseAttachments } from "@/lib/messageAttachments";
 import { logger } from "@/lib/logger";
 import { Bookmark, BookmarkPlus } from "lucide-react";
@@ -726,7 +726,7 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
       // As in the Library's own upload (`prepareFiles`): a scanned PDF or an
       // empty document is only the shared "no text" note — stored, it'd be a
       // source with nothing in it, and the next one would look like a duplicate.
-      if (a.kind === "text" && (a.data === NO_PDF_TEXT || a.data === NO_DOCX_TEXT || !a.data.trim())) {
+      if (a.kind === "text" && !hasReadableText(a.data)) {
         unreadable.push(a.name);
         continue;
       }

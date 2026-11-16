@@ -5,7 +5,15 @@
 
 import { describe, it, expect } from "vitest";
 import type { Attachment } from "@/types";
-import { decodeTextBytes, fileToAttachment, inlineTextAttachments, looksLikeText } from "./files";
+import {
+  decodeTextBytes,
+  fileToAttachment,
+  hasReadableText,
+  inlineTextAttachments,
+  looksLikeText,
+  NO_DOCX_TEXT,
+  NO_PDF_TEXT,
+} from "./files";
 import { computeContextUsage } from "./contextUsage";
 
 const PL = "Zażółć gęślą jaźń";
@@ -46,6 +54,16 @@ describe("decodeTextBytes", () => {
     expect(decodeTextBytes(cp1250, "cs")).toBe("Zażółć");
     // "Café" from a Western European Windows, as Windows-1252.
     expect(decodeTextBytes(new Uint8Array([0x43, 0x61, 0x66, 0xe9]), "en-GB")).toBe("Café");
+  });
+});
+
+// A scanned PDF or an empty document reads as a shared note: stored, it'd be
+// a source with nothing in it (the Library, a Space and Save to Library
+// share this check).
+describe("hasReadableText", () => {
+  it("refuses the no-text notes and blank text, and takes real text", () => {
+    for (const data of [NO_PDF_TEXT, NO_DOCX_TEXT, "", "  \n\t"]) expect(hasReadableText(data), data).toBe(false);
+    expect(hasReadableText("Quarterly report")).toBe(true);
   });
 });
 

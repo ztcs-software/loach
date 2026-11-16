@@ -67,6 +67,7 @@ import {
   typeLabel,
   type LibraryTab,
 } from "./libraryUi";
+import { notifyOnFail } from "@/stores/toastStore";
 
 const TAB_KEY = "loach.library.tab";
 const TABS: LibraryTab[] = ["datasets", "texts", "files", "links"];
@@ -232,13 +233,17 @@ export function LibraryView() {
     if (files.length === 0) return;
     setUploading((n) => n + files.length);
     try {
-      const { ready, failed } = await prepareFiles(files);
-      for (const f of failed) {
+      const prepared = await prepareFiles(files);
+      for (const f of prepared.failed) {
         useToastStore.getState().push({ kind: "error", title: `Couldn't add ${f.name}`, body: f.reason });
       }
+      // The same file twice in one batch (`report.pdf` and `report (1).pdf`)
+      // is one file: the first copy only.
+      const seen = new Set<string>();
+      const batch = prepared.ready.filter((f) => !seen.has(f.hash) && !!seen.add(f.hash));
       const known = new Map(useLibraryStore.getState().items.map((i) => [i.content_hash, i.id]));
-      const dupes = ready.filter((f) => known.has(f.hash));
-      let toAdd = ready;
+      const dupes = batch.filter((f) => known.has(f.hash));
+      let toAdd = batch;
       // Skipped duplicates: the copies already in the Library.
       let existingIds: string[] = [];
       if (dupes.length > 0) {
@@ -249,7 +254,7 @@ export function LibraryView() {
           cancelLabel: "Skip",
         });
         if (!again) {
-          toAdd = ready.filter((f) => !known.has(f.hash));
+          toAdd = batch.filter((f) => !known.has(f.hash));
           existingIds = dupes.map((f) => known.get(f.hash)!);
         }
       }
@@ -258,7 +263,17 @@ export function LibraryView() {
         // Uploading into a dataset means "put this in it": a skipped
         // duplicate joins as the copy the Library already has.
         const ids = [...added.map((a) => a.id), ...existingIds];
-        if (ids.length > 0) await addToDataset(openDataset.id, ids);
+        if (ids.length > 0) {
+          try {
+            await addToDataset(openDataset.id, ids);
+          } catch (e) {
+            useToastStore.getState().push({
+              kind: "error",
+              title: `Couldn't add to “${openDataset.name}”`,
+              body: e instanceof Error ? e.message : String(e),
+            });
+          }
+        }
       } else if (added.length > 0 && tab !== "files") {
         setTab("files");
       }
@@ -397,8 +412,10 @@ export function LibraryView() {
             </header>
 
             <div className="mb-5">
+              {/* Pressed buttons, not tabs: a tablist owes arrow keys and
+                  tabpanels, which these never had. */}
               <div
-                role="tablist"
+                role="group"
                 aria-label="Library sections"
                 className="inline-flex h-10 items-center rounded-2xl border border-foreground/10 bg-foreground/[0.04] p-1 text-foreground/55"
               >
@@ -406,8 +423,7 @@ export function LibraryView() {
                   <button
                     key={t}
                     type="button"
-                    role="tab"
-                    aria-selected={tab === t}
+                    aria-pressed={tab === t}
                     onClick={() => setTab(t)}
                     className={cn(
                       "inline-flex items-center gap-1.5 rounded-xl px-3.5 py-1.5 text-sm font-medium transition-all",
@@ -496,7 +512,9 @@ export function LibraryView() {
         )}
       </ScrollArea>
 
-      {selecting && (
+      {/* The list's own bar: on a dataset's page it acted on list items not
+          shown there ("Select all" took the hidden tab's). */}
+      {selecting && !openDataset && (
         <SelectionBar
           count={selected.size}
           onClear={() => setSelected(new Set())}
@@ -509,14 +527,19 @@ export function LibraryView() {
           })()}
           // A dataset can't go inside another one.
           datasetsSelected={selectedDatasetIds.length > 0}
-          onAddTo={async (datasetId) => {
-            await addToDataset(datasetId, selectedItemIds);
+          onAddTo={(datasetId) => {
             const name = datasets.find((d) => d.id === datasetId)?.name ?? "dataset";
-            useToastStore.getState().push({
-              kind: "info",
-              title: `Added ${selectedItemIds.length} to “${name}”`,
-            });
-            setSelected(new Set());
+            notifyOnFail(
+              (async () => {
+                await addToDataset(datasetId, selectedItemIds);
+                useToastStore.getState().push({
+                  kind: "info",
+                  title: `Added ${selectedItemIds.length} to “${name}”`,
+                });
+                setSelected(new Set());
+              })(),
+              `add them to “${name}”`,
+            );
           }}
           onNewDataset={() => setDatasetDialog({ seed: selectedItemIds })}
           onAddToSpace={async (spaceId) => {
@@ -555,7 +578,7 @@ export function LibraryView() {
         open={linkOpen}
         onOpenChange={setLinkOpen}
         onAdded={(id) => {
-          if (openDataset) void addToDataset(openDataset.id, [id]);
+          if (openDataset) notifyOnFail(addToDataset(openDataset.id, [id]), `add it to “${openDataset.name}”`);
         }}
       />
       <DatasetDialog
@@ -891,9 +914,33 @@ function MetaChip({ children }: { children: React.ReactNode }) {
 // Items
 // ---------------------------------------------------------------------------
 
-function ItemMenu({ item, onOpenChange }: { item: LibraryItemMeta; onOpenChange?: (o: boolean) => void }) {
+/** "Add to dataset ▸"'s entries. Mounted only while that submenu is open:
+ *  read in `ItemMenu`, every row re-rendered on any dataset change. */
+function DatasetMenuItems({ item }: { item: LibraryItemMeta }) {
   const datasets = useLibraryStore((s) => s.datasets);
   const addToDataset = useLibraryStore((s) => s.addToDataset);
+  return (
+    <>
+      {datasets.length === 0 && <DropdownMenuItem disabled>No datasets yet</DropdownMenuItem>}
+      {datasets.map((d) => {
+        const inIt = d.item_ids.includes(item.id);
+        return (
+          <DropdownMenuItem
+            key={d.id}
+            disabled={inIt}
+            onSelect={() => notifyOnFail(addToDataset(d.id, [item.id]), `add it to “${d.name}”`)}
+          >
+            <DatasetIcon size="sm" />
+            <span className="truncate">{d.name}</span>
+            {inIt && <span className="ml-auto text-[11px] text-foreground/45">Added</span>}
+          </DropdownMenuItem>
+        );
+      })}
+    </>
+  );
+}
+
+function ItemMenu({ item, onOpenChange }: { item: LibraryItemMeta; onOpenChange?: (o: boolean) => void }) {
   const openPreview = useLibraryStore((s) => s.openPreview);
   const openTextEditor = useLibraryStore((s) => s.openTextEditor);
   const refreshLink = useLibraryStore((s) => s.refreshLink);
@@ -948,17 +995,7 @@ function ItemMenu({ item, onOpenChange }: { item: LibraryItemMeta; onOpenChange?
             <Plus className="h-4 w-4" /> Add to dataset
           </DropdownMenuSubTrigger>
           <DropdownMenuSubContent className="max-h-72 min-w-[180px] overflow-y-auto">
-            {datasets.length === 0 && <DropdownMenuItem disabled>No datasets yet</DropdownMenuItem>}
-            {datasets.map((d) => {
-              const inIt = d.item_ids.includes(item.id);
-              return (
-                <DropdownMenuItem key={d.id} disabled={inIt} onSelect={() => void addToDataset(d.id, [item.id])}>
-                  <DatasetIcon size="sm" />
-                  <span className="truncate">{d.name}</span>
-                  {inIt && <span className="ml-auto text-[11px] text-foreground/45">Added</span>}
-                </DropdownMenuItem>
-              );
-            })}
+            <DatasetMenuItems item={item} />
           </DropdownMenuSubContent>
         </DropdownMenuSub>
         <AddToSpaceSubmenu sel={{ itemIds: [item.id], datasetIds: [] }} />
@@ -993,7 +1030,9 @@ function TextCard({
       aria-label={`Open text: ${item.title}`}
       onClick={() => (selecting ? onToggle() : openPreview(item.id))}
       onKeyDown={(e) => {
-        if (e.key !== "Enter" || e.target !== e.currentTarget) return;
+        // Space too, as every other card: it scrolled the page here.
+        if ((e.key !== "Enter" && e.key !== " ") || e.target !== e.currentTarget) return;
+        e.preventDefault();
         if (selecting) onToggle();
         else openPreview(item.id);
       }}
@@ -1062,7 +1101,10 @@ function ItemRow({
       : [typeLabel(item), formatBytes(item.size)];
   const activate = () => (selecting && onToggle ? onToggle() : openPreview(item.id));
   return (
-    <li
+    // A plain list item holding the button: as the button itself, the list
+    // lost its list semantics.
+    <li>
+    <div
       role="button"
       tabIndex={0}
       aria-label={`Open ${item.title}`}
@@ -1138,6 +1180,7 @@ function ItemRow({
         )}
         <ItemMenu item={item} />
       </div>
+    </div>
     </li>
   );
 }

@@ -66,7 +66,7 @@ export function SpaceForm() {
       reset();
       setViewingSpace(space.id);
     } catch (e) {
-      setError(String(e));
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       setSaving(false);
     }

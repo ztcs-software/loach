@@ -33,29 +33,46 @@ export interface LibrarySelection {
   datasetIds: string[];
 }
 
+/** A default for the id lists: a fresh `[]` per render made new Sets, and
+ *  rebuilt every row. */
+const NONE: string[] = [];
+
 /**
  * Multi-select dialog over the whole Library — the one way in from a chat's
  * "+" menu, a Space's Sources tab, and a dataset's "Add items". Shows what
  * the selection costs against the context window, so "will this fit?" is
  * answered before anything is attached.
  */
-export function LibraryPicker({
-  open,
+export function LibraryPicker({ open, ...props }: { open: boolean } & PickerProps) {
+  return (
+    <Dialog open={open} onOpenChange={props.onOpenChange}>
+      <DialogContent className="flex max-h-[84vh] max-w-2xl flex-col gap-0 p-0">
+        {/* Mounted with the open dialog (and through its close animation):
+            its rows, counts and estimate were rebuilt while it was shut, on
+            every keystroke in the composer that holds it. */}
+        <PickerBody {...props} />
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+type PickerProps = Parameters<typeof PickerBody>[0];
+
+function PickerBody({
   onOpenChange,
   title,
   description,
   confirmLabel,
   allowDatasets = true,
-  linkedItemIds = [],
-  linkedDatasetIds = [],
-  offItemIds = [],
-  offDatasetIds = [],
+  linkedItemIds = NONE,
+  linkedDatasetIds = NONE,
+  offItemIds = NONE,
+  offDatasetIds = NONE,
   numCtx,
   spaceId = null,
   mode = "auto",
   onConfirm,
 }: {
-  open: boolean;
   onOpenChange: (open: boolean) => void;
   title: string;
   description?: string;
@@ -88,6 +105,7 @@ export function LibraryPicker({
   const [query, setQuery] = useState("");
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const tabs: LibraryTab[] = allowDatasets ? ["datasets", "texts", "files", "links"] : ["texts", "files", "links"];
   const counts: Record<LibraryTab, number> = {
@@ -97,15 +115,13 @@ export function LibraryPicker({
     links: items.filter((i) => i.kind === "link").length,
   };
 
+  // Mounted per opening (see `LibraryPicker`), so this runs on each.
   useEffect(() => {
-    if (!open) return;
     if (!hydrated) void hydrate();
-    setQuery("");
-    setPicked(new Set());
     // Land on the first section with something in it.
     setTab(tabs.find((t) => counts[t] > 0) ?? tabs[0]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
+  }, []);
 
   const linkedItems = useMemo(() => new Set(linkedItemIds), [linkedItemIds]);
   const linkedDatasets = useMemo(() => new Set(linkedDatasetIds), [linkedDatasetIds]);
@@ -216,9 +232,14 @@ export function LibraryPicker({
 
   const confirm = async () => {
     setBusy(true);
+    setError(null);
     try {
       await onConfirm({ itemIds: selection.itemIds, datasetIds: selection.datasetIds });
       onOpenChange(false);
+    } catch (e) {
+      // Shown here, the dialog left open with the picks: it reached only
+      // main.tsx's "Something went wrong".
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
     }
@@ -253,8 +274,7 @@ export function LibraryPicker({
           : null;
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="flex max-h-[84vh] max-w-2xl flex-col gap-0 p-0">
+    <>
         <DialogHeader className="px-6 pb-3 pt-6 pr-14">
           <DialogTitle className="flex items-center gap-2">
             <Library className="h-[18px] w-[18px] text-foreground/60" />
@@ -303,13 +323,13 @@ export function LibraryPicker({
         ) : (
           <>
             <div className="flex flex-wrap items-center gap-2 px-6 pb-3">
-              <div role="tablist" className="flex flex-wrap gap-1">
+              {/* Pressed buttons, not an unfinished tab pattern. */}
+              <div role="group" aria-label="Library sections" className="flex flex-wrap gap-1">
                 {tabs.map((t) => (
                   <button
                     key={t}
                     type="button"
-                    role="tab"
-                    aria-selected={tab === t}
+                    aria-pressed={tab === t}
                     onClick={() => setTab(t)}
                     className={cn(
                       "rounded-full px-3 py-1 text-[12.5px] font-medium transition-colors",
@@ -384,6 +404,11 @@ export function LibraryPicker({
               )}
             </div>
 
+            {error && (
+              <p role="alert" className="mx-6 mt-3 text-[12px] text-destructive [overflow-wrap:anywhere]">
+                {error}
+              </p>
+            )}
             <footer className="flex flex-wrap items-center justify-between gap-3 px-6 py-4">
               <div className="min-w-0 text-xs text-foreground/55">
                 {picked.size === 0 ? (
@@ -422,7 +447,6 @@ export function LibraryPicker({
             </footer>
           </>
         )}
-      </DialogContent>
-    </Dialog>
+    </>
   );
 }

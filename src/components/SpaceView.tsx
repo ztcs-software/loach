@@ -51,7 +51,8 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { useToastStore } from "@/stores/toastStore";
 import { useUIStore } from "@/stores/uiStore";
 import { deleteChatConfirm } from "@/lib/confirmations";
-import { fileToAttachment, NO_DOCX_TEXT, NO_PDF_TEXT } from "@/lib/files";
+import { fileToAttachment, hasReadableText, NO_PDF_TEXT } from "@/lib/files";
+import { deleteSpaceConfirm } from "@/lib/confirmations";
 import { parseImageScaling, resolveImageScaling } from "@/lib/imageScaling";
 import { dialogEnter } from "@/lib/shortcuts";
 import { spaceSourceCount } from "@/lib/sources";
@@ -65,24 +66,10 @@ import {
   type SpaceFile,
   type SpaceMemory,
 } from "@/types";
+import { notifyOnFail } from "@/stores/toastStore";
 
 /** Stable empties for the "not loaded yet" case — a fresh `[]` per render
  *  would churn every memo and effect keyed on these. */
-/** Surface a failed chat-row action instead of letting it fall through to
- *  main.tsx's global unhandled-rejection net, which says only "Something
- *  went wrong" with no hint as to which action failed. The store actions
- *  don't catch, so without this every rename / pin / label / archive / delete
- *  in this view shared the vaguest error path in the file. */
-function notifyOnFail(p: Promise<unknown>, action: string): void {
-  void p.catch((e) => {
-    useToastStore.getState().push({
-      kind: "error",
-      title: `Couldn't ${action}`,
-      body: e instanceof Error ? e.message : String(e),
-    });
-  });
-}
-
 const EMPTY_FILES: SpaceFile[] = [];
 const EMPTY_MEMORIES: SpaceMemory[] = [];
 
@@ -218,12 +205,7 @@ export function SpaceView() {
   };
 
   const handleDeleteSpace = async () => {
-    const ok = await confirm({
-      title: `Delete Space “${space.name}”?`,
-      body: "Its instructions, memories and uploaded files are deleted for good. Library sources stay in your Library, and its chats are kept outside any Space.",
-      confirmLabel: "Delete Space",
-      destructive: true,
-    });
+    const ok = await confirm(deleteSpaceConfirm(space.name));
     if (ok) {
       void doDeleteSpace(space.id).then((deleted) => {
         if (deleted) {
@@ -416,10 +398,7 @@ export function SpaceView() {
                     for (const f of Array.from(fileList)) {
                       try {
                         const att = await fileToAttachment(f);
-                        if (
-                          att.kind === "text" &&
-                          (att.data === NO_PDF_TEXT || att.data === NO_DOCX_TEXT || !att.data.trim())
-                        ) {
+                        if (att.kind === "text" && !hasReadableText(att.data)) {
                           failed.push(
                             `${f.name}: no readable text${att.data === NO_PDF_TEXT ? " — it may be a scanned PDF" : ""}`,
                           );
@@ -607,7 +586,7 @@ function EditSpaceDialog({
       await onSave({ name: trimmedName, description: trimmedDesc });
       onOpenChange(false);
     } catch (e) {
-      setError(String(e));
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       setSaving(false);
     }
@@ -792,11 +771,13 @@ function ChatRow({
   const [draft, setDraft] = useState(session.title);
   const [menuOpen, setMenuOpen] = useState(false);
 
-  // Reseed the draft when a fresh rename starts so the input opens with the
-  // current title rather than a stale one from a previous edit.
-  useEffect(() => {
-    if (renaming) setDraft(session.title);
-  }, [renaming, session.title]);
+  // Seeded from the live title when the rename starts — in the trigger, not
+  // an effect on `session.title`, which replaced a half-typed draft when an
+  // auto-title landed mid-edit (Sidebar's row seeds the same way).
+  const beginRename = () => {
+    setDraft(session.title);
+    onStartRename();
+  };
 
   if (renaming) {
     return (
@@ -903,7 +884,7 @@ function ChatRow({
               iconClassName="mr-2 h-4 w-4"
             />
             <ChatSpaceSubmenu session={session} iconClassName="mr-2 h-4 w-4" />
-            <DropdownMenuItem onSelect={onStartRename}>
+            <DropdownMenuItem onSelect={beginRename}>
               <Pencil className="mr-2 h-4 w-4" />
               Rename
             </DropdownMenuItem>
@@ -943,7 +924,9 @@ function InstructionsTab({
     setVal(space.instructions);
   }, [space.id, space.instructions]);
 
-  const dirty = val !== space.instructions;
+  // Trimmed, as the save sends it: trailing whitespace alone stayed "dirty"
+  // for good, and re-saved (bumping the Space) on every blur.
+  const dirty = val.trim() !== space.instructions.trim();
 
   // Saved on blur, and again when the tab goes away with edits the blur never
   // caught — a keyboard shortcut or the app lock leaves without blurring the

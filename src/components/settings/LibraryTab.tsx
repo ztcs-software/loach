@@ -116,6 +116,9 @@ export function LibraryTab() {
     setRebuilding(true);
     try {
       await ragReindex();
+      // Reissued under the current key: re-read the per-item counts, or
+      // every item still reads as indexed (no busy edge if a pass was on).
+      void useLibraryStore.getState().refreshItems();
     } catch (e) {
       toastError("Couldn't rebuild the search index", e);
     } finally {

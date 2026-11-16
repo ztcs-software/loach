@@ -30,6 +30,9 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { formatTokens } from "@/lib/contextUsage";
 import { SPACE_BYTES_CAP } from "@/lib/files";
+
+/** The cap as the copy says it, from the constant the check uses. */
+const CAP_LABEL = `${SPACE_BYTES_CAP / (1024 * 1024)} MB`;
 import { FULL_TEXT_SHARE, resolveMode, retrievalBudgetTokens, sourceTokens, spaceSourceCount } from "@/lib/sources";
 import { cn, formatBytes } from "@/lib/utils";
 import { expandSources, useLibraryStore } from "@/stores/libraryStore";
@@ -223,8 +226,8 @@ export function SpaceSourcesTab({
                 ? "Uploads couldn't be loaded"
                 : "Loading uploads…"
               : atCap
-                ? "Reached the 200 MB upload limit"
-                : `${formatBytes(totalBytes)} of 200 MB uploaded · ${links.length} from Library`}
+                ? `Reached the ${CAP_LABEL} upload limit`
+                : `${formatBytes(totalBytes)} of ${CAP_LABEL} uploaded · ${links.length} from Library`}
           </span>
         </div>
         <div className="flex items-center gap-2">

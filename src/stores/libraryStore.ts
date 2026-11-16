@@ -20,7 +20,7 @@ import {
   onIndexStatus,
   ragStatus,
 } from "@/lib/tauri";
-import { fileToAttachment, NO_DOCX_TEXT, NO_PDF_TEXT } from "@/lib/files";
+import { fileToAttachment, hasReadableText, NO_PDF_TEXT } from "@/lib/files";
 import { useToastStore } from "./toastStore";
 import type {
   IndexStatus,
@@ -68,7 +68,7 @@ export async function prepareFiles(
       // A scanned PDF or an empty document comes back as a fixed note, which
       // every such file shares — stored, it'd be a "source" with nothing in
       // it, and the next one would look like a duplicate.
-      if (att.kind === "text" && (att.data === NO_PDF_TEXT || att.data === NO_DOCX_TEXT || !att.data.trim())) {
+      if (att.kind === "text" && !hasReadableText(att.data)) {
         failed.push({
           name: file.name,
           reason:
@@ -280,7 +280,10 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
       void onIndexStatus((status) => {
         const was = get().indexStatus;
         set({ indexStatus: status });
-        if (was?.busy && !status.busy) void get().refreshItems();
+        // And when one starts: a new embedding model or a Rebuild re-embeds
+        // everything, and counts read under the old key said each item was
+        // done — no item showed it was being indexed.
+        if (!!was?.busy !== status.busy) void get().refreshItems();
       });
       void ragStatus()
         .then((status) => set((s) => ({ indexStatus: s.indexStatus ?? status })))

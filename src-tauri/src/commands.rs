@@ -963,7 +963,7 @@ pub async fn set_setting(
 }
 
 #[tauri::command]
-pub async fn set_openai_key(key: String) -> Result<(), String> {
+pub async fn set_openai_key(state: State<'_, AppState>, key: String) -> Result<(), String> {
     // Keyring calls block on the OS credential store — on Linux that's
     // a DBus round-trip to the Secret Service which can stall for
     // hundreds of ms if `gnome-keyring-daemon` is unlocking a profile or
@@ -972,7 +972,12 @@ pub async fn set_openai_key(key: String) -> Result<(), String> {
     tokio::task::spawn_blocking(move || secrets::set_openai_key(&key))
         .await
         .map_err(|e| format!("set_openai_key task panicked: {e}"))?
-        .map_err(err)
+        .map_err(err)?;
+    // Embedding reads the key on every request: a 401 from before it was
+    // set kept indexing "paused", and search keyword-only, until the retry
+    // timer ran out. As `set_setting` does for the URL and model.
+    state.indexer.wake();
+    Ok(())
 }
 
 #[tauri::command]
@@ -983,11 +988,13 @@ pub async fn get_openai_key_status() -> Result<bool, String> {
 }
 
 #[tauri::command]
-pub async fn clear_openai_key() -> Result<(), String> {
+pub async fn clear_openai_key(state: State<'_, AppState>) -> Result<(), String> {
     tokio::task::spawn_blocking(secrets::clear_openai_key)
         .await
         .map_err(|e| format!("clear_openai_key task panicked: {e}"))?
-        .map_err(err)
+        .map_err(err)?;
+    state.indexer.wake();
+    Ok(())
 }
 
 // ---------- security (app lock) ----------

@@ -85,6 +85,20 @@ function startDismissTimer(
   dismissTimers.set(id, timerId);
 }
 
+/** Surface a failed action as "Couldn't <action>" instead of leaving the
+ *  rejection to main.tsx's net, which says only "Something went wrong" with
+ *  no hint of which action failed. For the fire-and-forget store actions
+ *  that don't catch their own failures. */
+export function notifyOnFail(p: Promise<unknown>, action: string): void {
+  void p.catch((e) => {
+    useToastStore.getState().push({
+      kind: "error",
+      title: `Couldn't ${action}`,
+      body: e instanceof Error ? e.message : String(e),
+    });
+  });
+}
+
 export const useToastStore = create<ToastState>((set, get) => ({
   toasts: [],
   push: (toast) => {

@@ -24,6 +24,15 @@ export const NO_PDF_TEXT =
   "[PDF contained no extractable text — it may be a scanned image. Try attaching it as an image instead for a vision-capable model.]";
 export const NO_DOCX_TEXT = "[DOCX contained no extractable text.]";
 
+/** Whether text read from a file has any in it: a scanned PDF or an empty
+ *  document reads as only the shared "no text" note — stored, it'd be a
+ *  source with nothing in it, and the next one would look like a duplicate.
+ *  One check for the Library's upload, a Space's and a message's "Save to
+ *  Library", which each had a copy. */
+export function hasReadableText(data: string): boolean {
+  return data !== NO_PDF_TEXT && data !== NO_DOCX_TEXT && data.trim() !== "";
+}
+
 /**
  * Combined inline-content ceiling for a single outgoing user message.
  *

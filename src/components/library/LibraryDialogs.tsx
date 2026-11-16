@@ -43,6 +43,7 @@ import {
   tokensLabel,
   typeLabel,
 } from "./libraryUi";
+import { notifyOnFail } from "@/stores/toastStore";
 
 // ---------------------------------------------------------------------------
 // Delete — one flow for every surface, naming what links to the items.
@@ -65,10 +66,10 @@ export function useDeleteLibraryItems() {
     } catch {
       /* the confirmation still works without the usage line */
     }
-    const where: string[] = [];
-    if (inDatasets.length) where.push(`${inDatasets.length} dataset${inDatasets.length === 1 ? "" : "s"}`);
-    if (usage.spaces.length) where.push(`Space${usage.spaces.length === 1 ? "" : "s"} ${usage.spaces.map((s) => `“${s}”`).join(", ")}`);
-    if (usage.chats) where.push(`${usage.chats} chat${usage.chats === 1 ? "" : "s"}`);
+    const where = [
+      ...(inDatasets.length ? [`${inDatasets.length} dataset${inDatasets.length === 1 ? "" : "s"}`] : []),
+      ...usagePlaces(usage),
+    ];
     const ok = await confirm({
       title: ids.length === 1 ? `Delete “${names[0] ?? "item"}”?` : `Delete ${ids.length} items?`,
       body:
@@ -79,6 +80,17 @@ export function useDeleteLibraryItems() {
     });
     return ok && (await deleteItems(ids));
   };
+}
+
+/** Where a Library delete reaches, for its confirmation: the Spaces by name
+ *  and a count of chats. Shared by the three delete flows below. */
+function usagePlaces(usage: { spaces: string[]; chats: number }): string[] {
+  const where: string[] = [];
+  if (usage.spaces.length) {
+    where.push(`Space${usage.spaces.length === 1 ? "" : "s"} ${usage.spaces.map((s) => `“${s}”`).join(", ")}`);
+  }
+  if (usage.chats) where.push(`${usage.chats} chat${usage.chats === 1 ? "" : "s"}`);
+  return where;
 }
 
 /** Delete a dataset (its items stay in the Library). */
@@ -94,9 +106,7 @@ export function useDeleteDataset() {
     } catch {
       /* ignore */
     }
-    const where: string[] = [];
-    if (usage.spaces.length) where.push(`Space${usage.spaces.length === 1 ? "" : "s"} ${usage.spaces.map((s) => `“${s}”`).join(", ")}`);
-    if (usage.chats) where.push(`${usage.chats} chat${usage.chats === 1 ? "" : "s"}`);
+    const where = usagePlaces(usage);
     const ok = await confirm({
       title: `Delete dataset “${ds.name}”?`,
       body:
@@ -133,9 +143,7 @@ export function useDeleteSelection() {
     } catch {
       /* the confirmation still works without the usage line */
     }
-    const where: string[] = [];
-    if (usage.spaces.length) where.push(`Space${usage.spaces.length === 1 ? "" : "s"} ${usage.spaces.map((s) => `“${s}”`).join(", ")}`);
-    if (usage.chats) where.push(`${usage.chats} chat${usage.chats === 1 ? "" : "s"}`);
+    const where = usagePlaces(usage);
     const what = [
       itemIds.length ? `${itemIds.length} item${itemIds.length === 1 ? "" : "s"}` : null,
       `${datasetIds.length} dataset${datasetIds.length === 1 ? "" : "s"}`,
@@ -152,8 +160,12 @@ export function useDeleteSelection() {
       destructive: true,
     });
     if (!ok) return false;
-    for (const id of datasetIds) await deleteDataset(id);
-    return itemIds.length > 0 ? deleteItems(itemIds) : true;
+    // A dataset that failed to go (the store toasted why) fails the whole:
+    // the selection stays, rather than clearing as if all of it went.
+    let allGone = true;
+    for (const id of datasetIds) if (!(await deleteDataset(id))) allGone = false;
+    const itemsGone = itemIds.length > 0 ? await deleteItems(itemIds) : true;
+    return allGone && itemsGone;
   };
 }
 
@@ -639,7 +651,7 @@ export function ItemPreviewDialog() {
     if (renameCancelled.current) return;
     const t = draftTitle.trim();
     setRenaming(false);
-    if (t && t !== item.title) await rename(item.id, t);
+    if (t && t !== item.title) notifyOnFail(rename(item.id, t), "rename it");
   };
 
   return (
@@ -767,7 +779,10 @@ export function ItemPreviewDialog() {
                   </DropdownMenuItem>
                 )}
                 {others.map((d) => (
-                  <DropdownMenuItem key={d.id} onSelect={() => void addToDataset(d.id, [item.id])}>
+                  <DropdownMenuItem
+                    key={d.id}
+                    onSelect={() => notifyOnFail(addToDataset(d.id, [item.id]), `add it to “${d.name}”`)}
+                  >
                     <DatasetIcon size="sm" />
                     <span className="truncate">{d.name}</span>
                   </DropdownMenuItem>
