@@ -3890,14 +3890,15 @@ pub async fn export_data_to_file(
         .into_path()
         .map_err(|e| format!("invalid path returned from dialog: {e}"))?;
 
-    // `snapshot()` reads every table (messages and space files carry inlined
-    // base64 bodies) under the DB lock, and the write that follows is as big
-    // — both blocking, so both on the blocking pool, like the import.
+    // `write_snapshot` reads every table (messages and space files carry
+    // inlined base64 bodies) and writes as it reads — blocking, so on the
+    // blocking pool, like the import.
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || -> Result<Option<String>, String> {
-        let snap = db.snapshot().map_err(err)?;
-        write_replacing(&path, |out| serde_json::to_writer_pretty(out, &snap).map_err(std::io::Error::from))
-            .map_err(|e| format!("couldn't write {}: {e}", path.display()))?;
+        write_replacing(&path, |out| {
+            db.write_snapshot(out).map_err(|e| std::io::Error::other(format!("{e:#}")))
+        })
+        .map_err(|e| format!("couldn't write {}: {e}", path.display()))?;
         Ok(Some(path.to_string_lossy().to_string()))
     })
     .await
