@@ -63,6 +63,10 @@ interface AttachmentActionsProps {
   /** Tailwind classes applied to the wrapping element. The wrapper is a
    *  block-inline span so it lays out the same as the chip it contains. */
   className?: string;
+  /** Controls of the chip's own (FileChip's ✕), drawn in it beside the
+   *  click-to-preview target rather than inside it: a button inside a
+   *  `role="button"` is flattened into it, and never reached. */
+  after?: React.ReactNode;
 }
 
 /**
@@ -74,6 +78,7 @@ export function AttachmentActions({
   attachment,
   children,
   className,
+  after,
 }: AttachmentActionsProps) {
   const [previewOpen, setPreviewOpen] = useState(false);
   const openCanvas = useCanvasStore((s) => s.open);
@@ -102,8 +107,7 @@ export function AttachmentActions({
     setPreviewOpen(true);
   };
 
-  return (
-    <>
+  const opener = (openerClass: string | undefined) => (
       <span
         role="button"
         // `tabIndex={0}` puts the chip in tab order — image thumbnails used
@@ -124,11 +128,23 @@ export function AttachmentActions({
         }}
         className={cn(
           "inline-flex cursor-pointer items-center outline-none transition-opacity hover:opacity-85 focus-visible:ring-2 focus-visible:ring-ring/40",
-          className,
+          openerClass,
         )}
       >
         {children}
       </span>
+  );
+
+  return (
+    <>
+      {after === undefined ? (
+        opener(className)
+      ) : (
+        <span className={className}>
+          {opener("gap-1.5 rounded-sm")}
+          {after}
+        </span>
+      )}
 
       {/* Preview dialog. Mounted only while open so cleanup effects in
           PdfPreview (page caches, doc.destroy) actually fire on close. */}

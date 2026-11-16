@@ -755,7 +755,7 @@ async function runTools(): Promise<CommandResult> {
   const { tools, errors } = await mcpTools();
   const items: CommandResultItem[] = [];
   for (const server of servers) {
-    const error = errors.find(([name]) => name === server.name)?.[1];
+    const error = errors.find((e) => e.server_id === server.id)?.error;
     if (error) {
       items.push({ label: server.name, detail: "error", hint: error });
       continue;

@@ -89,12 +89,15 @@ async fn pin_client_for(server: &McpServer) -> Result<(reqwest::Client, Url)> {
 /// per-server failures the chat path can surface to the user.
 pub async fn aggregate_tools(
     db: &Database,
-) -> (Vec<McpToolDef>, Vec<(String, String)>) {
+) -> (Vec<McpToolDef>, Vec<ServerError>) {
     let servers = match db.list_mcp_servers() {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!("MCP aggregate: list_mcp_servers failed: {e}");
-            return (Vec::new(), vec![("(database)".into(), e.to_string())]);
+            return (
+                Vec::new(),
+                vec![ServerError { server_id: String::new(), name: "(database)".into(), error: e.to_string() }],
+            );
         }
     };
 
@@ -112,14 +115,14 @@ pub async fn aggregate_tools(
         .zip(slugs.iter())
         .map(|(server, slug)| async move {
             let result = collect_one(server, slug).await;
-            (server.name.clone(), result)
+            (server.id.clone(), server.name.clone(), result)
         });
 
     let results = join_all(probes).await;
 
     let mut defs: Vec<McpToolDef> = Vec::new();
-    let mut errors: Vec<(String, String)> = Vec::new();
-    for (name, result) in results {
+    let mut errors: Vec<ServerError> = Vec::new();
+    for (server_id, name, result) in results {
         match result {
             Ok(mut these) => defs.append(&mut these),
             Err(e) => {
@@ -133,11 +136,23 @@ pub async fn aggregate_tools(
                 // stderr can print anything, a token included. The log line
                 // keeps it; Test connection shows it in full.
                 tracing::warn!("MCP aggregate: `{name}` failed: {e:#}");
-                errors.push((name, failure_summary(&e)));
+                let error = failure_summary(&e);
+                errors.push(ServerError { server_id, name, error });
             }
         }
     }
     (defs, errors)
+}
+
+/// A server whose tools couldn't be listed. Keyed by id: names aren't
+/// unique, and `/tools` matched by name showed a working server as failed
+/// beside a broken one of the same name.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct ServerError {
+    pub server_id: String,
+    /// For the chat's notice.
+    pub name: String,
+    pub error: String,
 }
 
 /// What the "couldn't be reached" notice and `/tools` say about a server
@@ -176,7 +191,7 @@ const TOOLS_CACHE_TTL: Duration = Duration::from_secs(300);
 pub struct CachedTools {
     cached_at: Instant,
     tools: Vec<McpToolDef>,
-    errors: Vec<(String, String)>,
+    errors: Vec<ServerError>,
     /// A server was skipped as busy: served once, then re-probed, rather
     /// than missing its tools for the whole TTL.
     stale: bool,
@@ -201,9 +216,9 @@ pub struct ToolsCacheState {
 
 impl ToolsCacheState {
     /// Keep a probe's catalogue, unless the config changed while it ran.
-    fn keep(&mut self, generation: u64, tools: Vec<McpToolDef>, errors: Vec<(String, String)>) {
+    fn keep(&mut self, generation: u64, tools: Vec<McpToolDef>, errors: Vec<ServerError>) {
         if self.generation == generation {
-            let stale = errors.iter().any(|(_, e)| e == SLOT_BUSY);
+            let stale = errors.iter().any(|e| e.error == SLOT_BUSY);
             self.entry = Some(CachedTools { cached_at: Instant::now(), tools, errors, stale });
         }
     }
@@ -232,7 +247,7 @@ pub fn new_tools_cache() -> ToolsCache {
 pub async fn aggregate_tools_cached(
     db: &Arc<Database>,
     cache: &ToolsCache,
-) -> (Vec<McpToolDef>, Vec<(String, String)>) {
+) -> (Vec<McpToolDef>, Vec<ServerError>) {
     let generation = {
         let mut guard = cache.lock().await;
         let generation = guard.generation;
@@ -430,6 +445,13 @@ pub async fn dispatch_tool_call(
     // other tool ignores it. It comes from the session row, never from the
     // model's arguments, so a model can't redirect itself at another tree.
     if server_id == crate::tools::builtin::BUILTIN_SERVER_ID {
+        if crate::tools::builtin::switched_off(db, name) {
+            return Ok(McpCallResult {
+                content_text: format!("`{name}` is switched off in Loach's settings."),
+                is_error: true,
+                ..Default::default()
+            });
+        }
         return crate::tools::builtin::dispatch_builtin_guarded(name, arguments, workspace_root)
             .await
             .ok_or_else(|| anyhow!("unknown built-in tool `{name}`"));
@@ -898,6 +920,10 @@ fn stable_id_suffix(id: &str) -> String {
 mod tests {
     use super::*;
 
+    fn failed(name: &str, error: &str) -> ServerError {
+        ServerError { server_id: format!("id-{name}"), name: name.into(), error: error.into() }
+    }
+
     fn fresh_db() -> (Database, tempfile::TempDir) {
         let dir = tempfile::TempDir::new().expect("tempdir");
         let db = Database::open(&dir.path().join("loach.db")).expect("open");
@@ -1179,6 +1205,22 @@ mod tests {
         assert!(a.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'), "{a}");
     }
 
+    /// A built-in switched off after the turn began doesn't run: the
+    /// workspace tools went on reading the folder for the rest of the reply.
+    #[tokio::test]
+    async fn a_builtin_switched_off_mid_turn_is_refused() {
+        let (db, dir) = fresh_db();
+        let args = serde_json::json!({});
+        let builtin = crate::tools::builtin::BUILTIN_SERVER_ID;
+        let tool = crate::tools::fs::LIST_DIRECTORY;
+        db.set_setting(crate::tools::fs::SETTING_KEY, "false").expect("setting");
+        let off = dispatch_tool_call(&db, builtin, tool, &args, Some(dir.path())).await.expect("dispatched");
+        assert!(off.is_error && off.content_text.contains("switched off"), "{}", off.content_text);
+        db.set_setting(crate::tools::fs::SETTING_KEY, "true").expect("setting");
+        let on = dispatch_tool_call(&db, builtin, tool, &args, Some(dir.path())).await.expect("dispatched");
+        assert!(!on.content_text.contains("switched off"), "{}", on.content_text);
+    }
+
     /// A stdio server that dies while starting leaves its stderr — which can
     /// print anything, a token included — out of the errors the chat notice
     /// and `/tools` show. Test connection still shows it.
@@ -1198,7 +1240,7 @@ mod tests {
         assert!(shown.contains("token-123"), "{shown}");
 
         let (_, errors) = aggregate_tools(&db).await;
-        let (_, e) = errors.first().expect("the server failed to start");
+        let e = &errors.first().expect("the server failed to start").error;
         assert!(e.contains("exited before replying"), "{e}");
         assert!(!e.contains("token-123"), "{e}");
     }
@@ -1208,9 +1250,9 @@ mod tests {
     #[test]
     fn a_busy_server_leaves_the_catalogue_stale() {
         let mut state = ToolsCacheState::default();
-        state.keep(0, Vec::new(), vec![("gh".into(), SLOT_BUSY.into())]);
+        state.keep(0, Vec::new(), vec![failed("gh", SLOT_BUSY)]);
         assert!(state.entry.as_ref().unwrap().stale);
-        state.keep(0, Vec::new(), vec![("gh".into(), "connection refused".into())]);
+        state.keep(0, Vec::new(), vec![failed("gh", "connection refused")]);
         assert!(!state.entry.as_ref().unwrap().stale);
     }
 
@@ -1221,7 +1263,11 @@ mod tests {
         let (db, _dir) = fresh_db();
         let db = Arc::new(db);
         let cache = new_tools_cache();
-        let old = vec![("old".to_string(), "unreachable".to_string())];
+        let old = vec![ServerError {
+            server_id: "s-old".to_string(),
+            name: "old".to_string(),
+            error: "unreachable".to_string(),
+        }];
         cache.lock().await.entry = Some(CachedTools {
             cached_at: Instant::now()
                 .checked_sub(TOOLS_CACHE_TTL + Duration::from_secs(1))

@@ -1728,6 +1728,7 @@ async function startTask(task: QueueTask, get: Getter, set: Setter): Promise<boo
             server_id: ev.server_id,
             server_name: ev.server_name,
             tool: ev.tool,
+            ...(ev.tool_name ? { tool_name: ev.tool_name } : {}),
             arguments: ev.arguments,
             result: null,
             is_error: false,

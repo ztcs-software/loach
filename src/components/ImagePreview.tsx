@@ -17,10 +17,14 @@ interface ImagePreviewProps {
   name: string;
 }
 
-function extForMime(mime: string, fallback: string): string {
-  if (mime === "image/jpeg") return "jpg";
-  const m = /^image\/([a-z0-9.+-]+)$/i.exec(mime);
-  return m ? m[1].toLowerCase() : fallback;
+/** The save dialog's extension: the name's own, else one of the image
+ *  types shown here. From the raw MIME, an MCP tool's image came out as
+ *  `*.svg+xml` or `*.x-icon` against a name ending `.svg` or `.img`. */
+function extFor(name: string, mime: string): string {
+  const own = /\.([a-z0-9]+)$/i.exec(name)?.[1];
+  if (own) return own.toLowerCase();
+  const safe = safeImageMime(mime);
+  return safe === "image/jpeg" ? "jpg" : safe.slice("image/".length);
 }
 
 export function ImagePreview({ open, onOpenChange, data, mime, name }: ImagePreviewProps) {
@@ -31,7 +35,7 @@ export function ImagePreview({ open, onOpenChange, data, mime, name }: ImagePrev
     if (saving) return;
     setSaving(true);
     try {
-      const ext = extForMime(mime, "png");
+      const ext = extFor(name, mime);
       const defaultName = /\.[a-z0-9]+$/i.test(name) ? name : `${name}.${ext}`;
       await saveBinaryToFile({
         base64_data: data,

@@ -262,6 +262,18 @@ pub fn dispatch_builtin(
     })
 }
 
+/// Whether the built-in `name` is switched off in the settings now. The
+/// catalogue is built when a turn starts; a tool switched off during it
+/// (Workspace files, say, while a reply reads the folder) mustn't keep
+/// running for the rest of the reply — as scripts, skills and MCP servers
+/// don't. `false` for a name that isn't a built-in.
+pub fn switched_off(db: &Database, name: &str) -> bool {
+    BUILTINS
+        .iter()
+        .find(|b| b.name == name)
+        .is_some_and(|b| db.get_setting(b.setting_key).ok().flatten().as_deref() != Some("true"))
+}
+
 /// Run a built-in tool with a panic boundary and a wall-clock timeout.
 ///
 /// Built-in dispatch is synchronous CPU work invoked inline on the chat

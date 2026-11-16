@@ -208,26 +208,20 @@ function SnippetCard({
   const [menuOpen, setMenuOpen] = useState(false);
   return (
     <article
-      role="button"
-      tabIndex={0}
-      aria-label={`Edit snippet: ${snippet.title}`}
-      onClick={onEdit}
-      onKeyDown={(e) => {
-        // Only the card's own keys: Enter on its Run or ⋯ button (or a menu
-        // item, which bubbles here through the portal) belongs to that
-        // control — the preventDefault below swallowed a keyboard Run.
-        if (e.target !== e.currentTarget) return;
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          onEdit();
-        }
-      }}
       className={cn(
-        "group relative flex h-full cursor-pointer flex-col rounded-2xl border border-foreground/10 bg-foreground/[0.025]",
+        "group relative flex h-full flex-col rounded-2xl border border-foreground/10 bg-foreground/[0.025]",
         "p-5 transition-colors hover:border-foreground/20 hover:bg-foreground/[0.04]",
-        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
       )}
     >
+      {/* Edit is a button stretched over the card, under its Run and ⋯
+          buttons: the card itself as a `role="button"` flattened them into
+          it, and a screen reader never reached them. */}
+      <button
+        type="button"
+        onClick={onEdit}
+        aria-label={`Edit snippet: ${snippet.title}`}
+        className="absolute inset-0 cursor-pointer rounded-2xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+      />
       {/* Title + actions menu */}
       <header className="flex items-start justify-between gap-2">
         <h3 className="line-clamp-1 flex-1 text-[15px] font-semibold text-foreground/90">
@@ -238,16 +232,15 @@ function SnippetCard({
             <button
               type="button"
               aria-label="Snippet actions"
-              onClick={(e) => e.stopPropagation()}
               className={cn(
-                "-m-1 rounded-md p-1 text-foreground/45 transition-opacity hover:bg-foreground/10 hover:text-foreground",
+                "relative -m-1 rounded-md p-1 text-foreground/45 transition-opacity hover:bg-foreground/10 hover:text-foreground",
                 menuOpen ? "opacity-100" : "opacity-0 group-hover:opacity-100 focus-visible:opacity-100",
               )}
             >
               <MoreHorizontal className="h-4 w-4" />
             </button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" onClick={(e) => e.stopPropagation()}>
+          <DropdownMenuContent align="end">
             <DropdownMenuItem onSelect={onRun}>
               <Play className="h-4 w-4" /> Run
             </DropdownMenuItem>
@@ -302,13 +295,8 @@ function SnippetCard({
         <Button
           size="sm"
           variant="outline"
-          onClick={(e) => {
-            // Tile body opens the editor; Run is its own action and
-            // shouldn't bubble up to the tile-level handler.
-            e.stopPropagation();
-            onRun();
-          }}
-          className="h-8 gap-1 rounded-lg px-3 text-xs"
+          onClick={onRun}
+          className="relative h-8 gap-1 rounded-lg px-3 text-xs"
         >
           <Play className="h-3 w-3 fill-current" />
           Run

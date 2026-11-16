@@ -7,6 +7,7 @@ import { useSnippetVarStore } from "@/stores/snippetVarStore";
 import { temporalVars } from "@/lib/temporal";
 import { cn } from "@/lib/utils";
 import type { SnippetVariable } from "@/types";
+import { notifyOnFail } from "@/stores/toastStore";
 
 /**
  * Collapsible block above the snippet grid on the Snippets Library page.
@@ -50,7 +51,9 @@ export function SnippetVariablesPanel() {
       confirmLabel: "Delete variable",
       destructive: true,
     });
-    if (ok) void remove(v.id);
+    // Its own toast: the store doesn't catch, and the failure reached only
+    // main.tsx's "Something went wrong".
+    if (ok) notifyOnFail(remove(v.id), "delete the variable");
   };
 
   return (

@@ -186,7 +186,14 @@ export function ConfirmDialogHost({ children }: { children: ReactNode }) {
           if (!open) closeWith(active?.kind === "prompt" ? null : false);
         }}
       >
-        <DialogContent className="max-w-md">
+        <DialogContent
+          className="max-w-md"
+          // A yes/no that blocks the app is an alert dialog.
+          role={active?.kind === "confirm" ? "alertdialog" : "dialog"}
+          // Without a body there's nothing to describe it: Radix otherwise
+          // pointed at a description that wasn't rendered, and warned.
+          {...(active?.body === undefined ? { "aria-describedby": undefined } : {})}
+        >
           <DialogHeader>
             <DialogTitle>{active?.title}</DialogTitle>
             {active?.body !== undefined && (
@@ -200,6 +207,9 @@ export function ConfirmDialogHost({ children }: { children: ReactNode }) {
             <input
               autoFocus
               type="text"
+              // Named by the question: a placeholder isn't a name, and some
+              // prompts have none ("Duplicate …").
+              aria-label={active.title}
               value={promptValue}
               placeholder={active.placeholder}
               onChange={(e) => setPromptValue(e.target.value)}

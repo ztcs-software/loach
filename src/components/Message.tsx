@@ -158,10 +158,12 @@ function formatArgs(args: unknown): string {
   }
 }
 
-/** The qualified tool name comes through as `<serverSlug>__<toolName>` —
- *  the raw piece is what the user recognises. */
-function rawToolName(tool: string): string {
-  return tool.includes("__") ? tool.slice(tool.indexOf("__") + 2) : tool;
+/** The name the user recognises: the tool's own, sent with the call. A
+ *  record saved before it was takes the piece after `<serverSlug>__`, which
+ *  a slugged, cut or hashed name doesn't give back exactly. */
+function toolNameOf(call: Pick<ToolCallRecord, "tool" | "tool_name">): string {
+  if (call.tool_name) return call.tool_name;
+  return call.tool.includes("__") ? call.tool.slice(call.tool.indexOf("__") + 2) : call.tool;
 }
 
 /**
@@ -182,7 +184,7 @@ function ApprovalCard({ call }: { call: ToolCallRecord }) {
     // click on an answered call is dropped by the store.
     void respond(call.id, decision).finally(() => setSent(false));
   };
-  const tool = rawToolName(call.tool);
+  const tool = toolNameOf(call);
   // Workspace file tools get a readable preview — the file, the diff, the
   // move, the deletion — instead of the arguments as JSON. Deletions are
   // painted red so they never blend in with the amber of an edit.
@@ -273,7 +275,7 @@ function ToolCallItem({ call }: { call: ToolCallRecord }) {
   const interrupted = !pending && call.interrupted === true;
   const failed = !pending && call.is_error && !denied;
   const argsText = formatArgs(call.arguments);
-  const rawTool = rawToolName(call.tool);
+  const rawTool = toolNameOf(call);
   // Same readable preview the approval card used, so the diff that was
   // approved can still be seen after the fact.
   const preview =
@@ -399,10 +401,10 @@ function ToolCallsBlock({
   } else if (anyPending) {
     label =
       calls.length === 1
-        ? `Calling ${rawToolName(calls[0].tool)} tool…`
+        ? `Calling ${toolNameOf(calls[0])} tool…`
         : "Calling tools…";
   } else if (calls.length === 1) {
-    label = `Called ${rawToolName(calls[0].tool)} tool`;
+    label = `Called ${toolNameOf(calls[0])} tool`;
   } else {
     label = `Called ${calls.length} tools`;
   }

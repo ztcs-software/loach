@@ -135,6 +135,10 @@ pub enum StreamEvent {
         server_id: String,
         server_name: String,
         tool: String,
+        /// The tool's own name, as its server lists it — for the card and
+        /// chips. `tool` is the qualified name, which can't be taken apart
+        /// (`qualify`): slugged, cut and hashed, it showed as another name.
+        tool_name: String,
         arguments: serde_json::Value,
         approval_required: bool,
         #[serde(skip_serializing_if = "Option::is_none")]

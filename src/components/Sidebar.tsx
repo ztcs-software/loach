@@ -941,7 +941,12 @@ function ChatFolderSubmenu({ session }: { session: Pick<Session, "id" | "title" 
       </DropdownMenuSubTrigger>
       <DropdownMenuSubContent className="max-h-72 min-w-[180px] overflow-y-auto">
         {folders.map((f) => (
-          <DropdownMenuItem key={f.id} onSelect={() => void move(f.id)}>
+          <DropdownMenuItem
+            key={f.id}
+            role="menuitemradio"
+            aria-checked={session.folder_id === f.id}
+            onSelect={() => void move(f.id)}
+          >
             <span className="min-w-0 truncate">{f.name}</span>
             {session.folder_id === f.id && <Check className="ml-auto h-3.5 w-3.5 shrink-0" />}
           </DropdownMenuItem>

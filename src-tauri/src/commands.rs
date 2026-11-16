@@ -2055,10 +2055,24 @@ fn sanitize_chat_error(s: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ");
     if collapsed.chars().count() <= MAX_CHARS {
-        return collapsed;
+        return escape_markdown(&collapsed);
     }
     let cut: String = collapsed.chars().take(MAX_CHARS).collect();
-    format!("{cut}…")
+    format!("{}…", escape_markdown(&cut))
+}
+
+/// `s` with the Markdown it could carry made literal. The MCP notice goes
+/// out as reply text, rendered as Markdown: an error body could close its
+/// italics and add a link styled as Loach's own warning.
+fn escape_markdown(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if matches!(c, '\\' | '`' | '*' | '_' | '[' | ']' | '(' | ')' | '<' | '>' | '!' | '#' | '~' | '|') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// Header-name syntax: RFC 7230 token = 1*tchar, with `tchar` being
@@ -2775,7 +2789,7 @@ pub async fn mcp_test(
 #[derive(Debug, Serialize)]
 pub struct McpToolsOverview {
     pub tools: Vec<crate::mcp::types::McpToolDef>,
-    pub errors: Vec<(String, String)>,
+    pub errors: Vec<crate::mcp::ServerError>,
 }
 
 #[tauri::command]
@@ -2858,7 +2872,7 @@ pub async fn chat_stream(
             // identifying / debug detail the underlying error carried).
             let log_summary = errors
                 .iter()
-                .map(|(name, e)| format!("{name}: {e}"))
+                .map(|e| format!("{}: {}", e.name, e.error))
                 .collect::<Vec<_>>()
                 .join("; ");
             tracing::warn!("MCP aggregate errors — {log_summary}");
@@ -2871,7 +2885,7 @@ pub async fn chat_stream(
             // has the full text in the log above.
             let ui_summary = errors
                 .iter()
-                .map(|(name, e)| format!("{name}: {}", sanitize_chat_error(e)))
+                .map(|e| format!("{}: {}", escape_markdown(&e.name), sanitize_chat_error(&e.error)))
                 .collect::<Vec<_>>()
                 .join("; ");
             // Surface to the user so a totally-broken MCP config isn't
@@ -4930,11 +4944,22 @@ mod tests {
     fn chat_error_notice_is_one_line_without_a_bearer_token() {
         assert_eq!(
             sanitize_chat_error("HTTP 401:\n  Authorization: Bearer ghp_abc123 (bearer: x)"),
-            "HTTP 401: Authorization: Bearer [redacted] (bearer: [redacted]"
+            r"HTTP 401: Authorization: Bearer \[redacted\] \(bearer: \[redacted\]"
         );
         let long = sanitize_chat_error(&"word ".repeat(40));
         assert_eq!(long.chars().count(), 121);
         assert!(long.ends_with('…'));
+    }
+
+    /// A server's error body can't put Markdown in the notice: no closed
+    /// italics, no link styled as Loach's own warning.
+    #[test]
+    fn chat_error_notice_carries_no_markdown() {
+        let shown = sanitize_chat_error("_ **Loach: sign in again** [open](https://evil.example/l)");
+        assert_eq!(
+            shown,
+            r"\_ \*\*Loach: sign in again\*\* \[open\]\(https://evil.example/l\)"
+        );
     }
 
     /// A disabled HTTP row isn't DNS-screened, so it can be switched off or

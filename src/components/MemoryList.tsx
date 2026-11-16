@@ -153,6 +153,8 @@ export function MemoryList({
           <Input
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
+            // The label above isn't tied to it: this is its name.
+            aria-label="Add a memory"
             placeholder="e.g. Prefers TypeScript over JavaScript."
             disabled={!enabled || adding}
             onKeyDown={(e) => {
@@ -191,6 +193,7 @@ export function MemoryList({
               <Input
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
+                aria-label="Search memories"
                 placeholder={`Search ${memories.length} ${memories.length === 1 ? "memory" : "memories"}…`}
                 className="h-9 rounded-xl border-foreground/10 bg-foreground/[0.03] pl-9"
               />
@@ -289,7 +292,9 @@ export function MemoryList({
                     <button
                       onClick={() => void onRemove(m.id)}
                       aria-label="Delete memory"
-                      className="shrink-0 rounded-md p-1 text-foreground/40 opacity-0 transition-all hover:bg-foreground/10 hover:text-destructive group-hover:opacity-100"
+                      // Shown on keyboard focus too: tabbing onto it focused
+                      // an invisible control one keypress from a delete.
+                      className="shrink-0 rounded-md p-1 text-foreground/40 opacity-0 transition-all hover:bg-foreground/10 hover:text-destructive group-hover:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
                     >
                       <Trash2 className="h-3.5 w-3.5" />
                     </button>

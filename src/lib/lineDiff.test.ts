@@ -162,6 +162,10 @@ describe("splitHidden", () => {
     const hidden = [
       0xe0041, 0xe007f, 0x3164, 0x115f, 0x1160, 0xffa0, 0x00ad, 0x200c, 0x200d, 0x180e,
       0x2061, 0x2064, 0xfe0f, 0xe0100,
+      // C1 controls, the combining grapheme joiner and the other blank
+      // default-ignorables the hand-kept list missed (F3-08).
+      0x0085, 0x009f, 0x034f, 0x17b4, 0x180b, 0x180f, 0xfff0, 0xfff9, 0x1bca0, 0x1d173,
+      0xe0200, 0x2028,
     ];
     for (const cp of hidden) {
       const tag = `U+${cp.toString(16).toUpperCase().padStart(4, "0")}`;

@@ -327,6 +327,9 @@ export interface ToolCallRecord {
   server_name: string;
   /** The qualified name the model picked (`<serverSlug>__<rawToolName>`). */
   tool: string;
+  /** The tool's own name, as its server lists it: what the card and chips
+   *  show. Absent on records saved before it existed. */
+  tool_name?: string;
   /** Arguments the model produced. Stored as a value so the UI can render
    *  with `JSON.stringify(…, null, 2)` for readability. */
   arguments: unknown;
@@ -475,6 +478,8 @@ export type StreamEvent =
       server_id: string;
       server_name: string;
       tool: string;
+      /** The tool's own name — see `ToolCallRecord.tool_name`. */
+      tool_name?: string;
       arguments: unknown;
       approval_required?: boolean;
       /** `write_file` only — see `ToolCallRecord.existing_bytes`. */
@@ -917,8 +922,8 @@ export interface McpTestResult {
 }
 
 /** Result of `mcp_tools` — the catalogue a chat turn would get, from the
- *  running servers. `errors` pairs a server name with why its tools
- *  couldn't be listed. */
+ *  running servers. `errors` says, per server, why its tools couldn't be
+ *  listed. */
 export interface McpToolsOverview {
   tools: Array<{
     server_id: string;
@@ -926,7 +931,8 @@ export interface McpToolsOverview {
     name: string;
     description: string | null;
   }>;
-  errors: Array<[server: string, error: string]>;
+  /** By server id: names aren't unique. */
+  errors: Array<{ server_id: string; name: string; error: string }>;
 }
 
 // ---------------------------------------------------------------------------
