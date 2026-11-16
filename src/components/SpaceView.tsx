@@ -92,6 +92,7 @@ export function SpaceView() {
   const doAddMemory = useSpaceStore((s) => s.addMemory);
   const doUpdateMemory = useSpaceStore((s) => s.updateMemory);
   const doRemoveMemory = useSpaceStore((s) => s.removeMemory);
+  const doRemoveMemories = useSpaceStore((s) => s.removeMemories);
   const storedMemories = useSpaceStore((s) =>
     viewingSpaceId ? s.spaceMemories[viewingSpaceId] : undefined,
   );
@@ -464,6 +465,15 @@ export function SpaceView() {
                       // Rethrow so MemoryTab stays in edit mode with the
                       // draft intact rather than discarding the edit.
                       throw e;
+                    })
+                  }
+                  onRemoveMany={(ids) =>
+                    doRemoveMemories(ids, space.id).catch((e) => {
+                      useToastStore.getState().push({
+                        kind: "error",
+                        title: "Couldn't remove the memories",
+                        body: e instanceof Error ? e.message : String(e),
+                      });
                     })
                   }
                   onRemove={(id) =>
@@ -1111,6 +1121,7 @@ function MemoryTab({
   onAdd,
   onUpdate,
   onRemove,
+  onRemoveMany,
   onOpenChat,
 }: {
   space: { id: string; memory_enabled: boolean };
@@ -1121,6 +1132,7 @@ function MemoryTab({
   onAdd: (content: string) => Promise<unknown>;
   onUpdate: (id: string, content: string) => Promise<unknown>;
   onRemove: (id: string) => Promise<unknown>;
+  onRemoveMany: (ids: string[]) => Promise<unknown>;
   onOpenChat: (sessionId: string) => void;
 }) {
   return (
@@ -1163,6 +1175,7 @@ function MemoryTab({
         onAdd={onAdd}
         onUpdate={onUpdate}
         onRemove={onRemove}
+        onRemoveMany={onRemoveMany}
         onOpenChat={onOpenChat}
       />
     </div>

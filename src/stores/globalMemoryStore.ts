@@ -2,6 +2,7 @@ import { create } from "zustand";
 import {
   addGlobalMemory,
   listGlobalMemories,
+  removeGlobalMemories,
   removeGlobalMemory,
   updateGlobalMemory,
 } from "@/lib/tauri";
@@ -30,6 +31,8 @@ interface GlobalMemoryState {
   updateMemory: (id: string, content: string) => Promise<boolean>;
   /** `false` when the memory was already gone. */
   removeMemory: (id: string) => Promise<boolean>;
+  /** Many at once, in one write and one list update ("Clear all"). */
+  removeMemories: (ids: string[]) => Promise<number>;
 }
 
 /** Writes completed so far. A load compares it before and after reading:
@@ -104,5 +107,13 @@ export const useGlobalMemoryStore = create<GlobalMemoryState>((set, get) => ({
       s.memories ? { memories: s.memories.filter((m) => m.id !== id) } : s,
     );
     return changed;
+  },
+
+  removeMemories: async (ids) => {
+    const removed = await removeGlobalMemories({ ids });
+    writes++;
+    const gone = new Set(ids);
+    set((s) => (s.memories ? { memories: s.memories.filter((m) => !gone.has(m.id)) } : s));
+    return removed;
   },
 }));

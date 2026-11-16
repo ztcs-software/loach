@@ -23,6 +23,7 @@ export function MemoryList({
   onAdd,
   onUpdate,
   onRemove,
+  onRemoveMany,
   onOpenChat,
   onEditingChange,
 }: {
@@ -33,6 +34,9 @@ export function MemoryList({
   onAdd: (content: string) => Promise<unknown>;
   onUpdate: (id: string, content: string) => Promise<unknown>;
   onRemove: (id: string) => Promise<unknown>;
+  /** "Clear all": every listed memory in one write and one list update —
+   *  one by one it was a call and a re-render per memory. */
+  onRemoveMany: (ids: string[]) => Promise<unknown>;
   /** Navigate to the chat a memory was extracted from. */
   onOpenChat: (sessionId: string) => void;
   /** Told when an inline edit opens and closes, so a host dialog can leave
@@ -133,9 +137,8 @@ export function MemoryList({
     if (!ok) return;
     setClearing(true);
     try {
-      // Sequential on purpose: each removal updates the store, and a failure
-      // mid-way leaves the survivors listed rather than half-vanished.
-      for (const m of targets) await onRemove(m.id);
+      // One transaction: all of them go, or (on a failure) none do.
+      await onRemoveMany(targets.map((m) => m.id));
     } finally {
       setClearing(false);
     }

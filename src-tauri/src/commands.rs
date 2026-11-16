@@ -1670,6 +1670,22 @@ pub async fn remove_space_memory(
         .map_err(err)
 }
 
+#[derive(Debug, Deserialize)]
+pub struct RemoveSpaceMemoriesArgs {
+    pub ids: Vec<String>,
+    pub space_id: String,
+}
+
+/// Remove many of a Space's memories at once ("Clear all"): one
+/// transaction, not one call per memory. Returns how many went.
+#[tauri::command]
+pub async fn remove_space_memories(
+    state: State<'_, AppState>,
+    args: RemoveSpaceMemoriesArgs,
+) -> Result<usize, String> {
+    state.db.remove_space_memories(&args.ids, &args.space_id).map_err(err)
+}
+
 // ---------- global memories ----------
 
 #[tauri::command]
@@ -1745,6 +1761,20 @@ pub async fn remove_global_memory(
     args: RemoveGlobalMemoryArgs,
 ) -> Result<bool, String> {
     state.db.remove_global_memory(&args.id).map_err(err)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RemoveGlobalMemoriesArgs {
+    pub ids: Vec<String>,
+}
+
+/// [`remove_space_memories`] for the global list.
+#[tauri::command]
+pub async fn remove_global_memories(
+    state: State<'_, AppState>,
+    args: RemoveGlobalMemoriesArgs,
+) -> Result<usize, String> {
+    state.db.remove_global_memories(&args.ids).map_err(err)
 }
 
 // ---------- snippets ----------

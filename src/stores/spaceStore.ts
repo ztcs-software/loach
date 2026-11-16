@@ -11,6 +11,7 @@ import {
   listSpaceMemories,
   listSpaces,
   removeSpaceFile,
+  removeSpaceMemories,
   removeSpaceMemory,
   setSpaceFileEnabled,
   setSpaceImageScaling,
@@ -119,6 +120,8 @@ interface SpaceState {
   updateMemory: (id: string, spaceId: string, content: string) => Promise<boolean>;
   /** `false` when the memory was already gone. */
   removeMemory: (id: string, spaceId: string) => Promise<boolean>;
+  /** Many at once, in one write and one list update ("Clear all"). */
+  removeMemories: (ids: string[], spaceId: string) => Promise<number>;
 }
 
 /** Memory writes completed so far. A load compares it before and after
@@ -513,5 +516,20 @@ export const useSpaceStore = create<SpaceState>((set, get) => ({
       };
     });
     return changed;
+  },
+
+  removeMemories: async (ids, spaceId) => {
+    const removed = await removeSpaceMemories({ ids, space_id: spaceId });
+    memoryWrites++;
+    const gone = new Set(ids);
+    patchSpaceContext(spaceId, (c) => ({ ...c, memories: c.memories.filter((m) => !gone.has(m.id)) }));
+    set((s) => {
+      const list = s.spaceMemories[spaceId];
+      if (!list) return s;
+      return {
+        spaceMemories: { ...s.spaceMemories, [spaceId]: list.filter((m) => !gone.has(m.id)) },
+      };
+    });
+    return removed;
   },
 }));

@@ -1258,6 +1258,13 @@ export function removeSpaceMemory(args: {
   return invoke("remove_space_memory", { args });
 }
 
+/** Remove many of a Space's memories in one transaction; resolves with how
+ *  many went. */
+export function removeSpaceMemories(args: { ids: string[]; space_id: string }): Promise<number> {
+  if (!isTauri) return notInTauri(args.ids.length);
+  return invoke("remove_space_memories", { args });
+}
+
 // ------------ global memories ------------
 
 export function listGlobalMemories(): Promise<GlobalMemory[]> {
@@ -1301,6 +1308,13 @@ export function updateGlobalMemory(args: {
 export function removeGlobalMemory(args: { id: string }): Promise<boolean> {
   if (!isTauri) return notInTauri(true);
   return invoke("remove_global_memory", { args });
+}
+
+/** Remove many global memories in one transaction; resolves with how many
+ *  went. */
+export function removeGlobalMemories(args: { ids: string[] }): Promise<number> {
+  if (!isTauri) return notInTauri(args.ids.length);
+  return invoke("remove_global_memories", { args });
 }
 
 // ------------ snippets ------------

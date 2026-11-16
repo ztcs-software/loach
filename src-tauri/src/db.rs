@@ -2655,6 +2655,23 @@ impl Database {
         Ok(changed > 0)
     }
 
+    /// [`remove_space_memory`](Self::remove_space_memory) for many, in one
+    /// transaction — "Clear all" made one call (and one write) per memory.
+    /// Returns how many went.
+    pub fn remove_space_memories(&self, ids: &[String], space_id: &str) -> Result<usize> {
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction()?;
+        let mut removed = 0;
+        {
+            let mut stmt = tx.prepare("DELETE FROM space_memories WHERE id = ?1 AND space_id = ?2")?;
+            for id in ids {
+                removed += stmt.execute(params![id, space_id])?;
+            }
+        }
+        tx.commit()?;
+        Ok(removed)
+    }
+
     /// Read every memory across every space — used by the export path.
     pub fn all_space_memories(&self) -> Result<Vec<SpaceMemory>> {
         self.with_read(|conn| {
@@ -2751,6 +2768,22 @@ impl Database {
         let conn = self.conn.lock();
         let changed = conn.execute("DELETE FROM global_memories WHERE id = ?1", params![id])?;
         Ok(changed > 0)
+    }
+
+    /// [`remove_global_memory`](Self::remove_global_memory) for many, in one
+    /// transaction. Returns how many went.
+    pub fn remove_global_memories(&self, ids: &[String]) -> Result<usize> {
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction()?;
+        let mut removed = 0;
+        {
+            let mut stmt = tx.prepare("DELETE FROM global_memories WHERE id = ?1")?;
+            for id in ids {
+                removed += stmt.execute(params![id])?;
+            }
+        }
+        tx.commit()?;
+        Ok(removed)
     }
 
     // ------------ snippets ------------
@@ -4494,6 +4527,25 @@ mod tests {
             vec!["search", "list_issues"]
         );
         assert!(!db.add_mcp_allowed_tool("no-such-server", "search").unwrap());
+    }
+
+    /// "Clear all" removes the listed memories in one go — only the scope's
+    /// own, for a Space — and says how many went.
+    #[test]
+    fn memories_are_removed_in_bulk() {
+        let (db, _dir) = fresh_db();
+        let ids: Vec<String> = ["a", "b", "c"]
+            .iter()
+            .map(|c| db.add_global_memory(c, None, None, None).unwrap().id)
+            .collect();
+        assert_eq!(db.remove_global_memories(&ids[..2]).unwrap(), 2);
+        let left: Vec<String> = db.list_global_memories().unwrap().into_iter().map(|m| m.id).collect();
+        assert_eq!(left, [ids[2].clone()]);
+
+        let space = db.create_space("S", "", "").unwrap();
+        let m = db.add_space_memory(&space.id, "fact", None, None, None).unwrap();
+        assert_eq!(db.remove_space_memories(std::slice::from_ref(&m.id), "another-space").unwrap(), 0);
+        assert_eq!(db.remove_space_memories(&[m.id], &space.id).unwrap(), 1);
     }
 
     /// The export reads in one transaction pinned to its thread, and lets go
