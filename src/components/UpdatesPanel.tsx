@@ -10,6 +10,7 @@ import {
   checkForUpdate,
   installPendingUpdate,
   isUpdaterSupported,
+  useUpdateInstall,
   type DownloadProgress,
   type UpdateInfo,
 } from "@/lib/updater";
@@ -29,6 +30,10 @@ type State =
 export function UpdatesPanel() {
   const [supported, setSupported] = useState<boolean | null>(null);
   const [state, setState] = useState<State>({ kind: "idle" });
+  // An install outlives this panel (a lock unmounts it), so its progress
+  // comes from the updater, not from local state.
+  const install = useUpdateInstall((s) => s.install);
+  const shown: State = install ? { kind: "installing", ...install } : state;
   const autoCheck = useSettingsStore((s) => s.auto_check_updates);
   const updateSetting = useSettingsStore((s) => s.update);
 
@@ -71,12 +76,8 @@ export function UpdatesPanel() {
 
   const onInstall = async () => {
     if (state.kind !== "available") return;
-    const info = state.info;
-    setState({ kind: "installing", info, progress: { downloaded: 0 } });
     try {
-      await installPendingUpdate((progress) => {
-        setState({ kind: "installing", info, progress });
-      });
+      await installPendingUpdate(state.info);
       // If we reach this line, relaunch() was awaited but the process is
       // already on its way down — nothing more to render.
     } catch (e) {
@@ -93,7 +94,7 @@ export function UpdatesPanel() {
 
       <Separator />
 
-      {state.kind === "idle" && (
+      {shown.kind === "idle" && (
         <div>
           <Button onClick={onCheck} className="gap-2" disabled={supported === null}>
             <RefreshCw className="h-4 w-4" />
@@ -102,14 +103,14 @@ export function UpdatesPanel() {
         </div>
       )}
 
-      {state.kind === "checking" && (
+      {shown.kind === "checking" && (
         <div className="flex items-center gap-2 text-sm text-foreground/75">
           <Loader2 className="h-4 w-4 animate-spin" />
           Checking for updates…
         </div>
       )}
 
-      {state.kind === "uptodate" && (
+      {shown.kind === "uptodate" && (
         <div className="space-y-3">
           <div className="flex items-center gap-2 text-sm text-foreground/85">
             <CheckCircle2 className="h-4 w-4 text-emerald-500" />
@@ -122,18 +123,18 @@ export function UpdatesPanel() {
         </div>
       )}
 
-      {state.kind === "available" && (
+      {shown.kind === "available" && (
         <div className="space-y-4">
           <div className="text-sm text-foreground/85">
-            <span className="font-medium">Loach v{state.info.version}</span> is
-            available. You're on v{state.info.currentVersion}.
+            <span className="font-medium">Loach v{shown.info.version}</span> is
+            available. You're on v{shown.info.currentVersion}.
           </div>
-          {state.info.notes && (
+          {shown.info.notes && (
             <div className="rounded-xl border border-foreground/10 bg-foreground/[0.03] p-4">
               <div className="mb-2 text-[11px] font-medium uppercase tracking-wider text-foreground/55">
                 Release notes
               </div>
-              <Markdown content={state.info.notes} className="text-sm" />
+              <Markdown content={shown.info.notes} className="text-sm" />
             </div>
           )}
           <div className="flex gap-2">
@@ -149,24 +150,24 @@ export function UpdatesPanel() {
         </div>
       )}
 
-      {state.kind === "installing" && (
+      {shown.kind === "installing" && (
         <div className="space-y-3">
           <div className="flex items-center gap-2 text-sm text-foreground/85">
             <Loader2 className="h-4 w-4 animate-spin" />
-            Downloading Loach v{state.info.version}…
+            Downloading Loach v{shown.info.version}…
           </div>
-          <UpdateProgressBar progress={state.progress} />
+          <UpdateProgressBar progress={shown.progress} />
           <p className="text-[11px] text-foreground/55">
             The app will restart automatically once the update is installed.
           </p>
         </div>
       )}
 
-      {state.kind === "error" && (
+      {shown.kind === "error" && (
         <div className="space-y-3">
           <div className="flex items-start gap-2 text-sm text-foreground/85">
             <XCircle className="mt-0.5 h-4 w-4 shrink-0 text-rose-500" />
-            <span>Update failed: {state.message}</span>
+            <span>Update failed: {shown.message}</span>
           </div>
           <Button variant="outline" onClick={onCheck} className="gap-2">
             <RefreshCw className="h-4 w-4" />

@@ -1368,10 +1368,15 @@ pub async fn openai_list_models_with_key(
     let url = format!("{}/models", base_url.trim_end_matches('/'));
     let mut req = state.http.get(url).timeout(std::time::Duration::from_secs(30));
     let key = api_key.trim();
-    if !key.is_empty() && providers::openai::is_safe_for_bearer(&base_url) {
+    let withheld = !key.is_empty() && !providers::openai::is_safe_for_bearer(&base_url);
+    if !key.is_empty() && !withheld {
         req = req.bearer_auth(key);
     }
-    let resp = req.send().await.and_then(|r| r.error_for_status()).map_err(err)?;
+    let resp = req
+        .send()
+        .await
+        .and_then(|r| r.error_for_status())
+        .map_err(|e| format!("{e}{}", providers::openai::withheld_key_note(e.status(), withheld)))?;
     let body: Models = resp.json().await.map_err(err)?;
     Ok(body
         .data

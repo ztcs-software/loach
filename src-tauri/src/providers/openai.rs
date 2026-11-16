@@ -91,12 +91,24 @@ pub async fn list_models(http: &Client, base_url: &str) -> Result<Vec<ModelInfo>
         .await
         .ok()
         .flatten();
+    let mut withheld = false;
     if let Some(key) = key {
-        if !key.is_empty() && is_safe_for_bearer(base_url) {
-            req = req.bearer_auth(key);
+        if !key.is_empty() {
+            if is_safe_for_bearer(base_url) {
+                req = req.bearer_auth(key);
+            } else {
+                withheld = true;
+            }
         }
     }
-    let resp = req.send().await?.error_for_status()?;
+    let resp = req
+        .send()
+        .await?
+        .error_for_status()
+        .map_err(|e| match withheld_key_note(e.status(), withheld) {
+            "" => anyhow::Error::from(e),
+            note => anyhow!("{e}{note}"),
+        })?;
     let body: ModelsResponse = resp.json().await?;
     Ok(body
         .data
@@ -756,15 +768,7 @@ async fn run_one_turn(
         // to a non-loopback host, surface the *why* — a bare "401" against
         // an OpenAI-compatible endpoint is otherwise indistinguishable from
         // a wrong key.
-        let suffix = if bearer_withheld
-            && (status == reqwest::StatusCode::UNAUTHORIZED
-                || status == reqwest::StatusCode::FORBIDDEN)
-        {
-            " (API key withheld because the base URL is http:// to a non-loopback host — \
-              switch to https:// to authenticate)"
-        } else {
-            ""
-        };
+        let suffix = withheld_key_note(Some(status), bearer_withheld);
         let _ = app.emit(
             channel,
             StreamEvent::Error {
@@ -1161,6 +1165,18 @@ fn parse_args(s: &str) -> Value {
     }
 }
 
+/// What to add to an endpoint's 401/403 when the key was withheld
+/// (`is_safe_for_bearer`): the chat stream and both model listings say it, or
+/// "Test connection" and onboarding blamed a key that was never sent.
+pub(crate) fn withheld_key_note(status: Option<reqwest::StatusCode>, withheld: bool) -> &'static str {
+    match status {
+        Some(reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN) if withheld => {
+            " (API key withheld because the base URL is http:// to a non-loopback host — switch to https:// to authenticate)"
+        }
+        _ => "",
+    }
+}
+
 /// Decide whether it's safe to attach a bearer token to a request going
 /// to `base_url`. Safe iff:
 ///   - the URL is https://, OR
@@ -1333,6 +1349,18 @@ mod tests {
         let unsent = r#"{"error":{"message":"Unsupported value","param":"top_p"}}"#;
         assert_eq!(refused_field(&body, unsent), None);
         assert_eq!(refused_field(&body, "temperature must be at most 2"), None);
+    }
+
+    // --- withheld_key_note ---------------------------------------------------
+
+    #[test]
+    fn withheld_key_note_only_explains_an_auth_refusal_of_a_withheld_key() {
+        use reqwest::StatusCode;
+        assert!(withheld_key_note(Some(StatusCode::UNAUTHORIZED), true).contains("API key withheld"));
+        assert!(withheld_key_note(Some(StatusCode::FORBIDDEN), true).contains("API key withheld"));
+        assert_eq!(withheld_key_note(Some(StatusCode::UNAUTHORIZED), false), "");
+        assert_eq!(withheld_key_note(Some(StatusCode::NOT_FOUND), true), "");
+        assert_eq!(withheld_key_note(None, true), "");
     }
 
     // --- is_safe_for_bearer -------------------------------------------------

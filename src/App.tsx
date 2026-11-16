@@ -71,7 +71,7 @@ import { ToastHost } from "@/components/ToastHost";
 import { ConfirmDialogHost } from "@/components/ConfirmDialog";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { Button } from "@/components/ui/button";
-import { SquarePen } from "lucide-react";
+import { RefreshCw, SquarePen } from "lucide-react";
 import { installedIn, resolveDefaultModelChoice, useChatStore } from "@/stores/chatStore";
 import { useModelsStore } from "@/stores/modelsStore";
 import { useMcpStore } from "@/stores/mcpStore";
@@ -149,6 +149,7 @@ export default function App() {
   // "No chat open" CTA for a loading skeleton so users with chats on disk
   // don't briefly see an empty-state message that tells them to create one.
   const chatsHydrated = useChatStore((s) => s.hydrated);
+  const chatsLoadError = useChatStore((s) => s.loadError);
 
   // Phase 1 — security probe. Pessimistically lock (so the chat UI never
   // flashes) and ask the backend whether a lock is configured. The store's
@@ -491,7 +492,13 @@ export default function App() {
                     // whether the user has zero chats or just chats that
                     // haven't loaded yet. The skeleton avoids telling them
                     // they have no chats when they actually do.
-                    chatsHydrated ? <NoChatState /> : <ChatLoadingSkeleton />
+                    !chatsHydrated ? (
+                      <ChatLoadingSkeleton />
+                    ) : chatsLoadError ? (
+                      <ChatLoadError message={chatsLoadError} />
+                    ) : (
+                      <NoChatState />
+                    )
                   ) : !transcriptLoaded ? (
                     // Session picked, transcript still in flight.
                     <ChatLoadingSkeleton />
@@ -682,6 +689,27 @@ function NoChatState() {
         <Button onClick={start} className="mt-5 gap-2 rounded-full px-5">
           <SquarePen className="h-4 w-4" />
           New chat
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+/** In place of NoChatState when the chats couldn't be read. "No chat open"
+ *  passed for an empty install: a user who took their history for gone
+ *  started new chats on top of the failing database. */
+function ChatLoadError({ message }: { message: string }) {
+  const hydrate = useChatStore((s) => s.hydrate);
+  return (
+    <div className="flex flex-1 items-center justify-center px-6">
+      <div className="-mt-10 max-w-md text-center">
+        <h2 className="text-xl font-medium text-foreground/85">
+          Couldn't load your chats
+        </h2>
+        <p className="mt-2 text-sm text-foreground/55">{message}</p>
+        <Button onClick={() => void hydrate()} variant="outline" className="mt-5 gap-2 rounded-full px-5">
+          <RefreshCw className="h-4 w-4" />
+          Retry
         </Button>
       </div>
     </div>

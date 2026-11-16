@@ -27,10 +27,21 @@ export function classifyConnError(msg: string, provider: ProviderId): { hint: st
       hint: "Loach blocks this address range — link-local hosts cloud-metadata services that shouldn't see LLM traffic. Use a public host or a private LAN address instead.",
     };
   }
+  // Ahead of the status rules: the key was never sent, so a 401 here isn't
+  // about the key (`providers/openai.rs`, `withheld_key_note`).
+  if (m.includes("api key withheld")) {
+    return {
+      hint: "Loach doesn't send your API key over plain http:// to another machine. Use an https:// address for this server.",
+    };
+  }
   if (
     m.includes("could not parse base url") ||
     m.includes("invalid url") ||
-    m.includes("relative url without a base")
+    m.includes("relative url without a base") ||
+    // What reqwest says about a URL it can't build a request from: a space
+    // in it, or no http(s):// scheme.
+    m.includes("builder error") ||
+    m.includes("scheme is not allowed")
   ) {
     return {
       hint: "The base URL didn't parse. Make sure it starts with http:// or https:// and has no typos.",

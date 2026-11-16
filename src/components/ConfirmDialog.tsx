@@ -216,11 +216,15 @@ export function ConfirmDialogHost({ children }: { children: ReactNode }) {
           )}
 
           <DialogFooter className="mt-2">
+            {/* A destructive confirm starts on Cancel: with focus on the
+                red button, an Enter out of habit (or a held key's repeat)
+                deleted a chat or cleared memories with no undo. */}
             <Button
               variant="ghost"
               onClick={() =>
                 closeWith(active?.kind === "prompt" ? null : false)
               }
+              autoFocus={active?.kind === "confirm" && active.destructive}
             >
               {active?.cancelLabel ?? "Cancel"}
             </Button>
@@ -233,7 +237,7 @@ export function ConfirmDialogHost({ children }: { children: ReactNode }) {
               onClick={() =>
                 closeWith(active?.kind === "prompt" ? promptValue : true)
               }
-              autoFocus={active?.kind !== "prompt"}
+              autoFocus={active?.kind === "confirm" && !active.destructive}
             >
               {active?.confirmLabel ?? "Confirm"}
             </Button>

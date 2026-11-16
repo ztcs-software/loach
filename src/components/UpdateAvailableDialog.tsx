@@ -15,10 +15,11 @@ import {
   checkForUpdate,
   installPendingUpdate,
   isUpdaterSupported,
-  type DownloadProgress,
+  useUpdateInstall,
   type UpdateInfo,
 } from "@/lib/updater";
 import { logger } from "@/lib/logger";
+import { usePrivateChatStore } from "@/stores/privateChatStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 
 /* ─────────────────────── Launch-time update notice ───────────────────────
@@ -36,7 +37,6 @@ import { useSettingsStore } from "@/stores/settingsStore";
 type State =
   | { kind: "hidden" }
   | { kind: "available"; info: UpdateInfo }
-  | { kind: "installing"; info: UpdateInfo; progress: DownloadProgress }
   | { kind: "error"; info: UpdateInfo; message: string };
 
 /** One check per launch. Guarding with a flag (rather than subscribing to
@@ -48,9 +48,24 @@ type State =
  *  offering a second download over one still running. */
 let launchCheckDone = false;
 
+/** What the notice is showing, for the same reason: in component state alone
+ *  a lock lost it, and with it the progress of an install started here — the
+ *  app then restarted with no warning on screen. */
+let notice: State = { kind: "hidden" };
+
 export function UpdateAvailableDialog() {
   const hydrated = useSettingsStore((s) => s.hydrated);
-  const [state, setState] = useState<State>({ kind: "hidden" });
+  const [state, setShown] = useState<State>(notice);
+  const setState = (next: State) => {
+    notice = next;
+    setShown(next);
+  };
+  // From the updater, so it survives the lock too — and shows here when the
+  // install was started from Settings → Updates instead.
+  const install = useUpdateInstall((s) => s.install);
+  // Behind Private Chat (a higher layer) the modal opened unseen, took focus
+  // onto "Update now" and blocked the overlay's clicks. Shown once it closes.
+  const privateChatOpen = usePrivateChatStore((s) => s.open);
 
   useEffect(() => {
     if (!hydrated || launchCheckDone) return;
@@ -63,24 +78,26 @@ export function UpdateAvailableDialog() {
         // only ever surface an install button that fails.
         if (!(await isUpdaterSupported())) return;
         const info = await checkForUpdate();
-        if (info) setState({ kind: "available", info });
+        if (info) {
+          notice = { kind: "available", info };
+          setShown(notice);
+        }
       } catch (e) {
         logger.warn("auto update check failed", e);
       }
     })();
   }, [hydrated]);
 
-  if (state.kind === "hidden") return null;
+  if (state.kind === "hidden" || privateChatOpen) return null;
 
   const { info } = state;
-  const installing = state.kind === "installing";
+  const installing = install !== null;
 
   const onInstall = async () => {
-    setState({ kind: "installing", info, progress: { downloaded: 0 } });
+    // A retry clears the last failure off the notice.
+    setState({ kind: "available", info });
     try {
-      await installPendingUpdate((progress) => {
-        setState({ kind: "installing", info, progress });
-      });
+      await installPendingUpdate(info);
       // Past this point `relaunch()` has been awaited and the process is on
       // its way down — nothing left to render.
     } catch (e) {
@@ -145,13 +162,13 @@ export function UpdateAvailableDialog() {
           </div>
         )}
 
-        {installing ? (
+        {install ? (
           <div className="space-y-3">
             <div className="flex items-center gap-2 text-sm text-foreground/85">
               <Loader2 className="h-4 w-4 animate-spin" />
-              Downloading Loach v{info.version}…
+              Downloading Loach v{install.info.version}…
             </div>
-            <UpdateProgressBar progress={state.progress} />
+            <UpdateProgressBar progress={install.progress} />
             <p className="text-[11px] text-foreground/55">
               The app will restart automatically once the update is installed.
             </p>

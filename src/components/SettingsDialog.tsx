@@ -269,7 +269,11 @@ export function SettingsDialog() {
                     }}
                     onBlur={ollamaUrlField.onBlur}
                     placeholder="http://localhost:11434"
+                    aria-invalid={!!ollamaUrlField.error}
                   />
+                  {ollamaUrlField.error && (
+                    <p className="mt-1.5 text-[11px] text-destructive">{ollamaUrlField.error}</p>
+                  )}
                   <p className="mt-1.5 text-[11px] text-foreground/50">
                     Auto-detected on app launch. Leave default unless you run Ollama remotely.
                   </p>
@@ -338,6 +342,7 @@ export function SettingsDialog() {
                       }}
                       onBlur={openaiUrlField.onBlur}
                       placeholder="https://api.openai.com/v1"
+                      aria-invalid={!!openaiUrlField.error}
                     />
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild>
@@ -369,6 +374,9 @@ export function SettingsDialog() {
                       </DropdownMenuContent>
                     </DropdownMenu>
                   </div>
+                  {openaiUrlField.error && (
+                    <p className="mt-1.5 text-[11px] text-destructive">{openaiUrlField.error}</p>
+                  )}
                   <p className="mt-1.5 text-[11px] text-foreground/50">
                     Set an OpenAI-compatible API endpoint.
                   </p>

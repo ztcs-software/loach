@@ -32,15 +32,26 @@ export function SnippetVariableDialog() {
   const editing = target && target !== "new" ? target : null;
   const isEditMode = !!editing;
 
-  const [key, setKey] = useState("");
-  const [value, setValue] = useState("");
-  const [description, setDescription] = useState("");
+  // A draft kept for this target — the dialog was unmounted by the app lock
+  // while it was open (see `draft`).
+  const keptDraft = () => {
+    const d = useSnippetVarStore.getState().draft;
+    return d && d.target === target ? d : null;
+  };
+  const [key, setKey] = useState(() => keptDraft()?.key ?? "");
+  const [value, setValue] = useState(() => keptDraft()?.value ?? "");
+  const [description, setDescription] = useState(() => keptDraft()?.description ?? "");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!target) return;
-    if (target === "new") {
+    const kept = keptDraft();
+    if (kept) {
+      setKey(kept.key);
+      setValue(kept.value);
+      setDescription(kept.description);
+    } else if (target === "new") {
       setKey("");
       setValue("");
       setDescription("");
@@ -50,7 +61,15 @@ export function SnippetVariableDialog() {
       setDescription(target.description ?? "");
     }
     setError(null);
+    // Re-seed only when a different variable opens.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [target]);
+
+  // Keep the store's copy of the draft current, so it outlives an unmount.
+  useEffect(() => {
+    if (!target) return;
+    useSnippetVarStore.setState({ draft: { target, key, value, description } });
+  }, [target, key, value, description]);
 
   // Inline validation — exposed to the user as they type so they don't only
   // discover the rule via the save-time error toast.

@@ -618,10 +618,15 @@ export function SearchBar() {
       return;
     }
     if (e.key !== "Tab") return;
-    const focusables = panelRef.current?.querySelectorAll<HTMLElement>(
-      'input, button:not([tabindex="-1"]), [href], [tabindex]:not([tabindex="-1"])',
-    );
-    if (!focusables || focusables.length === 0) return;
+    // Tab stops only: the narrow-window "Close search" button is always
+    // `display: none` at the app's minimum width, and counted as `last` it
+    // let Tab walk out of the palette from the real last stop.
+    const focusables = [
+      ...(panelRef.current?.querySelectorAll<HTMLElement>(
+        'input, button:not([tabindex="-1"]), [href], [tabindex]:not([tabindex="-1"])',
+      ) ?? []),
+    ].filter((el) => el.getClientRects().length > 0 && !el.matches(":disabled"));
+    if (focusables.length === 0) return;
     const first = focusables[0];
     const last = focusables[focusables.length - 1];
     const activeEl = document.activeElement;

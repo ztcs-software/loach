@@ -172,6 +172,9 @@ interface ChatState {
    *  from SQLite — without it the user briefly sees the "No chat open" CTA
    *  even when they have chats waiting on disk. */
   hydrated: boolean;
+  /** Why the last `hydrate()` failed, or null. A failed read otherwise left
+   *  an empty list that passed for a fresh install ("No chat open"). */
+  loadError: string | null;
   messages: Record<string, Message[]>;
   streamingByMessage: Record<string, MessageMetrics | null>;
   activeStream: ActiveStream | null;
@@ -1993,6 +1996,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   folders: [],
   activeSessionId: null,
   hydrated: false,
+  loadError: null,
   messages: {},
   streamingByMessage: {},
   activeStream: null,
@@ -2036,7 +2040,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         listSessions(),
         listFolders(),
       ]);
-      set({ sessions, folders });
+      set({ sessions, folders, loadError: null });
 
       // Remove all empty sessions (no messages) on startup, keep at most one.
       // Archived sessions are left alone even if empty — the user explicitly
@@ -2090,9 +2094,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
     } catch (e) {
       logger.error("chat hydrate failed", e);
+      set({ loadError: e instanceof Error ? e.message : String(e) });
     } finally {
       // Flip the flag regardless of success — if hydrate threw, the user
-      // sees the "No chat open" CTA, which is the correct empty state.
+      // sees the load error with a Retry instead of the skeleton.
       // Leaving `hydrated=false` here would keep the skeleton up forever.
       set({ hydrated: true });
     }

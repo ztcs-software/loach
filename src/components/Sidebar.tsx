@@ -419,6 +419,8 @@ function readOpenFolders(): Set<string> {
 function ChatList() {
   const sessions = useChatStore((s) => s.sessions);
   const folders = useChatStore((s) => s.folders);
+  const hydrated = useChatStore((s) => s.hydrated);
+  const loadError = useChatStore((s) => s.loadError);
   // The open chat's row is highlighted only while that chat is what's on
   // screen. On Spaces, the Library, Snippets, Models or a Space's page the
   // section's own entry is the highlight — two at once read as two places.
@@ -555,9 +557,12 @@ function ChatList() {
   );
 
   if (empty) {
+    // Not before the chats have loaded (the chat pane shows the skeleton
+    // meanwhile), and not as an empty history when the load failed.
+    if (!hydrated) return null;
     return (
       <p className="px-3 py-4 text-xs text-foreground/40">
-        Your conversations will appear here.
+        {loadError ? "Couldn't load your chats." : "Your conversations will appear here."}
       </p>
     );
   }

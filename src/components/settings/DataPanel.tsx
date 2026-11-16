@@ -18,6 +18,7 @@ import { useChatStore } from "@/stores/chatStore";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { useEffect, useRef, useState } from "react";
 import { useSecurityStore } from "@/stores/securityStore";
+import { useToastStore } from "@/stores/toastStore";
 
 type BusyKind = "export" | "import" | "archive-all" | null;
 
@@ -104,9 +105,17 @@ export function DataPanel() {
     }, 5000);
   };
 
+  /** A result that can land after the user has left this tab — closing
+   *  Settings or switching tabs mid-run unmounts the panel, and its inline
+   *  line went with it: a rejected import then said nothing at all. Toasts
+   *  outlive the panel, and an error one stays long enough to read. */
+  const report = (kind: "info" | "error", title: string, body?: string) =>
+    useToastStore.getState().push({ kind, title, body });
+  const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
+
   const handleExport = async () => {
     if (!isTauri) {
-      flash("error", "Export requires the desktop app.");
+      report("error", "Export requires the desktop app.");
       return;
     }
     setBusy("export");
@@ -118,9 +127,9 @@ export function DataPanel() {
         setBusy(null);
         return; // user cancelled the save dialog
       }
-      flash("info", `Exported to ${path}`);
+      report("info", "Data exported", path);
     } catch (e) {
-      flash("error", e instanceof Error ? e.message : String(e));
+      report("error", "Export failed", errorText(e));
     } finally {
       setBusy(null);
     }
@@ -128,7 +137,7 @@ export function DataPanel() {
 
   const handleImport = async () => {
     if (!isTauri) {
-      flash("error", "Import requires the desktop app.");
+      report("error", "Import requires the desktop app.");
       return;
     }
     setImportPromptOpen(true);
@@ -149,14 +158,14 @@ export function DataPanel() {
       flash("info", formatImportSummary(stats));
       reloadAfterDestructiveAction();
     } catch (e) {
-      flash("error", e instanceof Error ? e.message : String(e));
+      report("error", "Import failed", errorText(e));
       setBusy(null);
     }
   };
 
   const handleArchiveAll = async () => {
     if (!isTauri) {
-      flash("error", "Archive requires the desktop app.");
+      report("error", "Archive requires the desktop app.");
       return;
     }
     const liveIds = useChatStore
@@ -188,9 +197,9 @@ export function DataPanel() {
       await chats.hydrate();
       const active = useChatStore.getState().activeSessionId;
       if (active && liveIds.includes(active)) await chats.selectSession(null);
-      flash("info", `Archived ${n} chat${n === 1 ? "" : "s"}.`);
+      report("info", `Archived ${n} chat${n === 1 ? "" : "s"}.`);
     } catch (e) {
-      flash("error", e instanceof Error ? e.message : String(e));
+      report("error", "Couldn't archive chats", errorText(e));
     } finally {
       setBusy(null);
     }

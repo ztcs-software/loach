@@ -6,7 +6,7 @@ import { FilePreview } from "./FilePreview";
 import { getPdfjs, saveAttachment } from "@/lib/files";
 import { useToastStore } from "@/stores/toastStore";
 import type { Attachment } from "@/types";
-import type { PDFDocumentProxy, RenderTask } from "pdfjs-dist";
+import type { PDFDocumentLoadingTask, PDFDocumentProxy, RenderTask } from "pdfjs-dist";
 
 interface PdfPreviewProps {
   open: boolean;
@@ -60,11 +60,12 @@ function PdfPreviewBody({ open, onOpenChange, attachment }: PdfPreviewProps) {
   useEffect(() => {
     if (!open || !attachment.bytes) return;
     let cancelled = false;
+    let task: PDFDocumentLoadingTask | null = null;
     let loaded: PDFDocumentProxy | null = null;
     (async () => {
       try {
         const pdfjs = await getPdfjs();
-        const task = pdfjs.getDocument({ data: base64ToUint8(attachment.bytes!) });
+        task = pdfjs.getDocument({ data: base64ToUint8(attachment.bytes!) });
         loaded = await task.promise;
         if (cancelled) {
           await loaded.cleanup();
@@ -82,10 +83,10 @@ function PdfPreviewBody({ open, onOpenChange, attachment }: PdfPreviewProps) {
       cancelled = true;
       setDoc(null);
       setLoadError(null);
-      if (loaded) {
-        void loaded.cleanup();
-        void loaded.loadingTask.destroy();
-      }
+      if (loaded) void loaded.cleanup();
+      // Also a load still running: left alone, the worker parsed the whole
+      // document after the dialog had closed.
+      void task?.destroy();
     };
   }, [open, attachment]);
 
@@ -228,7 +229,11 @@ function PdfPage({ doc, pageNumber }: { doc: PDFDocumentProxy; pageNumber: numbe
     let cancelled = false;
     let renderTask: RenderTask | null = null;
     (async () => {
-      const page = await doc.getPage(pageNumber);
+      // Rejects once the dialog closes mid-load ("Transport destroyed", or
+      // the worker terminated) — expected, and unhandled it surfaced as the
+      // app's "Something went wrong" toast.
+      const page = await doc.getPage(pageNumber).catch(() => null);
+      if (!page) return;
       // 2× device-pixel-ratio is a good sharpness/cost balance: high-DPI
       // displays get crisp text. It isn't cheap, though — one A4 page is
       // ~8 MB of pixel data at 2×, ~32 MB at 2× on a 2× display — so only
