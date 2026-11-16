@@ -19,7 +19,10 @@ The macOS install / Gatekeeper-bypass instructions live in the top-level
 
 1. On your dev branch, when the work is ready to ship:
    - bump the version in `package.json`, `src-tauri/tauri.conf.json`,
-     `src-tauri/Cargo.toml`, and refresh `src-tauri/Cargo.lock`;
+     `src-tauri/Cargo.toml`, and refresh `src-tauri/Cargo.lock`
+     (`cargo update -p loach`) and `package-lock.json`
+     (`npm install --package-lock-only`) — `npm test` fails while any of
+     the five disagree;
    - create `releases/X.Y.Z.md` with user-facing notes (markdown is fine —
      headings, lists, links all render in both places).
 2. Merge the branch to `main`.

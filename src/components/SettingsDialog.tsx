@@ -319,7 +319,7 @@ export function SettingsDialog() {
                 <div>
                   <div className="flex items-start justify-between gap-4">
                     <div className="min-w-0">
-                      <Label className="flex items-center gap-1.5">
+                      <Label htmlFor="setting-ollama-auto-launch" className="flex items-center gap-1.5">
                         <Play className="h-3.5 w-3.5 text-foreground/60" />
                         Auto-launch Ollama
                       </Label>
@@ -330,7 +330,7 @@ export function SettingsDialog() {
                         model picker.
                       </p>
                     </div>
-                    <Switch
+                    <Switch id="setting-ollama-auto-launch"
                       checked={settings.ollama_auto_launch}
                       onCheckedChange={(next) =>
                         settings.update("ollama_auto_launch", next)

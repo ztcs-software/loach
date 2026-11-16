@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{oneshot, Notify};
 
 /// Tracks in-flight streaming generations so we can cancel them from the frontend.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct StreamRegistry {
     inner: Arc<DashMap<String, Arc<Notify>>>,
     /// Which of `inner` are chat streams, as opposed to model pulls and
@@ -15,10 +15,7 @@ pub struct StreamRegistry {
 
 impl StreamRegistry {
     pub fn new() -> Self {
-        Self {
-            inner: Arc::new(DashMap::new()),
-            chats: Arc::new(dashmap::DashSet::new()),
-        }
+        Self::default()
     }
 
     /// [`register`](Self::register) for a chat stream.

@@ -2,7 +2,7 @@ name: CI
 
 # Runs the checks the release checklist expects to be green — the TypeScript
 # build, the Vitest suite (which includes the release version-agreement
-# gate in tests/versions.test.ts), and the Rust unit tests. Releases are
+# gate in tests/versions.test.ts), the Rust unit tests and clippy. Releases are
 # handled by release.yml; this workflow never publishes anything.
 #
 # Triggers on pushes to main so each merge commit gets its own verdict, and
@@ -88,6 +88,8 @@ jobs:
       # release can't make CI and the release build disagree. Bump both
       # together.
       - uses: dtolnay/rust-toolchain@7dcc700092a1a8b9c17ba0e140b4e34e93000946 # 1.90.0
+        with:
+          components: clippy
 
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
@@ -96,6 +98,13 @@ jobs:
       # --locked: a Cargo.lock that drifted from Cargo.toml is a release
       # blocker (release.yml builds from the lockfile) — fail here instead.
       - run: cargo test --locked
+        working-directory: src-tauri
+
+      # Clippy's default lints, warnings failing the job: unchecked, they
+      # piled up (a dozen at once). This toolchain's clippy is the one that
+      # counts — a newer local one can flag lints it doesn't, and the other
+      # way round.
+      - run: cargo clippy --locked --all-targets -- -D warnings
         working-directory: src-tauri
 
   # Windows-only compile check. The `rust` job above runs on Linux, which

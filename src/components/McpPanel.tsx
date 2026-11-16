@@ -581,14 +581,14 @@ function McpEditor({ initial, onCancel, onSaved }: EditorProps) {
 
       <div className="flex items-center justify-between gap-4">
         <div>
-          <Label>Ask before each tool call</Label>
+          <Label htmlFor="mcp-ask-each-call">Ask before each tool call</Label>
           <p className="mt-1 text-[11px] text-foreground/50">
             Every call from this server shows what the model wants to run
             and waits for you. Turn this off only for servers whose tools
             can't do harm on their own.
           </p>
         </div>
-        <Switch
+        <Switch id="mcp-ask-each-call"
           checked={askEachCall}
           onCheckedChange={setAskEachCall}
           className="shrink-0"
@@ -630,13 +630,13 @@ function McpEditor({ initial, onCancel, onSaved }: EditorProps) {
 
       <div className="flex items-center justify-between gap-4">
         <div>
-          <Label>Enabled</Label>
+          <Label htmlFor="mcp-server-enabled">Enabled</Label>
           <p className="mt-1 text-[11px] text-foreground/50">
             Disabled servers stay in the config but don't surface to the
             model.
           </p>
         </div>
-        <Switch
+        <Switch id="mcp-server-enabled"
           checked={enabled}
           onCheckedChange={setEnabled}
           className="shrink-0"

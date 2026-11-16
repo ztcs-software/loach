@@ -183,7 +183,7 @@ export function UpdatesPanel() {
 
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
-          <Label className="flex items-center gap-1.5">
+          <Label htmlFor="setting-auto-check-updates" className="flex items-center gap-1.5">
             <RefreshCw className="h-3.5 w-3.5 text-foreground/60" />
             Auto-check for updates
           </Label>
@@ -193,7 +193,7 @@ export function UpdatesPanel() {
             until you confirm.
           </p>
         </div>
-        <Switch
+        <Switch id="setting-auto-check-updates"
           checked={autoCheck}
           onCheckedChange={(next) => updateSetting("auto_check_updates", next)}
           className="shrink-0"

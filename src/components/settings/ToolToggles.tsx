@@ -314,7 +314,7 @@ export function ToolToggleRow({
     <div>
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
-          <Label className="flex items-center gap-1.5">
+          <Label htmlFor={`setting-${tool.key}`} className="flex items-center gap-1.5">
             <Icon className="h-3.5 w-3.5 text-foreground/60" />
             {tool.title}
           </Label>
@@ -322,7 +322,7 @@ export function ToolToggleRow({
             {tool.description}
           </p>
         </div>
-        <Switch
+        <Switch id={`setting-${tool.key}`}
           checked={enabled}
           onCheckedChange={(next) => void update(tool.key, next)}
           className="shrink-0"
@@ -347,7 +347,7 @@ export function InstructionsFallbackToggle() {
   return (
     <div className="mt-3 ml-5 flex items-start justify-between gap-4 border-l border-foreground/10 pl-3">
       <div className="min-w-0">
-        <Label>Use CLAUDE.md or AGENTS.md</Label>
+        <Label htmlFor="setting-instructions-fallback">Use CLAUDE.md or AGENTS.md</Label>
         <p className="mt-1 text-[11px] text-foreground/50">
           A folder without a <span className="font-mono">LOACHFILE.md</span>{" "}
           uses its <span className="font-mono">CLAUDE.md</span>, else its{" "}
@@ -357,7 +357,7 @@ export function InstructionsFallbackToggle() {
           <span className="font-mono">LOACHFILE.md</span>.
         </p>
       </div>
-      <Switch
+      <Switch id="setting-instructions-fallback"
         checked={enabled}
         onCheckedChange={(next) => void update("workspace_instructions_fallback", next)}
         className="shrink-0"

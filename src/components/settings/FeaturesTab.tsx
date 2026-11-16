@@ -39,7 +39,7 @@ export function FeaturesTab() {
                 <div>
                   <div className="flex items-start justify-between gap-4">
                     <div className="min-w-0">
-                      <Label className="flex items-center gap-1.5">
+                      <Label htmlFor="setting-thinking-default" className="flex items-center gap-1.5">
                         <Brain className="h-3.5 w-3.5 text-foreground/60" />
                         Thinking
                       </Label>
@@ -50,7 +50,7 @@ export function FeaturesTab() {
                         API providers ignore this field.
                       </p>
                     </div>
-                    <Switch
+                    <Switch id="setting-thinking-default"
                       checked={settings.thinking_default}
                       onCheckedChange={(next) =>
                         settings.update("thinking_default", next)
@@ -66,7 +66,7 @@ export function FeaturesTab() {
                 <div>
                   <div className="flex items-start justify-between gap-4">
                     <div className="min-w-0">
-                      <Label className="flex items-center gap-1.5">
+                      <Label htmlFor="setting-temporal-awareness" className="flex items-center gap-1.5">
                         <Clock className="h-3.5 w-3.5 text-foreground/60" />
                         Temporal awareness
                       </Label>
@@ -76,7 +76,7 @@ export function FeaturesTab() {
                         like "What day is it today?".
                       </p>
                     </div>
-                    <Switch
+                    <Switch id="setting-temporal-awareness"
                       checked={settings.temporal_awareness}
                       onCheckedChange={(next) =>
                         settings.update("temporal_awareness", next)
@@ -122,7 +122,7 @@ export function FeaturesTab() {
                 <div>
                   <div className="flex items-start justify-between gap-4">
                     <div className="min-w-0">
-                      <Label className="flex items-center gap-1.5">
+                      <Label htmlFor="setting-global-memory" className="flex items-center gap-1.5">
                         <BookMarked className="h-3.5 w-3.5 text-foreground/60" />
                         Global memories
                       </Label>
@@ -137,7 +137,7 @@ export function FeaturesTab() {
                         reaches a cloud one. Never used in Private Chat.
                       </p>
                     </div>
-                    <Switch
+                    <Switch id="setting-global-memory"
                       checked={settings.global_memory_enabled}
                       onCheckedChange={(next) =>
                         settings.update("global_memory_enabled", next)

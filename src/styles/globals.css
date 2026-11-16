@@ -582,6 +582,15 @@ html.font-size-large   { --font-scale: 1.05; }
 .text-foreground\/90 { color: hsl(var(--foreground) / 0.98); }
 .text-foreground\/95 { color: hsl(var(--foreground)); }
 
+/* Light theme: the low tiers lifted further. Over the Aurora background's
+   peach band (around rgb(245,200,185)) the values above left /40 at about
+   4.3:1 and /30 near 3:1, so hints and metrics went faint. Dark mode keeps
+   the values above, which already read on near-black. */
+html:not(.dark) .text-foreground\/30 { color: hsl(var(--foreground) / 0.58); }
+html:not(.dark) .text-foreground\/35 { color: hsl(var(--foreground) / 0.62); }
+html:not(.dark) .text-foreground\/40 { color: hsl(var(--foreground) / 0.66); }
+html:not(.dark) .text-foreground\/45 { color: hsl(var(--foreground) / 0.70); }
+
 /* =========================================================================
    Contrast lift for destructive menu items in dark mode
    -------------------------------------------------------------------------

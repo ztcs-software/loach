@@ -185,7 +185,7 @@ export function DefaultModelPreloadToggle({ className }: { className?: string })
     <div className={className}>
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
-          <Label className={cn(!isOllama && "text-foreground/55")}>
+          <Label htmlFor="setting-default-model-preload" className={cn(!isOllama && "text-foreground/55")}>
             Preload on startup
           </Label>
           <p className="mt-1 text-[11px] text-foreground/50">
@@ -194,7 +194,7 @@ export function DefaultModelPreloadToggle({ className }: { className?: string })
               : "Only applies to local Ollama models. Pin the default to an Ollama model to enable."}
           </p>
         </div>
-        <Switch
+        <Switch id="setting-default-model-preload"
           checked={isOllama && enabled}
           disabled={!isOllama}
           onCheckedChange={(next) =>

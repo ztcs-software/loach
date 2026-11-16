@@ -9,6 +9,10 @@
 // from the lockfile) with an error that doesn't obviously say "you bumped the
 // version and didn't refresh the lockfile".
 //
+// So is package-lock.json's own version (its top level and its root
+// package): nothing reads it at build time, so it sat at 1.5.0 for a release
+// before anyone noticed.
+//
 // Parsing mirrors the workflow: package.json / tauri.conf.json are read as
 // JSON; Cargo.toml takes the first line of the file that starts with
 // `version` (`grep -m1 '^version'`), its value read the way the workflow's
@@ -38,6 +42,10 @@ describe("release version agreement", () => {
   // Line-walk rather than a multi-line regex: every dependency in the lock
   // file has the identical `name = ` / `version = ` shape, so the anchor that
   // matters is the name, and `version` is always the line right after it.
+  const npmLock = JSON.parse(read("package-lock.json")) as {
+    version?: unknown;
+    packages?: Record<string, { version?: unknown }>;
+  };
   const cargoLock = (() => {
     const lines = cargoLockText.split("\n").map((l) => l.trimEnd());
     const i = lines.indexOf('name = "loach"');
@@ -53,6 +61,7 @@ describe("release version agreement", () => {
       ["src-tauri/tauri.conf.json", tauri],
       ["src-tauri/Cargo.toml", cargo],
       ["src-tauri/Cargo.lock", cargoLock],
+      ["package-lock.json", npmLock.version],
     ] as const) {
       expect(v, `${name} version`).toMatch(/^\d+\.\d+\.\d+/);
     }
@@ -63,5 +72,12 @@ describe("release version agreement", () => {
       { tauriConf: tauri, cargoToml: cargo, cargoLock },
       "the release workflow hard-fails on drift — fix the odd one out, then run `cargo update -p loach` to refresh the lockfile",
     ).toEqual({ tauriConf: pkg, cargoToml: pkg, cargoLock: pkg });
+  });
+
+  it("package-lock.json carries the same version", () => {
+    expect(
+      { top: npmLock.version, root: npmLock.packages?.[""]?.version },
+      "run `npm install --package-lock-only` after bumping package.json",
+    ).toEqual({ top: pkg, root: pkg });
   });
 });

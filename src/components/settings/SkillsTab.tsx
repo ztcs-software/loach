@@ -85,7 +85,7 @@ export function SkillsTab() {
 
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
-          <Label className="flex items-center gap-1.5">
+          <Label htmlFor="setting-skills-enabled" className="flex items-center gap-1.5">
             <Puzzle className="h-3.5 w-3.5 text-foreground/60" />
             Use skills
           </Label>
@@ -97,7 +97,7 @@ export function SkillsTab() {
             message, so switch off the ones you don't use. Not in Private Chat.
           </p>
         </div>
-        <Switch
+        <Switch id="setting-skills-enabled"
           checked={enabled}
           onCheckedChange={(next) => void update("skills_enabled", next)}
           className="shrink-0"
@@ -107,7 +107,7 @@ export function SkillsTab() {
 
       <div className="ml-5 flex items-start justify-between gap-4 border-l border-foreground/10 pl-3">
         <div className="min-w-0">
-          <Label className="flex items-center gap-1.5">
+          <Label htmlFor="setting-skill-scripts" className="flex items-center gap-1.5">
             <Terminal className="h-3.5 w-3.5 text-foreground/60" />
             Let skills run scripts
           </Label>
@@ -122,7 +122,7 @@ export function SkillsTab() {
             minutes; Stop ends it.
           </p>
         </div>
-        <Switch
+        <Switch id="setting-skill-scripts"
           checked={scripts}
           onCheckedChange={(next) => void update("skill_scripts_enabled", next)}
           className="shrink-0"
