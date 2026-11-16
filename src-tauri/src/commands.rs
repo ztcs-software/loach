@@ -2008,18 +2008,20 @@ impl McpServerInput {
 /// truncates on a char boundary so a misbehaving server can't:
 ///   - inject newlines that break the surrounding markdown wrap
 ///   - bloat the message body with a multi-KB stack trace
-///   - silently smuggle echoed `Authorization` headers (or anything
-///     similarly shaped) into the persisted transcript, which would
-///     then land in snapshots / shared exports.
-/// The operator-facing tracing log keeps the unredacted text — only the
-/// renderer-visible notice is clipped.
+/// The cut doesn't keep a short secret out of the persisted transcript (and
+/// from there snapshots / shared exports). A server echoing the session's
+/// own credentials is handled where its text is read (`McpSession::scrub`
+/// in mcp/client.rs); dropping the word after any `Bearer` here is only a
+/// fallback. The operator-facing tracing log keeps the full text.
 fn sanitize_chat_error(s: &str) -> String {
     const MAX_CHARS: usize = 120;
-    let collapsed: String = s
-        .chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
-        .collect::<String>()
-        .split_whitespace()
+    let cleaned: String = s.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+    let words: Vec<&str> = cleaned.split_whitespace().collect();
+    let is_bearer = |w: &str| w.trim_matches(|c: char| !c.is_alphanumeric()).eq_ignore_ascii_case("bearer");
+    let collapsed: String = words
+        .iter()
+        .enumerate()
+        .map(|(i, w)| if i > 0 && is_bearer(words[i - 1]) { "[redacted]" } else { w })
         .collect::<Vec<_>>()
         .join(" ");
     if collapsed.chars().count() <= MAX_CHARS {
@@ -2076,22 +2078,24 @@ fn is_valid_header_value(value: &str) -> bool {
 /// previous version only checked literal IPs, so `evil.example.com` →
 /// `10.0.0.1` slipped through and the request was sent against the
 /// internal address with whatever auth headers the user configured.
-/// Why a server row failed validation. Everything except an unanswerable
-/// DNS query is a `Rejected`; the split exists so snapshot import can keep a
-/// backup that merely references an unreachable host (see stage 2 of
-/// `import_data_with_dialog`) while still refusing a tampered one.
+/// Why a server row failed validation: a structural fault (`Rejected`), a
+/// host DNS couldn't answer for (`Unscreenable`), or a host that is
+/// link-local (`Blocked`). The split exists so snapshot import can keep a
+/// row whose only fault is its host — disabled, see stage 2 of
+/// `import_data_with_dialog` — while still refusing a malformed one.
 /// `Display` — and the `From` below, which keeps `?` working in the
 /// `Result<_, String>` commands — reproduce the original messages verbatim.
 #[derive(Debug)]
 pub(crate) enum McpImportRejection {
     Rejected(String),
     Unscreenable(String),
+    Blocked(String),
 }
 
 impl std::fmt::Display for McpImportRejection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Rejected(m) | Self::Unscreenable(m) => f.write_str(m),
+            Self::Rejected(m) | Self::Unscreenable(m) | Self::Blocked(m) => f.write_str(m),
         }
     }
 }
@@ -2113,7 +2117,7 @@ async fn validate_mcp_input(
     input: &McpServerInput,
     screen_host: bool,
 ) -> Result<Vec<std::net::SocketAddr>, McpImportRejection> {
-    use McpImportRejection::{Rejected, Unscreenable};
+    use McpImportRejection::{Blocked, Rejected, Unscreenable};
     if input.name.trim().is_empty() {
         return Err(Rejected("server name is required".into()));
     }
@@ -2203,7 +2207,8 @@ async fn validate_mcp_input(
             match e {
                 // DNS didn't answer, so the host was never actually screened.
                 crate::tools::fetch_url::HostScreenError::Unresolvable(_) => Unscreenable(msg),
-                _ => Rejected(msg),
+                crate::tools::fetch_url::HostScreenError::Blocked(_) => Blocked(msg),
+                crate::tools::fetch_url::HostScreenError::Invalid(_) => Rejected(msg),
             }
         })
 }
@@ -2837,12 +2842,12 @@ pub async fn chat_stream(
                 .join("; ");
             tracing::warn!("MCP aggregate errors — {log_summary}");
             // The chat-bubble notice is sanitised: every error string is
-            // collapsed to a single line and truncated. A misbehaving MCP
-            // server that echoes an `Authorization` header (or any other
-            // secret) into its 401 body would otherwise land that text in
-            // the persisted message — and from there into snapshots and
-            // shared exports. Truncation is conservative; the operator
-            // still has the full text in the log above.
+            // collapsed to a single line and truncated, since it lands in
+            // the persisted message — and from there in snapshots and
+            // shared exports. Secrets a server echoes back (its 401 body
+            // quoting our `Authorization` header) were already scrubbed by
+            // the MCP client; see `sanitize_chat_error`. The operator still
+            // has the full text in the log above.
             let ui_summary = errors
                 .iter()
                 .map(|(name, e)| format!("{name}: {}", sanitize_chat_error(e)))
@@ -3988,13 +3993,18 @@ pub async fn import_data_with_dialog(
             // snippet in their backup. Keep the row but force it disabled:
             // nothing connects to it until the user re-saves it, which runs
             // the full validator on the normal path.
-            Err(McpImportRejection::Unscreenable(msg)) => {
+            //
+            // A link-local host goes the same way. A disabled row isn't
+            // screened on save, so the user's own APIPA or `fe80::` server
+            // reaches exports, and `x.local` can resolve to link-local on
+            // another network; refusing those cost the whole backup. Parked
+            // disabled it connects to nothing, and enabling it re-screens.
+            Err(McpImportRejection::Unscreenable(msg) | McpImportRejection::Blocked(msg)) => {
                 row.enabled = false;
                 quarantined.push(format!("{} ({msg})", row.name));
             }
-            // Positively identified as link-local, or structurally bad.
-            // Still a hard reject: this is the tampered-export case the
-            // re-validation exists to catch.
+            // Structurally bad. Still a hard reject: this is the
+            // tampered-export case the re-validation exists to catch.
             Err(McpImportRejection::Rejected(msg)) => {
                 return Err(format!(
                     "import rejected: MCP server #{} ({}): {msg}",
@@ -4027,7 +4037,7 @@ pub async fn import_data_with_dialog(
 
     if !quarantined.is_empty() {
         tracing::warn!(
-            "import: {} MCP server(s) could not be screened and were imported disabled: {}",
+            "import: {} MCP server(s) failed the host screen and were imported disabled: {}",
             quarantined.len(),
             quarantined.join(", ")
         );
@@ -4707,6 +4717,19 @@ mod tests {
         }
     }
 
+    /// The notice is one line, drops whatever follows `Bearer`, and is cut
+    /// at 120 characters.
+    #[test]
+    fn chat_error_notice_is_one_line_without_a_bearer_token() {
+        assert_eq!(
+            sanitize_chat_error("HTTP 401:\n  Authorization: Bearer ghp_abc123 (bearer: x)"),
+            "HTTP 401: Authorization: Bearer [redacted] (bearer: [redacted]"
+        );
+        let long = sanitize_chat_error(&"word ".repeat(40));
+        assert_eq!(long.chars().count(), 121);
+        assert!(long.ends_with('…'));
+    }
+
     /// A disabled HTTP row isn't DNS-screened, so it can be switched off or
     /// renamed while its host doesn't resolve — but it still gets every
     /// structural check, and an enabled one is still screened.
@@ -4729,6 +4752,16 @@ mod tests {
             Err(McpImportRejection::Rejected(_))
         ));
         input.headers = None;
+        // A link-local host is its own outcome, which import parks disabled
+        // instead of refusing the whole backup over (B1-03).
+        for url in ["http://169.254.10.20:8080/mcp", "http://[fe80::1]/mcp"] {
+            input.url = url.into();
+            assert!(validate_mcp_input(&input, false).await.is_ok(), "{url}");
+            assert!(
+                matches!(validate_mcp_input(&input, true).await, Err(McpImportRejection::Blocked(_))),
+                "{url}"
+            );
+        }
         input.url = "ftp://example.com".into();
         assert!(validate_mcp_input(&input, false).await.is_err());
     }

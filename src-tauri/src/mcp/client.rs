@@ -266,7 +266,14 @@ impl McpSession {
                 "_meta": { "progressToken": id },
             },
         });
-        let (resp, sid) = post_rpc(self, &body).await?;
+        let mut cancel = CancelOnDrop(Some(self.cancel_request(id)));
+        let result = post_rpc(self, &body).await;
+        // A reply was read, or the request provably never reached the
+        // server: nothing is left running there to stop.
+        if result.as_ref().map_or_else(is_pre_execution, |_| true) {
+            cancel.0 = None;
+        }
+        let (resp, sid) = result?;
         if let Some(s) = accept_session_id(sid) {
             self.session_id = Some(s);
         }
@@ -293,6 +300,50 @@ impl McpSession {
         }
         req
     }
+
+    /// The `notifications/cancelled` for request `id`, ready to send.
+    fn cancel_request(&self, id: i64) -> reqwest::RequestBuilder {
+        self.request(reqwest::Method::POST)
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json, text/event-stream")
+            .json(&json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/cancelled",
+                "params": { "requestId": id, "reason": "The client no longer needs the result." },
+            }))
+            .timeout(REQUEST_TIMEOUT)
+    }
+
+    /// Server text bound for an error — an HTTP error page, a frame that
+    /// isn't JSON-RPC — without this session's own secrets. Such an error
+    /// reaches the transcript, exports and the model, and a gateway or a
+    /// debug-mode server can echo the request back into it: the configured
+    /// headers (`Authorization: Bearer …`), the session id, a credential in
+    /// the URL's path or query. Values under 8 characters are left alone:
+    /// too short to be a credential, and common enough to garble the text.
+    fn scrub(&self, text: &str) -> String {
+        const MIN_CHARS: usize = 8;
+        let mut secrets: Vec<String> = Vec::new();
+        for value in self.headers.values() {
+            secrets.push(value.clone());
+            // `Bearer <token>` can come back as the token alone.
+            secrets.extend(value.split_whitespace().map(str::to_string));
+        }
+        secrets.extend(self.session_id.clone());
+        if let Ok(url) = reqwest::Url::parse(&self.url) {
+            secrets.extend(url.path_segments().into_iter().flatten().map(str::to_string));
+            secrets.extend(url.query().map(str::to_string));
+            secrets.extend(url.query_pairs().map(|(_, v)| v.into_owned()));
+            secrets.extend(url.password().map(str::to_string));
+        }
+        secrets.retain(|s| s.chars().count() >= MIN_CHARS);
+        // Longest first, so a whole header value goes before its token.
+        secrets.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+        secrets.dedup();
+        secrets
+            .iter()
+            .fold(text.to_string(), |text, secret| text.replace(secret.as_str(), "[redacted]"))
+    }
 }
 
 /// End the session on the server — the spec's HTTP DELETE — whenever one is
@@ -311,6 +362,29 @@ impl Drop for McpSession {
         let req = self.request(reqwest::Method::DELETE).timeout(REQUEST_TIMEOUT);
         rt.spawn(async move {
             // A server that doesn't support it answers 405, which is fine.
+            let _ = req.send().await;
+        });
+    }
+}
+
+/// Sends its `notifications/cancelled` when dropped still holding it: the
+/// user pressed Stop (which drops the call) or the call failed with the
+/// server possibly still at work — a timeout, a reset mid-reply. That's what
+/// stdio's `InFlight` does, "as the spec asks of a client"; over HTTP,
+/// dropping the POST doesn't do it, since a disconnect SHOULD NOT be read as
+/// cancellation. Built before the call, so it goes under the call's session.
+/// Best effort; a server ignores one for a request it has finished.
+struct CancelOnDrop(Option<reqwest::RequestBuilder>);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        let Some(req) = self.0.take() else {
+            return;
+        };
+        let Ok(rt) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        rt.spawn(async move {
             let _ = req.send().await;
         });
     }
@@ -512,9 +586,10 @@ async fn post_rpc(
     // `truncate` the body before it lands in the message: `raw` is bounded
     // only by MAX_RESPONSE_BYTES (4 MiB), and this error string is surfaced
     // as a ToolResult event that gets persisted into the transcript and
-    // logged in full.
-    let parsed: JsonRpcResponse = serde_json::from_str(&raw)
-        .with_context(|| format!("server sent invalid JSON-RPC frame: {}", truncate(&raw)))?;
+    // logged in full. Scrubbed first, so no token is cut in half.
+    let parsed: JsonRpcResponse = serde_json::from_str(&raw).with_context(|| {
+        format!("server sent invalid JSON-RPC frame: {}", truncate(&session.scrub(&raw)))
+    })?;
     Ok((parsed, sid))
 }
 
@@ -592,7 +667,11 @@ async fn post_rpc_raw(
             .and_then(|l| redirect_hint(&session.url, &l));
         let err = match hint {
             Some(hint) => anyhow!("server responded with HTTP {status}: {hint}"),
-            None => anyhow!("server responded with HTTP {}: {}", status, truncate(&text)),
+            None => anyhow!(
+                "server responded with HTTP {}: {}",
+                status,
+                truncate(&session.scrub(&text))
+            ),
         };
         // 404 against a session-carrying request is the spec's "unknown or
         // expired session" signal: the server refused the envelope, so it
@@ -1128,6 +1207,42 @@ mod tests {
         assert!(delete.to_ascii_lowercase().contains("mcp-session-id: sess-42"), "{delete}");
     }
 
+    /// A call the server got but never answered is cancelled there, as
+    /// stdio does; an answered one is not (B5-03). A Stop drops the call
+    /// the same way the failure here does.
+    #[tokio::test]
+    async fn an_unanswered_call_is_cancelled_on_the_server() {
+        fn respond(request: &str) -> String {
+            if request.contains(r#""name":"slow""#) {
+                // Progress, then the stream ends without the reply.
+                let frame = "data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",\
+                             \"params\":{\"progressToken\":1,\"progress\":1}}\n\n";
+                http("200 OK", "content-type: text/event-stream\r\n", frame)
+            } else if request.contains(r#""name":"fast""#) {
+                let reply = r#"{"jsonrpc":"2.0","id":2,"result":{"content":[]}}"#;
+                http("200 OK", "content-type: application/json\r\n", reply)
+            } else {
+                http("202 Accepted", "", "")
+            }
+        }
+        let (url, mut seen) = mock_server(respond).await;
+        let mut session = McpSession::new(reqwest::Client::new(), &row(&url)).expect("session");
+
+        assert!(session.call_tool("slow", &json!({})).await.is_err());
+        let _call = seen.recv().await;
+        let cancel = tokio::time::timeout(Duration::from_secs(5), seen.recv())
+            .await
+            .expect("a cancellation was sent")
+            .expect("a request");
+        assert!(cancel.contains(r#""method":"notifications/cancelled""#), "{cancel}");
+        assert!(cancel.contains(r#""requestId":1"#), "{cancel}");
+
+        session.call_tool("fast", &json!({})).await.expect("answered");
+        let _call = seen.recv().await;
+        let after = tokio::time::timeout(Duration::from_millis(500), seen.recv()).await;
+        assert!(after.is_err(), "nothing follows an answered call: {after:?}");
+    }
+
     /// The tag rides as context, under more context at times; it must be
     /// found either way, or the pool's one safe retry never happens.
     #[test]
@@ -1207,6 +1322,27 @@ mod tests {
         let same_host = redirect_hint(base, "/v2/s/sk-1/mcp").unwrap();
         assert!(!same_host.contains("sk-1"), "{same_host}");
         assert_eq!(redirect_hint("not a url", "/x"), None);
+    }
+
+    /// An error page that echoes the request back loses this session's
+    /// secrets before it becomes error text (B5-02).
+    #[test]
+    fn echoed_secrets_are_scrubbed_from_server_text() {
+        let mut server =
+            row("https://mcp.example.com/api/s/sk-live-path-secret/mcp?key=query-secret-123");
+        server.headers_json =
+            Some(r#"{"Authorization":"Bearer ghp_abcdef123456","X-Tenant":"acme"}"#.into());
+        let mut session = McpSession::new(reqwest::Client::new(), &server).expect("session");
+        session.session_id = Some("sess-0123456789".into());
+        let echoed = "401 Unauthorized. Authorization: Bearer ghp_abcdef123456 (ghp_abcdef123456); \
+                      Mcp-Session-Id: sess-0123456789; \
+                      POST /api/s/sk-live-path-secret/mcp?key=query-secret-123; tenant acme";
+        let out = session.scrub(echoed);
+        for secret in ["ghp_abcdef123456", "sess-0123456789", "sk-live-path-secret", "query-secret-123"] {
+            assert!(!out.contains(secret), "{secret} survived: {out}");
+        }
+        assert!(out.contains("tenant acme"), "short values are left alone: {out}");
+        assert!(out.starts_with("401 Unauthorized."), "{out}");
     }
 
     #[test]

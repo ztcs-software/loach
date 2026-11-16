@@ -501,6 +501,10 @@ an error.
    up the full endpoint URL in the server's docs.
 6. Loach connects directly, never through a proxy — a server reachable
    only through one won't answer.
+7. Chats reuse each server's tool list, and its last error, for about
+   5 minutes. If **Test connection** now works but a chat still reports
+   the old error or misses a new tool, save the server in **Settings →
+   MCP** (or switch it off and on) to refresh straight away.
 
 ### A local (stdio) MCP server won't start
 
@@ -546,6 +550,11 @@ enabled.)
    requests in a row go unanswered, Loach treats the server as hung and
    starts it afresh on the next call; to restart it sooner, disable and
    re-enable it.
+8. Chats reuse each server's tool list, and its last error, for about
+   5 minutes — so after a fix (step 4's warm-up included), a chat can
+   report the old error even though **Test connection** works. Save the
+   server in **Settings → MCP** (or switch it off and on) to refresh
+   straight away.
 
 ### A server imported from a backup is disabled and won't turn on
 
@@ -558,7 +567,9 @@ and the first enable asks you to confirm the command line. Review it and
 choose **Start server** to enable the row. HTTP servers import enabled —
 unless their host couldn't be looked up during the import (offline, off
 the VPN), in which case they arrive switched off too; turn them on once
-the host is reachable again.
+the host is reachable again. So does a server whose address is
+link-local (`169.254.x.x`, `fe80::`): Loach never connects to those, so it
+stays off until you point it at another address.
 
 Backups never contain MCP headers or environment variables, and a URL's
 credentials, the value after a `--token`-style argument and a credential

@@ -130,11 +130,30 @@ pub async fn aggregate_tools(
                 // stderr can print anything, a token included. The log line
                 // keeps it; Test connection shows it in full.
                 tracing::warn!("MCP aggregate: `{name}` failed: {e:#}");
-                errors.push((name, stdio::without_stderr(&format!("{e}")).to_string()));
+                errors.push((name, failure_summary(&e)));
             }
         }
     }
     (defs, errors)
+}
+
+/// What the "couldn't be reached" notice and `/tools` say about a server
+/// that failed: its first message and, when it's another layer, the root
+/// cause — "POST to MCP server failed: Connection refused". The retry tag
+/// is skipped: as the outermost layer it was all the user saw ("request
+/// failed before the server could run the tool", while listing tools), and
+/// the cause behind it was lost. Each part loses any stderr tail.
+fn failure_summary(e: &anyhow::Error) -> String {
+    let tag = client::PreExecutionFailure.to_string();
+    let mut layers = e.chain().map(|l| l.to_string()).filter(|l| *l != tag);
+    let Some(first) = layers.next() else {
+        return tag;
+    };
+    let first = stdio::without_stderr(&first);
+    match layers.last() {
+        Some(root) => format!("{first}: {}", stdio::without_stderr(&root)),
+        None => first.to_string(),
+    }
 }
 
 /// How long a cached tool catalogue stays fresh before the next chat send
@@ -1195,5 +1214,40 @@ mod tests {
         let entry = guard.entry.as_ref().expect("refreshed");
         assert!(entry.errors.is_empty());
         assert!(entry.cached_at.elapsed() < TOOLS_CACHE_TTL);
+    }
+
+    /// The notice names the cause, not the retry tag, and never a stderr
+    /// tail (B5-01).
+    #[test]
+    fn failure_summary_shows_the_cause_without_the_retry_tag() {
+        use client::PreExecutionFailure;
+        let io = |m: &str| std::io::Error::other(m.to_string());
+
+        // HTTP connect failure: tag over "POST … failed" over reqwest's chain.
+        let refused = anyhow::Error::new(io("Connection refused (os error 111)"))
+            .context("tcp connect error")
+            .context("error sending request")
+            .context("POST to MCP server failed")
+            .context(PreExecutionFailure);
+        assert_eq!(
+            failure_summary(&refused),
+            "POST to MCP server failed: Connection refused (os error 111)"
+        );
+
+        // stdio: the stderr tail goes, from either part.
+        let exited = anyhow!("MCP server `fs` process has exited — stderr: TOKEN=abc")
+            .context(PreExecutionFailure);
+        assert_eq!(failure_summary(&exited), "MCP server `fs` process has exited");
+        let write = anyhow::Error::new(io("The pipe is being closed."))
+            .context("couldn't write to MCP server `fs` — stderr: TOKEN=abc")
+            .context(PreExecutionFailure);
+        assert_eq!(
+            failure_summary(&write),
+            "couldn't write to MCP server `fs`: The pipe is being closed."
+        );
+
+        // A one-layer error reads as before.
+        let rpc = anyhow!("server returned error -32601: Method not found");
+        assert_eq!(failure_summary(&rpc), "server returned error -32601: Method not found");
     }
 }
