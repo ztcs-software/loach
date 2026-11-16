@@ -368,6 +368,7 @@ async fn admin_host_ok(
     false
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn create_model(
     app: AppHandle,
     http: Client,

@@ -140,7 +140,9 @@ pub enum StreamEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         existing_bytes: Option<Option<u64>>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        script_run: Option<crate::skills::script::Preview>,
+        // Boxed: a preview is most of this variant's size, and every event
+        // was as big as the largest one.
+        script_run: Option<Box<crate::skills::script::Preview>>,
     },
     /// Outcome of a `ToolCall`. `is_error` mirrors the MCP `isError` flag;
     /// `content` is the concatenated text content (or a stringified

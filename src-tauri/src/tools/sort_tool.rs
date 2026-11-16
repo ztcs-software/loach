@@ -5,6 +5,7 @@
 //! this case. The other modes are just for completeness so the model
 //! has one tool to reach for instead of three.
 
+use super::{err};
 use serde_json::{json, Value};
 
 use crate::mcp::McpCallResult;
@@ -59,12 +60,17 @@ pub fn dispatch(args: &Value) -> McpCallResult {
         return err(format!("input is {} bytes; max is {MAX_INPUT_BYTES}", input.len()));
     }
     let mode = args.get("mode").and_then(|v| v.as_str()).unwrap_or("lexical");
-    let reverse = args.get("reverse").and_then(|v| v.as_bool()).unwrap_or(false);
-    let unique = args.get("unique").and_then(|v| v.as_bool()).unwrap_or(false);
-    let case_sensitive = args
-        .get("case_sensitive")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
+    let flags = (|| {
+        Ok::<_, String>((
+            crate::tools::bool_arg(args, "reverse", false)?,
+            crate::tools::bool_arg(args, "unique", false)?,
+            crate::tools::bool_arg(args, "case_sensitive", true)?,
+        ))
+    })();
+    let (reverse, unique, case_sensitive) = match flags {
+        Ok(f) => f,
+        Err(e) => return err(e),
+    };
 
     let mut lines: Vec<String> = input.lines().map(|s| s.to_string()).collect();
     match mode {
@@ -145,14 +151,6 @@ pub fn dispatch(args: &Value) -> McpCallResult {
     McpCallResult {
         content_text: lines.join("\n"),
         is_error: false,
-        ..Default::default()
-    }
-}
-
-fn err(msg: impl Into<String>) -> McpCallResult {
-    McpCallResult {
-        content_text: msg.into(),
-        is_error: true,
         ..Default::default()
     }
 }

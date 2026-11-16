@@ -594,7 +594,9 @@ fn server_needs_approval(rows: Result<Vec<McpServer>>, server_id: &str, tool_nam
 /// operations the chat pipeline needs are the whole surface.
 pub enum Session {
     Http(McpSession),
-    Stdio(StdioSession),
+    /// Boxed: a stdio session is several times an HTTP one's size, and every
+    /// `Session` was as big as the largest variant.
+    Stdio(Box<StdioSession>),
 }
 
 impl Session {
@@ -618,7 +620,7 @@ async fn open_session(server: &McpServer) -> Result<Session> {
     if server.is_stdio() {
         let mut session = StdioSession::spawn(server).await?;
         session.initialize().await?;
-        Ok(Session::Stdio(session))
+        Ok(Session::Stdio(Box::new(session)))
     } else {
         let (http, _) = pin_client_for(server).await?;
         let mut session = McpSession::new(http, server)?;
@@ -1054,7 +1056,7 @@ mod tests {
         let pooled = PooledSession {
             fingerprint: session_fingerprint(&row),
             created_at: Instant::now(),
-            session: Session::Stdio(StdioSession::spawn(&row).await.expect("spawn")),
+            session: Session::Stdio(Box::new(StdioSession::spawn(&row).await.expect("spawn"))),
         };
         let too_long = anyhow::Error::new(stdio::UnreadableReply)
             .context("MCP server `big`: its reply was over 4 MiB");
@@ -1088,7 +1090,7 @@ mod tests {
         let stdio = PooledSession {
             fingerprint: session_fingerprint(&row),
             created_at: Instant::now(),
-            session: Session::Stdio(StdioSession::spawn(&row).await.expect("spawn")),
+            session: Session::Stdio(Box::new(StdioSession::spawn(&row).await.expect("spawn"))),
         };
         let web = http_row("x");
         let http = PooledSession {

@@ -200,7 +200,7 @@ pub(super) async fn execute_tool_call(
             arguments: args.clone(),
             approval_required,
             existing_bytes,
-            script_run,
+            script_run: script_run.map(Box::new),
         },
     );
 

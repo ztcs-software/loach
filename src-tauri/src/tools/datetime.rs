@@ -6,10 +6,12 @@
 //!   * misapply DST (e.g. `+2h` across a spring-forward),
 //!   * fabricate ISO offsets that don't exist,
 //!   * miscount business days beyond a week or two.
+//!
 //! Off-loading those to chrono / chrono-tz removes a whole class of
 //! confident-but-wrong answers without the user having to wire up an
 //! MCP server for a single function.
 
+use super::{err, ok};
 use chrono::format::{Item, StrftimeItems};
 use chrono::{
     DateTime, Datelike, Days, FixedOffset, LocalResult, Months, NaiveDate, NaiveDateTime, TimeZone,
@@ -140,6 +142,21 @@ fn validate_strftime(pattern: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// `formatted` written out. A parse-only specifier (`%#z`) passes
+/// [`validate_strftime`] but can't be written: `to_string()` panicked on it,
+/// and the model got "internal error".
+fn render(formatted: impl std::fmt::Display, pattern: &str) -> McpCallResult {
+    use std::fmt::Write as _;
+    let mut s = String::new();
+    match write!(s, "{formatted}") {
+        Ok(()) => ok(s),
+        Err(_) => err(format!(
+            "invalid strftime pattern `{pattern}` — it has a specifier that can only be parsed, not \
+             written (such as %#z)"
+        )),
+    }
+}
+
 fn op_now(args: &Value) -> McpCallResult {
     let tz = match resolve_tz(args.get("timezone").and_then(|v| v.as_str())) {
         Ok(tz) => tz,
@@ -150,7 +167,7 @@ fn op_now(args: &Value) -> McpCallResult {
         if let Err(e) = validate_strftime(fmt) {
             return err(e);
         }
-        return ok(now.format(fmt).to_string());
+        return render(now.format(fmt), fmt);
     }
     ok(now.to_rfc3339())
 }
@@ -189,8 +206,8 @@ fn op_format(args: &Value) -> McpCallResult {
     match parse_input(input, &tz) {
         // Kept apart from the `Tz` path, where `%Z` is the zone's name.
         Ok(dt) => match own_offset(args, input) {
-            Some(offset) => ok(dt.with_timezone(&offset).format(pattern).to_string()),
-            None => ok(dt.with_timezone(&tz).format(pattern).to_string()),
+            Some(offset) => render(dt.with_timezone(&offset).format(pattern), pattern),
+            None => render(dt.with_timezone(&tz).format(pattern), pattern),
         },
         Err(e) => err(e),
     }
@@ -207,6 +224,7 @@ fn op_add(args: &Value) -> McpCallResult {
     };
     let amount = match crate::tools::lenient_i64(args, "amount") {
         Some(n) => n,
+        None if args.get("amount").is_some() => return err("`amount` must be an integer"),
         None => return err("missing required `amount` argument (integer)"),
     };
     // The cap check compares unsigned magnitudes — `amount.unsigned_abs()`
@@ -314,6 +332,7 @@ fn op_business_days_from(args: &Value) -> McpCallResult {
     };
     let amount = match crate::tools::lenient_i64(args, "amount") {
         Some(n) => n,
+        None if args.get("amount").is_some() => return err("`amount` must be an integer"),
         None => return err("missing required `amount` argument (integer, negative goes backward)"),
     };
     // Same `i64::MIN`-safe cap check as `op_add` — compare unsigned
@@ -649,22 +668,6 @@ fn string_arg<'a>(args: &'a Value, key: &str) -> Result<&'a str, String> {
     match args.get(key).and_then(|v| v.as_str()) {
         Some(s) if !s.is_empty() => Ok(s),
         _ => Err(format!("missing required `{key}` argument (string)")),
-    }
-}
-
-fn ok(s: impl Into<String>) -> McpCallResult {
-    McpCallResult {
-        content_text: s.into(),
-        is_error: false,
-        ..Default::default()
-    }
-}
-
-fn err(s: impl Into<String>) -> McpCallResult {
-    McpCallResult {
-        content_text: s.into(),
-        is_error: true,
-        ..Default::default()
     }
 }
 

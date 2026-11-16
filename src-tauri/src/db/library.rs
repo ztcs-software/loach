@@ -1304,7 +1304,7 @@ mod tests {
             .unwrap();
         assert_eq!(linked.iter().map(|l| l.item_id.as_deref()).collect::<Vec<_>>(), vec![Some(a.id.as_str())]);
         // A missing owner is still an error, not a silent no-op.
-        assert!(db.add_library_sources(SourceOwner::Session, "gone-chat", &[a.id.clone()], &[]).is_err());
+        assert!(db.add_library_sources(SourceOwner::Session, "gone-chat", std::slice::from_ref(&a.id), &[]).is_err());
     }
 
     #[test]

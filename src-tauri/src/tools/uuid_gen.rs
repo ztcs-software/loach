@@ -6,6 +6,7 @@
 //! tool calls the actual `uuid` crate so the output is genuinely random
 //! (v4) or genuinely time-ordered (v7).
 
+use super::{err};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -49,7 +50,10 @@ pub fn input_schema() -> Value {
 
 pub fn dispatch(args: &Value) -> McpCallResult {
     let version = args.get("version").and_then(|v| v.as_str()).unwrap_or("v4");
-    let count = crate::tools::lenient_i64(args, "count").unwrap_or(1);
+    let count = match crate::tools::int_arg(args, "count", 1) {
+        Ok(n) => n,
+        Err(e) => return err(e),
+    };
     if count < 1 {
         return err("`count` must be at least 1");
     }
@@ -65,14 +69,6 @@ pub fn dispatch(args: &Value) -> McpCallResult {
     McpCallResult {
         content_text: lines.join("\n"),
         is_error: false,
-        ..Default::default()
-    }
-}
-
-fn err(msg: impl Into<String>) -> McpCallResult {
-    McpCallResult {
-        content_text: msg.into(),
-        is_error: true,
         ..Default::default()
     }
 }

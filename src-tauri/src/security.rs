@@ -958,8 +958,7 @@ mod tests {
         // Threshold-th failure trips the lockout window.
         record_attempt(&mut st, false);
         let err = check_lockout(&st)
-            .err()
-            .expect("expected lockout after threshold");
+            .expect_err("expected lockout after threshold");
         let msg = err.to_string();
         assert!(
             msg.contains("Too many failed attempts"),

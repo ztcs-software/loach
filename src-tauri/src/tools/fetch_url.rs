@@ -843,7 +843,7 @@ fn strip_blocks_with_lower(
                 next_open[idx] = find_opener(lower, open_l, i);
             }
             if let Some(pos) = next_open[idx] {
-                if best.map_or(true, |(bp, _)| pos < bp) {
+                if best.is_none_or(|(bp, _)| pos < bp) {
                     best = Some((pos, idx));
                 }
             }
@@ -919,7 +919,7 @@ fn replace_many_ci(hay: &str, needles: &[&str], repl: &str) -> String {
                 next_pos[idx] = lower[i..].find(needle_l.as_str()).map(|rel| i + rel);
             }
             if let Some(pos) = next_pos[idx] {
-                if best.map_or(true, |(bp, _)| pos < bp) {
+                if best.is_none_or(|(bp, _)| pos < bp) {
                     best = Some((pos, idx));
                 }
             }

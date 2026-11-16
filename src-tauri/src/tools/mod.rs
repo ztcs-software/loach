@@ -51,11 +51,22 @@ pub fn lenient_i64(args: &serde_json::Value, key: &str) -> Option<i64> {
 
 /// [`lenient_i64`] for a value already in hand — a field inside a nested
 /// spec rather than a top-level argument.
+///
+/// A string holding one counts too (`"5"`, `"5.0"`): local models write
+/// those as well, and they were reported missing or silently ignored.
 pub fn lenient_i64_value(v: &serde_json::Value) -> Option<i64> {
     if let Some(n) = v.as_i64() {
         return Some(n);
     }
-    let f = v.as_f64()?;
+    if let Some(s) = v.as_str() {
+        let s = s.trim();
+        return s.parse::<i64>().ok().or_else(|| integral(s.parse::<f64>().ok()?));
+    }
+    integral(v.as_f64()?)
+}
+
+/// `f` as an i64 when it is exactly a whole number i64 can hold.
+fn integral(f: f64) -> Option<i64> {
     if f.fract() != 0.0 {
         return None;
     }
@@ -63,4 +74,67 @@ pub fn lenient_i64_value(v: &serde_json::Value) -> Option<i64> {
     // magnitudes i64 can't actually hold.
     let n = f as i64;
     (n as f64 == f).then_some(n)
+}
+
+/// A number argument, also when written as a string (`"12.5"`).
+pub fn lenient_f64(args: &serde_json::Value, key: &str) -> Option<f64> {
+    let v = args.get(key)?;
+    v.as_f64().or_else(|| v.as_str()?.trim().parse().ok())
+}
+
+/// A boolean argument, also when written as the string `"true"` or `"false"`.
+pub fn lenient_bool(args: &serde_json::Value, key: &str) -> Option<bool> {
+    let v = args.get(key)?;
+    v.as_bool().or_else(|| match v.as_str()?.trim().to_ascii_lowercase().as_str() {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    })
+}
+
+/// An optional integer argument: `default` when it's absent, an error when
+/// it's there but no integer. Falling back to the default for a value the
+/// model plainly sent hid its mistake (`count: "five"` made one UUID).
+pub fn int_arg(args: &serde_json::Value, key: &str, default: i64) -> Result<i64, String> {
+    match args.get(key) {
+        None | Some(serde_json::Value::Null) => Ok(default),
+        Some(v) => lenient_i64_value(v).ok_or_else(|| format!("`{key}` must be an integer")),
+    }
+}
+
+/// [`int_arg`] for a boolean.
+pub fn bool_arg(args: &serde_json::Value, key: &str, default: bool) -> Result<bool, String> {
+    match args.get(key) {
+        None | Some(serde_json::Value::Null) => Ok(default),
+        Some(_) => lenient_bool(args, key).ok_or_else(|| format!("`{key}` must be true or false")),
+    }
+}
+
+/// A tool's error result.
+pub(crate) fn err(msg: impl Into<String>) -> crate::mcp::types::McpCallResult {
+    crate::mcp::types::McpCallResult {
+        content_text: msg.into(),
+        is_error: true,
+        ..Default::default()
+    }
+}
+
+/// A tool's plain-text result.
+pub(crate) fn ok(text: impl Into<String>) -> crate::mcp::types::McpCallResult {
+    crate::mcp::types::McpCallResult {
+        content_text: text.into(),
+        is_error: false,
+        ..Default::default()
+    }
+}
+
+/// `bytes` as lowercase hex, into one buffer (it was a `format!` a byte).
+pub(crate) fn hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        s.push(DIGITS[usize::from(b >> 4)] as char);
+        s.push(DIGITS[usize::from(b & 0xf)] as char);
+    }
+    s
 }

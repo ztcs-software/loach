@@ -17,6 +17,7 @@
 //! `.notdef` boxes, and the tool result counts them so the model can tell
 //! the user.
 
+use super::{err};
 use base64::Engine;
 use printpdf::*;
 use serde::Deserialize;
@@ -751,8 +752,15 @@ fn render_table_row(
         state.draw_line(x, top_y, x, bottom_y);
         // Cell text — truncated to col width (no wrap inside cells).
         let raw = cells.get(col).map(String::as_str).unwrap_or("");
+        // One line: a cell doesn't wrap, and a `\n`, a tab or another control
+        // character came out as an empty glyph box.
+        let flat = raw
+            .split(|c: char| c.is_whitespace() || c.is_control())
+            .filter(|w| !w.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
         let text = truncate_to_width(
-            &sanitise(raw, state.regular_font),
+            &sanitise(&flat, state.regular_font),
             col_width_mm - cell_pad_mm * 2.0_f32,
             state.font(bold),
             BODY_FONT_SIZE_PT,
@@ -944,14 +952,6 @@ fn is_windows_device_name(stem: &str) -> bool {
                 &upper[3..],
                 "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
             ))
-}
-
-fn err(msg: impl Into<String>) -> McpCallResult {
-    McpCallResult {
-        content_text: msg.into(),
-        is_error: true,
-        ..Default::default()
-    }
 }
 
 fn err_str(msg: &str) -> Result<(), String> {

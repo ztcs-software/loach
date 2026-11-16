@@ -1850,7 +1850,7 @@ fn normalise_var_key(key: &str) -> Result<String, String> {
             ));
         }
     }
-    if RESERVED_VAR_KEYS.iter().any(|r| *r == upper.as_str()) {
+    if RESERVED_VAR_KEYS.contains(&upper.as_str()) {
         return Err(format!(
             "'{upper}' is reserved by Loach — pick a different name."
         ));
@@ -2030,6 +2030,7 @@ impl McpServerInput {
 /// truncates on a char boundary so a misbehaving server can't:
 ///   - inject newlines that break the surrounding markdown wrap
 ///   - bloat the message body with a multi-KB stack trace
+///
 /// The cut doesn't keep a short secret out of the persisted transcript (and
 /// from there snapshots / shared exports). A server echoing the session's
 /// own credentials is handled where its text is read (`McpSession::scrub`

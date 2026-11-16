@@ -2170,6 +2170,7 @@ impl Database {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn update_message(
         &self,
         id: &str,

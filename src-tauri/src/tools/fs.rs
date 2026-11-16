@@ -43,6 +43,7 @@
 //! check, though, not something a person should read: [`display_path`]
 //! strips it for anything shown to the user or the model.
 
+use super::{err, ok};
 use std::fs;
 use std::io::Read as _;
 use std::path::{Component, Path, PathBuf};
@@ -2332,22 +2333,6 @@ pub fn dispatch_delete_file(root: &Path, args: &Value) -> McpCallResult {
     match fs::remove_file(&target) {
         Ok(()) => ok(format!("Deleted `{shown}` ({}).", human_size(meta.len()))),
         Err(e) => err(format!("couldn't delete `{shown}`: {e}")),
-    }
-}
-
-fn ok(text: impl Into<String>) -> McpCallResult {
-    McpCallResult {
-        content_text: text.into(),
-        is_error: false,
-        ..Default::default()
-    }
-}
-
-fn err(msg: impl Into<String>) -> McpCallResult {
-    McpCallResult {
-        content_text: msg.into(),
-        is_error: true,
-        ..Default::default()
     }
 }
 

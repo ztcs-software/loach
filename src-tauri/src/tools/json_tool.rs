@@ -9,6 +9,7 @@
 //! another crate. Syntax: `/foo/bar/0` — leading slash, slash-separated,
 //! integer indices for arrays. Documented in the description.
 
+use super::{err, ok};
 use serde_json::{json, Value};
 
 use crate::mcp::McpCallResult;
@@ -120,10 +121,10 @@ pub fn dispatch(args: &Value) -> McpCallResult {
             // pass `indent: 1_000_000` and allocate a 1 MiB indent string.
             // `lenient_i64` so a float-shaped `4.0` counts rather than
             // falling back to the default unnoticed.
-            let indent = crate::tools::lenient_i64(args, "indent")
-                .and_then(|n| u64::try_from(n).ok())
-                .unwrap_or(2)
-                .min(8);
+            let indent = match crate::tools::int_arg(args, "indent", 2) {
+                Ok(n) => u64::try_from(n).unwrap_or(2).min(8),
+                Err(e) => return err(e),
+            };
             match pretty(&parsed, indent as usize) {
                 Ok(out) => ok(out),
                 Err(e) => err(e),
@@ -160,22 +161,6 @@ pub fn dispatch(args: &Value) -> McpCallResult {
             }
         }
         other => err(format!("unknown op `{other}`")),
-    }
-}
-
-fn ok(s: impl Into<String>) -> McpCallResult {
-    McpCallResult {
-        content_text: s.into(),
-        is_error: false,
-        ..Default::default()
-    }
-}
-
-fn err(s: impl Into<String>) -> McpCallResult {
-    McpCallResult {
-        content_text: s.into(),
-        is_error: true,
-        ..Default::default()
     }
 }
 

@@ -21,9 +21,10 @@ use crate::db::Database;
 use crate::mcp::{McpCallResult, McpToolDef};
 
 /// Hard ceiling on a single built-in tool call. Built-ins are pure CPU and
-/// should return in well under a second; this only exists so a pathological
-/// model-supplied input (e.g. a giant `diff_text`) can't pin a worker
-/// indefinitely. The workspace tools that change files are exempt — see
+/// should return in well under a second. The timeout frees the chat turn,
+/// not the thread: the blocking task runs on, memory and all, to the end —
+/// so every tool must bound its own work, as `diff_text` does with its
+/// deadline. The workspace tools that change files are exempt — see
 /// [`dispatch_builtin_guarded`].
 const BUILTIN_TIMEOUT: Duration = Duration::from_secs(20);
 

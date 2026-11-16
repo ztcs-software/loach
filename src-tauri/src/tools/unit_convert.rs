@@ -7,6 +7,7 @@
 //! just scale). Everything else converts via a base unit: input × from
 //! factor → base, then ÷ to factor → output.
 
+use super::{err};
 use serde_json::{json, Value};
 
 use crate::mcp::McpCallResult;
@@ -266,9 +267,10 @@ pub fn input_schema() -> Value {
 }
 
 pub fn dispatch(args: &Value) -> McpCallResult {
-    let value = match args.get("value").and_then(|v| v.as_f64()) {
+    let value = match crate::tools::lenient_f64(args, "value") {
         Some(v) if v.is_finite() => v,
         Some(_) => return err("`value` must be a finite number"),
+        None if args.get("value").is_some() => return err("`value` must be a number"),
         None => return err("missing required `value` argument (number)"),
     };
     let from_raw = match args.get("from").and_then(|v| v.as_str()) {
@@ -378,14 +380,6 @@ fn convert_temperature(value: f64, from: &str, to: &str) -> Result<f64, String> 
         "k" | "kelvin" => kelvin,
         other => return Err(format!("unknown temperature unit `{other}`")),
     })
-}
-
-fn err(msg: impl Into<String>) -> McpCallResult {
-    McpCallResult {
-        content_text: msg.into(),
-        is_error: true,
-        ..Default::default()
-    }
 }
 
 #[cfg(test)]
