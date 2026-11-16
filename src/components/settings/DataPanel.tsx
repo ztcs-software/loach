@@ -15,12 +15,27 @@ import { StorageTile } from "@/components/settings/StorageTile";
 import { cn } from "@/lib/utils";
 import { type DestructiveAuth, type LockMethod, archiveAllSessions, exportDataToFile, factoryReset, importDataWithDialog, isTauri, wipeUserData } from "@/lib/tauri";
 import { useChatStore } from "@/stores/chatStore";
+import { haltMemoryExtraction } from "@/lib/memory";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { useEffect, useRef, useState } from "react";
 import { useSecurityStore } from "@/stores/securityStore";
 import { useToastStore } from "@/stores/toastStore";
 
 type BusyKind = "export" | "import" | "archive-all" | null;
+
+/** Before the data is erased or replaced, stop what would still write to it:
+ *  the memory extractor, and every chat reply running or queued (as Archive
+ *  all does for the chats it parks). Left running, a fact extracted from an
+ *  erased chat was saved into the emptied database. Returns the way back for
+ *  the extractor, for an action that fails or is called off. */
+async function stopWritersForReplace(): Promise<() => void> {
+  const resume = haltMemoryExtraction();
+  const chats = useChatStore.getState();
+  // Queued first, so cancelling the running one doesn't start the next.
+  const ids = new Set([...chats.queue.map((t) => t.sessionId), ...chats.sessions.map((s) => s.id)]);
+  for (const id of ids) await useChatStore.getState().cancelForSession(id);
+  return resume;
+}
 
 /* ───────────────────────── Data tab panel ─────────────────────────
  *
@@ -148,16 +163,19 @@ export function DataPanel() {
   // current credentials. The Rust side handles the dialog and the read.
   const runImport = async (auth?: DestructiveAuth) => {
     setBusy("import");
+    const resume = await stopWritersForReplace();
     try {
       const stats = await importDataWithDialog(auth);
       if (stats === null) {
         // User cancelled the file picker on the backend side.
+        resume();
         setBusy(null);
         return;
       }
       flash("info", formatImportSummary(stats));
       reloadAfterDestructiveAction();
     } catch (e) {
+      resume();
       report("error", "Import failed", errorText(e));
       setBusy(null);
     }
@@ -301,7 +319,8 @@ export function DataPanel() {
             <p className="mt-1 text-[12px] leading-relaxed text-foreground/60">
               Permanently delete your data, or factory-reset the app to its
               default state. This operation cannot be undone. Consider
-              performing an export first.
+              performing an export first. Loach compacts its database file
+              afterwards, so the deleted content doesn't linger in it.
             </p>
           </div>
           <Button
@@ -479,6 +498,7 @@ function EraseDialog({
       : undefined;
     setBusy(true);
     setError(null);
+    const resume = await stopWritersForReplace();
     try {
       if (mode === "user-data") {
         await wipeUserData(auth);
@@ -489,6 +509,7 @@ function EraseDialog({
       }
       onOpenChange(false);
     } catch (e) {
+      resume();
       setError(e instanceof Error ? e.message : String(e));
       setBusy(false);
     }

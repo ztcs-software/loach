@@ -1721,6 +1721,10 @@ Neither erase touches the skill folders (§9.5): imported skills stay in
 Loach's skills folder — delete them from **Settings → Skills → Open
 folder**.
 
+Both erases, and an import, stop any reply or memory extraction still
+running first, then compact the database file (`VACUUM`), so what was
+deleted or replaced doesn't linger in `loach.db` and the file shrinks.
+
 ---
 
 ## 15. Onboarding

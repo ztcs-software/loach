@@ -3826,7 +3826,6 @@ pub async fn export_data_to_file(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<Option<String>, String> {
-    use std::io::Write as _;
     use tauri_plugin_dialog::DialogExt;
 
     let file_name = format!("loach-export-{}.json", chrono::Utc::now().format("%Y-%m-%d"));
@@ -3854,21 +3853,39 @@ pub async fn export_data_to_file(
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || -> Result<Option<String>, String> {
         let snap = db.snapshot().map_err(err)?;
-        let failed = |e: std::io::Error| format!("couldn't write {}: {e}", path.display());
-        let mut out = std::io::BufWriter::new(std::fs::File::create(&path).map_err(failed)?);
-        let written = serde_json::to_writer_pretty(&mut out, &snap)
-            .map_err(std::io::Error::from)
-            .and_then(|()| out.flush());
-        if let Err(e) = written {
-            drop(out);
-            // A cut-off export reads as a backup until the day it won't import.
-            let _ = std::fs::remove_file(&path);
-            return Err(failed(e));
-        }
+        write_replacing(&path, |out| serde_json::to_writer_pretty(out, &snap).map_err(std::io::Error::from))
+            .map_err(|e| format!("couldn't write {}: {e}", path.display()))?;
         Ok(Some(path.to_string_lossy().to_string()))
     })
     .await
     .map_err(|e| format!("export task panicked: {e}"))?
+}
+
+/// Write `path` through a temp file beside it, put in its place only once
+/// it's complete and on disk. Written in place, a backup the user chose to
+/// replace was truncated before a byte of the new one existed, and a write
+/// that then failed (a full disk, a drive pulled) removed what was left:
+/// no backup at all. On any error only the temp file goes — a cut-off export
+/// would read as a backup until the day it won't import.
+fn write_replacing(
+    path: &std::path::Path,
+    write: impl FnOnce(&mut std::io::BufWriter<&std::fs::File>) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let dir = path
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    // Removed on drop, so every early return below cleans it up.
+    let tmp = tempfile::NamedTempFile::new_in(dir)?;
+    {
+        let mut out = std::io::BufWriter::new(tmp.as_file());
+        write(&mut out)?;
+        out.flush()?;
+    }
+    tmp.as_file().sync_all()?;
+    tmp.persist(path).map_err(|e| e.error)?;
+    Ok(())
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -4113,12 +4130,18 @@ pub async fn import_data_with_dialog(
         }
     }
 
-    // Stage 3 — apply. `restore_snapshot` holds the single DB mutex for
-    // the duration of the transaction and inserts every row serially, so
-    // it has to run on the blocking pool too.
+    // Stage 3 — apply. Stop every chat stream first (the memory extractor's
+    // included), or what they still write lands in the restored data.
+    // `restore_snapshot` holds the single DB mutex for the duration of the
+    // transaction and inserts every row serially, so it has to run on the
+    // blocking pool too.
+    state.streams.cancel_chats();
     let db = state.db.clone();
     let stats = tokio::task::spawn_blocking(move || -> Result<ImportStats, String> {
-        db.restore_snapshot(&snap).map_err(|e| format!("{e:#}"))
+        let stats = db.restore_snapshot(&snap).map_err(|e| format!("{e:#}"))?;
+        // The replaced data's pages, compacted away as after an erase.
+        db.compact();
+        Ok(stats)
     })
     .await
     .map_err(|e| format!("import restore task panicked: {e}"))??;
@@ -4240,13 +4263,21 @@ pub async fn wipe_user_data(
     auth: Option<DestructiveAuthArgs>,
 ) -> Result<(), String> {
     check_destructive_auth(auth).await?;
+    // Stop every chat stream first — the memory extractor's included — so
+    // nothing they would still write lands in the emptied database.
+    state.streams.cancel_chats();
     // Bulk DELETEs, each chunk row through its FTS trigger — on the blocking
     // pool.
+    // Then compacted, so the erased content doesn't linger in the file.
     let db = state.db.clone();
-    tokio::task::spawn_blocking(move || db.wipe_user_data())
-        .await
-        .map_err(err)?
-        .map_err(err)?;
+    tokio::task::spawn_blocking(move || {
+        db.wipe_user_data()?;
+        db.compact();
+        anyhow::Ok(())
+    })
+    .await
+    .map_err(err)?
+    .map_err(err)?;
     // The wipe deletes every `mcp_servers` row, so the cached tool catalogue
     // is now stale. The webview reloads afterwards but `AppState` doesn't, so
     // without this the next chat send would still advertise the just-erased
@@ -4273,12 +4304,18 @@ pub async fn factory_reset(
     auth: Option<DestructiveAuthArgs>,
 ) -> Result<(), String> {
     check_destructive_auth(auth).await?;
+    // As in `wipe_user_data`: no chat stream writes into the reset database.
+    state.streams.cancel_chats();
     // Blocking bulk DELETEs, as in `wipe_user_data`.
     let db = state.db.clone();
-    tokio::task::spawn_blocking(move || db.wipe_all())
-        .await
-        .map_err(err)?
-        .map_err(err)?;
+    tokio::task::spawn_blocking(move || {
+        db.wipe_all()?;
+        db.compact();
+        anyhow::Ok(())
+    })
+    .await
+    .map_err(err)?
+    .map_err(err)?;
     // Same reason as in `wipe_user_data`: the MCP rows are gone, so the
     // in-process tool catalogue has to go with them.
     crate::mcp::invalidate_tools_cache(&state.mcp_tools_cache).await;
@@ -4695,6 +4732,32 @@ mod tests {
         assert!(!runs_something_else(&a, &renamed));
         assert!(runs_something_else(&a, &stdio_input("npx", &["-y", "server-b"], &[]).to_draft()));
         assert!(runs_something_else(&a, &stdio_input("npx", &["-y", "server-a"], &[("K", "v")]).to_draft()));
+    }
+
+    /// X3-02: a failed export leaves the backup it was replacing as it was,
+    /// and no temp file behind; a finished one replaces it.
+    #[test]
+    fn an_export_replaces_the_old_file_only_once_complete() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("loach-export.json");
+        std::fs::write(&path, "the morning backup").unwrap();
+
+        let failed = write_replacing(&path, |out| {
+            use std::io::Write as _;
+            out.write_all(b"half of the new one")?;
+            Err(std::io::Error::other("disk full"))
+        });
+        assert!(failed.is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "the morning backup");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "the temp file was left behind");
+
+        write_replacing(&path, |out| {
+            use std::io::Write as _;
+            out.write_all(b"the new backup")
+        })
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "the new backup");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     /// A backup's auto-approve and "Always allow" answers survive a restore

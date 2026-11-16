@@ -3630,6 +3630,28 @@ impl Database {
         Ok(())
     }
 
+    /// Reclaim the pages a bulk delete freed — after an erase, a factory
+    /// reset or a restore. Deleted rows otherwise stay readable in the file's
+    /// free pages (any SQLite forensic tool carves them out), the search
+    /// index keeps their words as delete markers, and the file never shrinks:
+    /// "Permanently delete" left the chats in `loach.db`. Rebuilds the FTS
+    /// index from its (now emptied or replaced) content, VACUUMs, and
+    /// truncates the WAL, which holds the last copies of rewritten pages.
+    /// Best effort: a failure doesn't undo what came before it, so it's
+    /// logged rather than returned.
+    pub fn compact(&self) {
+        let conn = self.conn.lock();
+        let run = || -> Result<()> {
+            conn.execute("INSERT INTO rag_chunks_fts(rag_chunks_fts) VALUES('rebuild')", [])?;
+            conn.execute_batch("VACUUM;")?;
+            conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
+            Ok(())
+        };
+        if let Err(e) = run() {
+            tracing::warn!("couldn't compact the database after a bulk delete: {e:#}");
+        }
+    }
+
     /// Factory reset: everything `wipe_user_data` does, plus a settings
     /// purge. Caller is responsible for clearing the OS-kept OpenAI key
     /// since that lives outside SQLite.
@@ -4141,6 +4163,27 @@ mod tests {
         let db = Database::open(&path).expect("open");
         db.migrate().expect("migrate");
         (db, dir)
+    }
+
+    /// X3-03: an erased chat's text doesn't survive in the file — not in
+    /// free pages, not in the WAL.
+    #[test]
+    fn compacting_after_a_wipe_leaves_no_trace_of_the_erased_text() {
+        let (db, dir) = fresh_db();
+        let s = db.create_session("c", "ollama", "llama3", None, None).unwrap();
+        let secret = "quixotic-marmalade-".repeat(200);
+        db.append_message(&s.id, "user", &secret, None).unwrap();
+        db.wipe_user_data().unwrap();
+        db.compact();
+
+        let needle = b"quixotic-marmalade-";
+        for name in ["loach.db", "loach.db-wal"] {
+            let Ok(bytes) = std::fs::read(dir.path().join(name)) else { continue };
+            assert!(
+                !bytes.windows(needle.len()).any(|w| w == needle),
+                "{name} still holds the erased text"
+            );
+        }
     }
 
     /// An unsaved MCP row of either transport, minimal but valid.

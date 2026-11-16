@@ -110,6 +110,10 @@ let cancelEpoch = 0;
 /** One pass over the queue at a time: two would compete for the model. */
 let draining = false;
 
+/** Set by `haltMemoryExtraction` while the data is being erased or replaced:
+ *  nothing more is written, not even by a run already past its model call. */
+let halted = false;
+
 /** localStorage key mirroring the queue, so a restart doesn't lose the turns
  *  waiting in it. References only — the chat, the turn's two messages and the
  *  scope picked at send time; the words are read back from the database by
@@ -475,6 +479,7 @@ async function extractRun(
     if (edits >= MAX_EDITS_PER_RUN) break;
     const row = byNumber(n);
     if (!row || removedIds.has(row.id)) continue;
+    if (halted) return;
     try {
       // Gone already (the user deleted it while this run was out): there
       // is nothing to announce, or to put back.
@@ -496,6 +501,7 @@ async function extractRun(
     if (!content || content.length > MAX_MEMORY_CHARS) continue;
     if (content === row.content) continue;
     if (looksLikeSecret(content)) continue;
+    if (halted) return;
     try {
       if (!(await ops.update(row.id, content))) continue;
       updatedContent.set(row.id, content);
@@ -528,6 +534,7 @@ async function extractRun(
     if (isDuplicate(norm, existingNormalized)) continue;
 
     seenInRun.add(norm);
+    if (halted) return;
     try {
       const saved = await ops.add(trimmed, sessionId, latestMessageId);
       adds++;
@@ -554,6 +561,20 @@ let memoryStopFn: (() => Promise<void>) | null = null;
  *  the extractor re-parks its turns for the next run (its partial output is
  *  never parsed). Also stops a pass between runs, or a run whose stream
  *  hasn't connected yet, from starting a generation. */
+/** Stop the extractor for an erase or an import (Settings → Data): its model
+ *  call, as `cancelMemoryExtraction` does, and also the writes of a run past
+ *  it — `global_memories` has no parent row to fail on, so a fact from an
+ *  erased chat landed in the emptied database. Returns the way back, for an
+ *  action that fails or is called off (the window reloads after one that
+ *  went through). */
+export function haltMemoryExtraction(): () => void {
+  halted = true;
+  cancelMemoryExtraction();
+  return () => {
+    halted = false;
+  };
+}
+
 export function cancelMemoryExtraction(): void {
   cancelEpoch++;
   const stop = memoryStopFn;
