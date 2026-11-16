@@ -165,14 +165,20 @@ pub fn try_warm_default_model(db: Arc<Database>, http: reqwest::Client) {
             .get("ollama_keep_alive")
             .map(String::as_str)
             .and_then(crate::providers::ollama::keep_alive_value);
-        // Size the warmed runner like the first real request will. We can't
-        // read the model's Modelfile defaults from here (no /api/show plumbing
-        // on the startup path), so we use the app default num_ctx; the
-        // post-unlock JS preload re-fires with the precisely resolved params
-        // and corrects any mismatch before the user sends.
+        // Size the warmed runner like the first real request will: the
+        // model's Modelfile `num_ctx` / `num_gpu`, else the app default
+        // num_ctx — as the post-unlock JS preload does. Warming at the app
+        // default regardless had Ollama load a model whose Modelfile sets
+        // another size twice: here, then again for the JS preload. A failed
+        // `/api/show` (Ollama not up yet) falls back to the default.
+        let (num_ctx, num_gpu) =
+            match crate::providers::ollama::show_model(&http, &base_url, &model).await {
+                Ok(show) => modelfile_runner_options(show.parameters.as_deref()),
+                Err(_) => (None, None),
+            };
         let options = crate::providers::ollama::preload_options(
-            Some(crate::providers::ollama::DEFAULT_NUM_CTX),
-            None,
+            Some(num_ctx.unwrap_or(crate::providers::ollama::DEFAULT_NUM_CTX)),
+            num_gpu,
         );
         // `preload_model` swallows its own transport errors (timeout,
         // connection refused, 4xx model-not-found) and returns Ok(()).
@@ -182,6 +188,26 @@ pub fn try_warm_default_model(db: Arc<Database>, http: reqwest::Client) {
         )
         .await;
     });
+}
+
+/// The `num_ctx` and `num_gpu` in `/api/show`'s `parameters` text (one
+/// `name value` per line), read like the frontend's `parseModelParameters`:
+/// whole numbers that fit a u32, the last one winning, anything else skipped.
+fn modelfile_runner_options(parameters: Option<&str>) -> (Option<u32>, Option<u32>) {
+    let (mut num_ctx, mut num_gpu) = (None, None);
+    for line in parameters.unwrap_or("").lines() {
+        let mut parts = line.split_whitespace();
+        let (Some(key), Some(value)) = (parts.next(), parts.next()) else {
+            continue;
+        };
+        let value = value.trim_matches('"').parse::<u32>().ok();
+        match key {
+            "num_ctx" => num_ctx = value.or(num_ctx),
+            "num_gpu" => num_gpu = value.or(num_gpu),
+            _ => {}
+        }
+    }
+    (num_ctx, num_gpu)
 }
 
 /// Whether `base_url`'s host is safe to fire a speculative warm at before
@@ -461,5 +487,22 @@ mod tests {
         assert!(!is_safe_preload_host("http://169.254.1.1:11434"));
         // IPv6 link-local: same threat model (fe80::a9fe:a9fe style).
         assert!(!is_safe_preload_host("http://[fe80::1]:11434"));
+    }
+
+    /// The warm-up is sized from the Modelfile like a new chat's first send,
+    /// so Ollama doesn't load the model again for that send.
+    #[test]
+    fn runner_options_come_from_the_modelfile() {
+        // `/api/show` pads names to a column and quotes strings.
+        let shown = "num_ctx                        32768\n\
+                     stop                           \"<|im_end|>\"\n\
+                     num_gpu                        20";
+        assert_eq!(modelfile_runner_options(Some(shown)), (Some(32768), Some(20)));
+        // The last whole number wins; others are skipped.
+        assert_eq!(
+            modelfile_runner_options(Some("num_ctx 4096\nnum_ctx 8192\nnum_ctx big\nnum_gpu -1")),
+            (Some(8192), None)
+        );
+        assert_eq!(modelfile_runner_options(None), (None, None));
     }
 }

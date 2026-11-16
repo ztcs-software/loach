@@ -1299,12 +1299,9 @@ fn emit_metrics(
 }
 
 /// App-default context window, mirrored from `DEFAULT_PARAMS.num_ctx` in
-/// `src/types.ts`. The startup preload (in `preload.rs`) can't resolve a
-/// model's Modelfile defaults the way the frontend does, so it warms with this
-/// value — the size the first real message most commonly asks for. The
-/// post-unlock JS preload re-fires with the precisely-resolved params, so any
-/// mismatch here is corrected before the user's first send. Keep in sync with
-/// the TS default.
+/// `src/types.ts`. The startup preload (in `preload.rs`) warms with this
+/// value when the model's Modelfile sets no `num_ctx` — the size a new chat
+/// with that model asks for. Keep in sync with the TS default.
 pub const DEFAULT_NUM_CTX: u32 = 8192;
 
 /// Build the Ollama `options` object for a preload so the warmed runner is
