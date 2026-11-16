@@ -28,6 +28,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useUIStore } from "@/stores/uiStore";
 import { buildModelfile, escapeStop, parseParamsBlock, unescapeStop } from "@/lib/modelfile";
+import { fullOllamaTag } from "@/lib/modelChoice";
 import { formatBytes } from "@/lib/utils";
 import type {
   ModelInfo,
@@ -161,10 +162,9 @@ export function ModelsView() {
     // Ollama's create replaces whatever is under the tag already — the base
     // model itself, if the tag is its FROM. Ask first. A bare name is
     // Ollama's `:latest`.
-    const fullTag = (t: string) => (t.includes(":") ? t : `${t}:latest`);
-    const isBase = fullTag(targetName) === fullTag(form.from.trim());
+    const isBase = fullOllamaTag(targetName) === fullOllamaTag(form.from.trim());
     if (
-      (isBase || models.some((m) => m.provider === "ollama" && fullTag(m.id) === fullTag(targetName))) &&
+      (isBase || models.some((m) => m.provider === "ollama" && fullOllamaTag(m.id) === fullOllamaTag(targetName))) &&
       !(await confirm({
         title: `Replace “${targetName}”?`,
         body: isBase
@@ -192,8 +192,8 @@ export function ModelsView() {
         // chat", under a name no listed model has.
         const listed = useModelsStore
           .getState()
-          .models.find((m) => m.provider === "ollama" && fullTag(m.id) === fullTag(targetName));
-        if (stillHere()) setViewingModel(listed?.id ?? fullTag(targetName));
+          .models.find((m) => m.provider === "ollama" && fullOllamaTag(m.id) === fullOllamaTag(targetName));
+        if (stillHere()) setViewingModel(listed?.id ?? fullOllamaTag(targetName));
       } else if (run?.finished === "error") {
         // The create reached a terminal error — surface the real reason
         // instead of navigating to a model that was never created.
@@ -581,10 +581,12 @@ const NUMERIC_FIELDS: {
   group: (typeof PARAM_GROUPS)[number];
   step?: number;
   hint?: string;
-  /** Set on the fields every chat with the model sends as its defaults,
-   *  where the chat request types them as whole numbers (`u32`, `i64` for
-   *  the seed). Ollama itself takes e.g. `num_predict -1`, but a chat can't
-   *  carry it, so the editor refuses what a chat couldn't send. */
+  /** Whole numbers only. Set on the fields every chat with the model sends
+   *  as its defaults, where the chat request types them as whole numbers
+   *  (`u32`, `i64` for the seed) — Ollama itself takes e.g. `num_predict
+   *  -1`, but a chat can't carry it, so the editor refuses what a chat
+   *  couldn't send — and on the ones Ollama parses as integers, where `1.5`
+   *  failed the create at Save instead of at the field. */
   integer?: boolean;
   min?: number;
 }[] = [
@@ -594,7 +596,7 @@ const NUMERIC_FIELDS: {
   { key: "min_p", label: "Min-P", group: "Sampling", step: 0.01, hint: "0 – 1" },
   { key: "tfs_z", label: "Tail-free (tfs_z)", group: "Sampling", step: 0.05 },
   { key: "typical_p", label: "Typical-P", group: "Sampling", step: 0.01 },
-  { key: "mirostat", label: "Mirostat (0/1/2)", group: "Sampling", step: 1 },
+  { key: "mirostat", label: "Mirostat (0/1/2)", group: "Sampling", step: 1, integer: true, min: 0 },
   // "eta"/"tau" spelled out: the labels render uppercased, and capital η/τ
   // (Η/Τ) are indistinguishable from Latin H/T.
   { key: "mirostat_eta", label: "Mirostat eta", group: "Sampling", step: 0.05 },
@@ -602,12 +604,13 @@ const NUMERIC_FIELDS: {
   { key: "num_ctx", label: "Context (num_ctx)", group: "Length", step: 256, integer: true, min: 0 },
   { key: "num_predict", label: "Max tokens (num_predict)", group: "Length", step: 16, integer: true, min: 0 },
   { key: "repeat_penalty", label: "Repeat penalty", group: "Repetition", step: 0.05 },
-  { key: "repeat_last_n", label: "Repeat look-back", group: "Repetition", step: 8 },
+  // -1 is "the whole context", so no minimum.
+  { key: "repeat_last_n", label: "Repeat look-back", group: "Repetition", step: 8, integer: true },
   { key: "frequency_penalty", label: "Frequency penalty", group: "Repetition", step: 0.05 },
   { key: "presence_penalty", label: "Presence penalty", group: "Repetition", step: 0.05 },
-  { key: "num_batch", label: "Batch size (num_batch)", group: "Performance", step: 8 },
+  { key: "num_batch", label: "Batch size (num_batch)", group: "Performance", step: 8, integer: true, min: 0 },
   { key: "num_gpu", label: "GPU layers (num_gpu)", group: "Performance", step: 1, integer: true, min: 0 },
-  { key: "num_thread", label: "CPU threads (num_thread)", group: "Performance", step: 1 },
+  { key: "num_thread", label: "CPU threads (num_thread)", group: "Performance", step: 1, integer: true, min: 0 },
   { key: "seed", label: "Seed (blank = random)", group: "Reproducibility", step: 1, integer: true },
 ];
 

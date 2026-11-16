@@ -18,9 +18,9 @@ import { FinalStep } from "./FinalStep";
  * pattern as `LockScreen`.
  *
  * Closing rules:
- *   - X / Esc on most steps: dismiss immediately (and mark complete so
- *     onboarding doesn't re-fire).
- *   - X / Esc on the provider step: route through a small inline confirm
+ *   - X / Esc on the steps after the provider: dismiss immediately (and
+ *     mark complete so onboarding doesn't re-fire).
+ *   - X / Esc on the welcome or provider step: route through a small inline confirm
  *     ("Skip setup? You can configure later.") so the only required
  *     step isn't accidentally bypassed. The user can still dismiss —
  *     they just have to mean it.
@@ -33,7 +33,9 @@ export function Onboarding() {
   const complete = useOnboardingStore((s) => s.complete);
 
   const handleClose = () => {
-    if (step === "provider") {
+    // The welcome step too: it comes before the provider, and one stray Esc
+    // there skipped the whole wizard for good.
+    if (step === "welcome" || step === "provider") {
       setConfirming(true);
       return;
     }

@@ -51,7 +51,8 @@ import {
   type HostCapacity,
   type SizedVariant,
 } from "@/lib/modelChoice";
-import { useLivePulls } from "@/lib/usePullRuns";
+import { pullPercent, useLivePulls } from "@/lib/usePullRuns";
+import { PullProgress } from "@/components/PullProgress";
 import type { ModelInfo, ProviderId } from "@/types";
 import { cn, prefersReducedMotion } from "@/lib/utils";
 import { StepShell } from "./StepShell";
@@ -589,7 +590,7 @@ function OllamaPath({
       {/* Models already installed — let the user choose which one this
           install defaults to instead of silently taking the first. */}
       {probe.kind === "up" && probe.models.length > 0 && (
-        <DefaultModelPicker
+        <OnboardingDefaultPicker
           models={probe.models}
           value={pinnedModel}
           onSelect={(id) => void setProviderDefault("ollama", id)}
@@ -711,7 +712,7 @@ function ProviderSwitch({
  * `/v1/models` happened to return first. The pick is now visible even when
  * the user accepts it unchanged.
  */
-function DefaultModelPicker({
+function OnboardingDefaultPicker({
   models,
   value,
   onSelect,
@@ -992,6 +993,10 @@ function ModelCatalog({
                 tabIndex={0}
                 onClick={() => toggle(fam.family)}
                 onKeyDown={(e) => {
+                  // The row's own keys only: Enter on the "ollama.com"
+                  // button inside it toggled the row, and the link never
+                  // opened.
+                  if (e.target !== e.currentTarget) return;
                   if (e.key === "Enter" || e.key === " ") {
                     e.preventDefault();
                     toggle(fam.family);
@@ -1263,21 +1268,10 @@ function ProgressBar({ run }: { run: AdminProgress }) {
       </p>
     );
   }
-  const pct =
-    run.total > 0
-      ? Math.min(100, Math.round((run.completed / run.total) * 100))
-      : null;
+  const pct = pullPercent(run);
   return (
     <div>
-      <div className="h-1 w-full overflow-hidden rounded-full bg-foreground/[0.08]">
-        <div
-          className={cn(
-            "h-full bg-primary transition-all",
-            pct === null && "animate-pulse",
-          )}
-          style={{ width: pct === null ? "30%" : `${pct}%` }}
-        />
-      </div>
+      <PullProgress run={run} />
       <p className="mt-1 text-[10.5px] text-foreground/45">
         {run.status}
         {pct !== null && ` · ${pct}%`}
@@ -1287,8 +1281,8 @@ function ProgressBar({ run }: { run: AdminProgress }) {
 }
 
 function fmtPct(run: AdminProgress) {
-  if (run.total <= 0) return "starting…";
-  return `${Math.min(100, Math.round((run.completed / run.total) * 100))}%`;
+  const pct = pullPercent(run);
+  return pct === null ? "starting…" : `${pct}%`;
 }
 
 /* ───────────────────────── OpenAI path ───────────────────────── */
@@ -1391,7 +1385,19 @@ function OpenAIPath({
         ? await openaiListModelsWithKey(url, newKey)
         : await openaiListModels(url);
       if (url !== baseUrl) await update("openai_base_url", url);
-      if (newKey) await setOpenAIKey(newKey);
+      if (newKey) {
+        try {
+          await setOpenAIKey(newKey);
+        } catch (e) {
+          // The key just worked: it's the OS credential store that refused
+          // it (no Secret Service running, say) — not the key, nor the URL.
+          setError(
+            `Couldn't store the key in the OS credential manager: ${e instanceof Error ? e.message : String(e)}`,
+          );
+          setVerified(false);
+          return;
+        }
+      }
       const ranked = rankChatModels(list);
       setCatalog(ranked);
       if (ranked.length === 0) {
@@ -1529,7 +1535,7 @@ function OpenAIPath({
       </div>
 
       {catalog.length > 0 && (
-        <DefaultModelPicker
+        <OnboardingDefaultPicker
           models={catalog}
           value={pinnedModel}
           onSelect={(id) => void setProviderDefault("openai", id)}

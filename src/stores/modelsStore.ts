@@ -151,6 +151,8 @@ const pendingDefaults = new Map<string, Promise<Partial<GenerationParams>>>();
 /** Bumped per model by `forgetModel`; a Modelfile load caches only if it's
  *  unchanged since the load began. */
 const defaultsGeneration = new Map<string, number>();
+/** The Ollama base URL the caches were filled against (see `refresh`). */
+let cachedFromBase: string | null = null;
 
 /** Drop what we've *derived* from one model's Modelfile.
  *
@@ -218,6 +220,18 @@ export const useModelsStore = create<ModelsState>((set, get) => ({
     const seq = ++refreshSeq;
     set({ loading: true, error: null });
     const s = useSettingsStore.getState();
+    // Another Ollama server's Modelfile values and capabilities aren't this
+    // one's: the same tag there can be another build (the Rust embedding
+    // cache keys by server for the same reason). Dropped when the URL
+    // changed, in-flight reads included.
+    if (cachedFromBase !== null && cachedFromBase !== s.ollama_base_url) {
+      for (const k of [...pendingDefaults.keys(), ...Object.keys(get().modelDefaults)]) {
+        defaultsGeneration.set(k, (defaultsGeneration.get(k) ?? 0) + 1);
+      }
+      pendingDefaults.clear();
+      set({ modelDefaults: {}, modelCapabilities: {} });
+    }
+    cachedFromBase = s.ollama_base_url;
 
     // Try the OpenAI-compatible listing if either a key is stored or the base
     // URL has been pointed away from the public default — local/proxy servers
@@ -367,6 +381,10 @@ export const useModelsStore = create<ModelsState>((set, get) => ({
       });
       return;
     }
+    // Duplicating over an existing tag (the grid offers "Replace") makes it
+    // another model: its cached Modelfile values and capabilities went on
+    // being layered into every request until a restart.
+    forgetModel(set, destination);
     await get().refresh();
   },
 
@@ -397,6 +415,10 @@ export const useModelsStore = create<ModelsState>((set, get) => ({
           (ev) => handleAdminEvent(set, streamId, ev),
         ),
       async () => {
+        // Re-pulling an installed tag is how a model is updated: its new
+        // manifest may change the Modelfile values and capabilities cached
+        // for it. Whatever the outcome — a miss costs one `/api/show`.
+        forgetModel(set, name);
         await get().refresh();
       },
     );

@@ -17,10 +17,10 @@
 //!   - Users with an app-lock configured shouldn't have anything warmed
 //!     before they prove identity, so this preload bails out in that
 //!     case. The post-unlock JS preload still picks it up.
-//!   - The JS preload also re-fires after settings changes within the
-//!     session (e.g. the user flips `default_model_choice`); the Rust
-//!     preload only runs once at startup, against the values present in
-//!     the DB at that moment.
+//!   - The JS preload runs once per unlock, after the stores hydrate (it
+//!     doesn't re-fire when `default_model_choice` changes; the per-chat
+//!     typing warm-up is the other caller); this one runs once at startup,
+//!     against the values present in the DB at that moment.
 //!   - Defense in depth: if the Rust preload misses (Ollama not yet up
 //!     when Loach starts), the JS one runs a few hundred ms later and
 //!     usually succeeds. The duplicate is harmless — the second `/api/chat`
@@ -292,8 +292,10 @@ fn is_safe_preload_host(base_url: &str) -> bool {
 }
 
 /// Rust port of `resolveDefaultModelChoice` in `src/stores/chatStore.ts`.
-/// The encoding lives in three places (this function, the TS one, and
-/// the picker UI in `SettingsDialog.tsx`) — keep them in lockstep. One
+/// The encoding is decoded in two places — this function and
+/// `decodeModelChoice` in `src/lib/modelChoice.ts`, which the TS resolver,
+/// `components/settings/DefaultModelPicker.tsx` and, through the resolver,
+/// `ChatSources.useNewChatModelCtx` all use — keep them in lockstep. One
 /// deliberate gap: the TS `provider:` branch passes over chats whose model
 /// is no longer installed; this one has no model list, so it may pick a
 /// deleted model, whose preload just 404s quietly.

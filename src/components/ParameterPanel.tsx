@@ -569,10 +569,10 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
             </Section>
 
             <div>
-              <Label className="text-xs font-semibold uppercase tracking-[0.12em] text-foreground/70">
+              <Label id="params-persona-label" className="text-xs font-semibold uppercase tracking-[0.12em] text-foreground/70">
                 Persona
               </Label>
-              <div className="mt-2 flex flex-wrap gap-1.5">
+              <div role="group" aria-labelledby="params-persona-label" className="mt-2 flex flex-wrap gap-1.5">
                 {PERSONAS.map((p) => (
                   <PersonaPill
                     key={p.id}
@@ -592,10 +592,10 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
             </div>
 
             <div>
-              <Label className="text-xs font-semibold uppercase tracking-[0.12em] text-foreground/70">
+              <Label id="params-tone-label" className="text-xs font-semibold uppercase tracking-[0.12em] text-foreground/70">
                 Tone
               </Label>
-              <div className="mt-2 flex flex-wrap gap-1.5">
+              <div role="group" aria-labelledby="params-tone-label" className="mt-2 flex flex-wrap gap-1.5">
                 {TONES.map((t) => (
                   <TonePill
                     key={t.id}
@@ -662,6 +662,8 @@ function PersonaPill({
   return (
     <button
       type="button"
+      // The active one was only a tint: the next send's persona, unsaid.
+      aria-pressed={active}
       onClick={onClick}
       title={persona.description}
       className={cn(
@@ -692,6 +694,7 @@ function TonePill({
   return (
     <button
       type="button"
+      aria-pressed={active}
       onClick={onClick}
       title={tone.description}
       className={cn(

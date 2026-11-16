@@ -55,9 +55,50 @@ export function inputFromView(
  *  line for stdio. */
 export function connectionLabel(view: McpServerView): string {
   if (view.transport === "stdio") {
-    return [view.command, ...view.args].filter(Boolean).join(" ") || "(no command)";
+    return redactArgs([view.command, ...view.args]).filter(Boolean).join(" ") || "(no command)";
   }
-  return view.url || "(no URL)";
+  return redactUrl(view.url) || "(no URL)";
+}
+
+/** What masked text shows instead. */
+const MASK = "•••";
+/** A name that says its value is a secret — `--api-key`, `?access_token=`,
+ *  `X-Amz-Signature` — as a whole segment of it, so `--author` or
+ *  `--design` don't count. */
+const SECRET_NAME =
+  /(?:^|[-_.])(?:api[-_]?key|key|token|secret|passw(?:or)?d|pwd|auth(?:orization)?|credentials?|sig(?:nature)?)(?:$|[-_.])/i;
+const isSecretName = (name: string) => SECRET_NAME.test(name.replace(/^-+/, "").replace(/=$/, ""));
+
+/** `text` with the secrets a URL can carry masked: the password in its
+ *  userinfo (`postgresql://user:pw@host`) and secret-named query values
+ *  (`?token=…`). Display only — the list showed them to anyone looking. */
+export function redactUrl(text: string): string {
+  return text
+    .replace(/(\b[a-z][a-z\d+.-]*:\/\/[^/\s:@]*:)[^@\s/]+@/gi, `$1${MASK}@`)
+    .replace(/([?&]([^=&#\s]*)=)([^&#\s]*)/g, (all, head: string, name: string) =>
+      isSecretName(name) ? `${head}${MASK}` : all,
+    );
+}
+
+/** A token's shape: a known key prefix, or a long run of key characters
+ *  with letters and digits both. */
+function looksLikeToken(arg: string): boolean {
+  if (/^(?:sk|pk|rk|ghp|gho|ghs|github_pat|glpat|xox[abprs])[-_]\w/i.test(arg)) return true;
+  return /^[A-Za-z0-9_-]{32,}$/.test(arg) && /\d/.test(arg) && /[A-Za-z]/.test(arg);
+}
+
+/** A command line's parts with their secrets masked: URLs as in
+ *  `redactUrl`, the value of a secret-named flag (`--api-key X`,
+ *  `--token=X`) and token-shaped arguments. */
+export function redactArgs(parts: string[]): string[] {
+  return parts.map((part, i) => {
+    const prev = i > 0 ? parts[i - 1] : "";
+    if (/^-/.test(prev) && !prev.includes("=") && isSecretName(prev) && !/^-/.test(part)) return MASK;
+    const flag = /^(-{1,2}[^=\s]+=)(.+)$/.exec(part);
+    if (flag && isSecretName(flag[1])) return `${flag[1]}${MASK}`;
+    if (looksLikeToken(part)) return MASK;
+    return redactUrl(part);
+  });
 }
 
 interface McpState {

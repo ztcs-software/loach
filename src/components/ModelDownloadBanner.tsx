@@ -4,6 +4,7 @@ import { useChatStore } from "@/stores/chatStore";
 import { useModelsStore } from "@/stores/modelsStore";
 import { useUIStore } from "@/stores/uiStore";
 import { useFailedPullFor, useLivePullFor, pullPercent } from "@/lib/usePullRuns";
+import { PullProgress } from "./PullProgress";
 
 /**
  * "Your model is still downloading" bar, shown above the composer whenever
@@ -74,25 +75,7 @@ export function ModelDownloadBanner() {
             {pct === null ? pull.status : `${pct}%`}
           </span>
         </div>
-        <div
-          className="mt-1.5 h-1 w-full overflow-hidden rounded-full bg-foreground/[0.08]"
-          role="progressbar"
-          aria-label={`Downloading ${pull.target}`}
-          // Omitted rather than 0 while indeterminate — `aria-valuenow={0}`
-          // would announce "0 percent" for a download that may be nearly done.
-          aria-valuenow={pct ?? undefined}
-          aria-valuemin={0}
-          aria-valuemax={100}
-        >
-          <div
-            className={
-              pct === null
-                ? "h-full w-1/3 animate-pulse bg-primary"
-                : "h-full bg-primary transition-all"
-            }
-            style={pct === null ? undefined : { width: `${pct}%` }}
-          />
-        </div>
+        <PullProgress run={pull} className="mt-1.5" />
       </div>
     </div>
   );
