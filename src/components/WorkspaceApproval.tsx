@@ -205,7 +205,15 @@ function ScriptRun({
   const input = stdin !== null && stdin.length > 0 ? stdin : null;
   return (
     <div className="mt-2 space-y-1.5">
-      {code !== null && <CodePreview code={code} />}
+      {code !== null ? (
+        <CodePreview code={code} />
+      ) : (
+        // A script file the model may have written itself, under a standing
+        // write grant the user never saw it through: the path says nothing.
+        run.file_text !== undefined && (
+          <CodePreview code={run.file_text} label="Script file" fileBytes={run.file_bytes} />
+        )
+      )}
       <pre className="max-h-40 overflow-auto rounded border border-foreground/10 bg-foreground/[0.04] px-2 py-1.5 font-mono text-[11px] leading-snug text-foreground/80 whitespace-pre-wrap break-words">
         <Revealed text={run.command} />
       </pre>
@@ -232,17 +240,38 @@ function ScriptRun({
   );
 }
 
-/** Code the model wrote, as it will run — cut until "Show all" past
- *  {@link MAX_PREVIEW_CHARS}. */
-function CodePreview({ code }: { code: string }) {
+/** How much of a script file the backend sends (`MAX_SHOWN_FILE_BYTES` in
+ *  `skills/script.rs`). */
+const MAX_SHOWN_FILE_BYTES = 256 * 1024;
+
+/** Code as it will run — the model's own, or a script file's — cut until
+ *  "Show all" past {@link MAX_PREVIEW_CHARS}. `fileBytes` is a script
+ *  file's whole size, when the text is only its start. */
+function CodePreview({
+  code,
+  label = "Code",
+  fileBytes,
+}: {
+  code: string;
+  label?: string;
+  fileBytes?: number;
+}) {
   const [showAll, setShowAll] = useState(false);
   const lines = useMemo(() => splitLines(code).length, [code]);
   const clipped = !showAll && code.length > MAX_PREVIEW_CHARS;
+  const partial = fileBytes !== undefined && fileBytes > MAX_SHOWN_FILE_BYTES;
   return (
     <div>
       <div className="mb-1 text-[10.5px] uppercase tracking-wider text-foreground/45">
-        Code · {lines} {lines === 1 ? "line" : "lines"}
+        {label} · {lines} {lines === 1 ? "line" : "lines"}
+        {partial && " shown"}
       </div>
+      {partial && (
+        <p className="mb-1 text-[11px] text-amber-600 dark:text-amber-400">
+          Only the first {formatBytes(MAX_SHOWN_FILE_BYTES)} of this{" "}
+          {formatBytes(fileBytes)} file is shown here — all of it runs.
+        </p>
+      )}
       <pre className="max-h-72 overflow-auto rounded border border-foreground/10 bg-foreground/[0.04] px-2 py-1.5 font-mono text-[11px] leading-snug text-foreground/80 whitespace-pre-wrap break-words">
         <Revealed text={clipped ? code.slice(0, MAX_PREVIEW_CHARS) : code} />
         {clipped && (

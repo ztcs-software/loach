@@ -1237,10 +1237,13 @@ checked against the folder again before it is used, so a link pointing
 elsewhere is refused too — as is a link whose target doesn't exist, since
 writing through it would create that target wherever it points. Deleting
 or moving a link acts on the link itself, never on what it points to.
-Names that would be misread are refused as well: control characters and
-the text-direction override and isolate characters anywhere (a
-right-to-left override can make `txt.exe` look like `exe.txt` on the
-approval card), and on Windows a `:` (a hidden data stream such as `setup.exe:Zone.Identifier`), a reserved
+Names that would be misread are refused as well: control characters,
+text-direction marks and invisible characters (zero-width spaces and
+joiners, variation selectors) anywhere — a right-to-left override can make
+`txt.exe` look like `exe.txt` on the approval card, and a `main.rs` with a
+zero-width space in it is a different file that looks the same.
+Emoji built with a joiner or a variation selector (👨‍💻, ⚙️) are refused
+with them. On Windows, a `:` (a hidden data stream such as `setup.exe:Zone.Identifier`), a reserved
 device name (`CON`, `nul.txt`, `COM1`) or a name ending in a dot or a
 space — Windows tools can't open or delete those afterwards. A path that
 reaches a file through its Windows 8.3 short name (`IMPORT~1.MD` for

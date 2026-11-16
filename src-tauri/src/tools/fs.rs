@@ -223,12 +223,48 @@ fn vet_relative(rel: &str) -> Result<PathBuf, String> {
     Ok(out)
 }
 
+/// A character an approval — the consent dialog for a stdio MCP server, a
+/// card naming a file — can't show faithfully: control characters (a NUL
+/// truncates what the OS runs; a newline fakes a line break), and invisible
+/// or text-reordering Unicode — zero-width spaces, bidi overrides — that
+/// makes the text on screen differ from what runs or is written.
+pub(crate) fn unreviewable_char(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{00AD}'
+                | '\u{034F}'
+                | '\u{061C}'
+                | '\u{115F}'
+                | '\u{1160}'
+                | '\u{180E}'
+                | '\u{200B}'..='\u{200F}'
+                // Line and paragraph separators: dialogs render them as
+                // line breaks.
+                | '\u{2028}'..='\u{202E}'
+                | '\u{2060}'..='\u{206F}'
+                | '\u{3164}'
+                // Variation selectors.
+                | '\u{FE00}'..='\u{FE0F}'
+                | '\u{FEFF}'
+                | '\u{FFA0}'
+                | '\u{FFF9}'..='\u{FFFB}'
+                // Tag characters, and the supplementary variation selectors.
+                | '\u{E0000}'..='\u{E007F}'
+                | '\u{E0100}'..='\u{E01EF}'
+        )
+}
+
 /// Why `part` can't be a name the tools open or create, or `None` when it's
 /// fine.
 ///
-/// Everywhere: control characters, and the bidi controls that reorder how
-/// text is displayed — `\u{202E}` turns `txt.exe` into what reads as
-/// `exe.txt` on the approval card.
+/// Everywhere: any [`unreviewable_char`] — control characters, the bidi
+/// controls that reorder how text is displayed (`\u{202E}` turns `txt.exe`
+/// into what reads as `exe.txt` on the approval card), and invisible ones:
+/// `src/main\u{200B}.rs` is a lookalike beside `main.rs`, created unseen
+/// under a standing grant, and HFS+ ignores some of them in names, so
+/// `.g\u{200C}it` *is* `.git` there. (Emoji written with a joiner or a
+/// variation selector are refused with them.)
 ///
 /// On Windows, three more, because the root is a `\\?\` path and that
 /// prefix switches off Win32's own name checks:
@@ -242,11 +278,8 @@ fn vet_relative(rel: &str) -> Result<PathBuf, String> {
 ///     and ordinary tools can't open or delete them afterwards.
 fn unusable_name(part: &std::ffi::OsStr) -> Option<&'static str> {
     let name = part.to_string_lossy();
-    if name
-        .chars()
-        .any(|c| c.is_control() || matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'))
-    {
-        return Some("contains a control or text-direction character");
+    if name.chars().any(unreviewable_char) {
+        return Some("contains a control, invisible or text-direction character");
     }
     #[cfg(windows)]
     {
@@ -789,17 +822,24 @@ fn copy_dacl(original: &Path, tmp: &Path) -> std::io::Result<()> {
 ///
 /// That's a `.git` directory (whose changes also show in no `git status`
 /// or diff), the hook folders `core.hooksPath` is pointed at by husky
-/// (`.husky`) and by convention (`.githooks`), a `.pre-commit-config.yaml`
-/// (a `repo: local` hook runs any command), and any folder laid out as a
-/// bare repository — see [`in_git_dir_layout`].
+/// (`.husky`) and by convention (`.githooks`) — or by the repository's own
+/// config, whatever the folder is called ([`hooks_path`]) — a
+/// `.pre-commit-config.yaml` (a `repo: local` hook runs any command) or a
+/// lefthook config (the same, once `lefthook install` has run), and any
+/// folder laid out as a bare repository — see [`in_git_dir_layout`].
 pub fn touches_git_dir(root: &Path, args: &Value) -> bool {
+    let hooks = hooks_path(root);
     ["path", "from", "to"]
         .iter()
         .filter_map(|key| args.get(*key)?.as_str())
         .any(|rel| {
             runs_with_git(Path::new(rel.trim()))
                 || resolve_target(root, rel).ok().is_some_and(|p| {
-                    p.strip_prefix(root).is_ok_and(runs_with_git) || in_git_dir_layout(root, &p)
+                    p.strip_prefix(root).is_ok_and(runs_with_git)
+                        || in_git_dir_layout(root, &p)
+                        || hooks
+                            .as_deref()
+                            .is_some_and(|h| dunce::simplified(&p).starts_with(dunce::simplified(h)))
                 })
         })
 }
@@ -808,14 +848,87 @@ pub fn touches_git_dir(root: &Path, args: &Value) -> bool {
 /// [`touches_git_dir`].
 const GIT_RUN_NAMES: &[&str] = &[".git", ".husky", ".githooks", ".pre-commit-config.yaml"];
 
-/// Whether any component of `p` is one of [`GIT_RUN_NAMES`].
+/// Whether any component of `p` is one of [`GIT_RUN_NAMES`] or a lefthook
+/// config.
 fn runs_with_git(p: &Path) -> bool {
     p.components().any(|c| {
         matches!(c, Component::Normal(n) if {
             let n = n.to_string_lossy();
-            GIT_RUN_NAMES.iter().any(|name| n.eq_ignore_ascii_case(name))
+            GIT_RUN_NAMES.iter().any(|name| n.eq_ignore_ascii_case(name)) || is_lefthook_config(&n)
         })
     })
+}
+
+/// `lefthook.yml`, `.lefthook.yaml`, `lefthook-local.toml` and the rest of
+/// the names lefthook reads its commands from.
+fn is_lefthook_config(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    let name = name.strip_prefix('.').unwrap_or(&name);
+    name.rsplit_once('.').is_some_and(|(stem, ext)| {
+        matches!(stem, "lefthook" | "lefthook-local") && matches!(ext, "yml" | "yaml" | "toml" | "json")
+    })
+}
+
+/// The folder the repository holding `root` names as `core.hooksPath`: git
+/// runs hooks from there instead of `.git/hooks`. Read from the nearest
+/// `.git/config` at or above `root` by a plain scan — `git` isn't needed —
+/// with the last setting winning and a relative one taken from that
+/// repository's top folder, as git does. (A `.git` *file*, a linked
+/// worktree's, isn't followed.)
+fn hooks_path(root: &Path) -> Option<PathBuf> {
+    let root = root.canonicalize().ok()?;
+    let top = root.ancestors().find(|dir| dir.join(".git").is_dir())?;
+    let config = fs::read_to_string(top.join(".git").join("config")).ok()?;
+    let mut in_core = false;
+    let mut value = None;
+    for line in config.lines() {
+        let line = line.trim();
+        if let Some(header) = line.strip_prefix('[') {
+            in_core = header.split(']').next().is_some_and(|s| s.trim().eq_ignore_ascii_case("core"));
+        } else if let Some((key, raw)) = line.split_once('=').filter(|_| in_core) {
+            if key.trim().eq_ignore_ascii_case("hookspath") {
+                value = Some(config_value(raw));
+            }
+        }
+    }
+    let value = value.filter(|v| !v.is_empty())?;
+    let dir = match value.strip_prefix("~/") {
+        Some(rest) => std::env::home_dir()?.join(rest),
+        None => top.join(&value),
+    };
+    // Lexically, where it doesn't exist yet: the write may be what creates it.
+    Some(dir.canonicalize().unwrap_or_else(|_| {
+        dir.components().fold(PathBuf::new(), |mut out, c| {
+            match c {
+                Component::ParentDir => {
+                    out.pop();
+                }
+                Component::CurDir => {}
+                c => out.push(c),
+            }
+            out
+        })
+    }))
+}
+
+/// A git config value as git reads it: quotes removed, `\` escapes taken,
+/// and cut at a `#` or `;` outside quotes.
+fn config_value(raw: &str) -> String {
+    let (mut out, mut quoted, mut chars) = (String::new(), false, raw.chars());
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => quoted = !quoted,
+            '\\' => match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('t') => out.push('\t'),
+                Some(other) => out.push(other),
+                None => {}
+            },
+            '#' | ';' if !quoted => break,
+            c => out.push(c),
+        }
+    }
+    out.trim().to_string()
 }
 
 /// Whether `target`, once written, lies in a folder — the root itself or
@@ -2370,6 +2483,21 @@ mod tests {
         assert!(w.is_error, "{}", w.content_text);
     }
 
+    /// Invisible characters too: `main\u{200B}.rs` is a lookalike of
+    /// `main.rs`, and HFS+ ignores `\u{200C}` in `.g\u{200C}it`, making it
+    /// `.git` — past the guard on `.git` (B3-06).
+    #[test]
+    fn invisible_characters_in_names_are_refused() {
+        let (_d, root) = workspace();
+        for path in ["src/main\u{200B}.rs", ".g\u{200C}it/hooks/pre-commit", "a\u{2028}b.txt", "x\u{FEFF}.py"] {
+            let w = dispatch_write_file(&root, &json!({ "path": path, "content": "x" }));
+            assert!(w.is_error, "{path:?}: {}", w.content_text);
+            assert!(w.content_text.contains("invisible"), "{}", w.content_text);
+        }
+        let ok = dispatch_write_file(&root, &json!({ "path": "zażółć.txt", "content": "x" }));
+        assert!(!ok.is_error, "{}", ok.content_text);
+    }
+
     /// A hardlink canonicalizes to its name inside the workspace, but shares
     /// its data with the other names. Writes and edits must give the
     /// workspace name its own file rather than change the shared one — a
@@ -2502,14 +2630,52 @@ mod tests {
             ".pre-commit-config.yaml",
             "sub/.Pre-Commit-Config.yaml",
             ".HUSKY/_/h",
+            // lefthook (B3-03).
+            "lefthook.yml",
+            ".lefthook.yaml",
+            "lefthook-local.yml",
+            ".config/lefthook.toml",
+            "Lefthook.JSON",
         ] {
             assert!(runs_with_git(Path::new(p)), "{p}");
         }
-        for p in [".husky-notes.md", "pre-commit-config.yaml", ".github/workflows/ci.yml", "docs/githooks.md"] {
+        for p in [
+            ".husky-notes.md",
+            "pre-commit-config.yaml",
+            ".github/workflows/ci.yml",
+            "docs/githooks.md",
+            "docs/lefthook.md",
+            "lefthook-ci.yml",
+        ] {
             assert!(!runs_with_git(Path::new(p)), "{p}");
         }
         let (_d, root) = workspace();
         assert!(touches_git_dir(&root, &json!({ "from": "a.yaml", "to": ".pre-commit-config.yaml" })));
+    }
+
+    /// Whatever folder the repository's `core.hooksPath` names runs its
+    /// hooks, so no grant covers it, called `.husky` or not (B3-03).
+    #[test]
+    fn the_configured_hooks_folder_is_recognised() {
+        let (_d, root) = workspace();
+        fs::create_dir_all(root.join(".git")).unwrap();
+        let config = |text: &str| fs::write(root.join(".git/config"), text).unwrap();
+        let hook = json!({ "path": "tools/hooks/pre-commit" });
+        assert!(!touches_git_dir(&root, &hook), "no hooksPath set");
+
+        config("[core]\n\tbare = false\n\thooksPath = tools/hooks ; husky's folder\n");
+        assert!(touches_git_dir(&root, &hook));
+        assert!(touches_git_dir(&root, &json!({ "from": "a.sh", "to": "tools/hooks/post-merge" })));
+        assert!(!touches_git_dir(&root, &json!({ "path": "tools/build.sh" })));
+
+        // Quoted, and the last setting wins.
+        config("[core]\n\thooksPath = elsewhere\n[remote \"origin\"]\n\turl = x\n[CORE]\n\thookspath = \"scripts/git hooks\"\n");
+        assert!(touches_git_dir(&root, &json!({ "path": "scripts/git hooks/pre-push" })));
+        assert!(!touches_git_dir(&root, &json!({ "path": "elsewhere/pre-push" })));
+
+        // A hooksPath outside [core] is no setting at all.
+        config("[alias]\n\thooksPath = tools/hooks\n");
+        assert!(!touches_git_dir(&root, &hook));
     }
 
     /// A folder with `HEAD`, `objects/` and `refs/` is a bare repository to

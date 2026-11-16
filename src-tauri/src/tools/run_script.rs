@@ -198,6 +198,10 @@ mod tests {
         let file = preview(Some(&root), &json!({ "script": "scripts/build.py", "args": ["-v"] })).unwrap();
         assert!(file.command.ends_with("build.py -v"), "{}", file.command);
         assert_eq!(file.cwd, code.cwd);
+        // A file's card shows what's in it; code is already in the call (B3-01).
+        assert_eq!(file.file_text.as_deref(), Some("print(1)"));
+        assert_eq!(file.file_bytes, Some(8));
+        assert_eq!(code.file_text, None);
     }
 
     #[test]

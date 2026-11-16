@@ -17,6 +17,7 @@ use crate::providers::{self, ChatRequest, ModelInfo};
 use crate::secrets;
 use crate::security::{self, LockMethod, LockStatus};
 use crate::tools::fetch_url::{self as fetch_url_tool, FetchedPage};
+use crate::tools::fs::unreviewable_char;
 use crate::AppState;
 
 fn err<E: std::fmt::Display>(e: E) -> String {
@@ -2211,37 +2212,6 @@ async fn validate_mcp_input(
                 crate::tools::fetch_url::HostScreenError::Invalid(_) => Rejected(msg),
             }
         })
-}
-
-/// A character the consent dialog can't show faithfully: control
-/// characters (a NUL truncates what the OS runs; a newline fakes a line
-/// break), and invisible or text-reordering Unicode — zero-width spaces,
-/// bidi overrides — that makes the text on screen differ from what runs.
-fn unreviewable_char(c: char) -> bool {
-    c.is_control()
-        || matches!(
-            c,
-            '\u{00AD}'
-                | '\u{034F}'
-                | '\u{061C}'
-                | '\u{115F}'
-                | '\u{1160}'
-                | '\u{180E}'
-                | '\u{200B}'..='\u{200F}'
-                // Line and paragraph separators: dialogs render them as
-                // line breaks.
-                | '\u{2028}'..='\u{202E}'
-                | '\u{2060}'..='\u{206F}'
-                | '\u{3164}'
-                // Variation selectors.
-                | '\u{FE00}'..='\u{FE0F}'
-                | '\u{FEFF}'
-                | '\u{FFA0}'
-                | '\u{FFF9}'..='\u{FFFB}'
-                // Tag characters, and the supplementary variation selectors.
-                | '\u{E0000}'..='\u{E007F}'
-                | '\u{E0100}'..='\u{E01EF}'
-        )
 }
 
 /// An imported server name brought within the name rule `validate_mcp_input`

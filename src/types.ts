@@ -88,6 +88,10 @@ export interface ScriptRunPreview {
   cwd?: string;
   /** Characters of standard input, when there is any. */
   stdin_chars?: number;
+  /** A script file's text — its first 256 KB — for the card to show. */
+  file_text?: string;
+  /** The script file's whole size in bytes. */
+  file_bytes?: number;
 }
 
 /** How images are scaled down before they're sent to a model: `px` caps the

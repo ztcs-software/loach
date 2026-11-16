@@ -14,13 +14,14 @@
 //!   nothing in them is expanded, piped or redirected.
 //! * **Asked every time.** `mcp::needs_approval` parks every call on the
 //!   approval card, which shows the exact command and folder ([`Preview`])
-//!   — and the code, when the model wrote it — and
-//!   `providers::execute_tool_call` never records "allow for this chat"
-//!   for either tool.
+//!   — and the code, whether the model wrote it in the call or it's in the
+//!   script file — and `providers::execute_tool_call` never records "allow
+//!   for this chat" for either tool.
 //! * **Bounded.** [`TIMEOUT`], capped output, no terminal and no input
-//!   beyond `stdin`. Stop drops the run, and `kill_on_drop` kills the
-//!   process. Only that process, though: anything it started itself and
-//!   left running is not tracked.
+//!   beyond `stdin`. Everything the script starts is in one job object
+//!   (Windows) or process group (Unix): when the run ends, times out or is
+//!   stopped (Stop drops it), all of it is killed, so nothing it started
+//!   outlives it.
 //!
 //! Once it starts, a script runs as the user, with their access to every
 //! file — not just the workspace. The approval card says so.
@@ -37,6 +38,8 @@ use crate::mcp::McpCallResult;
 
 /// Longest a script may run before it is killed.
 pub const TIMEOUT: Duration = Duration::from_secs(300);
+/// How long output may keep coming once the script itself has exited.
+const PIPE_GRACE: Duration = Duration::from_secs(2);
 const MAX_ARGS: usize = 64;
 const MAX_ARGS_BYTES: usize = 16 * 1024;
 const MAX_STDIN_BYTES: usize = 1024 * 1024;
@@ -98,7 +101,18 @@ pub struct Preview {
     /// Characters of standard input, when there is any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stdin_chars: Option<usize>,
+    /// A script file's text, for the card to show next to the command —
+    /// the model may have written the file moments earlier under a
+    /// standing write grant, so its path alone says nothing. The first
+    /// [`MAX_SHOWN_FILE_BYTES`]; `file_bytes` is the whole file's size.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_bytes: Option<u64>,
 }
+
+/// How much of a script file its card shows. It's kept with the chat.
+pub const MAX_SHOWN_FILE_BYTES: u64 = 256 * 1024;
 
 /// A checked run, ready to start.
 #[derive(Debug)]
@@ -263,12 +277,31 @@ impl Plan {
             command.push(' ');
             command.push_str(&shown(a));
         }
+        let (file_text, file_bytes) = match &self.script {
+            Script::File(path) => match read_shown(path) {
+                Some((text, bytes)) => (Some(text), Some(bytes)),
+                None => (None, None),
+            },
+            Script::Code { .. } => (None, None),
+        };
         Preview {
             command,
             cwd: self.cwd.as_ref().map(|p| p.to_string_lossy().into_owned()),
             stdin_chars: self.stdin.as_ref().map(|s| s.chars().count()),
+            file_text,
+            file_bytes,
         }
     }
+}
+
+/// The start of a script file as text, and the file's size in bytes.
+fn read_shown(path: &Path) -> Option<(String, u64)> {
+    use std::io::Read as _;
+    let file = std::fs::File::open(path).ok()?;
+    let bytes = file.metadata().ok()?.len();
+    let mut buf = Vec::new();
+    file.take(MAX_SHOWN_FILE_BYTES).read_to_end(&mut buf).ok()?;
+    Some((String::from_utf8_lossy(&buf).into_owned(), bytes))
 }
 
 /// Save code in a temporary folder of its own, removed when the returned
@@ -356,6 +389,9 @@ pub async fn run(plan: Plan) -> McpCallResult {
         .kill_on_drop(true);
     #[cfg(windows)]
     cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW: no console flashing up.
+    // Its own process group, so `tree` can stop everything the script starts.
+    #[cfg(unix)]
+    cmd.process_group(0);
 
     let mut child = match cmd.spawn() {
         Ok(child) => child,
@@ -367,9 +403,13 @@ pub async fn run(plan: Plan) -> McpCallResult {
         }
         Err(e) => return failed(format!("Couldn't start `{}`: {e}", plan.program)),
     };
+    // Everything the script starts: dropped — when the run ends, times out
+    // or is stopped — it stops all of it.
+    let tree = crate::mcp::stdio::ProcessTree::adopt(&child);
     let (stdin, stdout, stderr) = (child.stdin.take(), child.stdout.take(), child.stderr.take());
     let input = plan.stdin.unwrap_or_default();
     let (mut out, mut err) = (Capture::default(), Capture::default());
+    let mut held_open = false;
     let waited = tokio::time::timeout(TIMEOUT, async {
         let feed = async {
             if let Some(mut pipe) = stdin {
@@ -378,8 +418,20 @@ pub async fn run(plan: Plan) -> McpCallResult {
                 let _ = pipe.write_all(input.as_bytes()).await;
             }
         };
-        let (status, (), (), ()) = tokio::join!(child.wait(), feed, out.drain(stdout), err.drain(stderr));
-        status
+        let pipes = async {
+            tokio::join!(feed, out.drain(stdout), err.drain(stderr));
+        };
+        tokio::pin!(pipes);
+        tokio::select! {
+            status = child.wait() => {
+                // The script is done. Its output ends with it unless a
+                // process it started still holds the pipes (`cmd &`,
+                // `Popen`): reading on would wait for that process instead.
+                held_open = tokio::time::timeout(PIPE_GRACE, &mut pipes).await.is_err();
+                status
+            }
+            () = &mut pipes => child.wait().await,
+        }
     })
     .await;
 
@@ -397,6 +449,16 @@ pub async fn run(plan: Plan) -> McpCallResult {
             )
         }
     };
+    // Stops whatever the script left running. Unix: the group id is still
+    // the script's own — reaped at most PIPE_GRACE ago, and reserved while
+    // any of the group lives.
+    drop(tree);
+    if held_open {
+        text.push_str(
+            " A process the script started was still running, so Loach stopped it: a script \
+             can't leave programs running.",
+        );
+    }
     let (out, err) = (out.text(), err.text());
     if !out.is_empty() {
         text.push_str(&format!("\n\n--- stdout ---\n{out}"));
@@ -683,5 +745,46 @@ mod tests {
         assert!(out[0].contains("loach-script-"), "{}", r.content_text);
         assert!(!Path::new(out[0]).exists());
         assert_eq!(out[1..], rest);
+    }
+
+    /// A script that leaves a process running, still holding its output,
+    /// ends when the script does — with its own exit code, not after the
+    /// 300 s timeout — says so, and takes that process with it (B3-02).
+    #[tokio::test]
+    async fn a_process_left_running_is_stopped_with_the_script() {
+        let (language, code) = if cfg!(windows) {
+            ("powershell", "(Start-Process ping -ArgumentList '-n','60','127.0.0.1' -NoNewWindow -PassThru).Id\n")
+        } else {
+            ("bash", "sleep 60 &\necho $!\n")
+        };
+        let started = std::time::Instant::now();
+        let r = run(plan_code(language, code, &json!({}), None).unwrap()).await;
+        assert!(started.elapsed() < Duration::from_secs(30), "{}", r.content_text);
+        assert!(r.content_text.starts_with("Exit code 0."), "{}", r.content_text);
+        assert!(r.content_text.contains("Loach stopped it"), "{}", r.content_text);
+
+        let stdout = r.content_text.split("--- stdout ---\n").nth(1).unwrap();
+        let pid: u32 = stdout.lines().find_map(|l| l.trim().parse().ok()).expect("the pid");
+        let running = |pid: u32| {
+            #[cfg(unix)]
+            {
+                // SAFETY: signal 0 only checks that the process exists.
+                unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+            }
+            #[cfg(windows)]
+            {
+                let list = std::process::Command::new("tasklist")
+                    .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+                    .output()
+                    .unwrap();
+                String::from_utf8_lossy(&list.stdout).contains(&pid.to_string())
+            }
+        };
+        // Killed at once; give whoever reaps it a moment.
+        let gone = (0..50).any(|_| {
+            std::thread::sleep(Duration::from_millis(100));
+            !running(pid)
+        });
+        assert!(gone, "process {pid} outlived the script");
     }
 }

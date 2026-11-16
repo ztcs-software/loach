@@ -100,12 +100,13 @@ pub(super) struct ToolOutcome {
 /// Shared by both providers so the consent gate, the Stop handling and
 /// the result capping can't drift apart between them.
 ///
-/// Returns `None` when the stream was cancelled while waiting — for an
-/// answer or for the tool — in which case nothing has been emitted for
-/// this call beyond `ToolCall`, and the caller emits `Cancelled` and
-/// returns exactly as it did before. The one exception is a workspace tool
-/// that changes files: once dispatched it runs to the end whatever Stop
-/// does, so its `ToolResult` goes out first and the change is on record.
+/// Returns `None` when the stream was cancelled while waiting — on the
+/// disk reads for its card, for an answer or for the tool — in which case
+/// nothing has been emitted for this call beyond `ToolCall` (if even that),
+/// and the caller emits `Cancelled` and returns exactly as it did before.
+/// The one exception is a workspace tool that changes files: once
+/// dispatched it runs to the end whatever Stop does, so its `ToolResult`
+/// goes out first and the change is on record.
 pub(super) async fn execute_tool_call(
     ctx: &ToolCallCtx<'_>,
     call_id: &str,
@@ -117,19 +118,25 @@ pub(super) async fn execute_tool_call(
     // the disk once: for a write, whether it replaces a file and how big
     // that is (so the card can't pass an overwrite off as a new file), and
     // for any of them whether it reaches into a `.git` directory.
+    //
+    // Raced against Stop, like the call itself: on a network share these
+    // reads can stall for as long as the share takes to fail.
     let builtin = tool_def.server_id == crate::tools::builtin::BUILTIN_SERVER_ID;
     let (existing_bytes, in_git_dir) = match ctx.workspace_root {
         Some(root) if builtin && crate::tools::fs::requires_approval(tool_name) => {
             let (root, args) = (root.to_path_buf(), args.clone());
             let is_write = tool_name == crate::tools::fs::WRITE_FILE;
-            tokio::task::spawn_blocking(move || {
+            let probe = tokio::task::spawn_blocking(move || {
                 let size = is_write
                     .then(|| crate::tools::fs::write_target_size(&root, &args))
                     .flatten();
                 (size, crate::tools::fs::touches_git_dir(&root, &args))
-            })
-            .await
-            .unwrap_or((None, false))
+            });
+            select! {
+                biased;
+                _ = ctx.cancel.notified() => return None,
+                r = probe => r.unwrap_or((None, false)),
+            }
         }
         _ => (None, false),
     };
@@ -142,16 +149,18 @@ pub(super) async fn execute_tool_call(
     let script_run = if every_time {
         let (app, root, args) = (ctx.app.clone(), ctx.workspace_root.map(|p| p.to_path_buf()), args.clone());
         let tool = tool_name.to_string();
-        tokio::task::spawn_blocking(move || {
+        let probe = tokio::task::spawn_blocking(move || {
             if tool == crate::skills::RUN_SKILL_SCRIPT {
                 crate::skills::script_preview(&app, root.as_deref(), &args)
             } else {
                 crate::tools::run_script::preview(root.as_deref(), &args)
             }
-        })
-        .await
-        .ok()
-        .flatten()
+        });
+        select! {
+            biased;
+            _ = ctx.cancel.notified() => return None,
+            r = probe => r.ok().flatten(),
+        }
     } else {
         None
     };
@@ -285,6 +294,12 @@ pub(super) async fn execute_tool_call(
     // a Stop pressed meanwhile — a stored permit — is honoured right after.
     let mutates = builtin && crate::tools::fs::requires_approval(tool_name);
     let outcome = if mutates {
+        // But a Stop pressed before it starts still counts — while the
+        // model's turn was ending, or with no card to wait on (a standing
+        // grant): nothing has touched the disk yet.
+        if ctx.cancel.notified().now_or_never().is_some() {
+            return None;
+        }
         dispatch.await
     } else {
         select! {

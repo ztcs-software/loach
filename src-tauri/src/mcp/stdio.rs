@@ -259,12 +259,15 @@ async fn shut_down(process: Process, stdin: SharedStdin) {
 ///
 /// The job handle is kept as an integer: a kernel handle is valid from any
 /// thread, and a raw pointer field would make every session `!Send`.
+///
+/// Script runs (`skills::script::run`) hold one the same way, so a script
+/// can't leave anything running behind it.
 #[cfg(windows)]
-struct ProcessTree(Option<isize>);
+pub(crate) struct ProcessTree(Option<isize>);
 
 #[cfg(windows)]
 impl ProcessTree {
-    fn adopt(child: &Child) -> Self {
+    pub(crate) fn adopt(child: &Child) -> Self {
         use windows::Win32::Foundation::{CloseHandle, HANDLE};
         use windows::Win32::System::JobObjects::{
             AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
@@ -290,7 +293,7 @@ impl ProcessTree {
             );
             if limited.is_err() || AssignProcessToJobObject(job, HANDLE(process)).is_err() {
                 let _ = CloseHandle(job);
-                tracing::warn!("MCP: couldn't put a stdio server in a job; only its own process will be stopped");
+                tracing::warn!("couldn't put a child process in a job; only that process will be stopped");
                 return Self(None);
             }
             Self(Some(job.0 as isize))
@@ -343,7 +346,7 @@ impl Drop for ProcessTree {
 /// Unix: the child leads its own process group (`process_group(0)` at
 /// spawn), and dropping this kills the whole group.
 #[cfg(unix)]
-struct ProcessTree(Option<libc::pid_t>);
+pub(crate) struct ProcessTree(Option<libc::pid_t>);
 
 /// Every live server's process group, kept outside the session pool so
 /// [`kill_all_now`] can reach one whose session is locked by a call in
@@ -354,7 +357,7 @@ static LIVE_GROUPS: Mutex<Vec<libc::pid_t>> = Mutex::new(Vec::new());
 
 #[cfg(unix)]
 impl ProcessTree {
-    fn adopt(child: &Child) -> Self {
+    pub(crate) fn adopt(child: &Child) -> Self {
         // The group id of a group leader is its pid.
         let pgid = child.id().and_then(|pid| libc::pid_t::try_from(pid).ok());
         if let Some(g) = pgid {
