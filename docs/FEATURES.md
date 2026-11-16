@@ -1198,7 +1198,8 @@ Chat (§2.8).
 - **sort** — sort lines (lexical, natural, or numeric; reverse / unique).
 - **ip** — CIDR membership checks and subnet info.
 - **pdf** — generate a downloadable PDF from a structured spec (headings,
-  paragraphs, lists, tables, page breaks), up to 200 pages. The result
+  paragraphs, lists, tables of up to 16 columns, page breaks), up to 200
+  pages. The result
   lands in the chat as a previewable, savable attachment. The bundled font
   covers Latin-script text only: Cyrillic, Greek, CJK and emoji print as
   `?`, and the tool tells the model how many characters that hit.

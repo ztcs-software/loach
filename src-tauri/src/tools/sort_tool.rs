@@ -26,7 +26,8 @@ pub fn tool_description() -> &'static str {
      that don't parse sort after the numbers in their original order). \
      Flags: `reverse` (descending order), `unique` (collapse adjacent \
      duplicates after sort, like `sort -u`; ignoring case when \
-     `case_sensitive` is false, like `sort -fu`), `case_sensitive` (default \
+     `case_sensitive` is false, like `sort -fu`; in `numeric` mode, one line \
+     per number — `1` and `1.0` count as the same — like `sort -nu`), `case_sensitive` (default \
      true; when false, lexical and natural compare case-insensitively)."
 }
 
@@ -112,6 +113,18 @@ pub fn dispatch(args: &Value) -> McpCallResult {
                 (None, Some(_)) => std::cmp::Ordering::Greater,
                 (None, None) => a.0.cmp(&b.0),
             });
+            // `unique` keeps one line per number, as `sort -nu` does: `1`,
+            // `1.0` and `1 ` are equal here, and comparing text left them
+            // all — and an exact repeat split off by one of them (B6-06).
+            // The first spelling wins; lines that aren't numbers still
+            // compare as text.
+            if unique {
+                decorated.dedup_by(|later, kept| match (later.1, kept.1) {
+                    (Some(x), Some(y)) => x == y,
+                    (None, None) => later.2 == kept.2,
+                    _ => false,
+                });
+            }
             lines = decorated.into_iter().map(|(_, _, s)| s).collect();
         }
         other => return err(format!("unknown mode `{other}`")),
@@ -119,10 +132,11 @@ pub fn dispatch(args: &Value) -> McpCallResult {
     if reverse && mode != "numeric" {
         lines.reverse();
     }
-    if unique {
+    // Numeric mode has deduplicated by value already.
+    if unique && mode != "numeric" {
         // Case-insensitive sorts put `Apple` next to `apple`; collapse
         // those too, as `sort -fu` does, rather than keep both.
-        if !case_sensitive && mode != "numeric" {
+        if !case_sensitive {
             lines.dedup_by(|a, b| a.to_lowercase() == b.to_lowercase());
         } else {
             lines.dedup();
@@ -231,6 +245,21 @@ mod tests {
             }));
             assert!(!r.is_error);
             assert_eq!(r.content_text, "Apple\nbanana", "{mode}");
+        }
+    }
+
+    /// Numeric `unique` keeps one line per number, whatever its spelling,
+    /// as `sort -nu` does — the first one given (B6-06).
+    #[test]
+    fn numeric_unique_collapses_equal_numbers() {
+        for (input, want) in [
+            ("1\n1 \n1", "1"),
+            ("1\n1.0\n1", "1"),
+            ("2\n01\n1.0\n-0\n0\nx\nx\ny", "-0\n01\n2\nx\ny"),
+        ] {
+            let r = dispatch(&json!({"input": input, "mode": "numeric", "unique": true}));
+            assert!(!r.is_error);
+            assert_eq!(r.content_text, want, "{input:?}");
         }
     }
 

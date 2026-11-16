@@ -12,7 +12,8 @@
 
 use chrono::format::{Item, StrftimeItems};
 use chrono::{
-    DateTime, Datelike, Days, LocalResult, Months, NaiveDate, NaiveDateTime, TimeZone, Utc, Weekday,
+    DateTime, Datelike, Days, FixedOffset, LocalResult, Months, NaiveDate, NaiveDateTime, TimeZone,
+    Utc, Weekday,
 };
 use chrono_tz::Tz;
 use serde_json::{json, Value};
@@ -87,7 +88,7 @@ pub fn input_schema() -> Value {
             "input": { "type": "string", "description": "Datetime string. Used by parse, format, add, tz_convert, weekday, business_days_from." },
             "from": { "type": "string", "description": "Source datetime for `diff`." },
             "to": { "type": "string", "description": "Target datetime for `diff`." },
-            "timezone": { "type": "string", "description": "IANA timezone. For `now`, `parse`, `format`, `weekday`, `add`: the display tz and the tz a naïve input is interpreted in. For `tz_convert`: the target tz." },
+            "timezone": { "type": "string", "description": "IANA timezone. For `now`, `parse`, `format`, `weekday`, `add`: the display tz and the tz a naïve input is interpreted in. For `tz_convert`: the target tz. When it's absent, `format`, `weekday` and `business_days_from` read an input that carries an offset (`+01:00`) on that offset, and everything else is UTC." },
             "source_timezone": { "type": "string", "description": "IANA timezone a naïve `input` is interpreted in for `tz_convert`. Defaults to UTC; ignored when `input` carries an offset." },
             "unit": {
                 "type": "string",
@@ -186,7 +187,11 @@ fn op_format(args: &Value) -> McpCallResult {
         return err(e);
     }
     match parse_input(input, &tz) {
-        Ok(dt) => ok(dt.with_timezone(&tz).format(pattern).to_string()),
+        // Kept apart from the `Tz` path, where `%Z` is the zone's name.
+        Ok(dt) => match own_offset(args, input) {
+            Some(offset) => ok(dt.with_timezone(&offset).format(pattern).to_string()),
+            None => ok(dt.with_timezone(&tz).format(pattern).to_string()),
+        },
         Err(e) => err(e),
     }
 }
@@ -297,7 +302,7 @@ fn op_weekday(args: &Value) -> McpCallResult {
         Err(e) => return err(e),
     };
     match parse_input(input, &tz) {
-        Ok(dt) => ok(weekday_name(dt.with_timezone(&tz).weekday())),
+        Ok(dt) => ok(weekday_name(calendar_view(dt, &tz, own_offset(args, input)).weekday())),
         Err(e) => err(e),
     }
 }
@@ -325,7 +330,7 @@ fn op_business_days_from(args: &Value) -> McpCallResult {
         Ok(dt) => dt,
         Err(e) => return err(e),
     };
-    let date = start.with_timezone(&tz).date_naive();
+    let date = calendar_view(start, &tz, own_offset(args, input)).date_naive();
     let end = match add_business_days(date, amount) {
         Some(d) => d,
         None => return err("business-day arithmetic overflowed chrono's representable range"),
@@ -334,6 +339,29 @@ fn op_business_days_from(args: &Value) -> McpCallResult {
 }
 
 // ---------- helpers ----------
+
+/// The offset `input` states itself (`…T00:30:00+01:00`, RFC 2822's
+/// `+0100`), when no `timezone` was given: the calendar to read a weekday,
+/// a date or a format off. `2026-11-16T00:30:00+01:00` is a Monday — taken
+/// in UTC, the default `timezone`, it was the Sunday before, so a
+/// datetime `now` returned in a zone came back a day off from `weekday`.
+fn own_offset(args: &Value, input: &str) -> Option<FixedOffset> {
+    if args.get("timezone").and_then(|v| v.as_str()).is_some() {
+        return None;
+    }
+    let s = input.trim();
+    let dt = DateTime::parse_from_rfc3339(s).or_else(|_| DateTime::parse_from_rfc2822(s)).ok()?;
+    Some(*dt.offset())
+}
+
+/// `dt` on the clock its calendar is read on: the input's own offset when
+/// [`own_offset`] found one, else `tz`.
+fn calendar_view(dt: DateTime<Utc>, tz: &Tz, own: Option<FixedOffset>) -> DateTime<FixedOffset> {
+    match own {
+        Some(offset) => dt.with_timezone(&offset),
+        None => dt.with_timezone(tz).fixed_offset(),
+    }
+}
 
 fn parse_input(s: &str, fallback_tz: &Tz) -> Result<DateTime<Utc>, String> {
     let s = s.trim();
@@ -651,6 +679,29 @@ mod tests {
         let r = dispatch(&json!({"op": "weekday", "input": "2026-05-25"}));
         assert!(!r.is_error, "{}", r.content_text);
         assert_eq!(r.content_text, "Monday");
+    }
+
+    /// With no `timezone`, an input's own offset decides its calendar date:
+    /// 00:30 on Monday in Warsaw is still Sunday in UTC (B6-05).
+    #[test]
+    fn calendar_ops_read_the_inputs_own_offset() {
+        let input = "2026-11-16T00:30:00+01:00";
+        let run = |extra: Value| {
+            let mut args = json!({ "input": input });
+            args.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            let r = dispatch(&args);
+            assert!(!r.is_error, "{}", r.content_text);
+            r.content_text
+        };
+        assert_eq!(run(json!({"op": "weekday"})), "Monday");
+        assert_eq!(run(json!({"op": "format", "format": "%Y-%m-%d %H:%M %z"})), "2026-11-16 00:30 +0100");
+        assert_eq!(run(json!({"op": "business_days_from", "amount": 1})), "2026-11-17");
+        // A `timezone` still wins, and an input without an offset is UTC.
+        assert_eq!(run(json!({"op": "weekday", "timezone": "UTC"})), "Sunday");
+        let r = dispatch(&json!({"op": "weekday", "input": "2026-11-16T00:30:00"}));
+        assert_eq!(r.content_text, "Monday");
+        // `%Z` keeps the zone's name when one is given.
+        assert_eq!(run(json!({"op": "format", "format": "%Z", "timezone": "Europe/Warsaw"})), "CET");
     }
 
     #[test]
