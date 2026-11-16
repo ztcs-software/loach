@@ -376,7 +376,10 @@ export function ChatCanvas() {
     // every message body per keystroke.
     for (const id of matchIds) {
       if (id === streamingMsgId) continue;
-      const el = messageRefs.current.get(id);
+      // Only the message body: the row also holds React-owned labels (code
+      // block Copy, Show more, metrics) whose Text nodes React rewrites later —
+      // swapping one for a mark made the next update throw NotFoundError.
+      const el = messageRefs.current.get(id)?.querySelector("[data-search-root]");
       if (!el) continue;
       highlightTextNodes(el, q, id === currentId);
       hasMarksRef.current = true;
@@ -937,13 +940,21 @@ function highlightTextNodes(
 
   // Snapshot text nodes first; mutating the tree while a TreeWalker is
   // iterating can skip nodes or revisit them. The filter rejects any text
-  // that already lives inside a highlight wrapper.
+  // that already lives inside a highlight wrapper, and text React may still
+  // rewrite or that isn't message content: buttons (Copy → Copied, Show
+  // more), aria-hidden decoration (the code gutter's line numbers) and KaTeX.
+  // Only ancestors inside `root` count: an open Radix modal sets aria-hidden
+  // on the whole app, which would otherwise reject every node.
   const targets: Text[] = [];
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
-    acceptNode: (node) =>
-      (node as Text).parentElement?.closest("[data-loach-match]")
+    acceptNode: (node) => {
+      const skip = (node as Text).parentElement?.closest(
+        '[data-loach-match], button, [aria-hidden="true"], .katex',
+      );
+      return skip && root.contains(skip)
         ? NodeFilter.FILTER_REJECT
-        : NodeFilter.FILTER_ACCEPT,
+        : NodeFilter.FILTER_ACCEPT;
+    },
   });
   let n: Node | null;
   while ((n = walker.nextNode())) targets.push(n as Text);

@@ -949,12 +949,12 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
           </div>
         ) : isUser ? (
           displayContent.length > 0 && (
-            <div ref={bodyRef}>
+            <div ref={bodyRef} data-search-root>
               <ExpandableUserText content={displayContent} />
             </div>
           )
         ) : (
-          <div ref={bodyRef}>
+          <div ref={bodyRef} data-search-root>
             <MarkdownSourceProvider
               value={{
                 sessionId: message.session_id,

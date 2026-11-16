@@ -29,12 +29,17 @@
 //!   connection's ICE traffic reaches a STUN server regardless of
 //!   `connect-src`), and removes nested frames as they're added: a `srcdoc`
 //!   or `javascript:` frame isn't stopped by `frame-src` and would run its
-//!   own script with a fresh `RTCPeerConnection`.
+//!   own script with a fresh `RTCPeerConnection`. The HTML runs in the host
+//!   page's own window and can replace any built-in there, so the host only
+//!   calls originals it kept before the HTML ran — a watcher calling the
+//!   page's `matches` or `Function.prototype.call` let frames through.
 //! * **WebView2's WebRTC policy**, on Windows, behind the host page: the main
 //!   window's `additionalBrowserArgs` (`tauri.conf.json`) add
 //!   `--force-webrtc-ip-handling-policy=disable_non_proxied_udp`, so a peer
 //!   connection that got past the page still has no UDP to reach a STUN
-//!   server with. Setting the field replaces wry's own arguments
+//!   server with. TCP to a TURN server, and the DNS lookup of its name, still
+//!   go out, so this narrows a leak rather than closing it: the host page is
+//!   the layer that has to hold. Setting the field replaces wry's own arguments
 //!   (`--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection`, the
 //!   `default_args` in wry 0.57's `src/webview2/mod.rs`), so they're repeated
 //!   ahead of it — re-check them after a wry upgrade.
@@ -212,5 +217,11 @@ mod tests {
             assert!(page.contains(&format!("\"{name}\"")), "`{name}` is left in place");
         }
         assert!(page.contains("new MutationObserver"), "nested frames are no longer removed");
+        // The page shares the host's window and can replace `call` or
+        // `Symbol.hasInstance`: through either, a frame got past the watcher
+        // or a wrapper handed the page the native it guards (B3-05).
+        for hook in [".call(", "instanceof"] {
+            assert!(!page.contains(hook), "the host page calls through the page-replaceable `{hook}`");
+        }
     }
 }
