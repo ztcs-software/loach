@@ -84,7 +84,7 @@ Behind a calm, beautifully crafted UI sits a rich feature set - ready when you n
 
 #### App, data & updates 
 - **Data management** - make backups of your content to JSON file (MCP headers, environment variables and chats' workspace folders are left out), restore data or permanently delete it with a few clicks, with a storage breakdown showing what your chats, attachments, Spaces and Library actually weigh on disk. 
-- **App lock** - optional PIN, password or PIN + password gate at launch, with opt-in auto-lock after inactivity or on minimize and a lock-now shortcut; credentials are hashed and stored in OS credential manager.
+- **App lock** - optional PIN, password or PIN + password gate at launch, with opt-in auto-lock after inactivity or on minimize and a lock-now shortcut; credentials are hashed and stored in OS credential manager. It gates the app's window only — the database isn't encrypted (see [Storage and privacy](#-storage-and-privacy)).
 - **Themes** - glassy, gradient Aurora or flat Solid, both available in Dark and Light variants.
 - **OTA updates** - get new features, bug fixes, performance improvements and security patches directly from the app, with an opt-in check at launch that tells you when a new version is out.
 
@@ -237,7 +237,7 @@ Only one OpenAI-compatible endpoint is active at a time — switch the base URL 
 
 | What | Where |
 |---|---|
-| Chats, messages, folders, spaces (instructions, reference sources, memories), the Library (texts, files, links, datasets and their search index), global memories, snippets, snippet variables and saved fill-ins, MCP servers (including their headers and environment variables, in plain text), app settings | SQLite at `<app-data-dir>/loach.db` |
+| Chats, messages, folders, spaces (instructions, reference sources, memories), the Library (texts, files, links, datasets and their search index), global memories, snippets, snippet variables and saved fill-ins, MCP servers (including their headers and environment variables), app settings | SQLite at `<app-data-dir>/loach.db`, unencrypted |
 | OpenAI API key | OS credential manager (Windows Credential Manager / Linux Secret Service / macOS Keychain) |
 | App-lock hash + hint | OS credential manager — same store, separate entry |
 | App-lock marker (whether a lock is set, its method, PIN length and whether it has a hint — no hashes) and failed-unlock count | `app_lock.json` and `app_lock_attempts.json` next to `loach.db` |
@@ -246,6 +246,8 @@ Only one OpenAI-compatible endpoint is active at a time — switch the base URL 
 | App data dir on Windows | `%APPDATA%\dev.loach.app\` |
 | App data dir on Linux | `~/.local/share/dev.loach.app/` |
 | App data dir on macOS | `~/Library/Application Support/dev.loach.app/` |
+
+`loach.db` is plain, unencrypted SQLite: anyone who can read your user account's files can read your chats, memories and MCP credentials, with or without the app lock, which gates Loach's own window only. On a laptop, full-disk encryption (BitLocker, FileVault, LUKS) with an OS login is what keeps that data private if the machine is lost or stolen.
 
 Loach launches and works completely offline as long as you stick to local providers. The **Models** library, **Spaces**, the **Library**, **Snippets**, search, parameter sidebar, app lock, and chat history are all available without network access. Only chat generations against remote endpoints (OpenAI, Groq, OpenRouter, …), model pulls, web fetch and Library links, embeddings from a remote endpoint, remote MCP servers (and the first launch of an `npx`/`uvx` one, which downloads its package), update checks and, depending on your system, voice dictation require internet connection.
 

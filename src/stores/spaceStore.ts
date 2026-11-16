@@ -55,7 +55,6 @@ interface SpaceState {
   error: string | null;
 
   hydrate: () => Promise<void>;
-  selectSpace: (id: string | null) => void;
   createSpace: (
     name: string,
     description: string,
@@ -186,10 +185,6 @@ export const useSpaceStore = create<SpaceState>((set, get) => ({
         error: e instanceof Error ? e.message : String(e),
       });
     }
-  },
-
-  selectSpace: (id) => {
-    set({ activeSpaceId: id });
   },
 
   createSpace: async (name, description, instructions) => {

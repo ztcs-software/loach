@@ -474,10 +474,11 @@ Commands are grouped the way `/help` lists them:
   system prompt; on its own it shows the current one), `/snippet <name>`
   (expand a saved snippet into the composer).
 - **Memory & Spaces** — `/remember <fact>`, `/forget <id|query>`,
-  `/space <name>` (typed on a Space's page, it opens the other Space's
-  page). Inside a Space the memory commands act on that Space's
-  memory; outside one they act on the global list. `/remember` needs that
-  memory turned on — the Space's memory toggle, or Global memories.
+  `/space <name>` (opens that Space's page, wherever it's typed). On a
+  Space's page, or in a chat that belongs to a Space, the memory commands
+  act on that Space's memory; anywhere else they act on the global list.
+  `/remember` needs that memory turned on — the Space's memory toggle, or
+  Global memories.
 - **Tools & web** — `/tools` (list tools from enabled MCP servers),
   `/web-fetch on|off`, `/fetch <url>`, `/skill [name]` (list skills, or
   load one into the chat — §9.5), `/thinking on|off`.
@@ -1591,6 +1592,13 @@ Optional credential gate that runs before any chat data hydrates, with
 opt-in triggers (§13.4) that re-engage it mid-session. Configure in
 **Settings → Security**.
 
+The lock gates Loach's window only; it doesn't encrypt anything. The
+database (`loach.db` and its `-wal` file) and the marker files next to it
+are ordinary files, readable by anyone who can read your user account's
+files or the disk — with Loach closed, locked or not installed. What
+protects that data on a lost or stolen machine is full-disk encryption
+(BitLocker, FileVault, LUKS) together with an OS login.
+
 - **PIN** (4, 6, or 8 digits), **Password** (at least 8 characters), or
   **both**.
 - **Optional hint** stored alongside (plaintext — the user has to be able
@@ -1603,7 +1611,11 @@ opt-in triggers (§13.4) that re-engage it mid-session. Configure in
   database as `app_lock.json`, so the lock screen comes up at launch
   without reading the credential store (and without a keychain prompt).
   The credential store is read when you unlock; a read that fails or is
-  refused keeps Loach locked.
+  refused keeps Loach locked. One exception: when the marker is missing
+  (the first launch after updating from a version without it, or after
+  it was deleted), Loach reads the credential store at launch instead,
+  and if that read fails or is refused it opens unlocked for that session
+  rather than stranding you behind a lock it can't check.
 
 ### 13.1 Lock screen
 
@@ -1630,10 +1642,9 @@ gate or trigger a wipe.
 ### 13.4 Auto-lock
 
 On its own the lock only gates *launch*: clear the lock screen once and you
-stay unlocked until you quit. That covers a stolen laptop but not the threat
-people actually have — walking away from an unlocked machine. Two opt-in
-triggers close it, both in the **Auto-lock** card that appears in
-**Settings → Security** once a lock is configured:
+stay unlocked until you quit — no help when you walk away from an unlocked
+machine. Two opt-in triggers close that gap, both in the **Auto-lock** card
+that appears in **Settings → Security** once a lock is configured:
 
 - **Lock after inactivity** — off, 1, 5, 15 or 30 minutes with no typing,
   clicking, scrolling, touch or mouse movement. A reply already streaming
@@ -1998,11 +2009,14 @@ verification happens before the binary is replaced.
 - **OpenAI-compatible API key, app-lock hash and hint** — OS credential store
   (Windows Credential Manager / Linux Secret Service / macOS Keychain via
   the `keyring` crate).
+- **The database isn't encrypted.** Everything in `loach.db` — chats,
+  memories, the Library, Space uploads — is stored as plain text, and the
+  app lock (§13) doesn't change that.
 - **MCP credentials are not in the credential store.** A server's HTTP
   headers (an `Authorization` token, say) and a stdio server's environment
-  variables are stored in the SQLite database as plain text, alongside the
-  rest of its configuration. They are scrubbed from exports (§9.2), but
-  anyone who can read the app-data directory can read them.
+  variables are stored in the SQLite database like the rest of its
+  configuration. They are scrubbed from exports (§9.2), but anyone who can
+  read the app-data directory can read them.
 - **No telemetry** — Loach makes no outbound network requests beyond
   the providers the user configures (an embedding model for the Library
   included — §4.5), the optional URL fetches the user triggers (Library

@@ -129,8 +129,6 @@ function memoryScope(): MemoryScope {
     (s) => s.id === useChatStore.getState().activeSessionId,
   );
   if (session?.space_id) return { kind: "space", spaceId: session.space_id };
-  const sid = useSpaceStore.getState().activeSpaceId;
-  if (sid) return { kind: "space", spaceId: sid };
   return { kind: "global" };
 }
 
@@ -737,12 +735,14 @@ async function runSpace(rest: string): Promise<CommandResult> {
     );
   }
   const match = matches[0]!;
-  // Typed on a Space's page, go to the new Space's page: switching only the
-  // active Space left the old page up while the next message started its
-  // chat in the new one, with the Library picks made on the old page.
-  const spaceStore = useSpaceStore.getState();
-  if (spaceStore.viewingSpaceId) spaceStore.setViewingSpace(match.id);
-  else spaceStore.selectSpace(match.id);
+  // Open the Space's page, wherever this is typed. Switching only the active
+  // Space showed nothing: on a Space's page the old page stayed up while the
+  // next message started its chat in the new one, and from a chat a hidden
+  // active Space then took `/remember`, `/forget`, `/list memories` and
+  // `/new` — a fact typed in a chat with no Space went to that Space.
+  useModelsStore.getState().setViewingModel(null);
+  useUIStore.getState().setSidebarTab("spaces");
+  useSpaceStore.getState().setViewingSpace(match.id);
   return ok("Active Space", match.name);
 }
 
