@@ -274,6 +274,13 @@ pub async fn aggregate_tools_cached(
     (tools, errors)
 }
 
+/// The cached MCP catalogue, without probing on a miss: for display-only
+/// readers (the context bar's tool count), which have no business starting
+/// servers. `None` until a send has listed them.
+pub async fn cached_tools(cache: &ToolsCache) -> Option<Vec<McpToolDef>> {
+    cache.lock().await.entry.as_ref().map(|e| e.tools.clone())
+}
+
 /// Drop any cached catalogue so the next chat send re-probes the servers.
 /// Must be called after every mutation of the `mcp_servers` table (add /
 /// edit / delete / enable-toggle) and after a snapshot restore, or the model

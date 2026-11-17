@@ -34,8 +34,18 @@ export function charsPerToken(sample: string): number {
   return total === 0 ? 4 : 4 - (3 * cjk) / total;
 }
 
+/** Characters per token for tool definitions: JSON schemas, denser than
+ *  prose. Measured on Ollama (gemma4): 23 of Loach's tools, 26,935
+ *  characters, cost 7,154 prompt tokens — ~3.77 a token, where the prose
+ *  rate of 4 came out 6% short. */
+export const TOOL_CHARS_PER_TOKEN = 3.75;
+
 export interface ContextUsageBreakdown {
   systemPromptTokens: number;
+  /** The tool definitions every request carries — built-ins, workspace
+   *  files, skills, MCP — which the backend adds on its own. With many on
+   *  they can take most of a small window. */
+  toolsTokens: number;
   /** The workspace's `LOACHFILE.md` (or the `CLAUDE.md` / `AGENTS.md` it
    *  falls back to), which the backend appends to the system prompt on
    *  every turn. Counted on its own because it is the one
@@ -54,8 +64,8 @@ export interface ContextUsageBreakdown {
   attachmentsTokens: number;
   messageCount: number;
   /** Total estimated tokens that will be sent to the model on the next
-   *  request: `systemPromptTokens + projectInstructionsTokens +
-   *  memoriesTokens + sourcesTokens + messagesTokens`. */
+   *  request: `systemPromptTokens + toolsTokens + projectInstructionsTokens
+   *  + memoriesTokens + sourcesTokens + messagesTokens`. */
   used: number;
   /** The effective context window for the next request — `params.num_ctx`
    *  with a sensible fallback when the field is missing. */
@@ -97,8 +107,11 @@ export function computeContextUsage(
   projectInstructions: string | null = null,
   memories: string | null = null,
   sourcesTokens = 0,
+  /** Characters of tool definitions (`chatToolsSize`). */
+  toolsChars = 0,
 ): ContextUsageBreakdown {
   const systemPromptTokens = estimateTokens(systemPrompt);
+  const toolsTokens = Math.ceil(toolsChars / TOOL_CHARS_PER_TOKEN);
   const projectInstructionsTokens = estimateTokens(projectInstructions);
   const memoriesTokens = estimateTokens(memories);
 
@@ -132,7 +145,12 @@ export function computeContextUsage(
   }
 
   const used =
-    systemPromptTokens + projectInstructionsTokens + memoriesTokens + sourcesTokens + messagesTokens;
+    systemPromptTokens +
+    toolsTokens +
+    projectInstructionsTokens +
+    memoriesTokens +
+    sourcesTokens +
+    messagesTokens;
   const total =
     typeof params.num_ctx === "number" && params.num_ctx > 0
       ? params.num_ctx
@@ -141,6 +159,7 @@ export function computeContextUsage(
 
   return {
     systemPromptTokens,
+    toolsTokens,
     projectInstructionsTokens,
     memoriesTokens,
     sourcesTokens,

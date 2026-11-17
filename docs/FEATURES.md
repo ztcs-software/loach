@@ -505,12 +505,16 @@ A slim **context usage bar** sits just below the message box once a chat
 has messages. It shows how much of the model's context window the chat is
 using — `used / total` tokens and a percentage — with a popover that breaks
 the estimate down into the system prompt (a Space's instructions
-included), project instructions (`LOACHFILE.md`, `CLAUDE.md` or
+included), tools (the definitions of every tool the chat offers, which go
+out with each request — with many switched on they can take most of an 8K
+window), project instructions (`LOACHFILE.md`, `CLAUDE.md` or
 `AGENTS.md`), memories, sources (what
 the next message will send of them, in full or as excerpts — §4.4) and
 messages (attachments called out), plus what's left of the window. It's an
 estimate, at about four characters per token, or about one character per
-token for Chinese, Japanese and Korean text.
+token for Chinese, Japanese and Korean text; tool definitions, being JSON,
+count at a little under four. MCP tools count once a message has listed
+them — the bar never starts a server.
 On an Ollama chat the popover's **Expand context window** button doubles
 this chat's context length. An OpenAI-compatible server ignores that
 setting, so there the bar measures against the 32k Loach assumes (§1.2),

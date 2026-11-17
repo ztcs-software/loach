@@ -58,6 +58,13 @@ export interface WorkspaceInstructions {
   text: string;
 }
 
+/** The tool definitions a send from a chat carries (`commands::ChatToolsSize`):
+ *  how many, and their length as the providers serialize them. */
+export interface ChatToolsSize {
+  count: number;
+  chars: number;
+}
+
 /** An installed Agent Skill (`skills::Skill`): a folder with a `SKILL.md`,
  *  from Loach's own skills folder or `~/.agents/skills`. */
 export interface SkillInfo {

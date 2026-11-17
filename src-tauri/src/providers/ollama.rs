@@ -1442,7 +1442,7 @@ fn build_options(req: &ChatRequest) -> Value {
     Value::Object(o)
 }
 
-fn ollama_tool_def(def: &McpToolDef) -> Value {
+pub(crate) fn ollama_tool_def(def: &McpToolDef) -> Value {
     // Ollama follows the OpenAI tools schema:
     //   {"type":"function","function":{"name","description","parameters"}}
     let mut function = serde_json::Map::new();

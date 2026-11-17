@@ -8,9 +8,11 @@ import { useGlobalMemoryStore } from "@/stores/globalMemoryStore";
 import { useLibraryStore } from "@/stores/libraryStore";
 import { selectMemoriesForPrompt } from "@/lib/memoryRules";
 import { estimateChatSources } from "@/lib/sources";
+import { chatToolsSize } from "@/lib/tauri";
 import {
   DEFAULT_PARAMS,
   OPENAI_COMPAT_NUM_CTX,
+  type ChatToolsSize,
   type GenerationParams,
   type Message,
   type SpaceFile,
@@ -118,6 +120,31 @@ export function ContextUsageBar() {
     if (spaceId) void ensureSources("space", spaceId).catch(() => undefined);
     if (sessionId) void ensureSources("session", sessionId).catch(() => undefined);
   }, [spaceId, sessionId, loadSpaceFiles, ensureSources]);
+  // The tool definitions every request carries, sized by the backend — it
+  // alone builds the catalogue. Asked again when the chat, its folder or any
+  // setting changes (most tools are a Settings switch), and once a turn in
+  // it ends: the send fills the MCP cache, and may have loaded a skill.
+  const workspaceRoot = session?.workspace_root ?? null;
+  const settings = useSettingsStore((s) => s);
+  const streamingHere = useChatStore(
+    (s) => !!sessionId && s.streamingSessionId === sessionId,
+  );
+  const [tools, setTools] = useState<{ sessionId: string; size: ChatToolsSize } | null>(null);
+  useEffect(() => {
+    if (!sessionId || streamingHere) return;
+    let live = true;
+    chatToolsSize(sessionId).then(
+      (size) => {
+        if (live) setTools({ sessionId, size });
+      },
+      // Display only: a failed read leaves the tools uncounted.
+      () => undefined,
+    );
+    return () => {
+      live = false;
+    };
+  }, [sessionId, workspaceRoot, settings, streamingHere]);
+  const toolsSize = tools?.sessionId === sessionId ? tools.size : null;
   const compactingSessionId = useChatStore((s) => s.compactingSessionId);
   const compactContext = useChatStore((s) => s.compactContext);
   const setSessionParams = useChatStore((s) => s.setSessionParams);
@@ -215,8 +242,17 @@ export function ContextUsageBar() {
         projectInstructions?.text ?? null,
         memoryText,
         sources.tokens,
+        toolsSize?.chars ?? 0,
       ),
-    [deferredMessages, effectiveSystemPrompt, params, projectInstructions, memoryText, sources.tokens],
+    [
+      deferredMessages,
+      effectiveSystemPrompt,
+      params,
+      projectInstructions,
+      memoryText,
+      sources.tokens,
+      toolsSize?.chars,
+    ],
   );
 
   // Don't show the bar before the user has any conversation to measure —
@@ -305,6 +341,7 @@ export function ContextUsageBar() {
         <ContextUsagePopover
           popoverRef={popoverRef}
           usage={usage}
+          toolsCount={toolsSize?.count ?? 0}
           sourcesLabel={
             sources.count > 0
               ? `Sources (${sources.count}${sources.mode === "retrieval" ? ", excerpts" : ""})`
@@ -341,6 +378,8 @@ export function ContextUsageBar() {
 
 interface PopoverProps {
   usage: ReturnType<typeof computeContextUsage>;
+  /** How many tool definitions `usage.toolsTokens` covers. */
+  toolsCount: number;
   /** Row label for the sources line, or null when the chat has none. */
   sourcesLabel: string | null;
   /** The file the project instructions came from, or null when none. */
@@ -357,6 +396,7 @@ interface PopoverProps {
 
 const ContextUsagePopover = ({
   usage,
+  toolsCount,
   sourcesLabel,
   instructionsFile,
   compacting,
@@ -427,6 +467,9 @@ const ContextUsagePopover = ({
           label="System prompt"
           value={formatTokens(usage.systemPromptTokens)}
         />
+        {usage.toolsTokens > 0 && (
+          <Row label={`Tools (${toolsCount})`} value={formatTokens(usage.toolsTokens)} />
+        )}
         {usage.projectInstructionsTokens > 0 && (
           <Row
             label={`Project instructions (${instructionsFile ?? "LOACHFILE.md"})`}

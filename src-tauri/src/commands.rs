@@ -397,6 +397,84 @@ pub async fn read_workspace_instructions(
     .map_err(|e| format!("instructions read task panicked: {e}"))
 }
 
+/// The tools Loach offers from its own process: the built-ins switched on
+/// (the workspace ones only with a folder) and `run_script`. One list for the
+/// send and the context bar's count, so the two can't drift.
+fn local_tool_defs(
+    db: &crate::db::Database,
+    has_workspace: bool,
+    private: bool,
+) -> Vec<mcp::McpToolDef> {
+    let mut defs = crate::tools::builtin::enabled_builtin_defs(db, has_workspace);
+    // Not in the registry: a run is a process, asked about every time
+    // (`tools::run_script`). Never in a private request, which promises
+    // nothing leaves this machine: a process can reach the network, and only
+    // the renderer's `no_tools` kept it out.
+    if !private && crate::tools::run_script::enabled(db) {
+        defs.push(crate::tools::run_script::tool_def(has_workspace));
+    }
+    defs
+}
+
+/// The tool definitions a send from a chat carries: how many, and how many
+/// characters they come to as the providers serialize them.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct ChatToolsSize {
+    pub count: usize,
+    pub chars: usize,
+}
+
+fn tools_size(tools: &[mcp::McpToolDef]) -> ChatToolsSize {
+    ChatToolsSize {
+        count: tools.len(),
+        // Both providers send the same shape; Ollama's builder stands for both.
+        chars: tools
+            .iter()
+            .map(|t| providers::ollama::ollama_tool_def(t).to_string().chars().count())
+            .sum(),
+    }
+}
+
+/// Size this chat's tool catalogue for the context bar. Every definition goes
+/// out with every request and the bar never counted them — while twenty
+/// tools took ~7K of an 8K window and replies came back cut off. The same
+/// catalogue `chat_stream` builds, except the MCP tools come from the cache
+/// only: a display-only read has no business starting servers, so they
+/// count once a send has listed them.
+#[tauri::command]
+pub async fn chat_tools_size(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<ChatToolsSize, String> {
+    let mut tools = mcp::cached_tools(&state.mcp_tools_cache).await.unwrap_or_default();
+    // As the send reads it: the folder counts only while Workspace files is
+    // on and it still resolves to a directory.
+    let workspace_tools_on = state
+        .db
+        .get_setting(crate::tools::fs::SETTING_KEY)
+        .ok()
+        .flatten()
+        .as_deref()
+        == Some("true");
+    let stored_root = if workspace_tools_on {
+        state.db.get_session(&session_id).map_err(err)?.and_then(|s| s.workspace_root)
+    } else {
+        None
+    };
+    let (roots, db) = (state.skill_roots.clone(), state.db.clone());
+    let (has_workspace, skill_tools) = tokio::task::spawn_blocking(move || {
+        let has_workspace = stored_root.is_some_and(|stored| {
+            std::path::Path::new(&stored).canonicalize().is_ok_and(|p| p.is_dir())
+        });
+        (has_workspace, crate::skills::prepare_turn(&roots, &db, &session_id).tools)
+    })
+    .await
+    .map_err(|e| format!("tools size task panicked: {e}"))?;
+    tools.extend(local_tool_defs(&state.db, has_workspace, false));
+    tools.extend(skill_tools);
+    Ok(tools_size(&tools))
+}
+
 /// Whether a workspace without a `LOACHFILE.md` borrows its `CLAUDE.md` or
 /// `AGENTS.md`. On by default: only an explicit `"false"` turns it off.
 fn instructions_fallback_on(db: &crate::db::Database) -> bool {
@@ -3097,19 +3175,11 @@ pub async fn chat_stream(
         // `no_tools`: its overlay has nowhere to show a tool call, and a
         // generated file (the pdf tool) was silently lost.
         if !request.no_tools {
-            request.tools.extend(crate::tools::builtin::enabled_builtin_defs(
+            request.tools.extend(local_tool_defs(
                 &db,
                 request.workspace_root.is_some(),
+                request.private,
             ));
-            // Not in the registry: a run is a process, asked about every
-            // time (`tools::run_script`). Never in a private request, which
-            // promises nothing leaves this machine: a process can reach the
-            // network, and only the renderer's `no_tools` kept it out.
-            if !request.private && crate::tools::run_script::enabled(&db) {
-                request
-                    .tools
-                    .push(crate::tools::run_script::tool_def(request.workspace_root.is_some()));
-            }
         }
         request.tools.extend(skill_tools);
 
@@ -5062,6 +5132,33 @@ mod tests {
 
         // A row nothing knows about is treated as new.
         assert!(save_changes_what_runs(&db, &McpServer { id: "gone".into(), ..running }));
+    }
+
+    /// The context bar sizes the same local tools the send adds: switched-on
+    /// built-ins, the workspace ones only with a folder, `run_script` never
+    /// in a private request — measured as the provider serializes them.
+    #[test]
+    fn local_tools_are_listed_and_sized_as_the_send_sends_them() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let db = crate::db::Database::open(&dir.path().join("loach.db")).expect("open");
+        db.migrate().expect("migrate");
+        assert_eq!(tools_size(&local_tool_defs(&db, true, false)), ChatToolsSize { count: 0, chars: 0 });
+
+        db.set_setting("calculate_tool_enabled", "true").unwrap();
+        db.set_setting(crate::tools::fs::SETTING_KEY, "true").unwrap();
+        db.set_setting(crate::tools::run_script::SETTING_KEY, "true").unwrap();
+        let names = |defs: Vec<mcp::McpToolDef>| defs.into_iter().map(|d| d.name).collect::<Vec<_>>();
+        assert_eq!(names(local_tool_defs(&db, false, false)), ["calculate", "run_script"]);
+        assert_eq!(local_tool_defs(&db, true, false).len(), 2 + 8, "the eight workspace tools");
+        assert_eq!(names(local_tool_defs(&db, false, true)), ["calculate"]);
+
+        let defs = local_tool_defs(&db, false, false);
+        let size = tools_size(&defs);
+        let sent = serde_json::to_string(&defs.iter().map(providers::ollama::ollama_tool_def).collect::<Vec<_>>())
+            .unwrap();
+        assert_eq!(size.count, 2);
+        // The array's brackets and comma aside, the same characters.
+        assert_eq!(size.chars, sent.chars().count() - 3);
     }
 
     /// The CRLF-injection guard on MCP headers: names are RFC 7230 tokens,

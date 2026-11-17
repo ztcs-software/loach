@@ -15,6 +15,7 @@ import {
   stripSummaryBlock,
   SUMMARY_END_TAG,
   SUMMARY_START_TAG,
+  TOOL_CHARS_PER_TOKEN,
 } from "./contextUsage";
 import { inlineTextAttachments } from "./files";
 import type { Attachment, GenerationParams, Message } from "@/types";
@@ -188,6 +189,19 @@ describe("computeContextUsage — project instructions", () => {
     const withMemories = computeContextUsage(messages, "be brief", NO_PARAMS, null, "m".repeat(800));
     expect(withMemories.memoriesTokens).toBe(200);
     expect(withMemories.used).toBe(without.used + 200);
+  });
+
+  // Twenty-three tools took 7.2K of an 8K window, and the bar showed the
+  // chat nearly empty while replies came back cut off.
+  it("counts the tool definitions every request carries, at the JSON rate", () => {
+    const messages = [msg("user", "hello")];
+    const without = computeContextUsage(messages, "be brief", NO_PARAMS);
+    const withTools = computeContextUsage(messages, "be brief", NO_PARAMS, null, null, 0, 26_935);
+    expect(without.toolsTokens).toBe(0);
+    expect(withTools.toolsTokens).toBe(Math.ceil(26_935 / TOOL_CHARS_PER_TOKEN));
+    expect(withTools.toolsTokens).toBeGreaterThan(7_000);
+    expect(withTools.used).toBe(without.used + withTools.toolsTokens);
+    expect(withTools.ratio).toBeGreaterThan(0.85);
   });
 });
 

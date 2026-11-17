@@ -454,6 +454,7 @@ pub fn run() {
             commands::clear_session_workspace,
             commands::open_session_workspace,
             commands::read_workspace_instructions,
+            commands::chat_tools_size,
             commands::skills_list,
             commands::skill_set_enabled,
             commands::skill_import,

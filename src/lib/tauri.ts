@@ -4,6 +4,7 @@ import type {
   AdminEvent,
   ChatLabel,
   ChatRequest,
+  ChatToolsSize,
   FetchedPage,
   Folder,
   GlobalMemory,
@@ -297,6 +298,14 @@ export function readWorkspaceInstructions(
 ): Promise<WorkspaceInstructions | null> {
   if (!isTauri) return notInTauri(null);
   return invoke("read_workspace_instructions", { sessionId });
+}
+
+/** The tool definitions the chat's next send will carry, for the context
+ *  usage estimate. MCP tools count once a send has listed them: this never
+ *  starts a server. */
+export function chatToolsSize(sessionId: string): Promise<ChatToolsSize> {
+  if (!isTauri) return notInTauri({ count: 0, chars: 0 });
+  return invoke("chat_tools_size", { sessionId });
 }
 
 // ------------ skills ------------
