@@ -3,7 +3,7 @@ import { AlertTriangle, FolderOpen, Loader2, Plus, Puzzle, RefreshCw, Terminal }
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
-import { importSkill, openSkillsFolder } from "@/lib/tauri";
+import { importSkill, openExternal, openSkillsFolder } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useSkillStore } from "@/stores/skillStore";
@@ -79,8 +79,16 @@ export function SkillsTab() {
       <SectionTitle>Skills</SectionTitle>
       <p className="text-[13px] text-foreground/55">
         A skill is a folder with a <span className="font-mono">SKILL.md</span> that teaches the model
-        how to do a particular task, sometimes with extra files and scripts. Skills made for other
-        agents work here too.
+        how to do a particular task, sometimes with extra files and scripts. Loach uses the open
+        Agent Skills format from{" "}
+        <button
+          type="button"
+          onClick={() => void openExternal("https://agentskills.io")}
+          className="underline underline-offset-2 hover:text-foreground"
+        >
+          agentskills.io
+        </button>
+        , so skills made for other agents work here too.
       </p>
 
       <div className="flex items-start justify-between gap-4">
