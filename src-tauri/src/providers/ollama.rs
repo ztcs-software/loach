@@ -1362,7 +1362,7 @@ fn emit_metrics(
 /// value when the model's Modelfile sets no `num_ctx` and the
 /// `default_num_ctx` setting is missing or unusable — the size a new chat
 /// with that model then asks for. Keep in sync with the TS default.
-pub const DEFAULT_NUM_CTX: u32 = 8192;
+pub const DEFAULT_NUM_CTX: u32 = 16384;
 
 /// Build the Ollama `options` object for a preload so the warmed runner is
 /// sized like the one the first real chat request will ask for. `num_ctx` is

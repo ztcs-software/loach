@@ -4,6 +4,7 @@
 // IPC boundary.
 
 import { describe, it, expect } from "vitest";
+import { DEFAULT_PARAMS } from "@/types";
 import { defaultNumCtx, modelContextLength, parseModelParameters } from "./modelParams";
 
 describe("parseModelParameters", () => {
@@ -40,10 +41,10 @@ describe("defaultNumCtx", () => {
     expect(defaultNumCtx(65536, 0)).toBe(65536);
   });
 
-  it("falls back to 8192 for a setting that isn't a window", () => {
+  it("falls back to the app default for a setting that isn't a window", () => {
     // `Number()` of a bad settings row, or one a backup carried in.
     for (const bad of [NaN, 0, -1, 4096.5, 2 ** 32, "32768", undefined]) {
-      expect(defaultNumCtx(bad)).toBe(8192);
+      expect(defaultNumCtx(bad)).toBe(DEFAULT_PARAMS.num_ctx);
     }
   });
 });

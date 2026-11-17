@@ -66,7 +66,7 @@ describe("Private Chat request params", () => {
 
   it("sends the app defaults and the global Thinking default when nothing was changed", async () => {
     const params = await sentParams();
-    expect(params.num_ctx).toBe(8192);
+    expect(params.num_ctx).toBe(16384);
     expect(params.temperature).toBe(0.7);
     expect(params.think).toBe(false);
   });

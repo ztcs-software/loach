@@ -50,8 +50,8 @@ export function modelContextLength(
 }
 
 /** The window a chat gets when nothing above the app default sets one:
- *  Settings' default context length (`setting`; 8192 when that isn't a
- *  usable window), capped at the model's maximum when known — a default
+ *  Settings' default context length (`setting`; `DEFAULT_PARAMS.num_ctx`
+ *  when that isn't a usable window), capped at the model's maximum when known — a default
  *  above it would have the context bar promise a window the model doesn't
  *  have. */
 export function defaultNumCtx(setting: unknown, modelMax?: number): number {

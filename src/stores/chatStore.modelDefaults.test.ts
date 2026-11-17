@@ -7,7 +7,7 @@
 // panel happened to be opened.
 
 import { describe, it, expect, vi } from "vitest";
-import { OPENAI_COMPAT_NUM_CTX, type OllamaShowResponse, type Session } from "@/types";
+import { DEFAULT_SETTINGS, OPENAI_COMPAT_NUM_CTX, type OllamaShowResponse, type Session } from "@/types";
 
 vi.mock("@/lib/tauri", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/tauri")>();
@@ -127,6 +127,6 @@ describe("Settings' default context length", () => {
     expect(await send(chat)).toBe(4096);
 
     expect(await send({ ...chat, params_json: JSON.stringify({ num_ctx: 65536 }) })).toBe(65536);
-    useSettingsStore.setState({ default_num_ctx: 8192 });
+    useSettingsStore.setState({ default_num_ctx: DEFAULT_SETTINGS.default_num_ctx });
   });
 });

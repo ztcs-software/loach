@@ -409,7 +409,7 @@ export interface GenerationParams {
 /** Context window assumed for an OpenAI-compatible chat that doesn't set
  *  `num_ctx` itself. Those servers don't report their window and ignore
  *  `num_ctx`, so it only sizes Library sources and the context bar — where
- *  DEFAULT_PARAMS' 8192 made a 128k model read as nearly full after a few
+ *  the Ollama default (8192 then) made a 128k model read as nearly full after a few
  *  turns and pushed its sources down to excerpts. */
 export const OPENAI_COMPAT_NUM_CTX = 32768;
 
@@ -419,7 +419,7 @@ export const DEFAULT_PARAMS: GenerationParams = {
   top_k: 40,
   min_p: 0.05,
   max_tokens: 4096,
-  num_ctx: 8192,
+  num_ctx: 16384,
   repeat_penalty: 1.1,
   frequency_penalty: 0,
   presence_penalty: 0,
@@ -742,7 +742,7 @@ export const DEFAULT_SETTINGS: Settings = {
   skill_scripts_enabled: false,
   run_script_enabled: false,
   ollama_keep_alive: "5m",
-  default_num_ctx: 8192,
+  default_num_ctx: 16384,
   thinking_default: true,
   default_tone_id: "default",
   onboarding_completed: false,
