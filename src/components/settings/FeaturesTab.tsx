@@ -128,14 +128,11 @@ export function FeaturesTab() {
                         Global memories
                       </Label>
                       <p className="mt-1 text-[11px] text-foreground/50">
-                        Remember durable facts about you across every chat,
-                        not just chats inside a Space. Chats outside a Space
-                        save here; Space chats keep their own memory but see
-                        these too. Off by default — when on, every reply
-                        triggers a second, hidden model call to extract facts.
-                        They're sent with every chat, whichever provider it
-                        uses — a fact learned talking to a local model also
-                        reaches a cloud one. Never used in Private Chat.
+                        Remember facts about you across all chats. After each
+                        reply, an extra background request picks out what's
+                        worth keeping. The facts go with every chat, cloud
+                        providers included. Space chats keep their own memory
+                        but see these too. Never used in Private Chat.
                       </p>
                     </div>
                     <Switch id="setting-global-memory"
@@ -196,13 +193,10 @@ export function FeaturesTab() {
                     Default context length
                   </Label>
                   <p className="mt-1 text-[11px] text-foreground/50">
-                    How much of the conversation a chat's model can see at
-                    once. Larger windows remember more but take more VRAM;
-                    past what fits, Ollama runs part of the model on the CPU
-                    and replies slow down. Capped at each model's own
-                    maximum. A model's Modelfile, a Space, or a chat's
-                    Parameters panel can set their own, and win. Ignored by
-                    OpenAI API providers.
+                    How much of the conversation the model can see at once.
+                    Bigger remembers more but uses more VRAM, and replies slow
+                    down once it no longer fits. Ollama only; a chat, Space or
+                    model with its own setting keeps it.
                   </p>
                   <ContextLengthSwitch
                     value={settings.default_num_ctx}

@@ -36,12 +36,10 @@ export const TOOL_TOGGLES: {
     blurb: "Read pages from URLs in your message",
     description: (
       <>
-        When your message contains an{" "}
-        <span className="font-mono">http(s)://</span> URL,
-        Loach downloads the page, extracts the readable text,
-        and appends it to the prompt so the model can read it.
-        Up to 5 URLs per message, 5&nbsp;MB each, 30&nbsp;s
-        timeout. Private IPs are blocked.
+        When your message has a link in it, Loach downloads the page and adds
+        its text to your message so the model can read it. Up to 5 links per
+        message, 5&nbsp;MB and 30&nbsp;seconds each. Private network
+        addresses are blocked.
       </>
     ),
   },
@@ -52,13 +50,8 @@ export const TOOL_TOGGLES: {
     blurb: "Exact math instead of guessed arithmetic",
     description: (
       <>
-        Exposes a built-in{" "}
-        <span className="font-mono">calculate</span> tool the
-        model can call mid-response to evaluate math
-        expressions. Local models often miscalculate
-        multi-step arithmetic; this gives them an exact
-        answer instead. Runs entirely in-process — no
-        network.
+        Lets the model do math exactly instead of guessing. Local models often
+        get multi-step arithmetic wrong.
       </>
     ),
   },
@@ -69,12 +62,9 @@ export const TOOL_TOGGLES: {
     blurb: "Date maths, timezones, business days",
     description: (
       <>
-        Exposes a{" "}
-        <span className="font-mono">datetime</span> tool for
-        parsing, formatting, and arithmetic on dates — DST-aware
-        timezone conversion, "47 business days from today",
-        weekday lookup. Local models pick wrong weekdays and
-        miscount business days; chrono is exact. In-process.
+        Date math, time zones (daylight saving included), weekdays and
+        business days, like "47 business days from today". Models often pick
+        the wrong weekday or miscount.
       </>
     ),
   },
@@ -85,11 +75,8 @@ export const TOOL_TOGGLES: {
     blurb: "Exact character, word, and line counts",
     description: (
       <>
-        Exposes a <span className="font-mono">count</span>{" "}
-        tool for exact character / byte / word / line /
-        substring counts. Tokenization hides character
-        identity from the model — this fixes the "how many
-        r's in strawberry" class of failure. In-process.
+        Exact counts of characters, words, lines, or how often something
+        appears. Fixes the "how many r's in strawberry" kind of mistake.
       </>
     ),
   },
@@ -100,11 +87,8 @@ export const TOOL_TOGGLES: {
     blurb: "Real SHA-2 digests, never fabricated",
     description: (
       <>
-        Exposes a <span className="font-mono">hash</span>{" "}
-        tool for SHA-224 / SHA-256 / SHA-384 / SHA-512
-        digests over UTF-8, hex, or base64 input. Models
-        will fabricate a digest that looks plausible but
-        isn't — this gives an exact one. In-process.
+        SHA-224, SHA-256, SHA-384 and SHA-512 hashes. Without it, models make
+        up hashes that look right but aren't.
       </>
     ),
   },
@@ -115,12 +99,8 @@ export const TOOL_TOGGLES: {
     blurb: "Generate real v4 / v7 UUIDs",
     description: (
       <>
-        Exposes a <span className="font-mono">uuid</span>{" "}
-        tool that generates v4 (random) or v7
-        (time-ordered) UUIDs, up to 100 per call. Models
-        will hallucinate UUID-shaped strings that
-        eventually collide — this generates real ones.
-        In-process.
+        Real v4 (random) or v7 (time-ordered) UUIDs, up to 100 at a time,
+        instead of made-up ones that can repeat.
       </>
     ),
   },
@@ -131,10 +111,8 @@ export const TOOL_TOGGLES: {
     blurb: "Encode and decode without garbling",
     description: (
       <>
-        Exposes a <span className="font-mono">base64</span>{" "}
-        tool for standard / URL-safe encode and decode.
-        Models routinely garble padding or mix alphabets —
-        this just does it right. In-process.
+        Base64 encoding and decoding, standard or URL-safe, without the
+        padding mistakes models make by hand.
       </>
     ),
   },
@@ -145,11 +123,8 @@ export const TOOL_TOGGLES: {
     blurb: "Validate, pretty-print, extract values",
     description: (
       <>
-        Exposes a <span className="font-mono">json</span>{" "}
-        tool that pretty-prints, validates, or extracts a
-        value at a JSON Pointer path. Catches the
-        almost-valid JSON (trailing commas, smart quotes)
-        models like to produce. In-process.
+        Checks, formats and pulls values out of JSON. Catches almost-valid
+        JSON, like trailing commas or curly quotes.
       </>
     ),
   },
@@ -160,13 +135,9 @@ export const TOOL_TOGGLES: {
     blurb: "Exact factors, from km↔mi to parsecs",
     description: (
       <>
-        Exposes a{" "}
-        <span className="font-mono">unit_convert</span> tool
-        with a curated factor table for length, mass,
-        temperature, volume, area, speed, time, energy,
-        and pressure — including uncommon units like
-        furlong, troy ounce, parsec. Models hallucinate
-        factors for anything past km↔mi. In-process.
+        Exact conversions for length, weight, temperature, volume, area,
+        speed, time, energy and pressure, down to furlongs, troy ounces and
+        parsecs.
       </>
     ),
   },
@@ -174,14 +145,11 @@ export const TOOL_TOGGLES: {
     key: "diff_text_tool_enabled",
     icon: Diff,
     title: "Text diff",
-    blurb: "Unified diffs by line, word, or character",
+    blurb: "Exact differences by line, word, or character",
     description: (
       <>
-        Exposes a <span className="font-mono">diff_text</span>{" "}
-        tool that computes a unified diff between two
-        strings, by line, word, or character. Models try
-        to eyeball diffs and miss small changes in long
-        inputs. In-process.
+        Shows exactly what changed between two texts, by line, word or
+        character. Models tend to miss small changes in long text.
       </>
     ),
   },
@@ -192,12 +160,8 @@ export const TOOL_TOGGLES: {
     blurb: "Lexical, natural, and numeric sorting",
     description: (
       <>
-        Exposes a <span className="font-mono">sort</span>{" "}
-        tool for lexical, natural, and numeric line sort
-        with reverse / unique / case-insensitive flags.
-        Natural sort (file1, file2, file10 — not file1,
-        file10, file2) is easy to get wrong by hand.
-        In-process.
+        Sorts lines alphabetically, by number, or naturally (file2 before
+        file10), with options to reverse, drop duplicates and ignore case.
       </>
     ),
   },
@@ -208,12 +172,9 @@ export const TOOL_TOGGLES: {
     blurb: "CIDR containment and subnet info",
     description: (
       <>
-        Exposes an <span className="font-mono">ip</span>{" "}
-        tool for CIDR containment ("does 10.0.5.7 fall in
-        10.0.0.0/16?") and subnet info (network,
-        broadcast, first/last usable host, total). IPv4
-        and IPv6. Easy to get wrong on /23, /127, or
-        anything past a /24. In-process.
+        Checks whether an address is in a range, like 10.0.5.7 in
+        10.0.0.0/16, and works out subnet details such as the first and last
+        usable address. IPv4 and IPv6.
       </>
     ),
   },
@@ -224,18 +185,10 @@ export const TOOL_TOGGLES: {
     blurb: "Generate downloadable PDF documents",
     description: (
       <>
-        Exposes a <span className="font-mono">pdf</span>{" "}
-        tool the model can call to produce a downloadable
-        PDF from a structured spec — headings, paragraphs,
-        bullet / numbered lists, horizontal rules, page
-        breaks, and simple tables. The result attaches to
-        the assistant message and opens in the built-in
-        viewer. Renders Unicode text (Latin, European
-        accents, common punctuation and currency) via a
-        bundled font; characters outside that set (e.g.
-        CJK, emoji) become <span className="font-mono">?</span>.
-        Image blocks and merging existing PDFs aren't
-        supported yet. In-process.
+        Lets the model make a PDF with headings, paragraphs, lists, tables
+        and page breaks, which you can open and download from its reply.
+        Latin-script text only: Cyrillic, Greek, CJK and emoji show as{" "}
+        <span className="font-mono">?</span>. No images yet.
       </>
     ),
   },
@@ -246,25 +199,14 @@ export const TOOL_TOGGLES: {
     blurb: "Let the model work in a folder you pick",
     description: (
       <>
-        Exposes{" "}
-        <span className="font-mono">list_directory</span>,{" "}
-        <span className="font-mono">find_files</span>,{" "}
-        <span className="font-mono">read_file</span>,{" "}
-        <span className="font-mono">search_files</span>,{" "}
-        <span className="font-mono">write_file</span>,{" "}
-        <span className="font-mono">edit_file</span>,{" "}
-        <span className="font-mono">move_file</span> and{" "}
-        <span className="font-mono">delete_file</span>, scoped to one directory
-        you choose per chat with the <span className="font-mono">+</span>{" "}
-        button next to the message box. Nothing outside that directory is
-        reachable, and chats without one see no file tools at all. Every
-        write, edit, move and deletion asks you first, showing the path and
-        the change, unless you allow that tool for the chat; deletions take
-        one file or empty directory at a time, and
-        there is no shell. Off until you pick a folder, which switches this
-        on. The tools run in-process, but what they read becomes part of the
-        conversation — with a cloud provider, those file contents are sent to
-        it like any other message.
+        Lets the model read, search, create, edit, move and delete files in a
+        folder you pick for a chat with the{" "}
+        <span className="font-mono">+</span> button by the message box. It
+        can't reach anything outside that folder. Every change asks you first
+        unless you allow it for the chat (edits to the folder's instructions
+        or <span className="font-mono">.git</span> always ask). Turns on by
+        itself when you pick a folder. With a cloud provider, the files it
+        reads are sent there.
       </>
     ),
   },
@@ -280,18 +222,12 @@ export const RUN_SCRIPT_TOGGLE: (typeof TOOL_TOGGLES)[number] = {
   blurb: "Run code the model writes, asking every time",
   description: (
     <>
-      Exposes a <span className="font-mono">run_script</span> tool: the model
-      can write a Python, bash, Node.js or PowerShell script and run it with
-      what's installed on this computer, or run a{" "}
-      <span className="font-mono">.py</span>, <span className="font-mono">.sh</span>,{" "}
-      <span className="font-mono">.js</span> or <span className="font-mono">.ps1</span>{" "}
-      file in the chat's workspace folder. Every run asks you first, showing
-      the code, the exact command and the folder it runs in — there is no
-      "allow for this chat". A script runs as you, with your access to every
-      file on this computer, not only the chat's folder. It runs in the chat's
-      workspace folder if it has one, otherwise in a temporary folder deleted
-      afterwards, for up to 5 minutes; Stop ends it. Not in Private Chat.
-      Scripts that ship with skills have their own switch in Settings → Skills.
+      Lets the model write a Python, bash, Node.js or PowerShell script and
+      run it with what's installed on this computer, or run a script file
+      from the chat's folder. Every run asks you first and shows the code and
+      the command. A script runs as you, so it can reach any file and the
+      network. Runs stop after 5 minutes. Not in Private Chat. Skill scripts
+      have their own switch in Settings → Skills.
     </>
   ),
 };
@@ -349,12 +285,12 @@ export function InstructionsFallbackToggle() {
       <div className="min-w-0">
         <Label htmlFor="setting-instructions-fallback">Use CLAUDE.md or AGENTS.md</Label>
         <p className="mt-1 text-[11px] text-foreground/50">
-          A folder without a <span className="font-mono">LOACHFILE.md</span>{" "}
-          uses its <span className="font-mono">CLAUDE.md</span>, else its{" "}
-          <span className="font-mono">AGENTS.md</span>, as project
-          instructions instead. Those are written for other coding agents, which
-          may have tools the model lacks — turn this off to send only{" "}
-          <span className="font-mono">LOACHFILE.md</span>.
+          The model gets the folder's{" "}
+          <span className="font-mono">LOACHFILE.md</span> as project
+          instructions. If there isn't one, it gets{" "}
+          <span className="font-mono">CLAUDE.md</span> or{" "}
+          <span className="font-mono">AGENTS.md</span> instead (made for Claude
+          Code and Codex). Turn off if they mention tools Loach doesn't have.
         </p>
       </div>
       <Switch id="setting-instructions-fallback"

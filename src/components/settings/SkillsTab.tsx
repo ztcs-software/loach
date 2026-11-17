@@ -78,9 +78,9 @@ export function SkillsTab() {
     <>
       <SectionTitle>Skills</SectionTitle>
       <p className="text-[13px] text-foreground/55">
-        Skills are folders with a <span className="font-mono">SKILL.md</span> that teach the model
-        a kind of task — instructions, plus reference files and scripts it can use. They follow the
-        open Agent Skills format, so skills made for other agents work here too.
+        A skill is a folder with a <span className="font-mono">SKILL.md</span> that teaches the model
+        how to do a particular task, sometimes with extra files and scripts. Skills made for other
+        agents work here too.
       </p>
 
       <div className="flex items-start justify-between gap-4">
@@ -90,11 +90,10 @@ export function SkillsTab() {
             Use skills
           </Label>
           <p className="mt-1 text-[11px] text-foreground/50">
-            The model sees the name and description of every enabled skill, and loads one's
-            instructions when your request matches it; <span className="font-mono">/skill</span>{" "}
-            loads one yourself. A loaded skill stays on for the rest of the chat — remove its chip
-            above the message box to drop it. Each enabled skill costs a few dozen tokens on every
-            message, so switch off the ones you don't use. Not in Private Chat.
+            The model picks a skill when your request fits it, or you can load one with{" "}
+            <span className="font-mono">/skill</span>. It stays for the rest of the chat; remove its
+            chip above the message box to drop it. Every enabled skill's name and description go
+            with each message, so turn off the ones you don't use. Not in Private Chat.
           </p>
         </div>
         <Switch id="setting-skills-enabled"
@@ -112,14 +111,10 @@ export function SkillsTab() {
             Let skills run scripts
           </Label>
           <p className="mt-1 text-[11px] text-foreground/50">
-            Lets the model run the <span className="font-mono">.py</span>,{" "}
-            <span className="font-mono">.sh</span>, <span className="font-mono">.js</span> and{" "}
-            <span className="font-mono">.ps1</span> scripts a skill ships with, using the Python,
-            bash, Node.js or PowerShell installed on this computer. Every run asks you first and
-            shows the exact command. A script runs as you, with your access to every file — not
-            only the chat's folder — so allow runs only from skills you trust. It runs in the
-            chat's workspace folder if it has one, otherwise in the skill's folder, for up to 5
-            minutes; Stop ends it.
+            Lets the model run the Python, bash, Node.js or PowerShell scripts a skill comes with,
+            using what's installed on this computer. Every run asks you first and shows the command.
+            A script runs as you, so it can reach any file and the network: only allow skills you
+            trust. Runs stop after 5 minutes.
           </p>
         </div>
         <Switch id="setting-skill-scripts"

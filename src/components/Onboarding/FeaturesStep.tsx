@@ -82,7 +82,7 @@ export function FeaturesStep({ onClose }: { onClose: () => void }) {
         <FeatureRow
           icon={<BookMarked className="h-4 w-4" />}
           title="Global memories"
-          description="Remember durable facts about you across every chat, not just chats inside a Space. When on, every reply triggers a second, hidden model call to extract facts, and the facts go with every chat — local or cloud provider alike. Never used in Private Chat."
+          description="Remember facts about you across all chats. After each reply, an extra background request picks out what's worth keeping. The facts go with every chat, cloud providers included. Never used in Private Chat."
           checked={draft.global_memory_enabled}
           onChange={(v) => set("global_memory_enabled", v)}
         />
@@ -107,9 +107,8 @@ export function FeaturesStep({ onClose }: { onClose: () => void }) {
           <div className="min-w-0 flex-1">
             <p className="text-[13px] font-medium">Default context length</p>
             <p className="mt-0.5 text-[11.5px] leading-relaxed text-foreground/55">
-              How much of the conversation a new chat's model can see at once. Larger windows
-              remember more but take more VRAM; past what fits, replies slow down. Capped at each
-              model's own maximum. Only applies to Ollama models.
+              How much of the conversation the model can see at once. Bigger remembers more but
+              uses more VRAM, and replies slow down once it no longer fits. Ollama only.
             </p>
             <ContextLengthSwitch
               value={draft.default_num_ctx}
