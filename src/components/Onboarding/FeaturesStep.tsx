@@ -1,13 +1,15 @@
 import { useState } from "react";
-import { BookMarked, Brain, Clock } from "lucide-react";
+import { BookMarked, Brain, Clock, Gauge } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
+import { ContextLengthSwitch } from "@/components/settings/switches";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useOnboardingStore } from "@/stores/onboardingStore";
+import { DEFAULT_SETTINGS } from "@/types";
 import { StepShell } from "./StepShell";
 
 /**
- * Feature toggles. Three defaults that are easier to set once at onboarding
- * than to discover later in Settings:
+ * Feature defaults. Four that are easier to set once at onboarding than to
+ * discover later in Settings:
  *
  *   - Global memories: OFF by default. When on, every reply costs a
  *     second, hidden extraction call, so it's opt-in.
@@ -15,8 +17,10 @@ import { StepShell } from "./StepShell";
  *     and fixes the "what's today's date?" surprise.
  *   - Thinking: ON by default. Reasoning models default to thinking
  *     unless the model author says otherwise.
+ *   - Default context length: the app default. Too small and chats
+ *     forget early turns; too large and the model spills out of VRAM.
  *
- * All three are committed to settings on Continue *and* on Skip —
+ * All four are committed to settings on Continue *and* on Skip —
  * establishing defaults is the wizard's job, and none of these reaches the
  * network or changes what the model is allowed to do (global memory's extra
  * call goes to the provider the chat already uses, and Skip writes it OFF).
@@ -29,12 +33,14 @@ interface DraftFeatures {
   global_memory_enabled: boolean;
   temporal_awareness: boolean;
   thinking_default: boolean;
+  default_num_ctx: number;
 }
 
 const RECOMMENDED: DraftFeatures = {
   global_memory_enabled: false,
   temporal_awareness: true,
   thinking_default: true,
+  default_num_ctx: DEFAULT_SETTINGS.default_num_ctx,
 };
 
 export function FeaturesStep({ onClose }: { onClose: () => void }) {
@@ -55,6 +61,7 @@ export function FeaturesStep({ onClose }: { onClose: () => void }) {
       update("global_memory_enabled", draft.global_memory_enabled),
       update("temporal_awareness", draft.temporal_awareness),
       update("thinking_default", draft.thinking_default),
+      update("default_num_ctx", draft.default_num_ctx),
     ]);
     goNext();
   };
@@ -93,6 +100,23 @@ export function FeaturesStep({ onClose }: { onClose: () => void }) {
           checked={draft.thinking_default}
           onChange={(v) => set("thinking_default", v)}
         />
+        <div className="flex items-start gap-3 rounded-xl border border-foreground/[0.06] bg-foreground/[0.015] p-3.5 transition-colors hover:bg-foreground/[0.025]">
+          <span className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-foreground/[0.05] text-foreground/75">
+            <Gauge className="h-4 w-4" />
+          </span>
+          <div className="min-w-0 flex-1">
+            <p className="text-[13px] font-medium">Default context length</p>
+            <p className="mt-0.5 text-[11.5px] leading-relaxed text-foreground/55">
+              How much of the conversation a new chat's model can see at once. Larger windows
+              remember more but take more VRAM; past what fits, replies slow down. Capped at each
+              model's own maximum. Only applies to Ollama models.
+            </p>
+            <ContextLengthSwitch
+              value={draft.default_num_ctx}
+              onChange={(v) => set("default_num_ctx", v)}
+            />
+          </div>
+        </div>
       </div>
     </StepShell>
   );
