@@ -298,7 +298,7 @@ export const RUN_SCRIPT_TOGGLE: (typeof TOOL_TOGGLES)[number] = {
 
 /** One row in Settings → Tools: icon, title, explanation, and the switch
  *  that flips its setting. Subscribes to just its own boolean so toggling
- *  one tool doesn't re-render the other twelve. `children` are sub-options
+ *  one tool doesn't re-render the others. `children` are sub-options
  *  shown under the row. */
 export function ToolToggleRow({
   tool,

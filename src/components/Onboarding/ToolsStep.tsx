@@ -8,12 +8,14 @@ import { cn } from "@/lib/utils";
 import { StepShell } from "./StepShell";
 
 /**
- * Tools step. Loach ships thirteen tools the model can call, and before this
- * screen existed every one of them was discover-by-accident — buried in
- * Settings → Tools with nothing in the product pointing there.
+ * Tools step. Loach ships thirteen built-in tool switches (twenty tools the
+ * model can call — Workspace files alone is eight), and before this screen
+ * existed every one of them was discover-by-accident — buried in Settings →
+ * Tools with nothing in the product pointing there.
  *
  * The utility tools open pre-set to a recommended selection (everything on
- * except the niche developer four: hash, UUID, base64, IP/CIDR), switchable
+ * except the niche developer four — hash, UUID, base64, IP/CIDR — and
+ * Workspace files; see `RECOMMENDED_OFF`), switchable
  * per tool or via the All OFF / Recommended / All ON presets. Because the
  * screen now *shows* a selection, the write rules are:
  *
@@ -22,7 +24,7 @@ import { StepShell } from "./StepShell";
  *   - **Skip** writes only what the user explicitly flipped. Skipping past
  *     is not consent to the recommended set.
  *   - **Web fetch** starts off regardless and is only ever written when
- *     touched. It is the one network-reaching switch in the app, and no
+ *     touched. It is the one network-reaching switch on this screen, and no
  *     default or preset may opt someone into networking.
  *
  * MCP gets a row with no switch — connecting a server needs a command,
@@ -125,7 +127,7 @@ export function ToolsStep({ onClose }: { onClose: () => void }) {
         <ToolRow
           icon={<Globe className="h-4 w-4" />}
           title="Web fetch"
-          description="When your message contains an http(s):// URL, Loach downloads the page and inlines the readable text so the model can read it. This is the only feature that reaches the network on your behalf."
+          description="When your message contains an http(s):// URL, Loach downloads the page and inlines the readable text so the model can read it. The only switch on this screen that reaches the network."
           checked={webFetch}
           onChange={(v) => {
             webFetchTouched.current = true;
@@ -159,8 +161,8 @@ export function ToolsStep({ onClose }: { onClose: () => void }) {
               <p className="text-[13px] font-medium">Tools</p>
               <p className="mt-0.5 text-[11.5px] leading-relaxed text-foreground/55">
                 Exact answers for the things language models reliably get wrong
-                — arithmetic, dates, hashes, unit conversion, JSON, diffs, and
-                more.
+                — arithmetic, dates, hashes, unit conversion, JSON, diffs —
+                plus PDF documents and files in a folder you pick.
               </p>
             </div>
             <PresetPicker active={activePreset} onPick={applyPreset} />
