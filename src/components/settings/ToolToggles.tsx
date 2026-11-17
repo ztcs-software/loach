@@ -272,7 +272,7 @@ export const TOOL_TOGGLES: {
 
 /** Settings → Tools → Run scripts. Not in `TOOL_TOGGLES`: onboarding offers
  *  those as in-process utilities, and its All ON preset would switch this
- *  on with them. */
+ *  on with them. Onboarding gives it its own row, outside the presets. */
 export const RUN_SCRIPT_TOGGLE: (typeof TOOL_TOGGLES)[number] = {
   key: "run_script_enabled",
   icon: Terminal,
