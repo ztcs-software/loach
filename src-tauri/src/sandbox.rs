@@ -22,8 +22,9 @@
 //!   Tauri or wry upgrade. (On macOS and Linux the scripts stay in the main
 //!   frame.)
 //! * **The app's `frame-src`** (`tauri.conf.json`) allows only this scheme,
-//!   which also stops the preview navigating itself to an outside URL — the
-//!   webview's navigation hook only sees the main frame.
+//!   which also stops the preview navigating itself to an outside URL — on
+//!   Windows the webview's navigation hook only sees the main frame (on
+//!   macOS and Linux it sees frames too, and lets only the host pages pass).
 //! * **The host page** (`assets/sandbox/preview.html`) covers what no CSP
 //!   directive does. It takes WebRTC away before the HTML runs (a peer
 //!   connection's ICE traffic reaches a STUN server regardless of

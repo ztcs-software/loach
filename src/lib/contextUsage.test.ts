@@ -203,6 +203,15 @@ describe("computeContextUsage — project instructions", () => {
     expect(withTools.used).toBe(without.used + withTools.toolsTokens);
     expect(withTools.ratio).toBeGreaterThan(0.85);
   });
+
+  // A loaded skill's SKILL.md goes out with every request too.
+  it("counts the loaded skills' instructions", () => {
+    const messages = [msg("user", "hello")];
+    const without = computeContextUsage(messages, "be brief", NO_PARAMS);
+    const withSkills = computeContextUsage(messages, "be brief", NO_PARAMS, null, null, 0, 0, 28_000);
+    expect(withSkills.skillsTokens).toBe(7_000);
+    expect(withSkills.used).toBe(without.used + 7_000);
+  });
 });
 
 describe("charsPerToken", () => {

@@ -422,6 +422,10 @@ fn local_tool_defs(
 pub struct ChatToolsSize {
     pub count: usize,
     pub chars: usize,
+    /// Characters of the instructions of the skills loaded in the chat,
+    /// which head its system prompt on every send — a `SKILL.md`'s whole
+    /// body each.
+    pub skills_chars: usize,
 }
 
 fn tools_size(tools: &[mcp::McpToolDef]) -> ChatToolsSize {
@@ -432,6 +436,7 @@ fn tools_size(tools: &[mcp::McpToolDef]) -> ChatToolsSize {
             .iter()
             .map(|t| providers::ollama::ollama_tool_def(t).to_string().chars().count())
             .sum(),
+        skills_chars: 0,
     }
 }
 
@@ -462,17 +467,20 @@ pub async fn chat_tools_size(
         None
     };
     let (roots, db) = (state.skill_roots.clone(), state.db.clone());
-    let (has_workspace, skill_tools) = tokio::task::spawn_blocking(move || {
+    let (has_workspace, skills) = tokio::task::spawn_blocking(move || {
         let has_workspace = stored_root.is_some_and(|stored| {
             std::path::Path::new(&stored).canonicalize().is_ok_and(|p| p.is_dir())
         });
-        (has_workspace, crate::skills::prepare_turn(&roots, &db, &session_id).tools)
+        (has_workspace, crate::skills::prepare_turn(&roots, &db, &session_id))
     })
     .await
     .map_err(|e| format!("tools size task panicked: {e}"))?;
     tools.extend(local_tool_defs(&state.db, has_workspace, false));
-    tools.extend(skill_tools);
-    Ok(tools_size(&tools))
+    tools.extend(skills.tools);
+    Ok(ChatToolsSize {
+        skills_chars: skills.prompt.map_or(0, |p| p.chars().count()),
+        ..tools_size(&tools)
+    })
 }
 
 /// Whether a workspace without a `LOACHFILE.md` borrows its `CLAUDE.md` or
@@ -5143,7 +5151,10 @@ mod tests {
         let dir = tempfile::TempDir::new().expect("tempdir");
         let db = crate::db::Database::open(&dir.path().join("loach.db")).expect("open");
         db.migrate().expect("migrate");
-        assert_eq!(tools_size(&local_tool_defs(&db, true, false)), ChatToolsSize { count: 0, chars: 0 });
+        assert_eq!(
+            tools_size(&local_tool_defs(&db, true, false)),
+            ChatToolsSize { count: 0, chars: 0, skills_chars: 0 }
+        );
 
         db.set_setting("calculate_tool_enabled", "true").unwrap();
         db.set_setting(crate::tools::fs::SETTING_KEY, "true").unwrap();

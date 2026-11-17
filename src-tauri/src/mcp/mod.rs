@@ -212,6 +212,9 @@ pub struct ToolsCacheState {
     /// A background re-probe of an expired entry is running, so another
     /// read doesn't start a second one.
     refreshing: bool,
+    /// Held by the probe a miss runs, so a second miss waits for its answer
+    /// instead of probing beside it (see [`aggregate_tools_cached`]).
+    probing: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl ToolsCacheState {
@@ -221,6 +224,29 @@ impl ToolsCacheState {
             let stale = errors.iter().any(|e| e.error == SLOT_BUSY);
             self.entry = Some(CachedTools { cached_at: Instant::now(), tools, errors, stale });
         }
+    }
+
+    /// The cached catalogue, when there is one, starting a background
+    /// re-probe when it has expired or skipped a busy server.
+    fn serve(
+        &mut self,
+        db: &Arc<Database>,
+        cache: &ToolsCache,
+    ) -> Option<(Vec<McpToolDef>, Vec<ServerError>)> {
+        let entry = self.entry.as_ref()?;
+        let answer = (entry.tools.clone(), entry.errors.clone());
+        if (entry.stale || entry.cached_at.elapsed() >= TOOLS_CACHE_TTL) && !self.refreshing {
+            self.refreshing = true;
+            let generation = self.generation;
+            let (db, cache) = (db.clone(), cache.clone());
+            tauri::async_runtime::spawn(async move {
+                let (tools, errors) = aggregate_tools(&db).await;
+                let mut guard = cache.lock().await;
+                guard.keep(generation, tools, errors);
+                guard.refreshing = false;
+            });
+        }
+        Some(answer)
     }
 }
 
@@ -240,32 +266,30 @@ pub fn new_tools_cache() -> ToolsCache {
 /// caller (and its cancel-aware `select!`) is unchanged; a cache hit
 /// simply resolves near-instantly.
 ///
-/// No single-flight guard on a miss: two simultaneous misses may both probe
-/// and the last writer wins — acceptable for a desktop app where concurrent
-/// sends to the same MCP set are rare, and far simpler than coordinating a
-/// barrier.
+/// One probe at a time on a miss: a second waits for the first and takes
+/// its answer. The typing warm-up (`mcp_warm`) is often still starting the
+/// servers when the send arrives, and a send probing beside it waited only
+/// [`SLOT_WAIT`] for each — so the reply went out without a slow server's
+/// tools, beside a notice blaming a call in another chat.
 pub async fn aggregate_tools_cached(
     db: &Arc<Database>,
     cache: &ToolsCache,
 ) -> (Vec<McpToolDef>, Vec<ServerError>) {
-    let generation = {
+    let probing = {
         let mut guard = cache.lock().await;
-        let generation = guard.generation;
-        if let Some(entry) = guard.entry.as_ref() {
-            let answer = (entry.tools.clone(), entry.errors.clone());
-            if (entry.stale || entry.cached_at.elapsed() >= TOOLS_CACHE_TTL) && !guard.refreshing {
-                guard.refreshing = true;
-                let (db, cache) = (db.clone(), cache.clone());
-                tauri::async_runtime::spawn(async move {
-                    let (tools, errors) = aggregate_tools(&db).await;
-                    let mut guard = cache.lock().await;
-                    guard.keep(generation, tools, errors);
-                    guard.refreshing = false;
-                });
-            }
+        if let Some(answer) = guard.serve(db, cache) {
             return answer;
         }
-        generation
+        guard.probing.clone()
+    };
+    let _probing = probing.lock().await;
+    let generation = {
+        let mut guard = cache.lock().await;
+        // Filled by the probe this one waited for.
+        if let Some(answer) = guard.serve(db, cache) {
+            return answer;
+        }
+        guard.generation
     };
     let (tools, errors) = aggregate_tools(db).await;
     // The config changed while this probe ran: its result is still the

@@ -1195,16 +1195,23 @@ impl Database {
         // columns: SQLite doesn't read virtual generated ones from an index.
         // Each added and backfilled on its own, so an interrupted migration
         // finishes on the next launch.
+        // In one transaction each, column and backfill: committed apart, a
+        // launch killed during the backfill kept the column, so the next
+        // one skipped the backfill and every item stayed at 0 / ''.
         if !has_column(&conn, "library_items", "chars")? {
             conn.execute_batch(
-                "ALTER TABLE library_items ADD COLUMN chars INTEGER NOT NULL DEFAULT 0;
-                 UPDATE library_items SET chars = CASE WHEN media = 'text' THEN length(content) ELSE 0 END;",
+                "BEGIN;
+                 ALTER TABLE library_items ADD COLUMN chars INTEGER NOT NULL DEFAULT 0;
+                 UPDATE library_items SET chars = CASE WHEN media = 'text' THEN length(content) ELSE 0 END;
+                 COMMIT;",
             )?;
         }
         if !has_column(&conn, "library_items", "preview")? {
             conn.execute_batch(
-                "ALTER TABLE library_items ADD COLUMN preview TEXT NOT NULL DEFAULT '';
-                 UPDATE library_items SET preview = CASE WHEN media = 'text' THEN substr(content, 1, 280) ELSE '' END;",
+                "BEGIN;
+                 ALTER TABLE library_items ADD COLUMN preview TEXT NOT NULL DEFAULT '';
+                 UPDATE library_items SET preview = CASE WHEN media = 'text' THEN substr(content, 1, 280) ELSE '' END;
+                 COMMIT;",
             )?;
         }
         conn.execute_batch(

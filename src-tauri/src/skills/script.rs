@@ -188,6 +188,23 @@ pub fn plan_file(root: &Path, rel: &str, args: &Value, cwd: &Path) -> Result<Pla
             "Loach runs .py, .sh, .js, .mjs, .cjs and .ps1 scripts, and `{rel}` isn't one of them."
         ));
     };
+    // Windows PowerShell reads a `.ps1` without a byte-order mark in the ANSI
+    // code page, while the card shows it as UTF-8: a letter's two bytes there
+    // can read as a quote here and end a string early, running a command the
+    // card showed as text. (Code the model sends is saved with the mark.)
+    if program == "powershell" {
+        let bytes = std::fs::read(&script).map_err(|e| format!("Couldn't read `{rel}`: {e}"))?;
+        let marked = [&[0xEF, 0xBB, 0xBF][..], &[0xFF, 0xFE], &[0xFE, 0xFF]]
+            .iter()
+            .any(|bom| bytes.starts_with(bom));
+        if !marked && !bytes.is_ascii() {
+            return Err(format!(
+                "`{rel}` has non-ASCII text but no byte-order mark, so Windows PowerShell would \
+                 read it in the ANSI code page — not as the approval card shows it. Save it as \
+                 UTF-8 with a byte-order mark (start it with U+FEFF), or use ASCII only."
+            ));
+        }
+    }
     let (args, stdin) = inputs(args)?;
     Ok(Plan {
         program: program.to_string(),
@@ -318,7 +335,8 @@ fn read_shown(path: &Path) -> Option<(String, u64)> {
 /// Windows PowerShell writes to a pipe in the console's OEM code page, so
 /// `zażółć ✓` came back `zaz�lc V`, and only code inside the process can
 /// change that. A `.ps1` runs through this wrapper instead: it switches the
-/// output to UTF-8, then runs the script named by [`PS_SCRIPT_VAR`] the way
+/// output to UTF-8 — and the input, which read the OEM code page too — then
+/// runs the script named by [`PS_SCRIPT_VAR`] the way
 /// `-File` would — the same arguments, its `exit` code, 1 when it throws.
 /// Standard input too: `-File` feeds it to `$input` only when the script's
 /// code names `$input` (otherwise `[Console]::In` reads it), and naming it
@@ -327,6 +345,7 @@ fn read_shown(path: &Path) -> Option<(String, u64)> {
 /// approval card shows the script's own command; this part is the same for
 /// every run.
 const PS_UTF8_WRAPPER: &str = r#"[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+[Console]::InputEncoding = [Text.UTF8Encoding]::new($false)
 $LoachScript = $env:LOACH_SCRIPT
 Remove-Item Env:LOACH_SCRIPT
 $LoachAst = [Management.Automation.Language.Parser]::ParseFile($LoachScript, [ref]$null, [ref]$null)
@@ -689,6 +708,23 @@ mod tests {
         assert_eq!(plan.preview().stdin_chars, Some(3));
     }
 
+    /// Windows PowerShell would read a mark-less `.ps1` in the ANSI code
+    /// page: `’` from `Ò`'s bytes is a quote to it.
+    #[cfg(windows)]
+    #[test]
+    fn refuses_a_non_ascii_ps1_without_a_byte_order_mark() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().canonicalize().unwrap();
+        let run = |text: &[u8]| {
+            fs::write(dir.join("x.ps1"), text).unwrap();
+            plan(&dir, &json!({ "script": "x.ps1" }), None)
+        };
+        let err = run("Write-Output 'CafÒ'".as_bytes()).unwrap_err();
+        assert!(err.contains("byte-order mark"), "{err}");
+        assert!(run(b"\xEF\xBB\xBFWrite-Output 'Caf\xC3\x92'").is_ok());
+        assert!(run(b"Write-Output 'Cafe'").is_ok());
+    }
+
     #[test]
     fn plans_code_under_the_name_it_is_saved_as() {
         let plan = plan_code("Python", "print(1)", &json!({ "args": ["x"] }), None).unwrap();
@@ -823,18 +859,19 @@ mod tests {
         // that names it.
         fs::write(tmp.path().join("lines.ps1"), "\"lines=$(@($input) -join ',')\"\r\nexit 4\r\n").unwrap();
         let dir = tmp.path().canonicalize().unwrap();
-        let plan = plan(&dir, &json!({ "script": "t.ps1", "args": ["arg"], "stdin": "input\r\n" }), None).unwrap();
+        let plan = plan(&dir, &json!({ "script": "t.ps1", "args": ["arg"], "stdin": "zażółć\r\n" }), None).unwrap();
         let r = run(plan).await;
         assert!(r.is_error);
         assert!(r.content_text.starts_with("Exit code 3."), "{}", r.content_text);
-        assert!(r.content_text.contains("--- stdout ---\ngot input and arg"), "{}", r.content_text);
+        // Read as UTF-8 too.
+        assert!(r.content_text.contains("--- stdout ---\ngot zażółć and arg"), "{}", r.content_text);
         // UTF-8, not the console's code page.
         assert!(r.content_text.contains("--- stderr ---\noops ✓"), "{}", r.content_text);
 
-        let plan = super::plan(&dir, &json!({ "script": "lines.ps1", "stdin": "a\r\nb\r\n" }), None).unwrap();
+        let plan = super::plan(&dir, &json!({ "script": "lines.ps1", "stdin": "a\r\nż\r\n" }), None).unwrap();
         let r = run(plan).await;
         assert!(r.content_text.starts_with("Exit code 4."), "{}", r.content_text);
-        assert!(r.content_text.contains("--- stdout ---\nlines=a,b"), "{}", r.content_text);
+        assert!(r.content_text.contains("--- stdout ---\nlines=a,ż"), "{}", r.content_text);
     }
 
     #[tokio::test]

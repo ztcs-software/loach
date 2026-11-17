@@ -51,6 +51,10 @@ export interface ContextUsageBreakdown {
    *  every turn. Counted on its own because it is the one
    *  backend-added layer that can be large, and the user can shrink it. */
   projectInstructionsTokens: number;
+  /** The instructions of the skills loaded in the chat, which the backend
+   *  puts at the head of the system prompt on every turn — a `SKILL.md`'s
+   *  whole body each. */
+  skillsTokens: number;
   /** The global and Space memory lists the send prepends to the system
    *  prompt — up to a few thousand characters each. */
   memoriesTokens: number;
@@ -65,7 +69,7 @@ export interface ContextUsageBreakdown {
   messageCount: number;
   /** Total estimated tokens that will be sent to the model on the next
    *  request: `systemPromptTokens + toolsTokens + projectInstructionsTokens
-   *  + memoriesTokens + sourcesTokens + messagesTokens`. */
+   *  + skillsTokens + memoriesTokens + sourcesTokens + messagesTokens`. */
   used: number;
   /** The effective context window for the next request — `params.num_ctx`
    *  with a sensible fallback when the field is missing. */
@@ -109,10 +113,14 @@ export function computeContextUsage(
   sourcesTokens = 0,
   /** Characters of tool definitions (`chatToolsSize`). */
   toolsChars = 0,
+  /** Characters of the loaded skills' instructions (`chatToolsSize`), at
+   *  the prose rate: only their length crosses over. */
+  skillsChars = 0,
 ): ContextUsageBreakdown {
   const systemPromptTokens = estimateTokens(systemPrompt);
   const toolsTokens = Math.ceil(toolsChars / TOOL_CHARS_PER_TOKEN);
   const projectInstructionsTokens = estimateTokens(projectInstructions);
+  const skillsTokens = Math.ceil(skillsChars / 4);
   const memoriesTokens = estimateTokens(memories);
 
   let messagesTokens = 0;
@@ -148,6 +156,7 @@ export function computeContextUsage(
     systemPromptTokens +
     toolsTokens +
     projectInstructionsTokens +
+    skillsTokens +
     memoriesTokens +
     sourcesTokens +
     messagesTokens;
@@ -161,6 +170,7 @@ export function computeContextUsage(
     systemPromptTokens,
     toolsTokens,
     projectInstructionsTokens,
+    skillsTokens,
     memoriesTokens,
     sourcesTokens,
     messagesTokens,

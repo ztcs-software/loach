@@ -59,10 +59,12 @@ export interface WorkspaceInstructions {
 }
 
 /** The tool definitions a send from a chat carries (`commands::ChatToolsSize`):
- *  how many, and their length as the providers serialize them. */
+ *  how many, and their length as the providers serialize them — and the
+ *  length of the loaded skills' instructions, which head its system prompt. */
 export interface ChatToolsSize {
   count: number;
   chars: number;
+  skills_chars: number;
 }
 
 /** An installed Agent Skill (`skills::Skill`): a folder with a `SKILL.md`,
@@ -466,8 +468,9 @@ export type StreamEvent =
   /** Stream ended naturally — provider emitted its EOF / `[DONE]` marker.
    *  `cut_off`: it stopped at a limit rather than at the end of the answer
    *  — Max Tokens, or the context window filling first. Mirrors
-   *  `src-tauri/src/stream.rs::CutOff`. */
-  | { kind: "done"; cut_off?: "max_tokens" | "context" }
+   *  `src-tauri/src/stream.rs::CutOff`. `tools`: the request carried tool
+   *  definitions. */
+  | { kind: "done"; cut_off?: "max_tokens" | "context"; tools?: boolean }
   /** Stream was cancelled mid-flight. Distinct from `done` so callers
    *  can avoid the "real completion" side-effects (memory extraction,
    *  unread dot) on an interrupted reply. Mirrors

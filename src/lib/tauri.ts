@@ -304,7 +304,7 @@ export function readWorkspaceInstructions(
  *  usage estimate. MCP tools count once a send has listed them: this never
  *  starts a server. */
 export function chatToolsSize(sessionId: string): Promise<ChatToolsSize> {
-  if (!isTauri) return notInTauri({ count: 0, chars: 0 });
+  if (!isTauri) return notInTauri({ count: 0, chars: 0, skills_chars: 0 });
   return invoke("chat_tools_size", { sessionId });
 }
 

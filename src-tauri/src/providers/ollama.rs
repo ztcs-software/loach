@@ -891,7 +891,7 @@ pub async fn chat_stream(
                     start,
                     tool_ctx.approval_wait(),
                 );
-                let _ = app.emit(&channel, StreamEvent::Done { cut_off });
+                let _ = app.emit(&channel, StreamEvent::Done { cut_off, tools: !req.tools.is_empty() });
                 registry.finish_own(&req.stream_id, &cancel);
                 return Ok(());
             }
@@ -1668,16 +1668,16 @@ mod tests {
 
         // An ordinary end is the same event as ever; a cut-off one says so.
         assert_eq!(
-            serde_json::to_value(StreamEvent::Done { cut_off: None }).unwrap(),
+            serde_json::to_value(StreamEvent::Done { cut_off: None, tools: false }).unwrap(),
             json!({ "kind": "done" })
         );
         assert_eq!(
-            serde_json::to_value(StreamEvent::Done { cut_off: Some(CutOff::MaxTokens) }).unwrap(),
+            serde_json::to_value(StreamEvent::Done { cut_off: Some(CutOff::MaxTokens), tools: false }).unwrap(),
             json!({ "kind": "done", "cut_off": "max_tokens" })
         );
         assert_eq!(
-            serde_json::to_value(StreamEvent::Done { cut_off: Some(CutOff::Context) }).unwrap(),
-            json!({ "kind": "done", "cut_off": "context" })
+            serde_json::to_value(StreamEvent::Done { cut_off: Some(CutOff::Context), tools: true }).unwrap(),
+            json!({ "kind": "done", "cut_off": "context", "tools": true })
         );
     }
 

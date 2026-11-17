@@ -870,7 +870,7 @@ pub fn touches_git_dir(root: &Path, args: &Value) -> bool {
 /// no card.
 pub fn touches_instructions(root: &Path, args: &Value, skill_dirs: &[PathBuf]) -> bool {
     let canon_root = root.canonicalize().ok();
-    let skill_dirs: Vec<PathBuf> = skill_dirs.iter().filter_map(|d| d.canonicalize().ok()).collect();
+    let skill_dirs: Vec<PathBuf> = skill_dirs.iter().filter_map(|d| canonical_prefix(d)).collect();
     ["path", "from", "to"]
         .iter()
         .filter_map(|key| args.get(*key)?.as_str())
@@ -882,9 +882,38 @@ pub fn touches_instructions(root: &Path, args: &Value, skill_dirs: &[PathBuf]) -
                         .as_deref()
                         .and_then(|r| p.strip_prefix(dunce::simplified(r)).ok())
                         .is_some_and(names_instructions)
-                        || skill_dirs.iter().any(|d| p.starts_with(dunce::simplified(d)))
+                        || skill_dirs.iter().any(|d| within(p, dunce::simplified(d)))
                 })
         })
+}
+
+/// `dir` with links resolved as far as it exists and the missing rest
+/// appended — how [`resolve_target`] spells a path under it. A skills folder
+/// that doesn't exist yet (`~/.agents/skills` on most installs) was dropped
+/// from [`touches_instructions`], so a standing grant let a write create the
+/// first skill there with no card.
+fn canonical_prefix(dir: &Path) -> Option<PathBuf> {
+    let mut missing = Vec::new();
+    let mut existing = dir;
+    loop {
+        if let Ok(canon) = existing.canonicalize() {
+            return Some(missing.into_iter().rev().fold(canon, |p, part| p.join(part)));
+        }
+        missing.push(existing.file_name()?);
+        existing = existing.parent()?;
+    }
+}
+
+/// Whether `path` is `dir` or inside it, names compared as a case-insensitive
+/// volume compares them ([`same_name`]): where `dir` doesn't exist yet,
+/// nothing has resolved how the call spelled it (`.AGENTS/skills`).
+fn within(path: &Path, dir: &Path) -> bool {
+    let mut path = path.components();
+    dir.components().all(|d| {
+        path.next().is_some_and(|p| {
+            same_name(&p.as_os_str().to_string_lossy(), &d.as_os_str().to_string_lossy())
+        })
+    })
 }
 
 /// Whether `rel`, relative to the workspace root, names one of
@@ -2672,8 +2701,13 @@ mod tests {
         let (_d, root) = workspace();
         let skills = root.join("home/.agents/skills");
         fs::create_dir_all(&skills).unwrap();
-        let dirs = [skills];
+        // A skills folder not made yet still counts: a write creates it.
+        let dirs = [skills, root.join("other/.agents/skills")];
         let hit = |args: Value| touches_instructions(&root, &args, &dirs);
+        assert!(hit(json!({ "path": "other/.agents/skills/x/SKILL.md" })));
+        assert!(hit(json!({ "path": "other/.AGENTS/Skills/x/SKILL.md" })));
+        assert!(hit(json!({ "from": "notes.md", "to": "other/.agents/skills/x/run.py" })));
+        assert!(!hit(json!({ "path": "other/.agents/notes.md" })));
 
         assert!(hit(json!({ "path": "LOACHFILE.md" })));
         assert!(hit(json!({ "path": "./loachfile.MD" })));

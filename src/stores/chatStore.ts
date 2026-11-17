@@ -1832,7 +1832,7 @@ async function startTask(task: QueueTask, get: Getter, set: Setter): Promise<boo
             // error line, instead of passing it off as a finished reply.
             const note =
               ev.cut_off === "context"
-                ? contextFullNote({ provider: task.request.provider, tools: true })
+                ? contextFullNote({ provider: task.request.provider, tools: !!ev.tools })
                 : CUT_OFF_NOTE;
             buf.content += `\n\n${note}`;
             pendingDirty.content = true;

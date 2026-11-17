@@ -34,15 +34,9 @@ export const useSkillStore = create<SkillState>((set, get) => ({
 
   setEnabled: async (name, enabled) => {
     await setSkillEnabled(name, enabled);
-    const catalog = get().catalog;
-    if (catalog) {
-      set({
-        catalog: {
-          ...catalog,
-          skills: catalog.skills.map((s) => (s.name === name ? { ...s, enabled } : s)),
-        },
-      });
-    }
+    // Re-read rather than patch the one row: the switch is kept under the
+    // skill's folder name too, which can be another skill's.
+    if (get().catalog) await get().loadCatalog();
   },
 
   loadSession: async (sessionId) => {

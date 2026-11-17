@@ -11,15 +11,24 @@ const HEADING = /^\s{0,3}#{1,6}(\s+|$)/;
 const BULLET = /^\s*[-*+]\s+(\[[ xX]\]\s+)?/;
 const ORDERED = /^\s*\d{1,9}[.)]\s+/;
 
-/** Inline markup stripped down to the words a voice should say. */
+// Private-use characters around an inline code span's index while the rest
+// of its line is stripped.
+const CODE_OPEN = String.fromCharCode(0xe000);
+const CODE_CLOSE = String.fromCharCode(0xe001);
+const CODE_SLOT = new RegExp(`${CODE_OPEN}(\\d+)${CODE_CLOSE}`, "g");
+
+/** Inline markup stripped down to the words a voice should say. Inline code
+ *  is set aside first and read as written: stripped with the rest,
+ *  `Vec<String>` lost its type as an HTML tag and `C:\Users` its slash. */
 function inlineText(line: string): string {
+  const code: string[] = [];
   return line
+    .replace(/(`+)(.+?)\1/g, (_, _ticks: string, span: string) => `${CODE_OPEN}${code.push(span) - 1}${CODE_CLOSE}`)
     .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
     .replace(/\[\^[^\]]+\]/g, "")
     .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
     .replace(/\[([^\]]+)\]\[[^\]]*\]/g, "$1")
     .replace(/<\/?[A-Za-z][^>]*>/g, " ")
-    .replace(/(`+)(.+?)\1/g, "$2")
     // `normalizeMath` has turned every vetted inline formula into `$$…$$`,
     // and left prices like "$5" alone for the voice to read as money.
     .replace(/\$\$(.+?)\$\$/g, (_, tex: string) => tex.replace(/[\\{}]/g, " "))
@@ -27,6 +36,7 @@ function inlineText(line: string): string {
     // Underscores only at word edges, so `snake_case` survives.
     .replace(/(^|\W)_+(?=\S)|(\S)_+(?=\W|$)/g, "$1$2")
     .replace(/~~|\\/g, "")
+    .replace(CODE_SLOT, (_, i: string) => code[Number(i)])
     .replace(/\s+/g, " ")
     .trim();
 }

@@ -100,9 +100,15 @@ pub enum StreamEvent {
     /// `done_reason: "length"`, OpenAI's `finish_reason: "length"`), not
     /// because it was done — the UI says so, and which limit, where the cut
     /// used to pass for a finished reply. Left out of the event when `None`.
+    ///
+    /// `tools`: the request carried tool definitions — for the note on a
+    /// full window, which suggests switching unused ones off only then. Left
+    /// out when false.
     Done {
         #[serde(skip_serializing_if = "Option::is_none")]
         cut_off: Option<CutOff>,
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        tools: bool,
     },
     /// Stream was cancelled by the user (or by another command stopping
     /// the runner). Distinct from `Done` so the frontend can avoid

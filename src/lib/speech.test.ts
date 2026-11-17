@@ -56,6 +56,12 @@ describe("speechChunks", () => {
     expect(speechChunks(md)).toEqual(["Model, Size", "llama, 8 GB"]);
   });
 
+  it("reads inline code as written", () => {
+    expect(speechChunks("Use `Vec<String>` or **`**kwargs`** in `C:\\Users`, not <b>this</b>.")).toEqual([
+      "Use Vec<String> or **kwargs in C:\\Users, not this .",
+    ]);
+  });
+
   it("keeps underscores inside words", () => {
     expect(speechChunks("Set my_var to __init__.")).toEqual(["Set my_var to init."]);
   });

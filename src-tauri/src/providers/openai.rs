@@ -459,7 +459,7 @@ pub async fn chat_stream(
                 // for compat shims that don't honour `include_usage`.
                 let tokens_for_metrics = reported_tokens.unwrap_or(total_tokens);
                 emit_metrics(&app, &channel, tokens_for_metrics, start, tool_ctx.approval_wait());
-                let _ = app.emit(&channel, StreamEvent::Done { cut_off });
+                let _ = app.emit(&channel, StreamEvent::Done { cut_off, tools: !req.tools.is_empty() });
                 registry.finish_own(&req.stream_id, &cancel);
                 return Ok(());
             }

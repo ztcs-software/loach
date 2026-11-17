@@ -33,9 +33,12 @@ use crate::stream::StreamRegistry;
 /// debug build from the dev server, passed as `dev_url`. `about:blank` is
 /// harmless. Anything else — an injected link or form, a `location` write —
 /// would load an outside page with the IPC bridge in reach; markdown renders
-/// without raw HTML and the CSP holds, so this is defense in depth. Frames
-/// aren't covered (wry's hook sees the main frame only): the preview's is
-/// held by the CSP's `frame-src`.
+/// without raw HTML and the CSP holds, so this is defense in depth.
+///
+/// On macOS and Linux the hook sees frame loads too (WebView2 reports the
+/// main frame alone), so the canvas preview's host pages (`sandbox.rs`) pass:
+/// refused, the preview stayed blank. Were the main frame sent there, the
+/// host page renders only HTML its parent posts, and it has no parent.
 fn is_app_url(url: &tauri::Url, dev_url: Option<&tauri::Url>) -> bool {
     match url.scheme() {
         "tauri" => url.host_str() == Some("localhost"),
@@ -44,6 +47,10 @@ fn is_app_url(url: &tauri::Url, dev_url: Option<&tauri::Url>) -> bool {
                 || dev_url.is_some_and(|d| d.origin() == url.origin())
         }
         "about" => url.as_str() == "about:blank",
+        scheme if scheme == sandbox::SCHEME => {
+            url.host_str() == Some("localhost")
+                && matches!(url.path(), "/preview.html" | "/preview-static.html")
+        }
         _ => false,
     }
 }
@@ -172,7 +179,8 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         // Keeps the window on the app's own pages (`is_app_url`). Consulted
-        // on every main-frame navigation, the window's first load included.
+        // on every main-frame navigation, the window's first load included,
+        // and on macOS and Linux on frame loads too.
         .plugin(
             tauri::plugin::Builder::<tauri::Wry, ()>::new("navigation-guard")
                 .on_navigation(|webview, url| {
@@ -626,6 +634,9 @@ mod tests {
             "http://tauri.localhost/",
             "https://tauri.localhost/assets/x.js",
             "about:blank",
+            // The canvas preview's frame, as macOS and Linux report it.
+            "loach-sandbox://localhost/preview.html",
+            "loach-sandbox://localhost/preview-static.html#top",
         ] {
             assert!(is_app_url(&url(ok), None), "{ok}");
         }
@@ -639,6 +650,8 @@ mod tests {
             "javascript:alert(1)",
             "data:text/html,hi",
             "about:srcdoc",
+            "loach-sandbox://localhost/other.html",
+            "loach-sandbox://evil.example/preview.html",
         ] {
             assert!(!is_app_url(&url(refused), None), "{refused}");
         }

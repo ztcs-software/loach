@@ -6,6 +6,7 @@ import { useDefaultNumCtx, useModelsStore } from "@/stores/modelsStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useGlobalMemoryStore } from "@/stores/globalMemoryStore";
 import { useLibraryStore } from "@/stores/libraryStore";
+import { useSkillStore } from "@/stores/skillStore";
 import { selectMemoriesForPrompt } from "@/lib/memoryRules";
 import { estimateChatSources } from "@/lib/sources";
 import { chatToolsSize } from "@/lib/tauri";
@@ -131,6 +132,8 @@ export function ContextUsageBar() {
   const streamingHere = useChatStore(
     (s) => !!sessionId && s.streamingSessionId === sessionId,
   );
+  // A skill loaded or unloaded with `/skill` changes what the send carries.
+  const loadedSkills = useSkillStore((s) => (sessionId ? s.bySession[sessionId] : undefined));
   const [tools, setTools] = useState<{ sessionId: string; size: ChatToolsSize } | null>(null);
   useEffect(() => {
     if (!sessionId || streamingHere) return;
@@ -145,7 +148,7 @@ export function ContextUsageBar() {
     return () => {
       live = false;
     };
-  }, [sessionId, workspaceRoot, settings, streamingHere]);
+  }, [sessionId, workspaceRoot, settings, streamingHere, loadedSkills]);
   const toolsSize = tools?.sessionId === sessionId ? tools.size : null;
   const compactingSessionId = useChatStore((s) => s.compactingSessionId);
   const compactContext = useChatStore((s) => s.compactContext);
@@ -247,6 +250,7 @@ export function ContextUsageBar() {
         memoryText,
         sources.tokens,
         toolsSize?.chars ?? 0,
+        toolsSize?.skills_chars ?? 0,
       ),
     [
       deferredMessages,
@@ -256,6 +260,7 @@ export function ContextUsageBar() {
       memoryText,
       sources.tokens,
       toolsSize?.chars,
+      toolsSize?.skills_chars,
     ],
   );
 
@@ -479,6 +484,9 @@ const ContextUsagePopover = ({
             label={`Project instructions (${instructionsFile ?? "LOACHFILE.md"})`}
             value={formatTokens(usage.projectInstructionsTokens)}
           />
+        )}
+        {usage.skillsTokens > 0 && (
+          <Row label="Loaded skills" value={formatTokens(usage.skillsTokens)} />
         )}
         {usage.memoriesTokens > 0 && (
           <Row label="Memories" value={formatTokens(usage.memoriesTokens)} />

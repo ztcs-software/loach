@@ -24,18 +24,22 @@ import { useToastStore } from "@/stores/toastStore";
 
 type BusyKind = "export" | "import" | "archive-all" | null;
 
-/** Before the data is erased or replaced, stop what would still write to it:
- *  the memory extractor, and every chat reply running or queued (as Archive
- *  all does for the chats it parks). Left running, a fact extracted from an
- *  erased chat was saved into the emptied database. Returns the way back for
- *  the extractor, for an action that fails or is called off. */
-async function stopWritersForReplace(): Promise<() => void> {
-  const resume = haltMemoryExtraction();
-  const chats = useChatStore.getState();
-  // Queued first, so cancelling the running one doesn't start the next.
-  const ids = new Set([...chats.queue.map((t) => t.sessionId), ...chats.sessions.map((s) => s.id)]);
-  for (const id of ids) await useChatStore.getState().cancelForSession(id);
-  return resume;
+/** Before the data is erased or replaced, hold what would add to it: the
+ *  memory extractor (left running, a fact extracted from an erased chat was
+ *  saved into the emptied database), and the chat queue, so no reply starts.
+ *  A reply already streaming runs on until the backend stops it
+ *  (`cancel_chats`), once the credentials and the file have passed — stopped
+ *  here, a wrong PIN or a closed file picker cut it off for nothing — and
+ *  what it writes after that only updates its own row, which the new data
+ *  doesn't have. Returns the way back, for an action that fails or is called
+ *  off. (Private Chat, the queue's other holder, can't open over Settings.) */
+function holdWritersForReplace(): () => void {
+  const resumeMemory = haltMemoryExtraction();
+  useChatStore.getState().setQueueHeld(true);
+  return () => {
+    resumeMemory();
+    useChatStore.getState().setQueueHeld(false);
+  };
 }
 
 /* ───────────────────────── Data tab panel ─────────────────────────
@@ -167,7 +171,7 @@ export function DataPanel() {
   // backend, after the sheet used to be gone) — or null once it's settled.
   const runImport = async (auth?: DestructiveAuth): Promise<string | null> => {
     setBusy("import");
-    const resume = await stopWritersForReplace();
+    const resume = holdWritersForReplace();
     try {
       const stats = await importDataWithDialog(auth);
       if (stats === null) {
@@ -507,7 +511,7 @@ function EraseDialog({
       : undefined;
     setBusy(true);
     setError(null);
-    const resume = await stopWritersForReplace();
+    const resume = holdWritersForReplace();
     try {
       if (mode === "user-data") {
         await wipeUserData(auth);

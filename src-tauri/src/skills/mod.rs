@@ -166,14 +166,15 @@ static DISABLED_LOCK: parking_lot::Mutex<()> = parking_lot::const_mutex(());
 /// Switch the skill `name` on or off. Off is recorded under its name and its
 /// folder's: the name is what its own `SKILL.md` declares, so an update
 /// that renamed the skill there brought it back on, unasked. A skill counts
-/// as off when either key is listed (see [`discover`]).
+/// as off when either key is listed (see [`discover`]). The folder's key is
+/// left alone while another skill is called that: it's that skill's switch.
 pub fn set_enabled(db: &Database, roots: &Roots, name: &str, enabled: bool) -> anyhow::Result<()> {
-    let folder = discover(roots, &HashSet::new())
-        .skills
-        .into_iter()
+    let skills = discover(roots, &HashSet::new()).skills;
+    let folder = skills
+        .iter()
         .find(|s| s.name == name)
         .and_then(|s| folder_name(&s.dir))
-        .filter(|f| f != name);
+        .filter(|f| !skills.iter().any(|s| &s.name == f));
     let _guard = DISABLED_LOCK.lock();
     let mut names: BTreeSet<String> = disabled(db).into_iter().collect();
     for key in std::iter::once(name.to_string()).chain(folder) {
@@ -243,7 +244,7 @@ pub fn discover(roots: &Roots, disabled: &HashSet<String>) -> Catalog {
         for dir in dirs {
             match load(&dir, *source, roots.data_dir.as_deref()) {
                 Ok(None) => {}
-                Ok(Some(mut skill)) => {
+                Ok(Some(skill)) => {
                     if let Some(first) = catalog.skills.iter().find(|s| s.name == skill.name) {
                         catalog.problems.push(Problem {
                             path: skill.path,
@@ -254,8 +255,6 @@ pub fn discover(roots: &Roots, disabled: &HashSet<String>) -> Catalog {
                         });
                         continue;
                     }
-                    skill.enabled = !disabled.contains(&skill.name)
-                        && !folder_name(&skill.dir).is_some_and(|f| disabled.contains(&f));
                     catalog.skills.push(skill);
                 }
                 Err(message) => catalog.problems.push(Problem {
@@ -264,6 +263,14 @@ pub fn discover(roots: &Roots, disabled: &HashSet<String>) -> Catalog {
                 }),
             }
         }
+    }
+    // A folder's key only while no skill is called that: names and folders
+    // share the list, and switching `pdf-tools` (in a folder `pdf`) off
+    // switched off the skill `pdf` too.
+    let names: HashSet<String> = catalog.skills.iter().map(|s| s.name.clone()).collect();
+    for skill in &mut catalog.skills {
+        skill.enabled = !disabled.contains(&skill.name)
+            && !folder_name(&skill.dir).is_some_and(|f| !names.contains(&f) && disabled.contains(&f));
     }
     catalog
 }
@@ -823,7 +830,7 @@ fn activate(db: &Database, session_id: Option<&str>, skill: &Skill) -> McpCallRe
             content_text: format!(
                 "Loaded the `{}` skill; it stays loaded for the rest of this chat. {}\n\n{content}",
                 skill.name,
-                paths_note(true)
+                paths_note(setting_on(db, SCRIPTS_SETTING_KEY))
             ),
             ..Default::default()
         },
@@ -1126,6 +1133,31 @@ mod tests {
         set_enabled(&db, &roots, "web-scraper-2", true).unwrap();
         set_enabled(&db, &roots, "web-scraper", true).unwrap();
         assert!(discover(&roots, &disabled(&db)).skills.iter().all(|s| s.enabled));
+    }
+
+    /// A folder named like another skill: switching the one in it off or on
+    /// leaves that other skill's switch alone.
+    #[test]
+    fn a_folder_named_like_another_skill_leaves_its_switch_alone() {
+        let tmp = TempDir::new().unwrap();
+        let db = Database::open(&tmp.path().join("loach.db")).unwrap();
+        db.migrate().unwrap();
+        let home = TempDir::new().unwrap();
+        let roots = Roots::new(tmp.path(), Some(home.path()));
+        write_skill(roots.loach_dir(), "pdf", &md("pdf", "Reads PDFs"));
+        write_skill(&home.path().join(".agents").join("skills"), "pdf", &md("pdf-tools", "Edits PDFs"));
+        let enabled = |name: &str| {
+            discover(&roots, &disabled(&db)).skills.into_iter().find(|s| s.name == name).unwrap().enabled
+        };
+
+        set_enabled(&db, &roots, "pdf-tools", false).unwrap();
+        assert!(!enabled("pdf-tools"));
+        assert!(enabled("pdf"));
+
+        set_enabled(&db, &roots, "pdf", false).unwrap();
+        set_enabled(&db, &roots, "pdf-tools", true).unwrap();
+        assert!(enabled("pdf-tools"));
+        assert!(!enabled("pdf"));
     }
 
     /// B3-12: ASCII only, and no Windows device names.
