@@ -61,7 +61,12 @@ import {
   SUMMARY_END_TAG,
   SUMMARY_START_TAG,
 } from "@/lib/contextUsage";
-import { CUT_OFF_NOTE, formatProviderError, replayableReply } from "@/lib/providerErrors";
+import {
+  CUT_OFF_NOTE,
+  contextFullNote,
+  formatProviderError,
+  replayableReply,
+} from "@/lib/providerErrors";
 import { isU32 } from "@/lib/modelParams";
 import { decodeModelChoice, fullOllamaTag } from "@/lib/modelChoice";
 import { getPersona } from "@/lib/personas";
@@ -1817,7 +1822,11 @@ async function startTask(task: QueueTask, get: Getter, set: Setter): Promise<boo
           if (ev.cut_off) {
             // The limit, not the model, ended it: say so, persisted like an
             // error line, instead of passing it off as a finished reply.
-            buf.content += `\n\n${CUT_OFF_NOTE}`;
+            const note =
+              ev.cut_off === "context"
+                ? contextFullNote({ provider: task.request.provider, tools: true })
+                : CUT_OFF_NOTE;
+            buf.content += `\n\n${note}`;
             pendingDirty.content = true;
             flushPendingFrame(get, set);
           }

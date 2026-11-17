@@ -5,7 +5,7 @@
 // fallthrough path.
 
 import { describe, it, expect } from "vitest";
-import { formatProviderError, replayableReply } from "./providerErrors";
+import { contextFullNote, formatProviderError, replayableReply } from "./providerErrors";
 import type { ProviderId } from "@/types";
 
 describe("formatProviderError", () => {
@@ -109,5 +109,22 @@ describe("replayableReply", () => {
   it("leaves a reply alone that only mentions a warning", () => {
     expect(replayableReply("Use _⚠ markers_ sparingly.")).toBe("Use _⚠ markers_ sparingly.");
     expect(replayableReply("Answer\n_⚠ not a note_\nmore")).toBe("Answer\n_⚠ not a note_\nmore");
+  });
+});
+
+// A full context window was reported as the Max Tokens limit.
+describe("contextFullNote", () => {
+  it("points at the setting that applies, and at tools only where some went out", () => {
+    expect(contextFullNote({ provider: "ollama", tools: true })).toBe(
+      "_⚠ Cut off: the context window is full — raise Context Length in Parameters, or turn off tools you don't use in Settings → Tools._",
+    );
+    // Loach's Context Length isn't sent to an OpenAI-compatible server.
+    expect(contextFullNote({ provider: "openai", tools: false })).toBe(
+      "_⚠ Cut off: the context window is full — raise the model's context length on its server._",
+    );
+  });
+  it("is a note the replay drops", () => {
+    const note = contextFullNote({ provider: "ollama", tools: true });
+    expect(replayableReply(`Partial\n\n${note}`)).toBe("Partial");
   });
 });

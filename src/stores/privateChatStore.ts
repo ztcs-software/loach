@@ -11,7 +11,12 @@ import {
 import { resolveImageScaling } from "@/lib/imageScaling";
 import { cancelMemoryExtraction } from "@/lib/memory";
 import { getPersona } from "@/lib/personas";
-import { CUT_OFF_NOTE, formatProviderError, replayableReply } from "@/lib/providerErrors";
+import {
+  CUT_OFF_NOTE,
+  contextFullNote,
+  formatProviderError,
+  replayableReply,
+} from "@/lib/providerErrors";
 import { getTone } from "@/lib/tones";
 import { useModelsStore } from "./modelsStore";
 import { useSettingsStore } from "./settingsStore";
@@ -427,9 +432,14 @@ export const usePrivateChatStore = create<PrivateChatState>((set, get) => ({
             pcFlush();
             teardown();
           } else if (ev.kind === "cancelled" || ev.kind === "done") {
-            // Stopped at the max-tokens limit: say so, as the regular chat does.
+            // Stopped at a limit: say so, as the regular chat does. No tools
+            // go out from here (`no_tools`), so none to turn off.
             if (ev.kind === "done" && ev.cut_off && pcBuffer) {
-              pcBuffer.content += `\n\n${CUT_OFF_NOTE}`;
+              const note =
+                ev.cut_off === "context"
+                  ? contextFullNote({ provider: "ollama", tools: false })
+                  : CUT_OFF_NOTE;
+              pcBuffer.content += `\n\n${note}`;
               pcBuffer.contentDirty = true;
             }
             // Sync-flush the last buffered tokens before tearing down so the

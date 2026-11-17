@@ -12,7 +12,7 @@ use tokio::select;
 use super::{resolve_qualified, ChatRequest, ModelInfo};
 use crate::db::Database;
 use crate::mcp::McpToolDef;
-use crate::stream::{admin_channel, event_channel, AdminEvent, StreamEvent, StreamRegistry};
+use crate::stream::{admin_channel, event_channel, AdminEvent, CutOff, StreamEvent, StreamRegistry};
 
 /// Per-line ceiling for the NDJSON / SSE pump. A well-behaved provider sends
 /// frames in the low-kilobytes range; this cap is generous enough to fit any
@@ -687,7 +687,8 @@ struct OllamaChunk {
     #[serde(default)]
     error: Option<String>,
     /// Why the final `done: true` chunk ended the reply: `stop`, or `length`
-    /// when it reached `num_predict` (the Max tokens setting).
+    /// when it reached `num_predict` (the Max tokens setting) — or filled
+    /// the context window, which Ollama reports the same way.
     #[serde(default)]
     done_reason: Option<String>,
 }
@@ -854,8 +855,8 @@ pub async fn chat_stream(
         // What the model says this turn, kept for the history should the
         // turn end in tool calls.
         let mut turn_text = String::new();
-        // Whether this turn stopped at the max-tokens limit.
-        let mut cut_off = false;
+        // Whether this turn stopped at a length limit, and which.
+        let mut cut_off: Option<CutOff> = None;
         let outcome = match run_one_turn(
             &app,
             &http,
@@ -1031,11 +1032,14 @@ async fn run_one_turn(
     reported_eval_ns: &mut Option<u64>,
     think_already_drop: &mut bool,
     turn_text: &mut String,
-    cut_off: &mut bool,
+    cut_off: &mut Option<CutOff>,
     stream_id: &str,
     registry: &StreamRegistry,
 ) -> Result<Option<TurnOutcome>> {
     let url = format!("{}/api/chat", base_url.trim_end_matches('/'));
+    // The Max Tokens cap this request goes out with, to tell a `length`
+    // stop at it from one where the context window filled first.
+    let num_predict = body["options"]["num_predict"].as_u64();
     // Race the request against a cancel. Ollama withholds response headers
     // until the model is loaded — routinely 30–120 s for a large cold model —
     // and the chat client deliberately carries no request timeout, so
@@ -1228,9 +1232,12 @@ async fn run_one_turn(
                                         }
                                     }
                                     if parsed.done {
-                                        // `length`: stopped at `num_predict`,
-                                        // not at the end of the answer.
-                                        *cut_off = parsed.done_reason.as_deref() == Some("length");
+                                        // `length`: stopped at `num_predict`
+                                        // or at the end of the context
+                                        // window, not at the end of the
+                                        // answer.
+                                        *cut_off = (parsed.done_reason.as_deref() == Some("length"))
+                                            .then(|| CutOff::of_length_stop(turn_eval, num_predict));
                                         finished = true;
                                         break;
                                     }
@@ -1660,12 +1667,16 @@ mod tests {
 
         // An ordinary end is the same event as ever; a cut-off one says so.
         assert_eq!(
-            serde_json::to_value(StreamEvent::Done { cut_off: false }).unwrap(),
+            serde_json::to_value(StreamEvent::Done { cut_off: None }).unwrap(),
             json!({ "kind": "done" })
         );
         assert_eq!(
-            serde_json::to_value(StreamEvent::Done { cut_off: true }).unwrap(),
-            json!({ "kind": "done", "cut_off": true })
+            serde_json::to_value(StreamEvent::Done { cut_off: Some(CutOff::MaxTokens) }).unwrap(),
+            json!({ "kind": "done", "cut_off": "max_tokens" })
+        );
+        assert_eq!(
+            serde_json::to_value(StreamEvent::Done { cut_off: Some(CutOff::Context) }).unwrap(),
+            json!({ "kind": "done", "cut_off": "context" })
         );
     }
 

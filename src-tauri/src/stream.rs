@@ -96,13 +96,13 @@ pub enum StreamEvent {
     /// Stream ended normally (provider emitted EOF / `[DONE]`). Carries
     /// the same closing semantics as the prior version of this enum.
     ///
-    /// `cut_off`: the model stopped because it reached the max-tokens limit
-    /// (Ollama's `done_reason: "length"`, OpenAI's `finish_reason:
-    /// "length"`), not because it was done — the UI says so, where the cut
-    /// used to pass for a finished reply. Left out of the event when false.
+    /// `cut_off`: the model stopped at a length limit (Ollama's
+    /// `done_reason: "length"`, OpenAI's `finish_reason: "length"`), not
+    /// because it was done — the UI says so, and which limit, where the cut
+    /// used to pass for a finished reply. Left out of the event when `None`.
     Done {
-        #[serde(skip_serializing_if = "std::ops::Not::not")]
-        cut_off: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cut_off: Option<CutOff>,
     },
     /// Stream was cancelled by the user (or by another command stopping
     /// the runner). Distinct from `Done` so the frontend can avoid
@@ -177,6 +177,31 @@ pub enum StreamEvent {
         denied: bool,
         timed_out: bool,
     },
+}
+
+/// Which limit cut a reply off ([`StreamEvent::Done`]). Ollama and
+/// llama.cpp-based servers report both as the same `length` stop, but the
+/// fix differs — and a full context window was blamed on Max Tokens, which
+/// raising did nothing for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CutOff {
+    /// The reply reached the Max Tokens setting.
+    MaxTokens,
+    /// The prompt and the reply together filled the context window first.
+    Context,
+}
+
+impl CutOff {
+    /// Why a `length` stop happened, from how many tokens the request
+    /// generated against the cap it was sent with: short of the cap, it was
+    /// the window. Without both counts, the cap — as it was always read.
+    pub fn of_length_stop(generated: Option<u32>, cap: Option<u64>) -> Self {
+        match (generated, cap) {
+            (Some(n), Some(cap)) if u64::from(n) < cap => Self::Context,
+            _ => Self::MaxTokens,
+        }
+    }
 }
 
 /// The user's answer to a per-call tool approval prompt. Wire form is the
@@ -327,6 +352,17 @@ mod tests {
     use super::*;
     use std::time::Duration;
     use tokio::time::timeout;
+
+    /// A `length` stop short of the cap ran out of window (an 8K window, a
+    /// 7.8K prompt and Max Tokens at 32K stopped at 401 tokens); one at the
+    /// cap, or with a count missing, is the Max Tokens limit.
+    #[test]
+    fn a_length_stop_short_of_the_cap_is_the_context_window() {
+        assert_eq!(CutOff::of_length_stop(Some(401), Some(32768)), CutOff::Context);
+        assert_eq!(CutOff::of_length_stop(Some(4096), Some(4096)), CutOff::MaxTokens);
+        assert_eq!(CutOff::of_length_stop(None, Some(4096)), CutOff::MaxTokens);
+        assert_eq!(CutOff::of_length_stop(Some(401), None), CutOff::MaxTokens);
+    }
 
     /// The backend twin of the frontend's connect-window race: a cancel
     /// issued between `register()` returning and the provider task first

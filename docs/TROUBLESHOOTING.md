@@ -186,6 +186,12 @@ Tokens** and **Repeat Penalty** only appear in its **Advanced** view:
   the limit ends with a "Cut off at the Max Tokens limit" line. On a
   thinking model the limit covers the reasoning too, so a long chain of
   thought can leave little room for the answer.
+- A reply that ends with "Cut off: the context window is full" ran out of
+  **Context Length** instead: the prompt and the reply share the window,
+  and Max Tokens can't raise it. Every enabled tool's definition goes out
+  with each request — with many of them on, they alone can take most of an
+  8K window. Raise Context Length, or switch off the tools you don't use in
+  **Settings → Tools**.
 - Raise **Context Length** if the model is forgetting earlier turns. A
   longer context uses more VRAM.
 - Increase **Repeat Penalty** (default 1.1; try up to 1.3) if the model

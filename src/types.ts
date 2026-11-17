@@ -457,9 +457,10 @@ export type StreamEvent =
   | { kind: "notice"; text: string }
   | { kind: "thinking"; delta: string }
   /** Stream ended naturally — provider emitted its EOF / `[DONE]` marker.
-   *  `cut_off`: it stopped at the max-tokens limit rather than at the end
-   *  of the answer. */
-  | { kind: "done"; cut_off?: boolean }
+   *  `cut_off`: it stopped at a limit rather than at the end of the answer
+   *  — Max Tokens, or the context window filling first. Mirrors
+   *  `src-tauri/src/stream.rs::CutOff`. */
+  | { kind: "done"; cut_off?: "max_tokens" | "context" }
   /** Stream was cancelled mid-flight. Distinct from `done` so callers
    *  can avoid the "real completion" side-effects (memory extraction,
    *  unread dot) on an interrupted reply. Mirrors

@@ -14,7 +14,7 @@ use crate::db::Database;
 use crate::mcp::McpToolDef;
 use crate::secrets;
 use crate::sse::{find_frame_end, frame_lines};
-use crate::stream::{event_channel, StreamEvent, StreamRegistry};
+use crate::stream::{event_channel, CutOff, StreamEvent, StreamRegistry};
 
 /// Per-frame ceiling on the SSE buffer between blank-line delimiters. Mirrors
 /// `providers::ollama::MAX_LINE_BYTES`. A reasonable OpenAI chunk is sub-KB;
@@ -428,8 +428,8 @@ pub async fn chat_stream(
         // What the model says this turn, kept for the history should the
         // turn end in tool calls.
         let mut turn_text = String::new();
-        // Whether this turn stopped at the max-tokens limit.
-        let mut cut_off = false;
+        // Whether this turn stopped at a length limit, and which.
+        let mut cut_off: Option<CutOff> = None;
         let outcome = match run_one_turn(
             &app,
             &http,
@@ -653,10 +653,17 @@ async fn run_one_turn(
     total_tokens: &mut u32,
     reported_tokens: &mut Option<u32>,
     turn_text: &mut String,
-    cut_off: &mut bool,
+    cut_off: &mut Option<CutOff>,
     stream_id: &str,
     registry: &StreamRegistry,
 ) -> Result<Option<TurnOutcome>> {
+    // The Max Tokens cap this request goes out with (under either name), to
+    // tell a `length` stop at it from one where the context window filled
+    // first — llama.cpp-based servers report both the same way.
+    let cap = body
+        .get("max_tokens")
+        .or_else(|| body.get("max_completion_tokens"))
+        .and_then(Value::as_u64);
     // Completion tokens reported for THIS turn. Folded into the caller's
     // running `reported_tokens` once, at every exit path below, so a server
     // that re-reports cumulative usage per chunk can't inflate the total.
@@ -802,6 +809,9 @@ async fn run_one_turn(
     // complete then, but the `usage` frame is still to come, so reading
     // goes on until `[DONE]`, the end of the stream, or `usage_deadline`.
     let mut finish_seen = false;
+    // The finish was `length`. Which limit is settled once the turn ends,
+    // when the `usage` frame that follows it has had its chance to arrive.
+    let mut length_stop = false;
     let mut usage_deadline: Option<tokio::time::Instant> = None;
 
     loop {
@@ -822,6 +832,7 @@ async fn run_one_turn(
                     *reported_tokens =
                         Some(reported_tokens.unwrap_or(0).saturating_add(n));
                 }
+                *cut_off = length_stop.then(|| CutOff::of_length_stop(turn_tokens, cap));
                 return Ok(Some(decide_outcome(accum)));
             }
             maybe = byte_stream.next() => {
@@ -1015,11 +1026,11 @@ async fn run_one_turn(
                                                     "the server ended the reply with an error".into(),
                                                 );
                                             }
-                                            // The max-tokens limit, not the
-                                            // end of what the model meant.
+                                            // A length limit, not the end
+                                            // of what the model meant.
                                             Some("length") => {
                                                 finish_seen = true;
-                                                *cut_off = true;
+                                                length_stop = true;
                                             }
                                             Some(_) => finish_seen = true,
                                             None => {}
@@ -1066,6 +1077,7 @@ async fn run_one_turn(
                                 *reported_tokens =
                                     Some(reported_tokens.unwrap_or(0).saturating_add(n));
                             }
+                            *cut_off = length_stop.then(|| CutOff::of_length_stop(turn_tokens, cap));
                             return Ok(Some(decide_outcome(accum)));
                         }
                         if finish_seen && usage_deadline.is_none() {
@@ -1087,6 +1099,7 @@ async fn run_one_turn(
                             *reported_tokens =
                                 Some(reported_tokens.unwrap_or(0).saturating_add(n));
                         }
+                        *cut_off = length_stop.then(|| CutOff::of_length_stop(turn_tokens, cap));
                         return Ok(Some(decide_outcome(accum)));
                     }
                 }

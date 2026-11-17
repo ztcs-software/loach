@@ -134,12 +134,24 @@ describe("finishRunning", () => {
 
   // X4-04: a reply the max-tokens limit ended passed for a finished one.
   it("on a cut-off done, says so and marks the chat unread, but remembers nothing", async () => {
-    await runTo({ kind: "done", cut_off: true } as never);
+    await runTo({ kind: "done", cut_off: "max_tokens" } as never);
     const reply = get().messages.bg.at(-1)!;
     expect(reply.content).toMatch(/^Noted\.\n\n_⚠ Cut off at the Max Tokens limit/);
     expect(mocks.queueMemoryTurn).not.toHaveBeenCalled();
     expect(mocks.extractMemories).not.toHaveBeenCalled();
     expect(get().unread).toEqual({ bg: true });
+  });
+
+  // A full context window ends a reply the same way, but blaming Max Tokens
+  // sent the user to a setting that did nothing for it.
+  it("on a done cut off by the context window, points at Context Length, not Max Tokens", async () => {
+    await runTo({ kind: "done", cut_off: "context" } as never);
+    const reply = get().messages.bg.at(-1)!;
+    expect(reply.content).toMatch(
+      /^Noted\.\n\n_⚠ Cut off: the context window is full — raise Context Length in Parameters, or turn off tools/,
+    );
+    expect(reply.content).not.toMatch(/Max Tokens/);
+    expect(mocks.queueMemoryTurn).not.toHaveBeenCalled();
   });
 
   it("on cancel, does neither", async () => {
