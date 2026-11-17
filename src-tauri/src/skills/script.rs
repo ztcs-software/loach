@@ -21,7 +21,9 @@
 //!   beyond `stdin`. Everything the script starts is in one job object
 //!   (Windows) or process group (Unix): when the run ends, times out or is
 //!   stopped (Stop drops it), all of it is killed, so nothing it started
-//!   outlives it.
+//!   outlives it. On Windows, what it starts outside the job — the
+//!   Microsoft Store's Python starts everything that way — is found by
+//!   parent id and killed with it.
 //!
 //! Once it starts, a script runs as the user, with their access to every
 //! file — not just the workspace. The approval card says so.
@@ -313,6 +315,45 @@ fn read_shown(path: &Path) -> Option<(String, u64)> {
     Some((String::from_utf8_lossy(&buf).into_owned(), bytes))
 }
 
+/// Windows PowerShell writes to a pipe in the console's OEM code page, so
+/// `zażółć ✓` came back `zaz�lc V`, and only code inside the process can
+/// change that. A `.ps1` runs through this wrapper instead: it switches the
+/// output to UTF-8, then runs the script named by [`PS_SCRIPT_VAR`] the way
+/// `-File` would — the same arguments, its `exit` code, 1 when it throws.
+/// Standard input too: `-File` feeds it to `$input` only when the script's
+/// code names `$input` (otherwise `[Console]::In` reads it), and naming it
+/// here would hand it over before the script runs — so the wrapper looks
+/// for `$input` in the script, and only then passes the lines on. The
+/// approval card shows the script's own command; this part is the same for
+/// every run.
+const PS_UTF8_WRAPPER: &str = r#"[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+$LoachScript = $env:LOACH_SCRIPT
+Remove-Item Env:LOACH_SCRIPT
+$LoachAst = [Management.Automation.Language.Parser]::ParseFile($LoachScript, [ref]$null, [ref]$null)
+if ($LoachAst.Find({ param($n) $n -is [Management.Automation.Language.VariableExpressionAst] -and $n.VariablePath.UserPath -eq 'input' }, $true)) {
+  & { while ($null -ne ($l = [Console]::In.ReadLine())) { $l } } | & $LoachScript @args
+} else {
+  & $LoachScript @args
+}
+if (-not $?) { exit $LASTEXITCODE }
+"#;
+/// Where [`PS_UTF8_WRAPPER`] finds the script; it removes the variable
+/// before the script starts.
+const PS_SCRIPT_VAR: &str = "LOACH_SCRIPT";
+
+/// Save [`PS_UTF8_WRAPPER`] beside the code, or in a temporary folder of its
+/// own for a script file, and return its path.
+fn save_ps_wrapper(saved: &mut SavedCode) -> std::io::Result<String> {
+    let dir = match saved.0.take() {
+        Some(dir) => dir,
+        None => tempfile::Builder::new().prefix("loach-script-").tempdir()?,
+    };
+    let path = dir.path().join("loach-utf8-output.ps1");
+    saved.0 = Some(dir);
+    std::fs::write(&path, PS_UTF8_WRAPPER)?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
 /// Save code in a temporary folder of its own, removed when the returned
 /// guard drops. Windows PowerShell reads a script without a byte-order mark
 /// in the ANSI code page, so a `.ps1` gets one.
@@ -396,7 +437,7 @@ impl Drop for SavedCode {
 pub async fn run(plan: Plan) -> McpCallResult {
     // Code goes in a folder of its own, removed when `saved` drops: when the
     // run ends, however it ends — Stop drops this future, the process first.
-    let (script, saved) = match &plan.script {
+    let (script, mut saved) = match &plan.script {
         Script::File(path) => (crate::tools::fs::display_path(path), SavedCode(None)),
         Script::Code { name, text } => match save_code(name, text) {
             Ok(dir) => (dir.path().join(name).to_string_lossy().into_owned(), SavedCode(Some(dir))),
@@ -408,7 +449,17 @@ pub async fn run(plan: Plan) -> McpCallResult {
         Err(e) => return failed(e),
     };
     let mut cmd = tokio::process::Command::new(&program);
-    cmd.args(plan.lead).arg(&script).args(&plan.args);
+    // Windows PowerShell (`pwsh`, elsewhere, writes UTF-8) runs the script
+    // through [`PS_UTF8_WRAPPER`].
+    if plan.program == "powershell" {
+        let wrapper = match save_ps_wrapper(&mut saved) {
+            Ok(wrapper) => wrapper,
+            Err(e) => return failed(format!("Couldn't save PowerShell's UTF-8 wrapper to a temporary file: {e}")),
+        };
+        cmd.args(plan.lead).arg(wrapper).args(&plan.args).env(PS_SCRIPT_VAR, &script);
+    } else {
+        cmd.args(plan.lead).arg(&script).args(&plan.args);
+    }
     #[cfg(unix)]
     {
         // The PATH a terminal would see, as stdio MCP servers get it: started
@@ -762,26 +813,41 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         fs::write(
             tmp.path().join("t.ps1"),
-            "$line = [Console]::In.ReadLine()\r\n\
+            "\u{feff}$line = [Console]::In.ReadLine()\r\n\
              Write-Output \"got $line and $($args[0])\"\r\n\
-             [Console]::Error.WriteLine('oops')\r\n\
+             [Console]::Error.WriteLine('oops ✓')\r\n\
              exit 3\r\n",
         )
         .unwrap();
+        // Standard input as `$input` too, as `-File` gives it to a script
+        // that names it.
+        fs::write(tmp.path().join("lines.ps1"), "\"lines=$(@($input) -join ',')\"\r\nexit 4\r\n").unwrap();
         let dir = tmp.path().canonicalize().unwrap();
         let plan = plan(&dir, &json!({ "script": "t.ps1", "args": ["arg"], "stdin": "input\r\n" }), None).unwrap();
         let r = run(plan).await;
         assert!(r.is_error);
         assert!(r.content_text.starts_with("Exit code 3."), "{}", r.content_text);
         assert!(r.content_text.contains("--- stdout ---\ngot input and arg"), "{}", r.content_text);
-        assert!(r.content_text.contains("--- stderr ---\noops"), "{}", r.content_text);
+        // UTF-8, not the console's code page.
+        assert!(r.content_text.contains("--- stderr ---\noops ✓"), "{}", r.content_text);
+
+        let plan = super::plan(&dir, &json!({ "script": "lines.ps1", "stdin": "a\r\nb\r\n" }), None).unwrap();
+        let r = run(plan).await;
+        assert!(r.content_text.starts_with("Exit code 4."), "{}", r.content_text);
+        assert!(r.content_text.contains("--- stdout ---\nlines=a,b"), "{}", r.content_text);
     }
 
     #[tokio::test]
     async fn runs_code_in_a_folder_it_removes_afterwards() {
-        // On Windows, the length also shows the code was read as UTF-8.
+        // On Windows, the length also shows the code was read as UTF-8, and
+        // the text that its output reaches Loach as UTF-8, not in the
+        // console's code page.
         let (language, code, rest) = if cfg!(windows) {
-            ("powershell", "(Get-Location).Path\n'zażółć'.Length\n$args[0]\n", vec!["6", "arg"])
+            (
+                "powershell",
+                "(Get-Location).Path\n'zażółć'.Length\n'zażółć ✓'\n$args[0]\n",
+                vec!["6", "zażółć ✓", "arg"],
+            )
         } else {
             ("bash", "pwd\necho \"$1\"\n", vec!["arg"])
         };

@@ -257,13 +257,23 @@ async fn shut_down(process: Process, stdin: SharedStdin) {
 /// moment between spawn and assignment could escape; `cmd.exe` takes far
 /// longer than that to launch anything.
 ///
+/// A packaged app's children don't join it, though: the Microsoft Store's
+/// Python is one, and what a script run with it started outlived Stop. So
+/// stopping the tree also stops what the child started outside the job,
+/// found by parent id ([`outside_job`]) — while Loach runs; a crash still
+/// strands those.
+///
 /// The job handle is kept as an integer: a kernel handle is valid from any
 /// thread, and a raw pointer field would make every session `!Send`.
 ///
 /// Script runs (`skills::script::run`) hold one the same way, so a script
 /// can't leave anything running behind it.
 #[cfg(windows)]
-pub(crate) struct ProcessTree(Option<isize>);
+pub(crate) struct ProcessTree {
+    job: Option<isize>,
+    /// The child, to find what it started outside the job.
+    root: Option<Held>,
+}
 
 #[cfg(windows)]
 impl ProcessTree {
@@ -274,14 +284,16 @@ impl ProcessTree {
             SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
             JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
         };
+        // Opened while `child` still holds the process, so the id is its own.
+        let root = child.id().and_then(Held::open);
         let Some(process) = child.raw_handle() else {
-            return Self(None);
+            return Self { job: None, root };
         };
         // SAFETY: plain Win32 calls on handles we own; `info` outlives the
         // call that reads it.
         unsafe {
             let Ok(job) = CreateJobObjectW(None, windows::core::PCWSTR::null()) else {
-                return Self(None);
+                return Self { job: None, root };
             };
             let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
             info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
@@ -293,10 +305,10 @@ impl ProcessTree {
             );
             if limited.is_err() || AssignProcessToJobObject(job, HANDLE(process)).is_err() {
                 let _ = CloseHandle(job);
-                tracing::warn!("couldn't put a child process in a job; only that process will be stopped");
-                return Self(None);
+                tracing::warn!("couldn't put a child process in a job; what it starts will be found by parent id");
+                return Self { job: None, root };
             }
-            Self(Some(job.0 as isize))
+            Self { job: Some(job.0 as isize), root }
         }
     }
 
@@ -308,7 +320,9 @@ impl ProcessTree {
             JobObjectExtendedLimitInformation, SetInformationJobObject,
             JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
         };
-        if let Some(job) = self.0.take() {
+        // Closing the child's handle stops nothing.
+        self.root = None;
+        if let Some(job) = self.job.take() {
             let job = HANDLE(job as *mut std::ffi::c_void);
             let info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
             // SAFETY: `job` came from `CreateJobObjectW` and is closed once;
@@ -330,16 +344,147 @@ impl ProcessTree {
 #[cfg(windows)]
 impl Drop for ProcessTree {
     fn drop(&mut self) {
-        if let Some(job) = self.0.take() {
+        use windows::Win32::Foundation::{CloseHandle, HANDLE};
+        use windows::Win32::System::Threading::TerminateProcess;
+        // What the job won't stop, found while the tree still stands: a
+        // process the job stops first could no longer be traced through.
+        let outside = self.root.take().map(|root| outside_job(&root)).unwrap_or_default();
+        if let Some(job) = self.job.take() {
             // Closing the last handle to a kill-on-close job ends every
             // process in it.
             // SAFETY: `job` came from `CreateJobObjectW` and is closed once.
             unsafe {
-                let _ = windows::Win32::Foundation::CloseHandle(
-                    windows::Win32::Foundation::HANDLE(job as *mut std::ffi::c_void),
-                );
+                let _ = CloseHandle(HANDLE(job as *mut std::ffi::c_void));
             }
         }
+        for process in &outside {
+            // SAFETY: a handle opened with `PROCESS_TERMINATE`, still open.
+            // One the job already stopped just fails.
+            unsafe {
+                let _ = TerminateProcess(HANDLE(process.handle as *mut std::ffi::c_void), 1);
+            }
+        }
+    }
+}
+
+/// A process held open — while it is, its id can't pass to another — with
+/// its id and when it started.
+#[cfg(windows)]
+struct Held {
+    handle: isize,
+    pid: u32,
+    /// `FILETIME` ticks.
+    created: u64,
+}
+
+#[cfg(windows)]
+impl Held {
+    fn open(pid: u32) -> Option<Self> {
+        use windows::Win32::Foundation::FILETIME;
+        use windows::Win32::System::Threading::{
+            GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
+        };
+        // SAFETY: plain Win32 calls; the handle is closed when `held` drops.
+        unsafe {
+            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE, false, pid).ok()?;
+            let mut held = Self { handle: handle.0 as isize, pid, created: 0 };
+            let (mut created, mut exited, mut kernel, mut user) =
+                (FILETIME::default(), FILETIME::default(), FILETIME::default(), FILETIME::default());
+            GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user).ok()?;
+            held.created = (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime);
+            Some(held)
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for Held {
+    fn drop(&mut self) {
+        // SAFETY: opened in `open` and closed once, here.
+        unsafe {
+            let _ = windows::Win32::Foundation::CloseHandle(windows::Win32::Foundation::HANDLE(
+                self.handle as *mut std::ffi::c_void,
+            ));
+        }
+    }
+}
+
+/// What `root` started, held open: every process whose parent is `root` or
+/// one of these, and that started after its parent — an exited parent's id
+/// stays on its children, and may name a newer process by now. Each is held
+/// as it's found, so its id stays its own, and listed again before it's
+/// returned: one that exited between the first list and being opened may
+/// have passed its id to a process that isn't ours, which shows its own
+/// parent in the second.
+#[cfg(windows)]
+fn outside_job(root: &Held) -> Vec<Held> {
+    let Some(listed) = parent_ids() else {
+        return Vec::new();
+    };
+    // Each with its parent's id; parents come before their children.
+    let mut found: Vec<(Held, u32)> = Vec::new();
+    let mut next = 0;
+    loop {
+        let (parent, parent_created) = match next {
+            0 => (root.pid, root.created),
+            n => match found.get(n - 1) {
+                Some((held, _)) => (held.pid, held.created),
+                None => break,
+            },
+        };
+        next += 1;
+        for &(pid, ppid) in &listed {
+            if ppid != parent || pid == root.pid || found.iter().any(|(held, _)| held.pid == pid) {
+                continue;
+            }
+            if let Some(held) = Held::open(pid).filter(|held| held.created >= parent_created) {
+                found.push((held, parent));
+            }
+        }
+    }
+    if found.is_empty() {
+        return Vec::new();
+    }
+    let Some(relisted) = parent_ids() else {
+        return Vec::new();
+    };
+    let mut ours = vec![root.pid];
+    found
+        .into_iter()
+        .filter(|(held, parent)| {
+            let kept = ours.contains(parent) && relisted.contains(&(held.pid, *parent));
+            if kept {
+                ours.push(held.pid);
+            }
+            kept
+        })
+        .map(|(held, _)| held)
+        .collect()
+}
+
+/// Every running process's id, with its parent's.
+#[cfg(windows)]
+fn parent_ids() -> Option<Vec<(u32, u32)>> {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+    };
+    // SAFETY: plain Win32 calls; `entry` carries its own size, and the
+    // snapshot is closed once.
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0).ok()?;
+        let mut entry = PROCESSENTRY32W {
+            dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+            ..Default::default()
+        };
+        let mut ids = Vec::new();
+        let mut more = Process32FirstW(snapshot, &mut entry).is_ok();
+        while more {
+            ids.push((entry.th32ProcessID, entry.th32ParentProcessID));
+            more = Process32NextW(snapshot, &mut entry).is_ok();
+        }
+        let _ = CloseHandle(snapshot);
+        Some(ids)
     }
 }
 
@@ -1379,6 +1524,51 @@ mod tests {
         drop(session);
         tokio::time::sleep(Duration::from_secs(4)).await;
         assert!(marker.exists(), "what the server left running was killed");
+    }
+
+    /// What the child started outside its job — the Microsoft Store's
+    /// Python starts everything that way — is found by parent id and
+    /// stopped with the tree. Here `ping` starts before the tree is adopted,
+    /// so it isn't in the job either.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn what_the_child_started_outside_its_job_is_stopped_with_the_tree() {
+        use tokio::io::AsyncBufReadExt as _;
+        let mut child = Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "(Start-Process ping -ArgumentList '-n','60','127.0.0.1' -NoNewWindow -PassThru).Id; Start-Sleep 60",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn powershell");
+        // `ping` writes to the same pipe; its id is the line that's a number.
+        let mut out = tokio::io::BufReader::new(child.stdout.take().unwrap());
+        let mut ping = None;
+        while ping.is_none() {
+            let mut line = String::new();
+            assert!(out.read_line(&mut line).await.unwrap() > 0, "no process id");
+            ping = line.trim().parse::<u32>().ok();
+        }
+        let ping = ping.unwrap();
+
+        drop(ProcessTree::adopt(&child));
+        let running = |pid: u32| parent_ids().unwrap().iter().any(|&(p, _)| p == pid);
+        let mut gone = false;
+        for _ in 0..50 {
+            if !running(ping) {
+                gone = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(gone, "process {ping}, started outside the job, outlived the tree");
     }
 
     /// One missed reply is a slow server; two in a row is a hung one, which
