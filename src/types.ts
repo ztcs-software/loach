@@ -649,6 +649,11 @@ export interface Settings {
    *  skips the multi-second cold reload — at the cost of pinned VRAM.
    *  Ignored by OpenAI providers. */
   ollama_keep_alive: OllamaKeepAlive;
+  /** Context window (`num_ctx`) an Ollama chat gets when neither it, its
+   *  Space nor its model's Modelfile sets one — the bottom layer of
+   *  `chatStore.layerParams`, capped at the model's own maximum
+   *  (`defaultNumCtx`). Ignored by OpenAI providers. */
+  default_num_ctx: number;
   /** Default value for the per-chat Thinking toggle. Applied as a baseline
    *  in `readSessionParams` so new chats (and chats that haven't touched
    *  the slider) inherit it. The per-chat Thinking switch in the parameter
@@ -737,6 +742,7 @@ export const DEFAULT_SETTINGS: Settings = {
   skill_scripts_enabled: false,
   run_script_enabled: false,
   ollama_keep_alive: "5m",
+  default_num_ctx: 8192,
   thinking_default: true,
   default_tone_id: "default",
   onboarding_completed: false,

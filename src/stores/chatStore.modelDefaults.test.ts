@@ -107,3 +107,26 @@ describe("an OpenAI-compatible chat", () => {
     expect(request.params.num_ctx).toBe(OPENAI_COMPAT_NUM_CTX);
   });
 });
+
+// Every new chat started at 8K and had to be raised by hand: the window under
+// a Modelfile's is now Settings' default context length, capped at the
+// model's maximum. A Modelfile's or the chat's own still wins.
+describe("Settings' default context length", () => {
+  it("sizes an Ollama chat whose Modelfile sets none, capped at the model's maximum", async () => {
+    useLibraryStore.setState({ hydrated: true, items: [], datasets: [], sources: {} });
+    useSettingsStore.setState({ default_num_ctx: 32768 });
+    const send = async (c: Session) => (await __testing.buildTaskRequest(c, c.id, [], "hi", [])).request.params.num_ctx;
+
+    useModelsStore.setState({ modelDefaults: { "custom:8b": {} }, modelCapabilities: {}, modelContextMax: {} });
+    expect(await send(chat)).toBe(32768);
+
+    useModelsStore.setState({ modelContextMax: { "custom:8b": 16384 } });
+    expect(await send(chat)).toBe(16384);
+
+    useModelsStore.setState({ modelDefaults: { "custom:8b": { num_ctx: 4096 } } });
+    expect(await send(chat)).toBe(4096);
+
+    expect(await send({ ...chat, params_json: JSON.stringify({ num_ctx: 65536 }) })).toBe(65536);
+    useSettingsStore.setState({ default_num_ctx: 8192 });
+  });
+});

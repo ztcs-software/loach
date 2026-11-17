@@ -13,14 +13,16 @@ import {
 import { useSettingsStore } from "./settingsStore";
 import { useSpaceStore } from "./spaceStore";
 import { useToastStore } from "./toastStore";
-import { parseModelParameters } from "@/lib/modelParams";
+import { defaultNumCtx, modelContextLength, parseModelParameters } from "@/lib/modelParams";
 import { fullOllamaTag } from "@/lib/modelChoice";
 import {
   DEFAULT_SETTINGS,
+  OPENAI_COMPAT_NUM_CTX,
   type AdminEvent,
   type GenerationParams,
   type ModelInfo,
   type OllamaShowResponse,
+  type ProviderId,
 } from "@/types";
 
 // Monotonic token guarding `refresh()` against overlapping runs — a base-URL /
@@ -82,6 +84,12 @@ interface ModelsState {
    *  none"; missing key means "we haven't asked yet, or asking failed".
    *  Older Ollama builds that omit the field show up as `[]` here. */
   modelCapabilities: Record<string, string[]>;
+
+  /** Per-model trained context window from `/api/show`'s `model_info`,
+   *  filled alongside `modelDefaults`. Caps the app's default context length
+   *  (`defaultNumCtx`); a missing key (not asked yet, or the model doesn't
+   *  say) caps nothing. */
+  modelContextMax: Record<string, number>;
 
   /** User-set "default thinking" preference per model (the Thinking toggle
    *  in ModelsView). Sits as a layer between Modelfile defaults and
@@ -180,11 +188,13 @@ function forgetModel(
   set((s) => {
     const modelDefaults = { ...s.modelDefaults };
     const modelCapabilities = { ...s.modelCapabilities };
+    const modelContextMax = { ...s.modelContextMax };
     for (const k of keys) {
       delete modelDefaults[k];
       delete modelCapabilities[k];
+      delete modelContextMax[k];
     }
-    return { modelDefaults, modelCapabilities };
+    return { modelDefaults, modelCapabilities, modelContextMax };
   });
 }
 
@@ -196,6 +206,7 @@ export const useModelsStore = create<ModelsState>((set, get) => ({
   runs: {},
   modelDefaults: {},
   modelCapabilities: {},
+  modelContextMax: {},
   modelThinkPrefs: loadThinkPrefs(),
 
   setModelThinkPref: (modelId, value) =>
@@ -229,7 +240,7 @@ export const useModelsStore = create<ModelsState>((set, get) => ({
         defaultsGeneration.set(k, (defaultsGeneration.get(k) ?? 0) + 1);
       }
       pendingDefaults.clear();
-      set({ modelDefaults: {}, modelCapabilities: {} });
+      set({ modelDefaults: {}, modelCapabilities: {}, modelContextMax: {} });
     }
     cachedFromBase = s.ollama_base_url;
 
@@ -319,10 +330,12 @@ export const useModelsStore = create<ModelsState>((set, get) => ({
     const load = (async () => {
       let patch: Partial<GenerationParams>;
       let caps: string[];
+      let max: number | undefined;
       try {
         const resp = await ollamaShowModel(base, modelId);
         patch = parseModelParameters(resp.parameters);
         caps = resp.capabilities ?? [];
+        max = modelContextLength(resp.model_info);
       } catch {
         // Network / 404 — app defaults for now, but nothing cached: Ollama
         // simply not running yet failed here, and a cached `{}` / `[]` then
@@ -334,10 +347,16 @@ export const useModelsStore = create<ModelsState>((set, get) => ({
       // The model was re-created (or deleted) while this read the old one:
       // cached, its values came back over the new Modelfile's.
       if ((defaultsGeneration.get(modelId) ?? 0) !== generation) return patch;
-      set((s) => ({
-        modelDefaults: { ...s.modelDefaults, [modelId]: patch },
-        modelCapabilities: { ...s.modelCapabilities, [modelId]: caps },
-      }));
+      set((s) => {
+        const modelContextMax = { ...s.modelContextMax };
+        if (max) modelContextMax[modelId] = max;
+        else delete modelContextMax[modelId];
+        return {
+          modelDefaults: { ...s.modelDefaults, [modelId]: patch },
+          modelCapabilities: { ...s.modelCapabilities, [modelId]: caps },
+          modelContextMax,
+        };
+      });
       return patch;
     })();
     pendingDefaults.set(modelId, load);
@@ -688,4 +707,26 @@ async function unpinDeletedModel(name: string) {
       logger.warn("could not clear a Space's default model after deleting it", e);
     }
   }
+}
+
+/** The app-default context window for a chat on `model`: Settings' default
+ *  context length, capped at an Ollama model's maximum once its `/api/show`
+ *  has loaded. The bottom `num_ctx` layer of `chatStore.layerParams`. */
+export function useDefaultNumCtx(provider: ProviderId | undefined, model: string | undefined): number {
+  const setting = useSettingsStore((s) => s.default_num_ctx);
+  const max = useModelsStore((s) =>
+    provider === "ollama" && model ? s.modelContextMax[model] : undefined,
+  );
+  return defaultNumCtx(setting, max);
+}
+
+/** The window under a chat's Space and own layers, as the send layers it:
+ *  an Ollama model's Modelfile `num_ctx`, else the app default
+ *  (`useDefaultNumCtx`); for an OpenAI-compatible model, the one assumed. */
+export function useModelNumCtx(provider: ProviderId | undefined, model: string | undefined): number {
+  const fallback = useDefaultNumCtx(provider, model);
+  const own = useModelsStore((s) =>
+    provider === "ollama" && model ? s.modelDefaults[model]?.num_ctx : undefined,
+  );
+  return provider === "openai" ? OPENAI_COMPAT_NUM_CTX : (own ?? fallback);
 }

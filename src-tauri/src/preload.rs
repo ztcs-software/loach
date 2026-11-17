@@ -167,17 +167,23 @@ pub fn try_warm_default_model(db: Arc<Database>, http: reqwest::Client) {
             .and_then(crate::providers::ollama::keep_alive_value);
         // Size the warmed runner like the first real request will: the
         // model's Modelfile `num_ctx` / `num_gpu`, else the app default
-        // num_ctx — as the post-unlock JS preload does. Warming at the app
+        // num_ctx (Settings' default context length, capped at the model's
+        // maximum) — as the post-unlock JS preload does. Warming at the app
         // default regardless had Ollama load a model whose Modelfile sets
         // another size twice: here, then again for the JS preload. A failed
         // `/api/show` (Ollama not up yet) falls back to the default.
-        let (num_ctx, num_gpu) =
+        let ((num_ctx, num_gpu), model_max) =
             match crate::providers::ollama::show_model(&http, &base_url, &model).await {
-                Ok(show) => modelfile_runner_options(show.parameters.as_deref()),
-                Err(_) => (None, None),
+                Ok(show) => (
+                    modelfile_runner_options(show.parameters.as_deref()),
+                    model_context_length(show.model_info.as_ref()),
+                ),
+                Err(_) => ((None, None), None),
             };
+        let app_num_ctx =
+            default_num_ctx(settings.get("default_num_ctx").map(String::as_str), model_max);
         let options = crate::providers::ollama::preload_options(
-            Some(num_ctx.unwrap_or(crate::providers::ollama::DEFAULT_NUM_CTX)),
+            Some(num_ctx.unwrap_or(app_num_ctx)),
             num_gpu,
         );
         // `preload_model` swallows its own transport errors (timeout,
@@ -208,6 +214,28 @@ fn modelfile_runner_options(parameters: Option<&str>) -> (Option<u32>, Option<u3
         }
     }
     (num_ctx, num_gpu)
+}
+
+/// The window a new chat gets when its model's Modelfile sets none, read like
+/// the frontend's `defaultNumCtx`: the `default_num_ctx` setting (else
+/// [`crate::providers::ollama::DEFAULT_NUM_CTX`] when it isn't a positive whole
+/// number), capped at the model's trained maximum when known.
+fn default_num_ctx(setting: Option<&str>, model_max: Option<u32>) -> u32 {
+    let n = setting
+        .and_then(|v| v.parse::<u32>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(crate::providers::ollama::DEFAULT_NUM_CTX);
+    model_max.filter(|&m| m > 0 && m < n).unwrap_or(n)
+}
+
+/// The window a model was trained for, from `/api/show`'s `model_info`
+/// (`<general.architecture>.context_length`), as the frontend's
+/// `modelContextLength` reads it.
+fn model_context_length(info: Option<&serde_json::Value>) -> Option<u32> {
+    let info = info?;
+    let arch = info.get("general.architecture")?.as_str()?;
+    let n = info.get(format!("{arch}.context_length"))?.as_u64()?;
+    u32::try_from(n).ok().filter(|&n| n > 0)
 }
 
 /// Whether `base_url`'s host is safe to fire a speculative warm at before
@@ -509,5 +537,28 @@ mod tests {
             (Some(8192), None)
         );
         assert_eq!(modelfile_runner_options(None), (None, None));
+    }
+
+    /// Without a Modelfile `num_ctx`, the warm-up uses Settings' default
+    /// context length, capped at the model's maximum, as a new chat does.
+    #[test]
+    fn default_window_comes_from_the_setting_capped_at_the_model() {
+        let default = crate::providers::ollama::DEFAULT_NUM_CTX;
+        assert_eq!(default_num_ctx(Some("32768"), None), 32768);
+        assert_eq!(default_num_ctx(Some("32768"), Some(131072)), 32768);
+        assert_eq!(default_num_ctx(Some("65536"), Some(8192)), 8192);
+        assert_eq!(default_num_ctx(Some("65536"), Some(0)), 65536);
+        for bad in [None, Some(""), Some("0"), Some("-1"), Some("big"), Some("4096.5")] {
+            assert_eq!(default_num_ctx(bad, None), default);
+        }
+
+        let info = serde_json::json!({
+            "general.architecture": "gemma4",
+            "gemma4.context_length": 131072,
+            "gemma4.embedding_length": 2560,
+        });
+        assert_eq!(model_context_length(Some(&info)), Some(131072));
+        assert_eq!(model_context_length(Some(&serde_json::json!({ "llama.context_length": 8192 }))), None);
+        assert_eq!(model_context_length(None), None);
     }
 }

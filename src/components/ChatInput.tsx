@@ -32,7 +32,7 @@ import {
 } from "@/lib/files";
 import { isPreparingSend, useChatStore, warmModelForTyping } from "@/stores/chatStore";
 import { useMcpStore } from "@/stores/mcpStore";
-import { useModelsStore } from "@/stores/modelsStore";
+import { useModelNumCtx, useModelsStore } from "@/stores/modelsStore";
 import { usePrivateChatStore } from "@/stores/privateChatStore";
 import { useSnippetStore } from "@/stores/snippetStore";
 import { useSpaceStore } from "@/stores/spaceStore";
@@ -75,7 +75,7 @@ import {
 } from "@/lib/commands/parser";
 import { orderByRecency, parseRecentCommands } from "@/lib/commands/recency";
 import type { CommandResult } from "@/lib/commands/types";
-import { OPENAI_COMPAT_NUM_CTX, type Attachment } from "@/types";
+import { type Attachment } from "@/types";
 
 interface ChatInputProps {
   centered?: boolean;
@@ -327,18 +327,11 @@ export function ChatInput({ centered = false }: ChatInputProps) {
         }),
       );
   };
-  // A Modelfile's own window, which the send layers under the chat's (for
-  // an OpenAI-compatible chat, the window Loach assumes for it). Before the
-  // chat exists, the window of the model it will start on.
-  const sessionModelCtx = useModelsStore((s) =>
-    !composerSessionId || !activeSession
-      ? undefined
-      : activeSession.provider === "ollama"
-        ? activeSession.model
-          ? s.modelDefaults[activeSession.model]?.num_ctx
-          : undefined
-        : OPENAI_COMPAT_NUM_CTX,
-  );
+  // A Modelfile's own window, else Settings' default, which the send layers
+  // under the chat's (for an OpenAI-compatible chat, the window Loach
+  // assumes for it). Before the chat exists, the window of the model it
+  // will start on.
+  const sessionModelCtx = useModelNumCtx(activeSession?.provider, activeSession?.model);
   const newChatModelCtx = useNewChatModelCtx(sourcesSpace);
   const composerModelCtx = composerSessionId && activeSession ? sessionModelCtx : newChatModelCtx;
   const libraryItems = useLibraryStore((s) => s.items);

@@ -67,7 +67,7 @@ import {
   formatProviderError,
   replayableReply,
 } from "@/lib/providerErrors";
-import { isU32 } from "@/lib/modelParams";
+import { defaultNumCtx, isU32 } from "@/lib/modelParams";
 import { decodeModelChoice, fullOllamaTag } from "@/lib/modelChoice";
 import { getPersona } from "@/lib/personas";
 import { getTone } from "@/lib/tones";
@@ -638,14 +638,17 @@ async function warmModelDefaults(session: Session): Promise<void> {
   }
 }
 
-/** A chat's parameters from their layers, bottom to top: app defaults, the
- *  global Thinking default, the model's (Modelfile) defaults, the per-model
- *  Thinking pref, the Space's, the chat's own. One merge for the send
- *  (`readSessionParams`) and the Parameters panel, which kept its own copy
- *  and drifted — an OpenAI chat's panel read and, on any touch, saved a
- *  context length of 8K where the send assumed 32K. */
+/** A chat's parameters from their layers, bottom to top: app defaults (with
+ *  Settings' default context length), the global Thinking default, the
+ *  model's (Modelfile) defaults, the per-model Thinking pref, the Space's,
+ *  the chat's own. One merge for the send (`readSessionParams`) and the
+ *  Parameters panel, which kept its own copy and drifted — an OpenAI chat's
+ *  panel read and, on any touch, saved a context length of 8K where the
+ *  send assumed 32K. */
 export function layerParams(l: {
   provider: ProviderId | undefined;
+  /** The app-default window: `defaultNumCtx` of the setting and the model. */
+  defaultNumCtx: number;
   /** Ollama's Modelfile values; `undefined` while not loaded. */
   modelDefaults: Partial<GenerationParams> | undefined;
   thinkingDefault: boolean;
@@ -656,6 +659,7 @@ export function layerParams(l: {
   const isOllama = l.provider === "ollama";
   return {
     ...DEFAULT_PARAMS,
+    num_ctx: l.defaultNumCtx,
     // Global Thinking default (Settings → Features). Sits below model +
     // per-model prefs and the per-chat override so an explicit per-model or
     // per-chat setting still wins.
@@ -709,6 +713,10 @@ function readSessionParams(session: Session | undefined): GenerationParams {
   }
   const merged = layerParams({
     provider: session.provider,
+    defaultNumCtx: defaultNumCtx(
+      settingsState.default_num_ctx,
+      modelsState?.modelContextMax[session.model],
+    ),
     modelDefaults: modelsState?.modelDefaults[session.model],
     thinkingDefault: settingsState.thinking_default,
     thinkPref: modelsState?.modelThinkPrefs[session.model],

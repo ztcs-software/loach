@@ -23,7 +23,7 @@ vi.mock("@/lib/tauri", async (importOriginal) => {
         system: null,
         license: null,
         details: null,
-        model_info: null,
+        model_info: { "general.architecture": "qwen3", "qwen3.context_length": 40960 },
         capabilities: ["completion", "thinking"],
       };
     }),
@@ -42,5 +42,6 @@ describe("loadModelDefaults", () => {
     show.fail = false;
     expect(await store().loadModelDefaults("qwen3:8b")).toEqual({ num_ctx: 32768 });
     expect(store().modelCapabilities["qwen3:8b"]).toContain("thinking");
+    expect(store().modelContextMax["qwen3:8b"]).toBe(40960);
   });
 });

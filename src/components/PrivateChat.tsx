@@ -44,7 +44,7 @@ import {
 } from "@/lib/personas";
 import { DEFAULT_TONE_ID, getTone, TONES, type Tone } from "@/lib/tones";
 import { useChatStore } from "@/stores/chatStore";
-import { useModelsStore } from "@/stores/modelsStore";
+import { useDefaultNumCtx, useModelsStore } from "@/stores/modelsStore";
 import {
   effectivePrivateParams,
   usePrivateChatStore,
@@ -630,6 +630,7 @@ function PrivateParamsPanel() {
   // chatStore.readSessionParams. Private Chat is Ollama-only so we don't
   // bother with the OpenAI branches.
   const thinkingDefault = useSettingsStore((s) => s.thinking_default);
+  const appNumCtx = useDefaultNumCtx("ollama", model);
   const defaultToneId = useSettingsStore((s) => s.default_tone_id);
   const effectiveToneId = toneId ?? defaultToneId ?? DEFAULT_TONE_ID;
 
@@ -648,9 +649,12 @@ function PrivateParamsPanel() {
 
   // Effective values shown on each row come from the same merge `send` uses,
   // so the panel shows exactly what the request carries.
-  const effective = effectivePrivateParams(params, modelDefaults, {
-    thinking_default: thinkingDefault,
-  });
+  const effective = effectivePrivateParams(
+    params,
+    modelDefaults,
+    { thinking_default: thinkingDefault },
+    appNumCtx,
+  );
   const effectiveContext = effective.num_ctx ?? DEFAULT_PARAMS.num_ctx ?? 8192;
   const effectiveThinking = effective.think;
 

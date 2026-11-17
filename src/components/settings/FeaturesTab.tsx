@@ -6,9 +6,10 @@ import {
   ChevronDown,
   ChevronRight,
   Clock,
+  Gauge,
   Image as ImageIcon,
 } from "lucide-react";
-import { KeepAliveSwitch } from "./switches";
+import { ContextLengthSwitch, KeepAliveSwitch } from "./switches";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { SectionTitle } from "./shared";
@@ -183,6 +184,30 @@ export function FeaturesTab() {
                     value={settings.ollama_keep_alive}
                     onChange={(next) =>
                       settings.update("ollama_keep_alive", next)
+                    }
+                  />
+                </div>
+
+                <Separator />
+
+                <div>
+                  <Label className="flex items-center gap-1.5">
+                    <Gauge className="h-3.5 w-3.5 text-foreground/60" />
+                    Default context length
+                  </Label>
+                  <p className="mt-1 text-[11px] text-foreground/50">
+                    How much of the conversation a chat's model can see at
+                    once. Larger windows remember more but take more VRAM;
+                    past what fits, Ollama runs part of the model on the CPU
+                    and replies slow down. Capped at each model's own
+                    maximum. A model's Modelfile, a Space, or a chat's
+                    Parameters panel can set their own, and win. Ignored by
+                    OpenAI API providers.
+                  </p>
+                  <ContextLengthSwitch
+                    value={settings.default_num_ctx}
+                    onChange={(next) =>
+                      settings.update("default_num_ctx", next)
                     }
                   />
                 </div>

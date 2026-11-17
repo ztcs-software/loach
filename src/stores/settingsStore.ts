@@ -58,6 +58,9 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         const def = DEFAULT_SETTINGS[k];
         if (typeof def === "boolean") {
           (merged as unknown as Record<string, unknown>)[k as string] = v === "true";
+        } else if (typeof def === "number") {
+          // Readers validate it (`defaultNumCtx`): a bad row falls back there.
+          (merged as unknown as Record<string, unknown>)[k as string] = Number(v);
         } else {
           (merged as unknown as Record<string, unknown>)[k as string] = v;
         }

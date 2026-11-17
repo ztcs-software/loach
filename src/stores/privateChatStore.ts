@@ -10,6 +10,7 @@ import {
 } from "@/lib/files";
 import { resolveImageScaling } from "@/lib/imageScaling";
 import { cancelMemoryExtraction } from "@/lib/memory";
+import { defaultNumCtx } from "@/lib/modelParams";
 import { getPersona } from "@/lib/personas";
 import {
   CUT_OFF_NOTE,
@@ -100,17 +101,20 @@ function randomId(): string {
 /** The params a Private Chat request sends — and, from the same call, the
  *  values its parameters panel shows. `chatStore.readSessionParams`' merge
  *  minus the layers Private Chat doesn't use (per-model Thinking pref, Space
- *  defaults): DEFAULT_PARAMS < global Thinking default < Modelfile defaults
- *  < panel overrides. Sending only the overrides left the rest to Ollama's
+ *  defaults): DEFAULT_PARAMS (with `appNumCtx`, Settings' default context
+ *  length capped at the model's maximum) < global Thinking default <
+ *  Modelfile defaults < panel overrides. Sending only the overrides left the rest to Ollama's
  *  own defaults, which didn't match the panel (it showed an 8K context
  *  while Ollama used its own). */
 export function effectivePrivateParams(
   overrides: Partial<GenerationParams>,
   modelDefaults: Partial<GenerationParams> | undefined,
   settings: { thinking_default: boolean },
+  appNumCtx: number,
 ): GenerationParams {
   return {
     ...DEFAULT_PARAMS,
+    num_ctx: appNumCtx,
     think: settings.thinking_default,
     ...modelDefaults,
     ...overrides,
@@ -331,6 +335,7 @@ export const usePrivateChatStore = create<PrivateChatState>((set, get) => ({
       state.params,
       models.modelDefaults[state.model],
       settings,
+      defaultNumCtx(settings.default_num_ctx, models.modelContextMax[state.model]),
     );
     // As in a regular chat (`chatStore.readSessionParams`): `think` only for
     // a model that lists the capability — any other answers it with a 400.

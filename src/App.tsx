@@ -89,7 +89,7 @@ import { useAutoLock } from "@/lib/autoLock";
 import { useCanvasStore } from "@/stores/canvasStore";
 import { usePrivateChatStore } from "@/stores/privateChatStore";
 import { cn } from "@/lib/utils";
-import { DEFAULT_PARAMS } from "@/types";
+import { defaultNumCtx } from "@/lib/modelParams";
 
 /** Set once the leftover-stream sweep has run for this page load. */
 let staleStreamsStopped = false;
@@ -322,7 +322,7 @@ export default function App() {
       if (resolved.provider === "ollama" && resolved.model) {
         // Resolve the runner-affecting params a fresh chat with this model
         // would send (num_ctx from the Modelfile defaults, else the app
-        // default) so the warmed model isn't
+        // default capped at the model's maximum) so the warmed model isn't
         // reloaded the instant the user sends their first message.
         void useModelsStore
           .getState()
@@ -331,7 +331,11 @@ export default function App() {
             void ollamaPreloadModel(
               s.ollama_base_url,
               resolved.model,
-              md.num_ctx ?? DEFAULT_PARAMS.num_ctx,
+              md.num_ctx ??
+                defaultNumCtx(
+                  s.default_num_ctx,
+                  useModelsStore.getState().modelContextMax[resolved.model],
+                ),
               md.num_gpu,
             ).catch(() => {});
           })

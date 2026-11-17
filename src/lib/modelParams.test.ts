@@ -4,7 +4,7 @@
 // IPC boundary.
 
 import { describe, it, expect } from "vitest";
-import { parseModelParameters } from "./modelParams";
+import { defaultNumCtx, modelContextLength, parseModelParameters } from "./modelParams";
 
 describe("parseModelParameters", () => {
   it("maps the keys it knows and drops the rest", () => {
@@ -26,5 +26,41 @@ describe("parseModelParameters", () => {
 
   it("keeps values that only look unusual", () => {
     expect(parseModelParameters("num_gpu 0\ntop_k 0\nseed -1")).toEqual({ num_gpu: 0, top_k: 0, seed: -1 });
+  });
+});
+
+// Settings' default context length is the window a chat gets when nothing
+// above it sets one — capped at the model's maximum, or the context bar
+// promises a window the model doesn't have.
+describe("defaultNumCtx", () => {
+  it("uses the setting, capped at the model's maximum when known", () => {
+    expect(defaultNumCtx(32768)).toBe(32768);
+    expect(defaultNumCtx(32768, 131072)).toBe(32768);
+    expect(defaultNumCtx(65536, 8192)).toBe(8192);
+    expect(defaultNumCtx(65536, 0)).toBe(65536);
+  });
+
+  it("falls back to 8192 for a setting that isn't a window", () => {
+    // `Number()` of a bad settings row, or one a backup carried in.
+    for (const bad of [NaN, 0, -1, 4096.5, 2 ** 32, "32768", undefined]) {
+      expect(defaultNumCtx(bad)).toBe(8192);
+    }
+  });
+});
+
+describe("modelContextLength", () => {
+  it("reads the architecture's context_length from model_info", () => {
+    const info = {
+      "general.architecture": "gemma4",
+      "gemma4.context_length": 131072,
+      "gemma4.embedding_length": 2560,
+    };
+    expect(modelContextLength(info)).toBe(131072);
+  });
+
+  it("is undefined when model_info doesn't say", () => {
+    expect(modelContextLength(null)).toBeUndefined();
+    expect(modelContextLength({ "llama.context_length": 8192 })).toBeUndefined();
+    expect(modelContextLength({ "general.architecture": "llama", "llama.context_length": "8192" })).toBeUndefined();
   });
 });

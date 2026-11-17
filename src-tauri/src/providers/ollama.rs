@@ -1359,8 +1359,9 @@ fn emit_metrics(
 
 /// App-default context window, mirrored from `DEFAULT_PARAMS.num_ctx` in
 /// `src/types.ts`. The startup preload (in `preload.rs`) warms with this
-/// value when the model's Modelfile sets no `num_ctx` — the size a new chat
-/// with that model asks for. Keep in sync with the TS default.
+/// value when the model's Modelfile sets no `num_ctx` and the
+/// `default_num_ctx` setting is missing or unusable — the size a new chat
+/// with that model then asks for. Keep in sync with the TS default.
 pub const DEFAULT_NUM_CTX: u32 = 8192;
 
 /// Build the Ollama `options` object for a preload so the warmed runner is

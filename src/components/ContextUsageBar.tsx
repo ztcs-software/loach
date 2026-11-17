@@ -2,7 +2,7 @@ import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } f
 import { Gauge, Loader2, Maximize2, Sparkles, X } from "lucide-react";
 import { parseOverrides, useChatStore } from "@/stores/chatStore";
 import { useSettingsStore } from "@/stores/settingsStore";
-import { useModelsStore } from "@/stores/modelsStore";
+import { useDefaultNumCtx, useModelsStore } from "@/stores/modelsStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useGlobalMemoryStore } from "@/stores/globalMemoryStore";
 import { useLibraryStore } from "@/stores/libraryStore";
@@ -43,11 +43,13 @@ function effectiveParams(
   paramsJson: string | null,
   modelDefaults: Partial<GenerationParams> | undefined,
   spaceParamsJson: string | null,
+  appNumCtx: number,
 ): GenerationParams {
   // Through the send's own guard: a wrong-typed `num_ctx` the send drops
   // (hand-edited, imported) overrode the model's window here.
   return {
     ...DEFAULT_PARAMS,
+    num_ctx: appNumCtx,
     ...(modelDefaults ?? {}),
     ...parseOverrides(spaceParamsJson),
     ...parseOverrides(paramsJson),
@@ -186,14 +188,16 @@ export function ContextUsageBar() {
     if (open) popoverRef.current?.querySelector<HTMLElement>("button:not(:disabled)")?.focus();
   }, [open]);
 
+  const appNumCtx = useDefaultNumCtx(session?.provider, session?.model);
   const params = useMemo(
     () =>
       effectiveParams(
         session?.params_json ?? null,
         modelDefaults,
         space?.default_params_json ?? null,
+        appNumCtx,
       ),
-    [session?.params_json, modelDefaults, space?.default_params_json],
+    [session?.params_json, modelDefaults, space?.default_params_json, appNumCtx],
   );
 
   // The system prompt the request will actually send is the Space's

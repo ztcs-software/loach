@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ImageScalingControl } from "@/components/ImageScalingControl";
 import { layerParams, parseOverrides, useChatStore } from "@/stores/chatStore";
-import { useModelsStore } from "@/stores/modelsStore";
+import { useDefaultNumCtx, useModelsStore } from "@/stores/modelsStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useToastStore } from "@/stores/toastStore";
@@ -95,6 +95,8 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
   // Global Thinking default (Settings → Features). Mirrors the chatStore
   // merge order so the panel shows the same value the request will send.
   const thinkingDefault = useSettingsStore((s) => s.thinking_default);
+  // Settings' default context length, capped at the model's maximum.
+  const appNumCtx = useDefaultNumCtx(session?.provider, session?.model);
 
   const overrides = useMemo(
     () => parseOverrides(session?.params_json ?? null),
@@ -132,6 +134,7 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
     () =>
       layerParams({
         provider: session?.provider,
+        defaultNumCtx: appNumCtx,
         modelDefaults,
         thinkingDefault,
         thinkPref: modelThinkPref,
@@ -145,6 +148,7 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
       modelThinkPref,
       thinkingDefault,
       session?.provider,
+      appNumCtx,
     ],
   );
 
@@ -461,7 +465,7 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
                 hint={
                   isOpenAI
                     ? "How much conversation history the model can see at once. Not sent to OpenAI providers — the server decides — but Loach sizes Library sources and the context bar by it, so set it to your model's window."
-                    : "How much conversation history the model can see at once. Larger windows remember more but use more VRAM."
+                    : "How much conversation history the model can see at once. Larger windows remember more but use more VRAM. New chats start at the default context length in Settings → Features."
                 }
               />
               {isAdvanced && (

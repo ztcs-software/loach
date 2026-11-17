@@ -88,7 +88,7 @@ describe("stored parameter overrides", () => {
 // F7-01 / F7-03: the Parameters panel had its own merge and parse. It now
 // uses these, so it shows (and saves) what a send uses.
 describe("the panel's merge", () => {
-  const base = { modelDefaults: undefined, thinkingDefault: true, thinkPref: undefined, spaceLayer: {}, overrides: {} };
+  const base = { defaultNumCtx: 8192, modelDefaults: undefined, thinkingDefault: true, thinkPref: undefined, spaceLayer: {}, overrides: {} };
   it("gives an OpenAI chat the window a send assumes, not the app's 8K", async () => {
     expect(layerParams({ ...base, provider: "openai" }).num_ctx).toBe(OPENAI_COMPAT_NUM_CTX);
     expect((await paramsFor(chat({}))).num_ctx).toBe(OPENAI_COMPAT_NUM_CTX);

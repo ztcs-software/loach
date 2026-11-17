@@ -985,6 +985,7 @@ const WRITABLE_SETTING_KEYS: &[&str] = &[
     "global_memory_enabled",
     "web_fetch_enabled",
     "ollama_keep_alive",
+    "default_num_ctx",
     "thinking_default",
     "default_tone_id",
     "onboarding_completed",
