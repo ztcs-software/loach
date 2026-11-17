@@ -7,6 +7,7 @@ import { useSpaceStore } from "@/stores/spaceStore";
 import { useGlobalMemoryStore } from "@/stores/globalMemoryStore";
 import { useLibraryStore } from "@/stores/libraryStore";
 import { useSkillStore } from "@/stores/skillStore";
+import { useMcpStore } from "@/stores/mcpStore";
 import { selectMemoriesForPrompt } from "@/lib/memoryRules";
 import { estimateChatSources } from "@/lib/sources";
 import { chatToolsSize } from "@/lib/tauri";
@@ -77,6 +78,11 @@ export function ContextUsageBar() {
         ? OPENAI_COMPAT_DEFAULTS
         : undefined,
   );
+  // The model's trained window, when Ollama reports it: Expand stops there,
+  // as the default does — Ollama clamps a bigger `num_ctx` on load.
+  const modelContextMax = useModelsStore((s) =>
+    isOllama && session?.model ? s.modelContextMax[session.model] : undefined,
+  );
   const space = useSpaceStore((s) =>
     session?.space_id ? s.spaces.find((x) => x.id === session.space_id) : null,
   );
@@ -132,8 +138,13 @@ export function ContextUsageBar() {
   const streamingHere = useChatStore(
     (s) => !!sessionId && s.streamingSessionId === sessionId,
   );
-  // A skill loaded or unloaded with `/skill` changes what the send carries.
+  // A skill loaded or unloaded with `/skill` changes what the send carries,
+  // as do a skill switched off or imported, an MCP server added or switched
+  // off, and the MCP tools the typing warm-up has listed.
   const loadedSkills = useSkillStore((s) => (sessionId ? s.bySession[sessionId] : undefined));
+  const skillCatalog = useSkillStore((s) => s.catalog);
+  const mcpServers = useMcpStore((s) => s.servers);
+  const mcpWarmedAt = useMcpStore((s) => s.toolsWarmedAt);
   const [tools, setTools] = useState<{ sessionId: string; size: ChatToolsSize } | null>(null);
   useEffect(() => {
     if (!sessionId || streamingHere) return;
@@ -148,7 +159,7 @@ export function ContextUsageBar() {
     return () => {
       live = false;
     };
-  }, [sessionId, workspaceRoot, settings, streamingHere, loadedSkills]);
+  }, [sessionId, workspaceRoot, settings, streamingHere, loadedSkills, skillCatalog, mcpServers, mcpWarmedAt]);
   const toolsSize = tools?.sessionId === sessionId ? tools.size : null;
   const compactingSessionId = useChatStore((s) => s.compactingSessionId);
   const compactContext = useChatStore((s) => s.compactContext);
@@ -269,6 +280,7 @@ export function ContextUsageBar() {
   if (!session || usage.messageCount === 0) return null;
 
   const isCompacting = compactingSessionId === session.id;
+  const expandedSize = modelContextMax ? Math.min(usage.total * 2, modelContextMax) : usage.total * 2;
   const pct = Math.round(usage.ratio * 100);
   const tone =
     usage.ratio >= 0.9
@@ -359,10 +371,11 @@ export function ContextUsageBar() {
           instructionsFile={projectInstructions?.file ?? null}
           compacting={isCompacting}
           onCompact={() => void compactContext(session.id)}
-          expandedSize={usage.total * 2}
+          expandedSize={expandedSize}
           // OpenAI-compatible servers ignore `num_ctx`: "expanding" there
           // would only change Loach's own estimate, not the model's window.
-          canExpand={isOllama}
+          // Nor past the model's own window.
+          canExpand={isOllama && expandedSize > usage.total}
           onExpand={() => {
             // Merge into the EXISTING per-chat override, not the merged
             // stack. `params` is DEFAULT_PARAMS + model defaults + space
@@ -375,7 +388,7 @@ export function ContextUsageBar() {
             // Guarded like the send reads it: unchecked keys were written back.
             void setSessionParams(session.id, {
               ...parseOverrides(session.params_json),
-              num_ctx: usage.total * 2,
+              num_ctx: expandedSize,
             } as GenerationParams);
           }}
           onClose={close}
@@ -568,8 +581,9 @@ const ContextUsagePopover = ({
             Expand context window
           </button>
           <p className="mt-1.5 text-[10.5px] leading-relaxed text-foreground/45">
-            Doubles the window from {formatTokens(usage.total)} to{" "}
-            {formatTokens(expandedSize)} tokens.
+            {expandedSize === usage.total * 2 ? "Doubles" : "Raises"} the window from{" "}
+            {formatTokens(usage.total)} to {formatTokens(expandedSize)} tokens
+            {expandedSize === usage.total * 2 ? "." : ", the most this model takes."}
           </p>
         </>
       )}

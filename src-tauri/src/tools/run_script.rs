@@ -43,7 +43,9 @@ pub fn tool_def(has_workspace: bool) -> McpToolDef {
         (
             "Send the `code` and its `language`, and Loach saves it to a temporary file and \
              runs it; or name a `script` file in the workspace folder to run that.",
-            "It runs in the workspace folder, so relative paths point there.",
+            "It runs in the workspace folder, so relative paths point there. `code` itself is \
+             saved outside it: Python imports and Node.js `require` find the workspace's own \
+             modules by their path from its top (`src.util`, `src/util`), not with `./`.",
         )
     } else {
         (
@@ -63,7 +65,9 @@ pub fn tool_def(has_workspace: bool) -> McpToolDef {
              on the computer. `args` reach the script exactly as given, with no shell in \
              between, so don't quote them and don't use pipes or redirection. {place} It has no \
              terminal and can't ask questions: give it everything through `args` or `stdin`. \
-             The user sees the code or command and approves every run. It gets {} seconds.",
+             Whatever it starts is stopped when it ends, so it can't leave a server or an app \
+             running. The user sees the code or command and approves every run. It gets {} \
+             seconds.",
             script::TIMEOUT.as_secs()
         )),
         input_schema: input_schema(has_workspace),

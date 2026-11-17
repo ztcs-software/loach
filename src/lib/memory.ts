@@ -326,11 +326,12 @@ function opsFor(scope: MemoryScope): MemoryOps {
  * waiting for the model — in whichever chat — so turns a send elsewhere cut
  * short no longer wait for their own chat's next reply. A
  * `cancelMemoryExtraction` stops the pass; what it hadn't reached stays
- * parked for the next one. `runnerOptions` gives a chat's `RunnerOptions`,
- * read when its run starts; without it an Ollama run sends none.
+ * parked for the next one. `runnerOptions` gives a chat's `RunnerOptions`
+ * for the model its turns ran on (the chat may have switched since), read
+ * when its run starts; without it an Ollama run sends none.
  */
 export async function extractMemories(
-  runnerOptions?: (sessionId: string) => Promise<RunnerOptions>,
+  runnerOptions?: (sessionId: string, model: string) => Promise<RunnerOptions>,
 ): Promise<void> {
   if (draining) return;
   draining = true;
@@ -378,7 +379,7 @@ export async function extractMemories(
 async function extractRun(
   run: PendingRun,
   epoch: number,
-  runnerOptions?: (sessionId: string) => Promise<RunnerOptions>,
+  runnerOptions?: (sessionId: string, model: string) => Promise<RunnerOptions>,
 ): Promise<void> {
   const { scope, sessionId, provider, model, baseUrl } = run;
   if (!model || !rememberingIn(scope)) return;
@@ -420,9 +421,10 @@ async function extractRun(
     [...usersOwn, ...alreadyKnown],
   );
 
-  // Sized like the chat's own requests, so Ollama keeps the loaded runner.
+  // Sized like the chat's own requests to this model, so Ollama keeps the
+  // loaded runner.
   const runner: RunnerOptions =
-    provider === "ollama" && runnerOptions ? await runnerOptions(sessionId) : {};
+    provider === "ollama" && runnerOptions ? await runnerOptions(sessionId, model) : {};
 
   // Read after the awaits above: a turn dropped meanwhile never reaches the
   // prompt.

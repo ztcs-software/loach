@@ -261,7 +261,8 @@ async fn shut_down(process: Process, stdin: SharedStdin) {
 /// Python is one, and what a script run with it started outlived Stop. So
 /// stopping the tree also stops what the child started outside the job,
 /// found by parent id ([`outside_job`]) — while Loach runs; a crash still
-/// strands those.
+/// strands those. A process whose parent has exited is found only through
+/// that parent if it was held while alive ([`track`](Self::track)).
 ///
 /// The job handle is kept as an integer: a kernel handle is valid from any
 /// thread, and a raw pointer field would make every session `!Send`.
@@ -271,8 +272,10 @@ async fn shut_down(process: Process, stdin: SharedStdin) {
 #[cfg(windows)]
 pub(crate) struct ProcessTree {
     job: Option<isize>,
-    /// The child, to find what it started outside the job.
-    root: Option<Held>,
+    /// The child first, then what it started as found so far — held, so an
+    /// exited one's id stays its own and what it started still traces back
+    /// to the child through it.
+    held: Vec<Held>,
 }
 
 #[cfg(windows)]
@@ -285,15 +288,15 @@ impl ProcessTree {
             JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
         };
         // Opened while `child` still holds the process, so the id is its own.
-        let root = child.id().and_then(Held::open);
+        let held: Vec<Held> = child.id().and_then(Held::open).into_iter().collect();
         let Some(process) = child.raw_handle() else {
-            return Self { job: None, root };
+            return Self { job: None, held };
         };
         // SAFETY: plain Win32 calls on handles we own; `info` outlives the
         // call that reads it.
         unsafe {
             let Ok(job) = CreateJobObjectW(None, windows::core::PCWSTR::null()) else {
-                return Self { job: None, root };
+                return Self { job: None, held };
             };
             let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
             info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
@@ -306,9 +309,19 @@ impl ProcessTree {
             if limited.is_err() || AssignProcessToJobObject(job, HANDLE(process)).is_err() {
                 let _ = CloseHandle(job);
                 tracing::warn!("couldn't put a child process in a job; what it starts will be found by parent id");
-                return Self { job: None, root };
+                return Self { job: None, held };
             }
-            Self { job: Some(job.0 as isize), root }
+            Self { job: Some(job.0 as isize), held }
+        }
+    }
+
+    /// Hold what the child has started so far. Called while it runs, so a
+    /// process whose parent exits later — `cmd /c start`, a shell running
+    /// something in the background — can still be traced back and stopped.
+    pub(crate) fn track(&mut self) {
+        if !self.held.is_empty() {
+            let more = outside_job(&self.held);
+            self.held.extend(more);
         }
     }
 
@@ -320,8 +333,8 @@ impl ProcessTree {
             JobObjectExtendedLimitInformation, SetInformationJobObject,
             JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
         };
-        // Closing the child's handle stops nothing.
-        self.root = None;
+        // Closing the handles stops nothing.
+        self.held.clear();
         if let Some(job) = self.job.take() {
             let job = HANDLE(job as *mut std::ffi::c_void);
             let info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
@@ -348,7 +361,9 @@ impl Drop for ProcessTree {
         use windows::Win32::System::Threading::TerminateProcess;
         // What the job won't stop, found while the tree still stands: a
         // process the job stops first could no longer be traced through.
-        let outside = self.root.take().map(|root| outside_job(&root)).unwrap_or_default();
+        // The child itself is the job's to stop, or `kill_on_drop`'s.
+        self.track();
+        let outside = std::mem::take(&mut self.held).into_iter().skip(1);
         if let Some(job) = self.job.take() {
             // Closing the last handle to a kill-on-close job ends every
             // process in it.
@@ -357,9 +372,9 @@ impl Drop for ProcessTree {
                 let _ = CloseHandle(HANDLE(job as *mut std::ffi::c_void));
             }
         }
-        for process in &outside {
+        for process in outside {
             // SAFETY: a handle opened with `PROCESS_TERMINATE`, still open.
-            // One the job already stopped just fails.
+            // One the job already stopped, or that exited, just fails.
             unsafe {
                 let _ = TerminateProcess(HANDLE(process.handle as *mut std::ffi::c_void), 1);
             }
@@ -409,35 +424,37 @@ impl Drop for Held {
     }
 }
 
-/// What `root` started, held open: every process whose parent is `root` or
-/// one of these, and that started after its parent — an exited parent's id
-/// stays on its children, and may name a newer process by now. Each is held
-/// as it's found, so its id stays its own, and listed again before it's
+/// What the `known` processes started, beyond them, held open: every process
+/// whose parent is one of them or of these, and that started after its
+/// parent — an exited parent's id stays on its children, and may name a
+/// newer process by now (not while it's held: then it's still its own, which
+/// is how a process can be traced through a parent that has exited). Each is
+/// held as it's found, so its id stays its own, and listed again before it's
 /// returned: one that exited between the first list and being opened may
 /// have passed its id to a process that isn't ours, which shows its own
 /// parent in the second.
 #[cfg(windows)]
-fn outside_job(root: &Held) -> Vec<Held> {
+fn outside_job(known: &[Held]) -> Vec<Held> {
     let Some(listed) = parent_ids() else {
         return Vec::new();
     };
+    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+    for &(pid, ppid) in &listed {
+        children.entry(ppid).or_default().push(pid);
+    }
+    let mut created: HashMap<u32, u64> = known.iter().map(|held| (held.pid, held.created)).collect();
     // Each with its parent's id; parents come before their children.
     let mut found: Vec<(Held, u32)> = Vec::new();
-    let mut next = 0;
-    loop {
-        let (parent, parent_created) = match next {
-            0 => (root.pid, root.created),
-            n => match found.get(n - 1) {
-                Some((held, _)) => (held.pid, held.created),
-                None => break,
-            },
-        };
-        next += 1;
-        for &(pid, ppid) in &listed {
-            if ppid != parent || pid == root.pid || found.iter().any(|(held, _)| held.pid == pid) {
+    let mut parents: Vec<u32> = known.iter().map(|held| held.pid).collect();
+    while let Some(parent) = parents.pop() {
+        let parent_created = created[&parent];
+        for &pid in children.get(&parent).into_iter().flatten() {
+            if created.contains_key(&pid) {
                 continue;
             }
             if let Some(held) = Held::open(pid).filter(|held| held.created >= parent_created) {
+                created.insert(pid, held.created);
+                parents.push(pid);
                 found.push((held, parent));
             }
         }
@@ -448,13 +465,14 @@ fn outside_job(root: &Held) -> Vec<Held> {
     let Some(relisted) = parent_ids() else {
         return Vec::new();
     };
-    let mut ours = vec![root.pid];
+    let relisted: std::collections::HashSet<(u32, u32)> = relisted.into_iter().collect();
+    let mut ours: std::collections::HashSet<u32> = known.iter().map(|held| held.pid).collect();
     found
         .into_iter()
         .filter(|(held, parent)| {
             let kept = ours.contains(parent) && relisted.contains(&(held.pid, *parent));
             if kept {
-                ours.push(held.pid);
+                ours.insert(held.pid);
             }
             kept
         })
@@ -510,6 +528,11 @@ impl ProcessTree {
         }
         Self(pgid)
     }
+
+    /// Nothing to do: the group holds everything the child starts, whether
+    /// or not its parent has exited (one that leaves it with `setsid`
+    /// escapes either way).
+    pub(crate) fn track(&mut self) {}
 
     fn forget(pgid: libc::pid_t) {
         LIVE_GROUPS
@@ -1569,6 +1592,60 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         assert!(gone, "process {ping}, started outside the job, outlived the tree");
+    }
+
+    /// A process whose parent exited before the tree stopped — `start /b`
+    /// from a `cmd` that then ends — is still found through that parent, held
+    /// by `track` while it ran. Outside the job (started before it), like
+    /// what the Store's Python starts.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn an_orphan_is_found_through_a_parent_held_while_it_ran() {
+        use tokio::io::AsyncBufReadExt as _;
+        let mut child = Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "(Start-Process cmd -ArgumentList '/d','/c','ping -n 2 127.0.0.1 >nul & start /b ping -n 60 127.0.0.1 >nul & ping -n 2 127.0.0.1 >nul' -NoNewWindow -PassThru).Id; Start-Sleep 60",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn powershell");
+        let mut out = tokio::io::BufReader::new(child.stdout.take().unwrap());
+        let mut line = String::new();
+        assert!(out.read_line(&mut line).await.unwrap() > 0, "no process id");
+        let cmd: u32 = line.trim().parse().expect("cmd's id");
+
+        // Held while `cmd` still runs, before it starts the long `ping`.
+        let mut tree = ProcessTree::adopt(&child);
+        tree.track();
+        let running = |pid: u32| parent_ids().unwrap().iter().any(|&(p, _)| p == pid);
+        for _ in 0..100 {
+            if !running(cmd) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(!running(cmd), "cmd didn't finish");
+        let orphans: Vec<u32> =
+            parent_ids().unwrap().iter().filter(|&&(_, ppid)| ppid == cmd).map(|&(pid, _)| pid).collect();
+        assert_eq!(orphans.len(), 1, "the long ping, left behind by cmd");
+
+        drop(tree);
+        let mut gone = false;
+        for _ in 0..50 {
+            if !running(orphans[0]) {
+                gone = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(gone, "process {}, left by an exited parent, outlived the tree", orphans[0]);
     }
 
     /// One missed reply is a slow server; two in a row is a hung one, which

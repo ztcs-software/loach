@@ -4,6 +4,7 @@ import { MessageItem } from "./Message";
 import { Button } from "@/components/ui/button";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { useChatStore } from "@/stores/chatStore";
+import { useSpeechStore } from "@/stores/speechStore";
 import { useUIStore } from "@/stores/uiStore";
 import { extractSummary } from "@/lib/contextUsage";
 import { cn, prefersReducedMotion } from "@/lib/utils";
@@ -216,6 +217,7 @@ export function ChatCanvas() {
   // resets on chat switch via the effect below. `prependAnchor` lets the layout
   // effect keep the viewport pinned when a reveal prepends rows above the fold.
   const [visibleCount, setVisibleCount] = useState(WINDOW_SIZE);
+  const speakingId = useSpeechStore((s) => s.speakingId);
   const prependAnchor = useRef<{ height: number; top: number } | null>(null);
 
   // ---------------- Search-in-chat ----------------
@@ -616,11 +618,16 @@ export function ChatCanvas() {
   // Only the trailing window mounts. Items keep their original `index` /
   // `startIndex` (computed against the full `messages` array), so the
   // compaction-divider placement and `isLast` checks below stay correct on the
-  // slice. `hiddenBefore` is how many messages sit above the window.
-  const visibleItems =
-    renderItems.length > visibleCount
-      ? renderItems.slice(renderItems.length - visibleCount)
-      : renderItems;
+  // slice. `hiddenBefore` is how many messages sit above the window. A reply
+  // being read aloud stays in it: unmounted, it stopped reading as new
+  // messages pushed it out (its Stop is on the row).
+  const speakingAt = speakingId
+    ? renderItems.findIndex((it) => it.kind === "message" && it.message.id === speakingId)
+    : -1;
+  const windowStart = Math.max(0, renderItems.length - visibleCount);
+  const visibleItems = renderItems.slice(
+    speakingAt === -1 ? windowStart : Math.min(windowStart, speakingAt),
+  );
   const firstVisible = visibleItems[0];
   const hiddenBefore = firstVisible
     ? firstVisible.kind === "message"

@@ -62,6 +62,21 @@ describe("speechChunks", () => {
     ]);
   });
 
+  // An online voice ends an utterance after ~15 s with no `end` event.
+  it("speaks a long paragraph a few sentences at a time", () => {
+    const sentence = "This sentence is here to make the paragraph long enough to split.";
+    const paragraph = Array.from({ length: 8 }, () => sentence).join(" ");
+    const chunks = speechChunks(paragraph);
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const c of chunks) expect(c.length).toBeLessThanOrEqual(200);
+    expect(chunks.join(" ")).toBe(paragraph);
+
+    const runOn = Array.from({ length: 60 }, (_, i) => `word${i}`).join(" ");
+    const pieces = speechChunks(runOn);
+    expect(pieces.length).toBeGreaterThan(1);
+    expect(pieces.join(" ")).toBe(runOn);
+  });
+
   it("keeps underscores inside words", () => {
     expect(speechChunks("Set my_var to __init__.")).toEqual(["Set my_var to init."]);
   });

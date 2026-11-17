@@ -42,14 +42,17 @@ use crate::mcp::McpCallResult;
 pub const TIMEOUT: Duration = Duration::from_secs(300);
 /// How long output may keep coming once the script itself has exited.
 const PIPE_GRACE: Duration = Duration::from_secs(2);
+/// How often, on Windows, what a running script has started is held
+/// (`ProcessTree::track`).
+const TRACK_EVERY: Duration = Duration::from_millis(250);
 const MAX_ARGS: usize = 64;
 const MAX_ARGS_BYTES: usize = 16 * 1024;
 const MAX_STDIN_BYTES: usize = 1024 * 1024;
 const MAX_CODE_BYTES: usize = 1024 * 1024;
 /// The languages `run_script` takes code in, as its schema lists them.
 pub const LANGUAGES: &[&str] = &["python", "bash", "node", "powershell"];
-/// Output kept per stream. The model gets less (the per-result cap); the
-/// transcript gets this much.
+/// Output kept per stream while the script runs. The result keeps less, the
+/// ends of it ([`fit_output`]).
 const MAX_CAPTURE_BYTES: usize = 256 * 1024;
 
 pub fn description() -> String {
@@ -360,16 +363,42 @@ if (-not $?) { exit $LASTEXITCODE }
 /// before the script starts.
 const PS_SCRIPT_VAR: &str = "LOACH_SCRIPT";
 
-/// Save [`PS_UTF8_WRAPPER`] beside the code, or in a temporary folder of its
-/// own for a script file, and return its path.
-fn save_ps_wrapper(saved: &mut SavedCode) -> std::io::Result<String> {
+/// Git Bash takes its arguments apart itself from the Windows command line —
+/// expanding `*.ps1`, `{a,b}` and `@file`, and pairing `'` as quotes — so a
+/// script's `args` reached it otherwise than the card showed (`"it's" x` came
+/// in as `its x`). On Windows bash gets them, and the script, in
+/// environment variables instead: started with this file as `BASH_ENV`, it
+/// rebuilds `"$@"` and runs the script in its place. The approval card shows
+/// the script's own command; this part is the same for every run.
+const BASH_ARGS_WRAPPER: &str = r#"unset BASH_ENV
+loach_script=$LOACH_SCRIPT
+loach_argc=$LOACH_ARGC
+unset LOACH_SCRIPT LOACH_ARGC
+set --
+loach_i=0
+while [ "$loach_i" -lt "$loach_argc" ]; do
+  loach_v=LOACH_ARG_$loach_i
+  set -- "$@" "${!loach_v}"
+  unset "$loach_v"
+  loach_i=$((loach_i + 1))
+done
+unset loach_i loach_v loach_argc
+exec "$BASH" "$loach_script" "$@"
+"#;
+/// What bash runs should it not read [`BASH_ARGS_WRAPPER`]: a failure that
+/// says so, not a silent success. Nothing in it Git Bash would re-read.
+const BASH_WRAPPER_MISSED: &str = "echo Loach could not hand the script to bash. >&2; exit 127";
+
+/// Save a wrapper beside the code, or in a temporary folder of its own for a
+/// script file, and return its path.
+fn save_wrapper(saved: &mut SavedCode, name: &str, text: &str) -> std::io::Result<String> {
     let dir = match saved.0.take() {
         Some(dir) => dir,
         None => tempfile::Builder::new().prefix("loach-script-").tempdir()?,
     };
-    let path = dir.path().join("loach-utf8-output.ps1");
+    let path = dir.path().join(name);
     saved.0 = Some(dir);
-    std::fs::write(&path, PS_UTF8_WRAPPER)?;
+    std::fs::write(&path, text)?;
     Ok(path.to_string_lossy().into_owned())
 }
 
@@ -471,11 +500,23 @@ pub async fn run(plan: Plan) -> McpCallResult {
     // Windows PowerShell (`pwsh`, elsewhere, writes UTF-8) runs the script
     // through [`PS_UTF8_WRAPPER`].
     if plan.program == "powershell" {
-        let wrapper = match save_ps_wrapper(&mut saved) {
+        let wrapper = match save_wrapper(&mut saved, "loach-utf8-output.ps1", PS_UTF8_WRAPPER) {
             Ok(wrapper) => wrapper,
             Err(e) => return failed(format!("Couldn't save PowerShell's UTF-8 wrapper to a temporary file: {e}")),
         };
         cmd.args(plan.lead).arg(wrapper).args(&plan.args).env(PS_SCRIPT_VAR, &script);
+    } else if cfg!(windows) && plan.program == "bash" {
+        let wrapper = match save_wrapper(&mut saved, "loach-args.sh", BASH_ARGS_WRAPPER) {
+            Ok(wrapper) => wrapper,
+            Err(e) => return failed(format!("Couldn't save bash's argument wrapper to a temporary file: {e}")),
+        };
+        cmd.args(["-c", BASH_WRAPPER_MISSED])
+            .env("BASH_ENV", wrapper)
+            .env("LOACH_SCRIPT", &script)
+            .env("LOACH_ARGC", plan.args.len().to_string());
+        for (i, arg) in plan.args.iter().enumerate() {
+            cmd.env(format!("LOACH_ARG_{i}"), arg);
+        }
     } else {
         cmd.args(plan.lead).arg(&script).args(&plan.args);
     }
@@ -493,12 +534,33 @@ pub async fn run(plan: Plan) -> McpCallResult {
     if let Some(cwd) = plan.cwd.as_deref().or(saved.path()) {
         cmd.current_dir(cwd);
     }
+    // Code is saved outside the workspace it runs in, so its imports looked
+    // in the temporary folder: `import mypkg` and `require('mypkg')` failed
+    // where a script in the workspace finds them. The workspace goes first
+    // on both module paths, as it would for a script there.
+    if let (Script::Code { .. }, Some(cwd)) = (&plan.script, plan.cwd.as_deref()) {
+        for (var, dirs) in [
+            ("PYTHONPATH", vec![cwd.to_path_buf()]),
+            ("NODE_PATH", vec![cwd.join("node_modules"), cwd.to_path_buf()]),
+        ] {
+            let inherited = std::env::var_os(var);
+            let paths = dirs.into_iter().chain(inherited.iter().flat_map(std::env::split_paths));
+            if let Ok(joined) = std::env::join_paths(paths) {
+                cmd.env(var, joined);
+            }
+        }
+    }
     cmd.stdin(if plan.stdin.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         // Python on Windows writes a pipe in the ANSI code page and fails on
         // the first character outside it; its UTF-8 mode makes it UTF-8.
         .env("PYTHONUTF8", "1")
+        // Nobody can answer a terminal prompt: git asking for a password
+        // waited out the whole time limit. (A Windows script still has a
+        // hidden console, so one reading a key or a password from it waits
+        // too — the tool's description says it can't ask.)
+        .env("GIT_TERMINAL_PROMPT", "0")
         .kill_on_drop(true);
     #[cfg(windows)]
     cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW: no console flashing up.
@@ -518,23 +580,36 @@ pub async fn run(plan: Plan) -> McpCallResult {
     };
     // Everything the script starts: dropped — when the run ends, times out
     // or is stopped — it stops all of it.
-    let tree = crate::mcp::stdio::ProcessTree::adopt(&child);
+    let mut tree = crate::mcp::stdio::ProcessTree::adopt(&child);
     let (stdin, stdout, stderr) = (child.stdin.take(), child.stdout.take(), child.stderr.take());
     let input = plan.stdin.unwrap_or_default();
     let (mut out, mut err) = (Capture::default(), Capture::default());
+    let feed = async {
+        if let Some(mut pipe) = stdin {
+            // A script that never reads its input closes the pipe; the
+            // write then fails, which is fine.
+            let _ = pipe.write_all(input.as_bytes()).await;
+        }
+    };
+    let mut pipes = Box::pin(async {
+        tokio::join!(feed, out.drain(stdout), err.drain(stderr));
+    });
     let mut held_open = false;
     let waited = tokio::time::timeout(TIMEOUT, async {
-        let feed = async {
-            if let Some(mut pipe) = stdin {
-                // A script that never reads its input closes the pipe; the
-                // write then fails, which is fine.
-                let _ = pipe.write_all(input.as_bytes()).await;
+        // Windows: what the script starts is held as it appears, so a
+        // process whose parent exits before the run ends (`cmd /c start`,
+        // which the Store's Python runs outside the job) is still found.
+        let watch = async {
+            if cfg!(windows) {
+                let mut every = tokio::time::interval(TRACK_EVERY);
+                loop {
+                    every.tick().await;
+                    tree.track();
+                }
+            } else {
+                std::future::pending::<()>().await;
             }
         };
-        let pipes = async {
-            tokio::join!(feed, out.drain(stdout), err.drain(stderr));
-        };
-        tokio::pin!(pipes);
         tokio::select! {
             status = child.wait() => {
                 // The script is done. Its output ends with it unless a
@@ -544,6 +619,7 @@ pub async fn run(plan: Plan) -> McpCallResult {
                 status
             }
             () = &mut pipes => child.wait().await,
+            () = watch => unreachable!("the watch never ends"),
         }
     })
     .await;
@@ -566,13 +642,19 @@ pub async fn run(plan: Plan) -> McpCallResult {
     // the script's own — reaped at most PIPE_GRACE ago, and reserved while
     // any of the group lives.
     drop(tree);
+    // Stopped, what held the output lets go of it: only then is it so.
+    let stopped = !held_open || tokio::time::timeout(PIPE_GRACE, &mut pipes).await.is_ok();
+    drop(pipes);
     if held_open {
-        text.push_str(
+        text.push_str(if stopped {
             " A process the script started was still running, so Loach stopped it: a script \
-             can't leave programs running.",
-        );
+             can't leave programs running."
+        } else {
+            " A process the script started is still running and still holds its output: \
+             Loach couldn't find it to stop it."
+        });
     }
-    let (out, err) = (out.text(), err.text());
+    let (out, err) = fit_output(out.text(), err.text());
     if !out.is_empty() {
         text.push_str(&format!("\n\n--- stdout ---\n{out}"));
     }
@@ -595,6 +677,60 @@ fn failed(text: String) -> McpCallResult {
         is_error: true,
         ..Default::default()
     }
+}
+
+/// Most of a script's output a result keeps: under the 32 KiB of a tool
+/// result the model reads (`providers::MAX_TOOL_RESULT_BYTES`), with room
+/// for the lines around it.
+const MAX_RESULT_OUTPUT: usize = 30 * 1024;
+/// What the standard error keeps of that at least: its end, where a
+/// traceback is.
+const MIN_RESULT_STDERR: usize = 8 * 1024;
+
+/// `out` and `err` cut to fit [`MAX_RESULT_OUTPUT`] together: the end of the
+/// error output, and the start and end of the rest. Cut from the front only,
+/// a long log on stdout left the model neither the traceback after it nor
+/// the summary at its end.
+fn fit_output(out: String, err: String) -> (String, String) {
+    if out.len() + err.len() <= MAX_RESULT_OUTPUT {
+        return (out, err);
+    }
+    let err = keep_end(err, MIN_RESULT_STDERR.max(MAX_RESULT_OUTPUT.saturating_sub(out.len())));
+    let out = keep_ends(out, MAX_RESULT_OUTPUT.saturating_sub(err.len()));
+    (out, err)
+}
+
+/// The last `max` bytes of `s` or so, after a note of what's left out.
+fn keep_end(s: String, max: usize) -> String {
+    if s.len() <= max {
+        return s;
+    }
+    let start = ceil_boundary(&s, s.len() - max);
+    format!("[… {start} bytes left out here]\n{}", &s[start..])
+}
+
+/// The first and last `max / 2` bytes of `s` or so, a note between them.
+fn keep_ends(s: String, max: usize) -> String {
+    if s.len() <= max {
+        return s;
+    }
+    let head = floor_boundary(&s, max / 2);
+    let tail = ceil_boundary(&s, s.len() - max / 2);
+    format!("{}\n[… {} bytes left out here]\n{}", &s[..head], tail - head, &s[tail..])
+}
+
+fn floor_boundary(s: &str, mut i: usize) -> usize {
+    while !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+fn ceil_boundary(s: &str, mut i: usize) -> usize {
+    while !s.is_char_boundary(i) {
+        i += 1;
+    }
+    i
 }
 
 /// The program to start for `program`: itself, except `bash` on Windows,
@@ -895,6 +1031,65 @@ mod tests {
         assert!(out[0].contains("loach-script-"), "{}", r.content_text);
         assert!(!Path::new(out[0]).exists());
         assert_eq!(out[1..], rest);
+    }
+
+    /// Git Bash takes a Windows command line apart itself — globs, braces,
+    /// `@file`, `'` as a quote — so the arguments go around it, and arrive
+    /// as the card shows them. Skipped where no bash runs scripts.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn bash_on_windows_gets_its_arguments_as_given() {
+        if !matches!(program_path("bash"), Ok(p) if Path::new(&p).is_absolute()) {
+            return;
+        }
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().canonicalize().unwrap();
+        fs::write(dir.join("show.sh"), "printf '[%s]\\n' \"$0\" \"$@\"\n").unwrap();
+        fs::write(dir.join("resp.txt"), "from the file").unwrap();
+        fs::write(dir.join("a.ps1"), "").unwrap();
+        let args = ["*.ps1", "it's", "x", "{a,b}", "@resp.txt", "a b", "zażółć", "\"q\"", ""];
+        let r = run(plan(&dir, &json!({ "script": "show.sh", "args": args }), None).unwrap()).await;
+        assert!(!r.is_error, "{}", r.content_text);
+        let out: Vec<&str> = r.content_text.split("--- stdout ---\n").nth(1).unwrap().lines().collect();
+        assert!(out[0].ends_with("show.sh]"), "{}", r.content_text);
+        let expected: Vec<String> = args.iter().map(|a| format!("[{a}]")).collect();
+        assert_eq!(out[1..], expected, "{}", r.content_text);
+    }
+
+    /// Code saved outside the workspace it runs in finds the workspace's
+    /// modules: the folder heads both module paths.
+    #[tokio::test]
+    async fn code_run_in_a_workspace_imports_from_it() {
+        let ws = TempDir::new().unwrap();
+        let dir = dunce::simplified(&ws.path().canonicalize().unwrap()).to_path_buf();
+        let (language, code) = if cfg!(windows) {
+            ("powershell", "$env:PYTHONPATH\n$env:NODE_PATH\n")
+        } else {
+            ("bash", "echo \"$PYTHONPATH\"\necho \"$NODE_PATH\"\n")
+        };
+        let r = run(plan_code(language, code, &json!({}), Some(&dir)).unwrap()).await;
+        assert!(!r.is_error, "{}", r.content_text);
+        let out: Vec<&str> = r.content_text.split("--- stdout ---\n").nth(1).unwrap().lines().collect();
+        let first = |line: &str| std::env::split_paths(line).next().unwrap();
+        assert_eq!(first(out[0]), dir);
+        assert_eq!(first(out[1]), dir.join("node_modules"));
+    }
+
+    /// Past what the model reads, the output keeps the end of stderr — the
+    /// traceback — and both ends of stdout, not just its start.
+    #[test]
+    fn long_output_keeps_the_error_and_both_ends_of_the_log() {
+        let log: String = (0..20_000).map(|i| format!("step {i} ✓\n")).collect();
+        let err = format!("{}Traceback (most recent call last):\nValueError: boom", "warning\n".repeat(2_000));
+        let (out, err) = fit_output(log, err);
+        assert!(out.starts_with("step 0 ✓"), "{}", &out[..40]);
+        assert!(out.ends_with("step 19999 ✓\n"));
+        assert!(out.contains("bytes left out here"));
+        assert!(err.ends_with("ValueError: boom"));
+        assert!(out.len() + err.len() < 31 * 1024);
+
+        let (out, err) = fit_output("short".into(), "also short".into());
+        assert_eq!((out.as_str(), err.as_str()), ("short", "also short"));
     }
 
     /// A script that leaves a process running, still holding its output,

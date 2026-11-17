@@ -1293,8 +1293,9 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
                     Regenerate
                   </DropdownMenuItem>
                 )}
-                {/* Not while this reply streams: its row on disk stays empty
-                    until the stream finishes, and that's what a fork copies. */}
+                {/* Not while this reply streams: a fork copies its row on
+                    disk, which holds only the text so far and the note that
+                    the reply was interrupted. */}
                 <DropdownMenuItem
                   onSelect={() =>
                     void forkChat(message.session_id, message.id).catch(failed("Couldn't fork the chat"))

@@ -860,9 +860,10 @@ pub fn touches_git_dir(root: &Path, args: &Value) -> bool {
 
 /// Whether a call's `path` — or either end of a move — is a file that is read
 /// in as instructions, as written or once links are resolved: `LOACHFILE.md`
-/// at the workspace root (in the system prompt of every turn), a `CLAUDE.md`
-/// or `AGENTS.md` at any depth (what Claude Code and Codex load as project
-/// instructions, nested ones included), or anything under one of
+/// at the workspace root (in the system prompt of every turn) or the file a
+/// root instructions file links to, a `CLAUDE.md`, `AGENTS.md` or one of
+/// [`OTHER_AGENT_FILES`] at any depth (what Claude Code and Codex load as
+/// project instructions, nested ones included), or anything under one of
 /// `skill_dirs` (a new skill there joins every chat's catalogue). Like
 /// [`touches_git_dir`], a standing "Allow … for this chat" never covers
 /// these: given for ordinary edits, it let the model rewrite its own
@@ -871,6 +872,19 @@ pub fn touches_git_dir(root: &Path, args: &Value) -> bool {
 pub fn touches_instructions(root: &Path, args: &Value, skill_dirs: &[PathBuf]) -> bool {
     let canon_root = root.canonicalize().ok();
     let skill_dirs: Vec<PathBuf> = skill_dirs.iter().filter_map(|d| canonical_prefix(d)).collect();
+    // `AGENTS.md -> docs/guide.md`: Loach reads the guide as instructions, so
+    // writing it is writing them, whatever it's called.
+    let link_targets: Vec<PathBuf> = canon_root
+        .as_deref()
+        .map(|r| {
+            INSTRUCTIONS_FILES
+                .iter()
+                .map(|f| r.join(f))
+                .filter(|p| fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink()))
+                .filter_map(|p| p.canonicalize().ok())
+                .collect()
+        })
+        .unwrap_or_default();
     ["path", "from", "to"]
         .iter()
         .filter_map(|key| args.get(*key)?.as_str())
@@ -882,10 +896,16 @@ pub fn touches_instructions(root: &Path, args: &Value, skill_dirs: &[PathBuf]) -
                         .as_deref()
                         .and_then(|r| p.strip_prefix(dunce::simplified(r)).ok())
                         .is_some_and(names_instructions)
+                        || link_targets.iter().any(|t| dunce::simplified(t) == p)
                         || skill_dirs.iter().any(|d| within(p, dunce::simplified(d)))
                 })
         })
 }
+
+/// Instruction files other agents load that Loach doesn't read itself:
+/// Claude Code's personal `CLAUDE.local.md`, and Codex's `AGENTS.override.md`,
+/// which it reads ahead of `AGENTS.md`.
+const OTHER_AGENT_FILES: [&str; 2] = ["CLAUDE.local.md", "AGENTS.override.md"];
 
 /// `dir` with links resolved as far as it exists and the missing rest
 /// appended — how [`resolve_target`] spells a path under it. A skills folder
@@ -917,15 +937,16 @@ fn within(path: &Path, dir: &Path) -> bool {
 }
 
 /// Whether `rel`, relative to the workspace root, names one of
-/// [`INSTRUCTIONS_FILES`] where it's read: `LOACHFILE.md` only at the root
-/// (all Loach reads), the others anywhere. Any case.
+/// [`INSTRUCTIONS_FILES`] or [`OTHER_AGENT_FILES`] where it's read:
+/// `LOACHFILE.md` only at the root (all Loach reads), the others anywhere.
+/// Any case.
 fn names_instructions(rel: &Path) -> bool {
     let Some(name) = rel.file_name().map(|n| n.to_string_lossy()) else {
         return false;
     };
     let at_root = rel.components().filter(|c| matches!(c, Component::Normal(_))).count() == 1;
     (at_root && same_name(&name, INSTRUCTIONS_FILES[0]))
-        || INSTRUCTIONS_FILES[1..].iter().any(|f| same_name(&name, f))
+        || INSTRUCTIONS_FILES[1..].iter().chain(&OTHER_AGENT_FILES).any(|f| same_name(&name, f))
 }
 
 /// Names git, or the hook manager it calls, takes commands from — see
@@ -2714,11 +2735,28 @@ mod tests {
         assert!(hit(json!({ "path": "CLAUDE.md" })));
         assert!(hit(json!({ "path": "src/AGENTS.md" })));
         assert!(hit(json!({ "from": "notes.md", "to": "docs/claude.md" })));
+        assert!(hit(json!({ "path": "CLAUDE.local.md" })));
+        assert!(hit(json!({ "path": "src/agents.override.MD" })));
         assert!(hit(json!({ "path": "home/.agents/skills/helper/SKILL.md" })));
         // Loach reads only the root's LOACHFILE.md.
         assert!(!hit(json!({ "path": "docs/LOACHFILE.md" })));
         assert!(!hit(json!({ "path": "README.md" })));
         assert!(!hit(json!({ "path": "src/main.rs" })));
+    }
+
+    /// A root instructions file that is a link: what it points at is what
+    /// Loach reads, so a write there asks too, whatever it's called.
+    #[cfg(unix)]
+    #[test]
+    fn the_target_of_a_linked_instructions_file_is_recognised() {
+        let (_d, root) = workspace();
+        fs::create_dir_all(root.join("docs")).unwrap();
+        fs::write(root.join("docs/guide.md"), "Be terse.\n").unwrap();
+        std::os::unix::fs::symlink("docs/guide.md", root.join("AGENTS.md")).unwrap();
+        let hit = |args: Value| touches_instructions(&root, &args, &[]);
+        assert!(hit(json!({ "path": "docs/guide.md" })));
+        assert!(hit(json!({ "from": "docs/guide.md", "to": "docs/old.md" })));
+        assert!(!hit(json!({ "path": "docs/other.md" })));
     }
 
     /// B3-14: a junction — the link Windows makes without privilege (pnpm

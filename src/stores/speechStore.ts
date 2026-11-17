@@ -22,6 +22,10 @@ let run = 0;
 // Held until spoken: Chromium can garbage-collect a queued utterance and then
 // never fire its `end` event.
 let queued: SpeechSynthesisUtterance[] = [];
+// Ends a run the engine has dropped without an `end` or `error` event —
+// WebKit right after a cancel(), WebKitGTK with no working voice: nothing
+// was heard, and the reply showed "Stop reading" until clicked.
+let watchdog: ReturnType<typeof setInterval> | null = null;
 
 export const useSpeechStore = create<SpeechState>((set, get) => ({
   speakingId: null,
@@ -37,8 +41,8 @@ export const useSpeechStore = create<SpeechState>((set, get) => ({
       return;
     }
     const mine = run;
-    // One utterance per paragraph: natural pauses, and no single utterance
-    // runs into the engine's length limit on a long reply.
+    // One utterance per chunk — a paragraph, or a few sentences of a long
+    // one: natural pauses, and none runs into the engine's length limit.
     queued = chunks.map((text, i) => {
       const u = new SpeechSynthesisUtterance(text);
       if (i === chunks.length - 1) {
@@ -62,11 +66,19 @@ export const useSpeechStore = create<SpeechState>((set, get) => ({
     });
     set({ speakingId: id });
     for (const u of queued) window.speechSynthesis.speak(u);
+    watchdog = setInterval(() => {
+      const engine = window.speechSynthesis;
+      if (run === mine && !engine.speaking && !engine.pending) get().stop();
+    }, 1500);
   },
   stop: (id) => {
     if (id !== undefined && get().speakingId !== id) return;
     run++;
     queued = [];
+    if (watchdog !== null) {
+      clearInterval(watchdog);
+      watchdog = null;
+    }
     if (speechAvailable) window.speechSynthesis.cancel();
     if (get().speakingId !== null) set({ speakingId: null });
   },

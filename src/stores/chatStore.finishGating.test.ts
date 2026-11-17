@@ -129,7 +129,11 @@ describe("finishRunning", () => {
     useModelsStore.setState({ modelDefaults: { "test-model": { num_ctx: 32768 } } });
     await runTo({ kind: "done" });
     const runnerOptions = mocks.extractMemories.mock.calls[0][0];
-    await expect(runnerOptions?.("bg")).resolves.toEqual({ num_ctx: 32768, num_gpu: 20 });
+    await expect(runnerOptions?.("bg", "test-model")).resolves.toEqual({ num_ctx: 32768, num_gpu: 20 });
+    // Moved to another model since: still sized for the one its turns ran on.
+    useChatStore.setState((s) => ({ sessions: s.sessions.map((x) => ({ ...x, model: "other-model" })) }));
+    useModelsStore.setState({ modelDefaults: { "test-model": { num_ctx: 32768 }, "other-model": { num_ctx: 4096 } } });
+    await expect(runnerOptions?.("bg", "test-model")).resolves.toEqual({ num_ctx: 32768, num_gpu: 20 });
   });
 
   // X4-04: a reply the max-tokens limit ended passed for a finished one.

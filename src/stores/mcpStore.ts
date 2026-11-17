@@ -105,6 +105,9 @@ interface McpState {
   servers: McpServerView[];
   loading: boolean;
   error: string | null;
+  /** When a `warmTools` listing last finished, so the context bar can count
+   *  the tools it cached; 0 before one has. */
+  toolsWarmedAt: number;
 
   hydrate: () => Promise<void>;
   refresh: () => Promise<void>;
@@ -171,6 +174,7 @@ export const useMcpStore = create<McpState>((set, get) => ({
   servers: [],
   loading: false,
   error: null,
+  toolsWarmedAt: 0,
 
   hydrate: async () => {
     await get().refresh();
@@ -225,6 +229,9 @@ export const useMcpStore = create<McpState>((set, get) => ({
     const now = Date.now();
     if (now - lastWarm < WARM_INTERVAL_MS) return;
     lastWarm = now;
-    void mcpWarm().catch(() => {});
+    void mcpWarm().then(
+      () => set({ toolsWarmedAt: Date.now() }),
+      () => {},
+    );
   },
 }));

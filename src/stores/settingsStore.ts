@@ -60,7 +60,12 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
           (merged as unknown as Record<string, unknown>)[k as string] = v === "true";
         } else if (typeof def === "number") {
           // Readers validate it (`defaultNumCtx`): a bad row falls back there.
-          (merged as unknown as Record<string, unknown>)[k as string] = Number(v);
+          // Digits only, as the backend's startup preload reads it
+          // (`parse::<u32>`): with `Number`, "32768.0" or "0x8000" was 32K
+          // here and the default there, so the model loaded at both sizes.
+          (merged as unknown as Record<string, unknown>)[k as string] = /^\+?\d+$/.test(v)
+            ? Number(v)
+            : Number.NaN;
         } else {
           (merged as unknown as Record<string, unknown>)[k as string] = v;
         }

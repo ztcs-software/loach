@@ -1470,10 +1470,12 @@ function finishRunning(
     logger.debug("memory extraction deferred — model busy");
     return;
   }
-  // Each run is sized the way the next send in its chat will be.
-  void extractMemories(async (sessionId) => {
-    const session = get().sessions.find((s) => s.id === sessionId);
-    if (!session) return {};
+  // Each run is sized the way a send in its chat to the run's model would be
+  // — the model its turns ran on, which the chat may have switched from.
+  void extractMemories(async (sessionId, model) => {
+    const chat = get().sessions.find((s) => s.id === sessionId);
+    if (!chat) return {};
+    const session: Session = { ...chat, provider: "ollama", model };
     await warmModelDefaults(session);
     const { num_ctx, num_gpu } = readSessionParams(session);
     return { num_ctx, num_gpu };

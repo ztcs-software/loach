@@ -51,6 +51,7 @@ import {
   type PrivateMessage,
 } from "@/stores/privateChatStore";
 import { useSettingsStore } from "@/stores/settingsStore";
+import { useSpeechStore } from "@/stores/speechStore";
 import {
   DEFAULT_PARAMS,
   type Attachment,
@@ -92,6 +93,8 @@ export function PrivateChat() {
     if (!open) return;
     const { setQueueHeld } = useChatStore.getState();
     setQueueHeld(true);
+    // A reply being read aloud stops too: its Stop is behind the overlay.
+    useSpeechStore.getState().stop();
     return () => setQueueHeld(false);
   }, [open]);
 

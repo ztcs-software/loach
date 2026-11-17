@@ -41,10 +41,36 @@ function inlineText(line: string): string {
     .trim();
 }
 
+/** Longest chunk, in characters. Chromium's online voices end an utterance
+ *  after about 15 seconds with no `end` event — some 200 characters at a
+ *  usual rate — so a long paragraph is spoken a few sentences at a time. */
+const MAX_CHUNK = 200;
+
+/** `text` in pieces of at most [`MAX_CHUNK`] characters, cut between
+ *  sentences, or between words inside a sentence too long on its own. */
+function bySentence(text: string): string[] {
+  if (text.length <= MAX_CHUNK) return [text];
+  const pieces: string[] = [];
+  let current = "";
+  const add = (part: string) => {
+    if (current && current.length + 1 + part.length > MAX_CHUNK) {
+      pieces.push(current);
+      current = "";
+    }
+    current = current ? `${current} ${part}` : part;
+  };
+  for (const sentence of text.split(/(?<=[.!?…])\s+/)) {
+    if (sentence.length <= MAX_CHUNK) add(sentence);
+    else for (const word of sentence.split(" ")) add(word);
+  }
+  if (current) pieces.push(current);
+  return pieces;
+}
+
 /**
  * A Markdown reply as it should be read aloud, in the chunks it's spoken in:
  * one per paragraph, heading, list item or table row, so the voice pauses
- * where the eye would.
+ * where the eye would — a long one a few sentences at a time.
  *
  * Code blocks and display math are skipped — spelled out symbol by symbol
  * they're noise. Inline code and inline math keep their text. A line scan
@@ -56,7 +82,7 @@ export function speechChunks(md: string): string[] {
   let current: string[] = [];
   const flush = () => {
     const text = current.join(" ").trim();
-    if (text) chunks.push(text);
+    if (text) chunks.push(...bySentence(text));
     current = [];
   };
   let fence: Fence | null = null;

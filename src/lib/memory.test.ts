@@ -107,7 +107,7 @@ function seed(count: number, byHand = false) {
   }));
 }
 
-const run = (runnerOptions?: (sessionId: string) => Promise<RunnerOptions>) => {
+const run = (runnerOptions?: (sessionId: string, model: string) => Promise<RunnerOptions>) => {
   queueMemoryTurn({
     scope: { kind: "global" },
     sessionId: "chat-1",
@@ -142,7 +142,10 @@ describe("extractMemories", () => {
     // reloaded the model — and the chat's next message reloaded it back.
     seed(0);
     mocks.reply = '{"add":[],"update":[],"remove":[]}';
-    await run(async (sessionId) => (sessionId === "chat-1" ? { num_ctx: 32768, num_gpu: 20 } : {}));
+    // For the model the turns ran on, which the chat may have left since.
+    await run(async (sessionId, model) =>
+      sessionId === "chat-1" && model === "m" ? { num_ctx: 32768, num_gpu: 20 } : {},
+    );
     expect(mocks.requests[0].params).toMatchObject({ num_ctx: 32768, num_gpu: 20, max_tokens: 512 });
   });
 

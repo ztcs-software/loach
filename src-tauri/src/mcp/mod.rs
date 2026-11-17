@@ -240,9 +240,14 @@ impl ToolsCacheState {
             let generation = self.generation;
             let (db, cache) = (db.clone(), cache.clone());
             tauri::async_runtime::spawn(async move {
-                let (tools, errors) = aggregate_tools(&db).await;
+                // The probe in a task of its own: should it panic,
+                // `refreshing` still goes back, or no expired catalogue was
+                // re-probed again until Loach restarted.
+                let probed = tauri::async_runtime::spawn(async move { aggregate_tools(&db).await }).await;
                 let mut guard = cache.lock().await;
-                guard.keep(generation, tools, errors);
+                if let Ok((tools, errors)) = probed {
+                    guard.keep(generation, tools, errors);
+                }
                 guard.refreshing = false;
             });
         }

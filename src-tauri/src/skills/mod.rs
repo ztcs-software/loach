@@ -461,8 +461,9 @@ fn scalar(rest: &str, more: &[&str]) -> Option<String> {
             return None;
         }
     }
-    let rest = match rest.find(" #") {
-        Some(at) => &rest[..at],
+    // A comment starts at a `#` after a space or a tab.
+    let rest = match rest.match_indices('#').find(|&(at, _)| rest[..at].ends_with([' ', '\t'])) {
+        Some((at, _)) => &rest[..at],
         None => rest,
     };
     let mut joined = vec![rest];
@@ -542,7 +543,11 @@ fn resource_files(dir: &Path) -> Vec<String> {
         .max_depth(3)
         .sort_by_file_name()
         .into_iter()
-        .filter_entry(|e| e.depth() == 0 || !e.file_name().to_string_lossy().starts_with('.'))
+        // Nor `node_modules`: sorted ahead of `references` and `scripts`, it
+        // took every place in the list.
+        .filter_entry(|e| {
+            e.depth() == 0 || !(e.file_name().to_string_lossy().starts_with('.') || e.file_name() == "node_modules")
+        })
         .filter_map(Result::ok)
         .filter(|e| e.file_type().is_file() && !(e.depth() == 1 && e.file_name() == SKILL_FILE))
         .filter_map(|e| {
@@ -810,32 +815,30 @@ fn activate(db: &Database, session_id: Option<&str>, skill: &Skill) -> McpCallRe
     let Some(session_id) = session_id else {
         return err("Skills can only be loaded in a saved chat.");
     };
-    match db.add_session_skill(session_id, &skill.name) {
-        Ok(false) => {
-            return McpCallResult {
-                content_text: format!(
-                    "`{}` is already loaded in this chat: its instructions are in your system \
-                     prompt, or earlier in this reply. Follow them; there's no need to load \
-                     it again.",
-                    skill.name
-                ),
-                ..Default::default()
-            }
-        }
-        Ok(true) => {}
+    // Already loaded, the instructions come back all the same: loaded with
+    // `/skill` while this reply streams, they aren't in the prompt it was
+    // sent with — nor are they when reading them failed then.
+    let added = match db.add_session_skill(session_id, &skill.name) {
+        Ok(added) => added,
         Err(e) => return err(format!("Couldn't record the skill for this chat: {e:#}")),
-    }
+    };
     match skill_content(skill) {
         Ok(content) => McpCallResult {
             content_text: format!(
-                "Loaded the `{}` skill; it stays loaded for the rest of this chat. {}\n\n{content}",
-                skill.name,
+                "{} {}\n\n{content}",
+                if added {
+                    format!("Loaded the `{}` skill; it stays loaded for the rest of this chat.", skill.name)
+                } else {
+                    format!("The `{}` skill is already loaded in this chat; here it is again.", skill.name)
+                },
                 paths_note(setting_on(db, SCRIPTS_SETTING_KEY))
             ),
             ..Default::default()
         },
         Err(e) => {
-            let _ = db.remove_session_skill(session_id, &skill.name);
+            if added {
+                let _ = db.remove_session_skill(session_id, &skill.name);
+            }
             err(e)
         }
     }
@@ -892,9 +895,28 @@ pub fn import(roots: &Roots, src: &Path) -> Result<String, String> {
             skill.name
         ));
     }
+    // Under another folder name, the one there would still be used.
+    if let Some(there) = discover(roots, &HashSet::new())
+        .skills
+        .into_iter()
+        .find(|s| s.name == skill.name && s.source == Source::Loach)
+    {
+        return Err(format!(
+            "Loach's skills folder already has a skill called `{}`, in {}. Remove it first to replace it.",
+            skill.name, there.path
+        ));
+    }
     if let Err(e) = copy_tree(&skill.dir, &dest) {
         let _ = fs::remove_dir_all(&dest);
         return Err(e);
+    }
+    // The copy leaves links out, a linked SKILL.md with them: what's left
+    // then isn't a skill, and "imported" would be wrong.
+    if !matches!(load(&dest, Source::Loach, roots.data_dir.as_deref()), Ok(Some(_))) {
+        let _ = fs::remove_dir_all(&dest);
+        return Err("That folder's SKILL.md is a link, which an import doesn't copy. Copy the folder \
+                    with the file itself in it, then import that."
+            .into());
     }
     Ok(skill.name)
 }
@@ -1100,6 +1122,48 @@ mod tests {
         assert!(import(&roots, &dir).unwrap_err().contains("already has"));
         assert!(import(&roots, &copied).unwrap_err().contains("already in"));
         assert!(import(&roots, src.path()).unwrap_err().contains("no SKILL.md"));
+
+        // The same name in a folder called otherwise: the one there would
+        // still be used.
+        fs::rename(&copied, roots.loach_dir().join("pdf-old")).unwrap();
+        let err = import(&roots, &dir).unwrap_err();
+        assert!(err.contains("already has a skill called `pdf`"), "{err}");
+        assert!(!copied.exists());
+    }
+
+    /// The copy leaves links out: a linked SKILL.md left a folder that
+    /// wasn't a skill, reported as imported.
+    #[cfg(unix)]
+    #[test]
+    fn an_import_whose_skill_md_is_a_link_is_refused() {
+        let data = TempDir::new().unwrap();
+        let src = TempDir::new().unwrap();
+        let roots = Roots::new(data.path(), None);
+        fs::write(src.path().join("real.md"), md("pdf", "d")).unwrap();
+        let dir = src.path().join("pdf");
+        fs::create_dir_all(&dir).unwrap();
+        std::os::unix::fs::symlink(src.path().join("real.md"), dir.join(SKILL_FILE)).unwrap();
+        let err = import(&roots, &dir).unwrap_err();
+        assert!(err.contains("is a link"), "{err}");
+        assert!(!roots.loach_dir().join("pdf").exists());
+    }
+
+    /// `node_modules` sorted ahead of the skill's own files and filled the
+    /// list; a comment after a tab was taken for part of a value.
+    #[test]
+    fn lists_a_skills_own_files_and_reads_comments_after_a_tab() {
+        let tmp = TempDir::new().unwrap();
+        let dir = write_skill(tmp.path(), "pdf", &md("pdf", "d"));
+        for i in 0..60 {
+            fs::create_dir_all(dir.join("node_modules").join(format!("m{i}"))).unwrap();
+            fs::write(dir.join("node_modules").join(format!("m{i}")).join("index.js"), "x").unwrap();
+        }
+        fs::create_dir_all(dir.join("scripts")).unwrap();
+        fs::write(dir.join("scripts").join("run.py"), "print(1)").unwrap();
+        assert_eq!(resource_files(&dir), ["scripts/run.py"]);
+
+        assert_eq!(scalar("pdf\t# the name", &[]).as_deref(), Some("pdf"));
+        assert_eq!(scalar("C# notes", &[]).as_deref(), Some("C# notes"));
     }
 
     #[test]
