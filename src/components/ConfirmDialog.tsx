@@ -186,7 +186,14 @@ export function ConfirmDialogHost({ children }: { children: ReactNode }) {
           if (!open) closeWith(active?.kind === "prompt" ? null : false);
         }}
       >
-        <DialogContent className="max-w-md">
+        <DialogContent
+          className="max-w-md"
+          // A yes/no that blocks the app is an alert dialog.
+          role={active?.kind === "confirm" ? "alertdialog" : "dialog"}
+          // Without a body there's nothing to describe it: Radix otherwise
+          // pointed at a description that wasn't rendered, and warned.
+          {...(active?.body === undefined ? { "aria-describedby": undefined } : {})}
+        >
           <DialogHeader>
             <DialogTitle>{active?.title}</DialogTitle>
             {active?.body !== undefined && (
@@ -200,6 +207,9 @@ export function ConfirmDialogHost({ children }: { children: ReactNode }) {
             <input
               autoFocus
               type="text"
+              // Named by the question: a placeholder isn't a name, and some
+              // prompts have none ("Duplicate …").
+              aria-label={active.title}
               value={promptValue}
               placeholder={active.placeholder}
               onChange={(e) => setPromptValue(e.target.value)}
@@ -216,11 +226,15 @@ export function ConfirmDialogHost({ children }: { children: ReactNode }) {
           )}
 
           <DialogFooter className="mt-2">
+            {/* A destructive confirm starts on Cancel: with focus on the
+                red button, an Enter out of habit (or a held key's repeat)
+                deleted a chat or cleared memories with no undo. */}
             <Button
               variant="ghost"
               onClick={() =>
                 closeWith(active?.kind === "prompt" ? null : false)
               }
+              autoFocus={active?.kind === "confirm" && active.destructive}
             >
               {active?.cancelLabel ?? "Cancel"}
             </Button>
@@ -233,7 +247,7 @@ export function ConfirmDialogHost({ children }: { children: ReactNode }) {
               onClick={() =>
                 closeWith(active?.kind === "prompt" ? promptValue : true)
               }
-              autoFocus={active?.kind !== "prompt"}
+              autoFocus={active?.kind === "confirm" && !active.destructive}
             >
               {active?.confirmLabel ?? "Confirm"}
             </Button>

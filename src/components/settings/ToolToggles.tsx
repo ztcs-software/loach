@@ -6,7 +6,7 @@
 
 import type { LucideIcon } from "lucide-react";
 import type { Settings } from "@/types";
-import { ArrowDownAZ, Binary, Braces, Calculator, CalendarClock, Diff, FileText, Fingerprint, FolderOpen, Globe, Hash, KeyRound, Network, Ruler } from "lucide-react";
+import { ArrowDownAZ, Binary, Braces, Calculator, CalendarClock, Diff, FileText, Fingerprint, FolderOpen, Globe, Hash, KeyRound, Network, Ruler, Terminal } from "lucide-react";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -27,9 +27,6 @@ export const TOOL_TOGGLES: {
   /** One-line summary for compact surfaces (the onboarding tools step).
    *  `description` below stays the full Settings copy. */
   blurb: string;
-  /** Verb phrase for the switch's accessible name in each direction. */
-  ariaOn: string;
-  ariaOff: string;
   description: React.ReactNode;
 }[] = [
   {
@@ -37,16 +34,12 @@ export const TOOL_TOGGLES: {
     icon: Globe,
     title: "Web fetch",
     blurb: "Read pages from URLs in your message",
-    ariaOn: "Enable web fetch",
-    ariaOff: "Disable web fetch",
     description: (
       <>
-        When your message contains an{" "}
-        <span className="font-mono">http(s)://</span> URL,
-        Loach downloads the page, extracts the readable text,
-        and appends it to the prompt so the model can read it.
-        Up to 5 URLs per message, 5&nbsp;MB each, 30&nbsp;s
-        timeout. Private IPs are blocked.
+        When your message has a link in it, Loach downloads the page and adds
+        its text to your message so the model can read it. Up to 5 links per
+        message, 5&nbsp;MB and 30&nbsp;seconds each. Private network
+        addresses are blocked.
       </>
     ),
   },
@@ -55,17 +48,10 @@ export const TOOL_TOGGLES: {
     icon: Calculator,
     title: "Calculator",
     blurb: "Exact math instead of guessed arithmetic",
-    ariaOn: "Enable calculator tool",
-    ariaOff: "Disable calculator tool",
     description: (
       <>
-        Exposes a built-in{" "}
-        <span className="font-mono">calculate</span> tool the
-        model can call mid-response to evaluate math
-        expressions. Local models often miscalculate
-        multi-step arithmetic; this gives them an exact
-        answer instead. Runs entirely in-process — no
-        network — and is available even in Private Chat.
+        Lets the model do math exactly instead of guessing. Local models often
+        get multi-step arithmetic wrong.
       </>
     ),
   },
@@ -74,16 +60,11 @@ export const TOOL_TOGGLES: {
     icon: CalendarClock,
     title: "Date & time",
     blurb: "Date maths, timezones, business days",
-    ariaOn: "Enable datetime tool",
-    ariaOff: "Disable datetime tool",
     description: (
       <>
-        Exposes a{" "}
-        <span className="font-mono">datetime</span> tool for
-        parsing, formatting, and arithmetic on dates — DST-aware
-        timezone conversion, "47 business days from today",
-        weekday lookup. Local models pick wrong weekdays and
-        miscount business days; chrono is exact. In-process.
+        Date math, time zones (daylight saving included), weekdays and
+        business days, like "47 business days from today". Models often pick
+        the wrong weekday or miscount.
       </>
     ),
   },
@@ -92,15 +73,10 @@ export const TOOL_TOGGLES: {
     icon: Hash,
     title: "Count",
     blurb: "Exact character, word, and line counts",
-    ariaOn: "Enable count tool",
-    ariaOff: "Disable count tool",
     description: (
       <>
-        Exposes a <span className="font-mono">count</span>{" "}
-        tool for exact character / byte / word / line /
-        substring counts. Tokenization hides character
-        identity from the model — this fixes the "how many
-        r's in strawberry" class of failure. In-process.
+        Exact counts of characters, words, lines, or how often something
+        appears. Fixes the "how many r's in strawberry" kind of mistake.
       </>
     ),
   },
@@ -109,15 +85,10 @@ export const TOOL_TOGGLES: {
     icon: Fingerprint,
     title: "Hash",
     blurb: "Real SHA-2 digests, never fabricated",
-    ariaOn: "Enable hash tool",
-    ariaOff: "Disable hash tool",
     description: (
       <>
-        Exposes a <span className="font-mono">hash</span>{" "}
-        tool for SHA-224 / SHA-256 / SHA-384 / SHA-512
-        digests over UTF-8, hex, or base64 input. Models
-        will fabricate a digest that looks plausible but
-        isn't — this gives an exact one. In-process.
+        SHA-224, SHA-256, SHA-384 and SHA-512 hashes. Without it, models make
+        up hashes that look right but aren't.
       </>
     ),
   },
@@ -126,16 +97,10 @@ export const TOOL_TOGGLES: {
     icon: KeyRound,
     title: "UUID",
     blurb: "Generate real v4 / v7 UUIDs",
-    ariaOn: "Enable uuid tool",
-    ariaOff: "Disable uuid tool",
     description: (
       <>
-        Exposes a <span className="font-mono">uuid</span>{" "}
-        tool that generates v4 (random) or v7
-        (time-ordered) UUIDs, up to 100 per call. Models
-        will hallucinate UUID-shaped strings that
-        eventually collide — this generates real ones.
-        In-process.
+        Real v4 (random) or v7 (time-ordered) UUIDs, up to 100 at a time,
+        instead of made-up ones that can repeat.
       </>
     ),
   },
@@ -144,14 +109,10 @@ export const TOOL_TOGGLES: {
     icon: Binary,
     title: "Base64",
     blurb: "Encode and decode without garbling",
-    ariaOn: "Enable base64 tool",
-    ariaOff: "Disable base64 tool",
     description: (
       <>
-        Exposes a <span className="font-mono">base64</span>{" "}
-        tool for standard / URL-safe encode and decode.
-        Models routinely garble padding or mix alphabets —
-        this just does it right. In-process.
+        Base64 encoding and decoding, standard or URL-safe, without the
+        padding mistakes models make by hand.
       </>
     ),
   },
@@ -160,15 +121,10 @@ export const TOOL_TOGGLES: {
     icon: Braces,
     title: "JSON",
     blurb: "Validate, pretty-print, extract values",
-    ariaOn: "Enable json tool",
-    ariaOff: "Disable json tool",
     description: (
       <>
-        Exposes a <span className="font-mono">json</span>{" "}
-        tool that pretty-prints, validates, or extracts a
-        value at a JSON Pointer path. Catches the
-        almost-valid JSON (trailing commas, smart quotes)
-        models like to produce. In-process.
+        Checks, formats and pulls values out of JSON. Catches almost-valid
+        JSON, like trailing commas or curly quotes.
       </>
     ),
   },
@@ -177,17 +133,11 @@ export const TOOL_TOGGLES: {
     icon: Ruler,
     title: "Unit conversion",
     blurb: "Exact factors, from km↔mi to parsecs",
-    ariaOn: "Enable unit conversion tool",
-    ariaOff: "Disable unit conversion tool",
     description: (
       <>
-        Exposes a{" "}
-        <span className="font-mono">unit_convert</span> tool
-        with a curated factor table for length, mass,
-        temperature, volume, area, speed, time, energy,
-        and pressure — including uncommon units like
-        furlong, troy ounce, parsec. Models hallucinate
-        factors for anything past km↔mi. In-process.
+        Exact conversions for length, weight, temperature, volume, area,
+        speed, time, energy and pressure, down to furlongs, troy ounces and
+        parsecs.
       </>
     ),
   },
@@ -195,16 +145,11 @@ export const TOOL_TOGGLES: {
     key: "diff_text_tool_enabled",
     icon: Diff,
     title: "Text diff",
-    blurb: "Unified diffs by line, word, or character",
-    ariaOn: "Enable text diff tool",
-    ariaOff: "Disable text diff tool",
+    blurb: "Exact differences by line, word, or character",
     description: (
       <>
-        Exposes a <span className="font-mono">diff_text</span>{" "}
-        tool that computes a unified diff between two
-        strings, by line, word, or character. Models try
-        to eyeball diffs and miss small changes in long
-        inputs. In-process.
+        Shows exactly what changed between two texts, by line, word or
+        character. Models tend to miss small changes in long text.
       </>
     ),
   },
@@ -213,16 +158,10 @@ export const TOOL_TOGGLES: {
     icon: ArrowDownAZ,
     title: "Sort",
     blurb: "Lexical, natural, and numeric sorting",
-    ariaOn: "Enable sort tool",
-    ariaOff: "Disable sort tool",
     description: (
       <>
-        Exposes a <span className="font-mono">sort</span>{" "}
-        tool for lexical, natural, and numeric line sort
-        with reverse / unique / case-insensitive flags.
-        Natural sort (file1, file2, file10 — not file1,
-        file10, file2) is easy to get wrong by hand.
-        In-process.
+        Sorts lines alphabetically, by number, or naturally (file2 before
+        file10), with options to reverse, drop duplicates and ignore case.
       </>
     ),
   },
@@ -231,16 +170,11 @@ export const TOOL_TOGGLES: {
     icon: Network,
     title: "IP / CIDR",
     blurb: "CIDR containment and subnet info",
-    ariaOn: "Enable IP / CIDR tool",
-    ariaOff: "Disable IP / CIDR tool",
     description: (
       <>
-        Exposes an <span className="font-mono">ip</span>{" "}
-        tool for CIDR containment ("does 10.0.5.7 fall in
-        10.0.0.0/16?") and subnet info (network,
-        broadcast, first/last usable host, total). IPv4
-        and IPv6. Easy to get wrong on /23, /127, or
-        anything past a /24. In-process.
+        Checks whether an address is in a range, like 10.0.5.7 in
+        10.0.0.0/16, and works out subnet details such as the first and last
+        usable address. IPv4 and IPv6.
       </>
     ),
   },
@@ -249,22 +183,12 @@ export const TOOL_TOGGLES: {
     icon: FileText,
     title: "PDF",
     blurb: "Generate downloadable PDF documents",
-    ariaOn: "Enable PDF tool",
-    ariaOff: "Disable PDF tool",
     description: (
       <>
-        Exposes a <span className="font-mono">pdf</span>{" "}
-        tool the model can call to produce a downloadable
-        PDF from a structured spec — headings, paragraphs,
-        bullet / numbered lists, horizontal rules, page
-        breaks, and simple tables. The result attaches to
-        the assistant message and opens in the built-in
-        viewer. Renders Unicode text (Latin, European
-        accents, common punctuation and currency) via a
-        bundled font; characters outside that set (e.g.
-        CJK, emoji) become <span className="font-mono">?</span>.
-        Image blocks and merging existing PDFs aren't
-        supported yet. In-process.
+        Lets the model make a PDF with headings, paragraphs, lists, tables
+        and page breaks, which you can open and download from its reply.
+        Latin-script text only: Cyrillic, Greek, CJK and emoji show as{" "}
+        <span className="font-mono">?</span>. No images yet.
       </>
     ),
   },
@@ -273,38 +197,52 @@ export const TOOL_TOGGLES: {
     icon: FolderOpen,
     title: "Workspace files",
     blurb: "Let the model work in a folder you pick",
-    ariaOn: "Enable workspace file tools",
-    ariaOff: "Disable workspace file tools",
     description: (
       <>
-        Exposes{" "}
-        <span className="font-mono">list_directory</span>,{" "}
-        <span className="font-mono">find_files</span>,{" "}
-        <span className="font-mono">read_file</span>,{" "}
-        <span className="font-mono">search_files</span>,{" "}
-        <span className="font-mono">write_file</span>,{" "}
-        <span className="font-mono">edit_file</span>,{" "}
-        <span className="font-mono">move_file</span> and{" "}
-        <span className="font-mono">delete_file</span>, scoped to one directory
-        you choose per chat with the <span className="font-mono">+</span>{" "}
-        button next to the message box. Nothing outside that directory is
-        reachable, and chats without one see no file tools at all. Every
-        write, edit, move and deletion asks you first, showing the path and
-        the change, unless you allow that tool for the chat; deletions take
-        one file or empty directory at a time, and
-        there is no shell. Off until you pick a folder, which switches this
-        on. The tools run in-process, but what they read becomes part of the
-        conversation — with a cloud provider, those file contents are sent to
-        it like any other message.
+        Lets the model read, search, create, edit, move and delete files in a
+        folder you pick for a chat with the{" "}
+        <span className="font-mono">+</span> button by the message box. It
+        can't reach anything outside that folder. Every change asks you first
+        unless you allow it for the chat (edits to the folder's instructions
+        or <span className="font-mono">.git</span> always ask). Turns on by
+        itself when you pick a folder. With a cloud provider, the files it
+        reads are sent there.
       </>
     ),
   },
 ];
 
+/** Settings → Tools → Run scripts. Not in `TOOL_TOGGLES`: onboarding offers
+ *  those as in-process utilities, and its All ON preset would switch this
+ *  on with them. Onboarding gives it its own row, outside the presets. */
+export const RUN_SCRIPT_TOGGLE: (typeof TOOL_TOGGLES)[number] = {
+  key: "run_script_enabled",
+  icon: Terminal,
+  title: "Run scripts",
+  blurb: "Run code the model writes, asking every time",
+  description: (
+    <>
+      Lets the model write a Python, bash, Node.js or PowerShell script and
+      run it with what's installed on this computer, or run a script file
+      from the chat's folder. Every run asks you first and shows the code and
+      the command. A script runs as you, so it can reach any file and the
+      network. Runs stop after 5 minutes. Not in Private Chat. Skill scripts
+      have their own switch in Settings → Skills.
+    </>
+  ),
+};
+
 /** One row in Settings → Tools: icon, title, explanation, and the switch
  *  that flips its setting. Subscribes to just its own boolean so toggling
- *  one tool doesn't re-render the other twelve. */
-export function ToolToggleRow({ tool }: { tool: (typeof TOOL_TOGGLES)[number] }) {
+ *  one tool doesn't re-render the others. `children` are sub-options
+ *  shown under the row. */
+export function ToolToggleRow({
+  tool,
+  children,
+}: {
+  tool: (typeof TOOL_TOGGLES)[number];
+  children?: React.ReactNode;
+}) {
   const enabled = useSettingsStore((s) => s[tool.key]);
   const update = useSettingsStore((s) => s.update);
   const Icon = tool.icon;
@@ -312,7 +250,7 @@ export function ToolToggleRow({ tool }: { tool: (typeof TOOL_TOGGLES)[number] })
     <div>
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
-          <Label className="flex items-center gap-1.5">
+          <Label htmlFor={`setting-${tool.key}`} className="flex items-center gap-1.5">
             <Icon className="h-3.5 w-3.5 text-foreground/60" />
             {tool.title}
           </Label>
@@ -320,13 +258,51 @@ export function ToolToggleRow({ tool }: { tool: (typeof TOOL_TOGGLES)[number] })
             {tool.description}
           </p>
         </div>
-        <Switch
+        <Switch id={`setting-${tool.key}`}
           checked={enabled}
           onCheckedChange={(next) => void update(tool.key, next)}
           className="shrink-0"
-          aria-label={enabled ? tool.ariaOff : tool.ariaOn}
+          // A stable name: the switch announces its own state. "Enable X"
+          // / "Disable X" flipped with it, and read as the opposite.
+          aria-label={tool.title}
         />
       </div>
+      {children}
+    </div>
+  );
+}
+
+/** Sub-option of Workspace files: whether a folder without a LOACHFILE.md
+ *  borrows the CLAUDE.md or AGENTS.md it keeps for another coding agent.
+ *  Not in `TOOL_TOGGLES`, which onboarding also offers as tools. Left
+ *  switchable while Workspace files is off, since picking a folder turns
+ *  that on. */
+export function InstructionsFallbackToggle() {
+  const enabled = useSettingsStore((s) => s.workspace_instructions_fallback);
+  const update = useSettingsStore((s) => s.update);
+  return (
+    <div className="mt-3 ml-5 flex items-start justify-between gap-4 border-l border-foreground/10 pl-3">
+      <div className="min-w-0">
+        <Label htmlFor="setting-instructions-fallback">Use CLAUDE.md or AGENTS.md</Label>
+        <p className="mt-1 text-[11px] text-foreground/50">
+          The model gets the folder's{" "}
+          <span className="font-mono">LOACHFILE.md</span> as project
+          instructions. If there isn't one, it gets{" "}
+          <span className="font-mono">CLAUDE.md</span> or{" "}
+          <span className="font-mono">AGENTS.md</span> instead (made for Claude
+          Code and Codex). Turn off if they mention tools Loach doesn't have.
+        </p>
+      </div>
+      <Switch id="setting-instructions-fallback"
+        checked={enabled}
+        onCheckedChange={(next) => void update("workspace_instructions_fallback", next)}
+        className="shrink-0"
+        aria-label={
+          enabled
+            ? "Stop using CLAUDE.md or AGENTS.md as project instructions"
+            : "Use CLAUDE.md or AGENTS.md as project instructions"
+        }
+      />
     </div>
   );
 }

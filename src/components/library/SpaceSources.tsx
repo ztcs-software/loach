@@ -30,7 +30,10 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { formatTokens } from "@/lib/contextUsage";
 import { SPACE_BYTES_CAP } from "@/lib/files";
-import { FULL_TEXT_SHARE, resolveMode, retrievalBudgetTokens, spaceSourceCount } from "@/lib/sources";
+
+/** The cap as the copy says it, from the constant the check uses. */
+const CAP_LABEL = `${SPACE_BYTES_CAP / (1024 * 1024)} MB`;
+import { FULL_TEXT_SHARE, resolveMode, retrievalBudgetTokens, sourceTokens, spaceSourceCount } from "@/lib/sources";
 import { cn, formatBytes } from "@/lib/utils";
 import { expandSources, useLibraryStore } from "@/stores/libraryStore";
 import { useModelsStore } from "@/stores/modelsStore";
@@ -60,11 +63,20 @@ const NO_LINKS: LibrarySource[] = [];
 export function SpaceSourcesTab({
   space,
   files,
+  filesLoaded,
+  filesError,
+  onRetryFiles,
   onUpload,
   onRemoveFile,
 }: {
   space: Space;
   files: SpaceFile[];
+  /** False until the Space's uploads have been read: until then (or when the
+   *  read failed, `filesError`) there's no knowing what's there or how much
+   *  of the 200 MB it uses. */
+  filesLoaded: boolean;
+  filesError: string | null;
+  onRetryFiles: () => void;
   onUpload: (files: FileList) => Promise<void>;
   onRemoveFile: (fileId: string) => void;
 }) {
@@ -102,17 +114,14 @@ export function SpaceSourcesTab({
 
   // What the model gets: enabled uploads + enabled links, each item once.
   // The count includes images (they reach the model too) so it matches the
-  // page's and the composer's; only text adds tokens.
+  // page's and the composer's; only text adds tokens — priced as the send
+  // prices them (chars/4 called CJK text "full text" that a send excerpted).
   const { tokens, count } = useMemo(() => {
-    let chars = 0;
-    for (const f of files) {
-      if (!f.enabled || f.kind !== "text") continue;
-      chars += f.data.length;
-    }
-    for (const it of expandSources(links, datasets, items)) {
-      if (it.media === "text") chars += it.chars;
-    }
-    return { tokens: Math.ceil(chars / 4), count: spaceSourceCount(files, links, datasets, items) };
+    const docs = [
+      ...files.filter((f) => f.enabled && f.kind === "text").map((f) => ({ chars: f.data.length, text: f.data })),
+      ...expandSources(links, datasets, items).filter((it) => it.media === "text"),
+    ];
+    return { tokens: sourceTokens(docs), count: spaceSourceCount(files, links, datasets, items) };
   }, [files, links, datasets, items]);
 
   const numCtx = chatNumCtx(null, space.default_params_json, modelNumCtx);
@@ -142,7 +151,8 @@ export function SpaceSourcesTab({
 
   // A failed link load isn't "no sources": the Space may well have some.
   const linksFailed = !sources && !!loadError;
-  const empty = files.length === 0 && links.length === 0 && !linksFailed;
+  // Nor is a failed (or unfinished) read of the uploads.
+  const empty = filesLoaded && files.length === 0 && links.length === 0 && !linksFailed;
 
   return (
     <div className="space-y-4">
@@ -211,9 +221,13 @@ export function SpaceSourcesTab({
         <div className="flex items-center gap-2.5 text-sm text-foreground/55">
           <Upload className="h-4 w-4" />
           <span>
-            {atCap
-              ? "Reached the 200 MB upload limit"
-              : `${formatBytes(totalBytes)} of 200 MB uploaded · ${links.length} from Library`}
+            {!filesLoaded
+              ? filesError
+                ? "Uploads couldn't be loaded"
+                : "Loading uploads…"
+              : atCap
+                ? `Reached the ${CAP_LABEL} upload limit`
+                : `${formatBytes(totalBytes)} of ${CAP_LABEL} uploaded · ${links.length} from Library`}
           </span>
         </div>
         <div className="flex items-center gap-2">
@@ -230,7 +244,7 @@ export function SpaceSourcesTab({
             size="sm"
             variant="outline"
             onClick={() => inputRef.current?.click()}
-            disabled={atCap || busy}
+            disabled={!filesLoaded || atCap || busy}
             className="gap-1.5 rounded-lg"
           >
             <Upload className="h-3.5 w-3.5" />
@@ -251,6 +265,14 @@ export function SpaceSourcesTab({
       />
 
       {error && <p className="whitespace-pre-line text-xs text-destructive">{error}</p>}
+      {filesError && (
+        <p className="text-xs text-destructive">
+          Couldn't load this Space's uploads: {filesError}{" "}
+          <button type="button" onClick={onRetryFiles} className="underline underline-offset-2 hover:text-foreground">
+            Retry
+          </button>
+        </p>
+      )}
       {linksFailed && (
         <p className="text-xs text-destructive">
           Couldn't load the Library sources linked to this Space: {loadError}{" "}
@@ -317,7 +339,11 @@ export function SpaceSourcesTab({
               title={f.name}
               sub={`Uploaded · ${formatBytes(f.size)}`}
               tokens={
-                f.kind === "text" ? Math.ceil(f.data.length / 4) : f.kind === "image" ? "image" : "unreadable"
+                f.kind === "text"
+                  ? sourceTokens([{ chars: f.data.length, text: f.data }])
+                  : f.kind === "image"
+                    ? "image"
+                    : "unreadable"
               }
               onOpen={() => setPreviewing(f)}
               actions={
@@ -463,7 +489,8 @@ function UploadPreview({ file, onClose }: { file: SpaceFile; onClose: () => void
         <DialogHeader className="border-b border-foreground/[0.07] px-6 pb-4 pt-6 pr-14">
           <DialogTitle className="text-base leading-snug [overflow-wrap:anywhere]">{file.name}</DialogTitle>
           <DialogDescription className="mt-1 text-xs">
-            Uploaded to this Space · {formatBytes(file.size)} · ~{formatTokens(Math.ceil(file.data.length / 4))} tokens
+            Uploaded to this Space · {formatBytes(file.size)} · ~
+            {formatTokens(sourceTokens([{ chars: file.data.length, text: file.data }]))} tokens
           </DialogDescription>
         </DialogHeader>
         <div className="min-h-[200px] flex-1 overflow-y-auto px-6 py-5">

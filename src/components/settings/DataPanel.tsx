@@ -6,6 +6,7 @@
 //! import-confirmation sheet.
 
 import type { ImportStats } from "@/types";
+import { stashImportNotice } from "@/lib/importNotice";
 import { AlertTriangle, Archive, Download, Loader2, RotateCcw, Trash2, Upload } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
@@ -15,11 +16,31 @@ import { StorageTile } from "@/components/settings/StorageTile";
 import { cn } from "@/lib/utils";
 import { type DestructiveAuth, type LockMethod, archiveAllSessions, exportDataToFile, factoryReset, importDataWithDialog, isTauri, wipeUserData } from "@/lib/tauri";
 import { useChatStore } from "@/stores/chatStore";
+import { haltMemoryExtraction } from "@/lib/memory";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { useEffect, useRef, useState } from "react";
 import { useSecurityStore } from "@/stores/securityStore";
+import { useToastStore } from "@/stores/toastStore";
 
 type BusyKind = "export" | "import" | "archive-all" | null;
+
+/** Before the data is erased or replaced, hold what would add to it: the
+ *  memory extractor (left running, a fact extracted from an erased chat was
+ *  saved into the emptied database), and the chat queue, so no reply starts.
+ *  A reply already streaming runs on until the backend stops it
+ *  (`cancel_chats`), once the credentials and the file have passed — stopped
+ *  here, a wrong PIN or a closed file picker cut it off for nothing — and
+ *  what it writes after that only updates its own row, which the new data
+ *  doesn't have. Returns the way back, for an action that fails or is called
+ *  off. (Private Chat, the queue's other holder, can't open over Settings.) */
+function holdWritersForReplace(): () => void {
+  const resumeMemory = haltMemoryExtraction();
+  useChatStore.getState().setQueueHeld(true);
+  return () => {
+    resumeMemory();
+    useChatStore.getState().setQueueHeld(false);
+  };
+}
 
 /* ───────────────────────── Data tab panel ─────────────────────────
  *
@@ -104,9 +125,17 @@ export function DataPanel() {
     }, 5000);
   };
 
+  /** A result that can land after the user has left this tab — closing
+   *  Settings or switching tabs mid-run unmounts the panel, and its inline
+   *  line went with it: a rejected import then said nothing at all. Toasts
+   *  outlive the panel, and an error one stays long enough to read. */
+  const report = (kind: "info" | "error", title: string, body?: string) =>
+    useToastStore.getState().push({ kind, title, body });
+  const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
+
   const handleExport = async () => {
     if (!isTauri) {
-      flash("error", "Export requires the desktop app.");
+      report("error", "Export requires the desktop app.");
       return;
     }
     setBusy("export");
@@ -118,9 +147,9 @@ export function DataPanel() {
         setBusy(null);
         return; // user cancelled the save dialog
       }
-      flash("info", `Exported to ${path}`);
+      report("info", "Data exported", path);
     } catch (e) {
-      flash("error", e instanceof Error ? e.message : String(e));
+      report("error", "Export failed", errorText(e));
     } finally {
       setBusy(null);
     }
@@ -128,7 +157,7 @@ export function DataPanel() {
 
   const handleImport = async () => {
     if (!isTauri) {
-      flash("error", "Import requires the desktop app.");
+      report("error", "Import requires the desktop app.");
       return;
     }
     setImportPromptOpen(true);
@@ -137,26 +166,34 @@ export function DataPanel() {
   // Stage 2 of import: armed by the ImportConfirm dialog, runs after the
   // user has confirmed AND (when a lock is configured) supplied their
   // current credentials. The Rust side handles the dialog and the read.
-  const runImport = async (auth?: DestructiveAuth) => {
+  // Resolves with the failure's text, for the confirm sheet to show — it
+  // stays open with the credentials typed (a wrong PIN comes back from the
+  // backend, after the sheet used to be gone) — or null once it's settled.
+  const runImport = async (auth?: DestructiveAuth): Promise<string | null> => {
     setBusy("import");
+    const resume = holdWritersForReplace();
     try {
       const stats = await importDataWithDialog(auth);
       if (stats === null) {
         // User cancelled the file picker on the backend side.
+        resume();
         setBusy(null);
-        return;
+        return null;
       }
       flash("info", formatImportSummary(stats));
+      stashImportNotice(stats);
       reloadAfterDestructiveAction();
+      return null;
     } catch (e) {
-      flash("error", e instanceof Error ? e.message : String(e));
+      resume();
       setBusy(null);
+      return errorText(e);
     }
   };
 
   const handleArchiveAll = async () => {
     if (!isTauri) {
-      flash("error", "Archive requires the desktop app.");
+      report("error", "Archive requires the desktop app.");
       return;
     }
     const liveIds = useChatStore
@@ -188,9 +225,9 @@ export function DataPanel() {
       await chats.hydrate();
       const active = useChatStore.getState().activeSessionId;
       if (active && liveIds.includes(active)) await chats.selectSession(null);
-      flash("info", `Archived ${n} chat${n === 1 ? "" : "s"}.`);
+      report("info", `Archived ${n} chat${n === 1 ? "" : "s"}.`);
     } catch (e) {
-      flash("error", e instanceof Error ? e.message : String(e));
+      report("error", "Couldn't archive chats", errorText(e));
     } finally {
       setBusy(null);
     }
@@ -204,7 +241,7 @@ export function DataPanel() {
         <DataRow
           icon={<Download className="h-4 w-4" />}
           title="Export data"
-          description="Save a full database dump (including chats, spaces, your Library, memories, snippets and settings) to a JSON file."
+          description="Save a full database dump (including chats, spaces, your Library, memories, snippets and settings) to a JSON file. The file isn't encrypted: anyone with it can read your chats, even with the app lock on."
           action={
             <Button
               variant="outline"
@@ -292,7 +329,8 @@ export function DataPanel() {
             <p className="mt-1 text-[12px] leading-relaxed text-foreground/60">
               Permanently delete your data, or factory-reset the app to its
               default state. This operation cannot be undone. Consider
-              performing an export first.
+              performing an export first. Loach compacts its database file
+              afterwards, so the deleted content doesn't linger in it.
             </p>
           </div>
           <Button
@@ -342,8 +380,9 @@ export function DataPanel() {
         lockMethod={lockStatus.method}
         pinLength={lockStatus.pin_length}
         onConfirm={async (auth) => {
-          setImportPromptOpen(false);
-          await runImport(auth);
+          const failure = await runImport(auth);
+          if (failure === null) setImportPromptOpen(false);
+          return failure;
         }}
       />
     </>
@@ -445,11 +484,13 @@ function EraseDialog({
   // Reset the form whenever the dialog is opened — never carry state across
   // mount/unmount cycles for a destructive action.
   useEffect(() => {
+    // On close as well: the dialog stays mounted with the Data tab, and a
+    // PIN or password typed and then cancelled stayed in its state.
+    setPin("");
+    setPassword("");
     if (open) {
       setMode("user-data");
       setConfirmText("");
-      setPin("");
-      setPassword("");
       setBusy(false);
       setError(null);
     }
@@ -470,16 +511,23 @@ function EraseDialog({
       : undefined;
     setBusy(true);
     setError(null);
+    const resume = holdWritersForReplace();
     try {
       if (mode === "user-data") {
         await wipeUserData(auth);
-        onDone("All chats, Spaces, snippets, and MCP servers deleted. Reloading…");
+        onDone("All chats, Spaces, Library items, memories, snippets, and MCP servers deleted. Reloading…");
       } else {
         await factoryReset(auth);
+        // This device's own state too — per-model Thinking defaults, layout,
+        // the queued memory turns — so the reset is the fresh start it says.
+        for (const key of Object.keys(localStorage)) {
+          if (key.startsWith("loach") || key === "parameterPanel.viewMode") localStorage.removeItem(key);
+        }
         onDone("Loach has been reset to factory defaults. Reloading…");
       }
       onOpenChange(false);
     } catch (e) {
+      resume();
       setError(e instanceof Error ? e.message : String(e));
       setBusy(false);
     }
@@ -523,9 +571,10 @@ function EraseDialog({
             emphasis="danger"
             body={
               <>
-                Everything above, <strong>plus</strong> all app settings and
-                your stored <strong>OpenAI API key</strong>. The app will
-                look like a fresh install.
+                Everything above, <strong>plus</strong> all app settings, the{" "}
+                <strong>app lock</strong> and your stored{" "}
+                <strong>OpenAI API key</strong>. The app will look like a
+                fresh install; skill folders on disk stay.
               </>
             }
           />
@@ -727,11 +776,14 @@ function ImportConfirm({
   lockConfigured: boolean;
   lockMethod: LockMethod | null;
   pinLength: number | null;
-  onConfirm: (auth?: DestructiveAuth) => Promise<void>;
+  /** Resolves with a failure to show here, or null once the parent has
+   *  closed the sheet (imported, or the picker cancelled). */
+  onConfirm: (auth?: DestructiveAuth) => Promise<string | null>;
 }) {
   const [pin, setPin] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const usesPin =
     lockConfigured && (lockMethod === "pin" || lockMethod === "both");
@@ -740,10 +792,12 @@ function ImportConfirm({
   const requiredPinLen = (pinLength ?? 4) as 4 | 6 | 8;
 
   useEffect(() => {
+    // On close as well, as in `EraseDialog`.
+    setPin("");
+    setPassword("");
     if (open) {
-      setPin("");
-      setPassword("");
       setBusy(false);
+      setError(null);
     }
   }, [open]);
 
@@ -760,8 +814,14 @@ function ImportConfirm({
         }
       : undefined;
     setBusy(true);
-    await onConfirm(auth);
-    // Parent flips `open` to false on success / cancel; we just stop here.
+    setError(null);
+    const failure = await onConfirm(auth);
+    // The parent closes the sheet on success or a cancelled picker; a
+    // failure stays here, credentials and all, to be fixed and retried.
+    if (failure !== null) {
+      setError(failure);
+      setBusy(false);
+    }
   };
 
   return (
@@ -777,7 +837,9 @@ function ImportConfirm({
             files, links and datasets), memories, snippets, MCP servers, and
             settings with the contents of the file you select next — a backup
             made before the Library existed leaves it empty. Your stored
-            OpenAI API key is not touched.
+            OpenAI API key is not touched. MCP servers come back without
+            their sign-in headers and environment variables, which a backup
+            doesn't carry.
           </DialogDescription>
         </div>
 
@@ -824,6 +886,15 @@ function ImportConfirm({
                 />
               </div>
             )}
+          </div>
+        )}
+
+        {error && (
+          <div
+            role="alert"
+            className="rounded-xl border border-destructive/40 bg-destructive/10 px-3 py-2 text-[12px] text-destructive"
+          >
+            {error}
           </div>
         )}
 

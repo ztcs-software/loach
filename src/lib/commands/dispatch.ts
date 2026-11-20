@@ -6,6 +6,7 @@ import { useModelsStore } from "@/stores/modelsStore";
 import { usePrivateChatStore } from "@/stores/privateChatStore";
 import { useSecurityStore } from "@/stores/securityStore";
 import { useSettingsStore } from "@/stores/settingsStore";
+import { useSkillStore } from "@/stores/skillStore";
 import { useSnippetStore } from "@/stores/snippetStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useUIStore, type SettingsTab } from "@/stores/uiStore";
@@ -128,8 +129,6 @@ function memoryScope(): MemoryScope {
     (s) => s.id === useChatStore.getState().activeSessionId,
   );
   if (session?.space_id) return { kind: "space", spaceId: session.space_id };
-  const sid = useSpaceStore.getState().activeSpaceId;
-  if (sid) return { kind: "space", spaceId: sid };
   return { kind: "global" };
 }
 
@@ -231,6 +230,8 @@ async function run(
       return runWebFetch(rest);
     case "fetch":
       return runFetch(rest);
+    case "skill":
+      return runSkill(rest);
     case "thinking":
       return runThinking(rest);
     case "help":
@@ -734,12 +735,14 @@ async function runSpace(rest: string): Promise<CommandResult> {
     );
   }
   const match = matches[0]!;
-  // Typed on a Space's page, go to the new Space's page: switching only the
-  // active Space left the old page up while the next message started its
-  // chat in the new one, with the Library picks made on the old page.
-  const spaceStore = useSpaceStore.getState();
-  if (spaceStore.viewingSpaceId) spaceStore.setViewingSpace(match.id);
-  else spaceStore.selectSpace(match.id);
+  // Open the Space's page, wherever this is typed. Switching only the active
+  // Space showed nothing: on a Space's page the old page stayed up while the
+  // next message started its chat in the new one, and from a chat a hidden
+  // active Space then took `/remember`, `/forget`, `/list memories` and
+  // `/new` — a fact typed in a chat with no Space went to that Space.
+  useModelsStore.getState().setViewingModel(null);
+  useUIStore.getState().setSidebarTab("spaces");
+  useSpaceStore.getState().setViewingSpace(match.id);
   return ok("Active Space", match.name);
 }
 
@@ -752,7 +755,7 @@ async function runTools(): Promise<CommandResult> {
   const { tools, errors } = await mcpTools();
   const items: CommandResultItem[] = [];
   for (const server of servers) {
-    const error = errors.find(([name]) => name === server.name)?.[1];
+    const error = errors.find((e) => e.server_id === server.id)?.error;
     if (error) {
       items.push({ label: server.name, detail: "error", hint: error });
       continue;
@@ -795,6 +798,49 @@ async function runFetch(rest: string): Promise<CommandResult> {
     { label: `${page.bytes} bytes${page.truncated ? " (truncated)" : ""}`, detail: page.content_type },
     { label: preview || "(empty body)" },
   ]);
+}
+
+/** `/skill` lists the enabled skills; `/skill <name>` loads one into the
+ *  chat — the same as the model calling `activate_skill`, so its
+ *  instructions go with every message from now on. A unique prefix or
+ *  substring is enough. */
+async function runSkill(rest: string): Promise<CommandResult> {
+  if (!useSettingsStore.getState().skills_enabled) {
+    throw new Error("Skills are off. Turn them on in Settings → Skills.");
+  }
+  const skills = useSkillStore.getState();
+  const enabled = (await skills.loadCatalog()).skills.filter((s) => s.enabled);
+  const query = rest.trim().toLowerCase();
+  if (!query) {
+    if (enabled.length === 0) {
+      return ok("No skills enabled", "Add or enable one in Settings → Skills.");
+    }
+    const sid = composerSessionId();
+    const loaded = sid ? await skills.loadSession(sid) : [];
+    return listItems(
+      "Skills",
+      enabled.map((s) => ({
+        label: s.name,
+        detail: loaded.includes(s.name) ? "loaded" : undefined,
+        hint: s.description,
+      })),
+    );
+  }
+  const session = requireSession();
+  const exact = enabled.find((s) => s.name === query);
+  const matches = exact ? [exact] : enabled.filter((s) => s.name.includes(query));
+  if (matches.length === 0) {
+    throw new Error(`No enabled skill matches "${query}". Type /skill to list them.`);
+  }
+  if (matches.length > 1) {
+    return listItems(
+      `Multiple skills match "${query}"`,
+      matches.map((s) => ({ label: s.name, hint: s.description })),
+    );
+  }
+  const skill = matches[0]!;
+  await skills.setActive(session.id, skill.name, true);
+  return ok("Skill loaded", `${skill.name} — its instructions now go with every message in this chat.`);
 }
 
 async function runThinking(rest: string): Promise<CommandResult> {
@@ -872,6 +918,7 @@ const SETTINGS_TAB_SET: Record<SettingsTab, true> = {
   providers: true,
   features: true,
   tools: true,
+  skills: true,
   library: true,
   appearance: true,
   mcp: true,
@@ -1188,7 +1235,8 @@ const PARAM_RULES: Partial<Record<keyof GenerationParams, ParamRule>> = {
   repeat_penalty: { integer: false, min: 0.8, max: 2 },
   frequency_penalty: { integer: false, min: -2, max: 2 },
   presence_penalty: { integer: false, min: -2, max: 2 },
-  num_gpu: { integer: true, min: 0 },
+  // The backend's `u32`: past it, every later send in the chat failed.
+  num_gpu: { integer: true, min: 0, max: 0xffff_ffff },
   seed: { integer: true },
 };
 

@@ -4,6 +4,7 @@
 //! is just made up. SHA-1 and MD5 are intentionally not exposed: they
 //! are broken for cryptographic use and we'd rather not encourage them.
 
+use super::{err, hex};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha224, Sha256, Sha384, Sha512};
 
@@ -94,7 +95,7 @@ fn decode_input(input: &str, fmt: &str) -> Result<Vec<u8>, String> {
             if !cleaned.bytes().all(|b| b.is_ascii_hexdigit()) {
                 return Err("hex input must contain only ASCII hex digits".to_string());
             }
-            if cleaned.len() % 2 != 0 {
+            if !cleaned.len().is_multiple_of(2) {
                 return Err("hex input has an odd number of characters".to_string());
             }
             (0..cleaned.len())
@@ -109,23 +110,6 @@ fn decode_input(input: &str, fmt: &str) -> Result<Vec<u8>, String> {
         "base64" => super::base64_tool::decode_lenient(input, input.contains(['-', '_']))
             .map_err(|e| format!("invalid base64 input: {e}")),
         other => Err(format!("unknown input_format `{other}` — use utf8/hex/base64")),
-    }
-}
-
-fn hex(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        // {:02x} is two lowercase hex digits, zero-padded.
-        s.push_str(&format!("{b:02x}"));
-    }
-    s
-}
-
-fn err(msg: impl Into<String>) -> McpCallResult {
-    McpCallResult {
-        content_text: msg.into(),
-        is_error: true,
-        ..Default::default()
     }
 }
 

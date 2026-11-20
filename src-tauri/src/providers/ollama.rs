@@ -12,7 +12,7 @@ use tokio::select;
 use super::{resolve_qualified, ChatRequest, ModelInfo};
 use crate::db::Database;
 use crate::mcp::McpToolDef;
-use crate::stream::{admin_channel, event_channel, AdminEvent, StreamEvent, StreamRegistry};
+use crate::stream::{admin_channel, event_channel, AdminEvent, CutOff, StreamEvent, StreamRegistry};
 
 /// Per-line ceiling for the NDJSON / SSE pump. A well-behaved provider sends
 /// frames in the low-kilobytes range; this cap is generous enough to fit any
@@ -122,7 +122,7 @@ pub async fn delete_model(http: &Client, base_url: &str, name: &str) -> Result<(
         .await?;
     if !resp.status().is_success() {
         let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
+        let text = super::error_body(resp).await;
         return Err(anyhow!("ollama delete failed ({status}): {text}"));
     }
     Ok(())
@@ -150,7 +150,7 @@ pub async fn copy_model(
         .await?;
     if !resp.status().is_success() {
         let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
+        let text = super::error_body(resp).await;
         return Err(anyhow!("ollama copy failed ({status}): {text}"));
     }
     Ok(())
@@ -339,15 +339,7 @@ pub async fn pull_model(
     stream_id: String,
     cancel: Arc<tokio::sync::Notify>,
 ) -> Result<()> {
-    if let Err(e) = super::refuse_link_local_host(base_url).await {
-        // Mirror the shape of an in-flight admin failure: emit an Error
-        // event on the admin channel and finish the registry slot so the
-        // UI sees the same teardown path as a network failure.
-        let _ = app.emit(
-            &admin_channel(&stream_id),
-            AdminEvent::Error { message: e },
-        );
-        registry.finish_own(&stream_id, &cancel);
+    if !admin_host_ok(&app, &registry, base_url, &stream_id, &cancel).await {
         return Ok(());
     }
     let url = format!("{}/api/pull", base_url.trim_end_matches('/'));
@@ -355,6 +347,28 @@ pub async fn pull_model(
     drive_progress_stream(app, registry, stream_id, url, body, http, cancel).await
 }
 
+/// The link-local screen before a pull or create, raced against Stop.
+/// False when the run ends here — refused (an Error, as an in-flight admin
+/// failure is shown) or stopped (Cancelled) — with the registry slot
+/// finished.
+async fn admin_host_ok(
+    app: &AppHandle,
+    registry: &StreamRegistry,
+    base_url: &str,
+    stream_id: &str,
+    cancel: &Arc<tokio::sync::Notify>,
+) -> bool {
+    let event = match super::screen_host(base_url, cancel).await {
+        Some(Ok(())) => return true,
+        Some(Err(message)) => AdminEvent::Error { message },
+        None => AdminEvent::Cancelled,
+    };
+    let _ = app.emit(&admin_channel(stream_id), event);
+    registry.finish_own(stream_id, cancel);
+    false
+}
+
+#[allow(clippy::too_many_arguments)]
 pub async fn create_model(
     app: AppHandle,
     http: Client,
@@ -365,12 +379,7 @@ pub async fn create_model(
     stream_id: String,
     cancel: Arc<tokio::sync::Notify>,
 ) -> Result<()> {
-    if let Err(e) = super::refuse_link_local_host(base_url).await {
-        let _ = app.emit(
-            &admin_channel(&stream_id),
-            AdminEvent::Error { message: e },
-        );
-        registry.finish_own(&stream_id, &cancel);
+    if !admin_host_ok(&app, &registry, base_url, &stream_id, &cancel).await {
         return Ok(());
     }
     let url = format!("{}/api/create", base_url.trim_end_matches('/'));
@@ -426,9 +435,15 @@ fn create_fields(modelfile: &str) -> std::result::Result<serde_json::Map<String,
                 let after = after.trim_start_matches([' ', '\t']);
                 let (value, next) = match after.strip_prefix("\"\"\"") {
                     Some(block) => {
-                        let end = block
+                        let first = block
                             .find("\"\"\"")
                             .ok_or_else(|| format!("{d} block has no closing \"\"\""))?;
+                        // The close is the last `"""` of a run of quotes: a
+                        // body ending in `"` (`Answer with "OK"`) makes
+                        // `""""`, and closing at the first one cut the body's
+                        // quote off and read it as a directive.
+                        let run = block[first..].bytes().take_while(|&b| b == b'"').count();
+                        let end = first + run - 3;
                         (&block[..end], &block[end + 3..])
                     }
                     None => {
@@ -479,8 +494,16 @@ fn take_line(s: &str) -> (&str, &str) {
     }
 }
 
-/// `"a\"b"` → `a"b`: reverses the quoting `buildModelfile` applies to `stop`.
+/// `"a\"b"` → `a"b`: reverses the quoting `buildModelfile` applies to `stop`
+/// — a JSON string, so `"\n\nUser:"` is two newlines and `User:`, as the
+/// model's own Modelfile meant it. Taking `\n` for a plain `n` turned a
+/// re-saved model's turn-boundary stop into text it never meets.
 fn unquote(v: &str) -> String {
+    if v.starts_with('"') {
+        if let Ok(s) = serde_json::from_str::<String>(v) {
+            return s;
+        }
+    }
     let inner = v
         .strip_prefix('"')
         .and_then(|s| s.strip_suffix('"'))
@@ -585,7 +608,7 @@ pub async fn unload_model(http: &Client, base_url: &str, model: &str) -> Result<
         .map_err(|e| anyhow!("couldn't reach Ollama to unload `{model}`: {e}"))?;
     if !resp.status().is_success() {
         let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
+        let text = super::error_body(resp).await;
         return Err(anyhow!("Ollama refused to unload `{model}` (HTTP {status}): {text}"));
     }
     Ok(())
@@ -663,6 +686,11 @@ struct OllamaChunk {
     /// that cut-off reply ended as a normal completion.
     #[serde(default)]
     error: Option<String>,
+    /// Why the final `done: true` chunk ended the reply: `stop`, or `length`
+    /// when it reached `num_predict` (the Max tokens setting) — or filled
+    /// the context window, which Ollama reports the same way.
+    #[serde(default)]
+    done_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -673,8 +701,10 @@ struct OllamaChunkMsg {
     thinking: Option<String>,
     /// Tool calls a tool-capable model emits. Ollama places them on the
     /// final chunk (where `done: true`), not interleaved with content
-    /// tokens, so we only need to inspect them once per turn.
-    #[serde(default)]
+    /// tokens, so we only need to inspect them once per turn. An explicit
+    /// `null` (a proxy re-serialising the chunks) is no calls: failing it
+    /// dropped the whole line, content and all.
+    #[serde(default, deserialize_with = "super::null_as_empty")]
     tool_calls: Vec<OllamaToolCall>,
 }
 
@@ -686,6 +716,7 @@ struct OllamaToolCall {
 
 #[derive(Debug, Deserialize, Clone)]
 struct OllamaToolFn {
+    #[serde(default, deserialize_with = "super::null_as_empty")]
     name: String,
     /// Ollama returns this as a parsed JSON object; some forks return a
     /// stringified JSON. `Value` covers both shapes — we re-stringify if
@@ -731,10 +762,18 @@ pub async fn chat_stream(
     // Defense-in-depth SSRF guard. Identical rationale to the OpenAI
     // path — reject link-local addresses (cloud-metadata services live
     // there) while allowing loopback, RFC 1918, CGNAT, and public IPs.
-    if let Err(e) = super::refuse_link_local_host(&req.base_url).await {
-        let _ = app.emit(&channel, StreamEvent::Error { message: e });
-        registry.finish_own(&req.stream_id, &cancel);
-        return Ok(());
+    match super::screen_host(&req.base_url, &cancel).await {
+        Some(Ok(())) => {}
+        Some(Err(e)) => {
+            let _ = app.emit(&channel, StreamEvent::Error { message: e });
+            registry.finish_own(&req.stream_id, &cancel);
+            return Ok(());
+        }
+        None => {
+            let _ = app.emit(&channel, StreamEvent::Cancelled);
+            registry.finish_own(&req.stream_id, &cancel);
+            return Ok(());
+        }
     }
 
     // Seed the running conversation with system prompt + the messages the
@@ -816,6 +855,8 @@ pub async fn chat_stream(
         // What the model says this turn, kept for the history should the
         // turn end in tool calls.
         let mut turn_text = String::new();
+        // Whether this turn stopped at a length limit, and which.
+        let mut cut_off: Option<CutOff> = None;
         let outcome = match run_one_turn(
             &app,
             &http,
@@ -828,6 +869,7 @@ pub async fn chat_stream(
             &mut reported_eval_ns,
             &mut think_already_drop,
             &mut turn_text,
+            &mut cut_off,
             &req.stream_id,
             &registry,
         )
@@ -849,7 +891,7 @@ pub async fn chat_stream(
                     start,
                     tool_ctx.approval_wait(),
                 );
-                let _ = app.emit(&channel, StreamEvent::Done);
+                let _ = app.emit(&channel, StreamEvent::Done { cut_off, tools: !req.tools.is_empty() });
                 registry.finish_own(&req.stream_id, &cancel);
                 return Ok(());
             }
@@ -885,6 +927,13 @@ pub async fn chat_stream(
                             let msg = format!(
                                 "unknown tool `{}` — server may have been disabled",
                                 func.name
+                            );
+                            super::emit_unknown_tool_call(
+                                &app,
+                                &channel,
+                                &call_id,
+                                &func.name,
+                                normalise_args(&func.arguments),
                             );
                             let _ = app.emit(
                                 &channel,
@@ -983,10 +1032,14 @@ async fn run_one_turn(
     reported_eval_ns: &mut Option<u64>,
     think_already_drop: &mut bool,
     turn_text: &mut String,
+    cut_off: &mut Option<CutOff>,
     stream_id: &str,
     registry: &StreamRegistry,
 ) -> Result<Option<TurnOutcome>> {
     let url = format!("{}/api/chat", base_url.trim_end_matches('/'));
+    // The Max Tokens cap this request goes out with, to tell a `length`
+    // stop at it from one where the context window filled first.
+    let num_predict = body["options"]["num_predict"].as_u64();
     // Race the request against a cancel. Ollama withholds response headers
     // until the model is loaded — routinely 30–120 s for a large cold model —
     // and the chat client deliberately carries no request timeout, so
@@ -1179,6 +1232,12 @@ async fn run_one_turn(
                                         }
                                     }
                                     if parsed.done {
+                                        // `length`: stopped at `num_predict`
+                                        // or at the end of the context
+                                        // window, not at the end of the
+                                        // answer.
+                                        *cut_off = (parsed.done_reason.as_deref() == Some("length"))
+                                            .then(|| CutOff::of_length_stop(turn_eval, num_predict));
                                         finished = true;
                                         break;
                                     }
@@ -1299,30 +1358,21 @@ fn emit_metrics(
 }
 
 /// App-default context window, mirrored from `DEFAULT_PARAMS.num_ctx` in
-/// `src/types.ts`. The startup preload (in `preload.rs`) can't resolve a
-/// model's Modelfile defaults the way the frontend does, so it warms with this
-/// value — the size the first real message most commonly asks for. The
-/// post-unlock JS preload re-fires with the precisely-resolved params, so any
-/// mismatch here is corrected before the user's first send. Keep in sync with
-/// the TS default.
-pub const DEFAULT_NUM_CTX: u32 = 8192;
+/// `src/types.ts`. The startup preload (in `preload.rs`) warms with this
+/// value when the model's Modelfile sets no `num_ctx` and the
+/// `default_num_ctx` setting is missing or unusable — the size a new chat
+/// with that model then asks for. Keep in sync with the TS default.
+pub const DEFAULT_NUM_CTX: u32 = 16384;
 
 /// Build the Ollama `options` object for a preload so the warmed runner is
 /// sized like the one the first real chat request will ask for. `num_ctx` is
 /// the load-bearing one (a mismatch forces a KV-cache realloc, i.e. a reload);
-/// `low_vram` / `num_gpu` matter on memory-constrained setups. Returns `None`
+/// `num_gpu` matters on memory-constrained setups. Returns `None`
 /// when nothing is set so the request body omits `options` entirely.
-pub fn preload_options(
-    num_ctx: Option<u32>,
-    low_vram: Option<bool>,
-    num_gpu: Option<u32>,
-) -> Option<Value> {
+pub fn preload_options(num_ctx: Option<u32>, num_gpu: Option<u32>) -> Option<Value> {
     let mut o = serde_json::Map::new();
     if let Some(v) = num_ctx {
         o.insert("num_ctx".into(), json!(v));
-    }
-    if let Some(v) = low_vram {
-        o.insert("low_vram".into(), json!(v));
     }
     if let Some(v) = num_gpu {
         o.insert("num_gpu".into(), json!(v));
@@ -1390,13 +1440,10 @@ fn build_options(req: &ChatRequest) -> Value {
     if let Some(v) = p.num_gpu {
         o.insert("num_gpu".into(), json!(v));
     }
-    if let Some(v) = p.low_vram {
-        o.insert("low_vram".into(), json!(v));
-    }
     Value::Object(o)
 }
 
-fn ollama_tool_def(def: &McpToolDef) -> Value {
+pub(crate) fn ollama_tool_def(def: &McpToolDef) -> Value {
     // Ollama follows the OpenAI tools schema:
     //   {"type":"function","function":{"name","description","parameters"}}
     let mut function = serde_json::Map::new();
@@ -1459,6 +1506,22 @@ fn normalise_args(v: &Value) -> Value {
 mod tests {
     use super::*;
 
+    /// B4-08: a proxy's `"tool_calls": null` (or a `null` name) is no calls,
+    /// not a line to drop with its content.
+    #[test]
+    fn a_null_tool_call_list_keeps_the_line() {
+        let chunk: OllamaChunk =
+            serde_json::from_str(r#"{"message":{"content":"Hello","tool_calls":null},"done":false}"#).expect("parses");
+        let msg = chunk.message.expect("message");
+        assert_eq!(msg.content.as_deref(), Some("Hello"));
+        assert!(msg.tool_calls.is_empty());
+        let named: OllamaChunk = serde_json::from_str(
+            r#"{"message":{"tool_calls":[{"function":{"name":null,"arguments":{}}}]},"done":true}"#,
+        )
+        .expect("parses");
+        assert_eq!(named.message.unwrap().tool_calls[0].function.as_ref().unwrap().name, "");
+    }
+
     // --- create_fields --------------------------------------------------------
     // Ollama 0.5.5+ rejects `/api/create` without the structured fields, so
     // the editor's Modelfile has to come apart cleanly.
@@ -1486,6 +1549,18 @@ mod tests {
         );
     }
 
+    /// F3-02: a body ending in `"` closed one quote early, and the stray `"`
+    /// failed every save. F3-03: escapes in a stop came through as letters.
+    #[test]
+    fn create_fields_keeps_a_closing_quote_and_decodes_stop_escapes() {
+        let modelfile = "FROM m\n\nSYSTEM \"\"\"Always answer with \"OK\"\"\"\"\n\n\
+            PARAMETER stop \"\\n\\nUser:\"\n\
+            PARAMETER stop \" Assistant:\\t\"\n";
+        let fields = create_fields(modelfile).expect("parses");
+        assert_eq!(fields["system"], "Always answer with \"OK\"");
+        assert_eq!(fields["parameters"]["stop"], json!(["\n\nUser:", " Assistant:\t"]));
+    }
+
     #[test]
     fn create_fields_omits_what_the_form_left_empty() {
         let fields = create_fields("FROM qwen3:8b\n").expect("parses");
@@ -1498,6 +1573,26 @@ mod tests {
         assert!(create_fields("FROM m\nSYSTEM \"\"\"never closed\n").is_err());
         assert!(create_fields("FROM m\nADAPTER ./lora.gguf\n").is_err());
         assert!(create_fields("FROM m\nPARAMETER temperature warm\n").is_err());
+    }
+
+    // --- build_options --------------------------------------------------------
+    // Ollama dropped its `low_vram` option (ollama/ollama#10574, May 2025)
+    // and logs any unknown option as invalid. Loach no longer offers the
+    // toggle, but chats and Spaces saved by older versions can still carry
+    // `low_vram` in their parameters.
+
+    #[test]
+    fn build_options_leaves_out_a_stored_low_vram() {
+        let req: ChatRequest = serde_json::from_value(json!({
+            "stream_id": "s",
+            "provider": "ollama",
+            "model": "m",
+            "base_url": "http://127.0.0.1:11434",
+            "messages": [],
+            "params": { "num_ctx": 4096, "num_gpu": 20, "low_vram": true },
+        }))
+        .expect("parameters saved by an older version still parse");
+        assert_eq!(build_options(&req), json!({ "num_ctx": 4096, "num_gpu": 20 }));
     }
 
     // --- normalise_args -------------------------------------------------------
@@ -1561,6 +1656,30 @@ mod tests {
     }
 
     // --- OllamaChunk ------------------------------------------------------------
+
+    /// X4-04: a reply stopped at `num_predict` passed for a finished one.
+    #[test]
+    fn the_done_reason_is_read_and_a_cut_off_done_says_so() {
+        let chunk: OllamaChunk =
+            serde_json::from_str(r#"{"done":true,"done_reason":"length","eval_count":4096}"#).expect("parses");
+        assert_eq!(chunk.done_reason.as_deref(), Some("length"));
+        let plain: OllamaChunk = serde_json::from_str(r#"{"done":true}"#).expect("parses");
+        assert_eq!(plain.done_reason, None);
+
+        // An ordinary end is the same event as ever; a cut-off one says so.
+        assert_eq!(
+            serde_json::to_value(StreamEvent::Done { cut_off: None, tools: false }).unwrap(),
+            json!({ "kind": "done" })
+        );
+        assert_eq!(
+            serde_json::to_value(StreamEvent::Done { cut_off: Some(CutOff::MaxTokens), tools: false }).unwrap(),
+            json!({ "kind": "done", "cut_off": "max_tokens" })
+        );
+        assert_eq!(
+            serde_json::to_value(StreamEvent::Done { cut_off: Some(CutOff::Context), tools: true }).unwrap(),
+            json!({ "kind": "done", "cut_off": "context", "tools": true })
+        );
+    }
 
     #[test]
     fn a_mid_stream_error_line_is_read_as_an_error() {

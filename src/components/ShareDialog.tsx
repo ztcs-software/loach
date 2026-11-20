@@ -8,7 +8,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { buildShareUrl, type ShareNetwork } from "@/lib/share";
+import { buildShareUrl, type ShareNetwork, trimsForShare } from "@/lib/share";
 import { renderShareImage, type ShareImage } from "@/lib/shareImage";
 import { openExternal, saveBinaryToFile } from "@/lib/tauri";
 import { logger } from "@/lib/logger";
@@ -156,6 +156,15 @@ export function ShareDialog() {
   };
 
   const handleShare = async (network: ShareNetwork) => {
+    // Cut to fit the network's composer: the whole text goes on the
+    // clipboard first, and the user is told — it used to be cut silently.
+    if (trimsForShare(network, target.content) && (await copyText())) {
+      useToastStore.getState().push({
+        kind: "info",
+        title: "Full text copied",
+        body: "The post was trimmed to fit — paste to use all of it.",
+      });
+    }
     try {
       await openExternal(buildShareUrl(network, target.content));
     } catch (e) {

@@ -25,6 +25,7 @@ export function FileChip({
     <AttachmentActions
       attachment={attachment}
       className={composerChipClass("attachment")}
+      after={<ChipRemove label={`Remove ${attachment.name}`} onClick={onRemove} />}
     >
       <AttachmentIcon kind={attachment.kind} />
       <span className="max-w-[140px] truncate">{attachment.name}</span>
@@ -39,7 +40,6 @@ export function FileChip({
           truncated
         </span>
       )}
-      <ChipRemove label={`Remove ${attachment.name}`} onClick={onRemove} />
     </AttachmentActions>
   );
 }

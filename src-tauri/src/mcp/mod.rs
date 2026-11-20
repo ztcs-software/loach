@@ -23,10 +23,13 @@
 //! Every outbound HTTP request goes through a DNS-pinned reqwest client
 //! built from [`crate::tools::fetch_url::resolve_lan_addrs`] +
 //! [`crate::tools::fetch_url::build_pinned_client`], so a malicious or
-//! misconfigured MCP server URL can't be aimed at the cloud-metadata
-//! service. Self-hosted servers on loopback or the local network are
-//! allowed — that's the common MCP deployment — only link-local
-//! (cloud-metadata) addresses are refused. stdio servers are gated
+//! misconfigured MCP server URL can't reach a link-local address — which is
+//! where most clouds' metadata service lives (169.254.169.254). Self-hosted
+//! servers on loopback or the local network are allowed — that's the common
+//! MCP deployment — so only link-local addresses (169.254/16, fe80::/10, and
+//! IPv6 forms carrying one) are refused. Not every metadata endpoint is
+//! link-local: AWS's IPv6 one (`fd00:ec2::254`) and Alibaba's
+//! (`100.100.100.200`) sit in ranges a LAN server can use too. stdio servers are gated
 //! differently: the exact command line has to be confirmed in a native
 //! dialog before it is ever saved or started (see
 //! `commands::confirm_stdio_spawn`).
@@ -86,12 +89,15 @@ async fn pin_client_for(server: &McpServer) -> Result<(reqwest::Client, Url)> {
 /// per-server failures the chat path can surface to the user.
 pub async fn aggregate_tools(
     db: &Database,
-) -> (Vec<McpToolDef>, Vec<(String, String)>) {
+) -> (Vec<McpToolDef>, Vec<ServerError>) {
     let servers = match db.list_mcp_servers() {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!("MCP aggregate: list_mcp_servers failed: {e}");
-            return (Vec::new(), vec![("(database)".into(), e.to_string())]);
+            return (
+                Vec::new(),
+                vec![ServerError { server_id: String::new(), name: "(database)".into(), error: e.to_string() }],
+            );
         }
     };
 
@@ -109,14 +115,14 @@ pub async fn aggregate_tools(
         .zip(slugs.iter())
         .map(|(server, slug)| async move {
             let result = collect_one(server, slug).await;
-            (server.name.clone(), result)
+            (server.id.clone(), server.name.clone(), result)
         });
 
     let results = join_all(probes).await;
 
     let mut defs: Vec<McpToolDef> = Vec::new();
-    let mut errors: Vec<(String, String)> = Vec::new();
-    for (name, result) in results {
+    let mut errors: Vec<ServerError> = Vec::new();
+    for (server_id, name, result) in results {
         match result {
             Ok(mut these) => defs.append(&mut these),
             Err(e) => {
@@ -130,15 +136,47 @@ pub async fn aggregate_tools(
                 // stderr can print anything, a token included. The log line
                 // keeps it; Test connection shows it in full.
                 tracing::warn!("MCP aggregate: `{name}` failed: {e:#}");
-                errors.push((name, stdio::without_stderr(&format!("{e}")).to_string()));
+                let error = failure_summary(&e);
+                errors.push(ServerError { server_id, name, error });
             }
         }
     }
     (defs, errors)
 }
 
+/// A server whose tools couldn't be listed. Keyed by id: names aren't
+/// unique, and `/tools` matched by name showed a working server as failed
+/// beside a broken one of the same name.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct ServerError {
+    pub server_id: String,
+    /// For the chat's notice.
+    pub name: String,
+    pub error: String,
+}
+
+/// What the "couldn't be reached" notice and `/tools` say about a server
+/// that failed: its first message and, when it's another layer, the root
+/// cause — "POST to MCP server failed: Connection refused". The retry tag
+/// is skipped: as the outermost layer it was all the user saw ("request
+/// failed before the server could run the tool", while listing tools), and
+/// the cause behind it was lost. Each part loses any stderr tail.
+fn failure_summary(e: &anyhow::Error) -> String {
+    let tag = client::PreExecutionFailure.to_string();
+    let mut layers = e.chain().map(|l| l.to_string()).filter(|l| *l != tag);
+    let Some(first) = layers.next() else {
+        return tag;
+    };
+    let first = stdio::without_stderr(&first);
+    match layers.last() {
+        Some(root) => format!("{first}: {}", stdio::without_stderr(&root)),
+        None => first.to_string(),
+    }
+}
+
 /// How long a cached tool catalogue stays fresh before the next chat send
-/// re-probes every enabled server. Config edits (add / edit / delete /
+/// re-probes every enabled server (in the background — see
+/// [`aggregate_tools_cached`]). Config edits (add / edit / delete /
 /// enable-toggle) and snapshot restores invalidate the cache eagerly via
 /// [`invalidate_tools_cache`], so this TTL only bounds how long a server's
 /// *own* tool-list change (rare) — or a transient reachability change —
@@ -153,7 +191,10 @@ const TOOLS_CACHE_TTL: Duration = Duration::from_secs(300);
 pub struct CachedTools {
     cached_at: Instant,
     tools: Vec<McpToolDef>,
-    errors: Vec<(String, String)>,
+    errors: Vec<ServerError>,
+    /// A server was skipped as busy: served once, then re-probed, rather
+    /// than missing its tools for the whole TTL.
+    stale: bool,
 }
 
 /// Process-lifetime cache of the aggregated MCP tool catalogue, parked on
@@ -168,6 +209,50 @@ pub struct ToolsCacheState {
     /// invalidation stores nothing: its catalogue is from before the change
     /// — a deleted server's tools, a renamed one's old slug.
     generation: u64,
+    /// A background re-probe of an expired entry is running, so another
+    /// read doesn't start a second one.
+    refreshing: bool,
+    /// Held by the probe a miss runs, so a second miss waits for its answer
+    /// instead of probing beside it (see [`aggregate_tools_cached`]).
+    probing: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl ToolsCacheState {
+    /// Keep a probe's catalogue, unless the config changed while it ran.
+    fn keep(&mut self, generation: u64, tools: Vec<McpToolDef>, errors: Vec<ServerError>) {
+        if self.generation == generation {
+            let stale = errors.iter().any(|e| e.error == SLOT_BUSY);
+            self.entry = Some(CachedTools { cached_at: Instant::now(), tools, errors, stale });
+        }
+    }
+
+    /// The cached catalogue, when there is one, starting a background
+    /// re-probe when it has expired or skipped a busy server.
+    fn serve(
+        &mut self,
+        db: &Arc<Database>,
+        cache: &ToolsCache,
+    ) -> Option<(Vec<McpToolDef>, Vec<ServerError>)> {
+        let entry = self.entry.as_ref()?;
+        let answer = (entry.tools.clone(), entry.errors.clone());
+        if (entry.stale || entry.cached_at.elapsed() >= TOOLS_CACHE_TTL) && !self.refreshing {
+            self.refreshing = true;
+            let generation = self.generation;
+            let (db, cache) = (db.clone(), cache.clone());
+            tauri::async_runtime::spawn(async move {
+                // The probe in a task of its own: should it panic,
+                // `refreshing` still goes back, or no expired catalogue was
+                // re-probed again until Loach restarted.
+                let probed = tauri::async_runtime::spawn(async move { aggregate_tools(&db).await }).await;
+                let mut guard = cache.lock().await;
+                if let Ok((tools, errors)) = probed {
+                    guard.keep(generation, tools, errors);
+                }
+                guard.refreshing = false;
+            });
+        }
+        Some(answer)
+    }
 }
 
 /// Construct a fresh, empty tool cache for `AppState`.
@@ -175,44 +260,54 @@ pub fn new_tools_cache() -> ToolsCache {
     Arc::default()
 }
 
-/// [`aggregate_tools`] for the chat hot path, served from `cache` when the
-/// entry is still within [`TOOLS_CACHE_TTL`]. On a miss (or expiry) it runs
-/// the live probe — DNS-pin + initialize + tools/list per enabled server —
-/// and stores the result so subsequent sends in the same conversation skip
-/// that whole round-trip. Returned shape is identical to `aggregate_tools`
-/// so the caller (and its cancel-aware `select!`) is unchanged; a cache hit
+/// [`aggregate_tools`] for the chat hot path, served from `cache`. With no
+/// entry (first use, or invalidated) it runs the live probe — DNS-pin +
+/// initialize + tools/list per enabled server — and stores the result so
+/// subsequent sends skip that whole round-trip. An entry past
+/// [`TOOLS_CACHE_TTL`] is still the answer, while a background probe
+/// replaces it: a send after a quiet spell used to wait on every server
+/// again, and a server's own tool-list change showing up one send later is
+/// the only cost. Returned shape is identical to `aggregate_tools` so the
+/// caller (and its cancel-aware `select!`) is unchanged; a cache hit
 /// simply resolves near-instantly.
 ///
-/// No single-flight guard: two simultaneous misses may both probe and the
-/// last writer wins — acceptable for a desktop app where concurrent sends to
-/// the same MCP set are rare, and far simpler than coordinating a barrier.
+/// One probe at a time on a miss: a second waits for the first and takes
+/// its answer. The typing warm-up (`mcp_warm`) is often still starting the
+/// servers when the send arrives, and a send probing beside it waited only
+/// [`SLOT_WAIT`] for each — so the reply went out without a slow server's
+/// tools, beside a notice blaming a call in another chat.
 pub async fn aggregate_tools_cached(
-    db: &Database,
+    db: &Arc<Database>,
     cache: &ToolsCache,
-) -> (Vec<McpToolDef>, Vec<(String, String)>) {
+) -> (Vec<McpToolDef>, Vec<ServerError>) {
+    let probing = {
+        let mut guard = cache.lock().await;
+        if let Some(answer) = guard.serve(db, cache) {
+            return answer;
+        }
+        guard.probing.clone()
+    };
+    let _probing = probing.lock().await;
     let generation = {
-        let guard = cache.lock().await;
-        if let Some(entry) = guard.entry.as_ref() {
-            if entry.cached_at.elapsed() < TOOLS_CACHE_TTL {
-                return (entry.tools.clone(), entry.errors.clone());
-            }
+        let mut guard = cache.lock().await;
+        // Filled by the probe this one waited for.
+        if let Some(answer) = guard.serve(db, cache) {
+            return answer;
         }
         guard.generation
     };
     let (tools, errors) = aggregate_tools(db).await;
-    {
-        let mut guard = cache.lock().await;
-        // The config changed while this probe ran: its result is still the
-        // answer for this send, but it mustn't be kept for the next one.
-        if guard.generation == generation {
-            guard.entry = Some(CachedTools {
-                cached_at: Instant::now(),
-                tools: tools.clone(),
-                errors: errors.clone(),
-            });
-        }
-    }
+    // The config changed while this probe ran: its result is still the
+    // answer for this send, but it mustn't be kept for the next one.
+    cache.lock().await.keep(generation, tools.clone(), errors.clone());
     (tools, errors)
+}
+
+/// The cached MCP catalogue, without probing on a miss: for display-only
+/// readers (the context bar's tool count), which have no business starting
+/// servers. `None` until a send has listed them.
+pub async fn cached_tools(cache: &ToolsCache) -> Option<Vec<McpToolDef>> {
+    cache.lock().await.entry.as_ref().map(|e| e.tools.clone())
 }
 
 /// Drop any cached catalogue so the next chat send re-probes the servers.
@@ -225,6 +320,11 @@ pub async fn invalidate_tools_cache(cache: &ToolsCache) {
     guard.entry = None;
     guard.generation += 1;
 }
+
+/// How long a tool probe waits for a server's session while another chat's
+/// call has it, and what it reports when that runs out.
+const SLOT_WAIT: Duration = Duration::from_secs(3);
+const SLOT_BUSY: &str = "busy with a tool call in another chat — its tools are back on your next message";
 
 /// Most tools one server may add to the catalogue. Large gateways expose a
 /// few dozen; past this the definitions crowd out the conversation.
@@ -242,7 +342,13 @@ async fn collect_one(server: &McpServer, slug: &str) -> Result<Vec<McpToolDef>> 
     // HTTP server was handshaken afresh on every send, leaving a session
     // behind on the server each time.
     let slot = session_slot(&server.id);
-    let mut pooled = slot.lock().await;
+    // Not for long: another chat's call can hold the session for minutes (a
+    // progress-reporting `tools/call`), and the send this probe is for
+    // showed nothing until it ended. Skipped as busy, the server is back on
+    // the next send (see `ToolsCacheState::keep`).
+    let Ok(mut pooled) = tokio::time::timeout(SLOT_WAIT, slot.lock()).await else {
+        bail!(SLOT_BUSY);
+    };
     let mut retried = false;
     let raws = loop {
         let reused = pooled
@@ -375,6 +481,13 @@ pub async fn dispatch_tool_call(
     // other tool ignores it. It comes from the session row, never from the
     // model's arguments, so a model can't redirect itself at another tree.
     if server_id == crate::tools::builtin::BUILTIN_SERVER_ID {
+        if crate::tools::builtin::switched_off(db, name) {
+            return Ok(McpCallResult {
+                content_text: format!("`{name}` is switched off in Loach's settings."),
+                is_error: true,
+                ..Default::default()
+            });
+        }
         return crate::tools::builtin::dispatch_builtin_guarded(name, arguments, workspace_root)
             .await
             .ok_or_else(|| anyhow!("unknown built-in tool `{name}`"));
@@ -502,15 +615,19 @@ fn keeps_session(p: &PooledSession, err: &anyhow::Error) -> bool {
 /// the dispatch re-reads the row, so a transient error here (a busy read
 /// pool) would otherwise run the tool unasked.
 ///
-/// The one built-in exception is the workspace tools that write to disk.
-/// "Local and in-process" is why the others are safe to run unattended;
-/// it is not why a write is, since a write changes the user's own files.
+/// The built-in exceptions are the workspace tools that write to disk, and
+/// the two that run scripts (`run_skill_script`, `run_script`), which ask
+/// every time. "Local and in-process" is why the others are safe to run
+/// unattended; it is not why a write is, since a write changes the user's
+/// own files, nor a script, which runs as the user.
 /// The per-turn "Always allow" answer is handled by the caller
 /// (`providers::execute_tool_call`) rather than here — built-ins have no
 /// server row to record an allow-list on.
 pub fn needs_approval(db: &Database, server_id: &str, tool_name: &str) -> bool {
     if server_id == crate::tools::builtin::BUILTIN_SERVER_ID {
-        return crate::tools::fs::requires_approval(tool_name);
+        return crate::tools::fs::requires_approval(tool_name)
+            || tool_name == crate::skills::RUN_SKILL_SCRIPT
+            || tool_name == crate::tools::run_script::TOOL_NAME;
     }
     server_needs_approval(db.list_mcp_servers(), server_id, tool_name)
 }
@@ -535,7 +652,9 @@ fn server_needs_approval(rows: Result<Vec<McpServer>>, server_id: &str, tool_nam
 /// operations the chat pipeline needs are the whole surface.
 pub enum Session {
     Http(McpSession),
-    Stdio(StdioSession),
+    /// Boxed: a stdio session is several times an HTTP one's size, and every
+    /// `Session` was as big as the largest variant.
+    Stdio(Box<StdioSession>),
 }
 
 impl Session {
@@ -559,7 +678,7 @@ async fn open_session(server: &McpServer) -> Result<Session> {
     if server.is_stdio() {
         let mut session = StdioSession::spawn(server).await?;
         session.initialize().await?;
-        Ok(Session::Stdio(session))
+        Ok(Session::Stdio(Box::new(session)))
     } else {
         let (http, _) = pin_client_for(server).await?;
         let mut session = McpSession::new(http, server)?;
@@ -837,6 +956,10 @@ fn stable_id_suffix(id: &str) -> String {
 mod tests {
     use super::*;
 
+    fn failed(name: &str, error: &str) -> ServerError {
+        ServerError { server_id: format!("id-{name}"), name: name.into(), error: error.into() }
+    }
+
     fn fresh_db() -> (Database, tempfile::TempDir) {
         let dir = tempfile::TempDir::new().expect("tempdir");
         let db = Database::open(&dir.path().join("loach.db")).expect("open");
@@ -995,7 +1118,7 @@ mod tests {
         let pooled = PooledSession {
             fingerprint: session_fingerprint(&row),
             created_at: Instant::now(),
-            session: Session::Stdio(StdioSession::spawn(&row).await.expect("spawn")),
+            session: Session::Stdio(Box::new(StdioSession::spawn(&row).await.expect("spawn"))),
         };
         let too_long = anyhow::Error::new(stdio::UnreadableReply)
             .context("MCP server `big`: its reply was over 4 MiB");
@@ -1029,7 +1152,7 @@ mod tests {
         let stdio = PooledSession {
             fingerprint: session_fingerprint(&row),
             created_at: Instant::now(),
-            session: Session::Stdio(StdioSession::spawn(&row).await.expect("spawn")),
+            session: Session::Stdio(Box::new(StdioSession::spawn(&row).await.expect("spawn"))),
         };
         let web = http_row("x");
         let http = PooledSession {
@@ -1118,6 +1241,22 @@ mod tests {
         assert!(a.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'), "{a}");
     }
 
+    /// A built-in switched off after the turn began doesn't run: the
+    /// workspace tools went on reading the folder for the rest of the reply.
+    #[tokio::test]
+    async fn a_builtin_switched_off_mid_turn_is_refused() {
+        let (db, dir) = fresh_db();
+        let args = serde_json::json!({});
+        let builtin = crate::tools::builtin::BUILTIN_SERVER_ID;
+        let tool = crate::tools::fs::LIST_DIRECTORY;
+        db.set_setting(crate::tools::fs::SETTING_KEY, "false").expect("setting");
+        let off = dispatch_tool_call(&db, builtin, tool, &args, Some(dir.path())).await.expect("dispatched");
+        assert!(off.is_error && off.content_text.contains("switched off"), "{}", off.content_text);
+        db.set_setting(crate::tools::fs::SETTING_KEY, "true").expect("setting");
+        let on = dispatch_tool_call(&db, builtin, tool, &args, Some(dir.path())).await.expect("dispatched");
+        assert!(!on.content_text.contains("switched off"), "{}", on.content_text);
+    }
+
     /// A stdio server that dies while starting leaves its stderr — which can
     /// print anything, a token included — out of the errors the chat notice
     /// and `/tools` show. Test connection still shows it.
@@ -1137,8 +1276,92 @@ mod tests {
         assert!(shown.contains("token-123"), "{shown}");
 
         let (_, errors) = aggregate_tools(&db).await;
-        let (_, e) = errors.first().expect("the server failed to start");
+        let e = &errors.first().expect("the server failed to start").error;
         assert!(e.contains("exited before replying"), "{e}");
         assert!(!e.contains("token-123"), "{e}");
+    }
+
+    /// B5-07: a catalogue with a server skipped as busy is kept stale — used
+    /// once, then re-probed — not cached without that server for the TTL.
+    #[test]
+    fn a_busy_server_leaves_the_catalogue_stale() {
+        let mut state = ToolsCacheState::default();
+        state.keep(0, Vec::new(), vec![failed("gh", SLOT_BUSY)]);
+        assert!(state.entry.as_ref().unwrap().stale);
+        state.keep(0, Vec::new(), vec![failed("gh", "connection refused")]);
+        assert!(!state.entry.as_ref().unwrap().stale);
+    }
+
+    /// An expired catalogue is still the answer while a background probe
+    /// replaces it: a send after a quiet spell doesn't wait on every server.
+    #[tokio::test]
+    async fn an_expired_catalogue_answers_while_it_refreshes() {
+        let (db, _dir) = fresh_db();
+        let db = Arc::new(db);
+        let cache = new_tools_cache();
+        let old = vec![ServerError {
+            server_id: "s-old".to_string(),
+            name: "old".to_string(),
+            error: "unreachable".to_string(),
+        }];
+        cache.lock().await.entry = Some(CachedTools {
+            cached_at: Instant::now()
+                .checked_sub(TOOLS_CACHE_TTL + Duration::from_secs(1))
+                .expect("uptime past the TTL"),
+            tools: Vec::new(),
+            errors: old.clone(),
+            stale: false,
+        });
+
+        let (_, errors) = aggregate_tools_cached(&db, &cache).await;
+        assert_eq!(errors, old);
+
+        // The background probe (no servers configured) replaces it.
+        for _ in 0..200 {
+            if !cache.lock().await.refreshing {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let guard = cache.lock().await;
+        assert!(!guard.refreshing);
+        let entry = guard.entry.as_ref().expect("refreshed");
+        assert!(entry.errors.is_empty());
+        assert!(entry.cached_at.elapsed() < TOOLS_CACHE_TTL);
+    }
+
+    /// The notice names the cause, not the retry tag, and never a stderr
+    /// tail (B5-01).
+    #[test]
+    fn failure_summary_shows_the_cause_without_the_retry_tag() {
+        use client::PreExecutionFailure;
+        let io = |m: &str| std::io::Error::other(m.to_string());
+
+        // HTTP connect failure: tag over "POST … failed" over reqwest's chain.
+        let refused = anyhow::Error::new(io("Connection refused (os error 111)"))
+            .context("tcp connect error")
+            .context("error sending request")
+            .context("POST to MCP server failed")
+            .context(PreExecutionFailure);
+        assert_eq!(
+            failure_summary(&refused),
+            "POST to MCP server failed: Connection refused (os error 111)"
+        );
+
+        // stdio: the stderr tail goes, from either part.
+        let exited = anyhow!("MCP server `fs` process has exited — stderr: TOKEN=abc")
+            .context(PreExecutionFailure);
+        assert_eq!(failure_summary(&exited), "MCP server `fs` process has exited");
+        let write = anyhow::Error::new(io("The pipe is being closed."))
+            .context("couldn't write to MCP server `fs` — stderr: TOKEN=abc")
+            .context(PreExecutionFailure);
+        assert_eq!(
+            failure_summary(&write),
+            "couldn't write to MCP server `fs`: The pipe is being closed."
+        );
+
+        // A one-layer error reads as before.
+        let rpc = anyhow!("server returned error -32601: Method not found");
+        assert_eq!(failure_summary(&rpc), "server returned error -32601: Method not found");
     }
 }

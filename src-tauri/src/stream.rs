@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{oneshot, Notify};
 
 /// Tracks in-flight streaming generations so we can cancel them from the frontend.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct StreamRegistry {
     inner: Arc<DashMap<String, Arc<Notify>>>,
     /// Which of `inner` are chat streams, as opposed to model pulls and
@@ -15,10 +15,7 @@ pub struct StreamRegistry {
 
 impl StreamRegistry {
     pub fn new() -> Self {
-        Self {
-            inner: Arc::new(DashMap::new()),
-            chats: Arc::new(dashmap::DashSet::new()),
-        }
+        Self::default()
     }
 
     /// [`register`](Self::register) for a chat stream.
@@ -73,13 +70,6 @@ impl StreamRegistry {
         }
     }
 
-    /// Retire `id` whoever holds it. Callers that have their handle use
-    /// [`finish_own`](Self::finish_own).
-    pub fn finish(&self, id: &str) {
-        self.chats.remove(id);
-        self.inner.remove(id);
-    }
-
     /// Retire `id` — but only while it is still `own`'s. After a collision
     /// (see [`register`](Self::register)) the old stream winds down and
     /// finishes too; removing by id alone took the newer stream's handle with
@@ -95,10 +85,31 @@ impl StreamRegistry {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum StreamEvent {
     Token { delta: String },
+    /// Something the user should know about this reply that isn't part of
+    /// it — today, MCP servers that couldn't be reached. Shown beside the
+    /// reply as a chip, never added to its text: sent as a `Token` it was
+    /// rendered as Markdown (a server's error text could add a link styled
+    /// as Loach's own), saved as the reply, replayed to the model as its own
+    /// words, and read by the memory extractor.
+    Notice { text: String },
     Thinking { delta: String },
     /// Stream ended normally (provider emitted EOF / `[DONE]`). Carries
     /// the same closing semantics as the prior version of this enum.
-    Done,
+    ///
+    /// `cut_off`: the model stopped at a length limit (Ollama's
+    /// `done_reason: "length"`, OpenAI's `finish_reason: "length"`), not
+    /// because it was done — the UI says so, and which limit, where the cut
+    /// used to pass for a finished reply. Left out of the event when `None`.
+    ///
+    /// `tools`: the request carried tool definitions — for the note on a
+    /// full window, which suggests switching unused ones off only then. Left
+    /// out when false.
+    Done {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cut_off: Option<CutOff>,
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        tools: bool,
+    },
     /// Stream was cancelled by the user (or by another command stopping
     /// the runner). Distinct from `Done` so the frontend can avoid
     /// pretending an interrupted generation finished naturally — useful
@@ -125,15 +136,27 @@ pub enum StreamEvent {
     /// `existing_bytes` is set for the built-in `write_file` only: the size
     /// of the file the write would replace, or `null` when it would create
     /// one, so the approval card can say which.
+    ///
+    /// `script_run` is set for `run_skill_script` and `run_script` only: the
+    /// command as it will run and the folder it runs in, so the card shows
+    /// the real command rather than the model's arguments.
     ToolCall {
         id: String,
         server_id: String,
         server_name: String,
         tool: String,
+        /// The tool's own name, as its server lists it — for the card and
+        /// chips. `tool` is the qualified name, which can't be taken apart
+        /// (`qualify`): slugged, cut and hashed, it showed as another name.
+        tool_name: String,
         arguments: serde_json::Value,
         approval_required: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         existing_bytes: Option<Option<u64>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        // Boxed: a preview is most of this variant's size, and every event
+        // was as big as the largest one.
+        script_run: Option<Box<crate::skills::script::Preview>>,
     },
     /// Outcome of a `ToolCall`. `is_error` mirrors the MCP `isError` flag;
     /// `content` is the concatenated text content (or a stringified
@@ -160,6 +183,31 @@ pub enum StreamEvent {
         denied: bool,
         timed_out: bool,
     },
+}
+
+/// Which limit cut a reply off ([`StreamEvent::Done`]). Ollama and
+/// llama.cpp-based servers report both as the same `length` stop, but the
+/// fix differs — and a full context window was blamed on Max Tokens, which
+/// raising did nothing for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CutOff {
+    /// The reply reached the Max Tokens setting.
+    MaxTokens,
+    /// The prompt and the reply together filled the context window first.
+    Context,
+}
+
+impl CutOff {
+    /// Why a `length` stop happened, from how many tokens the request
+    /// generated against the cap it was sent with: short of the cap, it was
+    /// the window. Without both counts, the cap — as it was always read.
+    pub fn of_length_stop(generated: Option<u32>, cap: Option<u64>) -> Self {
+        match (generated, cap) {
+            (Some(n), Some(cap)) if u64::from(n) < cap => Self::Context,
+            _ => Self::MaxTokens,
+        }
+    }
 }
 
 /// The user's answer to a per-call tool approval prompt. Wire form is the
@@ -311,6 +359,17 @@ mod tests {
     use std::time::Duration;
     use tokio::time::timeout;
 
+    /// A `length` stop short of the cap ran out of window (an 8K window, a
+    /// 7.8K prompt and Max Tokens at 32K stopped at 401 tokens); one at the
+    /// cap, or with a count missing, is the Max Tokens limit.
+    #[test]
+    fn a_length_stop_short_of_the_cap_is_the_context_window() {
+        assert_eq!(CutOff::of_length_stop(Some(401), Some(32768)), CutOff::Context);
+        assert_eq!(CutOff::of_length_stop(Some(4096), Some(4096)), CutOff::MaxTokens);
+        assert_eq!(CutOff::of_length_stop(None, Some(4096)), CutOff::MaxTokens);
+        assert_eq!(CutOff::of_length_stop(Some(401), None), CutOff::MaxTokens);
+    }
+
     /// The backend twin of the frontend's connect-window race: a cancel
     /// issued between `register()` returning and the provider task first
     /// awaiting `notified()` must be observed by that first poll. `cancel`
@@ -360,7 +419,7 @@ mod tests {
             .expect("the stored permit must wake the first poll");
     }
 
-    /// `finish()` retires the id. A cancel arriving after that (e.g. a Stop
+    /// `finish_own()` retires the id. A cancel arriving after that (e.g. a Stop
     /// click racing the final Done) must find nothing — in particular it
     /// must not park a permit that a future stream reusing the id would
     /// consume as a phantom cancel.
@@ -368,7 +427,7 @@ mod tests {
     async fn cancel_after_finish_is_a_noop() {
         let reg = StreamRegistry::new();
         let n = reg.register("s2".into());
-        reg.finish("s2");
+        reg.finish_own("s2", &n);
         reg.cancel("s2");
         let woke = timeout(Duration::from_millis(50), n.notified()).await;
         assert!(woke.is_err(), "no permit should exist after finish()");

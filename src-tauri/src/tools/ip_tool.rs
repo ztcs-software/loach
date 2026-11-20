@@ -4,6 +4,7 @@
 //! but slip on /15 vs /16 boundaries, broadcast/network identity for odd
 //! prefix lengths, and IPv6 in particular. `ipnet` is the right crate.
 
+use super::{err};
 use std::net::IpAddr;
 
 use ipnet::IpNet;
@@ -160,14 +161,6 @@ fn op_subnet_info(cidr: IpNet) -> McpCallResult {
     McpCallResult {
         content_text: out,
         is_error: false,
-        ..Default::default()
-    }
-}
-
-fn err(msg: impl Into<String>) -> McpCallResult {
-    McpCallResult {
-        content_text: msg.into(),
-        is_error: true,
         ..Default::default()
     }
 }

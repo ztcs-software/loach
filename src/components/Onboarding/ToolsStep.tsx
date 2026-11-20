@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import { ChevronDown, Globe, Plug, Wrench } from "lucide-react";
+import { ChevronDown, Globe, Plug, Terminal, Wrench } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useOnboardingStore } from "@/stores/onboardingStore";
@@ -8,12 +8,14 @@ import { cn } from "@/lib/utils";
 import { StepShell } from "./StepShell";
 
 /**
- * Tools step. Loach ships thirteen tools the model can call, and before this
- * screen existed every one of them was discover-by-accident — buried in
- * Settings → Tools with nothing in the product pointing there.
+ * Tools step. Loach ships fourteen built-in tool switches (twenty-one tools
+ * the model can call — Workspace files alone is eight), and before this screen
+ * existed every one of them was discover-by-accident — buried in Settings →
+ * Tools with nothing in the product pointing there.
  *
  * The utility tools open pre-set to a recommended selection (everything on
- * except the niche developer four: hash, UUID, base64, IP/CIDR), switchable
+ * except the niche developer four — hash, UUID, base64, IP/CIDR — and
+ * Workspace files; see `RECOMMENDED_OFF`), switchable
  * per tool or via the All OFF / Recommended / All ON presets. Because the
  * screen now *shows* a selection, the write rules are:
  *
@@ -21,17 +23,19 @@ import { StepShell } from "./StepShell";
  *     is what you get.
  *   - **Skip** writes only what the user explicitly flipped. Skipping past
  *     is not consent to the recommended set.
- *   - **Web fetch** starts off regardless and is only ever written when
- *     touched. It is the one network-reaching switch in the app, and no
- *     default or preset may opt someone into networking.
+ *   - **Web fetch** and **Run scripts** start off regardless and are only
+ *     ever written when touched. One reaches the network, the other runs
+ *     code as the user (network included), and no default or preset may opt
+ *     someone into either.
  *
  * MCP gets a row with no switch — connecting a server needs a command,
  * arguments and env, which is a Settings-sized job, not a wizard-sized one.
  */
 
 /** The in-process tools, i.e. everything in Settings → Tools except web
- *  fetch (which gets its own row above, being the only one that opens a
- *  socket). Derived from the same array Settings renders so the two can't
+ *  fetch, which opens a socket, and Run scripts, which starts a process
+ *  (`RUN_SCRIPT_TOGGLE`, never in `TOOL_TOGGLES`) — both get their own row
+ *  above. Derived from the same array Settings renders so the two can't
  *  drift as tools are added. */
 const UTILITY_TOOLS = TOOL_TOGGLES.filter((t) => t.key !== "web_fetch_enabled");
 
@@ -62,10 +66,12 @@ export function ToolsStep({ onClose }: { onClose: () => void }) {
   const goBack = useOnboardingStore((s) => s.goBack);
 
   const [webFetch, setWebFetch] = useState(false);
+  const [runScript, setRunScript] = useState(false);
   const [tools, setTools] = useState<Record<string, boolean>>(RECOMMENDED);
   const [utilitiesOpen, setUtilitiesOpen] = useState(true);
 
   const webFetchTouched = useRef(false);
+  const runScriptTouched = useRef(false);
   // Which utilities the user explicitly set (individually or via a preset) —
   // the only ones Skip persists.
   const touchedTools = useRef(new Set<UtilityKey>());
@@ -100,6 +106,9 @@ export function ToolsStep({ onClose }: { onClose: () => void }) {
     if (webFetchTouched.current) {
       writes.push(update("web_fetch_enabled", webFetch));
     }
+    if (runScriptTouched.current) {
+      writes.push(update("run_script_enabled", runScript));
+    }
     for (const tool of UTILITY_TOOLS) {
       if (opts.full || touchedTools.current.has(tool.key)) {
         writes.push(update(tool.key, tools[tool.key] ?? false));
@@ -125,11 +134,22 @@ export function ToolsStep({ onClose }: { onClose: () => void }) {
         <ToolRow
           icon={<Globe className="h-4 w-4" />}
           title="Web fetch"
-          description="When your message contains an http(s):// URL, Loach downloads the page and inlines the readable text so the model can read it. This is the only feature that reaches the network on your behalf."
+          description="When your message contains an http(s):// URL, Loach downloads the page and inlines the readable text so the model can read it. This reaches the network on your behalf."
           checked={webFetch}
           onChange={(v) => {
             webFetchTouched.current = true;
             setWebFetch(v);
+          }}
+        />
+
+        <ToolRow
+          icon={<Terminal className="h-4 w-4" />}
+          title="Run scripts"
+          description="Let the model write a Python, bash, Node.js or PowerShell script and run it with what's installed on this computer. Every run asks you first, showing the code and the exact command. A script runs as you, with your access to every file and the network. Never used in Private Chat."
+          checked={runScript}
+          onChange={(v) => {
+            runScriptTouched.current = true;
+            setRunScript(v);
           }}
         />
 
@@ -159,8 +179,8 @@ export function ToolsStep({ onClose }: { onClose: () => void }) {
               <p className="text-[13px] font-medium">Tools</p>
               <p className="mt-0.5 text-[11.5px] leading-relaxed text-foreground/55">
                 Exact answers for the things language models reliably get wrong
-                — arithmetic, dates, hashes, unit conversion, JSON, diffs, and
-                more.
+                — arithmetic, dates, hashes, unit conversion, JSON, diffs —
+                plus PDF documents and files in a folder you pick.
               </p>
             </div>
             <PresetPicker active={activePreset} onPick={applyPreset} />
@@ -184,7 +204,7 @@ export function ToolsStep({ onClose }: { onClose: () => void }) {
                     <Switch
                       checked={on}
                       onCheckedChange={(v) => setTool(t.key, v)}
-                      aria-label={on ? t.ariaOff : t.ariaOn}
+                      aria-label={t.title}
                       className="shrink-0"
                     />
                   </div>
@@ -285,7 +305,7 @@ function ToolRow({
       <Switch
         checked={checked}
         onCheckedChange={onChange}
-        aria-label={checked ? `Disable ${title}` : `Enable ${title}`}
+        aria-label={title}
         className="mt-1 shrink-0"
       />
     </div>

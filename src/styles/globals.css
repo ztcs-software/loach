@@ -51,10 +51,12 @@
        60%-lightness saturated hue chosen to read as a button/glow surface;
        as text on the near-white background it lands at 2.4:1. This is the
        same hue and saturation dropped to a lightness that clears 4.5:1, so
-       links stay recognisably "the accent" without failing AA. Dark mode
-       re-points it at `--primary` (see `.dark`), where the bright accent
-       already has ~8:1 against the near-black backdrop. */
-    --primary-text: 22 95% 38%;
+       links stay recognisably "the accent" without failing AA — on the
+       Aurora background's peach band too, where 38% came to about 3.4:1
+       (30% is about 4.8:1). Dark mode re-points it at `--primary` (see
+       `.dark`), where the bright accent already has ~8:1 against the
+       near-black backdrop. */
+    --primary-text: 22 95% 30%;
 
     /* Glass tokens flipped per theme */
     --glass-tint: 255 255 255;
@@ -545,7 +547,10 @@ html.font-size-large   { --font-scale: 1.05; }
 .text-\[13px\]    { font-size: calc(13px   * var(--font-scale, 0.93)); }
 .text-\[13\.5px\] { font-size: calc(13.5px * var(--font-scale, 0.93)); }
 .text-\[14px\]    { font-size: calc(14px   * var(--font-scale, 0.93)); }
+.text-\[14\.5px\] { font-size: calc(14.5px * var(--font-scale, 0.93)); }
 .text-\[15px\]    { font-size: calc(15px   * var(--font-scale, 0.93)); }
+.text-\[20px\]    { font-size: calc(20px   * var(--font-scale, 0.93)); }
+.text-\[22px\]    { font-size: calc(22px   * var(--font-scale, 0.93)); }
 
 /* =========================================================================
    Contrast lift for `text-foreground/<opacity>` utilities
@@ -576,6 +581,15 @@ html.font-size-large   { --font-scale: 1.05; }
 .text-foreground\/85 { color: hsl(var(--foreground) / 0.96); }
 .text-foreground\/90 { color: hsl(var(--foreground) / 0.98); }
 .text-foreground\/95 { color: hsl(var(--foreground)); }
+
+/* Light theme: the low tiers lifted further. Over the Aurora background's
+   peach band (around rgb(245,200,185)) the values above left /40 at about
+   4.3:1 and /30 near 3:1, so hints and metrics went faint. Dark mode keeps
+   the values above, which already read on near-black. */
+html:not(.dark) .text-foreground\/30 { color: hsl(var(--foreground) / 0.58); }
+html:not(.dark) .text-foreground\/35 { color: hsl(var(--foreground) / 0.62); }
+html:not(.dark) .text-foreground\/40 { color: hsl(var(--foreground) / 0.66); }
+html:not(.dark) .text-foreground\/45 { color: hsl(var(--foreground) / 0.70); }
 
 /* =========================================================================
    Contrast lift for destructive menu items in dark mode

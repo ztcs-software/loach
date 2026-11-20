@@ -127,9 +127,24 @@ export const useSecurityStore = create<SecurityState>((set, get) => ({
   },
 
   unlock: async ({ pin, password }) => {
-    const ok = await backendUnlock({ pin, password });
-    if (ok) set({ unlocked: true });
-    return ok;
+    try {
+      const ok = await backendUnlock({ pin, password });
+      if (ok) set({ unlocked: true });
+      return ok;
+    } catch (e) {
+      // The lock screen may have been built from a stale status — a PIN of
+      // the wrong length, or a PIN where a password is set — which no input
+      // could pass. The backend corrects it and says so
+      // (`security.rs`, `correct_stale_marker`); re-read it, so the screen
+      // asks for what the lock actually needs.
+      try {
+        const status = await securityStatus();
+        if (status.configured) set({ status });
+      } catch {
+        // Keep the error that brought us here.
+      }
+      throw e;
+    }
   },
 
   lock: () => {

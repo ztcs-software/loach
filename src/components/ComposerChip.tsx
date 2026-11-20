@@ -1,4 +1,4 @@
-import { X } from "lucide-react";
+import { Puzzle, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { Persona } from "@/lib/personas";
 import type { Tone } from "@/lib/tones";
@@ -24,7 +24,7 @@ import type { Tone } from "@/lib/tones";
 // light glass.
 // ---------------------------------------------------------------------------
 
-export type ComposerChipVariant = "config" | "attachment";
+type ComposerChipVariant = "config" | "attachment";
 
 export function composerChipClass(variant: ComposerChipVariant) {
   return cn(
@@ -59,17 +59,7 @@ export function ChipRemove({
   return (
     <button
       type="button"
-      onClick={(e) => {
-        // Attachment chips nest this inside AttachmentActions' click-to-preview
-        // wrapper — without this the ✕ would also open the preview.
-        e.stopPropagation();
-        onClick();
-      }}
-      onKeyDown={(e) => {
-        // …and the keys that activate it, which the wrapper would otherwise
-        // take as "open the preview" (cancelling this button's own click).
-        if (e.key === "Enter" || e.key === " ") e.stopPropagation();
-      }}
+      onClick={onClick}
       aria-label={label}
       disabled={disabled}
       className="-mr-1 grid h-5 w-5 shrink-0 place-items-center rounded-full text-foreground/50 transition-colors hover:bg-foreground/10 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-foreground/50"
@@ -106,6 +96,22 @@ export function PersonaChip({
       <Icon className={composerChipIconClass("config")} />
       <span>{persona.label}</span>
       <ChipRemove label={`Remove ${persona.label} persona`} onClick={onRemove} />
+    </div>
+  );
+}
+
+/** A skill loaded in this chat (`/skill`, or the model's `activate_skill`).
+ *  Config, not payload: its instructions go with every message until the
+ *  chip is removed. */
+export function SkillChip({ name, onRemove }: { name: string; onRemove: () => void }) {
+  return (
+    <div
+      className={composerChipClass("config")}
+      title={`Skill: ${name} — its instructions go with every message in this chat`}
+    >
+      <Puzzle className={composerChipIconClass("config")} />
+      <span>{name}</span>
+      <ChipRemove label={`Remove the ${name} skill from this chat`} onClick={onRemove} />
     </div>
   );
 }

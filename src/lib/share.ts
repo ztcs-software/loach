@@ -7,14 +7,19 @@ const LOACH_URL = "https://github.com/ztcs-software/loach";
 
 /** How much text each network's composer will actually accept. X counts
  *  characters against the post limit; the others just get unwieldy URLs
- *  past a point. The full text is on the clipboard either way, so a clamp
- *  here only trims the pre-fill. */
+ *  past a point. Longer text is cut to fit: the share dialog puts all of it
+ *  on the clipboard first and says so (`trimsForShare`). */
 const LIMITS: Record<ShareNetwork, number> = {
   facebook: 2000,
   x: 270,
   reddit: 4000,
   linkedin: 2800,
 };
+
+/** Whether `network`'s pre-fill cuts `text` short. */
+export function trimsForShare(network: ShareNetwork, text: string): boolean {
+  return text.trim().length > LIMITS[network];
+}
 
 /** Reddit self-posts need a title; it caps at 300 characters. */
 const REDDIT_TITLE_LIMIT = 300;

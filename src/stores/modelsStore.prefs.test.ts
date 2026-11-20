@@ -71,6 +71,34 @@ describe("deleting a model", () => {
       ["ollama", "qwen3:4b"],
     ]);
   });
+
+  // X5-01 / X5-02: a pin typed bare (`llama3.2`, as onboarding allows) is the
+  // listed `llama3.2:latest`, and a chat that picked it from a list cached
+  // its defaults under the full tag.
+  it("matches pins and cached defaults whichever way the tag was spelled", async () => {
+    const { useModelsStore } = await import("./modelsStore");
+    const { useSettingsStore } = await import("./settingsStore");
+    const { useSpaceStore } = await import("./spaceStore");
+    useSettingsStore.setState({
+      default_model_choice: "model:ollama:llama3.2",
+      default_provider: "ollama",
+      default_model: "llama3.2",
+    });
+    useSpaceStore.setState({ spaces: [space("pinned", "ollama", "llama3.2")] });
+    useModelsStore.setState({
+      modelDefaults: { "llama3.2": {}, "llama3.2:latest": {}, "qwen3:4b": {} },
+      modelCapabilities: { "llama3.2": [], "llama3.2:latest": [] },
+    });
+
+    await useModelsStore.getState().deleteModel("llama3.2:latest");
+
+    const settings = useSettingsStore.getState();
+    expect(settings.default_model_choice).toBe("recent");
+    expect(settings.default_model).toBe("");
+    expect(useSpaceStore.getState().spaces[0]!.default_model).toBeNull();
+    expect(Object.keys(useModelsStore.getState().modelDefaults)).toEqual(["qwen3:4b"]);
+    expect(useModelsStore.getState().modelCapabilities).toEqual({});
+  });
 });
 
 describe("the per-model Thinking default", () => {

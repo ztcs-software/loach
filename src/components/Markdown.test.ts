@@ -10,8 +10,29 @@
 import { describe, it, expect } from "vitest";
 import { __testing, stableBlocks, stableSplit } from "./Markdown";
 
-const { texReplace, rehypeTexFallback, shouldOpenExternally, rehypeHighlightCapped } =
+const { texReplace, rehypeTexFallback, shouldOpenExternally, misleadingHost, rehypeHighlightCapped } =
   __testing;
+
+// UX-04: a link whose text is one address and whose target is another.
+describe("misleadingHost", () => {
+  it("names the real host when the text is an address of another", () => {
+    expect(misleadingHost("www.mybank.com", "https://evil.example/login")).toBe("evil.example");
+    expect(misleadingHost("https://github.com/x", "https://gitHub.evil.example")).toBe("github.evil.example");
+    expect(misleadingHost("pay.example.com/checkout", "http://10.0.0.5/")).toBe("10.0.0.5");
+  });
+  it("lets through links that are what they say, or say no address", () => {
+    expect(misleadingHost("https://example.com/a", "https://example.com/b")).toBeNull();
+    expect(misleadingHost("example.com", "https://www.example.com/")).toBeNull();
+    expect(misleadingHost("the docs", "https://evil.example")).toBeNull();
+    expect(misleadingHost("v1.2.3 release notes", "https://example.com")).toBeNull();
+    expect(misleadingHost("a@b.com", "mailto:a@b.com")).toBeNull();
+    // File names, not addresses, though `.md` and `.py` are country domains.
+    expect(misleadingHost("README.md", "https://github.com/o/r/blob/main/README.md")).toBeNull();
+    expect(misleadingHost("main.py", "https://example.com/main.py")).toBeNull();
+    expect(misleadingHost("v1.2.3", "https://github.com/o/r/releases")).toBeNull();
+    expect(misleadingHost("paypal.com", "https://evil.example")).toBe("evil.example");
+  });
+});
 
 describe("texReplace (prose TeX→Unicode fallback)", () => {
   it("converts known single-token TeX", () => {

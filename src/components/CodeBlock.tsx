@@ -7,6 +7,7 @@ import {
 } from "@/stores/canvasStore";
 import { usePrivateChatStore } from "@/stores/privateChatStore";
 import { useMarkdownSource } from "./markdownSource";
+import { useToastStore } from "@/stores/toastStore";
 import { saveCodeToFile, defaultFilename } from "@/lib/codeExport";
 import { cn } from "@/lib/utils";
 
@@ -61,6 +62,10 @@ export function CodeBlock({ className, children, raw, language }: CodeBlockProps
     // for the gutter (the original `raw` is preserved for copy / export).
     return raw.replace(/\n+$/, "").split("\n").length;
   }, [raw]);
+  const gutter = useMemo(
+    () => Array.from({ length: lineCount }, (_, i) => i + 1).join("\n"),
+    [lineCount],
+  );
 
   const onCopy = async () => {
     try {
@@ -68,7 +73,11 @@ export function CodeBlock({ className, children, raw, language }: CodeBlockProps
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1500);
     } catch {
-      /* ignore */
+      useToastStore.getState().push({
+        kind: "error",
+        title: "Couldn't copy",
+        body: "Clipboard isn't available in this window.",
+      });
     }
   };
 
@@ -165,7 +174,7 @@ export function CodeBlock({ className, children, raw, language }: CodeBlockProps
           // is 3.3:1 on the light code surface.
           className="select-none px-3 py-3 text-right tabular-nums text-foreground/40"
         >
-          {Array.from({ length: lineCount }, (_, i) => i + 1).join("\n")}
+          {gutter}
         </pre>
         <pre
           className={cn(

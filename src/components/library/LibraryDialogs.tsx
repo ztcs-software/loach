@@ -31,6 +31,7 @@ import { dialogEnter } from "@/lib/shortcuts";
 import { libraryUsage, openExternal } from "@/lib/tauri";
 import { cn, formatBytes, relativeTime } from "@/lib/utils";
 import { safeImageMime } from "@/lib/files";
+import { sourceTokens } from "@/lib/sources";
 import { useLibraryStore } from "@/stores/libraryStore";
 import { useToastStore } from "@/stores/toastStore";
 import type { LibraryItem } from "@/types";
@@ -42,6 +43,7 @@ import {
   tokensLabel,
   typeLabel,
 } from "./libraryUi";
+import { notifyOnFail } from "@/stores/toastStore";
 
 // ---------------------------------------------------------------------------
 // Delete — one flow for every surface, naming what links to the items.
@@ -64,10 +66,10 @@ export function useDeleteLibraryItems() {
     } catch {
       /* the confirmation still works without the usage line */
     }
-    const where: string[] = [];
-    if (inDatasets.length) where.push(`${inDatasets.length} dataset${inDatasets.length === 1 ? "" : "s"}`);
-    if (usage.spaces.length) where.push(`Space${usage.spaces.length === 1 ? "" : "s"} ${usage.spaces.map((s) => `“${s}”`).join(", ")}`);
-    if (usage.chats) where.push(`${usage.chats} chat${usage.chats === 1 ? "" : "s"}`);
+    const where = [
+      ...(inDatasets.length ? [`${inDatasets.length} dataset${inDatasets.length === 1 ? "" : "s"}`] : []),
+      ...usagePlaces(usage),
+    ];
     const ok = await confirm({
       title: ids.length === 1 ? `Delete “${names[0] ?? "item"}”?` : `Delete ${ids.length} items?`,
       body:
@@ -78,6 +80,17 @@ export function useDeleteLibraryItems() {
     });
     return ok && (await deleteItems(ids));
   };
+}
+
+/** Where a Library delete reaches, for its confirmation: the Spaces by name
+ *  and a count of chats. Shared by the three delete flows below. */
+function usagePlaces(usage: { spaces: string[]; chats: number }): string[] {
+  const where: string[] = [];
+  if (usage.spaces.length) {
+    where.push(`Space${usage.spaces.length === 1 ? "" : "s"} ${usage.spaces.map((s) => `“${s}”`).join(", ")}`);
+  }
+  if (usage.chats) where.push(`${usage.chats} chat${usage.chats === 1 ? "" : "s"}`);
+  return where;
 }
 
 /** Delete a dataset (its items stay in the Library). */
@@ -93,9 +106,7 @@ export function useDeleteDataset() {
     } catch {
       /* ignore */
     }
-    const where: string[] = [];
-    if (usage.spaces.length) where.push(`Space${usage.spaces.length === 1 ? "" : "s"} ${usage.spaces.map((s) => `“${s}”`).join(", ")}`);
-    if (usage.chats) where.push(`${usage.chats} chat${usage.chats === 1 ? "" : "s"}`);
+    const where = usagePlaces(usage);
     const ok = await confirm({
       title: `Delete dataset “${ds.name}”?`,
       body:
@@ -132,9 +143,7 @@ export function useDeleteSelection() {
     } catch {
       /* the confirmation still works without the usage line */
     }
-    const where: string[] = [];
-    if (usage.spaces.length) where.push(`Space${usage.spaces.length === 1 ? "" : "s"} ${usage.spaces.map((s) => `“${s}”`).join(", ")}`);
-    if (usage.chats) where.push(`${usage.chats} chat${usage.chats === 1 ? "" : "s"}`);
+    const where = usagePlaces(usage);
     const what = [
       itemIds.length ? `${itemIds.length} item${itemIds.length === 1 ? "" : "s"}` : null,
       `${datasetIds.length} dataset${datasetIds.length === 1 ? "" : "s"}`,
@@ -151,8 +160,12 @@ export function useDeleteSelection() {
       destructive: true,
     });
     if (!ok) return false;
-    for (const id of datasetIds) await deleteDataset(id);
-    return itemIds.length > 0 ? deleteItems(itemIds) : true;
+    // A dataset that failed to go (the store toasted why) fails the whole:
+    // the selection stays, rather than clearing as if all of it went.
+    let allGone = true;
+    for (const id of datasetIds) if (!(await deleteDataset(id))) allGone = false;
+    const itemsGone = itemIds.length > 0 ? await deleteItems(itemIds) : true;
+    return allGone && itemsGone;
   };
 }
 
@@ -221,18 +234,31 @@ export function TextEditorDialog() {
     // into this item.
     setBody("");
     setLoading(true);
+    // This dialog stays mounted, so a load for an item since closed can land
+    // after the next one opened: its body under the new title, where Save
+    // would write it over the new item.
+    let stale = false;
     getContents([target])
       .then(([full]) => {
+        if (stale) return;
         const content = full?.content ?? "";
         setBody(content);
         setBaseline({ title: savedTitle, body: content });
       })
       .catch((e) => {
+        if (stale) return;
         setError(e instanceof Error ? e.message : String(e));
         setLoadFailed(true);
         setBaseline({ title: savedTitle, body: "" });
       })
-      .finally(() => setLoading(false));
+      .finally(() => {
+        if (!stale) setLoading(false);
+      });
+    return () => {
+      stale = true;
+      // Or "New text" opened next would wait on this load forever.
+      setLoading(false);
+    };
     // Re-seed only when a different item opens.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [target]);
@@ -279,7 +305,7 @@ export function TextEditorDialog() {
   };
 
   const canSave = !saving && !loading && !loadFailed && !!title.trim() && !!body.trim();
-  const tokens = Math.ceil(body.length / 4);
+  const tokens = sourceTokens([{ chars: body.length, text: body }]);
   return (
     <Dialog open={!!target} onOpenChange={(o) => !o && void requestClose()}>
       <DialogContent className="max-w-2xl">
@@ -586,9 +612,22 @@ export function ItemPreviewDialog() {
     setRenaming(false);
     if (!id) return;
     setLoading(true);
+    // As in the text editor: a slow load (a large image) for an item since
+    // closed landed in the next one's preview.
+    let stale = false;
     getContents([id])
-      .then(([it]) => setFull(it ?? null))
-      .finally(() => setLoading(false));
+      .then(([it]) => {
+        if (!stale) setFull(it?.id === id ? it : null);
+      })
+      // Left unloaded: "Couldn't load this item." says so.
+      .catch(() => {})
+      .finally(() => {
+        if (!stale) setLoading(false);
+      });
+    return () => {
+      stale = true;
+      setLoading(false);
+    };
     // `updated_at` re-reads the body after a refresh or an edit.
   }, [id, item?.updated_at, getContents]);
 
@@ -612,7 +651,7 @@ export function ItemPreviewDialog() {
     if (renameCancelled.current) return;
     const t = draftTitle.trim();
     setRenaming(false);
-    if (t && t !== item.title) await rename(item.id, t);
+    if (t && t !== item.title) notifyOnFail(rename(item.id, t), "rename it");
   };
 
   return (
@@ -740,7 +779,10 @@ export function ItemPreviewDialog() {
                   </DropdownMenuItem>
                 )}
                 {others.map((d) => (
-                  <DropdownMenuItem key={d.id} onSelect={() => void addToDataset(d.id, [item.id])}>
+                  <DropdownMenuItem
+                    key={d.id}
+                    onSelect={() => notifyOnFail(addToDataset(d.id, [item.id]), `add it to “${d.name}”`)}
+                  >
                     <DatasetIcon size="sm" />
                     <span className="truncate">{d.name}</span>
                   </DropdownMenuItem>

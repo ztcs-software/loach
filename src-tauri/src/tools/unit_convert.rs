@@ -7,6 +7,7 @@
 //! just scale). Everything else converts via a base unit: input × from
 //! factor → base, then ÷ to factor → output.
 
+use super::{err};
 use serde_json::{json, Value};
 
 use crate::mcp::McpCallResult;
@@ -129,12 +130,18 @@ const UNITS: &[Unit] = &[
     Unit { name: "gal", category: Category::Volume, factor: 3.785_411_784 },
     Unit { name: "gallon", category: Category::Volume, factor: 3.785_411_784 },
     Unit { name: "qt_us", category: Category::Volume, factor: 0.946_352_946 },
+    Unit { name: "qt_uk", category: Category::Volume, factor: 1.136_522_5 },
     Unit { name: "qt", category: Category::Volume, factor: 0.946_352_946 },
+    Unit { name: "quart", category: Category::Volume, factor: 0.946_352_946 },
     Unit { name: "pt_us", category: Category::Volume, factor: 0.473_176_473 },
+    Unit { name: "pt_uk", category: Category::Volume, factor: 0.568_261_25 },
     Unit { name: "pt", category: Category::Volume, factor: 0.473_176_473 },
+    Unit { name: "pint", category: Category::Volume, factor: 0.473_176_473 },
     Unit { name: "cup_us", category: Category::Volume, factor: 0.236_588_236_5 },
+    Unit { name: "cup_uk", category: Category::Volume, factor: 0.284_130_625 },
     Unit { name: "cup", category: Category::Volume, factor: 0.236_588_236_5 },
     Unit { name: "fl_oz_us", category: Category::Volume, factor: 0.029_573_529_562_5 },
+    Unit { name: "fl_oz_uk", category: Category::Volume, factor: 0.028_413_062_5 },
     Unit { name: "fl_oz", category: Category::Volume, factor: 0.029_573_529_562_5 },
     Unit { name: "tsp", category: Category::Volume, factor: 0.004_928_921_593_75 },
     Unit { name: "tbsp", category: Category::Volume, factor: 0.014_786_764_781_25 },
@@ -232,7 +239,8 @@ pub fn tool_description() -> &'static str {
      length (m, cm, mm, km, in, ft, yd, mi, nmi, furlong, ly, au, pc), \
      mass (kg, g, mg, t, lb, oz, stone, short_ton, long_ton, troy_oz, carat), \
      volume (L, mL, m3, gal, qt, pt, cup, fl_oz, tsp, tbsp — US by default; \
-     suffix `_us`/`_uk` for clarity), \
+     suffix `_us`/`_uk` for clarity on gal, qt, pt, cup and fl_oz, e.g. \
+     `pt_uk` for the imperial pint), \
      speed (m/s, km/h, mph, knot, ft/s), \
      time (s, ms, us, ns, min, h, day, week), \
      area (m2, cm2, km2, ft2, in2, yd2, mi2, acre, hectare), \
@@ -259,9 +267,10 @@ pub fn input_schema() -> Value {
 }
 
 pub fn dispatch(args: &Value) -> McpCallResult {
-    let value = match args.get("value").and_then(|v| v.as_f64()) {
+    let value = match crate::tools::lenient_f64(args, "value") {
         Some(v) if v.is_finite() => v,
         Some(_) => return err("`value` must be a finite number"),
+        None if args.get("value").is_some() => return err("`value` must be a number"),
         None => return err("missing required `value` argument (number)"),
     };
     let from_raw = match args.get("from").and_then(|v| v.as_str()) {
@@ -272,6 +281,12 @@ pub fn dispatch(args: &Value) -> McpCallResult {
         Some(s) => s,
         None => return err("missing required `to` argument"),
     };
+    // No unit name comes near this; a longer one is a runaway argument,
+    // better refused in so many words than as an unknown unit.
+    const MAX_UNIT_CHARS: usize = 64;
+    if [from_raw, to_raw].iter().any(|s| s.chars().count() > MAX_UNIT_CHARS) {
+        return err(format!("unit names are at most {MAX_UNIT_CHARS} characters"));
+    }
     let from = match find_unit(from_raw) {
         Some(u) => u,
         None => return err(format!("unknown unit `{from_raw}`")),
@@ -314,20 +329,27 @@ pub fn dispatch(args: &Value) -> McpCallResult {
 fn find_unit(name: &str) -> Option<&'static Unit> {
     let name = name.trim();
     // The degree sign names the same scales as the bare letters: `°C`, or
-    // the one-character `℃` / `℉`.
+    // the one-character `℃` / `℉`. Stripped once, not by calling itself:
+    // one stack frame per `°` let a long run of them overflow the stack,
+    // which aborts the whole app (B6-02).
     let scale = match name {
         "℃" => Some("C"),
         "℉" => Some("F"),
         _ => name.strip_prefix('°'),
     };
-    if let Some(scale) = scale {
-        return find_unit(scale).filter(|u| u.category == Category::Temperature);
+    match scale {
+        Some(scale) => lookup(scale.trim()).filter(|u| u.category == Category::Temperature),
+        None => lookup(name),
     }
+}
+
+/// A unit by its name, without a degree sign.
+fn lookup(name: &str) -> Option<&'static Unit> {
     // `Cal` is the food Calorie, a kilocalorie: only the capital tells it
     // from the `cal` a thousand times smaller, so it's matched before case
     // is folded.
     if matches!(name, "Cal" | "Cals") {
-        return find_unit("kcal");
+        return lookup("kcal");
     }
     if let Some(u) = CASED_UNITS.iter().find(|u| u.name == name) {
         return Some(u);
@@ -358,14 +380,6 @@ fn convert_temperature(value: f64, from: &str, to: &str) -> Result<f64, String> 
         "k" | "kelvin" => kelvin,
         other => return Err(format!("unknown temperature unit `{other}`")),
     })
-}
-
-fn err(msg: impl Into<String>) -> McpCallResult {
-    McpCallResult {
-        content_text: msg.into(),
-        is_error: true,
-        ..Default::default()
-    }
 }
 
 #[cfg(test)]
@@ -478,6 +492,36 @@ mod tests {
             assert_eq!(r.content_text, "212", "{from} → {to}");
         }
         assert!(convert(1.0, "°m", "m").is_error, "the degree sign is for temperatures only");
+    }
+
+    /// Every `_uk` volume the description promises exists (B6-04).
+    #[test]
+    fn imperial_volumes_convert() {
+        for (from, want) in [
+            ("pt_uk", "568.26125"),
+            ("qt_uk", "1136.5225"),
+            ("cup_uk", "284.130625"),
+            ("fl_oz_uk", "28.4130625"),
+            ("gal_uk", "4546.09"),
+            ("pint", "473.176473"),
+            ("quarts", "946.352946"),
+        ] {
+            let r = convert(1.0, from, "ml");
+            assert!(!r.is_error, "{from}: {}", r.content_text);
+            assert_eq!(r.content_text, want, "{from}");
+        }
+    }
+
+    /// A run of degree signs is an unknown unit, not a frame per sign on a
+    /// 2 MiB stack — overflowing it aborted the app, past `catch_unwind`
+    /// (B6-02).
+    #[test]
+    fn a_run_of_degree_signs_is_refused_without_recursing() {
+        assert!(find_unit(&format!("{}C", "°".repeat(100_000))).is_none());
+        assert!(find_unit("°°C").is_none());
+        let r = convert(1.0, &format!("{}C", "° ".repeat(30_000)), "F");
+        assert!(r.is_error);
+        assert!(r.content_text.contains("at most 64 characters"), "{}", r.content_text);
     }
 
     #[test]

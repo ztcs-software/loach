@@ -12,8 +12,6 @@ import type { Message } from "@/types";
 const mocks = vi.hoisted(() => ({
   /** Role whose next `appendMessage` parks until `release` (null: none). */
   park: null as null | "user" | "assistant",
-  /** Park the next `deleteMessage` (Regenerate's first await). */
-  parkDelete: false,
   release: null as null | (() => void),
   deleted: [] as string[],
   /** Id of the last assistant placeholder written. */
@@ -39,10 +37,6 @@ vi.mock("@/lib/tauri", async (importOriginal) => {
     }),
     deleteMessage: vi.fn((id: string) => {
       mocks.deleted.push(id);
-      if (mocks.parkDelete) {
-        mocks.parkDelete = false;
-        return gate(undefined);
-      }
       return Promise.resolve();
     }),
     // Connect but never finish.
@@ -83,7 +77,6 @@ function message(id: string, role: string, content: string): Message {
 
 beforeEach(() => {
   mocks.park = null;
-  mocks.parkDelete = false;
   mocks.release = null;
   mocks.deleted = [];
   mocks.placeholder = null;
@@ -148,17 +141,35 @@ describe("cancelForSession on work not yet running or queued", () => {
     expect(isPreparingSend("sess-A")).toBe(false);
   });
 
-  it("stops a regenerate still building its request", async () => {
-    mocks.parkDelete = true;
+  it("stops a regenerate still building its request, keeping the reply", async () => {
     const regen = get().regenerateLast("sess-A");
-    await tick();
-
     await get().cancelForSession("sess-A");
-    mocks.release!();
     await regen;
     await tick();
 
     nothingDispatched();
+    // X4-02: deleted up front, the answer was gone for good.
+    expect(mocks.deleted).not.toContain("a1");
+    expect(get().messages["sess-A"].map((m) => m.content)).toContain("old answer");
+  });
+
+  it("keeps a queued regenerate's reply when it's cancelled, and replaces it when it starts", async () => {
+    // Another chat is streaming, so the regenerate waits in the queue.
+    useChatStore.setState({ runningTask: { id: "t-other", sessionId: "sess-B" } } as never);
+    await get().regenerateLast("sess-A");
+    expect(get().queue).toHaveLength(1);
+    await get().cancelForSession("sess-A");
+    expect(get().queue).toEqual([]);
+    expect(mocks.deleted).not.toContain("a1");
+    expect(get().messages["sess-A"].map((m) => m.id)).toEqual(["u1", "a1"]);
+
+    // Nothing running: it starts, and only then does the original go.
+    useChatStore.setState({ runningTask: null } as never);
+    await get().regenerateLast("sess-A");
+    await tick();
+    expect(mocks.connects).toBe(1);
+    expect(mocks.deleted).toContain("a1");
+    expect(get().messages["sess-A"].map((m) => m.id)).toEqual(["u1", mocks.placeholder]);
   });
 
   it("stops a task between the queue and the stream, and drops its placeholder", async () => {

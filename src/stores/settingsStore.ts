@@ -25,6 +25,11 @@ interface SettingsState extends Settings {
    *  or it writes its prompt and base URLs over the user's real ones. */
   loadError: string | null;
   hydrate: () => Promise<void>;
+  /** Ask the OS keyring whether an OpenAI key is stored (`openai_key_set`).
+   *  Kept out of `hydrate`: the read can sit behind an OS prompt — the macOS
+   *  Keychain asks again after an update — or a slow Secret Service, and only
+   *  the OpenAI model listing needs the answer. */
+  hydrateOpenAIKey: () => Promise<void>;
   update: <K extends keyof Settings>(key: K, value: Settings[K]) => Promise<void>;
   setOpenAIKey: (key: string) => Promise<void>;
   clearOpenAIKey: () => Promise<void>;
@@ -42,15 +47,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
 
   hydrate: async () => {
     try {
-      // Fire the settings read and the OpenAI-key keyring probe concurrently:
-      // they're independent, and the probe (a spawn_blocking keyring read on
-      // the Rust side) otherwise serialized a whole round-trip after the SQLite
-      // read. getSettings rejecting still hits the outer catch; the key probe
-      // keeps its own fallback so a keyring failure never blocks hydration.
-      const [rows, hasKey] = await Promise.all([
-        getSettings(),
-        getOpenAIKeyStatus().catch(() => false),
-      ]);
+      const rows = await getSettings();
       const merged: Settings = { ...DEFAULT_SETTINGS };
       // Settings live in a string-keyed KV table; coerce each value back into
       // the type implied by DEFAULT_SETTINGS so booleans don't arrive as the
@@ -61,11 +58,19 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         const def = DEFAULT_SETTINGS[k];
         if (typeof def === "boolean") {
           (merged as unknown as Record<string, unknown>)[k as string] = v === "true";
+        } else if (typeof def === "number") {
+          // Readers validate it (`defaultNumCtx`): a bad row falls back there.
+          // Digits only, as the backend's startup preload reads it
+          // (`parse::<u32>`): with `Number`, "32768.0" or "0x8000" was 32K
+          // here and the default there, so the model loaded at both sizes.
+          (merged as unknown as Record<string, unknown>)[k as string] = /^\+?\d+$/.test(v)
+            ? Number(v)
+            : Number.NaN;
         } else {
           (merged as unknown as Record<string, unknown>)[k as string] = v;
         }
       });
-      set({ ...merged, openai_key_set: hasKey, hydrated: true, loadError: null });
+      set({ ...merged, hydrated: true, loadError: null });
       applyTheme(merged.theme);
       applyFontSize(merged.font_size);
       applyBackground(merged.background_style);
@@ -73,6 +78,12 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       logger.error("settings hydrate failed", e);
       set({ hydrated: true, loadError: e instanceof Error ? e.message : String(e) });
     }
+  },
+
+  hydrateOpenAIKey: async () => {
+    // A keyring that can't be read counts as no key stored.
+    const hasKey = await getOpenAIKeyStatus().catch(() => false);
+    set({ openai_key_set: hasKey });
   },
 
   update: async (key, value) => {

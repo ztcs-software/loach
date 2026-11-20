@@ -60,7 +60,13 @@ export function ChatLabelSubmenu({
       </DropdownMenuSubTrigger>
       <DropdownMenuSubContent>
         {CHAT_LABELS.map((l) => (
-          <DropdownMenuItem key={l.id} onSelect={() => onSelect(l.id)}>
+          // A radio item: the check alone said nothing to a screen reader.
+          <DropdownMenuItem
+            key={l.id}
+            role="menuitemradio"
+            aria-checked={value === l.id}
+            onSelect={() => onSelect(l.id)}
+          >
             <span
               aria-hidden
               style={{ backgroundColor: l.color }}

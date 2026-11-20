@@ -17,10 +17,10 @@
 //!   - Users with an app-lock configured shouldn't have anything warmed
 //!     before they prove identity, so this preload bails out in that
 //!     case. The post-unlock JS preload still picks it up.
-//!   - The JS preload also re-fires after settings changes within the
-//!     session (e.g. the user flips `default_model_choice`); the Rust
-//!     preload only runs once at startup, against the values present in
-//!     the DB at that moment.
+//!   - The JS preload runs once per unlock, after the stores hydrate (it
+//!     doesn't re-fire when `default_model_choice` changes; the per-chat
+//!     typing warm-up is the other caller); this one runs once at startup,
+//!     against the values present in the DB at that moment.
 //!   - Defense in depth: if the Rust preload misses (Ollama not yet up
 //!     when Loach starts), the JS one runs a few hundred ms later and
 //!     usually succeeds. The duplicate is harmless — the second `/api/chat`
@@ -165,16 +165,26 @@ pub fn try_warm_default_model(db: Arc<Database>, http: reqwest::Client) {
             .get("ollama_keep_alive")
             .map(String::as_str)
             .and_then(crate::providers::ollama::keep_alive_value);
-        // Size the warmed runner like the first real request will. We can't
-        // read the model's Modelfile defaults from here (no /api/show plumbing
-        // on the startup path), so we use the app default num_ctx + the global
-        // low-VRAM pin; the post-unlock JS preload re-fires with the precisely
-        // resolved params and corrects any mismatch before the user sends.
-        let low_vram_global = settings.get("low_vram_global").map(String::as_str) == Some("true");
+        // Size the warmed runner like the first real request will: the
+        // model's Modelfile `num_ctx` / `num_gpu`, else the app default
+        // num_ctx (Settings' default context length, capped at the model's
+        // maximum) — as the post-unlock JS preload does. Warming at the app
+        // default regardless had Ollama load a model whose Modelfile sets
+        // another size twice: here, then again for the JS preload. A failed
+        // `/api/show` (Ollama not up yet) falls back to the default.
+        let ((num_ctx, num_gpu), model_max) =
+            match crate::providers::ollama::show_model(&http, &base_url, &model).await {
+                Ok(show) => (
+                    modelfile_runner_options(show.parameters.as_deref()),
+                    model_context_length(show.model_info.as_ref()),
+                ),
+                Err(_) => ((None, None), None),
+            };
+        let app_num_ctx =
+            default_num_ctx(settings.get("default_num_ctx").map(String::as_str), model_max);
         let options = crate::providers::ollama::preload_options(
-            Some(crate::providers::ollama::DEFAULT_NUM_CTX),
-            if low_vram_global { Some(true) } else { None },
-            None,
+            Some(num_ctx.unwrap_or(app_num_ctx)),
+            num_gpu,
         );
         // `preload_model` swallows its own transport errors (timeout,
         // connection refused, 4xx model-not-found) and returns Ok(()).
@@ -184,6 +194,48 @@ pub fn try_warm_default_model(db: Arc<Database>, http: reqwest::Client) {
         )
         .await;
     });
+}
+
+/// The `num_ctx` and `num_gpu` in `/api/show`'s `parameters` text (one
+/// `name value` per line), read like the frontend's `parseModelParameters`:
+/// whole numbers that fit a u32, the last one winning, anything else skipped.
+fn modelfile_runner_options(parameters: Option<&str>) -> (Option<u32>, Option<u32>) {
+    let (mut num_ctx, mut num_gpu) = (None, None);
+    for line in parameters.unwrap_or("").lines() {
+        let mut parts = line.split_whitespace();
+        let (Some(key), Some(value)) = (parts.next(), parts.next()) else {
+            continue;
+        };
+        let value = value.trim_matches('"').parse::<u32>().ok();
+        match key {
+            "num_ctx" => num_ctx = value.or(num_ctx),
+            "num_gpu" => num_gpu = value.or(num_gpu),
+            _ => {}
+        }
+    }
+    (num_ctx, num_gpu)
+}
+
+/// The window a new chat gets when its model's Modelfile sets none, read like
+/// the frontend's `defaultNumCtx`: the `default_num_ctx` setting (else
+/// [`crate::providers::ollama::DEFAULT_NUM_CTX`] when it isn't a positive whole
+/// number), capped at the model's trained maximum when known.
+fn default_num_ctx(setting: Option<&str>, model_max: Option<u32>) -> u32 {
+    let n = setting
+        .and_then(|v| v.parse::<u32>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(crate::providers::ollama::DEFAULT_NUM_CTX);
+    model_max.filter(|&m| m > 0 && m < n).unwrap_or(n)
+}
+
+/// The window a model was trained for, from `/api/show`'s `model_info`
+/// (`<general.architecture>.context_length`), as the frontend's
+/// `modelContextLength` reads it.
+fn model_context_length(info: Option<&serde_json::Value>) -> Option<u32> {
+    let info = info?;
+    let arch = info.get("general.architecture")?.as_str()?;
+    let n = info.get(format!("{arch}.context_length"))?.as_u64()?;
+    u32::try_from(n).ok().filter(|&n| n > 0)
 }
 
 /// Whether `base_url`'s host is safe to fire a speculative warm at before
@@ -268,8 +320,13 @@ fn is_safe_preload_host(base_url: &str) -> bool {
 }
 
 /// Rust port of `resolveDefaultModelChoice` in `src/stores/chatStore.ts`.
-/// The encoding lives in three places (this function, the TS one, and
-/// the picker UI in `SettingsDialog.tsx`) — keep them in lockstep.
+/// The encoding is decoded in two places — this function and
+/// `decodeModelChoice` in `src/lib/modelChoice.ts`, which the TS resolver,
+/// `components/settings/DefaultModelPicker.tsx` and, through the resolver,
+/// `ChatSources.useNewChatModelCtx` all use — keep them in lockstep. One
+/// deliberate gap: the TS `provider:` branch passes over chats whose model
+/// is no longer installed; this one has no model list, so it may pick a
+/// deleted model, whose preload just 404s quietly.
 ///
 /// Returns `None` only for future-proofing (no current branch produces
 /// it); callers must treat `None` as "skip the preload".
@@ -463,5 +520,45 @@ mod tests {
         assert!(!is_safe_preload_host("http://169.254.1.1:11434"));
         // IPv6 link-local: same threat model (fe80::a9fe:a9fe style).
         assert!(!is_safe_preload_host("http://[fe80::1]:11434"));
+    }
+
+    /// The warm-up is sized from the Modelfile like a new chat's first send,
+    /// so Ollama doesn't load the model again for that send.
+    #[test]
+    fn runner_options_come_from_the_modelfile() {
+        // `/api/show` pads names to a column and quotes strings.
+        let shown = "num_ctx                        32768\n\
+                     stop                           \"<|im_end|>\"\n\
+                     num_gpu                        20";
+        assert_eq!(modelfile_runner_options(Some(shown)), (Some(32768), Some(20)));
+        // The last whole number wins; others are skipped.
+        assert_eq!(
+            modelfile_runner_options(Some("num_ctx 4096\nnum_ctx 8192\nnum_ctx big\nnum_gpu -1")),
+            (Some(8192), None)
+        );
+        assert_eq!(modelfile_runner_options(None), (None, None));
+    }
+
+    /// Without a Modelfile `num_ctx`, the warm-up uses Settings' default
+    /// context length, capped at the model's maximum, as a new chat does.
+    #[test]
+    fn default_window_comes_from_the_setting_capped_at_the_model() {
+        let default = crate::providers::ollama::DEFAULT_NUM_CTX;
+        assert_eq!(default_num_ctx(Some("32768"), None), 32768);
+        assert_eq!(default_num_ctx(Some("32768"), Some(131072)), 32768);
+        assert_eq!(default_num_ctx(Some("65536"), Some(8192)), 8192);
+        assert_eq!(default_num_ctx(Some("65536"), Some(0)), 65536);
+        for bad in [None, Some(""), Some("0"), Some("-1"), Some("big"), Some("4096.5")] {
+            assert_eq!(default_num_ctx(bad, None), default);
+        }
+
+        let info = serde_json::json!({
+            "general.architecture": "gemma4",
+            "gemma4.context_length": 131072,
+            "gemma4.embedding_length": 2560,
+        });
+        assert_eq!(model_context_length(Some(&info)), Some(131072));
+        assert_eq!(model_context_length(Some(&serde_json::json!({ "llama.context_length": 8192 }))), None);
+        assert_eq!(model_context_length(None), None);
     }
 }

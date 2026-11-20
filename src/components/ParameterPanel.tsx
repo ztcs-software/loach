@@ -1,5 +1,5 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
-import { Brain, ChevronRight, Dice5, Info, Layers, MemoryStick, RotateCcw, X } from "lucide-react";
+import { Brain, ChevronRight, Dice5, Info, Layers, RotateCcw, X } from "lucide-react";
 import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -8,13 +8,14 @@ import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ImageScalingControl } from "@/components/ImageScalingControl";
-import { useChatStore } from "@/stores/chatStore";
-import { useModelsStore } from "@/stores/modelsStore";
+import { layerParams, parseOverrides, useChatStore } from "@/stores/chatStore";
+import { useDefaultNumCtx, useModelsStore } from "@/stores/modelsStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useToastStore } from "@/stores/toastStore";
 import { useUIStore } from "@/stores/uiStore";
 import { parseImageScaling, resolveImageScaling } from "@/lib/imageScaling";
+import { isU32 } from "@/lib/modelParams";
 import { setSessionImageScaling } from "@/lib/tauri";
 import {
   DEFAULT_PERSONA_ID,
@@ -22,18 +23,9 @@ import {
   getPersona,
   type Persona,
 } from "@/lib/personas";
-import { DEFAULT_TONE_ID, TONES, type Tone } from "@/lib/tones";
+import { canonicalToneId, DEFAULT_TONE_ID, type Tone, TONES } from "@/lib/tones";
 import { cn } from "@/lib/utils";
-import { DEFAULT_PARAMS, type GenerationParams, type ImageScaling, type Session } from "@/types";
-
-function parseOverrides(json: string | null): Partial<GenerationParams> {
-  if (!json) return {};
-  try {
-    return JSON.parse(json) as Partial<GenerationParams>;
-  } catch {
-    return {};
-  }
-}
+import { type GenerationParams, type ImageScaling, type Session } from "@/types";
 
 /** Save a chat's own image scaling, or `null` to inherit again. */
 async function saveImageScaling(sessionId: string, scaling: ImageScaling | null) {
@@ -77,7 +69,7 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
   );
   const setSessionTone = useUIStore((s) => s.setSessionTone);
   const defaultToneId = useSettingsStore((s) => s.default_tone_id);
-  const effectiveToneId = activeToneId ?? defaultToneId ?? DEFAULT_TONE_ID;
+  const effectiveToneId = canonicalToneId(activeToneId ?? defaultToneId ?? DEFAULT_TONE_ID);
 
   // Subscribe to the per-model patch so this component re-renders the moment
   // the lazy fetch lands. The selector returns the raw object reference, so
@@ -100,14 +92,11 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
   );
   const supportsThinking =
     session?.provider === "ollama" && (modelCapabilities?.includes("thinking") ?? false);
-  // Global Low-VRAM pin (Settings → Features). When on, every Ollama request
-  // is sent with `low_vram: true` regardless of what's in this panel — so
-  // we visually pin the per-chat toggle on and disable it, with a hint
-  // pointing the user back to the global setting.
-  const lowVramGlobal = useSettingsStore((s) => s.low_vram_global);
   // Global Thinking default (Settings → Features). Mirrors the chatStore
   // merge order so the panel shows the same value the request will send.
   const thinkingDefault = useSettingsStore((s) => s.thinking_default);
+  // Settings' default context length, capped at the model's maximum.
+  const appNumCtx = useDefaultNumCtx(session?.provider, session?.model);
 
   const overrides = useMemo(
     () => parseOverrides(session?.params_json ?? null),
@@ -135,22 +124,23 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
   );
   const appImageScaling = useSettingsStore((s) => s.image_scaling);
 
-  // The merge order mirrors `chatStore.readSessionParams` exactly so the
-  // sliders (and the Thinking toggle) show the same values the request
-  // will actually use. The space layer matters twice over: without it the
-  // panel shows values the request won't use for any chat in a Space with
-  // pinned params, AND `update()` below snapshots what's displayed into the
-  // per-chat override — so one slider touch would quietly overwrite the
-  // Space's settings with the space-less merge.
+  // The same merge `chatStore.readSessionParams` sends (`layerParams`), so the
+  // sliders (and the Thinking toggle) show the values the request will use.
+  // The space layer matters twice over: without it the panel shows values the
+  // request won't use for any chat in a Space with pinned params, AND
+  // `update()` below snapshots what's displayed into the per-chat override —
+  // so one slider touch would quietly overwrite the Space's settings.
   const initial = useMemo<GenerationParams>(
-    () => ({
-      ...DEFAULT_PARAMS,
-      ...(session?.provider === "ollama" ? { think: thinkingDefault } : {}),
-      ...(modelDefaults ?? {}),
-      ...(modelThinkPref === undefined ? {} : { think: modelThinkPref }),
-      ...spaceLayer,
-      ...overrides,
-    }),
+    () =>
+      layerParams({
+        provider: session?.provider,
+        defaultNumCtx: appNumCtx,
+        modelDefaults,
+        thinkingDefault,
+        thinkPref: modelThinkPref,
+        spaceLayer,
+        overrides,
+      }),
     [
       overrides,
       spaceLayer,
@@ -158,6 +148,7 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
       modelThinkPref,
       thinkingDefault,
       session?.provider,
+      appNumCtx,
     ],
   );
 
@@ -232,12 +223,23 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
   }, [session?.system_prompt, systemPrompt]);
 
   // Defensive — newSession / setSessionModel already prefetch, but the panel
-  // can also be opened on a session created before this code shipped.
+  // can also be opened on a session created before this code shipped. A load
+  // that fails (Ollama not running) caches nothing, so `modelDefaults` stays
+  // undefined: noted here, or the label said "Loading…" for good.
+  const [defaultsFailedFor, setDefaultsFailedFor] = useState<string | null>(null);
   useEffect(() => {
     if (session?.provider === "ollama" && session.model && !modelDefaults) {
-      void loadModelDefaults(session.model);
+      const model = session.model;
+      void loadModelDefaults(model).then(() => {
+        if (useModelsStore.getState().modelDefaults[model] === undefined) setDefaultsFailedFor(model);
+      });
     }
   }, [session?.provider, session?.model, modelDefaults, loadModelDefaults]);
+
+  // An Ollama model whose Modelfile defaults haven't loaded: what the sliders
+  // show for the untouched keys is app defaults standing in for them.
+  const defaultsUnknown =
+    session?.provider === "ollama" && !!session.model && modelDefaults === undefined;
 
   const update = (patch: Partial<GenerationParams>) => {
     if (!session) return;
@@ -245,7 +247,12 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
     // edits — not a snapshot taken at mount. Touching any slider still
     // persists the whole effective set into the session's overrides, so a
     // later model swap doesn't silently shift values the user was looking at.
-    const next = { ...params, ...patch };
+    // Not while the Modelfile's defaults are unknown, though: then the set
+    // is app defaults standing in for them, and saving it wrote num_ctx 8192
+    // over a 32K model's window for good. Only what was touched goes then.
+    const next = defaultsUnknown
+      ? { ...overrides, ...touched, ...patch }
+      : { ...params, ...patch };
     setTouched((t) => ({ ...t, ...patch }));
     setSessionParams(session.id, next);
   };
@@ -301,7 +308,9 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
         : noModel
           ? "Using app defaults — no model selected yet."
           : modelDefaults === undefined
-            ? "Loading model defaults…"
+            ? defaultsFailedFor === session?.model
+              ? "Couldn't read the model's defaults — is Ollama running? Until it answers, a change here saves only what you change."
+              : "Loading model defaults…"
             : "Using app defaults — this model lists no overrides.";
 
   // Context-length stops — powers of two are the grid models are trained on
@@ -456,7 +465,7 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
                 hint={
                   isOpenAI
                     ? "How much conversation history the model can see at once. Not sent to OpenAI providers — the server decides — but Loach sizes Library sources and the context bar by it, so set it to your model's window."
-                    : "How much conversation history the model can see at once. Larger windows remember more but use more VRAM."
+                    : "How much conversation history the model can see at once. Larger windows remember more but use more VRAM. A chat that hasn't set its own uses the default context length in Settings → Features."
                 }
               />
               {isAdvanced && (
@@ -506,8 +515,8 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
               </Section>
             )}
 
-            <Section title="Performance">
-              {isAdvanced && (
+            {isAdvanced && (
+              <Section title="Performance">
                 <GpuLayersRow
                   value={params.num_gpu ?? null}
                   inherited={inheritedNumGpu ?? null}
@@ -521,23 +530,8 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
                   }
                   isOpenAI={isOpenAI}
                 />
-              )}
-              <LowVramRow
-                checked={
-                  // Global pin wins above everything — show that state
-                  // honestly so users don't think their per-chat toggle
-                  // is broken when it's actually being overridden.
-                  lowVramGlobal && !isOpenAI
-                    ? true
-                    : (params.low_vram ?? false)
-                }
-                // An explicit false: dropping the key let a Space's
-                // `low_vram: true` through while the switch read off.
-                onChange={(next) => update({ low_vram: next })}
-                isOpenAI={isOpenAI}
-                pinnedByGlobal={lowVramGlobal && !isOpenAI}
-              />
-            </Section>
+              </Section>
+            )}
 
             {isAdvanced && (
               <Section title="Reproducibility">
@@ -579,10 +573,10 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
             </Section>
 
             <div>
-              <Label className="text-xs font-semibold uppercase tracking-[0.12em] text-foreground/70">
+              <Label id="params-persona-label" className="text-xs font-semibold uppercase tracking-[0.12em] text-foreground/70">
                 Persona
               </Label>
-              <div className="mt-2 flex flex-wrap gap-1.5">
+              <div role="group" aria-labelledby="params-persona-label" className="mt-2 flex flex-wrap gap-1.5">
                 {PERSONAS.map((p) => (
                   <PersonaPill
                     key={p.id}
@@ -602,10 +596,10 @@ export function ParameterPanel({ session }: { session: Session | undefined }) {
             </div>
 
             <div>
-              <Label className="text-xs font-semibold uppercase tracking-[0.12em] text-foreground/70">
+              <Label id="params-tone-label" className="text-xs font-semibold uppercase tracking-[0.12em] text-foreground/70">
                 Tone
               </Label>
-              <div className="mt-2 flex flex-wrap gap-1.5">
+              <div role="group" aria-labelledby="params-tone-label" className="mt-2 flex flex-wrap gap-1.5">
                 {TONES.map((t) => (
                   <TonePill
                     key={t.id}
@@ -672,6 +666,8 @@ function PersonaPill({
   return (
     <button
       type="button"
+      // The active one was only a tint: the next send's persona, unsaid.
+      aria-pressed={active}
       onClick={onClick}
       title={persona.description}
       className={cn(
@@ -702,6 +698,7 @@ function TonePill({
   return (
     <button
       type="button"
+      aria-pressed={active}
       onClick={onClick}
       title={tone.description}
       className={cn(
@@ -764,7 +761,7 @@ function ThinkingRow({
           checked={checked}
           disabled={disabled}
           onCheckedChange={onChange}
-          aria-label={checked ? "Disable thinking" : "Enable thinking"}
+          aria-label="Thinking"
         />
       </div>
       <p className="mt-1.5 text-[10.5px] leading-snug text-foreground/50">
@@ -931,7 +928,11 @@ function GpuLayersRow({
       return;
     }
     const n = Number(trimmed);
-    if (Number.isFinite(n) && Number.isInteger(n) && n >= 0) onChange(n);
+    // A layer count the backend can hold (`u32`); anything else — `abc`,
+    // `-1`, `1.5`, a mistyped 99999999999 — goes back to what's in effect
+    // rather than staying on screen as if it were.
+    if (isU32(n)) onChange(n);
+    else setDraft(value === null ? "" : String(value));
   };
 
   const readout =
@@ -995,55 +996,6 @@ function GpuLayersRow({
           : inherited === null
             ? "How many model layers to offload to the GPU. 0 = CPU only; leave blank for Ollama's auto-detect."
             : `How many model layers to offload to the GPU. 0 = CPU only; leave blank for the model's default (${inherited}).`}
-      </p>
-    </div>
-  );
-}
-
-/**
- * Low-VRAM toggle. Sends `low_vram: true` to Ollama, which trades
- * throughput for footprint (smaller batches, leaner KV cache). Off by
- * default — only flip when you're hitting OOMs and `num_gpu` alone
- * isn't enough. Turning it off persists `false`, not `undefined`, so it
- * still wins over a Space that pins it on.
- *
- * `pinnedByGlobal` reflects the Settings → Features master switch. When
- * true, the per-chat toggle is forced on and disabled — flipping it
- * would be a no-op, so we make that obvious instead of silently ignoring
- * the click.
- */
-function LowVramRow({
-  checked,
-  onChange,
-  isOpenAI,
-  pinnedByGlobal,
-}: {
-  checked: boolean;
-  onChange: (next: boolean) => void;
-  isOpenAI: boolean;
-  pinnedByGlobal: boolean;
-}) {
-  const disabled = isOpenAI || pinnedByGlobal;
-  return (
-    <div className={disabled ? "opacity-55" : undefined}>
-      <div className="flex items-center justify-between gap-3">
-        <Label className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.1em] text-foreground/70">
-          <MemoryStick className="h-3.5 w-3.5 shrink-0 text-foreground/70" />
-          Low VRAM
-        </Label>
-        <Switch
-          checked={checked}
-          disabled={disabled}
-          onCheckedChange={onChange}
-          aria-label={checked ? "Disable low VRAM mode" : "Enable low VRAM mode"}
-        />
-      </div>
-      <p className="mt-1.5 text-[10.5px] leading-snug text-foreground/50">
-        {isOpenAI
-          ? "Ignored by OpenAI providers."
-          : pinnedByGlobal
-            ? "Pinned on by the global Low VRAM setting (Settings → Features). Turn that off to control it per chat."
-            : "Trade speed for memory: smaller batches and KV cache. Helpful when you're up against VRAM limits."}
       </p>
     </div>
   );

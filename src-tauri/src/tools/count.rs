@@ -3,6 +3,7 @@
 //! identity (and counts) from them — the canonical "how many r's in
 //! strawberry" failure. This tool just delegates to the standard library.
 
+use super::{err};
 use serde_json::{json, Value};
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -83,10 +84,10 @@ pub fn dispatch(args: &Value) -> McpCallResult {
                 Some(_) => return err("`needle` must be non-empty for occurrences"),
                 None => return err("missing required `needle` argument for occurrences"),
             };
-            let case_sensitive = args
-                .get("case_sensitive")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(true);
+            let case_sensitive = match crate::tools::bool_arg(args, "case_sensitive", true) {
+                Ok(b) => b,
+                Err(e) => return err(e),
+            };
             if case_sensitive {
                 input.matches(needle).count()
             } else {
@@ -98,14 +99,6 @@ pub fn dispatch(args: &Value) -> McpCallResult {
     McpCallResult {
         content_text: n.to_string(),
         is_error: false,
-        ..Default::default()
-    }
-}
-
-fn err(msg: impl Into<String>) -> McpCallResult {
-    McpCallResult {
-        content_text: msg.into(),
-        is_error: true,
         ..Default::default()
     }
 }

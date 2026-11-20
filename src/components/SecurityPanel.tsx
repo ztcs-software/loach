@@ -271,8 +271,9 @@ function AutoLockCard() {
           long. Anything already streaming keeps running behind the lock
           screen.
         </p>
+        {/* Toggle buttons, not a radiogroup: see `KeepAliveSwitch`. */}
         <div
-          role="radiogroup"
+          role="group"
           aria-label="Lock after inactivity"
           className="mt-3 grid grid-cols-5 gap-2 rounded-2xl border border-foreground/10 bg-foreground/[0.03] p-1"
         >
@@ -282,8 +283,7 @@ function AutoLockCard() {
               <button
                 key={opt.value}
                 type="button"
-                role="radio"
-                aria-checked={selected}
+                aria-pressed={selected}
                 onClick={() => void update("lock_idle_timeout", opt.value)}
                 className={cn(
                   "flex items-center justify-center rounded-xl px-2 py-2 text-[12px] font-medium transition-colors",
@@ -303,17 +303,18 @@ function AutoLockCard() {
 
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
-          <Label className="flex items-center gap-1.5">
+          <Label htmlFor="setting-lock-on-hide" className="flex items-center gap-1.5">
             <MonitorOff className="h-3.5 w-3.5 text-foreground/60" />
             Lock when minimized
           </Label>
           <p className="mt-1 text-[11px] text-foreground/50">
             Locks as soon as the window is minimized or hidden. Save and file
             dialogs don't count, so exporting or attaching a file won't lock
-            you out mid-task.
+            you out mid-task. Minimized from outside Loach (Win+D, ⌘M, the
+            taskbar), the window's preview may still show the last screen.
           </p>
         </div>
-        <Switch
+        <Switch id="setting-lock-on-hide"
           checked={lockOnHide}
           onCheckedChange={(next) => void update("lock_on_hide", next)}
           className="shrink-0"
@@ -656,6 +657,7 @@ function SetupWizard({
                   <button
                     key={n}
                     type="button"
+                    aria-pressed={pinLength === n}
                     onClick={() => setPinLength(n)}
                     className={cn(
                       "h-9 w-14 rounded-lg border text-sm font-medium transition-colors",
@@ -805,6 +807,7 @@ function MethodTile({
   return (
     <button
       type="button"
+      aria-pressed={selected}
       onClick={onClick}
       className={cn(
         "flex flex-col items-start gap-0.5 rounded-xl border px-3 py-2.5 text-left transition-colors",

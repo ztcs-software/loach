@@ -10,8 +10,14 @@ import {
 } from "@/lib/files";
 import { resolveImageScaling } from "@/lib/imageScaling";
 import { cancelMemoryExtraction } from "@/lib/memory";
+import { defaultNumCtx } from "@/lib/modelParams";
 import { getPersona } from "@/lib/personas";
-import { formatProviderError } from "@/lib/providerErrors";
+import {
+  CUT_OFF_NOTE,
+  contextFullNote,
+  formatProviderError,
+  replayableReply,
+} from "@/lib/providerErrors";
 import { getTone } from "@/lib/tones";
 import { useModelsStore } from "./modelsStore";
 import { useSettingsStore } from "./settingsStore";
@@ -95,23 +101,24 @@ function randomId(): string {
 /** The params a Private Chat request sends — and, from the same call, the
  *  values its parameters panel shows. `chatStore.readSessionParams`' merge
  *  minus the layers Private Chat doesn't use (per-model Thinking pref, Space
- *  defaults): DEFAULT_PARAMS < global Thinking default < Modelfile defaults
- *  < panel overrides, then the global Low-VRAM pin on top. Sending only the
- *  overrides left the rest to Ollama's own defaults, which didn't match the
- *  panel (it showed an 8K context while Ollama used its own). */
+ *  defaults): DEFAULT_PARAMS (with `appNumCtx`, Settings' default context
+ *  length capped at the model's maximum) < global Thinking default <
+ *  Modelfile defaults < panel overrides. Sending only the overrides left the rest to Ollama's
+ *  own defaults, which didn't match the panel (it showed an 8K context
+ *  while Ollama used its own). */
 export function effectivePrivateParams(
   overrides: Partial<GenerationParams>,
   modelDefaults: Partial<GenerationParams> | undefined,
-  settings: { thinking_default: boolean; low_vram_global: boolean },
+  settings: { thinking_default: boolean },
+  appNumCtx: number,
 ): GenerationParams {
-  const merged: GenerationParams = {
+  return {
     ...DEFAULT_PARAMS,
+    num_ctx: appNumCtx,
     think: settings.thinking_default,
     ...modelDefaults,
     ...overrides,
   };
-  if (settings.low_vram_global) merged.low_vram = true;
-  return merged;
 }
 
 /** Compose the effective system prompt the model should see, layering in
@@ -284,12 +291,27 @@ export const usePrivateChatStore = create<PrivateChatState>((set, get) => ({
     );
     if (pcSendToken !== myToken) return;
 
+    // The Modelfile's defaults and capabilities, awaited as a regular send
+    // awaits them (`warmModelDefaults`): read straight from the cache, a cold
+    // or failed load sent the app's 8K context and no `think` — and a failed
+    // one was never asked again for this overlay. De-duplicated, `{}` on a
+    // failure (which caches nothing, so the next send retries).
+    await useModelsStore.getState().loadModelDefaults(state.model);
+    if (pcSendToken !== myToken) return;
+
     // Build the chat history snapshot from in-memory messages only. The user
     // turn we just appended is the trailing entry with images attached; all
     // prior turns flow in as plain text.
+    // A reply goes back without Loach's notes (an error), and an empty one
+    // not at all — as in the regular chat's `chatHistory`.
     const history: ChatMessageIn[] = get()
       .messages.filter((m) => m.id !== userMsg.id && m.id !== assistantMsg.id)
-      .map((m) => ({ role: m.role, content: m.content, images: [] }));
+      .map((m) => ({
+        role: m.role,
+        content: m.role === "assistant" ? replayableReply(m.content) : m.content,
+        images: [],
+      }))
+      .filter((m) => m.role !== "assistant" || m.content !== "");
     history.push({ role: "user", content: inlinedContent, images });
 
     const streamId = makeRequestId();
@@ -307,12 +329,13 @@ export const usePrivateChatStore = create<PrivateChatState>((set, get) => ({
     };
 
     // Ollama is the only provider Private Chat talks to, so the Ollama-only
-    // layers (Thinking default, Modelfile defaults, Low-VRAM pin) always apply.
+    // layers (Thinking default, Modelfile defaults) always apply.
     const models = useModelsStore.getState();
     const params = effectivePrivateParams(
       state.params,
       models.modelDefaults[state.model],
       settings,
+      defaultNumCtx(settings.default_num_ctx, models.modelContextMax[state.model]),
     );
     // As in a regular chat (`chatStore.readSessionParams`): `think` only for
     // a model that lists the capability — any other answers it with a 400.
@@ -414,6 +437,16 @@ export const usePrivateChatStore = create<PrivateChatState>((set, get) => ({
             pcFlush();
             teardown();
           } else if (ev.kind === "cancelled" || ev.kind === "done") {
+            // Stopped at a limit: say so, as the regular chat does. No tools
+            // go out from here (`no_tools`), so none to turn off.
+            if (ev.kind === "done" && ev.cut_off && pcBuffer) {
+              const note =
+                ev.cut_off === "context"
+                  ? contextFullNote({ provider: "ollama", tools: false })
+                  : CUT_OFF_NOTE;
+              pcBuffer.content += `\n\n${note}`;
+              pcBuffer.contentDirty = true;
+            }
             // Sync-flush the last buffered tokens before tearing down so the
             // final frame of the reply doesn't vanish.
             pcFlush();

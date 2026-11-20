@@ -4,6 +4,7 @@ import type {
   AdminEvent,
   ChatLabel,
   ChatRequest,
+  ChatToolsSize,
   FetchedPage,
   Folder,
   GlobalMemory,
@@ -29,6 +30,7 @@ import type {
   RagSearchResult,
   RetrievalMode,
   Session,
+  SkillCatalog,
   Snippet,
   SnippetFillValue,
   SnippetVariable,
@@ -39,6 +41,7 @@ import type {
   StorageStats,
   StreamEvent,
   SystemInfo,
+  WorkspaceInstructions,
 } from "@/types";
 
 /**
@@ -285,13 +288,62 @@ export function openSessionWorkspace(sessionId: string): Promise<void> {
   return invoke("open_session_workspace", { sessionId });
 }
 
-/** The chat's `LOACHFILE.md` as the next turn will see it — clipped the
- *  same way — or null when the workspace has none. Display only: the
- *  workspace badge and the context usage estimate. The backend re-reads the file on
- *  every turn regardless. */
-export function readWorkspaceInstructions(sessionId: string): Promise<string | null> {
+/** The chat's project instructions (`LOACHFILE.md`, else `CLAUDE.md`, else
+ *  `AGENTS.md`) as the next turn will see them — clipped the same way — or
+ *  null when the workspace has none. Display only: the workspace badge and
+ *  the context usage estimate. The backend re-reads the file on every turn
+ *  regardless. */
+export function readWorkspaceInstructions(
+  sessionId: string,
+): Promise<WorkspaceInstructions | null> {
   if (!isTauri) return notInTauri(null);
   return invoke("read_workspace_instructions", { sessionId });
+}
+
+/** The tool definitions the chat's next send will carry, for the context
+ *  usage estimate. MCP tools count once a send has listed them: this never
+ *  starts a server. */
+export function chatToolsSize(sessionId: string): Promise<ChatToolsSize> {
+  if (!isTauri) return notInTauri({ count: 0, chars: 0, skills_chars: 0 });
+  return invoke("chat_tools_size", { sessionId });
+}
+
+// ------------ skills ------------
+
+/** Every installed Agent Skill, read from disk now. */
+export function listSkills(): Promise<SkillCatalog> {
+  if (!isTauri) return notInTauri({ skills: [], problems: [] });
+  return invoke("skills_list");
+}
+
+export function setSkillEnabled(name: string, enabled: boolean): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("skill_set_enabled", { name, enabled });
+}
+
+/** Pick a skill folder and copy it into Loach's skills folder. Resolves to
+ *  the skill's name, or null if the dialog was cancelled. */
+export function importSkill(): Promise<string | null> {
+  if (!isTauri) return notInTauri(null);
+  return invoke("skill_import");
+}
+
+export function openSkillsFolder(): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("skills_open_folder");
+}
+
+/** The skills switched on in a chat, oldest first. */
+export function sessionSkills(sessionId: string): Promise<string[]> {
+  if (!isTauri) return notInTauri([]);
+  return invoke("session_skills", { sessionId });
+}
+
+/** Switch a skill on or off in a chat. Switching on rejects a name that
+ *  isn't an enabled skill. */
+export function setSessionSkill(sessionId: string, name: string, active: boolean): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("session_skill_set", { sessionId, name, active });
 }
 
 export function exportSession(id: string, format: "md"): Promise<string> {
@@ -332,9 +384,17 @@ export function deleteFolder(id: string): Promise<void> {
 
 // ------------ messages ------------
 
+/** A chat's messages, their attachments listed without contents (`omitted`)
+ *  — see `loadAttachments`. */
 export function listMessages(sessionId: string): Promise<Message[]> {
   if (!isTauri) return notInTauri([]);
   return invoke("list_messages", { sessionId });
+}
+
+/** One message's `attachments_json` with contents, or null when it has none. */
+export function messageAttachments(sessionId: string, messageId: string): Promise<string | null> {
+  if (!isTauri) return notInTauri(null);
+  return invoke("message_attachments", { sessionId, messageId });
 }
 
 /** Per-session message counts (`{ sessionId: count }`). A session with zero
@@ -600,6 +660,13 @@ export async function onWindowCloseHidden(cb: () => void): Promise<UnlistenFn> {
   return listen("window://close-hidden", () => cb());
 }
 
+/** The tray is about to hide the window; it waits a moment so a lock can
+ *  paint first (`lib.rs`, `hide_main_window`). */
+export async function onWindowHiding(cb: () => void): Promise<UnlistenFn> {
+  if (!isTauri) return (() => undefined) as UnlistenFn;
+  return listen("window://hiding", () => cb());
+}
+
 // ------------ host hardware ------------
 
 /** Installed RAM + free disk, used by onboarding to size its model
@@ -639,7 +706,6 @@ export function ollamaPreloadModel(
   baseUrl: string,
   model: string,
   numCtx?: number,
-  lowVram?: boolean,
   numGpu?: number,
 ): Promise<void> {
   if (!isTauri) return notInTauri(undefined);
@@ -649,7 +715,6 @@ export function ollamaPreloadModel(
     baseUrl,
     model,
     numCtx: numCtx ?? null,
-    lowVram: lowVram ?? null,
     numGpu: numGpu ?? null,
   });
 }
@@ -800,9 +865,12 @@ export function updateSpace(args: {
   name: string;
   description: string;
   instructions: string;
-  default_provider?: string | null;
-  default_model?: string | null;
-  default_params_json?: string | null;
+  // Required: the backend writes all three as given, so one left out
+  // cleared the Space's pinned model and parameters. Pass the current value
+  // to keep it.
+  default_provider: string | null;
+  default_model: string | null;
+  default_params_json: string | null;
   memory_enabled?: boolean | null;
 }): Promise<void> {
   if (!isTauri) return notInTauri(undefined);
@@ -1199,6 +1267,13 @@ export function removeSpaceMemory(args: {
   return invoke("remove_space_memory", { args });
 }
 
+/** Remove many of a Space's memories in one transaction; resolves with how
+ *  many went. */
+export function removeSpaceMemories(args: { ids: string[]; space_id: string }): Promise<number> {
+  if (!isTauri) return notInTauri(args.ids.length);
+  return invoke("remove_space_memories", { args });
+}
+
 // ------------ global memories ------------
 
 export function listGlobalMemories(): Promise<GlobalMemory[]> {
@@ -1242,6 +1317,13 @@ export function updateGlobalMemory(args: {
 export function removeGlobalMemory(args: { id: string }): Promise<boolean> {
   if (!isTauri) return notInTauri(true);
   return invoke("remove_global_memory", { args });
+}
+
+/** Remove many global memories in one transaction; resolves with how many
+ *  went. */
+export function removeGlobalMemories(args: { ids: string[] }): Promise<number> {
+  if (!isTauri) return notInTauri(args.ids.length);
+  return invoke("remove_global_memories", { args });
 }
 
 // ------------ snippets ------------
@@ -1485,6 +1567,12 @@ export function mcpTest(input: McpServerInput): Promise<McpTestResult> {
 export function mcpTools(): Promise<McpToolsOverview> {
   if (!isTauri) return Promise.resolve({ tools: [], errors: [] });
   return invoke<McpToolsOverview>("mcp_tools");
+}
+
+/** Fill the backend's MCP tool cache ahead of a send (see `warmTools`). */
+export function mcpWarm(): Promise<void> {
+  if (!isTauri) return notInTauri(undefined);
+  return invoke("mcp_warm");
 }
 
 // ------------ data (export / import / wipe) ------------

@@ -1,4 +1,4 @@
-import { memo, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   Ban,
@@ -19,11 +19,12 @@ import {
   Share2,
   ShieldAlert,
   TextSelect,
+  Volume2,
   Wrench,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { AttachmentActions } from "./AttachmentActions";
-import { BUILTIN_SERVER_ID, workspaceApproval } from "./WorkspaceApproval";
+import { BUILTIN_SERVER_ID, Revealed, workspaceApproval } from "./WorkspaceApproval";
 import { Markdown, StreamingMarkdown } from "./Markdown";
 import { MarkdownSourceProvider } from "./markdownSource";
 import { lastCodeBlock } from "@/lib/codeBlocks";
@@ -41,14 +42,18 @@ import type {
   ToolCallRecord,
 } from "@/types";
 import { cn } from "@/lib/utils";
-import { NO_DOCX_TEXT, NO_PDF_TEXT, safeImageMime, stripInlinedAttachments } from "@/lib/files";
+import { hasReadableText, safeImageMime, stripInlinedAttachments } from "@/lib/files";
+import { loadAttachments, parseAttachments } from "@/lib/messageAttachments";
+import { logger } from "@/lib/logger";
 import { Bookmark, BookmarkPlus } from "lucide-react";
 import { useChatStore } from "@/stores/chatStore";
 import { useShareStore } from "@/stores/shareStore";
 import { useSnippetStore } from "@/stores/snippetStore";
 import { useToastStore } from "@/stores/toastStore";
 import { useLibraryStore } from "@/stores/libraryStore";
+import { speechAvailable, useSpeechStore } from "@/stores/speechStore";
 import { SOURCES_TOOL } from "@/lib/sources";
+import { NOTICE_TOOL } from "@/lib/notices";
 import { SourcesUsedChip } from "./library/SourcesUsedChip";
 
 interface MessageProps {
@@ -78,21 +83,41 @@ function getSelectionWithin(el: Element): string {
   return sel.toString();
 }
 
+/** An image attachment's 80 px thumbnail, or a same-size placeholder while
+ *  its contents are still being fetched (`omitted`). */
+function Thumbnail({ image }: { image: Attachment }) {
+  if (image.omitted) {
+    return <span aria-hidden className="block h-20 w-20 rounded-lg bg-foreground/[0.06]" />;
+  }
+  return (
+    <img
+      src={`data:${safeImageMime(image.mime)};base64,${image.data}`}
+      alt={image.name}
+      width={80}
+      height={80}
+      loading="lazy"
+      decoding="async"
+      className="h-20 w-20 rounded-lg object-cover"
+    />
+  );
+}
+
+/** A message's stored metrics, or `null` when they aren't the shape the footer
+ *  reads. JSON of another shape — `{"eval_count":200}` from a hand-edited or
+ *  third-party backup — made the footer's `.toFixed` throw, and the error
+ *  boundary took the whole transcript with it, on every reopen. Same checks
+ *  as `/stats` (`commands/dispatch.ts`). */
 function parseMetrics(json: string | null): MessageMetrics | null {
   if (!json) return null;
   try {
-    return JSON.parse(json) as MessageMetrics;
+    const m = JSON.parse(json) as Partial<MessageMetrics> | null;
+    return typeof m?.tokens === "number" &&
+      typeof m.elapsed_ms === "number" &&
+      typeof m.tokens_per_second === "number"
+      ? (m as MessageMetrics)
+      : null;
   } catch {
     return null;
-  }
-}
-
-function parseAttachments(json: string | null): Attachment[] {
-  if (!json) return [];
-  try {
-    return JSON.parse(json) as Attachment[];
-  } catch {
-    return [];
   }
 }
 
@@ -134,10 +159,12 @@ function formatArgs(args: unknown): string {
   }
 }
 
-/** The qualified tool name comes through as `<serverSlug>__<toolName>` —
- *  the raw piece is what the user recognises. */
-function rawToolName(tool: string): string {
-  return tool.includes("__") ? tool.slice(tool.indexOf("__") + 2) : tool;
+/** The name the user recognises: the tool's own, sent with the call. A
+ *  record saved before it was takes the piece after `<serverSlug>__`, which
+ *  a slugged, cut or hashed name doesn't give back exactly. */
+function toolNameOf(call: Pick<ToolCallRecord, "tool" | "tool_name">): string {
+  if (call.tool_name) return call.tool_name;
+  return call.tool.includes("__") ? call.tool.slice(call.tool.indexOf("__") + 2) : call.tool;
 }
 
 /**
@@ -158,13 +185,18 @@ function ApprovalCard({ call }: { call: ToolCallRecord }) {
     // click on an answered call is dropped by the store.
     void respond(call.id, decision).finally(() => setSent(false));
   };
-  const tool = rawToolName(call.tool);
+  const tool = toolNameOf(call);
   // Workspace file tools get a readable preview — the file, the diff, the
   // move, the deletion — instead of the arguments as JSON. Deletions are
   // painted red so they never blend in with the amber of an edit.
   const builtin = call.server_id === BUILTIN_SERVER_ID;
-  const preview = builtin ? workspaceApproval(tool, call.arguments, call.existing_bytes) : null;
+  const preview = builtin
+    ? workspaceApproval(tool, call.arguments, call.existing_bytes, call.script_run)
+    : null;
   const destructive = preview?.destructive === true;
+  // A script is asked about every time: a standing yes for the tool would
+  // cover any script with any arguments (see `execute_tool_call`).
+  const everyTime = builtin && (tool === "run_skill_script" || tool === "run_script");
   return (
     <div
       role="group"
@@ -198,8 +230,11 @@ function ApprovalCard({ call }: { call: ToolCallRecord }) {
       {preview ? (
         preview.body
       ) : (
+        // Revealed: this card is the only consent for an MCP tool, and a
+        // payload hidden in invisible characters (tag characters, bidi
+        // controls) read here as text that looks harmless.
         <pre className="mt-2 max-h-40 overflow-auto rounded border border-foreground/10 bg-foreground/[0.04] px-2 py-1.5 font-mono text-[11px] leading-snug text-foreground/80 whitespace-pre-wrap break-words">
-          {formatArgs(call.arguments) || "{}"}
+          <Revealed text={formatArgs(call.arguments) || "{}"} />
         </pre>
       )}
       <div className="mt-2.5 flex flex-wrap items-center gap-2">
@@ -209,15 +244,17 @@ function ApprovalCard({ call }: { call: ToolCallRecord }) {
         {/* A built-in's standing grant lives in memory for this chat only
             (see `ApprovalRegistry::grant`); an MCP tool's is written to the
             server's allow-list and outlives the app. Say which. */}
-        <Button
-          size="sm"
-          variant="outline"
-          className="h-7 px-3 text-xs"
-          disabled={sent}
-          onClick={() => decide("allow_always")}
-        >
-          {builtin ? `Allow ${tool} for this chat` : `Always allow ${tool}`}
-        </Button>
+        {!everyTime && (
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-7 px-3 text-xs"
+            disabled={sent}
+            onClick={() => decide("allow_always")}
+          >
+            {builtin ? `Allow ${tool} for this chat` : `Always allow ${tool}`}
+          </Button>
+        )}
         <Button
           size="sm"
           variant="ghost"
@@ -239,12 +276,12 @@ function ToolCallItem({ call }: { call: ToolCallRecord }) {
   const interrupted = !pending && call.interrupted === true;
   const failed = !pending && call.is_error && !denied;
   const argsText = formatArgs(call.arguments);
-  const rawTool = rawToolName(call.tool);
+  const rawTool = toolNameOf(call);
   // Same readable preview the approval card used, so the diff that was
   // approved can still be seen after the fact.
   const preview =
     call.server_id === BUILTIN_SERVER_ID
-      ? workspaceApproval(rawTool, call.arguments, call.existing_bytes)
+      ? workspaceApproval(rawTool, call.arguments, call.existing_bytes, call.script_run)
       : null;
   return (
     <div
@@ -306,7 +343,7 @@ function ToolCallItem({ call }: { call: ToolCallRecord }) {
                 Arguments
               </div>
               <pre className="max-h-40 overflow-auto rounded border border-foreground/10 bg-foreground/[0.04] px-2 py-1.5 font-mono text-[11px] leading-snug text-foreground/80 whitespace-pre-wrap break-words">
-                {argsText || "{}"}
+                <Revealed text={argsText || "{}"} />
               </pre>
             </div>
           )}
@@ -365,10 +402,10 @@ function ToolCallsBlock({
   } else if (anyPending) {
     label =
       calls.length === 1
-        ? `Calling ${rawToolName(calls[0].tool)} tool…`
+        ? `Calling ${toolNameOf(calls[0])} tool…`
         : "Calling tools…";
   } else if (calls.length === 1) {
-    label = `Called ${rawToolName(calls[0].tool)} tool`;
+    label = `Called ${toolNameOf(calls[0])} tool`;
   } else {
     label = `Called ${calls.length} tools`;
   }
@@ -435,7 +472,14 @@ function ExpandableUserText({ content }: { content: string }) {
     // whatever's currently rendered and trust the clamp class to land us
     // back in the right spot — `scrollHeight` ignores the line-clamp visual
     // truncation but reflects the height the element WOULD take.
-    setOverflowing(el.scrollHeight - el.clientHeight > 1);
+    const measure = () => setOverflowing(el.scrollHeight - el.clientHeight > 1);
+    measure();
+    // And again whenever its width changes: the code canvas opening or the
+    // window narrowing wraps the lines further, and a prompt measured as
+    // short got clamped with no toggle to expand it.
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
   }, [content, expanded]);
 
   return (
@@ -532,6 +576,12 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
   const bodyRef = useRef<HTMLDivElement>(null);
   const openSnippetDialog = useSnippetStore((s) => s.openDialog);
   const openShareDialog = useShareStore((s) => s.open);
+  const speaking = useSpeechStore((s) => s.speakingId === message.id);
+  const speak = useSpeechStore((s) => s.speak);
+  const stopSpeaking = useSpeechStore((s) => s.stop);
+  // Reading stops with the bubble: switching chats, regenerating or locking
+  // the app shouldn't leave a voice going with nothing on screen to stop it.
+  useEffect(() => () => useSpeechStore.getState().stop(message.id), [message.id]);
 
   // Single funnel for every clipboard write the message component does.
   // The Tauri webview can refuse `navigator.clipboard.writeText` in narrow
@@ -554,6 +604,15 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
       return false;
     }
   };
+
+  /** An action's failure as a toast: rejected with nothing to catch it, the
+   *  click did nothing and only the console heard why. */
+  const failed = (title: string) => (e: unknown) =>
+    useToastStore.getState().push({
+      kind: "error",
+      title,
+      body: e instanceof Error ? e.message : String(e),
+    });
 
   // Copy the raw assistant content — full markdown, untouched — so pasting
   // into a code editor keeps fences / tables / headings intact.
@@ -637,9 +696,12 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
   };
 
   const isUser = message.role === "user";
+  const hasText = message.content.length > 0;
   const isPinned = message.pinned_at != null;
   const togglePin = () =>
-    void pinMessage(message.session_id, message.id, !isPinned);
+    void pinMessage(message.session_id, message.id, !isPinned).catch(
+      failed(isPinned ? "Couldn't unpin the response" : "Couldn't pin the response"),
+    );
   // Memoise the JSON parses on their source strings. chatStore only swaps these
   // strings when their dirty flags fire, so during a content-only streaming
   // flush they stay reference-equal and the parse is skipped — otherwise the
@@ -653,21 +715,23 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
     () => (!isUser ? parseToolCalls(message.tool_calls_json) : []),
     [isUser, message.tool_calls_json],
   );
-  // The Library sources record renders as its own chip, not as a tool call.
+  // The Library sources record and any notices render as their own chips,
+  // not as tool calls.
   const sourcesRecord = allToolCalls.find((c) => c.tool === SOURCES_TOOL) ?? null;
+  const notices = useMemo(() => allToolCalls.filter((c) => c.tool === NOTICE_TOOL), [allToolCalls]);
   const toolCalls = useMemo(
-    () => allToolCalls.filter((c) => c.tool !== SOURCES_TOOL),
+    () => allToolCalls.filter((c) => c.tool !== SOURCES_TOOL && c.tool !== NOTICE_TOOL),
     [allToolCalls],
   );
   const saveToLibrary = useLibraryStore((s) => s.saveToLibrary);
   const saveAttachmentsToLibrary = async () => {
     const unreadable: string[] = [];
-    for (const a of attachments) {
+    for (const a of await loadAttachments(message)) {
       if (a.kind === "file") continue;
       // As in the Library's own upload (`prepareFiles`): a scanned PDF or an
       // empty document is only the shared "no text" note — stored, it'd be a
       // source with nothing in it, and the next one would look like a duplicate.
-      if (a.kind === "text" && (a.data === NO_PDF_TEXT || a.data === NO_DOCX_TEXT || !a.data.trim())) {
+      if (a.kind === "text" && !hasReadableText(a.data)) {
         unreadable.push(a.name);
         continue;
       }
@@ -689,10 +753,33 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
       });
     }
   };
-  const attachments = useMemo(
+  const listedAttachments = useMemo(
     () => parseAttachments(message.attachments_json),
     [message.attachments_json],
   );
+  // A chat loaded from disk lists attachments without their contents. This
+  // row fetches its own and holds them itself, not in the store, so they
+  // leave memory with the row instead of staying for every chat opened.
+  const [loadedAttachments, setLoadedAttachments] = useState<{
+    from: string | null;
+    list: Attachment[];
+  } | null>(null);
+  const needsContents = listedAttachments.some((a) => a.omitted);
+  const { id: messageId, session_id: messageSessionId, attachments_json: attachmentsJson } = message;
+  useEffect(() => {
+    if (!needsContents) return;
+    let live = true;
+    loadAttachments({ id: messageId, session_id: messageSessionId, attachments_json: attachmentsJson })
+      .then((list) => {
+        if (live) setLoadedAttachments({ from: attachmentsJson, list });
+      })
+      .catch((e) => logger.warn("couldn't load a message's attachments", e));
+    return () => {
+      live = false;
+    };
+  }, [needsContents, messageId, messageSessionId, attachmentsJson]);
+  const attachments =
+    loadedAttachments?.from === attachmentsJson ? loadedAttachments.list : listedAttachments;
   // Images can come from a user upload or, on an assistant turn, from an
   // MCP tool result (mapped to an image attachment in mcp/client.rs).
   const images = attachments.filter((a) => a.kind === "image");
@@ -711,6 +798,18 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
     if (isUser || !isStreaming) return null;
     return lastCodeBlock(message.content)?.code ?? null;
   }, [isUser, isStreaming, message.content]);
+  // One object per change, not per render: a fresh literal re-rendered every
+  // finished code block of the streaming reply on each flush — context gets
+  // past their `memo`.
+  const markdownSource = useMemo(
+    () => ({
+      sessionId: message.session_id,
+      messageId: message.id,
+      streaming: !!isStreaming,
+      lastBlockRaw,
+    }),
+    [message.session_id, message.id, isStreaming, lastBlockRaw],
+  );
 
   // Below every hook, deliberately. This used to sit above four `useMemo`
   // calls, which breaks the rules of hooks — safe only because a row's role
@@ -858,15 +957,7 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
                 attachment={img}
                 className="rounded-lg focus-visible:ring-2 focus-visible:ring-ring/40"
               >
-                <img
-                  src={`data:${safeImageMime(img.mime)};base64,${img.data}`}
-                  alt={img.name}
-                  width={80}
-                  height={80}
-                  loading="lazy"
-                  decoding="async"
-                  className="h-20 w-20 rounded-lg object-cover"
-                />
+                <Thumbnail image={img} />
               </AttachmentActions>
             ))}
           </div>
@@ -895,6 +986,13 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
             isStreaming={isStreaming && message.content.length === 0}
           />
         )}
+        {!isUser &&
+          notices.map((n) => (
+            <p key={n.id} className="mb-2 flex items-start gap-1.5 text-xs text-amber-700 dark:text-amber-300">
+              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              <span className="[overflow-wrap:anywhere]">{n.result}</span>
+            </p>
+          ))}
         {!isUser && sourcesRecord && <SourcesUsedChip record={sourcesRecord} />}
         {!isUser && toolCalls.length > 0 && (
           <ToolCallsBlock calls={toolCalls} interactive={!!isStreaming} />
@@ -907,20 +1005,16 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
           </div>
         ) : isUser ? (
           displayContent.length > 0 && (
-            <div ref={bodyRef}>
+            <div ref={bodyRef} data-search-root>
               <ExpandableUserText content={displayContent} />
             </div>
           )
+        ) : !hasText && !isStreaming && !message.thinking && toolCalls.length === 0 ? (
+          // Stopped before anything arrived: say so, not an empty gap.
+          <p className="py-1 text-[12px] italic text-muted-foreground">Stopped before replying.</p>
         ) : (
-          <div ref={bodyRef}>
-            <MarkdownSourceProvider
-              value={{
-                sessionId: message.session_id,
-                messageId: message.id,
-                streaming: !!isStreaming,
-                lastBlockRaw,
-              }}
-            >
+          <div ref={bodyRef} data-search-root>
+            <MarkdownSourceProvider value={markdownSource}>
               {/* While streaming, only the trailing block re-parses per flush
                   (and skips highlighting) — completed blocks render once. Once
                   done, fall back to the plain whole-message render so the
@@ -941,15 +1035,7 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
                 attachment={img}
                 className="rounded-lg focus-visible:ring-2 focus-visible:ring-ring/40"
               >
-                <img
-                  src={`data:${safeImageMime(img.mime)};base64,${img.data}`}
-                  alt={img.name}
-                  width={80}
-                  height={80}
-                  loading="lazy"
-                  decoding="async"
-                  className="h-20 w-20 rounded-lg object-cover"
-                />
+                <Thumbnail image={img} />
               </AttachmentActions>
             ))}
           </div>
@@ -976,8 +1062,10 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
             full-content actions (Copy message, Save as Snippet) that the
             right-click menu intentionally omits. Hidden until hover/focus
             to keep the outgoing-message look clean, but tab-reachable so
-            keyboard users have a discoverable path to these actions. */}
-        {isUser && displayContent.length > 0 && (
+            keyboard users have a discoverable path to these actions. A
+            prompt that's only attachments keeps the menu for its
+            attachment action; the text actions need text. */}
+        {isUser && (displayContent.length > 0 || attachments.some((a) => a.kind !== "file")) && (
           <div className="absolute -bottom-1 right-2 translate-y-full">
             <DropdownMenu open={userKebabOpen} onOpenChange={setUserKebabOpen}>
               <DropdownMenuTrigger asChild>
@@ -989,7 +1077,11 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
                   // differing. This one carries Copy + Share + Save as
                   // Snippet, which only make sense for the user's own
                   // message.
-                  aria-label="Copy, share or save this message"
+                  aria-label={
+                    displayContent.length > 0
+                      ? "Copy, share or save this message"
+                      : "Save this message's attachments"
+                  }
                   className={cn(
                     "inline-flex h-7 w-7 items-center justify-center rounded-full text-foreground/55 transition-opacity hover:bg-foreground/10 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
                     userKebabOpen
@@ -1004,34 +1096,40 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
                 align="end"
                 className="min-w-[180px]"
               >
-                <DropdownMenuItem
-                  onSelect={() => void copyUserContent(displayContent)}
-                  className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
-                >
-                  <Copy className="h-4 w-4 text-foreground/60" />
-                  Copy message
-                </DropdownMenuItem>
-                <DropdownMenuItem
-                  onSelect={() =>
-                    openShareDialog({ role: "user", content: displayContent })
-                  }
-                  className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
-                >
-                  <Share2 className="h-4 w-4 text-foreground/60" />
-                  Share
-                </DropdownMenuItem>
-                <DropdownMenuItem
-                  onSelect={() =>
-                    openSnippetDialog({ seedPrompt: displayContent })
-                  }
-                  className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
-                >
-                  <Bookmark className="h-4 w-4 text-foreground/60" />
-                  Save as Snippet
-                </DropdownMenuItem>
+                {displayContent.length > 0 && (
+                  <>
+                    <DropdownMenuItem
+                      onSelect={() => void copyUserContent(displayContent)}
+                      className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
+                    >
+                      <Copy className="h-4 w-4 text-foreground/60" />
+                      Copy message
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
+                      onSelect={() =>
+                        openShareDialog({ role: "user", content: displayContent })
+                      }
+                      className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
+                    >
+                      <Share2 className="h-4 w-4 text-foreground/60" />
+                      Share
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
+                      onSelect={() =>
+                        openSnippetDialog({ seedPrompt: displayContent })
+                      }
+                      className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
+                    >
+                      <Bookmark className="h-4 w-4 text-foreground/60" />
+                      Save as Snippet
+                    </DropdownMenuItem>
+                  </>
+                )}
                 {attachments.some((a) => a.kind !== "file") && (
                   <DropdownMenuItem
-                    onSelect={() => void saveAttachmentsToLibrary()}
+                    onSelect={() =>
+                      void saveAttachmentsToLibrary().catch(failed("Couldn't save to Library"))
+                    }
                     className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
                   >
                     <BookmarkPlus className="h-4 w-4 text-foreground/60" />
@@ -1042,7 +1140,11 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
             </DropdownMenu>
           </div>
         )}
-        {!isUser && message.content.length > 0 && (
+        {/* Every finished reply gets its actions — one with no text too (a
+            Stop before the first token or at an approval card, a reply of
+            tool calls only), which used to show none, Regenerate included.
+            The items that need text are left out for it. */}
+        {!isUser && (hasText || !isStreaming) && (
           <div className="mt-1.5 flex items-center gap-2">
             {isPinned && (
               <span
@@ -1076,6 +1178,9 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
                 >
                   {copied ? (
                     <Check className="h-4 w-4 text-emerald-400" />
+                  ) : speaking ? (
+                    // Marks the reply being read; Stop reading is in this menu.
+                    <Volume2 className="h-4 w-4 animate-pulse" />
                   ) : (
                     <MoreHorizontal className="h-4 w-4" />
                   )}
@@ -1085,41 +1190,79 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
                 align="start"
                 className="min-w-[140px]"
               >
-                <DropdownMenuItem
-                  onSelect={() => void copyContent()}
-                  className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
-                >
-                  <Copy className="h-4 w-4 text-foreground/60" />
-                  Copy message
-                </DropdownMenuItem>
-                <DropdownMenuItem
-                  onSelect={() =>
-                    openShareDialog({
-                      role: "assistant",
-                      content: message.content,
-                    })
-                  }
-                  className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
-                >
-                  <Share2 className="h-4 w-4 text-foreground/60" />
-                  Share
-                </DropdownMenuItem>
-                <DropdownMenuItem
-                  onSelect={() =>
-                    void saveToLibrary({
-                      kind: "text",
-                      title: replyTitle(message.content),
-                      mime: "text/markdown",
-                      media: "text",
-                      content: message.content,
-                      size: new TextEncoder().encode(message.content).length,
-                    })
-                  }
-                  className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
-                >
-                  <BookmarkPlus className="h-4 w-4 text-foreground/60" />
-                  Save to Library
-                </DropdownMenuItem>
+                {hasText && (
+                  <DropdownMenuItem
+                    onSelect={() => void copyContent()}
+                    className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
+                  >
+                    <Copy className="h-4 w-4 text-foreground/60" />
+                    Copy message
+                  </DropdownMenuItem>
+                )}
+                {/* Not while this reply streams: it would read only what has
+                    arrived so far. */}
+                {speechAvailable && hasText && (
+                  <DropdownMenuItem
+                    onSelect={() =>
+                      speaking
+                        ? stopSpeaking(message.id)
+                        : speak(message.id, message.content)
+                    }
+                    disabled={isStreaming}
+                    className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
+                  >
+                    {speaking ? (
+                      <>
+                        <CircleStop className="h-4 w-4 text-foreground/60" />
+                        Stop reading
+                      </>
+                    ) : (
+                      <>
+                        <Volume2 className="h-4 w-4 text-foreground/60" />
+                        Read aloud
+                      </>
+                    )}
+                  </DropdownMenuItem>
+                )}
+                {/* Nor these two: they'd share or store what has arrived so
+                    far, and saving the finished reply later made a second
+                    Library item. */}
+                {hasText && (
+                  <DropdownMenuItem
+                    onSelect={() =>
+                      openShareDialog({
+                        role: "assistant",
+                        content: message.content,
+                      })
+                    }
+                    disabled={isStreaming}
+                    title={isStreaming ? "Wait for the reply to finish" : undefined}
+                    className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
+                  >
+                    <Share2 className="h-4 w-4 text-foreground/60" />
+                    Share
+                  </DropdownMenuItem>
+                )}
+                {hasText && (
+                  <DropdownMenuItem
+                    onSelect={() =>
+                      void saveToLibrary({
+                        kind: "text",
+                        title: replyTitle(message.content),
+                        mime: "text/markdown",
+                        media: "text",
+                        content: message.content,
+                        size: new TextEncoder().encode(message.content).length,
+                      })
+                    }
+                    disabled={isStreaming}
+                    title={isStreaming ? "Wait for the reply to finish" : undefined}
+                    className="gap-2.5 px-3 py-2 text-foreground/85 focus:text-foreground"
+                  >
+                    <BookmarkPlus className="h-4 w-4 text-foreground/60" />
+                    Save to Library
+                  </DropdownMenuItem>
+                )}
                 {/* Not offered for hidden imported rows: they render inside a
                     collapsed card, so a pin chip for one would scroll nowhere
                     when the card is shut. */}
@@ -1150,11 +1293,12 @@ function MessageItemImpl({ message, isStreaming, metrics, canRegenerate }: Messa
                     Regenerate
                   </DropdownMenuItem>
                 )}
-                {/* Not while this reply streams: its row on disk stays empty
-                    until the stream finishes, and that's what a fork copies. */}
+                {/* Not while this reply streams: a fork copies its row on
+                    disk, which holds only the text so far and the note that
+                    the reply was interrupted. */}
                 <DropdownMenuItem
                   onSelect={() =>
-                    void forkChat(message.session_id, message.id)
+                    void forkChat(message.session_id, message.id).catch(failed("Couldn't fork the chat"))
                   }
                   disabled={isStreaming}
                   title={isStreaming ? "Wait for the reply to finish" : undefined}

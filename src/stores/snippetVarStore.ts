@@ -37,6 +37,15 @@ interface SnippetVarState {
    *  first time someone opens the dialog for that snippet. */
   fillValuesBySnippet: Record<string, Record<string, string>>;
   dialogTarget: VarDialogTarget;
+  /** The editor's unsaved fields, as `fillDraft` is the fill dialog's: the
+   *  app lock unmounts the editor, and a variable typed before the idle lock
+   *  fired came back empty. Dropped on save or close. */
+  draft: {
+    target: Exclude<VarDialogTarget, null>;
+    key: string;
+    value: string;
+    description: string;
+  } | null;
   pendingFill: PendingFill | null;
   /** The fill dialog's typed values for `pendingFill`. Kept here, not in the
    *  dialog: the app lock unmounts the dialog, and what was typed must still
@@ -79,6 +88,7 @@ export const useSnippetVarStore = create<SnippetVarState>((set, get) => ({
   variables: [],
   fillValuesBySnippet: {},
   dialogTarget: null,
+  draft: null,
   pendingFill: null,
   fillDraft: null,
 
@@ -162,6 +172,10 @@ export const useSnippetVarStore = create<SnippetVarState>((set, get) => ({
     }
   },
 
-  openDialog: (target) => set({ dialogTarget: target }),
-  closeDialog: () => set({ dialogTarget: null }),
+  openDialog: (target) =>
+    set((s) => ({
+      dialogTarget: target,
+      draft: s.draft?.target === target ? s.draft : null,
+    })),
+  closeDialog: () => set({ dialogTarget: null, draft: null }),
 }));

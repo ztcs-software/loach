@@ -25,6 +25,8 @@ import { useSpaceStore } from "@/stores/spaceStore";
 import { useUIStore } from "@/stores/uiStore";
 import { cn, relativeTime } from "@/lib/utils";
 import type { Space } from "@/types";
+import { deleteSpaceConfirm } from "@/lib/confirmations";
+import { notifyOnFail } from "@/stores/toastStore";
 
 /**
  * Full-canvas browse surface for Spaces. Mirrors SnippetsLibrary in shape so
@@ -72,12 +74,7 @@ export function SpacesLibrary() {
   );
 
   const handleDelete = async (space: Space) => {
-    const ok = await confirm({
-      title: `Delete Space “${space.name}”?`,
-      body: "Its instructions, memories and uploaded files are deleted for good. Library sources stay in your Library, and its chats are kept outside any Space.",
-      confirmLabel: "Delete Space",
-      destructive: true,
-    });
+    const ok = await confirm(deleteSpaceConfirm(space.name));
     if (ok) void removeSpace(space.id);
   };
 
@@ -88,7 +85,7 @@ export function SpacesLibrary() {
   const newChatInSpace = (space: Space) => {
     setViewingSpace(null);
     setSidebarTab("chats");
-    void newSession({ spaceId: space.id });
+    notifyOnFail(newSession({ spaceId: space.id }), "start a chat in this Space");
   };
 
   return (

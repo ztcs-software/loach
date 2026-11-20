@@ -1,7 +1,9 @@
 import { PartyPopper } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Logo } from "@/components/Logo";
+import { useModelsStore } from "@/stores/modelsStore";
 import { useOnboardingStore } from "@/stores/onboardingStore";
+import { useSettingsStore } from "@/stores/settingsStore";
 import { useUIStore } from "@/stores/uiStore";
 import { useLivePulls } from "@/lib/usePullRuns";
 import { StepShell } from "./StepShell";
@@ -15,6 +17,10 @@ import { StepShell } from "./StepShell";
  * lie at 40% of an 18 GB pull, and it's the last thing the wizard says before
  * handing over — so when a pull is live we say so instead, and the
  * `PullStrip` below (from StepShell) carries the actual progress.
+ *
+ * Nor is it true once that download failed or was cancelled and there's no
+ * other model to chat with: then we say so and offer the way back to the
+ * provider step.
  */
 
 export function FinalStep({ onClose }: { onClose: () => void }) {
@@ -24,6 +30,15 @@ export function FinalStep({ onClose }: { onClose: () => void }) {
     (s) => s.setPendingOpenModelPicker,
   );
   const downloading = useLivePulls().length > 0;
+  const stalled = useModelsStore(
+    (s) =>
+      !s.models.some((m) => m.provider === "ollama") &&
+      Object.values(s.runs).some(
+        (r) => r.kind === "pull" && (r.finished === "error" || r.finished === "cancelled"),
+      ),
+  );
+  const onOpenAI = useSettingsStore((s) => s.default_provider === "openai" && !!s.default_model);
+  const noModel = !downloading && stalled && !onOpenAI;
 
   const handleStart = async () => {
     // Arm the picker before complete() runs — complete() creates the
@@ -55,10 +70,15 @@ export function FinalStep({ onClose }: { onClose: () => void }) {
           </span>
         </div>
         <h1 className="text-2xl font-semibold tracking-tight">
-          {downloading ? "Setup complete" : "You're all set"}
+          {noModel ? "Your download didn't finish" : downloading ? "Setup complete" : "You're all set"}
         </h1>
         <p className="mt-2.5 max-w-sm text-[13.5px] leading-relaxed text-foreground/60">
-          {downloading ? (
+          {noModel ? (
+            <>
+              There's no model to chat with yet. Go back to pick or pull one —
+              or finish now and get one later from the Models page.
+            </>
+          ) : downloading ? (
             <>
               Your model is still downloading — you can look around while it
               finishes, and Loach will tell you when it's ready to chat.
@@ -71,12 +91,26 @@ export function FinalStep({ onClose }: { onClose: () => void }) {
           )}
         </p>
 
-        <Button
-          onClick={() => void handleStart()}
-          className="mt-8 gap-2 px-6 py-5 text-[14px]"
-        >
-          {downloading ? "Explore Loach" : "Start chatting"}
-        </Button>
+        {noModel ? (
+          <div className="mt-8 flex items-center gap-2">
+            <Button variant="ghost" onClick={() => void handleStart()} className="px-5 py-5 text-[14px]">
+              Finish anyway
+            </Button>
+            <Button
+              onClick={() => useOnboardingStore.setState({ step: "provider" })}
+              className="gap-2 px-6 py-5 text-[14px]"
+            >
+              Pick a model
+            </Button>
+          </div>
+        ) : (
+          <Button
+            onClick={() => void handleStart()}
+            className="mt-8 gap-2 px-6 py-5 text-[14px]"
+          >
+            {downloading ? "Explore Loach" : "Start chatting"}
+          </Button>
+        )}
       </div>
     </StepShell>
   );

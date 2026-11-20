@@ -23,6 +23,7 @@ export function MemoryList({
   onAdd,
   onUpdate,
   onRemove,
+  onRemoveMany,
   onOpenChat,
   onEditingChange,
 }: {
@@ -33,6 +34,9 @@ export function MemoryList({
   onAdd: (content: string) => Promise<unknown>;
   onUpdate: (id: string, content: string) => Promise<unknown>;
   onRemove: (id: string) => Promise<unknown>;
+  /** "Clear all": every listed memory in one write and one list update —
+   *  one by one it was a call and a re-render per memory. */
+  onRemoveMany: (ids: string[]) => Promise<unknown>;
   /** Navigate to the chat a memory was extracted from. */
   onOpenChat: (sessionId: string) => void;
   /** Told when an inline edit opens and closes, so a host dialog can leave
@@ -133,9 +137,8 @@ export function MemoryList({
     if (!ok) return;
     setClearing(true);
     try {
-      // Sequential on purpose: each removal updates the store, and a failure
-      // mid-way leaves the survivors listed rather than half-vanished.
-      for (const m of targets) await onRemove(m.id);
+      // One transaction: all of them go, or (on a failure) none do.
+      await onRemoveMany(targets.map((m) => m.id));
     } finally {
       setClearing(false);
     }
@@ -153,6 +156,8 @@ export function MemoryList({
           <Input
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
+            // The label above isn't tied to it: this is its name.
+            aria-label="Add a memory"
             placeholder="e.g. Prefers TypeScript over JavaScript."
             disabled={!enabled || adding}
             onKeyDown={(e) => {
@@ -191,6 +196,7 @@ export function MemoryList({
               <Input
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
+                aria-label="Search memories"
                 placeholder={`Search ${memories.length} ${memories.length === 1 ? "memory" : "memories"}…`}
                 className="h-9 rounded-xl border-foreground/10 bg-foreground/[0.03] pl-9"
               />
@@ -289,7 +295,9 @@ export function MemoryList({
                     <button
                       onClick={() => void onRemove(m.id)}
                       aria-label="Delete memory"
-                      className="shrink-0 rounded-md p-1 text-foreground/40 opacity-0 transition-all hover:bg-foreground/10 hover:text-destructive group-hover:opacity-100"
+                      // Shown on keyboard focus too: tabbing onto it focused
+                      // an invisible control one keypress from a delete.
+                      className="shrink-0 rounded-md p-1 text-foreground/40 opacity-0 transition-all hover:bg-foreground/10 hover:text-destructive group-hover:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
                     >
                       <Trash2 className="h-3.5 w-3.5" />
                     </button>

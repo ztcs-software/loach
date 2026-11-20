@@ -51,7 +51,8 @@ import {
   type HostCapacity,
   type SizedVariant,
 } from "@/lib/modelChoice";
-import { useLivePulls } from "@/lib/usePullRuns";
+import { pullPercent, useLivePulls } from "@/lib/usePullRuns";
+import { PullProgress } from "@/components/PullProgress";
 import type { ModelInfo, ProviderId } from "@/types";
 import { cn, prefersReducedMotion } from "@/lib/utils";
 import { StepShell } from "./StepShell";
@@ -254,9 +255,15 @@ export function ProviderStep({
             }}
           />
           {phase === "ollama" ? (
-            <OllamaPath onProvisioned={() => setProvisioned(true)} />
+            <OllamaPath
+              onProvisioned={() => setProvisioned(true)}
+              onUnprovisioned={() => setProvisioned(false)}
+            />
           ) : (
-            <OpenAIPath onProvisioned={() => setProvisioned(true)} />
+            <OpenAIPath
+              onProvisioned={() => setProvisioned(true)}
+              onUnprovisioned={() => setProvisioned(false)}
+            />
           )}
         </div>
       )}
@@ -347,7 +354,13 @@ type OllamaProbe =
  *  otherwise sit in front of a warning that is no longer true. */
 const REPROBE_MS = 3000;
 
-function OllamaPath({ onProvisioned }: { onProvisioned: () => void }) {
+function OllamaPath({
+  onProvisioned,
+  onUnprovisioned,
+}: {
+  onProvisioned: () => void;
+  onUnprovisioned: () => void;
+}) {
   const baseUrl = useSettingsStore((s) => s.ollama_base_url);
   const update = useSettingsStore((s) => s.update);
   const setProviderDefault = useSettingsStore((s) => s.setProviderDefault);
@@ -397,6 +410,15 @@ function OllamaPath({ onProvisioned }: { onProvisioned: () => void }) {
         if (!alreadyPinned) await setProviderDefault("ollama", list[0].id);
         await refreshModels();
         onProvisioned();
+      } else if (
+        !Object.values(useModelsStore.getState().runs).some(
+          (r) => r.kind === "pull" && r.finished === null,
+        )
+      ) {
+        // Nothing installed and nothing downloading: the pull that unlocked
+        // Continue failed or was cancelled, and Continue led on to "You're
+        // all set" with no model to chat with.
+        onUnprovisioned();
       }
     } catch (e) {
       setProbe({
@@ -568,7 +590,7 @@ function OllamaPath({ onProvisioned }: { onProvisioned: () => void }) {
       {/* Models already installed — let the user choose which one this
           install defaults to instead of silently taking the first. */}
       {probe.kind === "up" && probe.models.length > 0 && (
-        <DefaultModelPicker
+        <OnboardingDefaultPicker
           models={probe.models}
           value={pinnedModel}
           onSelect={(id) => void setProviderDefault("ollama", id)}
@@ -690,7 +712,7 @@ function ProviderSwitch({
  * `/v1/models` happened to return first. The pick is now visible even when
  * the user accepts it unchanged.
  */
-function DefaultModelPicker({
+function OnboardingDefaultPicker({
   models,
   value,
   onSelect,
@@ -971,6 +993,10 @@ function ModelCatalog({
                 tabIndex={0}
                 onClick={() => toggle(fam.family)}
                 onKeyDown={(e) => {
+                  // The row's own keys only: Enter on the "ollama.com"
+                  // button inside it toggled the row, and the link never
+                  // opened.
+                  if (e.target !== e.currentTarget) return;
                   if (e.key === "Enter" || e.key === " ") {
                     e.preventDefault();
                     toggle(fam.family);
@@ -1023,6 +1049,7 @@ function ModelCatalog({
                           key={v.tag}
                           label={v.label}
                           sizeGb={v.sizeGb}
+                          residentGb={v.residentGb}
                           tag={v.tag}
                           run={run}
                           fit={fit}
@@ -1115,6 +1142,7 @@ function RecommendationCard({
           <p className="font-mono text-[13.5px] font-medium">{variant.tag}</p>
           <p className="mt-0.5 text-[11.5px] text-foreground/60">
             ~{formatGb(variant.sizeGb)} download ·{" "}
+            {variant.residentGb !== undefined && `~${formatGb(variant.residentGb)} in memory · `}
             {fit.tier === "comfortable"
               ? basis.kind === "vram"
                 ? "fits entirely on your GPU"
@@ -1169,6 +1197,7 @@ function RecommendationCard({
 function VariantRow({
   label,
   sizeGb,
+  residentGb,
   tag,
   run,
   fit,
@@ -1176,6 +1205,9 @@ function VariantRow({
 }: {
   label: string;
   sizeGb: number;
+  /** What it holds in memory, when that's far less than the download (the
+   *  edge models) — the download alone made E2B look as heavy as a 12B. */
+  residentGb?: number;
   tag: string;
   run: AdminProgress | undefined;
   fit: FitVerdict | null;
@@ -1191,7 +1223,10 @@ function VariantRow({
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-2">
           <span className="font-medium">{label}</span>
-          <span className="text-[11px] text-foreground/45">~{formatGb(sizeGb)}</span>
+          <span className="text-[11px] text-foreground/45">
+            ~{formatGb(sizeGb)}
+            {residentGb !== undefined && ` download · ~${formatGb(residentGb)} in memory`}
+          </span>
           <FitBadge fit={fit} />
         </div>
         <p className="font-mono text-[11px] text-foreground/40">{tag}</p>
@@ -1242,21 +1277,10 @@ function ProgressBar({ run }: { run: AdminProgress }) {
       </p>
     );
   }
-  const pct =
-    run.total > 0
-      ? Math.min(100, Math.round((run.completed / run.total) * 100))
-      : null;
+  const pct = pullPercent(run);
   return (
     <div>
-      <div className="h-1 w-full overflow-hidden rounded-full bg-foreground/[0.08]">
-        <div
-          className={cn(
-            "h-full bg-primary transition-all",
-            pct === null && "animate-pulse",
-          )}
-          style={{ width: pct === null ? "30%" : `${pct}%` }}
-        />
-      </div>
+      <PullProgress run={run} />
       <p className="mt-1 text-[10.5px] text-foreground/45">
         {run.status}
         {pct !== null && ` · ${pct}%`}
@@ -1266,13 +1290,24 @@ function ProgressBar({ run }: { run: AdminProgress }) {
 }
 
 function fmtPct(run: AdminProgress) {
-  if (run.total <= 0) return "starting…";
-  return `${Math.min(100, Math.round((run.completed / run.total) * 100))}%`;
+  const pct = pullPercent(run);
+  return pct === null ? "starting…" : `${pct}%`;
 }
 
 /* ───────────────────────── OpenAI path ───────────────────────── */
 
-function OpenAIPath({ onProvisioned }: { onProvisioned: () => void }) {
+/** A reachable endpoint with nothing to chat with — LM Studio with no model
+ *  loaded answers `{"data":[]}`. "You're ready to chat" there ended the wizard
+ *  with no model. */
+const NO_OPENAI_MODELS = "Connected, but this server lists no models — load one, then verify again.";
+
+function OpenAIPath({
+  onProvisioned,
+  onUnprovisioned,
+}: {
+  onProvisioned: () => void;
+  onUnprovisioned: () => void;
+}) {
   const baseUrl = useSettingsStore((s) => s.openai_base_url);
   const keySet = useSettingsStore((s) => s.openai_key_set);
   const pinnedModel = useSettingsStore((s) => s.default_model);
@@ -1319,7 +1354,12 @@ function OpenAIPath({ onProvisioned }: { onProvisioned: () => void }) {
     void openaiListModels(baseUrl)
       .then((list) => {
         if (superseded.current) return;
-        setCatalog(rankChatModels(list));
+        const ranked = rankChatModels(list);
+        setCatalog(ranked);
+        if (ranked.length === 0) {
+          setError(NO_OPENAI_MODELS);
+          return;
+        }
         setVerified(true);
         onProvisioned();
       })
@@ -1354,15 +1394,37 @@ function OpenAIPath({ onProvisioned }: { onProvisioned: () => void }) {
         ? await openaiListModelsWithKey(url, newKey)
         : await openaiListModels(url);
       if (url !== baseUrl) await update("openai_base_url", url);
-      if (newKey) await setOpenAIKey(newKey);
+      if (newKey) {
+        try {
+          await setOpenAIKey(newKey);
+        } catch (e) {
+          // The key just worked: it's the OS credential store that refused
+          // it (no Secret Service running, say) — not the key, nor the URL.
+          setError(
+            `Couldn't store the key in the OS credential manager: ${e instanceof Error ? e.message : String(e)}`,
+          );
+          setVerified(false);
+          return;
+        }
+      }
       const ranked = rankChatModels(list);
       setCatalog(ranked);
-      if (ranked.length > 0) {
-        // Pin the best chat candidate rather than whatever `/v1/models`
-        // listed first — on api.openai.com that's frequently an embedding
-        // or audio model. The picker below shows the result either way.
-        await setProviderDefault("openai", ranked[0].id);
+      if (ranked.length === 0) {
+        setKey("");
+        setVerified(false);
+        setError(NO_OPENAI_MODELS);
+        onUnprovisioned();
+        return;
       }
+      // Pin the best chat candidate rather than whatever `/v1/models`
+      // listed first — on api.openai.com that's frequently an embedding
+      // or audio model. The picker below shows the result either way.
+      // Not over a pick from that picker, though, as OllamaPath doesn't:
+      // re-verifying (after fixing the key, say) stamped it back to the top.
+      const settings = useSettingsStore.getState();
+      const alreadyPinned =
+        settings.default_provider === "openai" && ranked.some((m) => m.id === settings.default_model);
+      if (!alreadyPinned) await setProviderDefault("openai", ranked[0].id);
       await refreshModels();
       setVerified(true);
       setKey("");
@@ -1482,7 +1544,7 @@ function OpenAIPath({ onProvisioned }: { onProvisioned: () => void }) {
       </div>
 
       {catalog.length > 0 && (
-        <DefaultModelPicker
+        <OnboardingDefaultPicker
           models={catalog}
           value={pinnedModel}
           onSelect={(id) => void setProviderDefault("openai", id)}

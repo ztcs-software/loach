@@ -58,8 +58,9 @@ export function ImageScalingControl({
 
   return (
     <div className="space-y-2.5">
+      {/* Toggle buttons, not a radiogroup: see McpPanel's `TransportSwitch`. */}
       <div
-        role="radiogroup"
+        role="group"
         aria-label="Image scaling"
         className="grid rounded-xl border border-foreground/10 bg-foreground/[0.04] p-0.5"
         style={{ gridTemplateColumns: `repeat(${choices.length}, minmax(0, 1fr))` }}
@@ -68,8 +69,7 @@ export function ImageScalingControl({
           <button
             key={c.id}
             type="button"
-            role="radio"
-            aria-checked={choice === c.id}
+            aria-pressed={choice === c.id}
             onClick={() => pick(c.id)}
             // Narrow padding: three options fit the chat's Parameters panel.
             className={cn(segmentClass(choice === c.id), "px-1.5")}
@@ -130,7 +130,7 @@ function SizeRow({
         className="h-8 w-24 text-sm"
       />
       <div
-        role="radiogroup"
+        role="group"
         aria-label="Unit"
         className="inline-flex rounded-xl border border-foreground/10 bg-foreground/[0.04] p-0.5"
       >
@@ -138,8 +138,7 @@ function SizeRow({
           <button
             key={mode}
             type="button"
-            role="radio"
-            aria-checked={value.mode === mode}
+            aria-pressed={value.mode === mode}
             onClick={() => mode !== value.mode && onChange({ ...value, mode })}
             className={cn(segmentClass(value.mode === mode), "px-2.5")}
             title={mode === "px" ? "Cap the longest side, in pixels" : "Shrink to a share of the original size"}

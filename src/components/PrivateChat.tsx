@@ -8,7 +8,6 @@ import {
   CircleCheck,
   Ghost,
   Info,
-  MemoryStick,
   Plus,
   RefreshCw,
   RotateCcw,
@@ -35,6 +34,7 @@ import { FileChip } from "./FileChip";
 import { ChipDivider, PersonaChip, ToneChip } from "./ComposerChip";
 import { Markdown, StreamingMarkdown } from "./Markdown";
 import { fileToAttachment, FileTooLargeError } from "@/lib/files";
+import { logger } from "@/lib/logger";
 import { ollamaListModels, ollamaProbe } from "@/lib/tauri";
 import {
   DEFAULT_PERSONA_ID,
@@ -44,13 +44,14 @@ import {
 } from "@/lib/personas";
 import { DEFAULT_TONE_ID, getTone, TONES, type Tone } from "@/lib/tones";
 import { useChatStore } from "@/stores/chatStore";
-import { useModelsStore } from "@/stores/modelsStore";
+import { useDefaultNumCtx, useModelsStore } from "@/stores/modelsStore";
 import {
   effectivePrivateParams,
   usePrivateChatStore,
   type PrivateMessage,
 } from "@/stores/privateChatStore";
 import { useSettingsStore } from "@/stores/settingsStore";
+import { useSpeechStore } from "@/stores/speechStore";
 import {
   DEFAULT_PARAMS,
   type Attachment,
@@ -92,6 +93,8 @@ export function PrivateChat() {
     if (!open) return;
     const { setQueueHeld } = useChatStore.getState();
     setQueueHeld(true);
+    // A reply being read aloud stops too: its Stop is behind the overlay.
+    useSpeechStore.getState().stop();
     return () => setQueueHeld(false);
   }, [open]);
 
@@ -436,12 +439,12 @@ function PrivateChatBody() {
             <ShieldCheck className="h-6 w-6 text-zinc-300" />
           </div>
           <h2 className="text-2xl font-medium tracking-tight text-zinc-100">
-            We are private
+            This chat isn't saved
           </h2>
           <p className="mt-3 text-sm leading-relaxed text-zinc-400">
-            Private Chats are temporary conversations with nothing stored.
-            <br />
-            All messages are removed immediately when you close the chat.
+            {/* What Loach keeps, not a promise for the model server too: an
+                Ollama run with debug logging can still log prompts. */}
+            Loach keeps nothing after you close it.
             <br />
             {/* Sends go to whatever Ollama server is configured, so "local"
                 is only true when that's this machine. */}
@@ -537,7 +540,7 @@ function PrivateMessageBubble({
           />
         )}
         {message.metrics && !isStreaming && (
-          <div className="mt-1 text-[11px] text-zinc-500">
+          <div className="mt-1 text-[11px] text-zinc-400">
             {message.metrics.tokens} tokens ·{" "}
             {Math.round(message.metrics.tokens_per_second)} tok/s
           </div>
@@ -630,7 +633,7 @@ function PrivateParamsPanel() {
   // chatStore.readSessionParams. Private Chat is Ollama-only so we don't
   // bother with the OpenAI branches.
   const thinkingDefault = useSettingsStore((s) => s.thinking_default);
-  const lowVramGlobal = useSettingsStore((s) => s.low_vram_global);
+  const appNumCtx = useDefaultNumCtx("ollama", model);
   const defaultToneId = useSettingsStore((s) => s.default_tone_id);
   const effectiveToneId = toneId ?? defaultToneId ?? DEFAULT_TONE_ID;
 
@@ -649,13 +652,14 @@ function PrivateParamsPanel() {
 
   // Effective values shown on each row come from the same merge `send` uses,
   // so the panel shows exactly what the request carries.
-  const effective = effectivePrivateParams(params, modelDefaults, {
-    thinking_default: thinkingDefault,
-    low_vram_global: lowVramGlobal,
-  });
+  const effective = effectivePrivateParams(
+    params,
+    modelDefaults,
+    { thinking_default: thinkingDefault },
+    appNumCtx,
+  );
   const effectiveContext = effective.num_ctx ?? DEFAULT_PARAMS.num_ctx ?? 8192;
   const effectiveThinking = effective.think;
-  const effectiveLowVram = effective.low_vram ?? false;
 
   const update = (patch: Partial<GenerationParams>) =>
     setParams({ ...params, ...patch });
@@ -713,16 +717,6 @@ function PrivateParamsPanel() {
             />
           </Section>
 
-          <Section title="Performance">
-            <LowVramRow
-              checked={effectiveLowVram}
-              onChange={(next) =>
-                update({ low_vram: next ? true : undefined })
-              }
-              pinnedByGlobal={lowVramGlobal}
-            />
-          </Section>
-
           <div className="pt-1">
             <Button
               type="button"
@@ -764,7 +758,7 @@ function PrivateParamsPanel() {
                 />
               ))}
             </div>
-            <p className="mt-1.5 text-[11px] leading-relaxed text-zinc-500">
+            <p className="mt-1.5 text-[11px] leading-relaxed text-zinc-400">
               Defines the assistant's role. Layered into the system prompt at send time.
             </p>
           </div>
@@ -787,7 +781,7 @@ function PrivateParamsPanel() {
                 />
               ))}
             </div>
-            <p className="mt-1.5 text-[11px] leading-relaxed text-zinc-500">
+            <p className="mt-1.5 text-[11px] leading-relaxed text-zinc-400">
               Style modifier appended after the system prompt. Falls back to your global default in Settings → General when not set here.
             </p>
           </div>
@@ -807,7 +801,7 @@ function PrivateParamsPanel() {
               value={additional}
               onChange={(e) => setAdditional(e.target.value)}
             />
-            <p className="mt-1.5 text-[11px] leading-relaxed text-zinc-500">
+            <p className="mt-1.5 text-[11px] leading-relaxed text-zinc-400">
               Free-form per-chat instructions. Wiped along with everything else when the chat closes.
             </p>
           </div>
@@ -866,47 +860,13 @@ function ThinkingRow({
           checked={checked}
           disabled={disabled}
           onCheckedChange={onChange}
-          aria-label={checked ? "Disable thinking" : "Enable thinking"}
+          aria-label="Thinking"
         />
       </div>
-      <p className="mt-1.5 text-[10.5px] leading-snug text-zinc-500">
+      <p className="mt-1.5 text-[10.5px] leading-snug text-zinc-400">
         {disabled
           ? disabledHint
           : "Let the model reason step-by-step before replying. Adds latency for long answers but may improve quality on complex prompts."}
-      </p>
-    </div>
-  );
-}
-
-function LowVramRow({
-  checked,
-  onChange,
-  pinnedByGlobal,
-}: {
-  checked: boolean;
-  onChange: (next: boolean) => void;
-  /** Settings → Features Low VRAM mode is on: every request is sent with
-   *  it, so the switch is shown on and disabled, as in ParameterPanel. */
-  pinnedByGlobal: boolean;
-}) {
-  return (
-    <div className={pinnedByGlobal ? "opacity-55" : undefined}>
-      <div className="flex items-center justify-between gap-3">
-        <Label className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.1em] text-zinc-300">
-          <MemoryStick className="h-3.5 w-3.5 shrink-0 text-zinc-300" />
-          Low VRAM
-        </Label>
-        <Switch
-          checked={checked}
-          disabled={pinnedByGlobal}
-          onCheckedChange={onChange}
-          aria-label={checked ? "Disable low VRAM mode" : "Enable low VRAM mode"}
-        />
-      </div>
-      <p className="mt-1.5 text-[10.5px] leading-snug text-zinc-500">
-        {pinnedByGlobal
-          ? "Pinned on by the global Low VRAM setting (Settings → Features). Turn that off to control it here."
-          : "Trade speed for memory: smaller batches and KV cache. Helpful when you're up against VRAM limits."}
       </p>
     </div>
   );
@@ -963,7 +923,7 @@ function SliderRow({
         onValueChange={(v) => onChange(stops[v[0]])}
       />
       {hint && (
-        <p className="mt-1.5 text-[10.5px] leading-snug text-zinc-500">
+        <p className="mt-1.5 text-[10.5px] leading-snug text-zinc-400">
           {hint}
         </p>
       )}
@@ -1080,7 +1040,12 @@ function PrivateChatComposer() {
         if (e instanceof FileTooLargeError) {
           setError(`${e.name} is larger than 20 MB.`);
         } else {
-          setError("Failed to read file");
+          // Named, with the reason, as the main composer has it: a bare
+          // "Failed to read file" read the same for a corrupt upload and a
+          // pdfjs fault that needs a different fix.
+          logger.error("attachment read failed", f.name, e);
+          const reason = e instanceof Error ? e.message : String(e);
+          setError(`Couldn't read ${f.name}: ${reason}`);
         }
       }
     }
@@ -1213,7 +1178,7 @@ function PrivateChatComposer() {
             // unless explicitly nulled. Without these overrides, focusing
             // the field flashed a translucent inner panel inside our
             // flat pill. Mirrors the regular ChatInput's overrides.
-            className="min-h-[28px] max-h-[220px] flex-1 resize-none border-none bg-transparent backdrop-blur-none px-1 py-1.5 text-[15px] leading-relaxed text-zinc-100 placeholder:text-zinc-500 shadow-none outline-none focus-visible:ring-0 focus-visible:border-none focus-visible:bg-transparent focus-visible:outline-none"
+            className="min-h-[28px] max-h-[220px] flex-1 resize-none border-none bg-transparent backdrop-blur-none px-1 py-1.5 text-[15px] leading-relaxed text-zinc-100 placeholder:text-zinc-400 shadow-none outline-none focus-visible:ring-0 focus-visible:border-none focus-visible:bg-transparent focus-visible:outline-none"
             rows={1}
           />
           {/* No voice-dictation button here, deliberately: the regular

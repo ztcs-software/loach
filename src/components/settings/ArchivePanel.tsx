@@ -123,11 +123,28 @@ export function ArchivePanel({ onOpenChat }: { onOpenChat: () => void }) {
             key={s.id}
             session={s}
             onOpen={() => void handleOpen(s.id)}
-            onUnarchive={() => void archive(s.id, false)}
+            onUnarchive={() =>
+              void archive(s.id, false).catch((e) =>
+                useToastStore.getState().push({
+                  kind: "error",
+                  title: "Couldn't unarchive the chat",
+                  body: e instanceof Error ? e.message : String(e),
+                }),
+              )
+            }
             onDelete={() =>
               void (async () => {
                 const ok = await confirm(deleteChatConfirm(s.title));
-                if (ok) await remove(s.id);
+                if (!ok) return;
+                try {
+                  await remove(s.id);
+                } catch (e) {
+                  useToastStore.getState().push({
+                    kind: "error",
+                    title: "Couldn't delete the chat",
+                    body: e instanceof Error ? e.message : String(e),
+                  });
+                }
               })()
             }
           />

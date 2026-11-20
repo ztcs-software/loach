@@ -9,6 +9,7 @@
 //! another crate. Syntax: `/foo/bar/0` — leading slash, slash-separated,
 //! integer indices for arrays. Documented in the description.
 
+use super::{err, ok};
 use serde_json::{json, Value};
 
 use crate::mcp::McpCallResult;
@@ -17,6 +18,47 @@ pub const TOOL_NAME: &str = "json";
 
 /// 4 MiB cap. Same rationale as the other text tools.
 const MAX_INPUT_BYTES: usize = 4 * 1024 * 1024;
+
+/// Most pretty-printed output `format` and `extract` return. Each value is
+/// written after `indent × depth` spaces, so deep nesting grows the input
+/// hundreds of times — 4 MiB in, gigabytes out — all of it built in memory,
+/// then carried by the `ToolResult` event into the transcript (only the
+/// model's copy is capped).
+const MAX_OUTPUT_BYTES: usize = 2 * 1024 * 1024;
+
+/// A buffer that refuses to grow past [`MAX_OUTPUT_BYTES`], so serializing
+/// stops there instead of building the rest.
+struct Capped(Vec<u8>);
+
+impl std::io::Write for Capped {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.0.len() + buf.len() > MAX_OUTPUT_BYTES {
+            return Err(std::io::Error::other("output budget spent"));
+        }
+        self.0.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// `value` pretty-printed with `indent` spaces, within [`MAX_OUTPUT_BYTES`].
+fn pretty(value: &Value, indent: usize) -> Result<String, String> {
+    let mut out = Capped(Vec::new());
+    let indent = " ".repeat(indent);
+    let formatter = serde_json::ser::PrettyFormatter::with_indent(indent.as_bytes());
+    let mut ser = serde_json::Serializer::with_formatter(&mut out, formatter);
+    match serde::Serialize::serialize(value, &mut ser) {
+        Ok(()) => Ok(String::from_utf8(out.0).unwrap_or_else(|_| "non-UTF-8 output".to_string())),
+        Err(e) if e.is_io() => Err(format!(
+            "formatted output would exceed {MAX_OUTPUT_BYTES} bytes — use `extract` for a \
+             sub-tree, or a smaller `indent`"
+        )),
+        Err(e) => Err(format!("formatting failed: {e}")),
+    }
+}
 
 pub fn tool_description() -> &'static str {
     "Validate, pretty-print, or extract a value from JSON. Use this when \
@@ -79,26 +121,14 @@ pub fn dispatch(args: &Value) -> McpCallResult {
             // pass `indent: 1_000_000` and allocate a 1 MiB indent string.
             // `lenient_i64` so a float-shaped `4.0` counts rather than
             // falling back to the default unnoticed.
-            let indent = crate::tools::lenient_i64(args, "indent")
-                .and_then(|n| u64::try_from(n).ok())
-                .unwrap_or(2)
-                .min(8);
-            // serde_json::to_string_pretty hard-codes 2-space indent, so
-            // we build a formatter when the user asks for something else.
-            let out = if indent == 2 {
-                serde_json::to_string_pretty(&parsed)
-                    .unwrap_or_else(|e| format!("formatting failed: {e}"))
-            } else {
-                let mut buf = Vec::new();
-                let indent_str: String = " ".repeat(indent as usize);
-                let formatter = serde_json::ser::PrettyFormatter::with_indent(indent_str.as_bytes());
-                let mut ser = serde_json::Serializer::with_formatter(&mut buf, formatter);
-                if let Err(e) = serde::Serialize::serialize(&parsed, &mut ser) {
-                    return err(format!("formatting failed: {e}"));
-                }
-                String::from_utf8(buf).unwrap_or_else(|_| "non-UTF-8 output".to_string())
+            let indent = match crate::tools::int_arg(args, "indent", 2) {
+                Ok(n) => u64::try_from(n).unwrap_or(2).min(8),
+                Err(e) => return err(e),
             };
-            ok(out)
+            match pretty(&parsed, indent as usize) {
+                Ok(out) => ok(out),
+                Err(e) => err(e),
+            }
         }
         "extract" => {
             let path = match args.get("path").and_then(|v| v.as_str()) {
@@ -117,10 +147,10 @@ pub fn dispatch(args: &Value) -> McpCallResult {
                 format!("/{path}")
             };
             match parsed.pointer(&pointer) {
-                Some(v) => ok(
-                    serde_json::to_string_pretty(v)
-                        .unwrap_or_else(|e| format!("formatting failed: {e}")),
-                ),
+                Some(v) => match pretty(v, 2) {
+                    Ok(out) => ok(out),
+                    Err(e) => err(e),
+                },
                 // JSONPath (`$.users[0].name`) finds nothing as a pointer, and
                 // "no value" would read as a missing key.
                 None if path.starts_with('$') || path.contains('[') => err(format!(
@@ -131,22 +161,6 @@ pub fn dispatch(args: &Value) -> McpCallResult {
             }
         }
         other => err(format!("unknown op `{other}`")),
-    }
-}
-
-fn ok(s: impl Into<String>) -> McpCallResult {
-    McpCallResult {
-        content_text: s.into(),
-        is_error: false,
-        ..Default::default()
-    }
-}
-
-fn err(s: impl Into<String>) -> McpCallResult {
-    McpCallResult {
-        content_text: s.into(),
-        is_error: true,
-        ..Default::default()
     }
 }
 
@@ -175,6 +189,23 @@ mod tests {
         assert!(!r.is_error);
         // 2-space indent, key on its own line.
         assert!(r.content_text.contains("\n  \"a\": 1"));
+    }
+
+    /// Deep nesting plus indent made 40 KB of input about 20 MB of output;
+    /// past MAX_OUTPUT_BYTES it's refused, and the serializer stops there
+    /// rather than building the rest (B6-03).
+    #[test]
+    fn format_output_is_bounded() {
+        let depth = 120;
+        let input = format!("{}{}{}", "[".repeat(depth), vec!["0"; 20_000].join(","), "]".repeat(depth));
+        let r = dispatch(&json!({"input": input, "op": "format", "indent": 8}));
+        assert!(r.is_error);
+        assert!(r.content_text.contains("would exceed"), "{}", r.content_text);
+        let r = dispatch(&json!({"input": input, "op": "extract", "path": ""}));
+        assert!(r.is_error, "extract pretty-prints too");
+        // Small enough, it formats as before.
+        let r = dispatch(&json!({"input": "[[1,2]]", "op": "format", "indent": 8}));
+        assert_eq!(r.content_text, "[\n        [\n                1,\n                2\n        ]\n]");
     }
 
     #[test]

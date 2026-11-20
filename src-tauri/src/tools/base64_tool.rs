@@ -2,6 +2,7 @@
 //! URL-safe alphabet. Models routinely garble padding or mix alphabets;
 //! `base64` is a few lines, so we just do it ourselves.
 
+use super::{err, hex};
 use base64::Engine;
 use serde_json::{json, Value};
 
@@ -76,11 +77,12 @@ pub fn dispatch(args: &Value) -> McpCallResult {
                 Err(e) => return err(format!("invalid base64 input: {e}")),
             };
             McpCallResult {
-                content_text: match String::from_utf8(decoded.clone()) {
+                // The bytes come back from the error: no copy kept for it.
+                content_text: match String::from_utf8(decoded) {
                     Ok(s) => s,
                     // Non-UTF-8 result: hex-dump it so the model still has
                     // something deterministic to read.
-                    Err(_) => format!("(non-UTF-8 bytes, hex) {}", hex(&decoded)),
+                    Err(e) => format!("(non-UTF-8 bytes, hex) {}", hex(e.as_bytes())),
                 },
                 is_error: false,
                 ..Default::default()
@@ -104,22 +106,6 @@ pub fn decode_lenient(input: &str, url_safe: bool) -> Result<Vec<u8>, base64::De
         (&STANDARD, &STANDARD_NO_PAD)
     };
     padded.decode(&cleaned).or_else(|_| unpadded.decode(&cleaned))
-}
-
-fn hex(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        s.push_str(&format!("{b:02x}"));
-    }
-    s
-}
-
-fn err(msg: impl Into<String>) -> McpCallResult {
-    McpCallResult {
-        content_text: msg.into(),
-        is_error: true,
-        ..Default::default()
-    }
 }
 
 #[cfg(test)]

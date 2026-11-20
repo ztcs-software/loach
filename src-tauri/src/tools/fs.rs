@@ -43,6 +43,7 @@
 //! check, though, not something a person should read: [`display_path`]
 //! strips it for anything shown to the user or the model.
 
+use super::{err, ok};
 use std::fs;
 use std::io::Read as _;
 use std::path::{Component, Path, PathBuf};
@@ -130,14 +131,29 @@ fn cut_by_depth(entry: &walkdir::DirEntry) -> bool {
 /// tree costs a stat, not an allocation.
 const MAX_SEARCH_FILE_BYTES: u64 = 512 * 1024;
 
-/// Project instructions file, read from the workspace root on every turn
-/// and appended to the system prompt — the same idea as a `CLAUDE.md` or
-/// `AGENTS.md`: the project's own notes on how to work in the tree.
-pub const INSTRUCTIONS_FILE: &str = "LOACHFILE.md";
-/// How much of `LOACHFILE.md` reaches the prompt. The same cap as a tool
-/// result: past this the file is a document rather than instructions, and
-/// local models follow short instruction files far better anyway.
+/// Project instructions files, in the order they're looked for at the
+/// workspace root; the first usable one is read on every turn and appended
+/// to the system prompt — the project's own notes on how to work in the
+/// tree. Loach's own `LOACHFILE.md` wins; a project without one falls back
+/// to the file it already keeps for Claude Code (`CLAUDE.md`) or Codex
+/// (`AGENTS.md`), so it needn't keep a third copy — unless the user has
+/// switched that off ([`INSTRUCTIONS_FALLBACK_SETTING_KEY`]).
+pub const INSTRUCTIONS_FILES: [&str; 3] = ["LOACHFILE.md", "CLAUDE.md", "AGENTS.md"];
+/// Settings → Tools → Workspace files → "Use CLAUDE.md or AGENTS.md". On
+/// unless set to `"false"`, so an install that never touched it falls back.
+pub const INSTRUCTIONS_FALLBACK_SETTING_KEY: &str = "workspace_instructions_fallback";
+/// How much of an instructions file reaches the prompt. The same cap as a
+/// tool result: past this the file is a document rather than instructions,
+/// and local models follow short instruction files far better anyway.
 const MAX_INSTRUCTIONS_BYTES: usize = crate::providers::MAX_TOOL_RESULT_BYTES;
+
+/// The workspace's project instructions and the file they came from.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct WorkspaceInstructions {
+    /// One of [`INSTRUCTIONS_FILES`].
+    pub file: &'static str,
+    pub text: String,
+}
 
 /// Directories skipped when *walking* (`list_directory`, `find_files`,
 /// `search_files`). Naming one explicitly still works — the user may well
@@ -208,12 +224,48 @@ fn vet_relative(rel: &str) -> Result<PathBuf, String> {
     Ok(out)
 }
 
+/// A character an approval — the consent dialog for a stdio MCP server, a
+/// card naming a file — can't show faithfully: control characters (a NUL
+/// truncates what the OS runs; a newline fakes a line break), and invisible
+/// or text-reordering Unicode — zero-width spaces, bidi overrides — that
+/// makes the text on screen differ from what runs or is written.
+pub(crate) fn unreviewable_char(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{00AD}'
+                | '\u{034F}'
+                | '\u{061C}'
+                | '\u{115F}'
+                | '\u{1160}'
+                | '\u{180E}'
+                | '\u{200B}'..='\u{200F}'
+                // Line and paragraph separators: dialogs render them as
+                // line breaks.
+                | '\u{2028}'..='\u{202E}'
+                | '\u{2060}'..='\u{206F}'
+                | '\u{3164}'
+                // Variation selectors.
+                | '\u{FE00}'..='\u{FE0F}'
+                | '\u{FEFF}'
+                | '\u{FFA0}'
+                | '\u{FFF9}'..='\u{FFFB}'
+                // Tag characters, and the supplementary variation selectors.
+                | '\u{E0000}'..='\u{E007F}'
+                | '\u{E0100}'..='\u{E01EF}'
+        )
+}
+
 /// Why `part` can't be a name the tools open or create, or `None` when it's
 /// fine.
 ///
-/// Everywhere: control characters, and the bidi controls that reorder how
-/// text is displayed — `\u{202E}` turns `txt.exe` into what reads as
-/// `exe.txt` on the approval card.
+/// Everywhere: any [`unreviewable_char`] — control characters, the bidi
+/// controls that reorder how text is displayed (`\u{202E}` turns `txt.exe`
+/// into what reads as `exe.txt` on the approval card), and invisible ones:
+/// `src/main\u{200B}.rs` is a lookalike beside `main.rs`, created unseen
+/// under a standing grant, and HFS+ ignores some of them in names, so
+/// `.g\u{200C}it` *is* `.git` there. (Emoji written with a joiner or a
+/// variation selector are refused with them.)
 ///
 /// On Windows, three more, because the root is a `\\?\` path and that
 /// prefix switches off Win32's own name checks:
@@ -227,11 +279,8 @@ fn vet_relative(rel: &str) -> Result<PathBuf, String> {
 ///     and ordinary tools can't open or delete them afterwards.
 fn unusable_name(part: &std::ffi::OsStr) -> Option<&'static str> {
     let name = part.to_string_lossy();
-    if name
-        .chars()
-        .any(|c| c.is_control() || matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'))
-    {
-        return Some("contains a control or text-direction character");
+    if name.chars().any(unreviewable_char) {
+        return Some("contains a control, invisible or text-direction character");
     }
     #[cfg(windows)]
     {
@@ -322,7 +371,7 @@ fn ensure_inside(root: &Path, candidate: &Path, rel: &str) -> Result<(), String>
 }
 
 /// Resolve a path that must already exist.
-fn resolve_read(root: &Path, rel: &str) -> Result<PathBuf, String> {
+pub(crate) fn resolve_read(root: &Path, rel: &str) -> Result<PathBuf, String> {
     let vetted = vet_relative(rel)?;
     let joined = root.join(&vetted);
     let canon = joined
@@ -617,7 +666,20 @@ fn replace_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => return Err(e),
     };
-    if existing.as_ref().is_some_and(|m| m.permissions().readonly()) {
+    // `readonly()` says only that no write bit is set at all. A root-owned
+    // `0644` file (left by a container run) isn't "read-only", yet this user
+    // can't write it — and the rename below needs only the folder's write
+    // permission, so it replaced the file, now owned by the user. Asking the
+    // OS to open it for writing (nothing truncated) answers as an in-place
+    // write would. Only a refusal counts: a file busy elsewhere goes on.
+    let not_writable = |m: &fs::Metadata| {
+        m.permissions().readonly()
+            || matches!(
+                fs::OpenOptions::new().write(true).open(path),
+                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied
+            )
+    };
+    if existing.as_ref().is_some_and(not_writable) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
             "the file is read-only",
@@ -774,33 +836,216 @@ fn copy_dacl(original: &Path, tmp: &Path) -> std::io::Result<()> {
 ///
 /// That's a `.git` directory (whose changes also show in no `git status`
 /// or diff), the hook folders `core.hooksPath` is pointed at by husky
-/// (`.husky`) and by convention (`.githooks`), a `.pre-commit-config.yaml`
-/// (a `repo: local` hook runs any command), and any folder laid out as a
-/// bare repository — see [`in_git_dir_layout`].
+/// (`.husky`) and by convention (`.githooks`) — or by the repository's own
+/// config, whatever the folder is called ([`hooks_path`]) — a
+/// `.pre-commit-config.yaml` (a `repo: local` hook runs any command) or a
+/// lefthook config (the same, once `lefthook install` has run), and any
+/// folder laid out as a bare repository — see [`in_git_dir_layout`].
 pub fn touches_git_dir(root: &Path, args: &Value) -> bool {
+    let hooks = hooks_path(root);
     ["path", "from", "to"]
         .iter()
         .filter_map(|key| args.get(*key)?.as_str())
         .any(|rel| {
             runs_with_git(Path::new(rel.trim()))
                 || resolve_target(root, rel).ok().is_some_and(|p| {
-                    p.strip_prefix(root).is_ok_and(runs_with_git) || in_git_dir_layout(root, &p)
+                    p.strip_prefix(root).is_ok_and(runs_with_git)
+                        || in_git_dir_layout(root, &p)
+                        || hooks
+                            .as_deref()
+                            .is_some_and(|h| dunce::simplified(&p).starts_with(dunce::simplified(h)))
                 })
         })
+}
+
+/// Whether a call's `path` — or either end of a move — is a file that is read
+/// in as instructions, as written or once links are resolved: `LOACHFILE.md`
+/// at the workspace root (in the system prompt of every turn) or the file a
+/// root instructions file links to, a `CLAUDE.md`, `AGENTS.md` or one of
+/// [`OTHER_AGENT_FILES`] at any depth (what Claude Code and Codex load as
+/// project instructions, nested ones included), or anything under one of
+/// `skill_dirs` (a new skill there joins every chat's catalogue). Like
+/// [`touches_git_dir`], a standing "Allow … for this chat" never covers
+/// these: given for ordinary edits, it let the model rewrite its own
+/// instructions — for every later turn and every chat on the folder — with
+/// no card.
+pub fn touches_instructions(root: &Path, args: &Value, skill_dirs: &[PathBuf]) -> bool {
+    let canon_root = root.canonicalize().ok();
+    let skill_dirs: Vec<PathBuf> = skill_dirs.iter().filter_map(|d| canonical_prefix(d)).collect();
+    // `AGENTS.md -> docs/guide.md`: Loach reads the guide as instructions, so
+    // writing it is writing them, whatever it's called.
+    let link_targets: Vec<PathBuf> = canon_root
+        .as_deref()
+        .map(|r| {
+            INSTRUCTIONS_FILES
+                .iter()
+                .map(|f| r.join(f))
+                .filter(|p| fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink()))
+                .filter_map(|p| p.canonicalize().ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    ["path", "from", "to"]
+        .iter()
+        .filter_map(|key| args.get(*key)?.as_str())
+        .any(|rel| {
+            names_instructions(Path::new(rel.trim()))
+                || resolve_target(root, rel).ok().is_some_and(|p| {
+                    let p = dunce::simplified(&p);
+                    canon_root
+                        .as_deref()
+                        .and_then(|r| p.strip_prefix(dunce::simplified(r)).ok())
+                        .is_some_and(names_instructions)
+                        || link_targets.iter().any(|t| dunce::simplified(t) == p)
+                        || skill_dirs.iter().any(|d| within(p, dunce::simplified(d)))
+                })
+        })
+}
+
+/// Instruction files other agents load that Loach doesn't read itself:
+/// Claude Code's personal `CLAUDE.local.md`, and Codex's `AGENTS.override.md`,
+/// which it reads ahead of `AGENTS.md`.
+const OTHER_AGENT_FILES: [&str; 2] = ["CLAUDE.local.md", "AGENTS.override.md"];
+
+/// `dir` with links resolved as far as it exists and the missing rest
+/// appended — how [`resolve_target`] spells a path under it. A skills folder
+/// that doesn't exist yet (`~/.agents/skills` on most installs) was dropped
+/// from [`touches_instructions`], so a standing grant let a write create the
+/// first skill there with no card.
+fn canonical_prefix(dir: &Path) -> Option<PathBuf> {
+    let mut missing = Vec::new();
+    let mut existing = dir;
+    loop {
+        if let Ok(canon) = existing.canonicalize() {
+            return Some(missing.into_iter().rev().fold(canon, |p, part| p.join(part)));
+        }
+        missing.push(existing.file_name()?);
+        existing = existing.parent()?;
+    }
+}
+
+/// Whether `path` is `dir` or inside it, names compared as a case-insensitive
+/// volume compares them ([`same_name`]): where `dir` doesn't exist yet,
+/// nothing has resolved how the call spelled it (`.AGENTS/skills`).
+fn within(path: &Path, dir: &Path) -> bool {
+    let mut path = path.components();
+    dir.components().all(|d| {
+        path.next().is_some_and(|p| {
+            same_name(&p.as_os_str().to_string_lossy(), &d.as_os_str().to_string_lossy())
+        })
+    })
+}
+
+/// Whether `rel`, relative to the workspace root, names one of
+/// [`INSTRUCTIONS_FILES`] or [`OTHER_AGENT_FILES`] where it's read:
+/// `LOACHFILE.md` only at the root (all Loach reads), the others anywhere.
+/// Any case.
+fn names_instructions(rel: &Path) -> bool {
+    let Some(name) = rel.file_name().map(|n| n.to_string_lossy()) else {
+        return false;
+    };
+    let at_root = rel.components().filter(|c| matches!(c, Component::Normal(_))).count() == 1;
+    (at_root && same_name(&name, INSTRUCTIONS_FILES[0]))
+        || INSTRUCTIONS_FILES[1..].iter().chain(&OTHER_AGENT_FILES).any(|f| same_name(&name, f))
 }
 
 /// Names git, or the hook manager it calls, takes commands from — see
 /// [`touches_git_dir`].
 const GIT_RUN_NAMES: &[&str] = &[".git", ".husky", ".githooks", ".pre-commit-config.yaml"];
 
-/// Whether any component of `p` is one of [`GIT_RUN_NAMES`].
+/// Whether any component of `p` is one of [`GIT_RUN_NAMES`] or a lefthook
+/// config.
 fn runs_with_git(p: &Path) -> bool {
     p.components().any(|c| {
         matches!(c, Component::Normal(n) if {
             let n = n.to_string_lossy();
-            GIT_RUN_NAMES.iter().any(|name| n.eq_ignore_ascii_case(name))
+            GIT_RUN_NAMES.iter().any(|name| same_name(&n, name)) || is_lefthook_config(&n)
         })
     })
+}
+
+/// `name` folded as a case-insensitive volume compares names: by Unicode
+/// case, not ASCII alone. NTFS and APFS take `ı` (dotless i) for `I` and `ſ`
+/// (long s) for `S`, so `.pre-commıt-config.yaml` passed an ASCII check and
+/// then opened as `.pre-commit-config.yaml`.
+fn folded(name: &str) -> String {
+    name.chars().flat_map(char::to_uppercase).flat_map(char::to_lowercase).collect()
+}
+
+fn same_name(a: &str, b: &str) -> bool {
+    folded(a) == folded(b)
+}
+
+/// `lefthook.yml`, `.lefthook.yaml`, `lefthook-local.toml` and the rest of
+/// the names lefthook reads its commands from.
+fn is_lefthook_config(name: &str) -> bool {
+    let name = folded(name);
+    let name = name.strip_prefix('.').unwrap_or(&name);
+    name.rsplit_once('.').is_some_and(|(stem, ext)| {
+        matches!(stem, "lefthook" | "lefthook-local") && matches!(ext, "yml" | "yaml" | "toml" | "json")
+    })
+}
+
+/// The folder the repository holding `root` names as `core.hooksPath`: git
+/// runs hooks from there instead of `.git/hooks`. Read from the nearest
+/// `.git/config` at or above `root` by a plain scan — `git` isn't needed —
+/// with the last setting winning and a relative one taken from that
+/// repository's top folder, as git does. (A `.git` *file*, a linked
+/// worktree's, isn't followed.)
+fn hooks_path(root: &Path) -> Option<PathBuf> {
+    let root = root.canonicalize().ok()?;
+    let top = root.ancestors().find(|dir| dir.join(".git").is_dir())?;
+    let config = fs::read_to_string(top.join(".git").join("config")).ok()?;
+    let mut in_core = false;
+    let mut value = None;
+    for line in config.lines() {
+        let line = line.trim();
+        if let Some(header) = line.strip_prefix('[') {
+            in_core = header.split(']').next().is_some_and(|s| s.trim().eq_ignore_ascii_case("core"));
+        } else if let Some((key, raw)) = line.split_once('=').filter(|_| in_core) {
+            if key.trim().eq_ignore_ascii_case("hookspath") {
+                value = Some(config_value(raw));
+            }
+        }
+    }
+    let value = value.filter(|v| !v.is_empty())?;
+    let dir = match value.strip_prefix("~/") {
+        Some(rest) => std::env::home_dir()?.join(rest),
+        None => top.join(&value),
+    };
+    // Lexically, where it doesn't exist yet: the write may be what creates it.
+    Some(dir.canonicalize().unwrap_or_else(|_| {
+        dir.components().fold(PathBuf::new(), |mut out, c| {
+            match c {
+                Component::ParentDir => {
+                    out.pop();
+                }
+                Component::CurDir => {}
+                c => out.push(c),
+            }
+            out
+        })
+    }))
+}
+
+/// A git config value as git reads it: quotes removed, `\` escapes taken,
+/// and cut at a `#` or `;` outside quotes.
+fn config_value(raw: &str) -> String {
+    let (mut out, mut quoted, mut chars) = (String::new(), false, raw.chars());
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => quoted = !quoted,
+            '\\' => match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('t') => out.push('\t'),
+                Some(other) => out.push(other),
+                None => {}
+            },
+            '#' | ';' if !quoted => break,
+            c => out.push(c),
+        }
+    }
+    out.trim().to_string()
 }
 
 /// Whether `target`, once written, lies in a folder — the root itself or
@@ -845,22 +1090,35 @@ pub fn write_target_size(root: &Path, args: &Value) -> Option<Option<u64>> {
 // Project instructions
 // ---------------------------------------------------------------------------
 
-/// The workspace's `LOACHFILE.md`, ready for the system prompt, or `None`
-/// when there isn't one worth sending.
+/// The workspace's project instructions, ready for the system prompt, from
+/// the first of [`INSTRUCTIONS_FILES`] worth sending, or `None` when none is.
+/// Without `fallback`, only `LOACHFILE.md` is looked for.
 ///
-/// Resolved through the same sandbox as every tool path, so a
-/// `LOACHFILE.md` that is a symlink out of the tree is refused rather than
-/// followed, and decoded like any file the tools read, so one saved as
-/// Windows-1250 or UTF-16 reads correctly. Anything else that can't be used
-/// — a directory by that name, a binary, a blank file, an I/O error — also
-/// counts as absent: the file is a courtesy to the model, not something a
-/// turn should fail on.
+/// Each is resolved through the same sandbox as every tool path, so one
+/// that is a symlink out of the tree is refused rather than followed, and
+/// decoded like any file the tools read, so one saved as Windows-1250 or
+/// UTF-16 reads correctly. Anything else that can't be used — a directory
+/// by that name, a binary, a blank file, an I/O error — also counts as
+/// absent, and the next file in line is tried: the file is a courtesy to
+/// the model, not something a turn should fail on.
+pub fn read_workspace_instructions(root: &Path, fallback: bool) -> Option<WorkspaceInstructions> {
+    let files = if fallback {
+        &INSTRUCTIONS_FILES[..]
+    } else {
+        &INSTRUCTIONS_FILES[..1]
+    };
+    files.iter().find_map(|&file| {
+        read_instructions_file(root, file).map(|text| WorkspaceInstructions { file, text })
+    })
+}
+
+/// One instructions file's text, or `None` when it can't be used.
 ///
 /// Reads at most the cap plus one byte, so a runaway file costs one bounded
 /// read; what survives is clipped to [`MAX_INSTRUCTIONS_BYTES`] with a note
 /// that says so and names the real size.
-pub fn read_workspace_instructions(root: &Path) -> Option<String> {
-    let path = resolve_read(root, INSTRUCTIONS_FILE).ok()?;
+fn read_instructions_file(root: &Path, name: &str) -> Option<String> {
+    let path = resolve_read(root, name).ok()?;
     if !path.is_file() {
         return None;
     }
@@ -881,7 +1139,7 @@ pub fn read_workspace_instructions(root: &Path) -> Option<String> {
     // trailing U+FFFD; drop it rather than send the model garbage.
     let body = text.trim_end_matches('\u{FFFD}').trim();
     Some(format!(
-        "{body}\n\n[{INSTRUCTIONS_FILE} truncated by Loach at {}; the file is {}. \
+        "{body}\n\n[{name} truncated by Loach at {}; the file is {}. \
          Keep project instructions short.]",
         human_size(MAX_INSTRUCTIONS_BYTES as u64),
         human_size(total)
@@ -1169,13 +1427,18 @@ fn walk_listing(
         return false;
     }
     let mut entries: Vec<fs::DirEntry> = match fs::read_dir(dir) {
-        Ok(rd) => rd.flatten().collect(),
+        // Bounded like `find_files`: a folder of a million files was read
+        // whole (a ~600-byte entry each on Windows) before the 500-line cap
+        // applied. A folder past the bound overruns that cap anyway, so the
+        // listing says it stopped.
+        Ok(rd) => rd.flatten().take(MAX_FIND_VISITED).collect(),
         // An unreadable subdirectory shouldn't abort the whole listing.
         Err(_) => return false,
     };
     // Directories first, then files, each alphabetical — the order a person
     // would write the tree in, and stable across platforms (read_dir is not).
-    entries.sort_by_key(|e| {
+    // Each key built once, not on every comparison.
+    entries.sort_by_cached_key(|e| {
         let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
         (!is_dir, e.file_name().to_string_lossy().to_lowercase())
     });
@@ -2123,22 +2386,6 @@ pub fn dispatch_delete_file(root: &Path, args: &Value) -> McpCallResult {
     }
 }
 
-fn ok(text: impl Into<String>) -> McpCallResult {
-    McpCallResult {
-        content_text: text.into(),
-        is_error: false,
-        ..Default::default()
-    }
-}
-
-fn err(msg: impl Into<String>) -> McpCallResult {
-    McpCallResult {
-        content_text: msg.into(),
-        is_error: true,
-        ..Default::default()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2342,6 +2589,21 @@ mod tests {
         assert!(w.is_error, "{}", w.content_text);
     }
 
+    /// Invisible characters too: `main\u{200B}.rs` is a lookalike of
+    /// `main.rs`, and HFS+ ignores `\u{200C}` in `.g\u{200C}it`, making it
+    /// `.git` — past the guard on `.git` (B3-06).
+    #[test]
+    fn invisible_characters_in_names_are_refused() {
+        let (_d, root) = workspace();
+        for path in ["src/main\u{200B}.rs", ".g\u{200C}it/hooks/pre-commit", "a\u{2028}b.txt", "x\u{FEFF}.py"] {
+            let w = dispatch_write_file(&root, &json!({ "path": path, "content": "x" }));
+            assert!(w.is_error, "{path:?}: {}", w.content_text);
+            assert!(w.content_text.contains("invisible"), "{}", w.content_text);
+        }
+        let ok = dispatch_write_file(&root, &json!({ "path": "zażółć.txt", "content": "x" }));
+        assert!(!ok.is_error, "{}", ok.content_text);
+    }
+
     /// A hardlink canonicalizes to its name inside the workspace, but shares
     /// its data with the other names. Writes and edits must give the
     /// workspace name its own file rather than change the shared one — a
@@ -2453,6 +2715,99 @@ mod tests {
         }
     }
 
+    /// Nor the files read in as instructions: LOACHFILE.md at the root,
+    /// CLAUDE.md / AGENTS.md at any depth, and anything in a skills folder.
+    #[test]
+    fn calls_on_instruction_files_are_recognised() {
+        let (_d, root) = workspace();
+        let skills = root.join("home/.agents/skills");
+        fs::create_dir_all(&skills).unwrap();
+        // A skills folder not made yet still counts: a write creates it.
+        let dirs = [skills, root.join("other/.agents/skills")];
+        let hit = |args: Value| touches_instructions(&root, &args, &dirs);
+        assert!(hit(json!({ "path": "other/.agents/skills/x/SKILL.md" })));
+        assert!(hit(json!({ "path": "other/.AGENTS/Skills/x/SKILL.md" })));
+        assert!(hit(json!({ "from": "notes.md", "to": "other/.agents/skills/x/run.py" })));
+        assert!(!hit(json!({ "path": "other/.agents/notes.md" })));
+
+        assert!(hit(json!({ "path": "LOACHFILE.md" })));
+        assert!(hit(json!({ "path": "./loachfile.MD" })));
+        assert!(hit(json!({ "path": "CLAUDE.md" })));
+        assert!(hit(json!({ "path": "src/AGENTS.md" })));
+        assert!(hit(json!({ "from": "notes.md", "to": "docs/claude.md" })));
+        assert!(hit(json!({ "path": "CLAUDE.local.md" })));
+        assert!(hit(json!({ "path": "src/agents.override.MD" })));
+        assert!(hit(json!({ "path": "home/.agents/skills/helper/SKILL.md" })));
+        // Loach reads only the root's LOACHFILE.md.
+        assert!(!hit(json!({ "path": "docs/LOACHFILE.md" })));
+        assert!(!hit(json!({ "path": "README.md" })));
+        assert!(!hit(json!({ "path": "src/main.rs" })));
+    }
+
+    /// A root instructions file that is a link: what it points at is what
+    /// Loach reads, so a write there asks too, whatever it's called.
+    #[cfg(unix)]
+    #[test]
+    fn the_target_of_a_linked_instructions_file_is_recognised() {
+        let (_d, root) = workspace();
+        fs::create_dir_all(root.join("docs")).unwrap();
+        fs::write(root.join("docs/guide.md"), "Be terse.\n").unwrap();
+        std::os::unix::fs::symlink("docs/guide.md", root.join("AGENTS.md")).unwrap();
+        let hit = |args: Value| touches_instructions(&root, &args, &[]);
+        assert!(hit(json!({ "path": "docs/guide.md" })));
+        assert!(hit(json!({ "from": "docs/guide.md", "to": "docs/old.md" })));
+        assert!(!hit(json!({ "path": "docs/other.md" })));
+    }
+
+    /// B3-14: a junction — the link Windows makes without privilege (pnpm
+    /// makes them) — is no way out of the workspace either. Pinned here
+    /// because every other link test needs a symlink, which CI can't make.
+    #[cfg(windows)]
+    #[test]
+    fn a_junction_out_of_the_workspace_is_not_followed() {
+        let (_d, root) = workspace();
+        let outside = tempfile::TempDir::new().unwrap();
+        fs::write(outside.path().join("secret.txt"), "SUPERSECRETTOKEN\n").unwrap();
+        let link = dunce::simplified(&root).join("link");
+        let made = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(dunce::simplified(outside.path()))
+            .output()
+            .expect("cmd");
+        assert!(made.status.success(), "{}", String::from_utf8_lossy(&made.stdout));
+
+        let r = dispatch_read_file(&root, &json!({ "path": "link/secret.txt" }));
+        assert!(r.is_error && !r.content_text.contains("SUPERSECRETTOKEN"), "{}", r.content_text);
+        let w = dispatch_write_file(&root, &json!({ "path": "link/planted.txt", "content": "x" }));
+        assert!(w.is_error, "{}", w.content_text);
+        assert!(!outside.path().join("planted.txt").exists());
+        let m = dispatch_move_file(&root, &json!({ "from": "README.md", "to": "link/moved.md" }));
+        assert!(m.is_error, "{}", m.content_text);
+        assert!(root.join("README.md").exists());
+        let s = dispatch_search_files(&root, &json!({ "pattern": "SUPERSECRETTOKEN" }));
+        assert!(s.content_text.contains("No matches"), "{}", s.content_text);
+        let l = dispatch_list_directory(&root, &json!({ "path": ".", "depth": 3 }));
+        assert!(!l.content_text.contains("secret.txt"), "{}", l.content_text);
+
+        let d = dispatch_delete_file(&root, &json!({ "path": "link" }));
+        assert!(!d.is_error, "{}", d.content_text);
+        assert!(fs::symlink_metadata(&link).is_err(), "the junction is still there");
+        assert!(outside.path().join("secret.txt").exists(), "the junction's target was emptied");
+    }
+
+    /// B3-08: names are compared by Unicode case, as NTFS and APFS fold them.
+    #[test]
+    fn git_and_instruction_names_match_unicode_lookalikes() {
+        let (_d, root) = workspace();
+        assert!(touches_git_dir(&root, &json!({ "path": ".pre-commıt-config.yaml" })));
+        assert!(touches_git_dir(&root, &json!({ "path": ".githookſ/pre-push" })));
+        assert!(is_lefthook_config("Lefthook-Local.YML"));
+        assert!(touches_instructions(&root, &json!({ "path": "AGENTſ.md" }), &[]));
+        assert!(touches_instructions(&root, &json!({ "path": "LOACHFıLE.md" }), &[]));
+        assert!(!touches_git_dir(&root, &json!({ "path": "src/main.rs" })));
+    }
+
     /// No standing grant covers `.git`: hooks and config there run commands.
     #[test]
     fn calls_into_a_git_directory_are_recognised() {
@@ -2474,14 +2829,52 @@ mod tests {
             ".pre-commit-config.yaml",
             "sub/.Pre-Commit-Config.yaml",
             ".HUSKY/_/h",
+            // lefthook (B3-03).
+            "lefthook.yml",
+            ".lefthook.yaml",
+            "lefthook-local.yml",
+            ".config/lefthook.toml",
+            "Lefthook.JSON",
         ] {
             assert!(runs_with_git(Path::new(p)), "{p}");
         }
-        for p in [".husky-notes.md", "pre-commit-config.yaml", ".github/workflows/ci.yml", "docs/githooks.md"] {
+        for p in [
+            ".husky-notes.md",
+            "pre-commit-config.yaml",
+            ".github/workflows/ci.yml",
+            "docs/githooks.md",
+            "docs/lefthook.md",
+            "lefthook-ci.yml",
+        ] {
             assert!(!runs_with_git(Path::new(p)), "{p}");
         }
         let (_d, root) = workspace();
         assert!(touches_git_dir(&root, &json!({ "from": "a.yaml", "to": ".pre-commit-config.yaml" })));
+    }
+
+    /// Whatever folder the repository's `core.hooksPath` names runs its
+    /// hooks, so no grant covers it, called `.husky` or not (B3-03).
+    #[test]
+    fn the_configured_hooks_folder_is_recognised() {
+        let (_d, root) = workspace();
+        fs::create_dir_all(root.join(".git")).unwrap();
+        let config = |text: &str| fs::write(root.join(".git/config"), text).unwrap();
+        let hook = json!({ "path": "tools/hooks/pre-commit" });
+        assert!(!touches_git_dir(&root, &hook), "no hooksPath set");
+
+        config("[core]\n\tbare = false\n\thooksPath = tools/hooks ; husky's folder\n");
+        assert!(touches_git_dir(&root, &hook));
+        assert!(touches_git_dir(&root, &json!({ "from": "a.sh", "to": "tools/hooks/post-merge" })));
+        assert!(!touches_git_dir(&root, &json!({ "path": "tools/build.sh" })));
+
+        // Quoted, and the last setting wins.
+        config("[core]\n\thooksPath = elsewhere\n[remote \"origin\"]\n\turl = x\n[CORE]\n\thookspath = \"scripts/git hooks\"\n");
+        assert!(touches_git_dir(&root, &json!({ "path": "scripts/git hooks/pre-push" })));
+        assert!(!touches_git_dir(&root, &json!({ "path": "elsewhere/pre-push" })));
+
+        // A hooksPath outside [core] is no setting at all.
+        config("[alias]\n\thooksPath = tools/hooks\n");
+        assert!(!touches_git_dir(&root, &hook));
     }
 
     /// A folder with `HEAD`, `objects/` and `refs/` is a bare repository to
@@ -3114,31 +3507,81 @@ mod tests {
 
     // ---- project instructions ----
 
+    /// Just the text, for the tests that only care what the model reads.
+    fn instructions_text(root: &Path) -> Option<String> {
+        read_workspace_instructions(root, true).map(|i| i.text)
+    }
+
     #[test]
     fn instructions_are_absent_without_a_usable_loachfile() {
         let (_d, root) = workspace();
-        assert_eq!(read_workspace_instructions(&root), None);
+        assert_eq!(read_workspace_instructions(&root, true), None);
 
         // Blank is as good as missing: there is nothing to tell the model.
-        fs::write(root.join(INSTRUCTIONS_FILE), "  \n\n").unwrap();
-        assert_eq!(read_workspace_instructions(&root), None);
+        fs::write(root.join("LOACHFILE.md"), "  \n\n").unwrap();
+        assert_eq!(read_workspace_instructions(&root, true), None);
 
         // So is a directory that happens to carry the name.
-        fs::remove_file(root.join(INSTRUCTIONS_FILE)).unwrap();
-        fs::create_dir(root.join(INSTRUCTIONS_FILE)).unwrap();
-        assert_eq!(read_workspace_instructions(&root), None);
+        fs::remove_file(root.join("LOACHFILE.md")).unwrap();
+        fs::create_dir(root.join("LOACHFILE.md")).unwrap();
+        assert_eq!(read_workspace_instructions(&root, true), None);
+    }
+
+    #[test]
+    fn instructions_fall_back_to_claude_md_then_agents_md() {
+        let (_d, root) = workspace();
+        let found = |root: &Path| read_workspace_instructions(root, true).map(|i| (i.file, i.text));
+
+        fs::write(root.join("AGENTS.md"), "From AGENTS.md\n").unwrap();
+        assert_eq!(found(&root), Some(("AGENTS.md", "From AGENTS.md".into())));
+
+        fs::write(root.join("CLAUDE.md"), "From CLAUDE.md\n").unwrap();
+        assert_eq!(found(&root), Some(("CLAUDE.md", "From CLAUDE.md".into())));
+
+        // Loach's own file wins, and only one file is ever sent.
+        fs::write(root.join("LOACHFILE.md"), "From LOACHFILE.md\n").unwrap();
+        assert_eq!(
+            found(&root),
+            Some(("LOACHFILE.md", "From LOACHFILE.md".into()))
+        );
+    }
+
+    /// A file that can't be used is passed over, not taken as "none".
+    #[test]
+    fn an_unusable_instructions_file_falls_through_to_the_next() {
+        let (_d, root) = workspace();
+        fs::write(root.join("LOACHFILE.md"), "  \n").unwrap();
+        fs::create_dir(root.join("CLAUDE.md")).unwrap();
+        fs::write(root.join("AGENTS.md"), "From AGENTS.md\n").unwrap();
+        let found = read_workspace_instructions(&root, true).expect("present");
+        assert_eq!(found.file, "AGENTS.md");
+        assert_eq!(found.text, "From AGENTS.md");
+    }
+
+    /// With the fallback switched off, only Loach's own file counts.
+    #[test]
+    fn without_the_fallback_only_loachfile_is_read() {
+        let (_d, root) = workspace();
+        fs::write(root.join("CLAUDE.md"), "From CLAUDE.md\n").unwrap();
+        fs::write(root.join("AGENTS.md"), "From AGENTS.md\n").unwrap();
+        assert_eq!(read_workspace_instructions(&root, false), None);
+
+        fs::write(root.join("LOACHFILE.md"), "From LOACHFILE.md\n").unwrap();
+        let found = read_workspace_instructions(&root, false).expect("present");
+        assert_eq!(found.file, "LOACHFILE.md");
+        assert_eq!(found.text, "From LOACHFILE.md");
     }
 
     #[test]
     fn instructions_come_back_verbatim_when_within_the_cap() {
         let (_d, root) = workspace();
         fs::write(
-            root.join(INSTRUCTIONS_FILE),
+            root.join("LOACHFILE.md"),
             "# Project\r\n\r\nRun the tests before you edit.\r\n",
         )
         .unwrap();
         assert_eq!(
-            read_workspace_instructions(&root).as_deref(),
+            instructions_text(&root).as_deref(),
             Some("# Project\r\n\r\nRun the tests before you edit.")
         );
     }
@@ -3149,9 +3592,9 @@ mod tests {
         // Three-byte characters: the byte cap can't fall between them
         // evenly, so the clip has to cope with a split sequence.
         let big = "€".repeat(MAX_INSTRUCTIONS_BYTES);
-        fs::write(root.join(INSTRUCTIONS_FILE), &big).unwrap();
+        fs::write(root.join("LOACHFILE.md"), &big).unwrap();
 
-        let out = read_workspace_instructions(&root).expect("present");
+        let out = instructions_text(&root).expect("present");
         let (body, note) = out
             .split_once("\n\n[")
             .expect("truncation note follows the body");
@@ -3167,6 +3610,23 @@ mod tests {
         );
     }
 
+    /// The truncation note names the file the text actually came from.
+    #[test]
+    fn a_clipped_fallback_names_its_own_file() {
+        let (_d, root) = workspace();
+        fs::write(
+            root.join("CLAUDE.md"),
+            "x".repeat(MAX_INSTRUCTIONS_BYTES + 1),
+        )
+        .unwrap();
+        let out = instructions_text(&root).expect("present");
+        assert!(
+            out.contains("\n\n[CLAUDE.md truncated by Loach at"),
+            "{}",
+            &out[out.len() - 120..]
+        );
+    }
+
     /// Unix-only for the same reason as the tool symlink tests above.
     #[cfg(unix)]
     #[test]
@@ -3175,8 +3635,10 @@ mod tests {
         let outside = tempfile::TempDir::new().unwrap();
         let secret = outside.path().join("notes.md");
         fs::write(&secret, "classified\n").unwrap();
-        std::os::unix::fs::symlink(&secret, root.join(INSTRUCTIONS_FILE)).unwrap();
-        assert_eq!(read_workspace_instructions(&root), None);
+        for file in INSTRUCTIONS_FILES {
+            std::os::unix::fs::symlink(&secret, root.join(file)).unwrap();
+        }
+        assert_eq!(read_workspace_instructions(&root, true), None);
     }
 
     /// A LOACHFILE.md saved by a Polish Notepad reads as Polish, not as
@@ -3185,12 +3647,12 @@ mod tests {
     fn instructions_in_a_legacy_encoding_are_decoded() {
         let (_d, root) = workspace();
         fs::write(
-            root.join(INSTRUCTIONS_FILE),
+            root.join("LOACHFILE.md"),
             cp1250("Pisz komentarze po polsku: zażółć.\n"),
         )
         .unwrap();
         assert_eq!(
-            read_workspace_instructions(&root).as_deref(),
+            instructions_text(&root).as_deref(),
             Some("Pisz komentarze po polsku: zażółć.")
         );
     }

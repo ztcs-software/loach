@@ -15,6 +15,7 @@
 //! We still cap the input string so a runaway prompt can't ship a 10 MB
 //! expression at us.
 
+use super::{err};
 use exmex::{
     literal_matcher_from_pattern, BinOp, Express, FlatEx, FloatOpsFactory, MakeOperators,
     MatchLiteral, Operator,
@@ -295,14 +296,6 @@ pub fn dispatch(arguments: &Value) -> McpCallResult {
             ..Default::default()
         },
         Err(e) => err(format!("could not evaluate `{trimmed}`: {e}")),
-    }
-}
-
-fn err(msg: impl Into<String>) -> McpCallResult {
-    McpCallResult {
-        content_text: msg.into(),
-        is_error: true,
-        ..Default::default()
     }
 }
 

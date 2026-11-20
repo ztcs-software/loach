@@ -1,18 +1,19 @@
 //! Settings -> General: the default-model picker and its preload toggle.
-//! The picker mirrors chatStore.resolveDefaultModelChoice, so the encoding of
-//! a choice string ('recent' / 'provider:x' / 'model:p:id') is decoded here
-//! rather than in the dialog shell.
+//! The picker mirrors chatStore.resolveDefaultModelChoice: both decode a
+//! choice string ('recent' / 'provider:x' / 'model:p:id') with
+//! `decodeModelChoice` (lib/modelChoice), not the dialog shell.
 
-import type { ModelInfo, ProviderId } from "@/types";
+import type { ModelInfo } from "@/types";
 import { Check, ChevronDown } from "lucide-react";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
-import { resolveDefaultModelChoice, useChatStore } from "@/stores/chatStore";
+import { installedIn, resolveDefaultModelChoice, useChatStore } from "@/stores/chatStore";
 import { useMemo } from "react";
 import { useModelsStore } from "@/stores/modelsStore";
 import { useSettingsStore } from "@/stores/settingsStore";
+import { decodeModelChoice } from "@/lib/modelChoice";
 
 /* ─────────────────────── Default-model picker ───────────────────────
  *
@@ -24,40 +25,14 @@ import { useSettingsStore } from "@/stores/settingsStore";
  *   "provider:<id>"           → pin to that provider (most recent model)
  *   "model:<provider>:<id>"   → always start in this exact model
  *
- * The encoding lives in `chatStore.resolveDefaultModelChoice` too — keep
- * the two in sync.
+ * Decoded by `decodeModelChoice` (lib/modelChoice), for this picker and
+ * for `chatStore.resolveDefaultModelChoice` alike.
  *
  * The picker reads the live model list from `useModelsStore`; if it's
  * empty (e.g. Ollama unreachable, no OpenAI key) the model section just
  * collapses and the user is left with "recent" + per-provider choices,
  * which still works.
  * ─────────────────────────────────────────────────────────────────── */
-
-function decodeModelChoice(
-  choice: string,
-):
-  | { kind: "recent" }
-  | { kind: "provider"; provider: ProviderId }
-  | { kind: "model"; provider: ProviderId; model: string } {
-  if (choice.startsWith("model:")) {
-    const rest = choice.slice("model:".length);
-    const sep = rest.indexOf(":");
-    if (sep > 0) {
-      const p = rest.slice(0, sep);
-      const m = rest.slice(sep + 1);
-      if ((p === "ollama" || p === "openai") && m) {
-        return { kind: "model", provider: p, model: m };
-      }
-    }
-  }
-  if (choice.startsWith("provider:")) {
-    const p = choice.slice("provider:".length);
-    if (p === "ollama" || p === "openai") {
-      return { kind: "provider", provider: p };
-    }
-  }
-  return { kind: "recent" };
-}
 
 function describeChoice(
   choice: string,
@@ -190,6 +165,7 @@ export function DefaultModelPreloadToggle({ className }: { className?: string })
   const recentModel = useSettingsStore((s) => s.default_model);
   const update = useSettingsStore((s) => s.update);
   const sessions = useChatStore((s) => s.sessions);
+  const models = useModelsStore((s) => s.models);
 
   const resolved = useMemo(
     () =>
@@ -198,8 +174,9 @@ export function DefaultModelPreloadToggle({ className }: { className?: string })
         recentProvider,
         recentModel ?? "",
         sessions,
+        installedIn(models),
       ),
-    [choice, recentProvider, recentModel, sessions],
+    [choice, recentProvider, recentModel, sessions, models],
   );
 
   const isOllama = resolved.provider === "ollama" && !!resolved.model;
@@ -208,7 +185,7 @@ export function DefaultModelPreloadToggle({ className }: { className?: string })
     <div className={className}>
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
-          <Label className={cn(!isOllama && "text-foreground/55")}>
+          <Label htmlFor="setting-default-model-preload" className={cn(!isOllama && "text-foreground/55")}>
             Preload on startup
           </Label>
           <p className="mt-1 text-[11px] text-foreground/50">
@@ -217,18 +194,14 @@ export function DefaultModelPreloadToggle({ className }: { className?: string })
               : "Only applies to local Ollama models. Pin the default to an Ollama model to enable."}
           </p>
         </div>
-        <Switch
+        <Switch id="setting-default-model-preload"
           checked={isOllama && enabled}
           disabled={!isOllama}
           onCheckedChange={(next) =>
             void update("default_model_preload", next)
           }
           className="shrink-0"
-          aria-label={
-            enabled
-              ? "Disable default model preload"
-              : "Enable default model preload"
-          }
+          aria-label="Preload the default model"
         />
       </div>
     </div>

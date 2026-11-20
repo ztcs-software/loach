@@ -17,16 +17,15 @@ import { formatTokens } from "@/lib/contextUsage";
 import { setSessionRetrievalMode } from "@/lib/tauri";
 import { chatRetrievalMode, estimateChatSources, spaceSourceCount } from "@/lib/sources";
 import { cn } from "@/lib/utils";
-import { resolveDefaultModelChoice, useChatStore } from "@/stores/chatStore";
+import { installedIn, resolveDefaultModelChoice, useChatStore } from "@/stores/chatStore";
 import { useLibraryStore } from "@/stores/libraryStore";
-import { useModelsStore } from "@/stores/modelsStore";
+import { useModelNumCtx, useModelsStore } from "@/stores/modelsStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useToastStore } from "@/stores/toastStore";
 import { useUIStore } from "@/stores/uiStore";
 import {
   DEFAULT_PARAMS,
-  OPENAI_COMPAT_NUM_CTX,
   type LibraryDataset,
   type LibraryItemMeta,
   type RetrievalMode,
@@ -205,7 +204,8 @@ function ChipIcon({ chip }: { chip: ChipRef }) {
 
 /** The context window a chat's sends are sized against, layered the way
  *  the send layers it: its own `num_ctx` override, else its Space's, else
- *  the model's default (a Modelfile's `num_ctx`), else the app default. */
+ *  `modelNumCtx` — the window under both (`useModelNumCtx`: a Modelfile's
+ *  `num_ctx`, else Settings' default context length). */
 export function chatNumCtx(
   sessionParams: string | null | undefined,
   spaceParams: string | null | undefined,
@@ -227,15 +227,17 @@ export function chatNumCtx(
 /** The window of the model a new chat starts on — in `space`, or outside
  *  any Space when null — picked the way `newSession` picks it: the Space's
  *  pinned model (both halves set), else the app's default. A Modelfile's
- *  `num_ctx`, or the one assumed for an OpenAI-compatible model; undefined
- *  until known. For sizing sources before the chat exists. */
+ *  `num_ctx`, else Settings' default context length (`useModelNumCtx`), or
+ *  the one assumed for an OpenAI-compatible model. For sizing sources
+ *  before the chat exists. */
 export function useNewChatModelCtx(
   space: Pick<Space, "default_provider" | "default_model"> | null | undefined,
-): number | undefined {
+): number {
   const defaultChoice = useSettingsStore((s) => s.default_model_choice);
   const recentProvider = useSettingsStore((s) => s.default_provider);
   const recentModel = useSettingsStore((s) => s.default_model);
   const sessions = useChatStore((s) => s.sessions);
+  const models = useModelsStore((s) => s.models);
   const loadModelDefaults = useModelsStore((s) => s.loadModelDefaults);
   const pinnedProvider = space?.default_provider;
   const pinnedModel = space?.default_model;
@@ -243,19 +245,13 @@ export function useNewChatModelCtx(
     () =>
       pinnedProvider && pinnedModel
         ? { provider: pinnedProvider, model: pinnedModel }
-        : resolveDefaultModelChoice(defaultChoice, recentProvider, recentModel ?? "", sessions),
-    [pinnedProvider, pinnedModel, defaultChoice, recentProvider, recentModel, sessions],
+        : resolveDefaultModelChoice(defaultChoice, recentProvider, recentModel ?? "", sessions, installedIn(models)),
+    [pinnedProvider, pinnedModel, defaultChoice, recentProvider, recentModel, sessions, models],
   );
   useEffect(() => {
     if (chatModel.provider === "ollama" && chatModel.model) void loadModelDefaults(chatModel.model);
   }, [chatModel.provider, chatModel.model, loadModelDefaults]);
-  return useModelsStore((s) =>
-    !chatModel.model
-      ? undefined
-      : chatModel.provider === "ollama"
-        ? s.modelDefaults[chatModel.model]?.num_ctx
-        : OPENAI_COMPAT_NUM_CTX,
-  );
+  return useModelNumCtx(chatModel.provider, chatModel.model);
 }
 
 /** How this chat's sources reach the model, with the effective result. */
@@ -266,13 +262,7 @@ function ModeChip({ sessionId, spaceId }: { sessionId: string; spaceId: string |
   // Re-estimate when the Library or the links change.
   useLibraryStore((s) => s.items);
   useLibraryStore((s) => s.sources);
-  const modelNumCtx = useModelsStore((s) =>
-    session?.provider === "ollama" && session.model
-      ? s.modelDefaults[session.model]?.num_ctx
-      : session
-        ? OPENAI_COMPAT_NUM_CTX
-        : undefined,
-  );
+  const modelNumCtx = useModelNumCtx(session?.provider, session?.model);
   const numCtx = chatNumCtx(session?.params_json, space?.default_params_json, modelNumCtx);
   if (!session) return null;
 
@@ -425,11 +415,14 @@ export function MentionPalette({
   highlightIndex,
   onHighlightChange,
   onSelect,
+  listId,
 }: {
   entries: MentionEntry[];
   highlightIndex: number;
   onHighlightChange: (i: number) => void;
   onSelect: (e: MentionEntry) => void;
+  /** As `CommandPalette`'s: option `i` is `${listId}-${i}`. */
+  listId: string;
 }) {
   const listRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -439,23 +432,27 @@ export function MentionPalette({
   }, [highlightIndex]);
   return (
     <div className="absolute bottom-full left-0 right-0 z-30 mb-2" onMouseDown={(e) => e.preventDefault()}>
-      <div
-        ref={listRef}
-        role="listbox"
-        aria-label="Attach from your Library"
-        className="mx-auto max-h-[300px] w-full max-w-3xl overflow-y-auto rounded-2xl border border-foreground/10 bg-popover/95 p-1.5 text-popover-foreground shadow-xl backdrop-blur-xl"
-      >
+      <div className="mx-auto w-full max-w-3xl rounded-2xl border border-foreground/10 bg-popover/95 p-1.5 text-popover-foreground shadow-xl backdrop-blur-xl">
+        {/* Outside the listbox, which holds options only. */}
         <div className="flex items-baseline justify-between px-3 pb-1 pt-1.5">
           <span className="text-[10px] font-semibold uppercase tracking-wider text-foreground/40">
             Attach from Library
           </span>
           <span className="text-[10.5px] text-foreground/40">Tab to attach · Enter sends</span>
         </div>
+        <div
+          ref={listRef}
+          id={listId}
+          role="listbox"
+          aria-label="Attach from your Library"
+          className="max-h-[268px] overflow-y-auto"
+        >
         {entries.map((e, i) => (
           <button
             key={`${e.kind}:${e.id}`}
             type="button"
             role="option"
+            id={`${listId}-${i}`}
             aria-selected={i === highlightIndex}
             data-mention-index={i}
             onMouseEnter={() => onHighlightChange(i)}
@@ -472,6 +469,7 @@ export function MentionPalette({
             </span>
           </button>
         ))}
+        </div>
       </div>
     </div>
   );

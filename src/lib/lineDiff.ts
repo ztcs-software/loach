@@ -109,17 +109,19 @@ export function diffLines(oldText: string, newText: string): DiffLine[] {
 }
 
 /**
- * Characters that change how text displays without showing up themselves:
- * bidi controls (which can make code read in a different order than it
- * runs), zero-width characters (joiners and the invisible math operators
- * included), line and paragraph separators, control characters other than
- * tab and line breaks, the soft hyphen, the Hangul fillers and the
- * Mongolian vowel separator (blank, yet valid in an identifier), variation
- * selectors and the tag block (both can carry a hidden message in text that
- * looks unchanged).
+ * Characters that change how text displays without showing up themselves,
+ * by Unicode's own lists rather than a hand-kept one (which missed the C1
+ * controls, U+034F and more): every default-ignorable code point — bidi
+ * controls (which can make code read in a different order than it runs),
+ * zero-width characters and joiners, the invisible math operators, the soft
+ * hyphen, the Hangul fillers and the Mongolian vowel separator (blank, yet
+ * valid in an identifier), variation selectors and the whole tag plane (both
+ * can carry a hidden message in text that looks unchanged) — every control
+ * character other than tab and line breaks, the line and paragraph
+ * separators, and the interlinear annotation marks.
  */
 const HIDDEN_CHAR =
-  /([\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\u00AD\u061C\u115F\u1160\u180E\u200B-\u200F\u2028-\u202E\u2060-\u2064\u2066-\u2069\u3164\uFE00-\uFE0F\uFEFF\uFFA0\u{E0000}-\u{E007F}\u{E0100}-\u{E01EF}])/u;
+  /((?![\t\n\r])[\p{Default_Ignorable_Code_Point}\p{Cc}\u2028\u2029\uFFF9-\uFFFB])/u;
 
 /**
  * `text` split so every hidden character stands on its own, as a

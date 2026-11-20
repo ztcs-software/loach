@@ -136,6 +136,20 @@ beforeEach(() => {
 });
 
 describe("sendUserMessage edges", () => {
+  // F1-01: the saved list predated both fields, so a sent PDF lost its
+  // preview and Save of the original, and its "truncated" pill.
+  it("keeps a sent attachment's original bytes and truncation mark", async () => {
+    const { appendMessage } = await import("@/lib/tauri");
+    const pdf = { kind: "text", name: "doc.pdf", mime: "application/pdf", data: "text…", bytes: "JVBERi0=", truncated: true } as const;
+    await get().sendUserMessage("read this", [pdf]);
+    const userCall = vi
+      .mocked(appendMessage)
+      .mock.calls.map(([args]) => args as unknown as { role: string; attachments_json?: string })
+      .filter((args) => args.role === "user")
+      .at(-1);
+    expect(JSON.parse(userCall!.attachments_json!)).toEqual([pdf]);
+  });
+
   it("parks a send while Private Chat holds the queue, and starts it on release", async () => {
     get().setQueueHeld(true);
     await get().sendUserMessage("hi", []);

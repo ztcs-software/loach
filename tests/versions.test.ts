@@ -9,10 +9,15 @@
 // from the lockfile) with an error that doesn't obviously say "you bumped the
 // version and didn't refresh the lockfile".
 //
+// So is package-lock.json's own version (its top level and its root
+// package): nothing reads it at build time, so it sat at 1.5.0 for a release
+// before anyone noticed.
+//
 // Parsing mirrors the workflow: package.json / tauri.conf.json are read as
-// JSON; Cargo.toml takes the first `version = "…"` line of the [package]
-// section (dependency tables use inline `{ version = "…" }`, which never
-// starts a line). Cargo.lock is matched on the `[[package]]` entry whose
+// JSON; Cargo.toml takes the first line of the file that starts with
+// `version` (`grep -m1 '^version'`), its value read the way the workflow's
+// `sed` reads it (dependency tables use inline `{ version = "…" }`, which
+// never starts a line). A line the workflow can't read fails here too. Cargo.lock is matched on the `[[package]]` entry whose
 // name is `loach` — every dependency has the same shape, so anchoring on the
 // name is what keeps this from reading some crate's version instead.
 
@@ -30,11 +35,17 @@ describe("release version agreement", () => {
     JSON.parse(read("src-tauri", "tauri.conf.json")) as { version?: unknown }
   ).version;
   const cargoToml = read("src-tauri", "Cargo.toml");
-  const cargo = /^\[package\][\s\S]*?^version\s*=\s*"([^"]+)"/m.exec(cargoToml)?.[1];
+  const cargo = /^version *= *"(.*)"$/.exec(
+    cargoToml.split(/\r?\n/).find((l) => l.startsWith("version")) ?? "",
+  )?.[1];
   const cargoLockText = read("src-tauri", "Cargo.lock");
   // Line-walk rather than a multi-line regex: every dependency in the lock
   // file has the identical `name = ` / `version = ` shape, so the anchor that
   // matters is the name, and `version` is always the line right after it.
+  const npmLock = JSON.parse(read("package-lock.json")) as {
+    version?: unknown;
+    packages?: Record<string, { version?: unknown }>;
+  };
   const cargoLock = (() => {
     const lines = cargoLockText.split("\n").map((l) => l.trimEnd());
     const i = lines.indexOf('name = "loach"');
@@ -50,6 +61,7 @@ describe("release version agreement", () => {
       ["src-tauri/tauri.conf.json", tauri],
       ["src-tauri/Cargo.toml", cargo],
       ["src-tauri/Cargo.lock", cargoLock],
+      ["package-lock.json", npmLock.version],
     ] as const) {
       expect(v, `${name} version`).toMatch(/^\d+\.\d+\.\d+/);
     }
@@ -60,5 +72,12 @@ describe("release version agreement", () => {
       { tauriConf: tauri, cargoToml: cargo, cargoLock },
       "the release workflow hard-fails on drift — fix the odd one out, then run `cargo update -p loach` to refresh the lockfile",
     ).toEqual({ tauriConf: pkg, cargoToml: pkg, cargoLock: pkg });
+  });
+
+  it("package-lock.json carries the same version", () => {
+    expect(
+      { top: npmLock.version, root: npmLock.packages?.[""]?.version },
+      "run `npm install --package-lock-only` after bumping package.json",
+    ).toEqual({ top: pkg, root: pkg });
   });
 });

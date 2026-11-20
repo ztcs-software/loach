@@ -224,7 +224,7 @@ fn last_chunk_id(conn: &Connection) -> Result<i64> {
 /// reach.
 pub(super) fn reissue_chunks(conn: &Connection, doc: Option<(&str, &str)>, last: i64) -> Result<()> {
     let (kind, id) = doc.unzip();
-    let filter = "id <= ?3 AND (?1 IS NULL OR (doc_kind = ?1 AND doc_id = ?2))";
+    let filter = if doc.is_some() { REISSUE_DOC } else { REISSUE_ALL };
     conn.execute(
         &format!(
             "INSERT INTO rag_chunks (doc_kind, doc_id, seq, text)
@@ -235,6 +235,12 @@ pub(super) fn reissue_chunks(conn: &Connection, doc: Option<(&str, &str)>, last:
     conn.execute(&format!("DELETE FROM rag_chunks WHERE {filter}"), params![kind, id, last])?;
     Ok(())
 }
+
+/// [`reissue_chunks`]' filters. Two rather than one `?1 IS NULL OR (…)`: the
+/// planner can't see the parameter, so that form used no index, and one
+/// rename walked the whole chunk table twice under the write lock.
+const REISSUE_DOC: &str = "doc_kind = ?1 AND doc_id = ?2 AND id <= ?3";
+const REISSUE_ALL: &str = "id <= ?3";
 
 /// Chunks [`Database::clear_rag_embeddings`] moves per transaction.
 const REISSUE_BATCH: i64 = 500;
@@ -252,10 +258,24 @@ fn in_scope(param: &str) -> String {
     )
 }
 
+/// The indexer's next batch — see [`Database::rag_pending_embeddings`].
+const PENDING_SELECT: &str = "
+    SELECT c.id, c.text, COALESCE(li.title, sf.name, '')
+      FROM rag_chunks c
+      LEFT JOIN library_items li ON c.doc_kind = 'library' AND li.id = c.doc_id
+      LEFT JOIN space_files sf ON c.doc_kind = 'space_file' AND sf.id = c.doc_id
+     WHERE c.id IN (SELECT id FROM rag_chunks INDEXED BY idx_rag_chunks_doc_model
+                     WHERE embed_model IS NOT ?1 ORDER BY id LIMIT ?2)
+     ORDER BY c.id";
+
+/// Chunks in the index, and those done with a model — see
+/// [`Database::rag_counts`].
+const COUNTS_SELECT: &str =
+    "SELECT COUNT(*), COALESCE(SUM(embed_model = ?1), 0) FROM rag_chunks";
+
 const ITEM_META_SELECT: &str = "
     SELECT i.id, i.kind, i.title, i.mime, i.media, i.size,
-           CASE WHEN i.media = 'text' THEN LENGTH(i.content) ELSE 0 END,
-           CASE WHEN i.media = 'text' THEN substr(i.content, 1, 280) ELSE '' END,
+           i.chars, i.preview,
            i.url, i.fetched_at, i.content_hash, i.truncated,
            (SELECT COUNT(*) FROM rag_chunks c
              WHERE c.doc_kind = 'library' AND c.doc_id = i.id),
@@ -285,7 +305,7 @@ fn item_meta_from_row(r: &rusqlite::Row) -> rusqlite::Result<LibraryItemMeta> {
     })
 }
 
-fn item_from_row(r: &rusqlite::Row) -> rusqlite::Result<LibraryItem> {
+pub(super) fn item_from_row(r: &rusqlite::Row) -> rusqlite::Result<LibraryItem> {
     Ok(LibraryItem {
         id: r.get(0)?,
         kind: r.get(1)?,
@@ -303,7 +323,7 @@ fn item_from_row(r: &rusqlite::Row) -> rusqlite::Result<LibraryItem> {
     })
 }
 
-const ITEM_SELECT: &str = "SELECT id, kind, title, mime, media, content, size, url, fetched_at,
+pub(super) const ITEM_SELECT: &str = "SELECT id, kind, title, mime, media, content, size, url, fetched_at,
                                   content_hash, truncated, created_at, updated_at
                            FROM library_items";
 
@@ -328,6 +348,13 @@ pub(super) fn restore_library(conn: &Connection, d: &SnapshotData) -> Result<()>
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         )?;
         for i in &d.library_items {
+            // The checks `create_library_item` makes: anything else is never
+            // indexed or shown right. Dataset members and links left pointing
+            // at a skipped item are dropped with the other dangling rows.
+            if !matches!(i.kind.as_str(), "text" | "file" | "link") || !matches!(i.media.as_str(), "text" | "image") {
+                tracing::warn!("restore: skipped Library item {} ({} / {})", i.id, i.kind, i.media);
+                continue;
+            }
             // A hand-edited or old export may lack the digest; recompute so
             // duplicate detection keeps working on restored rows.
             let hash = if i.content_hash.is_empty() {
@@ -376,6 +403,12 @@ pub(super) fn restore_library(conn: &Connection, d: &SnapshotData) -> Result<()>
             owner.table()
         );
         for s in rows {
+            // A link names exactly one thing; one with neither (or both) had
+            // nothing for the foreign-key check to catch.
+            if s.item_id.is_some() == s.dataset_id.is_some() {
+                tracing::warn!("restore: skipped Library link {} with no single target", s.id);
+                continue;
+            }
             conn.execute(
                 &sql,
                 params![
@@ -436,16 +469,6 @@ impl Database {
     }
 
     /// Every item with its body, for export.
-    pub fn all_library_items(&self) -> Result<Vec<LibraryItem>> {
-        self.with_read(|conn| {
-            let mut stmt = conn.prepare(&format!("{ITEM_SELECT} ORDER BY created_at"))?;
-            let rows = stmt
-                .query_map([], item_from_row)?
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(rows)
-        })
-    }
-
     pub fn create_library_item(
         &self,
         item: &NewLibraryItem,
@@ -877,16 +900,17 @@ impl Database {
     }
 
     /// Up to `limit` chunks not yet embedded with `model`, oldest first.
+    ///
+    /// The ids come from `idx_rag_chunks_doc_model`. `embed_model` is stored
+    /// after the embedding BLOB, so finding it on the table itself read every
+    /// embedded chunk's vector, overflow pages and all, on every batch — the
+    /// indexer's whole first pass was quadratic in vector reads, and every
+    /// wake ended reading the whole index to learn nothing was pending. The
+    /// index holds `embed_model` and the id in a few dozen bytes; only the
+    /// chunks returned are read in full.
     pub fn rag_pending_embeddings(&self, model: &str, limit: usize) -> Result<Vec<PendingChunk>> {
         self.with_read(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT c.id, c.text, COALESCE(li.title, sf.name, '')
-                   FROM rag_chunks c
-                   LEFT JOIN library_items li ON c.doc_kind = 'library' AND li.id = c.doc_id
-                   LEFT JOIN space_files sf ON c.doc_kind = 'space_file' AND sf.id = c.doc_id
-                  WHERE c.embed_model IS NOT ?1
-                  ORDER BY c.id LIMIT ?2",
-            )?;
+            let mut stmt = conn.prepare(PENDING_SELECT)?;
             let rows = stmt
                 .query_map(params![model, limit as i64], |r| {
                     Ok(PendingChunk {
@@ -954,7 +978,7 @@ impl Database {
     pub fn rag_counts(&self, model: Option<&str>) -> Result<(i64, i64)> {
         self.with_read(|conn| {
             Ok(conn.query_row(
-                "SELECT COUNT(*), COALESCE(SUM(embed_model = ?1), 0) FROM rag_chunks",
+                COUNTS_SELECT,
                 params![model],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )?)
@@ -1269,7 +1293,7 @@ mod tests {
             .unwrap();
         assert_eq!(linked.iter().map(|l| l.item_id.as_deref()).collect::<Vec<_>>(), vec![Some(a.id.as_str())]);
         // A missing owner is still an error, not a silent no-op.
-        assert!(db.add_library_sources(SourceOwner::Session, "gone-chat", &[a.id.clone()], &[]).is_err());
+        assert!(db.add_library_sources(SourceOwner::Session, "gone-chat", std::slice::from_ref(&a.id), &[]).is_err());
     }
 
     #[test]
@@ -1547,6 +1571,54 @@ mod tests {
         assert!(plan.iter().any(|d| d.contains("INDEX idx_rag_chunks_doc (doc_kind=? AND doc_id=?)")), "{plan:?}");
     }
 
+    /// B2-04 / B2-07: the lookups a delete cascade and a rename make go
+    /// through an index, not a scan; the unused hash index is gone.
+    #[test]
+    fn link_cascades_and_reissues_use_an_index() {
+        let (db, _dir) = fresh_db();
+        let conn = db.conn.lock();
+        let plan = |sql: &str| -> Vec<String> {
+            let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+            stmt.query_map(params!["a", "b", 1], |r| r.get(3)).unwrap().collect::<Result<_, _>>().unwrap()
+        };
+        for (sql, index) in [
+            ("SELECT id FROM session_library_sources WHERE owner_id = ?1 AND ?2 AND ?3", "idx_session_library_sources_owner"),
+            ("SELECT id FROM space_library_sources WHERE item_id = ?1 AND ?2 AND ?3", "idx_space_library_sources_item_id"),
+            ("SELECT id FROM session_library_sources WHERE dataset_id = ?1 AND ?2 AND ?3", "idx_session_library_sources_dataset_id"),
+            ("SELECT id FROM sessions WHERE forked_from_session_id = ?1 AND ?2 AND ?3", "idx_sessions_forked"),
+            (&format!("SELECT id FROM rag_chunks WHERE {REISSUE_DOC}"), "idx_rag_chunks_doc"),
+        ] {
+            let p = plan(sql);
+            assert!(p.iter().any(|d| d.contains(index)), "{sql}: {p:?}");
+        }
+        let hash_index: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sqlite_master WHERE name = 'idx_library_items_hash'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(hash_index, 0);
+    }
+
+    /// B2-08: restore skips what the app itself would never write.
+    #[test]
+    fn restore_skips_items_and_links_the_app_never_writes() {
+        let (db, _dir) = fresh_db();
+        let a = text_item(&db, "A", "alpha");
+        let b = text_item(&db, "B", "beta");
+        let chat = db.create_session("c", "ollama", "m", None, None).unwrap();
+        db.add_library_sources(SourceOwner::Session, &chat.id, &[a.id.clone(), b.id.clone()], &[]).unwrap();
+        let mut snap = db.snapshot().unwrap();
+        snap.data.library_items.iter_mut().find(|i| i.id == b.id).unwrap().media = "video".into();
+        snap.data.session_library_sources.iter_mut().find(|l| l.item_id.as_deref() == Some(a.id.as_str())).unwrap().item_id =
+            None;
+
+        let (db2, _dir2) = fresh_db();
+        db2.restore_snapshot(&snap).expect("restore");
+        let items: Vec<String> = db2.list_library_items(None).unwrap().into_iter().map(|i| i.id).collect();
+        assert_eq!(items, vec![a.id.clone()]);
+        // The target-less link is skipped, and the one to the skipped item
+        // is dropped as dangling.
+        assert!(db2.list_library_sources(SourceOwner::Session, &chat.id).unwrap().is_empty());
+    }
+
     // Regression: the "embedded with this model" counts — per item in the
     // Library list, per scope in a search — read each chunk past its
     // embedding BLOB to reach `embed_model`, where an index answers them.
@@ -1557,9 +1629,12 @@ mod tests {
             "SELECT COUNT(*), COALESCE(SUM(embed_model IS NOT ?2), 0) FROM rag_chunks WHERE {}",
             in_scope("?1")
         );
-        let cases: [(&str, &[&dyn rusqlite::ToSql]); 2] = [
+        let cases: [(&str, &[&dyn rusqlite::ToSql]); 4] = [
             (ITEM_META_SELECT, params!["ollama:m1"]),
             (&rag_vectors_count, params!["[]", "ollama:m1"]),
+            // The indexer's per-batch reads (B2-01).
+            (PENDING_SELECT, params!["ollama:m1", 16]),
+            (COUNTS_SELECT, params!["ollama:m1"]),
         ];
         for (sql, args) in cases {
             let conn = db.conn.lock();
@@ -1570,7 +1645,62 @@ mod tests {
                 plan.iter().any(|d| d.contains("COVERING INDEX idx_rag_chunks_doc_model")),
                 "{sql}: {plan:?}"
             );
+            if sql == PENDING_SELECT {
+                // …and only the chunks picked are read whole.
+                assert!(plan.iter().all(|d| !d.starts_with("SCAN c")), "{plan:?}");
+                assert!(plan.iter().any(|d| d.starts_with("SEARCH c USING INTEGER PRIMARY KEY")), "{plan:?}");
+            }
         }
+    }
+
+    /// Listing the Library reads every item's metadata from a covering index
+    /// (B2-06): the columns sit after `content` in the row, so reading them
+    /// from the table walked each body — every image's base64 — to reach
+    /// them.
+    #[test]
+    fn the_library_list_never_reads_a_body() {
+        let (db, _dir) = fresh_db();
+        let conn = db.conn.lock();
+        let sql = format!("{ITEM_META_SELECT} ORDER BY i.updated_at DESC");
+        let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+        let plan: Vec<String> =
+            stmt.query_map(["ollama:m1"], |r| r.get(3)).unwrap().collect::<Result<_, _>>().unwrap();
+        assert!(
+            plan.iter().any(|d| d.contains("SCAN i USING COVERING INDEX idx_library_items_list")),
+            "{plan:?}"
+        );
+    }
+
+    /// A database from before the stored count and preview gets them filled
+    /// in for the items it already has.
+    #[test]
+    fn existing_items_get_their_counts_on_upgrade() {
+        let (db, _dir) = fresh_db();
+        let id = text_item(&db, "Old", "from before").id;
+        db.conn
+            .lock()
+            .execute_batch(
+                "DROP TRIGGER library_items_derive_ai; DROP TRIGGER library_items_derive_au;
+                 DROP INDEX idx_library_items_list;
+                 ALTER TABLE library_items DROP COLUMN chars; ALTER TABLE library_items DROP COLUMN preview;",
+            )
+            .unwrap();
+        db.migrate().unwrap();
+        let item = db.list_library_items(None).unwrap().into_iter().find(|i| i.id == id).unwrap();
+        assert_eq!((item.chars, item.preview.as_str()), (11, "from before"));
+    }
+
+    /// The stored count and preview follow the body through an edit.
+    #[test]
+    fn listed_counts_and_previews_follow_the_body() {
+        let (db, _dir) = fresh_db();
+        let id = text_item(&db, "Notes", "short").id;
+        let listed = |db: &Database| db.list_library_items(None).unwrap().into_iter().find(|i| i.id == id).unwrap();
+        assert_eq!(listed(&db).chars, 5);
+        assert_eq!(listed(&db).preview, "short");
+        db.conn.lock().execute("UPDATE library_items SET content = ?1 WHERE id = ?2", params!["x".repeat(500), id]).unwrap();
+        assert_eq!(listed(&db).chars, 500);
+        assert_eq!(listed(&db).preview, "x".repeat(280));
     }
 
     #[test]

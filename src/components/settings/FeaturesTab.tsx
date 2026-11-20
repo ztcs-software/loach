@@ -6,10 +6,10 @@ import {
   ChevronDown,
   ChevronRight,
   Clock,
+  Gauge,
   Image as ImageIcon,
-  MemoryStick,
 } from "lucide-react";
-import { KeepAliveSwitch } from "./switches";
+import { ContextLengthSwitch, KeepAliveSwitch } from "./switches";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { SectionTitle } from "./shared";
@@ -40,7 +40,7 @@ export function FeaturesTab() {
                 <div>
                   <div className="flex items-start justify-between gap-4">
                     <div className="min-w-0">
-                      <Label className="flex items-center gap-1.5">
+                      <Label htmlFor="setting-thinking-default" className="flex items-center gap-1.5">
                         <Brain className="h-3.5 w-3.5 text-foreground/60" />
                         Thinking
                       </Label>
@@ -51,17 +51,13 @@ export function FeaturesTab() {
                         API providers ignore this field.
                       </p>
                     </div>
-                    <Switch
+                    <Switch id="setting-thinking-default"
                       checked={settings.thinking_default}
                       onCheckedChange={(next) =>
                         settings.update("thinking_default", next)
                       }
                       className="shrink-0"
-                      aria-label={
-                        settings.thinking_default
-                          ? "Disable LLM Thinking by default"
-                          : "Enable LLM Thinking by default"
-                      }
+                      aria-label="LLM Thinking by default"
                     />
                   </div>
                 </div>
@@ -71,7 +67,7 @@ export function FeaturesTab() {
                 <div>
                   <div className="flex items-start justify-between gap-4">
                     <div className="min-w-0">
-                      <Label className="flex items-center gap-1.5">
+                      <Label htmlFor="setting-temporal-awareness" className="flex items-center gap-1.5">
                         <Clock className="h-3.5 w-3.5 text-foreground/60" />
                         Temporal awareness
                       </Label>
@@ -81,17 +77,13 @@ export function FeaturesTab() {
                         like "What day is it today?".
                       </p>
                     </div>
-                    <Switch
+                    <Switch id="setting-temporal-awareness"
                       checked={settings.temporal_awareness}
                       onCheckedChange={(next) =>
                         settings.update("temporal_awareness", next)
                       }
                       className="shrink-0"
-                      aria-label={
-                        settings.temporal_awareness
-                          ? "Disable temporal awareness"
-                          : "Enable temporal awareness"
-                      }
+                      aria-label="Temporal awareness"
                     />
                   </div>
                   <div className="mt-3 rounded-xl border border-foreground/10 bg-foreground/[0.03] p-3 text-[11px] leading-relaxed text-foreground/60">
@@ -131,32 +123,25 @@ export function FeaturesTab() {
                 <div>
                   <div className="flex items-start justify-between gap-4">
                     <div className="min-w-0">
-                      <Label className="flex items-center gap-1.5">
+                      <Label htmlFor="setting-global-memory" className="flex items-center gap-1.5">
                         <BookMarked className="h-3.5 w-3.5 text-foreground/60" />
                         Global memories
                       </Label>
                       <p className="mt-1 text-[11px] text-foreground/50">
-                        Remember durable facts about you across every chat,
-                        not just chats inside a Space. Chats outside a Space
-                        save here; Space chats keep their own memory but see
-                        these too. Off by default — when on, every reply
-                        triggers a second, hidden model call to extract facts.
-                        They're sent with every chat, whichever provider it
-                        uses — a fact learned talking to a local model also
-                        reaches a cloud one. Never used in Private Chat.
+                        Remember facts about you across all chats. After each
+                        reply, an extra background request picks out what's
+                        worth keeping. The facts go with every chat, cloud
+                        providers included. Space chats keep their own memory
+                        but see these too. Never used in Private Chat.
                       </p>
                     </div>
-                    <Switch
+                    <Switch id="setting-global-memory"
                       checked={settings.global_memory_enabled}
                       onCheckedChange={(next) =>
                         settings.update("global_memory_enabled", next)
                       }
                       className="shrink-0"
-                      aria-label={
-                        settings.global_memory_enabled
-                          ? "Disable global memories"
-                          : "Enable global memories"
-                      }
+                      aria-label="Global memories"
                     />
                   </div>
                   <Button
@@ -173,38 +158,6 @@ export function FeaturesTab() {
                     open={globalMemoriesOpen}
                     onOpenChange={setGlobalMemoriesOpen}
                   />
-                </div>
-
-                <Separator />
-
-                <div>
-                  <div className="flex items-start justify-between gap-4">
-                    <div className="min-w-0">
-                      <Label className="flex items-center gap-1.5">
-                        <MemoryStick className="h-3.5 w-3.5 text-foreground/60" />
-                        Low VRAM mode
-                      </Label>
-                      <p className="mt-1 text-[11px] text-foreground/50">
-                        Force Ollama into low-VRAM mode for every chat for
-                        smaller batches and leaner KV cache. This setting
-                        overrides the per-chat Low&nbsp;VRAM toggle so you don't
-                        have to flip it on each new session. Ignored by OpenAI
-                        API providers.
-                      </p>
-                    </div>
-                    <Switch
-                      checked={settings.low_vram_global}
-                      onCheckedChange={(next) =>
-                        settings.update("low_vram_global", next)
-                      }
-                      className="shrink-0"
-                      aria-label={
-                        settings.low_vram_global
-                          ? "Disable global Low VRAM mode"
-                          : "Enable global Low VRAM mode"
-                      }
-                    />
-                  </div>
                 </div>
 
                 <Separator />
@@ -228,6 +181,27 @@ export function FeaturesTab() {
                     value={settings.ollama_keep_alive}
                     onChange={(next) =>
                       settings.update("ollama_keep_alive", next)
+                    }
+                  />
+                </div>
+
+                <Separator />
+
+                <div>
+                  <Label className="flex items-center gap-1.5">
+                    <Gauge className="h-3.5 w-3.5 text-foreground/60" />
+                    Default context length
+                  </Label>
+                  <p className="mt-1 text-[11px] text-foreground/50">
+                    How much of the conversation the model can see at once.
+                    Bigger remembers more but uses more VRAM, and replies slow
+                    down once it no longer fits. Ollama only; a chat, Space or
+                    model with its own setting keeps it.
+                  </p>
+                  <ContextLengthSwitch
+                    value={settings.default_num_ctx}
+                    onChange={(next) =>
+                      settings.update("default_num_ctx", next)
                     }
                   />
                 </div>

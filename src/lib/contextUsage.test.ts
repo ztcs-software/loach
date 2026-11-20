@@ -15,6 +15,7 @@ import {
   stripSummaryBlock,
   SUMMARY_END_TAG,
   SUMMARY_START_TAG,
+  TOOL_CHARS_PER_TOKEN,
 } from "./contextUsage";
 import { inlineTextAttachments } from "./files";
 import type { Attachment, GenerationParams, Message } from "@/types";
@@ -88,6 +89,25 @@ describe("computeContextUsage — what reaches the model", () => {
     expect(usage.messagesTokens).toBe(1);
     expect(usage.systemPromptTokens).toBe(2);
     expect(usage.used).toBe(3);
+  });
+
+  it("counts CJK messages and attachments at about a token per character", () => {
+    // Messages and attachments once stayed at a flat char/4 while every
+    // other layer was CJK-aware, so a Chinese chat filled its window about
+    // four times faster than the bar showed.
+    const prompt = "机器学习是人工智能的一个分支"; // 14 chars → 14 tokens
+    const file = att({ name: "笔记.txt", data: "这是一个很长的中文文件。".repeat(40) });
+    const content = inlineTextAttachments(prompt, [file]);
+    const usage = computeContextUsage(
+      [msg("user", content), msg("assistant", "日本語のテキスト")], // 8 chars → 8 tokens
+      null,
+      NO_PARAMS,
+    );
+    const appendedChars = content.length - prompt.length;
+    expect(usage.attachmentsTokens).toBe(estimateTokens(content.slice(prompt.length)));
+    // Mostly CJK, so well above the flat char/4 count.
+    expect(usage.attachmentsTokens).toBeGreaterThan(appendedChars / 2);
+    expect(usage.messagesTokens).toBe(14 + usage.attachmentsTokens + 8);
   });
 
   it("leaves thinking text out, as chatHistory() does", () => {
@@ -169,6 +189,28 @@ describe("computeContextUsage — project instructions", () => {
     const withMemories = computeContextUsage(messages, "be brief", NO_PARAMS, null, "m".repeat(800));
     expect(withMemories.memoriesTokens).toBe(200);
     expect(withMemories.used).toBe(without.used + 200);
+  });
+
+  // Twenty-three tools took 7.2K of an 8K window, and the bar showed the
+  // chat nearly empty while replies came back cut off.
+  it("counts the tool definitions every request carries, at the JSON rate", () => {
+    const messages = [msg("user", "hello")];
+    const without = computeContextUsage(messages, "be brief", NO_PARAMS);
+    const withTools = computeContextUsage(messages, "be brief", NO_PARAMS, null, null, 0, 26_935);
+    expect(without.toolsTokens).toBe(0);
+    expect(withTools.toolsTokens).toBe(Math.ceil(26_935 / TOOL_CHARS_PER_TOKEN));
+    expect(withTools.toolsTokens).toBeGreaterThan(7_000);
+    expect(withTools.used).toBe(without.used + withTools.toolsTokens);
+    expect(withTools.ratio).toBeGreaterThan(0.85);
+  });
+
+  // A loaded skill's SKILL.md goes out with every request too.
+  it("counts the loaded skills' instructions", () => {
+    const messages = [msg("user", "hello")];
+    const without = computeContextUsage(messages, "be brief", NO_PARAMS);
+    const withSkills = computeContextUsage(messages, "be brief", NO_PARAMS, null, null, 0, 0, 28_000);
+    expect(withSkills.skillsTokens).toBe(7_000);
+    expect(withSkills.used).toBe(without.used + 7_000);
   });
 });
 

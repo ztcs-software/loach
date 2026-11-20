@@ -223,13 +223,16 @@ export function normalizeMath(src: string): string {
     if (inFence) {
       out.push(line);
       // CommonMark closes a fence only on the same character, a run at least
-      // as long as the opener, and no more than three columns further in —
-      // so a shorter ``` inside a ```` block stays content.
+      // as long as the opener, nothing after it but spaces, and no more than
+      // three columns further in — so a shorter ``` inside a ```` block, or
+      // a "```python" inside a "```markdown" one, stays content. Taking that
+      // line for the end rewrote the code after it as math.
       if (
         fence &&
         !fence[2] &&
         fence[3][0] === fenceChar &&
         fence[3].length >= fenceLen &&
+        !line.slice(fence[0].length).trim() &&
         indentWidth(fence[1]) <= fenceIndent + 3
       ) {
         inFence = false;

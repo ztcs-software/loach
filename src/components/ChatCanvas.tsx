@@ -1,9 +1,10 @@
-import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ArrowDown, ChevronDown, ChevronUp, Hourglass, Import, Pin, Search, ShieldAlert, Sparkles, Trash2, Zap, X } from "lucide-react";
 import { MessageItem } from "./Message";
 import { Button } from "@/components/ui/button";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { useChatStore } from "@/stores/chatStore";
+import { useSpeechStore } from "@/stores/speechStore";
 import { useUIStore } from "@/stores/uiStore";
 import { extractSummary } from "@/lib/contextUsage";
 import { cn, prefersReducedMotion } from "@/lib/utils";
@@ -106,6 +107,9 @@ export function ChatCanvas() {
   const approvalBlocking = useChatStore((s) => {
     const sid = s.streamingSessionId;
     if (!sid || sid === s.activeSessionId) return null;
+    // Only read while this chat waits: the parse below ran on every store
+    // update (each token flush) whenever another chat streamed.
+    if (!s.queue.some((t) => t.sessionId === s.activeSessionId)) return null;
     const json = s.messages[sid]?.at(-1)?.tool_calls_json;
     if (!json) return null;
     try {
@@ -213,6 +217,7 @@ export function ChatCanvas() {
   // resets on chat switch via the effect below. `prependAnchor` lets the layout
   // effect keep the viewport pinned when a reveal prepends rows above the fold.
   const [visibleCount, setVisibleCount] = useState(WINDOW_SIZE);
+  const speakingId = useSpeechStore((s) => s.speakingId);
   const prependAnchor = useRef<{ height: number; top: number } | null>(null);
 
   // ---------------- Search-in-chat ----------------
@@ -224,6 +229,8 @@ export function ChatCanvas() {
   const [searchQuery, setSearchQuery] = useState("");
   const [matchCursor, setMatchCursor] = useState(0);
   const searchInputRef = useRef<HTMLInputElement>(null);
+  /** What had focus when the finder opened (see `closeSearch`). */
+  const finderReturnFocus = useRef<HTMLElement | null>(null);
   // Per-message DOM refs so we can scrollIntoView the current match without
   // computing offsets manually. Cleaned up via callback ref so removed
   // messages don't keep dangling entries in the map.
@@ -273,6 +280,10 @@ export function ChatCanvas() {
     const open = (e: Event) => {
       const query = (e as CustomEvent<{ query?: string } | null>).detail?.query;
       if (query) setSearchQuery(query);
+      const active = document.activeElement;
+      if (active instanceof HTMLElement && active !== searchInputRef.current) {
+        finderReturnFocus.current = active;
+      }
       setSearchOpen(true);
     };
     window.addEventListener("loach:open-chat-search", open);
@@ -295,14 +306,23 @@ export function ChatCanvas() {
     return () => cancelAnimationFrame(id);
   }, [searchOpen]);
 
-  // Scroll the active match into view whenever the cursor moves or the
-  // matches list changes (e.g. new query). `scrollIntoView` handles the
+  // What the two effects below run on, as strings: a streaming flush rebuilds
+  // `matchIds` and `messages` ~60 times a second, and keyed on those the
+  // finder snapped the view back to its match every frame — the user could
+  // neither scroll away nor follow the reply — and re-highlighted every
+  // matched message each time. These only change when the match does.
+  const currentMatchId = matchIds[matchCursor] ?? null;
+  const matchKey = matchIds.join("\n");
+  // The streaming bubble is always the last message in the streaming session.
+  const streamingMsgId =
+    streamingHere && messages.length > 0 ? messages[messages.length - 1].id : null;
+
+  // Scroll the active match into view whenever it changes: the cursor
+  // moves, or a new query finds another. `scrollIntoView` handles the
   // `overflow-hidden` parent + smooth animation for us.
   useEffect(() => {
-    if (!searchOpen) return;
-    const id = matchIds[matchCursor];
-    if (!id) return;
-    const el = messageRefs.current.get(id);
+    if (!searchOpen || !currentMatchId) return;
+    const el = messageRefs.current.get(currentMatchId);
     if (el) {
       // Off the bottom until the scroll lands, or the content observer below
       // pulls the view back down when opening the finder mounts older rows.
@@ -312,31 +332,24 @@ export function ChatCanvas() {
         block: "center",
       });
     }
-  }, [matchCursor, matchIds, searchOpen]);
+  }, [currentMatchId, searchOpen]);
 
   // Inline phrase highlighting. The cleanest abstraction here would be a
   // custom rehype plugin running inside react-markdown so React owns the
   // highlight nodes — but we'd still need a separate path for plain-text
   // user messages. A single DOM walker covers both, at the cost of being
-  // out-of-band of React's reconciliation: when messages re-render
-  // (streaming, new turn) our marks get wiped from the DOM and we
-  // re-apply on the next effect tick. The flicker is brief and only
-  // happens during active streaming, which is acceptable.
+  // out-of-band of React's reconciliation. Finished rows are memoised and
+  // keep their marks while a reply streams; the streaming one is left alone
+  // (below) and highlighted once it ends.
   //
-  // Tracks whether we currently have any marks in the DOM. The effect below
-  // runs on every messages change (including every streaming token), so we
-  // gate the unwrap pass on this flag — otherwise we'd run a
-  // querySelectorAll for every message bubble per token even when the finder
-  // is closed and there's nothing to strip.
+  // Tracks whether we currently have any marks in the DOM, so the strip pass
+  // below doesn't run a querySelectorAll over every message bubble when the
+  // finder is closed and there's nothing to strip.
   const hasMarksRef = useRef(false);
   useEffect(() => {
-    // Fast path for the common case during streaming: search panel is
-    // closed AND no marks were left in the DOM. Bail before doing any
-    // DOM work so the effect's per-token re-runs are essentially free.
-    // The slower path below still strips stale marks (e.g. search was
-    // open then closed and we haven't run since) — gated behind
-    // hasMarksRef so we never querySelectorAll across every message
-    // bubble per token when there's nothing to find.
+    // Fast path: search panel closed AND no marks were left in the DOM.
+    // The slower path below still strips stale marks (e.g. search was open
+    // then closed and we haven't run since).
     if (!searchOpen && !hasMarksRef.current) return;
 
     // Never touch the streaming message's DOM. The highlighter mutates text
@@ -344,12 +357,7 @@ export function ChatCanvas() {
     // React would reconcile against our detached nodes — freezing the text or
     // throwing NotFoundError into the chat ErrorBoundary. Skip it in BOTH the
     // strip and highlight passes; it gets highlighted normally once it stops
-    // streaming (this effect re-runs when `streamingHere` flips). The
-    // streaming bubble is always the last message in the streaming session.
-    const streamingMsgId =
-      streamingHere && messages.length > 0
-        ? messages[messages.length - 1].id
-        : null;
+    // streaming (this effect re-runs when `streamingMsgId` changes).
 
     if (hasMarksRef.current) {
       // Strip stale highlights — covers query changes, search close, message
@@ -366,29 +374,35 @@ export function ChatCanvas() {
     if (!searchOpen) return;
     const q = searchQuery.trim();
     if (!q) return;
-    const currentId = matchIds[matchCursor];
-    // Drive the highlighting from `matchIds` rather than re-deriving it from
-    // `messages`: the two filters have to agree, and they didn't. This loop
-    // marked any message with a DOM ref whose displayed text matched, while
-    // `matchIds` also excludes hidden imported rows — so expanding an import
-    // card produced highlights the counter didn't count and prev/next could
-    // never reach. Reusing the memoised list also drops a second full scan of
-    // every message body per keystroke.
-    for (const id of matchIds) {
+    // Drive the highlighting from `matchIds` (here as `matchKey`) rather than
+    // re-deriving it from `messages`: the two filters have to agree, and they
+    // didn't. This loop marked any message with a DOM ref whose displayed
+    // text matched, while `matchIds` also excludes hidden imported rows — so
+    // expanding an import card produced highlights the counter didn't count
+    // and prev/next could never reach. Reusing the memoised list also drops a
+    // second full scan of every message body per keystroke.
+    for (const id of matchKey ? matchKey.split("\n") : []) {
       if (id === streamingMsgId) continue;
-      const el = messageRefs.current.get(id);
+      // Only the message body: the row also holds React-owned labels (code
+      // block Copy, Show more, metrics) whose Text nodes React rewrites later —
+      // swapping one for a mark made the next update throw NotFoundError.
+      const el = messageRefs.current.get(id)?.querySelector("[data-search-root]");
       if (!el) continue;
-      highlightTextNodes(el, q, id === currentId);
+      highlightTextNodes(el, q, id === currentMatchId);
       hasMarksRef.current = true;
     }
-    // `messages` stays a dependency for the `streamingMsgId` read above. It
-    // adds no runs — `matchIds` is re-derived from it on every change.
-  }, [searchOpen, searchQuery, matchIds, matchCursor, messages, streamingHere]);
+  }, [searchOpen, searchQuery, matchKey, currentMatchId, streamingMsgId]);
 
   const closeSearch = () => {
     setSearchOpen(false);
     setSearchQuery("");
     setMatchCursor(0);
+    // Back where it was before the finder opened — the composer when that
+    // is gone (a menu item) — not dropped to <body> with the input.
+    const back = finderReturnFocus.current;
+    finderReturnFocus.current = null;
+    const target = back?.isConnected ? back : document.querySelector<HTMLElement>("[data-composer]");
+    target?.focus({ preventScroll: true });
   };
 
   const stepMatch = (delta: 1 | -1) => {
@@ -534,7 +548,8 @@ export function ChatCanvas() {
     [],
   );
 
-  const jumpToMessage = (id: string) => {
+  // Stable, so the memoised pinned chips skip the re-render each flush.
+  const jumpToMessage = useCallback((id: string) => {
     // Only reach past the window when the target actually sits above it.
     // Expanding unconditionally would mount (and markdown-parse) the whole
     // transcript on every chip click — and because `visibleCount` only ever
@@ -544,7 +559,7 @@ export function ChatCanvas() {
     // Both updates batch into one render, so the effect below runs after any
     // revealed rows have committed their refs.
     setJumpTarget(id);
-  };
+  }, []);
 
   // Deliberately no cleanup function: clearing `jumpTarget` re-runs this
   // effect immediately, and a cleanup would cancel the highlight timer we
@@ -584,7 +599,7 @@ export function ChatCanvas() {
     if (!messages.some((m) => m.id === pendingJumpMessageId)) return;
     consumePendingJumpMessage();
     jumpToMessage(pendingJumpMessageId);
-  }, [pendingJumpMessageId, messages, consumePendingJumpMessage]);
+  }, [pendingJumpMessageId, messages, consumePendingJumpMessage, jumpToMessage]);
 
   // Reveal the next batch of older rows. Snapshot the scroller geometry first
   // so the layout effect above can re-anchor once the prepended rows mount.
@@ -603,11 +618,16 @@ export function ChatCanvas() {
   // Only the trailing window mounts. Items keep their original `index` /
   // `startIndex` (computed against the full `messages` array), so the
   // compaction-divider placement and `isLast` checks below stay correct on the
-  // slice. `hiddenBefore` is how many messages sit above the window.
-  const visibleItems =
-    renderItems.length > visibleCount
-      ? renderItems.slice(renderItems.length - visibleCount)
-      : renderItems;
+  // slice. `hiddenBefore` is how many messages sit above the window. A reply
+  // being read aloud stays in it: unmounted, it stopped reading as new
+  // messages pushed it out (its Stop is on the row).
+  const speakingAt = speakingId
+    ? renderItems.findIndex((it) => it.kind === "message" && it.message.id === speakingId)
+    : -1;
+  const windowStart = Math.max(0, renderItems.length - visibleCount);
+  const visibleItems = renderItems.slice(
+    speakingAt === -1 ? windowStart : Math.min(windowStart, speakingAt),
+  );
   const firstVisible = visibleItems[0];
   const hiddenBefore = firstVisible
     ? firstVisible.kind === "message"
@@ -937,13 +957,21 @@ function highlightTextNodes(
 
   // Snapshot text nodes first; mutating the tree while a TreeWalker is
   // iterating can skip nodes or revisit them. The filter rejects any text
-  // that already lives inside a highlight wrapper.
+  // that already lives inside a highlight wrapper, and text React may still
+  // rewrite or that isn't message content: buttons (Copy → Copied, Show
+  // more), aria-hidden decoration (the code gutter's line numbers) and KaTeX.
+  // Only ancestors inside `root` count: an open Radix modal sets aria-hidden
+  // on the whole app, which would otherwise reject every node.
   const targets: Text[] = [];
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
-    acceptNode: (node) =>
-      (node as Text).parentElement?.closest("[data-loach-match]")
+    acceptNode: (node) => {
+      const skip = (node as Text).parentElement?.closest(
+        '[data-loach-match], button, [aria-hidden="true"], .katex',
+      );
+      return skip && root.contains(skip)
         ? NodeFilter.FILTER_REJECT
-        : NodeFilter.FILTER_ACCEPT,
+        : NodeFilter.FILTER_ACCEPT;
+    },
   });
   let n: Node | null;
   while ((n = walker.nextNode())) targets.push(n as Text);

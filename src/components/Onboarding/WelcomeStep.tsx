@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Logo } from "@/components/Logo";
 import { useToastStore } from "@/stores/toastStore";
 import { importDataWithDialog, isTauri } from "@/lib/tauri";
+import { stashImportNotice } from "@/lib/importNotice";
 import { StepShell } from "./StepShell";
 import { useOnboardingStore } from "@/stores/onboardingStore";
 
@@ -41,6 +42,7 @@ export function WelcomeStep({ onClose }: { onClose: () => void }) {
       }
       // Full reload — every store re-hydrates against the freshly written
       // DB, including `onboarding_completed` from the import payload.
+      stashImportNotice(stats);
       window.setTimeout(() => window.location.reload(), 350);
     } catch (e) {
       push({

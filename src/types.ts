@@ -51,6 +51,58 @@ export interface Session {
   updated_at: number;
 }
 
+/** A chat's project instructions as the next turn will see them: the first
+ *  usable file at the workspace root, in this order. */
+export interface WorkspaceInstructions {
+  file: "LOACHFILE.md" | "CLAUDE.md" | "AGENTS.md";
+  text: string;
+}
+
+/** The tool definitions a send from a chat carries (`commands::ChatToolsSize`):
+ *  how many, and their length as the providers serialize them — and the
+ *  length of the loaded skills' instructions, which head its system prompt. */
+export interface ChatToolsSize {
+  count: number;
+  chars: number;
+  skills_chars: number;
+}
+
+/** An installed Agent Skill (`skills::Skill`): a folder with a `SKILL.md`,
+ *  from Loach's own skills folder or `~/.agents/skills`. */
+export interface SkillInfo {
+  name: string;
+  description: string;
+  /** The skill's folder. */
+  path: string;
+  source: "loach" | "agents";
+  /** Off in Settings → Skills: the model isn't offered it. */
+  enabled: boolean;
+  /** Departures from the spec that didn't stop it loading. */
+  warnings: string[];
+}
+
+/** Every installed skill, plus the folders that couldn't be loaded. */
+export interface SkillCatalog {
+  skills: SkillInfo[];
+  problems: { path: string; message: string }[];
+}
+
+/** What a `run_skill_script` or `run_script` call will run, worked out by
+ *  the backend for its approval card (`skills::script::Preview`). */
+export interface ScriptRunPreview {
+  /** Code the model wrote appears under the name it's saved as
+   *  (`script.py`). */
+  command: string;
+  /** Absent: the temporary folder the code is saved in. */
+  cwd?: string;
+  /** Characters of standard input, when there is any. */
+  stdin_chars?: number;
+  /** A script file's text — its first 256 KB — for the card to show. */
+  file_text?: string;
+  /** The script file's whole size in bytes. */
+  file_bytes?: number;
+}
+
 /** How images are scaled down before they're sent to a model: `px` caps the
  *  longest side, `percent` shrinks both sides to that share of the original.
  *  Neither ever enlarges. Off sends the original. Both sizes are kept so
@@ -210,6 +262,9 @@ export interface Attachment {
    *  is told via an inline marker; the UI shows a "truncated" pill on the
    *  file chip so users know what reached the model isn't the full file. */
   truncated?: boolean;
+  /** Set on attachments of a message listed by `listMessages`: `data` and
+   *  `bytes` were left out (`data` reads ""). `loadAttachments` fetches them. */
+  omitted?: boolean;
 }
 
 export interface MessageMetrics {
@@ -281,6 +336,9 @@ export interface ToolCallRecord {
   server_name: string;
   /** The qualified name the model picked (`<serverSlug>__<rawToolName>`). */
   tool: string;
+  /** The tool's own name, as its server lists it: what the card and chips
+   *  show. Absent on records saved before it existed. */
+  tool_name?: string;
   /** Arguments the model produced. Stored as a value so the UI can render
    *  with `JSON.stringify(…, null, 2)` for readability. */
   arguments: unknown;
@@ -304,6 +362,10 @@ export interface ToolCallRecord {
   /** `write_file` only: size of the file the write replaces, or `null`
    *  when it creates one. Absent on records saved before it existed. */
   existing_bytes?: number | null;
+  /** `run_skill_script` and `run_script` only: the command and folder it
+   *  runs in, as the backend worked them out. Absent when the call couldn't
+   *  run. */
+  script_run?: ScriptRunPreview;
   /** True when the reply ended (Stop, error) before this call's result
    *  arrived. `result` then says whether it could have run — a workspace
    *  write already under way when Stop landed still finishes on disk. */
@@ -344,17 +406,12 @@ export interface GenerationParams {
    *  `undefined` lets Ollama auto-detect. Lets users dial offload down when
    *  the model OOMs the GPU. Ignored by OpenAI providers. */
   num_gpu?: number;
-  /** Ollama-only: opt into low-VRAM mode. `true` shrinks batch sizes and
-   *  the KV cache; `undefined` / `false` leaves Ollama's default (off).
-   *  Pairs with `num_gpu` for memory-constrained setups. Ignored by OpenAI
-   *  providers. */
-  low_vram?: boolean;
 }
 
 /** Context window assumed for an OpenAI-compatible chat that doesn't set
  *  `num_ctx` itself. Those servers don't report their window and ignore
  *  `num_ctx`, so it only sizes Library sources and the context bar — where
- *  DEFAULT_PARAMS' 8192 made a 128k model read as nearly full after a few
+ *  the Ollama default (8192 then) made a 128k model read as nearly full after a few
  *  turns and pushed its sources down to excerpts. */
 export const OPENAI_COMPAT_NUM_CTX = 32768;
 
@@ -364,7 +421,7 @@ export const DEFAULT_PARAMS: GenerationParams = {
   top_k: 40,
   min_p: 0.05,
   max_tokens: 4096,
-  num_ctx: 8192,
+  num_ctx: 16384,
   repeat_penalty: 1.1,
   frequency_penalty: 0,
   presence_penalty: 0,
@@ -403,9 +460,17 @@ export interface ChatRequest {
 
 export type StreamEvent =
   | { kind: "token"; delta: string }
+  /** Something to tell the user beside the reply, never part of it (MCP
+   *  servers that couldn't be reached). Kept as a notice record on the
+   *  reply — see `lib/notices.ts`. */
+  | { kind: "notice"; text: string }
   | { kind: "thinking"; delta: string }
-  /** Stream ended naturally — provider emitted its EOF / `[DONE]` marker. */
-  | { kind: "done" }
+  /** Stream ended naturally — provider emitted its EOF / `[DONE]` marker.
+   *  `cut_off`: it stopped at a limit rather than at the end of the answer
+   *  — Max Tokens, or the context window filling first. Mirrors
+   *  `src-tauri/src/stream.rs::CutOff`. `tools`: the request carried tool
+   *  definitions. */
+  | { kind: "done"; cut_off?: "max_tokens" | "context"; tools?: boolean }
   /** Stream was cancelled mid-flight. Distinct from `done` so callers
    *  can avoid the "real completion" side-effects (memory extraction,
    *  unread dot) on an interrupted reply. Mirrors
@@ -428,10 +493,15 @@ export type StreamEvent =
       server_id: string;
       server_name: string;
       tool: string;
+      /** The tool's own name — see `ToolCallRecord.tool_name`. */
+      tool_name?: string;
       arguments: unknown;
       approval_required?: boolean;
       /** `write_file` only — see `ToolCallRecord.existing_bytes`. */
       existing_bytes?: number | null;
+      /** `run_skill_script` and `run_script` only — see
+       *  `ToolCallRecord.script_run`. */
+      script_run?: ScriptRunPreview;
     }
   /** Outcome of a tool call. `id` pairs with the matching `tool_call`. */
   | {
@@ -491,8 +561,9 @@ export interface Settings {
    *  Keyed `global_system_prompt` for backwards compat with the on-disk KV
    *  table; the UI now surfaces it as "Custom instructions". */
   global_system_prompt: string;
-  /** Last-used provider+model. Always tracked so "Use most recent" can resolve
-   *  to a concrete pair. Not surfaced directly in the UI. */
+  /** Last-used provider+model, so "Use most recent" can resolve to a
+   *  concrete pair: set when a chat switches model or starts on a chosen one
+   *  (not a Space's pin). Not surfaced directly in the UI. */
   default_provider: ProviderId;
   default_model: string;
   /** How `New chat` picks its initial model. Encoded as one of:
@@ -561,12 +632,19 @@ export interface Settings {
    *  require the chat to have a directory picked — see `Session.workspace_root`.
    *  Picking one turns this on (`chatStore.pickWorkspace`). */
   workspace_tool_enabled: boolean;
-  /** Global override for Ollama's `low_vram` option. When `true`, every
-   *  Ollama request is sent with `low_vram: true` regardless of per-chat
-   *  params or per-model Modelfile defaults — handy on memory-constrained
-   *  hardware where you'd otherwise have to remember to flip the per-chat
-   *  toggle. Off by default. Ignored by OpenAI providers. */
-  low_vram_global: boolean;
+  /** Whether a workspace without a `LOACHFILE.md` uses its `CLAUDE.md`, else
+   *  its `AGENTS.md`, as project instructions. On by default; read by the
+   *  backend on every turn and by `read_workspace_instructions`. */
+  workspace_instructions_fallback: boolean;
+  /** Settings → Skills master switch. Off: no skill catalogue, tools or
+   *  instructions reach any model. */
+  skills_enabled: boolean;
+  /** Whether `run_skill_script` is offered. Every run still asks. */
+  skill_scripts_enabled: boolean;
+  /** Settings → Tools → Run scripts: whether `run_script` is offered, to
+   *  run code the model writes or a script in the chat's workspace. Every
+   *  run still asks. */
+  run_script_enabled: boolean;
   /** How long Ollama keeps the resolved model resident in VRAM after each
    *  request (the `keep_alive` field). The default `"5m"` matches Ollama's
    *  own idle-unload timeout; longer values (or `"-1"` = until unloaded)
@@ -574,6 +652,11 @@ export interface Settings {
    *  skips the multi-second cold reload — at the cost of pinned VRAM.
    *  Ignored by OpenAI providers. */
   ollama_keep_alive: OllamaKeepAlive;
+  /** Context window (`num_ctx`) an Ollama chat gets when neither it, its
+   *  Space nor its model's Modelfile sets one — the bottom layer of
+   *  `chatStore.layerParams`, capped at the model's own maximum
+   *  (`defaultNumCtx`). Ignored by OpenAI providers. */
+  default_num_ctx: number;
   /** Default value for the per-chat Thinking toggle. Applied as a baseline
    *  in `readSessionParams` so new chats (and chats that haven't touched
    *  the slider) inherit it. The per-chat Thinking switch in the parameter
@@ -657,8 +740,12 @@ export const DEFAULT_SETTINGS: Settings = {
   ip_tool_enabled: false,
   pdf_tool_enabled: false,
   workspace_tool_enabled: false,
-  low_vram_global: false,
+  workspace_instructions_fallback: true,
+  skills_enabled: false,
+  skill_scripts_enabled: false,
+  run_script_enabled: false,
   ollama_keep_alive: "5m",
+  default_num_ctx: 16384,
   thinking_default: true,
   default_tone_id: "default",
   onboarding_completed: false,
@@ -856,8 +943,8 @@ export interface McpTestResult {
 }
 
 /** Result of `mcp_tools` — the catalogue a chat turn would get, from the
- *  running servers. `errors` pairs a server name with why its tools
- *  couldn't be listed. */
+ *  running servers. `errors` says, per server, why its tools couldn't be
+ *  listed. */
 export interface McpToolsOverview {
   tools: Array<{
     server_id: string;
@@ -865,7 +952,8 @@ export interface McpToolsOverview {
     name: string;
     description: string | null;
   }>;
-  errors: Array<[server: string, error: string]>;
+  /** By server id: names aren't unique. */
+  errors: Array<{ server_id: string; name: string; error: string }>;
 }
 
 // ---------------------------------------------------------------------------
@@ -889,6 +977,14 @@ export interface ImportStats {
   settings: number;
   library_items: number;
   library_datasets: number;
+  /** MCP servers brought back switched off: stdio ones waiting for this
+   *  install's consent, and hosts that couldn't be screened. */
+  mcp_disabled: string[];
+  /** MCP servers renamed to fit the naming rule, as `"old" → "new"`. */
+  mcp_renamed: string[];
+  /** The backup's OpenAI-compatible URL was set aside: a key is stored for
+   *  the current one. */
+  openai_base_url_kept: boolean;
 }
 
 /** Storage usage for the Settings → Data tile, from `storage_stats`.

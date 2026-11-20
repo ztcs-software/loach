@@ -278,6 +278,21 @@ describe("normalizeMath — code is never touched", () => {
     expect(normalizeMath(src)).toBe(src);
   });
 
+  it("does not take a fence line with an info string for a closer", () => {
+    // F3-04: a ```markdown README holding a ```python block. "```python"
+    // is content to CommonMark — the bare ``` after the code closes the
+    // block — so the code between must come through untouched.
+    const src = [
+      "```markdown",
+      "# Tool",
+      "```python",
+      're.compile(r"\\(\\w+\\)")',
+      "cp $src/$dst",
+      "```",
+    ].join("\n");
+    expect(normalizeMath(src)).toBe(src);
+  });
+
   it("does not let a short inner fence close a longer outer one", () => {
     // A ```` block whose body shows ``` fenced markdown: the inner run is
     // content, so the `$$…$$` in the example must survive as written.

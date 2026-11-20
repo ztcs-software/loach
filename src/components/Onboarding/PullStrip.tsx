@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import { Check, Download, X, XCircle } from "lucide-react";
 import { pullPercent } from "@/lib/usePullRuns";
 import { useModelsStore } from "@/stores/modelsStore";
+import { PullProgress } from "@/components/PullProgress";
 
 /**
  * Thin download strip pinned to the bottom of every wizard step.
@@ -60,8 +61,9 @@ export function PullStrip() {
               <span className="min-w-0 flex-1 truncate font-mono text-[11.5px] text-foreground/75">
                 {run.target}
               </span>
-              <span className="shrink-0 text-[11px] text-destructive">
-                Failed
+              {/* The reason on screen, not only in a mouse-only tooltip. */}
+              <span className="min-w-0 max-w-[55%] truncate text-[11px] text-destructive">
+                Failed{run.error ? `: ${run.error}` : ""}
               </span>
             </div>
           );
@@ -79,21 +81,7 @@ export function PullStrip() {
                   {pct === null ? run.status : `${pct}%`}
                 </span>
               </div>
-              <div
-                className="mt-1 h-1 w-full overflow-hidden rounded-full bg-foreground/[0.08]"
-                role="progressbar"
-                aria-label={`Downloading ${run.target}`}
-                // An indeterminate bar reports no value at all rather than a
-                // misleading 0%, which is what `aria-valuenow={0}` would say.
-                aria-valuenow={pct ?? undefined}
-                aria-valuemin={0}
-                aria-valuemax={100}
-              >
-                <div
-                  className={pct === null ? "h-full w-1/3 animate-pulse bg-primary" : "h-full bg-primary transition-all"}
-                  style={pct === null ? undefined : { width: `${pct}%` }}
-                />
-              </div>
+              <PullProgress run={run} className="mt-1" />
             </div>
             {/* Stopping is low-cost: Ollama keeps the layers it already
                 fetched, so a re-pull of the same tag resumes from them. No

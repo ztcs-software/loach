@@ -30,20 +30,22 @@ import {
   fileToAttachment,
   FileTooLargeError,
 } from "@/lib/files";
-import { isPreparingSend, useChatStore } from "@/stores/chatStore";
-import { useModelsStore } from "@/stores/modelsStore";
+import { isPreparingSend, useChatStore, warmModelForTyping } from "@/stores/chatStore";
+import { useMcpStore } from "@/stores/mcpStore";
+import { useModelNumCtx, useModelsStore } from "@/stores/modelsStore";
 import { usePrivateChatStore } from "@/stores/privateChatStore";
 import { useSnippetStore } from "@/stores/snippetStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useUIStore } from "@/stores/uiStore";
 import { useSettingsStore } from "@/stores/settingsStore";
+import { useSkillStore } from "@/stores/skillStore";
 import { useToastStore } from "@/stores/toastStore";
 import { cn } from "@/lib/utils";
 import { logger } from "@/lib/logger";
 import { formatShortcut, modalDialogOpen } from "@/lib/shortcuts";
 import { openSessionWorkspace } from "@/lib/tauri";
 import { chatRetrievalMode } from "@/lib/sources";
-import { ChipDivider, PersonaChip, ToneChip } from "./ComposerChip";
+import { ChipDivider, PersonaChip, SkillChip, ToneChip } from "./ComposerChip";
 import { WorkspaceNotice } from "./WorkspaceNotice";
 import { LibraryPicker, type LibrarySelection } from "./library/LibraryPicker";
 import {
@@ -73,7 +75,7 @@ import {
 } from "@/lib/commands/parser";
 import { orderByRecency, parseRecentCommands } from "@/lib/commands/recency";
 import type { CommandResult } from "@/lib/commands/types";
-import { OPENAI_COMPAT_NUM_CTX, type Attachment } from "@/types";
+import { type Attachment } from "@/types";
 
 interface ChatInputProps {
   centered?: boolean;
@@ -87,10 +89,26 @@ interface ChatInputProps {
  *  one chat with the next chat's message. Kept out here, in memory only. */
 const drafts = new Map<string, { text: string; attachments: Attachment[] }>();
 
+/** The slash-command and `#` palettes' listbox ids (see the textarea's
+ *  `aria-activedescendant`). One composer is mounted at a time. */
+const COMMAND_LIST_ID = "composer-commands";
+const MENTION_LIST_ID = "composer-mentions";
+
 /** The `composerInsertSeq` last applied. One composer is mounted at a time,
  *  so a newer one at mount is a primer (a snippet's Run, a failed send put
  *  back) that landed while none was. */
 let appliedInsertSeq = 0;
+
+// A deleted chat's draft goes with it: kept, it held the text and files (up
+// to 20 MB each) until restart. A Space page's draft is keyed `space:<id>`.
+useChatStore.subscribe((state, prev) => {
+  if (state.sessions === prev.sessions) return;
+  for (const key of drafts.keys()) {
+    if (key && !key.startsWith("space:") && !state.sessions.some((s) => s.id === key)) {
+      drafts.delete(key);
+    }
+  }
+});
 
 export function ChatInput({ centered = false }: ChatInputProps) {
   // "Streaming in this chat" means the global runner is currently producing
@@ -132,15 +150,24 @@ export function ChatInput({ centered = false }: ChatInputProps) {
   const refreshWorkspaceInstructions = useChatStore(
     (s) => s.refreshWorkspaceInstructions,
   );
-  // Keep the LOACHFILE.md badge honest. The file can change under us — the
+  // Keep the project-instructions badge honest (LOACHFILE.md, else
+  // CLAUDE.md or AGENTS.md). The file can change under us — the
   // user edits it, or the model writes it mid-turn — so it is re-read when
-  // this chat is opened or gets a folder, and again once a turn in it ends.
+  // this chat is opened or gets a folder, again once a turn in it ends, and
+  // when the CLAUDE.md / AGENTS.md fallback is switched in Settings.
   // The backend reads its own copy every turn regardless; this only feeds
   // the workspace notice and the context usage row.
+  const instructionsFallback = useSettingsStore((s) => s.workspace_instructions_fallback);
   useEffect(() => {
     if (!composerSessionId || !workspaceRoot || streamingThisChat) return;
     void refreshWorkspaceInstructions(composerSessionId);
-  }, [composerSessionId, workspaceRoot, streamingThisChat, refreshWorkspaceInstructions]);
+  }, [
+    composerSessionId,
+    workspaceRoot,
+    streamingThisChat,
+    instructionsFallback,
+    refreshWorkspaceInstructions,
+  ]);
   const composerDraft = useUIStore((s) => s.composerDraft);
   const composerAttachments = useUIStore((s) => s.composerAttachments);
   const composerInsertSeq = useUIStore((s) => s.composerInsertSeq);
@@ -269,18 +296,42 @@ export function ChatInput({ centered = false }: ChatInputProps) {
   );
   const chatSources = useChatSources(composerSessionId, sourcesSpaceId);
   const hasChatSources = chatSources.chips.length > 0 || chatSources.spaceCount > 0;
-  // A Modelfile's own window, which the send layers under the chat's (for
-  // an OpenAI-compatible chat, the window Loach assumes for it). Before the
-  // chat exists, the window of the model it will start on.
-  const sessionModelCtx = useModelsStore((s) =>
-    !composerSessionId || !activeSession
-      ? undefined
-      : activeSession.provider === "ollama"
-        ? activeSession.model
-          ? s.modelDefaults[activeSession.model]?.num_ctx
-          : undefined
-        : OPENAI_COMPAT_NUM_CTX,
+  // Skills loaded in this chat. Shown only while skills are on, and only
+  // those still enabled once the catalogue is known: the rest aren't sent.
+  const skillsOn = useSettingsStore((s) => s.skills_enabled);
+  const recordedSkills = useSkillStore((s) =>
+    composerSessionId ? s.bySession[composerSessionId] : undefined,
   );
+  const skillCatalog = useSkillStore((s) => s.catalog);
+  useEffect(() => {
+    if (!skillsOn || !composerSessionId) return;
+    const skills = useSkillStore.getState();
+    void skills.loadSession(composerSessionId).catch(() => {});
+    if (!skills.catalog) void skills.loadCatalog().catch(() => {});
+  }, [skillsOn, composerSessionId]);
+  const chatSkills = !skillsOn
+    ? []
+    : (recordedSkills ?? []).filter(
+        (name) => !skillCatalog || skillCatalog.skills.some((s) => s.name === name && s.enabled),
+      );
+  const removeSkill = (name: string) => {
+    if (!composerSessionId) return;
+    void useSkillStore
+      .getState()
+      .setActive(composerSessionId, name, false)
+      .catch((e) =>
+        useToastStore.getState().push({
+          kind: "error",
+          title: `Couldn't remove ${name}`,
+          body: e instanceof Error ? e.message : String(e),
+        }),
+      );
+  };
+  // A Modelfile's own window, else Settings' default, which the send layers
+  // under the chat's (for an OpenAI-compatible chat, the window Loach
+  // assumes for it). Before the chat exists, the window of the model it
+  // will start on.
+  const sessionModelCtx = useModelNumCtx(activeSession?.provider, activeSession?.model);
   const newChatModelCtx = useNewChatModelCtx(sourcesSpace);
   const composerModelCtx = composerSessionId && activeSession ? sessionModelCtx : newChatModelCtx;
   const libraryItems = useLibraryStore((s) => s.items);
@@ -447,7 +498,15 @@ export function ChatInput({ centered = false }: ChatInputProps) {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") setCtxMenu(null);
     };
-    const onScroll = () => setCtxMenu(null);
+    // Only a scroll that moves the composer: the transcript's own scroll to
+    // follow a streaming reply fired here too, and closed the menu on the
+    // next token.
+    const onScroll = (e: Event) => {
+      const ta = textareaRef.current;
+      if (e.target === document || (ta && e.target instanceof Node && e.target.contains(ta))) {
+        setCtxMenu(null);
+      }
+    };
     // Use mousedown so we close before a focus-stealing click lands.
     window.addEventListener("mousedown", dismiss);
     window.addEventListener("keydown", onKey);
@@ -912,6 +971,9 @@ export function ChatInput({ centered = false }: ChatInputProps) {
     // fall through to the normal send path so the user's literal text still
     // reaches the model (the "ignore unknown" rule).
     if (trimmed && isCommandInput(trimmed)) {
+      // Its text stays in the box while it runs: a second Enter ran it
+      // again (two fetches, two confirmations).
+      if (runningCommand !== null) return;
       const insertSeq = useUIStore.getState().composerInsertSeq;
       const key = draftKey;
       setRunningCommand(text);
@@ -1067,6 +1129,8 @@ export function ChatInput({ centered = false }: ChatInputProps) {
     placeholder = "This chat is waiting in the queue…";
     disabledTitle =
       "This chat already has a prompt waiting. Cancel it or wait for it to run before sending another.";
+  } else if (!text.trim() && attachments.length === 0) {
+    disabledTitle = "Type a message to send";
   }
 
   const primaryAriaLabel = streamingThisChat
@@ -1091,7 +1155,7 @@ export function ChatInput({ centered = false }: ChatInputProps) {
             onDismiss={() => setCommandResult(null)}
           />
         )}
-        {(attachments.length > 0 || activePersona || activeTone || hasChatSources) && (
+        {(attachments.length > 0 || activePersona || activeTone || hasChatSources || chatSkills.length > 0) && (
           // Config chips first, then payload. The divider marks the lifetime
           // boundary — everything left of it survives the send, everything
           // right of it goes with the message.
@@ -1106,8 +1170,11 @@ export function ChatInput({ centered = false }: ChatInputProps) {
                 onRemove={clearTone}
               />
             )}
+            {chatSkills.map((name) => (
+              <SkillChip key={name} name={name} onRemove={() => removeSkill(name)} />
+            ))}
             <ChatSourceChips sessionId={composerSessionId} spaceId={sourcesSpaceId} />
-            {(activePersona || activeTone || hasChatSources) &&
+            {(activePersona || activeTone || hasChatSources || chatSkills.length > 0) &&
               attachments.length > 0 && <ChipDivider />}
             {attachments.map((a, i) => (
               <FileChip
@@ -1124,6 +1191,7 @@ export function ChatInput({ centered = false }: ChatInputProps) {
             highlightIndex={mentionIndex}
             onHighlightChange={setMentionIndex}
             onSelect={acceptMention}
+            listId={MENTION_LIST_ID}
           />
         )}
         {paletteOpen && (
@@ -1132,6 +1200,7 @@ export function ChatInput({ centered = false }: ChatInputProps) {
             highlightIndex={paletteIndex}
             onHighlightChange={setPaletteIndex}
             onSelect={acceptPaletteEntry}
+            listId={COMMAND_LIST_ID}
           />
         )}
         <div
@@ -1159,7 +1228,7 @@ export function ChatInput({ centered = false }: ChatInputProps) {
             <WorkspaceNotice
               root={workspaceRoot}
               toolsEnabled={workspaceToolsEnabled}
-              // With the switch off the backend sends no LOACHFILE.md either.
+              // With the switch off the backend sends no instructions either.
               instructions={workspaceToolsEnabled ? workspaceInstructions : null}
               locked={streamingThisChat}
               hidden={dragging}
@@ -1242,16 +1311,32 @@ export function ChatInput({ centered = false }: ChatInputProps) {
 
             <Textarea
               ref={textareaRef}
+              // Where the chat finder hands focus back when it closes.
+              data-composer=""
               // Not left to the placeholder: it is the only thing naming this
               // control, and it swaps to "Replying — press the Stop button…"
               // mid-stream, so the composer's accessible name would change
               // under the user. A fixed label keeps it stable; the placeholder
               // stays as the visible status hint.
               aria-label="Message"
+              // The open palette and its highlighted entry, for screen
+              // readers: arrowing through it said nothing. The caret stays
+              // here, so the entry is named through the textbox.
+              aria-autocomplete={paletteOpen || mentionOpen ? "list" : undefined}
+              aria-controls={paletteOpen ? COMMAND_LIST_ID : mentionOpen ? MENTION_LIST_ID : undefined}
+              aria-activedescendant={
+                paletteOpen
+                  ? `${COMMAND_LIST_ID}-${paletteIndex}`
+                  : mentionOpen
+                    ? `${MENTION_LIST_ID}-${mentionIndex}`
+                    : undefined
+              }
               value={text}
               onChange={(e) => {
                 setText(e.target.value);
                 setCaret(e.target.selectionStart ?? e.target.value.length);
+                if (composerSessionId) void warmModelForTyping(composerSessionId);
+                useMcpStore.getState().warmTools();
               }}
               onSelect={(e) => setCaret(e.currentTarget.selectionStart ?? 0)}
               onKeyDown={(e) => {
@@ -1334,6 +1419,10 @@ export function ChatInput({ centered = false }: ChatInputProps) {
               }}
               onPaste={(e) => void onPaste(e)}
               onContextMenu={(e) => {
+                // Opened from the keyboard (the Menu key, Shift+F10), the
+                // native menu stays: this one is for the mouse — its items
+                // act on mousedown, and nothing moves focus into it.
+                if (e.button !== 2) return;
                 e.preventDefault();
                 e.stopPropagation();
                 const el = textareaRef.current;
@@ -1372,7 +1461,7 @@ export function ChatInput({ centered = false }: ChatInputProps) {
                 className={cn(
                   "relative rounded-full transition-colors",
                   listening
-                    ? "bg-rose-500/15 text-rose-300 hover:bg-rose-500/25 hover:text-rose-200"
+                    ? "bg-rose-500/15 text-rose-700 hover:bg-rose-500/25 hover:text-rose-800 dark:text-rose-300 dark:hover:text-rose-200"
                     : "text-foreground/65 hover:bg-foreground/10 hover:text-foreground",
                 )}
               >
@@ -1402,7 +1491,7 @@ export function ChatInput({ centered = false }: ChatInputProps) {
 
         </div>
         {error && (
-          <p className="mt-2 text-xs text-rose-300">{error}</p>
+          <p className="mt-2 text-xs text-rose-700 dark:text-rose-300">{error}</p>
         )}
         {!centered && <ContextUsageBar />}
       </div>
@@ -1498,8 +1587,8 @@ function PrimaryButton({
         "shadow-[0_6px_24px_-4px_rgb(var(--primary-glow)/0.75)]",
         "transition-all duration-200",
         "hover:bg-primary/90 hover:shadow-[0_8px_28px_-4px_rgb(var(--primary-glow)/0.90)]",
-        "disabled:bg-primary/70 disabled:text-primary-foreground/85",
-        "disabled:shadow-[0_4px_18px_-6px_rgb(var(--primary-glow)/0.45)] disabled:cursor-not-allowed",
+        // Plainly off: a dimmed orange still read as a button to press.
+        "disabled:bg-foreground/10 disabled:text-foreground/40 disabled:shadow-none disabled:cursor-not-allowed",
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60 focus-visible:ring-offset-0",
       )}
     >

@@ -22,6 +22,8 @@ const mocks = vi.hoisted(() => {
     streams: [] as FakeStream[],
     spaceAdds: [] as Array<{ space_id: string; content: string }>,
     globalAdds: [] as string[],
+    /** Run inside the next global-memory write, as if it landed then. */
+    duringAdd: null as null | (() => void),
   };
 });
 
@@ -58,6 +60,8 @@ vi.mock("@/lib/tauri", async (importOriginal) => {
       return { ...row(args.content), space_id: args.space_id };
     }),
     addGlobalMemory: vi.fn(async (args: { content: string }) => {
+      mocks.duringAdd?.();
+      mocks.duringAdd = null;
       mocks.globalAdds.push(args.content);
       return row(args.content);
     }),
@@ -69,6 +73,8 @@ import { useGlobalMemoryStore } from "./globalMemoryStore";
 import { useLibraryStore } from "./libraryStore";
 import { useSettingsStore } from "./settingsStore";
 import { useSpaceStore } from "./spaceStore";
+import { haltMemoryExtraction } from "@/lib/memory";
+import { invalidateAllSpaceContext } from "@/lib/spaceContextCache";
 
 // The extractor and the toast store call `window.setTimeout`.
 vi.stubGlobal("window", {
@@ -141,6 +147,10 @@ beforeEach(() => {
   useSettingsStore.setState({ global_memory_enabled: true, temporal_awareness: false });
   useGlobalMemoryStore.setState({ memories: null });
   useSpaceStore.setState({ spaces: [space], spaceMemories: {}, viewingSpaceId: null, activeSpaceId: null });
+  // The cached Space context keeps the memories a test saved (a memory write
+  // patches it), while the mocked backend forgets them: start each test from
+  // the backend's state.
+  invalidateAllSpaceContext();
   useLibraryStore.setState({ hydrated: true, error: null, items: [], datasets: [], sources: {} });
   useChatStore.setState({
     sessions: [session("A", "sp1"), session("B", null)],
@@ -181,6 +191,24 @@ describe("memory extraction across chats", () => {
 
     await vi.waitFor(() => expect(mocks.globalAdds).toEqual(["Has a dog called Burek"]));
     expect(mocks.spaceAdds).toEqual([{ space_id: "sp1", content: "Lives in Gdańsk" }]);
+  });
+
+  // X3-01: an erase started while a run was saving its facts — the rest of
+  // them landed in the emptied database (`global_memories` has no parent).
+  it("writes nothing more once halted for an erase, even mid-run", async () => {
+    await send("B", "I have a dog and a cat");
+    answer(chats()[0], "Nice.");
+    await vi.waitFor(() => expect(extractors()).toHaveLength(1));
+    let resume: (() => void) | null = null;
+    mocks.duringAdd = () => {
+      resume = haltMemoryExtraction();
+    };
+    answer(extractors()[0], JSON.stringify({ add: ["Has a dog", "Has a cat"] }));
+
+    await vi.waitFor(() => expect(mocks.globalAdds).toEqual(["Has a dog"]));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(mocks.globalAdds).toEqual(["Has a dog"]);
+    resume!();
   });
 
   it("remembers in the Space the message was sent from, though the chat moved since", async () => {

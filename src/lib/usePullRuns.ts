@@ -32,7 +32,8 @@ export function useLivePulls(): LivePull[] {
   );
 }
 
-/** The in-flight pull that makes a session's pinned model unusable, or null.
+/** The pulls of a session's model, oldest first, when they decide whether it
+ *  can answer; otherwise null.
  *
  *  Two qualifiers, because a run's `target` is only a string and "a pull is
  *  running for this name" isn't the same as "this model can't answer yet":
@@ -43,21 +44,42 @@ export function useLivePulls(): LivePull[] {
  *      Ollama updates it, and it keeps serving the existing copy until the new
  *      manifest lands, so there is nothing to wait for.
  */
+function pullsOf(
+  runs: Record<string, AdminProgress>,
+  installed: ModelInfo[],
+  provider: string | null | undefined,
+  model: string | null | undefined,
+): AdminProgress[] | null {
+  if (!model || provider !== "ollama") return null;
+  // `llama3` and `llama3:latest` are one model, however each was typed.
+  const tag = fullOllamaTag(model);
+  if (installed.some((m) => fullOllamaTag(m.id) === tag)) return null;
+  return Object.values(runs).filter((r) => r.kind === "pull" && fullOllamaTag(r.target) === tag);
+}
+
+/** The in-flight pull that makes a session's pinned model unusable, or null. */
 function findBlockingPull(
   runs: Record<string, AdminProgress>,
   installed: ModelInfo[],
   provider: string | null | undefined,
   model: string | null | undefined,
 ): AdminProgress | null {
-  if (!model || provider !== "ollama") return null;
-  // `llama3` and `llama3:latest` are one model, however each was typed.
-  const tag = fullOllamaTag(model);
-  if (installed.some((m) => fullOllamaTag(m.id) === tag)) return null;
-  return (
-    Object.values(runs).find(
-      (r) => r.kind === "pull" && fullOllamaTag(r.target) === tag && r.finished === null,
-    ) ?? null
-  );
+  return pullsOf(runs, installed, provider, model)?.find((r) => r.finished === null) ?? null;
+}
+
+/** The pull of a session's model that last ended without it — failed or
+ *  cancelled, with no retry since — or null. When that happened the download
+ *  banner just vanished, and the next send got Ollama's 404 rendered as
+ *  "endpoint or model not found", the message the banner exists to head off. */
+export function findFailedPull(
+  runs: Record<string, AdminProgress>,
+  installed: ModelInfo[],
+  provider: string | null | undefined,
+  model: string | null | undefined,
+): AdminProgress | null {
+  // Runs are kept in start order, so the last one is the latest attempt.
+  const last = pullsOf(runs, installed, provider, model)?.at(-1);
+  return last && (last.finished === "error" || last.finished === "cancelled") ? last : null;
 }
 
 /** Reactive {@link findBlockingPull} for components. */
@@ -81,6 +103,28 @@ export function getLivePullFor(
 ): AdminProgress | null {
   const { runs, models } = useModelsStore.getState();
   return findBlockingPull(runs, models, provider, model);
+}
+
+/** Reactive {@link findFailedPull} for components. */
+export function useFailedPullFor(
+  provider: string | null | undefined,
+  model: string | null | undefined,
+): AdminProgress | null {
+  const runs = useModelsStore((s) => s.runs);
+  const installed = useModelsStore((s) => s.models);
+  return useMemo(
+    () => findFailedPull(runs, installed, provider, model),
+    [runs, installed, provider, model],
+  );
+}
+
+/** Non-reactive {@link findFailedPull}, for the send guard. */
+export function getFailedPullFor(
+  provider: string | null | undefined,
+  model: string | null | undefined,
+): AdminProgress | null {
+  const { runs, models } = useModelsStore.getState();
+  return findFailedPull(runs, models, provider, model);
 }
 
 /** Completion percentage, or null while the daemon is still working out how

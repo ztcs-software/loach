@@ -31,6 +31,8 @@ pub const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 pub const MAX_BODY_BYTES: usize = 5 * 1024 * 1024; // 5 MB
 pub const MAX_TEXT_CHARS: usize = 12_000; // ~3-4k tokens, plenty for inlining
 pub const MAX_REDIRECTS: usize = 10;
+/// Characters of a page's title kept (see `html_to_text`).
+const MAX_TITLE_CHARS: usize = 300;
 /// Wall-clock for the TCP connect phase. The whole-request `FETCH_TIMEOUT`
 /// only fires once the response starts arriving — a SYN sent to a black-
 /// holed address waits for the OS TCP retransmit budget (~75 s on Linux,
@@ -100,12 +102,11 @@ pub struct FetchedPage {
 
 /// Top-level fetch + clean pipeline.
 ///
-/// `_shared_http` is the long-lived client the rest of the app uses; we
-/// accept it for API symmetry but DO NOT use it here — the SSRF guard
-/// requires a private DNS table per request (see [`build_pinned_client`])
-/// to close the TOCTOU window between "we resolved a public IP" and
-/// "reqwest dials a now-private one".
-pub async fn fetch(_shared_http: &reqwest::Client, raw_url: &str) -> Result<FetchedPage, String> {
+/// It takes no client: the SSRF guard needs a private DNS table per request
+/// (see [`build_pinned_client`]) to close the window between "we resolved a
+/// public IP" and "reqwest dials a now-private one", so never the app's
+/// shared one.
+pub async fn fetch(raw_url: &str) -> Result<FetchedPage, String> {
     fetch_capped(raw_url, MAX_TEXT_CHARS).await
 }
 
@@ -753,7 +754,12 @@ fn html_to_text(html: &str) -> (Option<String>, String) {
         .map(|raw| {
             // Skip past the opening tag's `>`
             let start = raw.find('>').map(|i| i + 1).unwrap_or(0);
-            decode_entities(&raw[start..]).trim().to_string()
+            // Capped, on one line: a `<title>` running on for megabytes was
+            // stored whole in the message's web-fetch tool record. Decoded
+            // from a bounded slice — entities only shorten text.
+            let head: String = raw[start..].chars().take(MAX_TITLE_CHARS * MAX_ENTITY_LEN).collect();
+            let one_line = decode_entities(&head).split_whitespace().collect::<Vec<_>>().join(" ");
+            one_line.chars().take(MAX_TITLE_CHARS).collect::<String>()
         })
         .filter(|s| !s.is_empty());
 
@@ -837,7 +843,7 @@ fn strip_blocks_with_lower(
                 next_open[idx] = find_opener(lower, open_l, i);
             }
             if let Some(pos) = next_open[idx] {
-                if best.map_or(true, |(bp, _)| pos < bp) {
+                if best.is_none_or(|(bp, _)| pos < bp) {
                     best = Some((pos, idx));
                 }
             }
@@ -913,7 +919,7 @@ fn replace_many_ci(hay: &str, needles: &[&str], repl: &str) -> String {
                 next_pos[idx] = lower[i..].find(needle_l.as_str()).map(|rel| i + rel);
             }
             if let Some(pos) = next_pos[idx] {
-                if best.map_or(true, |(bp, _)| pos < bp) {
+                if best.is_none_or(|(bp, _)| pos < bp) {
                     best = Some((pos, idx));
                 }
             }

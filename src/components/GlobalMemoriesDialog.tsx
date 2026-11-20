@@ -30,6 +30,7 @@ export function GlobalMemoriesDialog({
   const addMemory = useGlobalMemoryStore((s) => s.addMemory);
   const updateMemory = useGlobalMemoryStore((s) => s.updateMemory);
   const removeMemory = useGlobalMemoryStore((s) => s.removeMemory);
+  const removeMemories = useGlobalMemoryStore((s) => s.removeMemories);
   const enabled = useSettingsStore((s) => s.global_memory_enabled);
   // Radix hears Escape on the document before the edit field does, so Esc
   // while editing a memory closed the whole dialog instead of the edit.
@@ -92,6 +93,9 @@ export function GlobalMemoriesDialog({
             }
             onRemove={(id) =>
               removeMemory(id).catch((e) => notify("remove memory", e))
+            }
+            onRemoveMany={(ids) =>
+              removeMemories(ids).catch((e) => notify("remove memories", e))
             }
             onOpenChat={openChat}
             onEditingChange={setEditingMemory}

@@ -1,6 +1,6 @@
 [package]
 name = "loach"
-version = "1.6.0"
+version = "1.7.0"
 description = "Native local LLM chat client (Ollama + OpenAI-compatible)."
 authors = ["Loach"]
 license = "MIT"
@@ -72,6 +72,10 @@ open = { version = "5", features = ["shellexecute-on-windows"] }
 # (see `commands::confirm_stdio_spawn`). Already in the tree through that
 # plugin, which also switches on the per-platform backend features.
 rfd = { version = "0.16", default-features = false }
+# The temporary folder code from `run_script` is saved and run in, removed
+# afterwards (`skills/script.rs`). Already in the tree through
+# tauri-plugin-updater; the test suites use it for scratch folders too.
+tempfile = "3"
 
 
 # Backing crates for the rest of the built-in tools. Each is small,
@@ -158,7 +162,7 @@ sysinfo = { version = "0.38", default-features = false, features = ["system", "d
 # `Get`/`SetNamedSecurityInfoW`, which carry a file's ACL over to the copy
 # an edit renames into its place (`tools/fs.rs`).
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D12", "Win32_System_JobObjects", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem"] }
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D12", "Win32_System_JobObjects", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Threading", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem"] }
 
 # `killpg` for the same purpose on macOS / Linux: a stdio MCP server runs in
 # its own process group and the whole group is stopped with it. Already in
@@ -178,12 +182,6 @@ libc = "0.2"
 gtk = "0.18"
 keyring-core = "1"
 zbus-secret-service-keyring-store = { version = "1", features = ["crypto-rust"] }
-
-[dev-dependencies]
-# Only used by the db.rs test suite, which opens a fresh database in a
-# tempdir per test so we don't trample the user's real `loach.db` and so
-# tests can run in parallel without sharing state.
-tempfile = "3"
 
 [features]
 # this feature is used for production builds or when a dev server is not specified

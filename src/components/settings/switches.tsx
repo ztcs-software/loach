@@ -1,5 +1,6 @@
-//! Two Settings switches (Features → keep-alive, Appearance → font size) that
-//! carry enough of their own state and copy to be worth their own file.
+//! Settings switches (Features → keep-alive and default context length,
+//! Appearance → font size) that carry enough of their own state and copy to
+//! be worth their own file.
 
 import type { FontSize, OllamaKeepAlive } from "@/types";
 import { cn } from "@/lib/utils";
@@ -36,8 +37,10 @@ export function KeepAliveSwitch({
   onChange: (next: OllamaKeepAlive) => void;
 }) {
   return (
+    // Toggle buttons in a group, not a radiogroup: that owes arrow-key roving
+    // focus, which these never had (see ProviderStep's `ProviderSwitch`).
     <div
-      role="radiogroup"
+      role="group"
       aria-label="Keep model loaded"
       className="mt-3 grid grid-cols-4 gap-2 rounded-2xl border border-foreground/10 bg-foreground/[0.03] p-1"
     >
@@ -47,8 +50,7 @@ export function KeepAliveSwitch({
           <button
             key={opt.value}
             type="button"
-            role="radio"
-            aria-checked={selected}
+            aria-pressed={selected}
             onClick={() => onChange(opt.value)}
             className={cn(
               "flex items-center justify-center rounded-xl px-3 py-2 text-[12px] font-medium transition-colors",
@@ -65,6 +67,46 @@ export function KeepAliveSwitch({
   );
 }
 
+/** The Parameters panel's context-length stops a default is likely to be;
+ *  past 128K, few models and fewer GPUs keep up. */
+const CONTEXT_LENGTH_OPTIONS = [4096, 8192, 16384, 32768, 65536, 131072];
+
+export function ContextLengthSwitch({
+  value,
+  onChange,
+}: {
+  value: number;
+  onChange: (next: number) => void;
+}) {
+  return (
+    <div
+      role="group"
+      aria-label="Default context length"
+      className="mt-3 grid grid-cols-6 gap-2 rounded-2xl border border-foreground/10 bg-foreground/[0.03] p-1"
+    >
+      {CONTEXT_LENGTH_OPTIONS.map((opt) => {
+        const selected = value === opt;
+        return (
+          <button
+            key={opt}
+            type="button"
+            aria-pressed={selected}
+            onClick={() => onChange(opt)}
+            className={cn(
+              "flex items-center justify-center rounded-xl px-2 py-2 text-[12px] font-medium tabular-nums transition-colors",
+              selected
+                ? "bg-primary/10 text-foreground shadow-[0_1px_0_0_rgba(255,255,255,0.06)_inset]"
+                : "text-foreground/70 hover:bg-foreground/[0.05] hover:text-foreground",
+            )}
+          >
+            {opt / 1024}K
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 export function FontSizeSwitch({
   value,
   onChange,
@@ -74,7 +116,7 @@ export function FontSizeSwitch({
 }) {
   return (
     <div
-      role="radiogroup"
+      role="group"
       aria-label="Font size"
       className="mt-3 grid grid-cols-3 gap-2 rounded-2xl border border-foreground/10 bg-foreground/[0.03] p-1"
     >
@@ -84,8 +126,7 @@ export function FontSizeSwitch({
           <button
             key={opt.value}
             type="button"
-            role="radio"
-            aria-checked={selected}
+            aria-pressed={selected}
             onClick={() => onChange(opt.value)}
             className={cn(
               "flex flex-col items-center justify-center gap-1 rounded-xl px-3 py-2.5 transition-colors",

@@ -20,7 +20,7 @@ import {
   onIndexStatus,
   ragStatus,
 } from "@/lib/tauri";
-import { fileToAttachment, NO_DOCX_TEXT, NO_PDF_TEXT } from "@/lib/files";
+import { fileToAttachment, hasReadableText, NO_PDF_TEXT } from "@/lib/files";
 import { useToastStore } from "./toastStore";
 import type {
   IndexStatus,
@@ -68,7 +68,7 @@ export async function prepareFiles(
       // A scanned PDF or an empty document comes back as a fixed note, which
       // every such file shares — stored, it'd be a "source" with nothing in
       // it, and the next one would look like a duplicate.
-      if (att.kind === "text" && (att.data === NO_PDF_TEXT || att.data === NO_DOCX_TEXT || !att.data.trim())) {
+      if (att.kind === "text" && !hasReadableText(att.data)) {
         failed.push({
           name: file.name,
           reason:
@@ -187,8 +187,8 @@ interface LibraryState {
   deleteItems: (ids: string[]) => Promise<boolean>;
   createDataset: (name: string, description: string, itemIds?: string[]) => Promise<LibraryDataset>;
   updateDataset: (id: string, name: string, description: string) => Promise<void>;
-  setDatasetItems: (id: string, itemIds: string[]) => Promise<void>;
   addToDataset: (id: string, itemIds: string[]) => Promise<void>;
+  removeFromDataset: (id: string, itemIds: string[]) => Promise<void>;
   /** False when the delete failed (a toast already said why). */
   deleteDataset: (id: string) => Promise<boolean>;
   /** Save a body from elsewhere (an attachment, a Space file, a reply).
@@ -256,8 +256,17 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     // racing the startup one — wiped link lists loaded since and restarted
     // their version numbers under loads still in flight.
     try {
-      const { items, datasets } = await libraryList();
-      set({ items, datasets, hydrated: true, error: null });
+      // Read again if a write landed while the list was out, as
+      // `refreshItems` does: the send path re-runs this, and an older list
+      // landing last dropped an item just created.
+      for (;;) {
+        const { items: itemsBefore, datasets: datasetsBefore } = get();
+        const { items, datasets } = await libraryList();
+        if (get().items === itemsBefore && get().datasets === datasetsBefore) {
+          set({ items, datasets, hydrated: true, error: null });
+          break;
+        }
+      }
     } catch (e) {
       logger.error("library hydrate failed", e);
       set({ hydrated: true, error: errorText(e) });
@@ -271,7 +280,10 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
       void onIndexStatus((status) => {
         const was = get().indexStatus;
         set({ indexStatus: status });
-        if (was?.busy && !status.busy) void get().refreshItems();
+        // And when one starts: a new embedding model or a Rebuild re-embeds
+        // everything, and counts read under the old key said each item was
+        // done — no item showed it was being indexed.
+        if (!!was?.busy !== status.busy) void get().refreshItems();
       });
       void ragStatus()
         .then((status) => set((s) => ({ indexStatus: s.indexStatus ?? status })))
@@ -425,12 +437,15 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     }));
   },
 
-  setDatasetItems: (id, itemIds) => writeMembers(id, () => itemIds),
-
   // The members to add go onto the list as it stands once the writes queued
   // before this one have landed — not as it stood when it was asked for.
   addToDataset: (id, itemIds) =>
     writeMembers(id, (current) => current && [...current, ...itemIds.filter((i) => !current.includes(i))]),
+
+  // Likewise for removal. A list built at click time put back a member
+  // removed a moment earlier, or dropped files an upload was still adding.
+  removeFromDataset: (id, itemIds) =>
+    writeMembers(id, (current) => current?.filter((i) => !itemIds.includes(i))),
 
   deleteDataset: async (id) => {
     try {

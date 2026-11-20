@@ -1,4 +1,4 @@
-import type { GenerationParams } from "@/types";
+import { DEFAULT_PARAMS, type GenerationParams } from "@/types";
 
 /**
  * Maps Ollama PARAMETER lines (the raw text returned by `/api/show` in the
@@ -29,6 +29,35 @@ const KEY_MAP: Record<string, keyof GenerationParams> = {
  *  the whole `chat_stream` request failed, so every send did. The sentinels
  *  all mean "use the default", which leaving the field out already does. */
 const U32_FIELDS = new Set<keyof GenerationParams>(["top_k", "max_tokens", "num_ctx", "num_gpu"]);
+
+/** A value one of [`U32_FIELDS`] can hold — shared with the stored-override
+ *  guards in chatStore, which let `4096.5` or `-1` through to a send that
+ *  then failed every time. */
+export function isU32(v: unknown): v is number {
+  return typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= 0xffff_ffff;
+}
+
+/** The context window a model was trained for, from `/api/show`'s
+ *  `model_info` (`<general.architecture>.context_length`, e.g.
+ *  `gemma4.context_length`); undefined when it doesn't say. */
+export function modelContextLength(
+  info: Record<string, unknown> | null | undefined,
+): number | undefined {
+  const arch = info?.["general.architecture"];
+  if (typeof arch !== "string") return undefined;
+  const n = info?.[`${arch}.context_length`];
+  return isU32(n) && n > 0 ? n : undefined;
+}
+
+/** The window a chat gets when nothing above the app default sets one:
+ *  Settings' default context length (`setting`; `DEFAULT_PARAMS.num_ctx`
+ *  when that isn't a usable window), capped at the model's maximum when known — a default
+ *  above it would have the context bar promise a window the model doesn't
+ *  have. */
+export function defaultNumCtx(setting: unknown, modelMax?: number): number {
+  const n = isU32(setting) && setting > 0 ? setting : (DEFAULT_PARAMS.num_ctx ?? 8192);
+  return modelMax !== undefined && modelMax > 0 && modelMax < n ? modelMax : n;
+}
 
 /**
  * Parse the multiline `parameters` block from `ollama_show_model` into a
@@ -71,7 +100,7 @@ export function parseModelParameters(
       continue;
     }
     const n = parseFloat(value);
-    if (U32_FIELDS.has(target) && !(Number.isInteger(n) && n >= 0 && n <= 0xffff_ffff)) continue;
+    if (U32_FIELDS.has(target) && !isU32(n)) continue;
     if (Number.isFinite(n)) {
       // The numeric fields all share `number` as their type, so the cast
       // here is the narrowest indirection that keeps TS happy without

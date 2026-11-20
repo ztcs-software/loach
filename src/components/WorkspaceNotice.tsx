@@ -1,6 +1,7 @@
 import { useId } from "react";
 import { FolderOpen } from "lucide-react";
 import { cn } from "@/lib/utils";
+import type { WorkspaceInstructions } from "@/types";
 import { ChipRemove } from "./ComposerChip";
 
 /** "Working in <folder>" — the chat's workspace directory, shown as a line
@@ -24,10 +25,11 @@ export function WorkspaceNotice({
    *  but it can be turned off again afterwards — and then the notice would
    *  be promising tools the model doesn't have, so it says so instead. */
   toolsEnabled: boolean;
-  /** The root's `LOACHFILE.md`, when it has one. A badge, with the file's
+  /** The root's project instructions (`LOACHFILE.md`, else `CLAUDE.md` or
+   *  `AGENTS.md`), when it has some. A badge naming the file, with its
    *  first line in the tooltip, so it's visible that the model is being
    *  briefed by the project and not only by the user. */
-  instructions: string | null;
+  instructions: WorkspaceInstructions | null;
   /** A reply is running in this chat. That turn resolved its folder when it
    *  started and keeps using it, so removing the folder now would only take
    *  effect afterwards — while the approval cards went on showing paths in
@@ -40,12 +42,12 @@ export function WorkspaceNotice({
   onOpen: () => void;
   onRemove: () => void;
 }) {
-  const firstLine = instructions
-    ?.split(/\r?\n/)
+  const firstLine = instructions?.text
+    .split(/\r?\n/)
     .map((l) => l.trim())
     .find((l) => l.length > 0);
   const instructionsHint = firstLine
-    ? `\nProject instructions from LOACHFILE.md: ${
+    ? `\nProject instructions from ${instructions?.file}: ${
         firstLine.length > 80 ? `${firstLine.slice(0, 80)}…` : firstLine
       }`
     : "";
@@ -86,7 +88,7 @@ export function WorkspaceNotice({
         </button>
       </span>
       {instructions && (
-        <span className="shrink-0 text-[10px] tracking-wide opacity-80">LOACHFILE.md</span>
+        <span className="shrink-0 text-[10px] tracking-wide opacity-80">{instructions.file}</span>
       )}
       {!toolsEnabled && (
         <span className="shrink-0 text-[10px] uppercase tracking-wider opacity-80">tools off</span>

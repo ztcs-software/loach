@@ -1,7 +1,7 @@
 //! Settings -> General: identity, default model, custom instructions, and the app-wide toggles.
 
 import { ChevronDown, ChevronRight } from "lucide-react";
-import { DEFAULT_TONE_ID, TONES } from "@/lib/tones";
+import { canonicalToneId, DEFAULT_TONE_ID, TONES } from "@/lib/tones";
 import { DefaultModelPicker, DefaultModelPreloadToggle } from "./DefaultModelPicker";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -88,11 +88,12 @@ export function GeneralTab({ open }: { open: boolean }) {
                     {TONES.map((t) => {
                       const Icon = t.icon;
                       const active =
-                        (settings.default_tone_id || DEFAULT_TONE_ID) === t.id;
+                        canonicalToneId(settings.default_tone_id || DEFAULT_TONE_ID) === t.id;
                       return (
                         <button
                           key={t.id}
                           type="button"
+                          aria-pressed={active}
                           onClick={() =>
                             settings.update("default_tone_id", t.id)
                           }

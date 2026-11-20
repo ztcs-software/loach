@@ -1,13 +1,15 @@
 import { useState } from "react";
-import { BookMarked, Brain, Clock, MemoryStick } from "lucide-react";
+import { BookMarked, Brain, Clock, Gauge } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
+import { ContextLengthSwitch } from "@/components/settings/switches";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useOnboardingStore } from "@/stores/onboardingStore";
+import { DEFAULT_SETTINGS } from "@/types";
 import { StepShell } from "./StepShell";
 
 /**
- * Feature toggles. Four defaults that are easier to set once at onboarding
- * than to discover later in Settings:
+ * Feature defaults. Four that are easier to set once at onboarding than to
+ * discover later in Settings:
  *
  *   - Global memories: OFF by default. When on, every reply costs a
  *     second, hidden extraction call, so it's opt-in.
@@ -15,8 +17,8 @@ import { StepShell } from "./StepShell";
  *     and fixes the "what's today's date?" surprise.
  *   - Thinking: ON by default. Reasoning models default to thinking
  *     unless the model author says otherwise.
- *   - Low VRAM: OFF by default. Hurts speed if you don't need it; the
- *     in-chat toggle is right there if a model OOMs.
+ *   - Default context length: the app default. Too small and chats
+ *     forget early turns; too large and the model spills out of VRAM.
  *
  * All four are committed to settings on Continue *and* on Skip —
  * establishing defaults is the wizard's job, and none of these reaches the
@@ -31,14 +33,14 @@ interface DraftFeatures {
   global_memory_enabled: boolean;
   temporal_awareness: boolean;
   thinking_default: boolean;
-  low_vram_global: boolean;
+  default_num_ctx: number;
 }
 
 const RECOMMENDED: DraftFeatures = {
   global_memory_enabled: false,
   temporal_awareness: true,
   thinking_default: true,
-  low_vram_global: false,
+  default_num_ctx: DEFAULT_SETTINGS.default_num_ctx,
 };
 
 export function FeaturesStep({ onClose }: { onClose: () => void }) {
@@ -59,7 +61,7 @@ export function FeaturesStep({ onClose }: { onClose: () => void }) {
       update("global_memory_enabled", draft.global_memory_enabled),
       update("temporal_awareness", draft.temporal_awareness),
       update("thinking_default", draft.thinking_default),
-      update("low_vram_global", draft.low_vram_global),
+      update("default_num_ctx", draft.default_num_ctx),
     ]);
     goNext();
   };
@@ -80,7 +82,7 @@ export function FeaturesStep({ onClose }: { onClose: () => void }) {
         <FeatureRow
           icon={<BookMarked className="h-4 w-4" />}
           title="Global memories"
-          description="Remember durable facts about you across every chat, not just chats inside a Space. When on, every reply triggers a second, hidden model call to extract facts, and the facts go with every chat — local or cloud provider alike. Never used in Private Chat."
+          description="Remember facts about you across all chats. After each reply, an extra background request picks out what's worth keeping. The facts go with every chat, cloud providers included. Never used in Private Chat."
           checked={draft.global_memory_enabled}
           onChange={(v) => set("global_memory_enabled", v)}
         />
@@ -98,13 +100,22 @@ export function FeaturesStep({ onClose }: { onClose: () => void }) {
           checked={draft.thinking_default}
           onChange={(v) => set("thinking_default", v)}
         />
-        <FeatureRow
-          icon={<MemoryStick className="h-4 w-4" />}
-          title="Low VRAM mode"
-          description="Force Ollama into low-VRAM mode for every chat for smaller batches and leaner KV cache. This setting overrides the per-chat Low VRAM toggle so you don't have to flip it on each new session. Ignored by OpenAI API providers."
-          checked={draft.low_vram_global}
-          onChange={(v) => set("low_vram_global", v)}
-        />
+        <div className="flex items-start gap-3 rounded-xl border border-foreground/[0.06] bg-foreground/[0.015] p-3.5 transition-colors hover:bg-foreground/[0.025]">
+          <span className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-foreground/[0.05] text-foreground/75">
+            <Gauge className="h-4 w-4" />
+          </span>
+          <div className="min-w-0 flex-1">
+            <p className="text-[13px] font-medium">Default context length</p>
+            <p className="mt-0.5 text-[11.5px] leading-relaxed text-foreground/55">
+              How much of the conversation the model can see at once. Bigger remembers more but
+              uses more VRAM, and replies slow down once it no longer fits. Ollama only.
+            </p>
+            <ContextLengthSwitch
+              value={draft.default_num_ctx}
+              onChange={(v) => set("default_num_ctx", v)}
+            />
+          </div>
+        </div>
       </div>
     </StepShell>
   );
@@ -141,7 +152,7 @@ function FeatureRow({
       <Switch
         checked={checked}
         onCheckedChange={onChange}
-        aria-label={checked ? `Disable ${title}` : `Enable ${title}`}
+        aria-label={title}
         className="mt-1 shrink-0"
       />
     </div>

@@ -1,4 +1,4 @@
-import { Check, ChevronDown, CircleAlert, CircleCheck, RefreshCw } from "lucide-react";
+import { Check, ChevronDown, CircleAlert, CircleCheck, Loader2, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -67,17 +67,18 @@ export function DefaultModelPicker({
       <DropdownMenuContent align="start" className="min-w-[--radix-dropdown-menu-trigger-width]">
         <div className="flex items-center justify-between px-2 py-1.5">
           <DropdownMenuLabel className="p-0">Models</DropdownMenuLabel>
-          <button
-            type="button"
-            onClick={(e) => {
+          {/* An item, not a bare button: the menu moves focus only between
+              its items and swallows Tab. Kept open on select. */}
+          <DropdownMenuItem
+            onSelect={(e) => {
               e.preventDefault();
               refresh();
             }}
-            className="rounded p-1 hover:bg-accent"
+            className="rounded p-1"
             aria-label="Refresh models"
           >
             <RefreshCw className={cn("h-3.5 w-3.5", loading && "animate-spin")} />
-          </button>
+          </DropdownMenuItem>
         </div>
         <DropdownMenuSeparator />
         <DropdownMenuItem onSelect={() => onChange(null, null)}>
@@ -87,7 +88,11 @@ export function DefaultModelPicker({
         </DropdownMenuItem>
         <DropdownMenuSeparator />
         <DropdownMenuLabel className="flex items-center gap-1.5">
-          {ollamaUp ? (
+          {/* Neutral until the first probe answers: `null` read as down,
+              and the picker said "Not running" for a running Ollama. */}
+          {ollamaUp === null ? (
+            <Loader2 className="h-3 w-3 animate-spin text-foreground/45" />
+          ) : ollamaUp ? (
             <CircleCheck className="h-3 w-3 text-emerald-500" />
           ) : (
             <CircleAlert className="h-3 w-3 text-amber-500" />
@@ -95,7 +100,9 @@ export function DefaultModelPicker({
           Ollama
         </DropdownMenuLabel>
         {ollamaModels.length === 0 && (
-          <DropdownMenuItem disabled>{ollamaUp ? "No models installed" : "Not running"}</DropdownMenuItem>
+          <DropdownMenuItem disabled>
+            {ollamaUp === null ? "Checking…" : ollamaUp ? "No models installed" : "Not running"}
+          </DropdownMenuItem>
         )}
         {ollamaModels.map((m) => (
           <DropdownMenuItem key={`ollama:${m.id}`} onSelect={() => onChange("ollama", m.id)}>

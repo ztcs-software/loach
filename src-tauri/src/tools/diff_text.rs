@@ -4,6 +4,7 @@
 //! (e.g. a single character flip in a hundred-line config). `similar`
 //! is the de facto Rust line/word-diff implementation; this just wraps it.
 
+use super::{err};
 use std::time::Duration;
 
 use serde_json::{json, Value};
@@ -83,9 +84,10 @@ pub fn dispatch(args: &Value) -> McpCallResult {
         ));
     }
     let mode = args.get("mode").and_then(|v| v.as_str()).unwrap_or("line");
-    let context = crate::tools::lenient_i64(args, "context")
-        .unwrap_or(3)
-        .clamp(0, 1000) as usize;
+    let context = match crate::tools::int_arg(args, "context", 3) {
+        Ok(n) => n.clamp(0, 1000) as usize,
+        Err(e) => return err(e),
+    };
     let out = match mode {
         "line" => unified_lines(a, b, context),
         "word" => inline_diff(TextDiff::configure().timeout(DIFF_TIMEOUT).diff_words(a, b)),
@@ -141,14 +143,6 @@ fn inline_diff<'a>(diff: TextDiff<'a, 'a, str>) -> String {
         }
     }
     out
-}
-
-fn err(msg: impl Into<String>) -> McpCallResult {
-    McpCallResult {
-        content_text: msg.into(),
-        is_error: true,
-        ..Default::default()
-    }
 }
 
 #[cfg(test)]

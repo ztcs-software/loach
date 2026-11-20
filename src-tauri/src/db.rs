@@ -295,6 +295,15 @@ pub struct SnippetFillValue {
     pub updated_at: i64,
 }
 
+/// A skill switched on in a chat (`session_skills`). Only the name: the
+/// skill itself is a folder on disk, outside the database.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SessionSkill {
+    pub session_id: String,
+    pub name: String,
+    pub created_at: i64,
+}
+
 /// A user-configured MCP (Model Context Protocol) server. Two transports:
 ///
 ///   - **Streamable HTTP** — one URL, POST JSON-RPC bodies, optional auth
@@ -600,6 +609,11 @@ impl Database {
     where
         F: FnOnce(&Connection) -> Result<R>,
     {
+        // Inside `write_snapshot` on this thread: its read transaction, so
+        // every table of an export comes from one state of the database.
+        if PINNED_READ.with(|p| p.borrow().is_some()) {
+            return PINNED_READ.with(|p| f(p.borrow().as_deref().expect("pinned just above")));
+        }
         let conn = self.read_pool.get().context("acquire read connection")?;
         f(&conn)
     }
@@ -874,7 +888,11 @@ impl Database {
         conn.execute_batch(
             "CREATE INDEX IF NOT EXISTS idx_sessions_space ON sessions(space_id);
              CREATE INDEX IF NOT EXISTS idx_sessions_archived ON sessions(archived_at);
-             CREATE INDEX IF NOT EXISTS idx_sessions_folder ON sessions(folder_id);",
+             CREATE INDEX IF NOT EXISTS idx_sessions_folder ON sessions(folder_id);
+             -- The fork pointer's `ON DELETE SET NULL` looks up the chats
+             -- forked from each one deleted; unindexed, emptying the archive
+             -- scanned every chat once per chat removed.
+             CREATE INDEX IF NOT EXISTS idx_sessions_forked ON sessions(forked_from_session_id);",
         )?;
 
         // Add per-space default model + params columns if missing. Null =
@@ -1027,8 +1045,11 @@ impl Database {
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL
             );
-            CREATE INDEX IF NOT EXISTS idx_library_items_hash
-                ON library_items(content_hash);
+            -- Retired: nothing looks items up by hash (duplicates are found
+            -- from the listed metadata), so it only cost a write per insert
+            -- or edit. Dropped for databases that have it, as
+            -- `idx_mcp_servers_updated` was.
+            DROP INDEX IF EXISTS idx_library_items_hash;
             CREATE TABLE IF NOT EXISTS library_datasets (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
@@ -1070,6 +1091,32 @@ impl Database {
                 ON session_library_sources(owner_id, item_id) WHERE item_id IS NOT NULL;
             CREATE UNIQUE INDEX IF NOT EXISTS idx_session_library_sources_dataset
                 ON session_library_sources(owner_id, dataset_id) WHERE dataset_id IS NOT NULL;
+            -- Plain indexes beside the partial unique ones, which can serve
+            -- neither an `owner_id = ?` lookup (listing a chat's or Space's
+            -- links on every send, and the cascade when one is deleted) nor
+            -- `item_id = ?` / `dataset_id = ?` (the cascade when a Library
+            -- item or dataset is deleted): each was a scan of the table.
+            CREATE INDEX IF NOT EXISTS idx_space_library_sources_owner
+                ON space_library_sources(owner_id);
+            CREATE INDEX IF NOT EXISTS idx_space_library_sources_item_id
+                ON space_library_sources(item_id);
+            CREATE INDEX IF NOT EXISTS idx_space_library_sources_dataset_id
+                ON space_library_sources(dataset_id);
+            CREATE INDEX IF NOT EXISTS idx_session_library_sources_owner
+                ON session_library_sources(owner_id);
+            CREATE INDEX IF NOT EXISTS idx_session_library_sources_item_id
+                ON session_library_sources(item_id);
+            CREATE INDEX IF NOT EXISTS idx_session_library_sources_dataset_id
+                ON session_library_sources(dataset_id);
+            -- Agent Skills switched on in a chat, by name (see `skills`). The
+            -- skills themselves are folders on disk, not rows: a name whose
+            -- folder is gone is simply skipped when the prompt is built.
+            CREATE TABLE IF NOT EXISTS session_skills (
+                session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                name TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                PRIMARY KEY (session_id, name)
+            );
             "#,
         )?;
 
@@ -1136,6 +1183,54 @@ impl Database {
                 DELETE FROM rag_chunks WHERE doc_kind = 'space_file' AND doc_id = old.id;
             END;
             "#,
+        )?;
+
+        // A Library item's character count and preview, stored and read
+        // with the rest of its metadata from a covering index
+        // (`idx_library_items_list`). Every metadata column sits after
+        // `content` in the row, so listing the Library walked each body's
+        // overflow pages — the whole base64 of every image — and `length()` /
+        // `substr()` on a body load all of it. Triggers keep them right on
+        // every write path (create, edit, link refresh, restore). Plain
+        // columns: SQLite doesn't read virtual generated ones from an index.
+        // Each added and backfilled on its own, so an interrupted migration
+        // finishes on the next launch.
+        // In one transaction each, column and backfill: committed apart, a
+        // launch killed during the backfill kept the column, so the next
+        // one skipped the backfill and every item stayed at 0 / ''.
+        if !has_column(&conn, "library_items", "chars")? {
+            conn.execute_batch(
+                "BEGIN;
+                 ALTER TABLE library_items ADD COLUMN chars INTEGER NOT NULL DEFAULT 0;
+                 UPDATE library_items SET chars = CASE WHEN media = 'text' THEN length(content) ELSE 0 END;
+                 COMMIT;",
+            )?;
+        }
+        if !has_column(&conn, "library_items", "preview")? {
+            conn.execute_batch(
+                "BEGIN;
+                 ALTER TABLE library_items ADD COLUMN preview TEXT NOT NULL DEFAULT '';
+                 UPDATE library_items SET preview = CASE WHEN media = 'text' THEN substr(content, 1, 280) ELSE '' END;
+                 COMMIT;",
+            )?;
+        }
+        conn.execute_batch(
+            "CREATE TRIGGER IF NOT EXISTS library_items_derive_ai AFTER INSERT ON library_items BEGIN
+                 UPDATE library_items
+                    SET chars = CASE WHEN new.media = 'text' THEN length(new.content) ELSE 0 END,
+                        preview = CASE WHEN new.media = 'text' THEN substr(new.content, 1, 280) ELSE '' END
+                  WHERE rowid = new.rowid;
+             END;
+             CREATE TRIGGER IF NOT EXISTS library_items_derive_au AFTER UPDATE OF content, media ON library_items BEGIN
+                 UPDATE library_items
+                    SET chars = CASE WHEN new.media = 'text' THEN length(new.content) ELSE 0 END,
+                        preview = CASE WHEN new.media = 'text' THEN substr(new.content, 1, 280) ELSE '' END
+                  WHERE rowid = new.rowid;
+             END;
+             CREATE INDEX IF NOT EXISTS idx_library_items_list ON library_items(
+                 updated_at, id, kind, title, mime, media, size, chars, preview,
+                 url, fetched_at, content_hash, truncated, created_at
+             );",
         )?;
 
         Ok(())
@@ -1305,6 +1400,12 @@ impl Database {
              SELECT lower(hex(randomblob(16))), ?1, item_id, dataset_id, enabled, position, ?2
              FROM session_library_sources WHERE owner_id = ?3",
             params![new_id, now, source.id],
+        )?;
+        // …and so do its skills, for the same reason.
+        tx.execute(
+            "INSERT INTO session_skills (session_id, name, created_at)
+             SELECT ?1, name, created_at FROM session_skills WHERE session_id = ?2",
+            params![new_id, source.id],
         )?;
 
         // One prepare for the whole copy — forking a long chat replays every
@@ -1527,6 +1628,55 @@ impl Database {
         Ok(())
     }
 
+    /// Skills switched on in a chat, in the order they were switched on.
+    pub fn session_skills(&self, session_id: &str) -> Result<Vec<String>> {
+        self.with_read(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT name FROM session_skills WHERE session_id = ?1 ORDER BY created_at, name",
+            )?;
+            let names = stmt
+                .query_map(params![session_id], |r| r.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(names)
+        })
+    }
+
+    /// Switch a skill on in a chat. `Ok(false)` when it already was; an
+    /// error when the chat is gone.
+    pub fn add_session_skill(&self, session_id: &str, name: &str) -> Result<bool> {
+        let conn = self.conn.lock();
+        let added = conn.execute(
+            "INSERT OR IGNORE INTO session_skills (session_id, name, created_at) VALUES (?1, ?2, ?3)",
+            params![session_id, name, Utc::now().timestamp_millis()],
+        )?;
+        Ok(added > 0)
+    }
+
+    fn all_session_skills(&self) -> Result<Vec<SessionSkill>> {
+        self.with_read(|conn| {
+            let mut stmt = conn.prepare("SELECT session_id, name, created_at FROM session_skills")?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok(SessionSkill {
+                        session_id: r.get(0)?,
+                        name: r.get(1)?,
+                        created_at: r.get(2)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+    }
+
+    pub fn remove_session_skill(&self, session_id: &str, name: &str) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "DELETE FROM session_skills WHERE session_id = ?1 AND name = ?2",
+            params![session_id, name],
+        )?;
+        Ok(())
+    }
+
     pub fn get_session(&self, id: &str) -> Result<Option<Session>> {
         self.with_read(|conn| {
             let mut stmt = conn.prepare(
@@ -1650,6 +1800,21 @@ impl Database {
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(rows)
+        })
+    }
+
+    /// One message's `attachments_json`, or `None` when it has none or isn't
+    /// in `session_id` (scoped like `update_message`).
+    pub fn message_attachments(&self, id: &str, session_id: &str) -> Result<Option<String>> {
+        self.with_read(|conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT attachments_json FROM messages WHERE id = ?1 AND session_id = ?2",
+                    params![id, session_id],
+                    |r| r.get::<_, Option<String>>(0),
+                )
+                .optional()?
+                .flatten())
         })
     }
 
@@ -2058,6 +2223,7 @@ impl Database {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn update_message(
         &self,
         id: &str,
@@ -2496,28 +2662,46 @@ impl Database {
         Ok(changed > 0)
     }
 
+    /// [`remove_space_memory`](Self::remove_space_memory) for many, in one
+    /// transaction — "Clear all" made one call (and one write) per memory.
+    /// Returns how many went.
+    pub fn remove_space_memories(&self, ids: &[String], space_id: &str) -> Result<usize> {
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction()?;
+        let mut removed = 0;
+        {
+            let mut stmt = tx.prepare("DELETE FROM space_memories WHERE id = ?1 AND space_id = ?2")?;
+            for id in ids {
+                removed += stmt.execute(params![id, space_id])?;
+            }
+        }
+        tx.commit()?;
+        Ok(removed)
+    }
+
     /// Read every memory across every space — used by the export path.
     pub fn all_space_memories(&self) -> Result<Vec<SpaceMemory>> {
-        let conn = self.read_pool.get().context("acquire read connection")?;
-        let mut stmt = conn.prepare(
-            "SELECT id, space_id, content, source_session_id, source_message_id,
-                    created_at, updated_at
-             FROM space_memories ORDER BY space_id, created_at, rowid",
-        )?;
-        let rows = stmt
-            .query_map([], |r| {
-                Ok(SpaceMemory {
-                    id: r.get(0)?,
-                    space_id: r.get(1)?,
-                    content: r.get(2)?,
-                    source_session_id: r.get(3)?,
-                    source_message_id: r.get(4)?,
-                    created_at: r.get(5)?,
-                    updated_at: r.get(6)?,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(rows)
+        self.with_read(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, space_id, content, source_session_id, source_message_id,
+                        created_at, updated_at
+                 FROM space_memories ORDER BY space_id, created_at, rowid",
+            )?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok(SpaceMemory {
+                        id: r.get(0)?,
+                        space_id: r.get(1)?,
+                        content: r.get(2)?,
+                        source_session_id: r.get(3)?,
+                        source_message_id: r.get(4)?,
+                        created_at: r.get(5)?,
+                        updated_at: r.get(6)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
     }
 
     // ------------ global memories ------------
@@ -2591,6 +2775,22 @@ impl Database {
         let conn = self.conn.lock();
         let changed = conn.execute("DELETE FROM global_memories WHERE id = ?1", params![id])?;
         Ok(changed > 0)
+    }
+
+    /// [`remove_global_memory`](Self::remove_global_memory) for many, in one
+    /// transaction. Returns how many went.
+    pub fn remove_global_memories(&self, ids: &[String]) -> Result<usize> {
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction()?;
+        let mut removed = 0;
+        {
+            let mut stmt = tx.prepare("DELETE FROM global_memories WHERE id = ?1")?;
+            for id in ids {
+                removed += stmt.execute(params![id])?;
+            }
+        }
+        tx.commit()?;
+        Ok(removed)
     }
 
     // ------------ snippets ------------
@@ -2988,66 +3188,19 @@ impl Database {
     // `settings` alone; `wipe_all()` also drops `settings` for a true
     // factory reset.
 
-    /// Read every message across every session. Used by the export path —
-    /// callers normally fetch messages per-session.
-    pub fn all_messages(&self) -> Result<Vec<Message>> {
-        let conn = self.read_pool.get().context("acquire read connection")?;
-        let mut stmt = conn.prepare(
-            "SELECT id, session_id, role, content, thinking, attachments_json, metrics_json, tool_calls_json, compacted_at, created_at, import_group, import_hidden, pinned_at
-             FROM messages ORDER BY session_id, created_at, rowid",
-        )?;
-        let rows = stmt
-            .query_map([], |r| {
-                Ok(Message {
-                    id: r.get(0)?,
-                    session_id: r.get(1)?,
-                    role: r.get(2)?,
-                    content: r.get(3)?,
-                    thinking: r.get(4)?,
-                    attachments_json: r.get(5)?,
-                    metrics_json: r.get(6)?,
-                    tool_calls_json: r.get(7)?,
-                    compacted_at: r.get(8)?,
-                    created_at: r.get(9)?,
-                    import_group: r.get(10)?,
-                    import_hidden: r.get(11)?,
-                    pinned_at: r.get(12)?,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(rows)
-    }
-
     /// Read every space file across every space.
+    #[cfg(test)]
     pub fn all_space_files(&self) -> Result<Vec<SpaceFile>> {
-        let conn = self.read_pool.get().context("acquire read connection")?;
-        let mut stmt = conn.prepare(
-            "SELECT id, space_id, name, mime, kind, data, size, position, created_at, enabled
-             FROM space_files ORDER BY space_id, position",
-        )?;
-        let rows = stmt
-            .query_map([], |r| {
-                Ok(SpaceFile {
-                    id: r.get(0)?,
-                    space_id: r.get(1)?,
-                    name: r.get(2)?,
-                    mime: r.get(3)?,
-                    kind: r.get(4)?,
-                    data: r.get(5)?,
-                    size: r.get(6)?,
-                    position: r.get(7)?,
-                    enabled: r.get::<_, i64>(9)? != 0,
-                    created_at: r.get(8)?,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(rows)
+        self.with_read(|conn| {
+            let mut stmt = conn.prepare(ALL_SPACE_FILES_SQL)?;
+            let rows = stmt.query_map([], space_file_from_row)?.collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
     }
 
-    /// Capture the full database state in a plain data struct the frontend
-    /// can ship to disk as JSON. `settings` is a key/value list — its
-    /// shape is deliberately loose so future settings keys don't require
-    /// a schema bump.
+    /// The full database state as JSON — an export — written to `out`.
+    /// `settings` is a key/value list — its shape is deliberately loose so
+    /// future settings keys don't require a schema bump.
     ///
     /// **MCP credentials are scrubbed.** Each `mcp_servers` row's
     /// `headers_json` (HTTP) or `env_json` (stdio) carries the user's
@@ -3058,20 +3211,19 @@ impl Database {
     /// reconfigure auth after re-importing. The import path tolerates
     /// a NULL `headers_json` already (an MCP server with no auth headers
     /// is a valid configuration), so the round-trip remains valid.
-    pub fn snapshot(&self) -> Result<DatabaseSnapshot> {
-        // Freeze writers for the duration. The export is assembled from
-        // eleven separate reads, and with the lock released between them a
-        // streaming flush or a session create could commit halfway through —
-        // producing a file whose `messages` reference a session absent from
-        // `sessions`. A restore drops such orphans (`clear_dangling_refs`), so
-        // they'd be silently lost on the way back in.
-        //
-        // Every read below goes through the pool, and no pooled read takes
-        // this lock, so holding it here freezes the database without
-        // deadlocking. Export is a rare, explicit action already running on
-        // the blocking pool, so stalling writers briefly is the cheap half of
-        // the trade.
-        let _writer_frozen = self.conn.lock();
+    ///
+    /// Every table is read in one read transaction, pinned for this thread
+    /// so the readers below use it (`with_read`): one state of the database
+    /// throughout, without stopping writers — with seventeen separate reads,
+    /// a session created halfway through left `messages` naming a session
+    /// absent from `sessions`, and a restore dropped those as orphans. The
+    /// big tables (messages, Space files, Library items — the inlined
+    /// bodies) are written row by row, never all in memory: the export
+    /// used to hold the whole database, and the writer lock, until it was
+    /// written.
+    pub fn write_snapshot(&self, out: impl std::io::Write) -> Result<()> {
+        let conn = self.read_pool.get().context("acquire read connection")?;
+        let _pinned = PinnedRead::begin(conn)?;
         let mcp_servers: Vec<McpServer> = self
             .list_mcp_servers()?
             .into_iter()
@@ -3105,16 +3257,16 @@ impl Database {
                 s
             })
             .collect();
-        Ok(DatabaseSnapshot {
+        let doc = SnapshotOut {
             schema: SNAPSHOT_SCHEMA.to_string(),
             exported_at: Utc::now().timestamp_millis(),
             loach_version: env!("CARGO_PKG_VERSION").to_string(),
-            data: SnapshotData {
+            data: SnapshotDataOut {
                 sessions,
                 folders: self.list_folders()?,
-                messages: self.all_messages()?,
+                messages: Streamed { sql: ALL_MESSAGES_SQL.to_string(), map: message_from_row },
                 spaces: self.list_spaces()?,
-                space_files: self.all_space_files()?,
+                space_files: Streamed { sql: ALL_SPACE_FILES_SQL.to_string(), map: space_file_from_row },
                 space_memories: self.all_space_memories()?,
                 global_memories: self.list_global_memories()?,
                 snippets: self.list_snippets()?,
@@ -3122,12 +3274,26 @@ impl Database {
                 snippet_fill_values: self.all_snippet_fill_values()?,
                 mcp_servers,
                 settings: self.all_settings()?,
-                library_items: self.all_library_items()?,
+                library_items: Streamed {
+                    sql: format!("{} ORDER BY created_at", library::ITEM_SELECT),
+                    map: library::item_from_row,
+                },
                 library_datasets: self.list_library_datasets()?,
                 space_library_sources: self.all_library_sources(library::SourceOwner::Space)?,
                 session_library_sources: self.all_library_sources(library::SourceOwner::Session)?,
+                session_skills: self.all_session_skills()?,
             },
-        })
+        };
+        serde_json::to_writer_pretty(out, &doc)?;
+        Ok(())
+    }
+
+    /// The export as a value, through `write_snapshot` — for tests.
+    #[cfg(test)]
+    pub fn snapshot(&self) -> Result<DatabaseSnapshot> {
+        let mut buf = Vec::new();
+        self.write_snapshot(&mut buf)?;
+        Ok(serde_json::from_slice(&buf)?)
     }
 
     /// Replace the contents of every table with the snapshot. Returns a
@@ -3164,6 +3330,7 @@ impl Database {
         tx.execute_batch(
             r#"
             DELETE FROM rag_chunks;
+            DELETE FROM session_skills;
             DELETE FROM session_library_sources;
             DELETE FROM space_library_sources;
             DELETE FROM library_dataset_items;
@@ -3235,6 +3402,17 @@ impl Database {
                     s.retrieval_mode.as_deref().filter(|m| is_retrieval_mode(m)),
                     s.image_scaling_json.as_deref().and_then(normalize_image_scaling),
                 ],
+            )?;
+        }
+
+        // A name off the skill-name rule never came from `/skill` or the
+        // model, so it's left out rather than shown as a chip. One whose
+        // chat isn't in the snapshot falls to `clear_dangling_refs`.
+        for sk in d.session_skills.iter().filter(|sk| crate::skills::is_valid_name(&sk.name)) {
+            tx.execute(
+                "INSERT OR IGNORE INTO session_skills (session_id, name, created_at)
+                 VALUES (?1, ?2, ?3)",
+                params![sk.session_id, sk.name, sk.created_at],
             )?;
         }
 
@@ -3329,6 +3507,12 @@ impl Database {
         }
 
         for f in &d.space_files {
+            // `kind` decides how the file is chunked and sent; one outside
+            // the three the app writes reached neither path.
+            if !matches!(f.kind.as_str(), "text" | "image" | "file") {
+                tracing::warn!("restore: skipped Space file {} of unknown kind `{}`", f.id, f.kind);
+                continue;
+            }
             tx.execute(
                 "INSERT INTO space_files (id, space_id, name, mime, kind, data, size, position, created_at, enabled)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
@@ -3447,6 +3631,9 @@ impl Database {
             settings: d.settings.len(),
             library_items: d.library_items.len(),
             library_datasets: d.library_datasets.len(),
+            mcp_disabled: Vec::new(),
+            mcp_renamed: Vec::new(),
+            openai_base_url_kept: false,
         };
 
         tx.commit()?;
@@ -3480,8 +3667,9 @@ impl Database {
     }
 
     /// Delete everything the user created (chats, spaces, snippets,
-    /// MCP servers) while leaving app settings intact. `messages` and
-    /// `space_files` fall via ON DELETE CASCADE.
+    /// MCP servers) while leaving app settings intact. FK enforcement is off
+    /// for the transaction, so nothing cascades: every table is emptied by
+    /// its own DELETE in [`Self::wipe_user_data_locked`].
     ///
     /// `PRAGMA foreign_keys = ON` is restored on every exit path so a mid-
     /// transaction failure can't leave the shared connection with FK
@@ -3506,6 +3694,7 @@ impl Database {
         tx.execute_batch(
             r#"
             DELETE FROM rag_chunks;
+            DELETE FROM session_skills;
             DELETE FROM session_library_sources;
             DELETE FROM space_library_sources;
             DELETE FROM library_dataset_items;
@@ -3526,6 +3715,28 @@ impl Database {
         )?;
         tx.commit()?;
         Ok(())
+    }
+
+    /// Reclaim the pages a bulk delete freed — after an erase, a factory
+    /// reset or a restore. Deleted rows otherwise stay readable in the file's
+    /// free pages (any SQLite forensic tool carves them out), the search
+    /// index keeps their words as delete markers, and the file never shrinks:
+    /// "Permanently delete" left the chats in `loach.db`. Rebuilds the FTS
+    /// index from its (now emptied or replaced) content, VACUUMs, and
+    /// truncates the WAL, which holds the last copies of rewritten pages.
+    /// Best effort: a failure doesn't undo what came before it, so it's
+    /// logged rather than returned.
+    pub fn compact(&self) {
+        let conn = self.conn.lock();
+        let run = || -> Result<()> {
+            conn.execute("INSERT INTO rag_chunks_fts(rag_chunks_fts) VALUES('rebuild')", [])?;
+            conn.execute_batch("VACUUM;")?;
+            conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
+            Ok(())
+        };
+        if let Err(e) = run() {
+            tracing::warn!("couldn't compact the database after a bulk delete: {e:#}");
+        }
     }
 
     /// Factory reset: everything `wipe_user_data` does, plus a settings
@@ -3553,6 +3764,7 @@ impl Database {
         tx.execute_batch(
             r#"
             DELETE FROM rag_chunks;
+            DELETE FROM session_skills;
             DELETE FROM session_library_sources;
             DELETE FROM space_library_sources;
             DELETE FROM library_dataset_items;
@@ -3623,6 +3835,132 @@ pub fn is_supported_snapshot_schema(schema: &str) -> bool {
     matches!(schema, "loach/v1" | SNAPSHOT_SCHEMA)
 }
 
+thread_local! {
+    /// The read transaction `write_snapshot` runs in, for `with_read` to use
+    /// on this thread while it does (see there).
+    static PINNED_READ: std::cell::RefCell<Option<r2d2::PooledConnection<SqliteConnectionManager>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Holds [`PINNED_READ`] for the length of an export: begun with the read
+/// transaction, rolled back (it only read) and unpinned when dropped — on
+/// an error or a panic too, so no later read on this pool thread lands in
+/// a stale transaction.
+struct PinnedRead;
+
+impl PinnedRead {
+    fn begin(conn: r2d2::PooledConnection<SqliteConnectionManager>) -> Result<Self> {
+        conn.execute_batch("BEGIN")?;
+        PINNED_READ.with(|p| *p.borrow_mut() = Some(conn));
+        Ok(PinnedRead)
+    }
+}
+
+impl Drop for PinnedRead {
+    fn drop(&mut self) {
+        if let Some(conn) = PINNED_READ.with(|p| p.borrow_mut().take()) {
+            let _ = conn.execute_batch("ROLLBACK");
+        }
+    }
+}
+
+/// A table written into the export row by row from the pinned read
+/// transaction, one row in memory at a time.
+struct Streamed<T> {
+    sql: String,
+    map: fn(&rusqlite::Row) -> rusqlite::Result<T>,
+}
+
+impl<T: Serialize> Serialize for Streamed<T> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::{Error as _, SerializeSeq as _};
+        PINNED_READ.with(|pinned| {
+            let pinned = pinned.borrow();
+            let conn = pinned
+                .as_deref()
+                .ok_or_else(|| S::Error::custom("the export's read transaction isn't open"))?;
+            let mut stmt = conn.prepare(&self.sql).map_err(S::Error::custom)?;
+            let rows = stmt.query_map([], self.map).map_err(S::Error::custom)?;
+            let mut seq = s.serialize_seq(None)?;
+            for row in rows {
+                seq.serialize_element(&row.map_err(S::Error::custom)?)?;
+            }
+            seq.end()
+        })
+    }
+}
+
+/// [`DatabaseSnapshot`] as `write_snapshot` writes it: the same fields in
+/// the same order, the big tables streamed.
+#[derive(Serialize)]
+struct SnapshotOut {
+    schema: String,
+    exported_at: i64,
+    loach_version: String,
+    data: SnapshotDataOut,
+}
+
+/// [`SnapshotData`]'s fields, in its order — keep the two in step.
+#[derive(Serialize)]
+struct SnapshotDataOut {
+    sessions: Vec<Session>,
+    folders: Vec<Folder>,
+    messages: Streamed<Message>,
+    spaces: Vec<Space>,
+    space_files: Streamed<SpaceFile>,
+    space_memories: Vec<SpaceMemory>,
+    global_memories: Vec<GlobalMemory>,
+    snippets: Vec<Snippet>,
+    snippet_variables: Vec<SnippetVariable>,
+    snippet_fill_values: Vec<SnippetFillValue>,
+    mcp_servers: Vec<McpServer>,
+    settings: Vec<(String, String)>,
+    library_items: Streamed<library::LibraryItem>,
+    library_datasets: Vec<library::LibraryDataset>,
+    space_library_sources: Vec<library::LibrarySource>,
+    session_library_sources: Vec<library::LibrarySource>,
+    session_skills: Vec<SessionSkill>,
+}
+
+const ALL_MESSAGES_SQL: &str = "SELECT id, session_id, role, content, thinking, attachments_json, metrics_json, tool_calls_json, compacted_at, created_at, import_group, import_hidden, pinned_at
+     FROM messages ORDER BY session_id, created_at, rowid";
+
+fn message_from_row(r: &rusqlite::Row) -> rusqlite::Result<Message> {
+    Ok(Message {
+        id: r.get(0)?,
+        session_id: r.get(1)?,
+        role: r.get(2)?,
+        content: r.get(3)?,
+        thinking: r.get(4)?,
+        attachments_json: r.get(5)?,
+        metrics_json: r.get(6)?,
+        tool_calls_json: r.get(7)?,
+        compacted_at: r.get(8)?,
+        created_at: r.get(9)?,
+        import_group: r.get(10)?,
+        import_hidden: r.get(11)?,
+        pinned_at: r.get(12)?,
+    })
+}
+
+const ALL_SPACE_FILES_SQL: &str = "SELECT id, space_id, name, mime, kind, data, size, position, created_at, enabled
+     FROM space_files ORDER BY space_id, position";
+
+fn space_file_from_row(r: &rusqlite::Row) -> rusqlite::Result<SpaceFile> {
+    Ok(SpaceFile {
+        id: r.get(0)?,
+        space_id: r.get(1)?,
+        name: r.get(2)?,
+        mime: r.get(3)?,
+        kind: r.get(4)?,
+        data: r.get(5)?,
+        size: r.get(6)?,
+        position: r.get(7)?,
+        enabled: r.get::<_, i64>(9)? != 0,
+        created_at: r.get(8)?,
+    })
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DatabaseSnapshot {
     /// Wire-format tag — bump when the shape changes so loaders can
@@ -3675,6 +4013,10 @@ pub struct SnapshotData {
     /// Library items / datasets linked into chats.
     #[serde(default)]
     pub session_library_sources: Vec<library::LibrarySource>,
+    /// Skills switched on in each chat. Empty on exports that predate
+    /// skills. Older builds ignore the field, so it needs no schema bump.
+    #[serde(default)]
+    pub session_skills: Vec<SessionSkill>,
 }
 
 /// Row-count breakdown returned after a successful import.
@@ -3694,6 +4036,13 @@ pub struct ImportStats {
     pub settings: usize,
     pub library_items: usize,
     pub library_datasets: usize,
+    /// MCP servers brought back switched off (stdio awaiting consent, hosts
+    /// that couldn't be screened). Filled by `import_data_with_dialog`.
+    pub mcp_disabled: Vec<String>,
+    /// MCP servers renamed to fit the name rule, as `"old" → "new"`.
+    pub mcp_renamed: Vec<String>,
+    /// The backup's OpenAI base URL was set aside for the current one.
+    pub openai_base_url_kept: bool,
 }
 
 /// How much text `search_messages` keeps around a hit, in characters: the
@@ -3786,17 +4135,25 @@ fn build_snippet(text: &str, needle: &str) -> Option<String> {
 }
 
 /// Stands in for a secret [`redact_args_json`] leaves out of an export.
-const REDACTED: &str = "REDACTED";
+pub(crate) const REDACTED: &str = "REDACTED";
 
 /// Whether a flag, environment variable, header or query parameter called
-/// `name` holds a credential. `auth` only counts as a whole word (`--auth`,
-/// `--basic-auth`), so `--author` and `--authority` keep their values.
+/// `name` holds a credential. `auth`, `key`, `pat` and `bearer` only count as
+/// whole words (`--auth`, `--basic-auth`, `--key`, `GITHUB_PAT`), so
+/// `--author`, `--authority` and `--keyspace` keep their values — though a
+/// name *ending* in `key` counts too (`--privatekey`, `ACCESSKEY`,
+/// `OPENAI_KEY`). Erring this way costs a harmless value retyped after a
+/// restore; the other way, a key in a shared backup.
 fn is_secret_name(name: &str) -> bool {
     let n = name.to_ascii_lowercase();
-    ["token", "secret", "password", "passwd", "apikey", "api-key", "api_key", "authorization"]
-        .iter()
-        .any(|w| n.contains(w))
-        || n.split(['-', '_', '.']).any(|word| word == "auth")
+    [
+        "token", "secret", "password", "passwd", "apikey", "api-key", "api_key", "authorization",
+        "credential", "cookie",
+    ]
+    .iter()
+    .any(|w| n.contains(w))
+        || n.ends_with("key")
+        || n.split(['-', '_', '.']).any(|word| matches!(word, "auth" | "key" | "pat" | "bearer"))
 }
 
 /// A stdio server's `args_json` as it goes into an export: the value of a
@@ -3855,7 +4212,38 @@ fn redact_arg_value(arg: &str) -> String {
             }
         }
     }
+    if looks_like_token(arg) {
+        return REDACTED.to_string();
+    }
     redact_url_credentials(arg)
+}
+
+/// An argument shaped like a key on its own, with no flag naming it: a known
+/// key prefix (`sk-…`, `ghp_…`, `xoxb-…`) or a long run of key characters
+/// holding both letters and digits. The same rule as the on-screen masking
+/// (`redactArgs` in src/stores/mcpStore.ts).
+fn looks_like_token(arg: &str) -> bool {
+    const PREFIXES: [&str; 13] = [
+        "sk", "pk", "rk", "ghp", "gho", "ghs", "github_pat", "glpat", "xoxa", "xoxb", "xoxp", "xoxr", "xoxs",
+    ];
+    let lower = arg.to_ascii_lowercase();
+    let prefixed = PREFIXES.iter().any(|p| {
+        lower
+            .strip_prefix(p)
+            .and_then(|rest| rest.strip_prefix(['-', '_']))
+            .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_'))
+    });
+    prefixed
+        || (arg.len() >= 32
+            && arg.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            && arg.chars().any(|c| c.is_ascii_digit())
+            && arg.chars().any(|c| c.is_ascii_alphabetic()))
+}
+
+/// Whether an MCP row came out of an export with a credential replaced by
+/// [`REDACTED`] — it can't run as it stands until the value is entered again.
+pub(crate) fn carries_redaction(row: &McpServer) -> bool {
+    row.url.contains(REDACTED) || row.args_json.as_deref().is_some_and(|a| a.contains(REDACTED))
 }
 
 /// `text` with the credentials of any URL in it replaced by [`REDACTED`]:
@@ -4028,6 +4416,27 @@ mod tests {
         (db, dir)
     }
 
+    /// X3-03: an erased chat's text doesn't survive in the file — not in
+    /// free pages, not in the WAL.
+    #[test]
+    fn compacting_after_a_wipe_leaves_no_trace_of_the_erased_text() {
+        let (db, dir) = fresh_db();
+        let s = db.create_session("c", "ollama", "llama3", None, None).unwrap();
+        let secret = "quixotic-marmalade-".repeat(200);
+        db.append_message(&s.id, "user", &secret, None).unwrap();
+        db.wipe_user_data().unwrap();
+        db.compact();
+
+        let needle = b"quixotic-marmalade-";
+        for name in ["loach.db", "loach.db-wal"] {
+            let Ok(bytes) = std::fs::read(dir.path().join(name)) else { continue };
+            assert!(
+                !bytes.windows(needle.len()).any(|w| w == needle),
+                "{name} still holds the erased text"
+            );
+        }
+    }
+
     /// An unsaved MCP row of either transport, minimal but valid.
     fn mcp_draft(name: &str, transport: &str) -> McpServer {
         let stdio = transport == "stdio";
@@ -4127,6 +4536,39 @@ mod tests {
         assert!(!db.add_mcp_allowed_tool("no-such-server", "search").unwrap());
     }
 
+    /// "Clear all" removes the listed memories in one go — only the scope's
+    /// own, for a Space — and says how many went.
+    #[test]
+    fn memories_are_removed_in_bulk() {
+        let (db, _dir) = fresh_db();
+        let ids: Vec<String> = ["a", "b", "c"]
+            .iter()
+            .map(|c| db.add_global_memory(c, None, None, None).unwrap().id)
+            .collect();
+        assert_eq!(db.remove_global_memories(&ids[..2]).unwrap(), 2);
+        let left: Vec<String> = db.list_global_memories().unwrap().into_iter().map(|m| m.id).collect();
+        assert_eq!(left, [ids[2].clone()]);
+
+        let space = db.create_space("S", "", "").unwrap();
+        let m = db.add_space_memory(&space.id, "fact", None, None, None).unwrap();
+        assert_eq!(db.remove_space_memories(std::slice::from_ref(&m.id), "another-space").unwrap(), 0);
+        assert_eq!(db.remove_space_memories(&[m.id], &space.id).unwrap(), 1);
+    }
+
+    /// The export reads in one transaction pinned to its thread, and lets go
+    /// of it when done: left pinned, every later read on that thread would
+    /// still see the database as it was during the export.
+    #[test]
+    fn export_releases_its_read_transaction() {
+        let (db, _dir) = fresh_db();
+        db.create_session("before", "ollama", "llama3", None, None).unwrap();
+        let snap = db.snapshot().expect("snapshot");
+        assert_eq!(snap.data.sessions.len(), 1);
+        db.create_session("after", "ollama", "llama3", None, None).unwrap();
+        assert_eq!(db.list_sessions().unwrap().len(), 2);
+        assert!(PINNED_READ.with(|p| p.borrow().is_none()));
+    }
+
     /// stdio servers take their API keys through `env_json`; an export
     /// must scrub it exactly as it scrubs HTTP headers.
     #[test]
@@ -4179,13 +4621,63 @@ mod tests {
         assert_eq!(redact_args_json("not json"), None);
     }
 
+    /// A row whose export replaced a credential is recognised as such, so an
+    /// import can switch it off until the value is entered again; one with
+    /// nothing masked isn't.
+    #[test]
+    fn masked_rows_are_recognised() {
+        let (db, _dir) = fresh_db();
+        let mut keyed = mcp_draft("pg", "stdio");
+        keyed.args_json = Some(r#"["postgresql://app:hunter2@db/shop"]"#.into());
+        db.upsert_mcp_server(&keyed).expect("insert");
+        db.upsert_mcp_server(&mcp_draft("fs", "stdio")).expect("insert");
+        let snap = db.snapshot().expect("snapshot");
+        let row = |name: &str| snap.data.mcp_servers.iter().find(|r| r.name == name).expect("row");
+        assert!(carries_redaction(row("pg")));
+        assert!(!carries_redaction(row("fs")));
+    }
+
+    /// A key passed on its own, with no flag naming it, goes too — as the
+    /// settings list masks it on screen — while ordinary arguments stay.
+    #[test]
+    fn exported_arguments_lose_bare_tokens() {
+        let args = serde_json::to_string(&[
+            "sk-proj-abc123",
+            "ghp_abcdef",
+            "xoxb-1-2",
+            "0123456789abcdef0123456789abcdef",
+            "@modelcontextprotocol/server-filesystem",
+            "C:\\Users\\you\\Documents",
+            "skills",
+            "sk",
+            "--port=8080",
+        ])
+        .unwrap();
+        let out: Vec<String> =
+            serde_json::from_str(&redact_args_json(&args).expect("a list of strings")).unwrap();
+        assert_eq!(
+            out,
+            [
+                "REDACTED",
+                "REDACTED",
+                "REDACTED",
+                "REDACTED",
+                "@modelcontextprotocol/server-filesystem",
+                "C:\\Users\\you\\Documents",
+                "skills",
+                "sk",
+                "--port=8080",
+            ]
+        );
+    }
+
     /// The other places a stdio command line carries a credential — a token
     /// as the whole URL userinfo, an env assignment for `docker run -e`, an
     /// auth header, a key in the query — lose it too, while flags that only
     /// contain "auth" in a longer word keep their values.
     #[test]
     fn exported_arguments_lose_tokens_in_env_headers_and_queries() {
-        let args = serde_json::to_string(&[
+        let args = serde_json::to_string(&vec![
             "https://ghp_abc@github.com/org/repo",
             "-e",
             "GITHUB_TOKEN=ghp_abc",
@@ -4203,6 +4695,24 @@ mod tests {
             "--authority=ca.example.com",
             "--auth",
             "hunter2",
+            // `key`-named, and the rest of B2-03's shapes.
+            "--key",
+            "sk-live-1",
+            "-e",
+            "OPENAI_KEY=sk-2",
+            "--private-key",
+            "pk-3",
+            "--accesskey=ak-4",
+            "--credentials",
+            "c-5",
+            "-H",
+            "Cookie: session=c-6",
+            "-e",
+            "GITHUB_PAT=ghp_7",
+            "--keyspace",
+            "main",
+            "--sort-order",
+            "asc",
         ])
         .unwrap();
         let out: Vec<String> =
@@ -4227,6 +4737,23 @@ mod tests {
                 "--authority=ca.example.com",
                 "--auth",
                 "REDACTED",
+                "--key",
+                "REDACTED",
+                "-e",
+                "OPENAI_KEY=REDACTED",
+                "--private-key",
+                "REDACTED",
+                "--accesskey=REDACTED",
+                "--credentials",
+                "REDACTED",
+                "-H",
+                "Cookie: REDACTED",
+                "-e",
+                "GITHUB_PAT=REDACTED",
+                "--keyspace",
+                "main",
+                "--sort-order",
+                "asc",
             ]
         );
     }
@@ -5049,5 +5576,72 @@ mod tests {
         let stats = db.restore_snapshot(&snapshot).unwrap();
         assert_eq!(stats.global_memories, 1);
         assert_eq!(db.list_global_memories().unwrap()[0].content, "Lives in Berlin.");
+    }
+
+    #[test]
+    fn session_skills_follow_the_chat() {
+        let (db, _dir) = fresh_db();
+        let s = db.create_session("t", "ollama", "m", None, None).unwrap();
+        assert!(db.add_session_skill(&s.id, "pdf").unwrap());
+        assert!(!db.add_session_skill(&s.id, "pdf").unwrap());
+        assert!(db.add_session_skill(&s.id, "docx").unwrap());
+        assert_eq!(db.session_skills(&s.id).unwrap().len(), 2);
+        db.remove_session_skill(&s.id, "docx").unwrap();
+        assert_eq!(db.session_skills(&s.id).unwrap(), ["pdf"]);
+
+        let fork = db.fork_session(&s.id, None).unwrap();
+        assert_eq!(db.session_skills(&fork.id).unwrap(), ["pdf"]);
+
+        db.delete_session(&s.id).unwrap();
+        assert!(db.session_skills(&s.id).unwrap().is_empty());
+        assert!(db.add_session_skill("gone", "pdf").is_err());
+    }
+
+    /// A restore used to delete every chat's skills without exporting them.
+    /// They now travel in the snapshot; a name off the skill-name rule or a
+    /// chat the snapshot doesn't carry is dropped on the way back in.
+    #[test]
+    fn session_skills_survive_a_snapshot_round_trip() {
+        let (db, _dir) = fresh_db();
+        let s = db.create_session("t", "ollama", "m", None, None).unwrap();
+        db.add_session_skill(&s.id, "pdf").unwrap();
+        db.add_session_skill(&s.id, "docx").unwrap();
+
+        let mut snap = db.snapshot().expect("snapshot");
+        assert_eq!(snap.data.session_skills.len(), 2);
+        snap.data.session_skills.push(SessionSkill {
+            session_id: s.id.clone(),
+            name: "<b>Bad Name</b>".into(),
+            created_at: 0,
+        });
+        snap.data.session_skills.push(SessionSkill {
+            session_id: "missing-chat".into(),
+            name: "pdf".into(),
+            created_at: 0,
+        });
+
+        let (db2, _dir2) = fresh_db();
+        db2.restore_snapshot(&snap).expect("restore");
+        let mut names = db2.session_skills(&s.id).unwrap();
+        names.sort();
+        assert_eq!(names, ["docx", "pdf"]);
+        assert!(db2.session_skills("missing-chat").unwrap().is_empty());
+    }
+
+    /// `message_attachments` hands back a message's attachments whole, but
+    /// only to the chat the message is in.
+    #[test]
+    fn message_attachments_are_scoped_to_their_chat() {
+        let (db, _dir) = fresh_db();
+        let a = db.create_session("a", "ollama", "m", None, None).unwrap();
+        let b = db.create_session("b", "ollama", "m", None, None).unwrap();
+        let json = r#"[{"kind":"image","name":"cat.png","mime":"image/png","data":"iVBORw0K"}]"#;
+        let with = db.append_message(&a.id, "user", "look", Some(json)).unwrap();
+        let without = db.append_message(&a.id, "assistant", "a cat", None).unwrap();
+
+        assert_eq!(db.message_attachments(&with.id, &a.id).unwrap().as_deref(), Some(json));
+        assert_eq!(db.message_attachments(&with.id, &b.id).unwrap(), None);
+        assert_eq!(db.message_attachments(&without.id, &a.id).unwrap(), None);
+        assert_eq!(db.message_attachments("missing", &a.id).unwrap(), None);
     }
 }

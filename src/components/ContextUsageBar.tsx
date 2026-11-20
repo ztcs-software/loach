@@ -1,16 +1,20 @@
-import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { Gauge, Loader2, Maximize2, Sparkles, X } from "lucide-react";
-import { useChatStore } from "@/stores/chatStore";
+import { parseOverrides, useChatStore } from "@/stores/chatStore";
 import { useSettingsStore } from "@/stores/settingsStore";
-import { useModelsStore } from "@/stores/modelsStore";
+import { useDefaultNumCtx, useModelsStore } from "@/stores/modelsStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useGlobalMemoryStore } from "@/stores/globalMemoryStore";
 import { useLibraryStore } from "@/stores/libraryStore";
+import { useSkillStore } from "@/stores/skillStore";
+import { useMcpStore } from "@/stores/mcpStore";
 import { selectMemoriesForPrompt } from "@/lib/memoryRules";
 import { estimateChatSources } from "@/lib/sources";
+import { chatToolsSize } from "@/lib/tauri";
 import {
   DEFAULT_PARAMS,
   OPENAI_COMPAT_NUM_CTX,
+  type ChatToolsSize,
   type GenerationParams,
   type Message,
   type SpaceFile,
@@ -41,28 +45,16 @@ function effectiveParams(
   paramsJson: string | null,
   modelDefaults: Partial<GenerationParams> | undefined,
   spaceParamsJson: string | null,
+  appNumCtx: number,
 ): GenerationParams {
-  let overrides: Partial<GenerationParams> = {};
-  if (paramsJson) {
-    try {
-      overrides = JSON.parse(paramsJson) as Partial<GenerationParams>;
-    } catch {
-      /* ignore — fall back to layered defaults */
-    }
-  }
-  let spaceLayer: Partial<GenerationParams> = {};
-  if (spaceParamsJson) {
-    try {
-      spaceLayer = JSON.parse(spaceParamsJson) as Partial<GenerationParams>;
-    } catch {
-      /* ignore */
-    }
-  }
+  // Through the send's own guard: a wrong-typed `num_ctx` the send drops
+  // (hand-edited, imported) overrode the model's window here.
   return {
     ...DEFAULT_PARAMS,
+    num_ctx: appNumCtx,
     ...(modelDefaults ?? {}),
-    ...spaceLayer,
-    ...overrides,
+    ...parseOverrides(spaceParamsJson),
+    ...parseOverrides(paramsJson),
   };
 }
 
@@ -86,11 +78,16 @@ export function ContextUsageBar() {
         ? OPENAI_COMPAT_DEFAULTS
         : undefined,
   );
+  // The model's trained window, when Ollama reports it: Expand stops there,
+  // as the default does — Ollama clamps a bigger `num_ctx` on load.
+  const modelContextMax = useModelsStore((s) =>
+    isOllama && session?.model ? s.modelContextMax[session.model] : undefined,
+  );
   const space = useSpaceStore((s) =>
     session?.space_id ? s.spaces.find((x) => x.id === session.space_id) : null,
   );
   // Counted only while Workspace files is on — the backend drops the
-  // folder, and with it LOACHFILE.md, when the switch is off.
+  // folder, and with it its instructions file, when the switch is off.
   const workspaceToolsEnabled = useSettingsStore((s) => s.workspace_tool_enabled);
   const projectInstructions = useChatStore((s) =>
     workspaceToolsEnabled && s.activeSessionId
@@ -132,6 +129,38 @@ export function ContextUsageBar() {
     if (spaceId) void ensureSources("space", spaceId).catch(() => undefined);
     if (sessionId) void ensureSources("session", sessionId).catch(() => undefined);
   }, [spaceId, sessionId, loadSpaceFiles, ensureSources]);
+  // The tool definitions every request carries, sized by the backend — it
+  // alone builds the catalogue. Asked again when the chat, its folder or any
+  // setting changes (most tools are a Settings switch), and once a turn in
+  // it ends: the send fills the MCP cache, and may have loaded a skill.
+  const workspaceRoot = session?.workspace_root ?? null;
+  const settings = useSettingsStore((s) => s);
+  const streamingHere = useChatStore(
+    (s) => !!sessionId && s.streamingSessionId === sessionId,
+  );
+  // A skill loaded or unloaded with `/skill` changes what the send carries,
+  // as do a skill switched off or imported, an MCP server added or switched
+  // off, and the MCP tools the typing warm-up has listed.
+  const loadedSkills = useSkillStore((s) => (sessionId ? s.bySession[sessionId] : undefined));
+  const skillCatalog = useSkillStore((s) => s.catalog);
+  const mcpServers = useMcpStore((s) => s.servers);
+  const mcpWarmedAt = useMcpStore((s) => s.toolsWarmedAt);
+  const [tools, setTools] = useState<{ sessionId: string; size: ChatToolsSize } | null>(null);
+  useEffect(() => {
+    if (!sessionId || streamingHere) return;
+    let live = true;
+    chatToolsSize(sessionId).then(
+      (size) => {
+        if (live) setTools({ sessionId, size });
+      },
+      // Display only: a failed read leaves the tools uncounted.
+      () => undefined,
+    );
+    return () => {
+      live = false;
+    };
+  }, [sessionId, workspaceRoot, settings, streamingHere, loadedSkills, skillCatalog, mcpServers, mcpWarmedAt]);
+  const toolsSize = tools?.sessionId === sessionId ? tools.size : null;
   const compactingSessionId = useChatStore((s) => s.compactingSessionId);
   const compactContext = useChatStore((s) => s.compactContext);
   const setSessionParams = useChatStore((s) => s.setSessionParams);
@@ -139,6 +168,13 @@ export function ContextUsageBar() {
   const [open, setOpen] = useState(false);
   const popoverRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
+  // Closed from inside (Escape, its X), focus goes back to the trigger: it
+  // unmounted with the popover, and fell to <body>.
+  const close = useCallback(() => {
+    const inside = popoverRef.current?.contains(document.activeElement) ?? false;
+    setOpen(false);
+    if (inside) triggerRef.current?.focus();
+  }, []);
 
   // Close popover on outside click / Esc. Same pattern as the textarea
   // context menu in ChatInput.
@@ -152,7 +188,7 @@ export function ContextUsageBar() {
       setOpen(false);
     };
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
+      if (e.key === "Escape") close();
     };
     window.addEventListener("mousedown", onDown);
     window.addEventListener("keydown", onKey);
@@ -160,16 +196,22 @@ export function ContextUsageBar() {
       window.removeEventListener("mousedown", onDown);
       window.removeEventListener("keydown", onKey);
     };
+  }, [open, close]);
+  // Focus moves in when it opens.
+  useEffect(() => {
+    if (open) popoverRef.current?.querySelector<HTMLElement>("button:not(:disabled)")?.focus();
   }, [open]);
 
+  const appNumCtx = useDefaultNumCtx(session?.provider, session?.model);
   const params = useMemo(
     () =>
       effectiveParams(
         session?.params_json ?? null,
         modelDefaults,
         space?.default_params_json ?? null,
+        appNumCtx,
       ),
-    [session?.params_json, modelDefaults, space?.default_params_json],
+    [session?.params_json, modelDefaults, space?.default_params_json, appNumCtx],
   );
 
   // The system prompt the request will actually send is the Space's
@@ -178,8 +220,9 @@ export function ContextUsageBar() {
   // pick the send makes. Sources (Space uploads, Library items) are counted
   // separately below at what the send will spend on them. The bar is a
   // hint, not a billing tool — close enough for sizing decisions. The one
-  // backend-appended layer that can be big is the workspace's LOACHFILE.md,
-  // so that is counted from the store's last read of it.
+  // backend-appended layer that can be big is the workspace's instructions
+  // file (LOACHFILE.md, CLAUDE.md or AGENTS.md), so that is counted from
+  // the store's last read of it.
   const effectiveSystemPrompt = baseSystemPrompt(
     session?.system_prompt ?? null,
     globalSystemPrompt,
@@ -214,11 +257,22 @@ export function ContextUsageBar() {
         deferredMessages,
         effectiveSystemPrompt,
         params,
-        projectInstructions,
+        projectInstructions?.text ?? null,
         memoryText,
         sources.tokens,
+        toolsSize?.chars ?? 0,
+        toolsSize?.skills_chars ?? 0,
       ),
-    [deferredMessages, effectiveSystemPrompt, params, projectInstructions, memoryText, sources.tokens],
+    [
+      deferredMessages,
+      effectiveSystemPrompt,
+      params,
+      projectInstructions,
+      memoryText,
+      sources.tokens,
+      toolsSize?.chars,
+      toolsSize?.skills_chars,
+    ],
   );
 
   // Don't show the bar before the user has any conversation to measure —
@@ -226,6 +280,7 @@ export function ContextUsageBar() {
   if (!session || usage.messageCount === 0) return null;
 
   const isCompacting = compactingSessionId === session.id;
+  const expandedSize = modelContextMax ? Math.min(usage.total * 2, modelContextMax) : usage.total * 2;
   const pct = Math.round(usage.ratio * 100);
   const tone =
     usage.ratio >= 0.9
@@ -307,17 +362,20 @@ export function ContextUsageBar() {
         <ContextUsagePopover
           popoverRef={popoverRef}
           usage={usage}
+          toolsCount={toolsSize?.count ?? 0}
           sourcesLabel={
             sources.count > 0
               ? `Sources (${sources.count}${sources.mode === "retrieval" ? ", excerpts" : ""})`
               : null
           }
+          instructionsFile={projectInstructions?.file ?? null}
           compacting={isCompacting}
           onCompact={() => void compactContext(session.id)}
-          expandedSize={usage.total * 2}
+          expandedSize={expandedSize}
           // OpenAI-compatible servers ignore `num_ctx`: "expanding" there
           // would only change Loach's own estimate, not the model's window.
-          canExpand={isOllama}
+          // Nor past the model's own window.
+          canExpand={isOllama && expandedSize > usage.total}
           onExpand={() => {
             // Merge into the EXISTING per-chat override, not the merged
             // stack. `params` is DEFAULT_PARAMS + model defaults + space
@@ -327,22 +385,13 @@ export function ContextUsageBar() {
             // pinned params into this chat as if the user had set them. A
             // later Modelfile edit or Space change then silently stopped
             // applying here. Only `num_ctx` is the user's intent.
-            let overrides: Partial<GenerationParams> = {};
-            if (session.params_json) {
-              try {
-                overrides = JSON.parse(
-                  session.params_json,
-                ) as Partial<GenerationParams>;
-              } catch {
-                /* malformed — start from an empty override */
-              }
-            }
+            // Guarded like the send reads it: unchecked keys were written back.
             void setSessionParams(session.id, {
-              ...overrides,
-              num_ctx: usage.total * 2,
+              ...parseOverrides(session.params_json),
+              num_ctx: expandedSize,
             } as GenerationParams);
           }}
-          onClose={() => setOpen(false)}
+          onClose={close}
         />
       )}
     </div>
@@ -351,8 +400,12 @@ export function ContextUsageBar() {
 
 interface PopoverProps {
   usage: ReturnType<typeof computeContextUsage>;
+  /** How many tool definitions `usage.toolsTokens` covers. */
+  toolsCount: number;
   /** Row label for the sources line, or null when the chat has none. */
   sourcesLabel: string | null;
+  /** The file the project instructions came from, or null when none. */
+  instructionsFile: string | null;
   compacting: boolean;
   onCompact: () => void;
   /** False for OpenAI-compatible chats, whose servers ignore `num_ctx`. */
@@ -365,7 +418,9 @@ interface PopoverProps {
 
 const ContextUsagePopover = ({
   usage,
+  toolsCount,
   sourcesLabel,
+  instructionsFile,
   compacting,
   onCompact,
   canExpand,
@@ -434,11 +489,17 @@ const ContextUsagePopover = ({
           label="System prompt"
           value={formatTokens(usage.systemPromptTokens)}
         />
+        {usage.toolsTokens > 0 && (
+          <Row label={`Tools (${toolsCount})`} value={formatTokens(usage.toolsTokens)} />
+        )}
         {usage.projectInstructionsTokens > 0 && (
           <Row
-            label="Project instructions (LOACHFILE.md)"
+            label={`Project instructions (${instructionsFile ?? "LOACHFILE.md"})`}
             value={formatTokens(usage.projectInstructionsTokens)}
           />
+        )}
+        {usage.skillsTokens > 0 && (
+          <Row label="Loaded skills" value={formatTokens(usage.skillsTokens)} />
         )}
         {usage.memoriesTokens > 0 && (
           <Row label="Memories" value={formatTokens(usage.memoriesTokens)} />
@@ -463,7 +524,8 @@ const ContextUsagePopover = ({
       </dl>
 
       <p className="mt-2.5 text-[10.5px] leading-relaxed text-foreground/45">
-        Estimate based on ~4 characters per token. Actual counts vary by model.
+        Estimate based on ~4 characters per token (~1 for Chinese, Japanese
+        and Korean). Actual counts vary by model.
       </p>
 
       <button
@@ -519,8 +581,9 @@ const ContextUsagePopover = ({
             Expand context window
           </button>
           <p className="mt-1.5 text-[10.5px] leading-relaxed text-foreground/45">
-            Doubles the window from {formatTokens(usage.total)} to{" "}
-            {formatTokens(expandedSize)} tokens.
+            {expandedSize === usage.total * 2 ? "Doubles" : "Raises"} the window from{" "}
+            {formatTokens(usage.total)} to {formatTokens(expandedSize)} tokens
+            {expandedSize === usage.total * 2 ? "." : ", the most this model takes."}
           </p>
         </>
       )}

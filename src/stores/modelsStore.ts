@@ -13,14 +13,16 @@ import {
 import { useSettingsStore } from "./settingsStore";
 import { useSpaceStore } from "./spaceStore";
 import { useToastStore } from "./toastStore";
-import { parseModelParameters } from "@/lib/modelParams";
+import { defaultNumCtx, modelContextLength, parseModelParameters } from "@/lib/modelParams";
 import { fullOllamaTag } from "@/lib/modelChoice";
 import {
   DEFAULT_SETTINGS,
+  OPENAI_COMPAT_NUM_CTX,
   type AdminEvent,
   type GenerationParams,
   type ModelInfo,
   type OllamaShowResponse,
+  type ProviderId,
 } from "@/types";
 
 // Monotonic token guarding `refresh()` against overlapping runs — a base-URL /
@@ -82,6 +84,12 @@ interface ModelsState {
    *  none"; missing key means "we haven't asked yet, or asking failed".
    *  Older Ollama builds that omit the field show up as `[]` here. */
   modelCapabilities: Record<string, string[]>;
+
+  /** Per-model trained context window from `/api/show`'s `model_info`,
+   *  filled alongside `modelDefaults`. Caps the app's default context length
+   *  (`defaultNumCtx`); a missing key (not asked yet, or the model doesn't
+   *  say) caps nothing. */
+  modelContextMax: Record<string, number>;
 
   /** User-set "default thinking" preference per model (the Thinking toggle
    *  in ModelsView). Sits as a layer between Modelfile defaults and
@@ -148,6 +156,11 @@ function loadThinkPrefs(): Record<string, boolean> {
  *  callers share one `/api/show` round-trip instead of each issuing their
  *  own — the cache below only de-duplicates once a load has *finished*. */
 const pendingDefaults = new Map<string, Promise<Partial<GenerationParams>>>();
+/** Bumped per model by `forgetModel`; a Modelfile load caches only if it's
+ *  unchanged since the load began. */
+const defaultsGeneration = new Map<string, number>();
+/** The Ollama base URL the caches were filled against (see `refresh`). */
+let cachedFromBase: string | null = null;
 
 /** Drop what we've *derived* from one model's Modelfile.
  *
@@ -164,13 +177,24 @@ function forgetModel(
   set: (fn: (s: ModelsState) => Partial<ModelsState>) => void,
   name: string,
 ) {
-  pendingDefaults.delete(name);
+  // Under either spelling: a model saved as `x` is listed — and so cached by
+  // the chats that picked it — as `x:latest`, and the other way round.
+  const keys = new Set([name, fullOllamaTag(name), name.replace(/:latest$/, "")]);
+  for (const k of keys) {
+    pendingDefaults.delete(k);
+    // A load already out read the model as it was: it mustn't cache that.
+    defaultsGeneration.set(k, (defaultsGeneration.get(k) ?? 0) + 1);
+  }
   set((s) => {
     const modelDefaults = { ...s.modelDefaults };
     const modelCapabilities = { ...s.modelCapabilities };
-    delete modelDefaults[name];
-    delete modelCapabilities[name];
-    return { modelDefaults, modelCapabilities };
+    const modelContextMax = { ...s.modelContextMax };
+    for (const k of keys) {
+      delete modelDefaults[k];
+      delete modelCapabilities[k];
+      delete modelContextMax[k];
+    }
+    return { modelDefaults, modelCapabilities, modelContextMax };
   });
 }
 
@@ -182,6 +206,7 @@ export const useModelsStore = create<ModelsState>((set, get) => ({
   runs: {},
   modelDefaults: {},
   modelCapabilities: {},
+  modelContextMax: {},
   modelThinkPrefs: loadThinkPrefs(),
 
   setModelThinkPref: (modelId, value) =>
@@ -206,6 +231,18 @@ export const useModelsStore = create<ModelsState>((set, get) => ({
     const seq = ++refreshSeq;
     set({ loading: true, error: null });
     const s = useSettingsStore.getState();
+    // Another Ollama server's Modelfile values and capabilities aren't this
+    // one's: the same tag there can be another build (the Rust embedding
+    // cache keys by server for the same reason). Dropped when the URL
+    // changed, in-flight reads included.
+    if (cachedFromBase !== null && cachedFromBase !== s.ollama_base_url) {
+      for (const k of [...pendingDefaults.keys(), ...Object.keys(get().modelDefaults)]) {
+        defaultsGeneration.set(k, (defaultsGeneration.get(k) ?? 0) + 1);
+      }
+      pendingDefaults.clear();
+      set({ modelDefaults: {}, modelCapabilities: {}, modelContextMax: {} });
+    }
+    cachedFromBase = s.ollama_base_url;
 
     // Try the OpenAI-compatible listing if either a key is stored or the base
     // URL has been pointed away from the public default — local/proxy servers
@@ -289,13 +326,16 @@ export const useModelsStore = create<ModelsState>((set, get) => ({
     }
 
     const base = useSettingsStore.getState().ollama_base_url;
+    const generation = defaultsGeneration.get(modelId) ?? 0;
     const load = (async () => {
       let patch: Partial<GenerationParams>;
       let caps: string[];
+      let max: number | undefined;
       try {
         const resp = await ollamaShowModel(base, modelId);
         patch = parseModelParameters(resp.parameters);
         caps = resp.capabilities ?? [];
+        max = modelContextLength(resp.model_info);
       } catch {
         // Network / 404 — app defaults for now, but nothing cached: Ollama
         // simply not running yet failed here, and a cached `{}` / `[]` then
@@ -304,17 +344,27 @@ export const useModelsStore = create<ModelsState>((set, get) => ({
         // caller (a send, opening the chat or the panel) asks again.
         return {};
       }
-      set((s) => ({
-        modelDefaults: { ...s.modelDefaults, [modelId]: patch },
-        modelCapabilities: { ...s.modelCapabilities, [modelId]: caps },
-      }));
+      // The model was re-created (or deleted) while this read the old one:
+      // cached, its values came back over the new Modelfile's.
+      if ((defaultsGeneration.get(modelId) ?? 0) !== generation) return patch;
+      set((s) => {
+        const modelContextMax = { ...s.modelContextMax };
+        if (max) modelContextMax[modelId] = max;
+        else delete modelContextMax[modelId];
+        return {
+          modelDefaults: { ...s.modelDefaults, [modelId]: patch },
+          modelCapabilities: { ...s.modelCapabilities, [modelId]: caps },
+          modelContextMax,
+        };
+      });
       return patch;
     })();
     pendingDefaults.set(modelId, load);
     try {
       return await load;
     } finally {
-      pendingDefaults.delete(modelId);
+      // Only its own entry: a newer load for the same model may be there.
+      if (pendingDefaults.get(modelId) === load) pendingDefaults.delete(modelId);
     }
   },
 
@@ -350,6 +400,10 @@ export const useModelsStore = create<ModelsState>((set, get) => ({
       });
       return;
     }
+    // Duplicating over an existing tag (the grid offers "Replace") makes it
+    // another model: its cached Modelfile values and capabilities went on
+    // being layered into every request until a restart.
+    forgetModel(set, destination);
     await get().refresh();
   },
 
@@ -380,6 +434,10 @@ export const useModelsStore = create<ModelsState>((set, get) => ({
           (ev) => handleAdminEvent(set, streamId, ev),
         ),
       async () => {
+        // Re-pulling an installed tag is how a model is updated: its new
+        // manifest may change the Modelfile values and capabilities cached
+        // for it. Whatever the outcome — a miss costs one `/api/show`.
+        forgetModel(set, name);
         await get().refresh();
       },
     );
@@ -587,7 +645,8 @@ async function unpinAbandonedPull(streamId: string) {
   const run = models.runs[streamId];
   if (!run || run.kind !== "pull" || run.finished === "ok") return;
   // Ollama lists a bare tag the user typed as `<name>:latest`.
-  if (models.models.some((m) => fullOllamaTag(m.id) === fullOllamaTag(run.target))) return;
+  const installed = (tag: string) => models.models.some((m) => fullOllamaTag(m.id) === fullOllamaTag(tag));
+  if (installed(run.target)) return;
 
   const settings = useSettingsStore.getState();
   if (
@@ -596,10 +655,20 @@ async function unpinAbandonedPull(streamId: string) {
   ) {
     return;
   }
-  // "" is the no-pin state a fresh install starts from — new chats fall back
-  // to the most recently used model instead of a tag that doesn't exist.
+  // Onboarding pins every pull it starts, so this one may have displaced an
+  // earlier pick: hand the pin back to another pull's model, one that landed
+  // before one still running (latest first). Clearing it outright left no
+  // default although the first download had finished fine.
+  const others = Object.entries(models.runs)
+    .filter(([id, r]) => id !== streamId && r.kind === "pull")
+    .map(([, r]) => r);
+  const fallback =
+    others.filter((r) => r.finished === "ok" && installed(r.target)).at(-1) ??
+    others.filter((r) => r.finished === null).at(-1);
+  // Else "", the no-pin state a fresh install starts from — new chats fall
+  // back to the most recently used model instead of a tag that doesn't exist.
   try {
-    await settings.update("default_model", "");
+    await settings.update("default_model", fallback?.target ?? "");
   } catch (e) {
     logger.warn("could not clear the default model after an abandoned pull", e);
   }
@@ -611,15 +680,21 @@ async function unpinAbandonedPull(streamId: string) {
  *  place, each new chat started on a tag Ollama no longer has. */
 async function unpinDeletedModel(name: string) {
   const settings = useSettingsStore.getState();
+  // Compared with the tag filled in, as `unpinAbandonedPull` does: a default
+  // typed bare in onboarding (`llama3.2`) is the listed `llama3.2:latest`,
+  // and an exact match left it pinned to a model that's gone.
+  const deleted = fullOllamaTag(name);
+  const isDeleted = (model: string | null | undefined) => !!model && fullOllamaTag(model) === deleted;
   // `update` reports a failed write itself (a toast) and reverts.
-  if (settings.default_model_choice === `model:ollama:${name}`) {
+  const choice = settings.default_model_choice;
+  if (choice.startsWith("model:ollama:") && isDeleted(choice.slice("model:ollama:".length))) {
     await settings.update("default_model_choice", "recent");
   }
-  if (settings.default_provider === "ollama" && settings.default_model === name) {
+  if (settings.default_provider === "ollama" && isDeleted(settings.default_model)) {
     await settings.update("default_model", "");
   }
   for (const space of useSpaceStore.getState().spaces) {
-    if (space.default_provider !== "ollama" || space.default_model !== name) continue;
+    if (space.default_provider !== "ollama" || !isDeleted(space.default_model)) continue;
     try {
       await useSpaceStore.getState().updateSpace(space.id, {
         name: space.name,
@@ -632,4 +707,26 @@ async function unpinDeletedModel(name: string) {
       logger.warn("could not clear a Space's default model after deleting it", e);
     }
   }
+}
+
+/** The app-default context window for a chat on `model`: Settings' default
+ *  context length, capped at an Ollama model's maximum once its `/api/show`
+ *  has loaded. The bottom `num_ctx` layer of `chatStore.layerParams`. */
+export function useDefaultNumCtx(provider: ProviderId | undefined, model: string | undefined): number {
+  const setting = useSettingsStore((s) => s.default_num_ctx);
+  const max = useModelsStore((s) =>
+    provider === "ollama" && model ? s.modelContextMax[model] : undefined,
+  );
+  return defaultNumCtx(setting, max);
+}
+
+/** The window under a chat's Space and own layers, as the send layers it:
+ *  an Ollama model's Modelfile `num_ctx`, else the app default
+ *  (`useDefaultNumCtx`); for an OpenAI-compatible model, the one assumed. */
+export function useModelNumCtx(provider: ProviderId | undefined, model: string | undefined): number {
+  const fallback = useDefaultNumCtx(provider, model);
+  const own = useModelsStore((s) =>
+    provider === "ollama" && model ? s.modelDefaults[model]?.num_ctx : undefined,
+  );
+  return provider === "openai" ? OPENAI_COMPAT_NUM_CTX : (own ?? fallback);
 }

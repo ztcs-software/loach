@@ -265,8 +265,14 @@ export function SearchBar() {
   const [activeIndex, setActiveIndex] = useState(0);
   // Transcript hits for the current query. Unlike the other three sources
   // this can't be derived: only the ACTIVE chat's messages are resident in
-  // the store, so matching the rest means asking SQLite.
-  const [messageHits, setMessageHits] = useState<MessageHit[]>([]);
+  // the store, so matching the rest means asking SQLite. Kept with the terms
+  // they were found for and shown only while those are the terms: through
+  // the next query's debounce and round trip the list showed hits for the
+  // old one, and Enter opened a "rust" hit when "rusty" was typed.
+  const [messageHits, setMessageHits] = useState<{ terms: string; hits: MessageHit[] }>({
+    terms: "",
+    hits: [],
+  });
   // True from the keystroke until that query's transcript search settles.
   // Only used to hold back the "no matches" line: asserting it while a
   // message-only query is still in flight contradicts itself a moment later.
@@ -351,7 +357,7 @@ export function SearchBar() {
   useEffect(() => {
     const wantsMessages = scope === "everywhere" || scope === "messages";
     if (!open || !wantsMessages || terms.length < MIN_MESSAGE_QUERY) {
-      setMessageHits([]);
+      setMessageHits({ terms: "", hits: [] });
       setSearching(false);
       return;
     }
@@ -362,14 +368,14 @@ export function SearchBar() {
       // a full page instead of the slice reserved in the mixed view.
       searchMessages(terms, scope === "messages" ? MAX_RESULTS : MAX_MESSAGE_RESULTS)
         .then((hits) => {
-          if (live) setMessageHits(hits);
+          if (live) setMessageHits({ terms, hits });
         })
         .catch((e) => {
           // Non-fatal: the local title/space/snippet matches are still on
           // screen, so a failed transcript search degrades to the old
           // behaviour rather than emptying the palette.
           logger.error("message search failed", e);
-          if (live) setMessageHits([]);
+          if (live) setMessageHits({ terms, hits: [] });
         })
         .finally(() => {
           if (live) setSearching(false);
@@ -527,7 +533,7 @@ export function SearchBar() {
     // `in:messages` that block is the whole list.
     const messageRoom = scope === "messages" ? MAX_RESULTS : MAX_MESSAGE_RESULTS;
     const messages: Result[] = allows("message")
-      ? messageHits.map((hit) => ({
+      ? (messageHits.terms === terms ? messageHits.hits : []).map((hit) => ({
           kind: "message",
           id: hit.message_id,
           label: hit.session_title || "New chat",
@@ -618,10 +624,15 @@ export function SearchBar() {
       return;
     }
     if (e.key !== "Tab") return;
-    const focusables = panelRef.current?.querySelectorAll<HTMLElement>(
-      'input, button:not([tabindex="-1"]), [href], [tabindex]:not([tabindex="-1"])',
-    );
-    if (!focusables || focusables.length === 0) return;
+    // Tab stops only: the narrow-window "Close search" button is always
+    // `display: none` at the app's minimum width, and counted as `last` it
+    // let Tab walk out of the palette from the real last stop.
+    const focusables = [
+      ...(panelRef.current?.querySelectorAll<HTMLElement>(
+        'input, button:not([tabindex="-1"]), [href], [tabindex]:not([tabindex="-1"])',
+      ) ?? []),
+    ].filter((el) => el.getClientRects().length > 0 && !el.matches(":disabled"));
+    if (focusables.length === 0) return;
     const first = focusables[0];
     const last = focusables[focusables.length - 1];
     const activeEl = document.activeElement;

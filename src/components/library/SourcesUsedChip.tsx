@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { AlertTriangle, ChevronDown, ChevronRight, Library } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { SourcesReport } from "@/lib/sources";
@@ -17,7 +17,8 @@ export function SourcesUsedChip({ record }: { record: ToolCallRecord }) {
   const openPreview = useLibraryStore((s) => s.openPreview);
   const sources = report?.sources ?? [];
   const warning = report?.warning ?? null;
-  const known = new Set(items.map((i) => i.id));
+  // Once per change to the Library, not per render of every sourced reply.
+  const known = useMemo(() => new Set(items.map((i) => i.id)), [items]);
 
   return (
     <div className="mb-2">

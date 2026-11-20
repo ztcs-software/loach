@@ -9,6 +9,7 @@ mod rag;
 mod sandbox;
 mod secrets;
 mod security;
+mod skills;
 mod sse;
 mod stream;
 mod tools;
@@ -26,6 +27,49 @@ use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use crate::db::Database;
 use crate::stream::StreamRegistry;
 
+/// Whether `url` is one of the app's own pages: where the main window may
+/// navigate. Tauri serves them from `tauri://localhost` (macOS, Linux) and
+/// `http://tauri.localhost` (Windows; `https` with `useHttpsScheme`), and a
+/// debug build from the dev server, passed as `dev_url`. `about:blank` is
+/// harmless. Anything else — an injected link or form, a `location` write —
+/// would load an outside page with the IPC bridge in reach; markdown renders
+/// without raw HTML and the CSP holds, so this is defense in depth.
+///
+/// On macOS and Linux the hook sees frame loads too (WebView2 reports the
+/// main frame alone), so the canvas preview's host pages (`sandbox.rs`) pass:
+/// refused, the preview stayed blank. Were the main frame sent there, the
+/// host page renders only HTML its parent posts, and it has no parent.
+fn is_app_url(url: &tauri::Url, dev_url: Option<&tauri::Url>) -> bool {
+    match url.scheme() {
+        "tauri" => url.host_str() == Some("localhost"),
+        "http" | "https" => {
+            url.host_str() == Some("tauri.localhost")
+                || dev_url.is_some_and(|d| d.origin() == url.origin())
+        }
+        "about" => url.as_str() == "about:blank",
+        scheme if scheme == sandbox::SCHEME => {
+            url.host_str() == Some("localhost")
+                && matches!(url.path(), "/preview.html" | "/preview-static.html")
+        }
+        _ => false,
+    }
+}
+
+/// Hide the main window for the tray — after telling the renderer, which
+/// locks first when "Lock when minimized" is on (`autoLock.ts`), and giving
+/// it a moment to paint the lock screen. Hidden at once, the window kept the
+/// open chat as its last frame, and showing it again drew that first. As the
+/// macOS close-to-hide arm below does.
+fn hide_main_window(w: &tauri::WebviewWindow) {
+    use tauri::Emitter;
+    let _ = w.emit("window://hiding", ());
+    let w = w.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        let _ = w.hide();
+    });
+}
+
 /// Show a blocking native error dialog and exit. Used during `setup` for
 /// failures we can't reasonably recover from (data dir unresolvable, DB
 /// corrupt, etc.) — much friendlier than the prior `panic!` which left
@@ -33,10 +77,12 @@ use crate::stream::StreamRegistry;
 /// stderr if the dialog itself can't be shown.
 fn fatal_setup_error(app: &tauri::AppHandle, what: &str, err: impl std::fmt::Display) -> ! {
     let body = format!(
-        "Loach can't start because {what}.\n\nDetails: {err}\n\n\
+        "Loach can't start because {what}.\n\nDetails: {err:#}\n\n\
          If this keeps happening, please file an issue with the details above."
     );
-    eprintln!("[fatal] {what}: {err}");
+    // `{:#}`: for an anyhow error the whole cause chain — `{}` showed only
+    // the outermost context, "open sqlite", and lost the OS error under it.
+    eprintln!("[fatal] {what}: {err:#}");
     // `blocking_show` returns once the user clicks "OK". On platforms where
     // the dialog can't be shown (very headless CI, broken display) this
     // returns immediately — we still exit afterwards so the app doesn't
@@ -90,6 +136,8 @@ pub struct AppState {
     /// Background worker keeping the Library / Space-source retrieval index
     /// chunked and embedded. Woken by anything that can create work.
     pub indexer: Arc<rag::indexer::Indexer>,
+    /// The folders Agent Skills are read from (see `skills`).
+    pub skill_roots: skills::Roots,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -130,6 +178,25 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        // Keeps the window on the app's own pages (`is_app_url`). Consulted
+        // on every main-frame navigation, the window's first load included,
+        // and on macOS and Linux on frame loads too.
+        .plugin(
+            tauri::plugin::Builder::<tauri::Wry, ()>::new("navigation-guard")
+                .on_navigation(|webview, url| {
+                    let dev_url = if cfg!(debug_assertions) {
+                        webview.config().build.dev_url.clone()
+                    } else {
+                        None
+                    };
+                    let allowed = is_app_url(url, dev_url.as_ref());
+                    if !allowed {
+                        tracing::warn!("kept the window from navigating to {url}");
+                    }
+                    allowed
+                })
+                .build(),
+        )
         .register_uri_scheme_protocol(sandbox::SCHEME, |_ctx, request| sandbox::handle(&request))
         .setup(|app| {
             // Replace the prior `.expect(...)` chain with explicit user-
@@ -159,6 +226,13 @@ pub fn run() {
             }
 
             security::init_marker(&data_dir);
+
+            // Loach's own skills folder exists from the start, so "Open
+            // skills folder" always has somewhere to go.
+            let skill_roots = skills::Roots::new(&data_dir, app.path().home_dir().ok().as_deref());
+            if let Err(e) = std::fs::create_dir_all(skill_roots.loach_dir()) {
+                tracing::warn!("couldn't create the skills folder: {e}");
+            }
 
             let db_path = data_dir.join("loach.db");
             let db = match Database::open(&db_path) {
@@ -236,6 +310,7 @@ pub fn run() {
                 approvals: crate::stream::ApprovalRegistry::new(),
                 stdio_approved: Default::default(),
                 indexer,
+                skill_roots,
             };
             app.manage(state);
 
@@ -248,76 +323,85 @@ pub fn run() {
             // the full rationale and the JS/Rust handoff story.
             preload::try_warm_default_model(preload_db, preload_http);
 
-            // System tray
-            let show_i = MenuItem::with_id(app, "show", "Show Loach", true, None::<&str>)?;
-            let hide_i = MenuItem::with_id(app, "hide", "Hide to tray", true, None::<&str>)?;
-            let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show_i, &hide_i, &quit_i])?;
+            // System tray. Not essential: where it can't be built (a Linux
+            // desktop with no working tray or appindicator), Loach starts
+            // without one. As an error out of `setup`, Tauri turned it into a
+            // panic — the silent crash `fatal_setup_error` exists to replace.
+            let tray = (|| -> tauri::Result<()> {
+                let show_i = MenuItem::with_id(app, "show", "Show Loach", true, None::<&str>)?;
+                let hide_i = MenuItem::with_id(app, "hide", "Hide to tray", true, None::<&str>)?;
+                let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+                let menu = Menu::with_items(app, &[&show_i, &hide_i, &quit_i])?;
 
-            // macOS menu-bar icons render as template images — single-channel
-            // masks taken from the alpha channel — so they auto-invert in
-            // light vs. dark menu bars. That rules out the app icon there: it
-            // is an opaque rounded square, so its mask is a solid blob. macOS
-            // gets `icons/tray-template.png` instead, the fish line art in
-            // black on transparent. It is 36 px tall because tray-icon draws
-            // the image 18 pt tall, so it maps 2:1 onto a Retina menu bar.
-            let _tray = {
-                let builder = TrayIconBuilder::with_id("loach-tray")
-                    .menu(&menu)
-                    .show_menu_on_left_click(false)
-                    .tooltip("Loach");
-                // `default_window_icon()` is Some in any normal bundled build,
-                // but guard rather than `unwrap()` so a packaging slip that
-                // ships without the icon degrades to an icon-less tray instead
-                // of panicking the whole `setup` (which would bypass the
-                // friendly `fatal_setup_error` dialog the rest of setup uses).
-                #[cfg(not(target_os = "macos"))]
-                let builder = match app.default_window_icon() {
-                    Some(icon) => builder.icon(icon.clone()),
-                    None => builder,
-                };
-                #[cfg(target_os = "macos")]
-                let builder = builder
-                    .icon(tauri::include_image!("icons/tray-template.png"))
-                    .icon_as_template(true);
-                builder
-                .on_menu_event(|app, event| match event.id.as_ref() {
-                    "show" => {
-                        if let Some(w) = app.get_webview_window("main") {
-                            let _ = w.show();
-                            let _ = w.set_focus();
-                        }
-                    }
-                    "hide" => {
-                        if let Some(w) = app.get_webview_window("main") {
-                            let _ = w.hide();
-                        }
-                    }
-                    "quit" => {
-                        app.exit(0);
-                    }
-                    _ => {}
-                })
-                .on_tray_icon_event(|tray, event| {
-                    if let TrayIconEvent::Click {
-                        button: MouseButton::Left,
-                        button_state: MouseButtonState::Up,
-                        ..
-                    } = event
-                    {
-                        let app = tray.app_handle();
-                        if let Some(w) = app.get_webview_window("main") {
-                            if w.is_visible().unwrap_or(false) {
-                                let _ = w.hide();
-                            } else {
+                // macOS menu-bar icons render as template images — single-channel
+                // masks taken from the alpha channel — so they auto-invert in
+                // light vs. dark menu bars. That rules out the app icon there: it
+                // is an opaque rounded square, so its mask is a solid blob. macOS
+                // gets `icons/tray-template.png` instead, the fish line art in
+                // black on transparent. It is 36 px tall because tray-icon draws
+                // the image 18 pt tall, so it maps 2:1 onto a Retina menu bar.
+                let _tray = {
+                    let builder = TrayIconBuilder::with_id("loach-tray")
+                        .menu(&menu)
+                        .show_menu_on_left_click(false)
+                        .tooltip("Loach");
+                    // `default_window_icon()` is Some in any normal bundled build,
+                    // but guard rather than `unwrap()` so a packaging slip that
+                    // ships without the icon degrades to an icon-less tray instead
+                    // of panicking the whole `setup` (which would bypass the
+                    // friendly `fatal_setup_error` dialog the rest of setup uses).
+                    #[cfg(not(target_os = "macos"))]
+                    let builder = match app.default_window_icon() {
+                        Some(icon) => builder.icon(icon.clone()),
+                        None => builder,
+                    };
+                    #[cfg(target_os = "macos")]
+                    let builder = builder
+                        .icon(tauri::include_image!("icons/tray-template.png"))
+                        .icon_as_template(true);
+                    builder
+                    .on_menu_event(|app, event| match event.id.as_ref() {
+                        "show" => {
+                            if let Some(w) = app.get_webview_window("main") {
                                 let _ = w.show();
                                 let _ = w.set_focus();
                             }
                         }
-                    }
-                })
-                .build(app)?
-            };
+                        "hide" => {
+                            if let Some(w) = app.get_webview_window("main") {
+                                hide_main_window(&w);
+                            }
+                        }
+                        "quit" => {
+                            app.exit(0);
+                        }
+                        _ => {}
+                    })
+                    .on_tray_icon_event(|tray, event| {
+                        if let TrayIconEvent::Click {
+                            button: MouseButton::Left,
+                            button_state: MouseButtonState::Up,
+                            ..
+                        } = event
+                        {
+                            let app = tray.app_handle();
+                            if let Some(w) = app.get_webview_window("main") {
+                                if w.is_visible().unwrap_or(false) {
+                                    hide_main_window(&w);
+                                } else {
+                                    let _ = w.show();
+                                    let _ = w.set_focus();
+                                }
+                            }
+                        }
+                    })
+                    .build(app)?
+                };
+                Ok(())
+            })();
+            if let Err(e) = tray {
+                tracing::warn!("couldn't create the tray icon, starting without one: {e}");
+            }
 
             // macOS: closing the window (red button, ⌘W) hides it and Loach
             // stays in the Dock, like other Mac apps; the Dock icon (the
@@ -378,12 +462,20 @@ pub fn run() {
             commands::clear_session_workspace,
             commands::open_session_workspace,
             commands::read_workspace_instructions,
+            commands::chat_tools_size,
+            commands::skills_list,
+            commands::skill_set_enabled,
+            commands::skill_import,
+            commands::skills_open_folder,
+            commands::session_skills,
+            commands::session_skill_set,
             commands::list_folders,
             commands::create_folder,
             commands::rename_folder,
             commands::delete_folder,
             commands::export_session,
             commands::list_messages,
+            commands::message_attachments,
             commands::session_message_counts,
             commands::search_messages,
             commands::append_message,
@@ -433,10 +525,12 @@ pub fn run() {
             commands::add_space_memory,
             commands::update_space_memory,
             commands::remove_space_memory,
+            commands::remove_space_memories,
             commands::list_global_memories,
             commands::add_global_memory,
             commands::update_global_memory,
             commands::remove_global_memory,
+            commands::remove_global_memories,
             commands::list_snippets,
             commands::create_snippet,
             commands::update_snippet,
@@ -478,6 +572,7 @@ pub fn run() {
             commands::mcp_delete,
             commands::mcp_test,
             commands::mcp_tools,
+            commands::mcp_warm,
             commands::tool_approval_respond,
             commands::storage_stats,
             commands::export_data_to_file,
@@ -522,6 +617,48 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    use super::is_app_url;
+    use tauri::Url;
+
+    fn url(s: &str) -> Url {
+        Url::parse(s).expect("url")
+    }
+
+    /// The window may load the app's own pages — on every platform, and the
+    /// dev server in a debug build — and nothing else.
+    #[test]
+    fn navigation_stays_on_the_app() {
+        let dev = url("http://localhost:1420");
+        for ok in [
+            "tauri://localhost/index.html",
+            "http://tauri.localhost/",
+            "https://tauri.localhost/assets/x.js",
+            "about:blank",
+            // The canvas preview's frame, as macOS and Linux report it.
+            "loach-sandbox://localhost/preview.html",
+            "loach-sandbox://localhost/preview-static.html#top",
+        ] {
+            assert!(is_app_url(&url(ok), None), "{ok}");
+        }
+        assert!(is_app_url(&url("http://localhost:1420/?x=1"), Some(&dev)));
+        for refused in [
+            "https://example.com/",
+            "http://localhost:1420/",
+            "tauri://evil.example/",
+            "http://tauri.localhost.evil.example/",
+            "file:///C:/Windows/win.ini",
+            "javascript:alert(1)",
+            "data:text/html,hi",
+            "about:srcdoc",
+            "loach-sandbox://localhost/other.html",
+            "loach-sandbox://evil.example/preview.html",
+        ] {
+            assert!(!is_app_url(&url(refused), None), "{refused}");
+        }
+        // The dev server's own origin only: another port isn't it.
+        assert!(!is_app_url(&url("http://localhost:1421/"), Some(&dev)));
+    }
+
     /// macOS draws the tray icon as a template, from the alpha channel alone
     /// and 18 pt tall, so the file must stay black on transparent and 36 px
     /// (2x) tall. Off macOS this is also the only place the `include_image!`

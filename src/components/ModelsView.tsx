@@ -24,9 +24,11 @@ import { Textarea } from "@/components/ui/textarea";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { useChatStore } from "@/stores/chatStore";
 import { useModelsStore } from "@/stores/modelsStore";
+import { useSettingsStore } from "@/stores/settingsStore";
 import { useSpaceStore } from "@/stores/spaceStore";
 import { useUIStore } from "@/stores/uiStore";
-import { buildModelfile, parseParamsBlock } from "@/lib/modelfile";
+import { buildModelfile, escapeStop, parseParamsBlock, unescapeStop } from "@/lib/modelfile";
+import { fullOllamaTag } from "@/lib/modelChoice";
 import { formatBytes } from "@/lib/utils";
 import type {
   ModelInfo,
@@ -160,10 +162,9 @@ export function ModelsView() {
     // Ollama's create replaces whatever is under the tag already — the base
     // model itself, if the tag is its FROM. Ask first. A bare name is
     // Ollama's `:latest`.
-    const fullTag = (t: string) => (t.includes(":") ? t : `${t}:latest`);
-    const isBase = fullTag(targetName) === fullTag(form.from.trim());
+    const isBase = fullOllamaTag(targetName) === fullOllamaTag(form.from.trim());
     if (
-      (isBase || models.some((m) => m.provider === "ollama" && fullTag(m.id) === fullTag(targetName))) &&
+      (isBase || models.some((m) => m.provider === "ollama" && fullOllamaTag(m.id) === fullOllamaTag(targetName))) &&
       !(await confirm({
         title: `Replace “${targetName}”?`,
         body: isBase
@@ -185,8 +186,14 @@ export function ModelsView() {
       const run = await createModel(targetName, modelfile);
       if (run?.finished === "ok") {
         // Land the user on the freshly-created model so they can immediately
-        // iterate on it or try it in a new chat.
-        if (stillHere()) setViewingModel(targetName);
+        // iterate on it or try it in a new chat — under the id Ollama lists
+        // it by (`x:latest`), as everything else names it. Landing on the
+        // bare name as typed filed this page's Thinking pref, and its "New
+        // chat", under a name no listed model has.
+        const listed = useModelsStore
+          .getState()
+          .models.find((m) => m.provider === "ollama" && fullOllamaTag(m.id) === fullOllamaTag(targetName));
+        if (stillHere()) setViewingModel(listed?.id ?? fullOllamaTag(targetName));
       } else if (run?.finished === "error") {
         // The create reached a terminal error — surface the real reason
         // instead of navigating to a model that was never created.
@@ -574,10 +581,12 @@ const NUMERIC_FIELDS: {
   group: (typeof PARAM_GROUPS)[number];
   step?: number;
   hint?: string;
-  /** Set on the fields every chat with the model sends as its defaults,
-   *  where the chat request types them as whole numbers (`u32`, `i64` for
-   *  the seed). Ollama itself takes e.g. `num_predict -1`, but a chat can't
-   *  carry it, so the editor refuses what a chat couldn't send. */
+  /** Whole numbers only. Set on the fields every chat with the model sends
+   *  as its defaults, where the chat request types them as whole numbers
+   *  (`u32`, `i64` for the seed) — Ollama itself takes e.g. `num_predict
+   *  -1`, but a chat can't carry it, so the editor refuses what a chat
+   *  couldn't send — and on the ones Ollama parses as integers, where `1.5`
+   *  failed the create at Save instead of at the field. */
   integer?: boolean;
   min?: number;
 }[] = [
@@ -587,7 +596,7 @@ const NUMERIC_FIELDS: {
   { key: "min_p", label: "Min-P", group: "Sampling", step: 0.01, hint: "0 – 1" },
   { key: "tfs_z", label: "Tail-free (tfs_z)", group: "Sampling", step: 0.05 },
   { key: "typical_p", label: "Typical-P", group: "Sampling", step: 0.01 },
-  { key: "mirostat", label: "Mirostat (0/1/2)", group: "Sampling", step: 1 },
+  { key: "mirostat", label: "Mirostat (0/1/2)", group: "Sampling", step: 1, integer: true, min: 0 },
   // "eta"/"tau" spelled out: the labels render uppercased, and capital η/τ
   // (Η/Τ) are indistinguishable from Latin H/T.
   { key: "mirostat_eta", label: "Mirostat eta", group: "Sampling", step: 0.05 },
@@ -595,12 +604,13 @@ const NUMERIC_FIELDS: {
   { key: "num_ctx", label: "Context (num_ctx)", group: "Length", step: 256, integer: true, min: 0 },
   { key: "num_predict", label: "Max tokens (num_predict)", group: "Length", step: 16, integer: true, min: 0 },
   { key: "repeat_penalty", label: "Repeat penalty", group: "Repetition", step: 0.05 },
-  { key: "repeat_last_n", label: "Repeat look-back", group: "Repetition", step: 8 },
+  // -1 is "the whole context", so no minimum.
+  { key: "repeat_last_n", label: "Repeat look-back", group: "Repetition", step: 8, integer: true },
   { key: "frequency_penalty", label: "Frequency penalty", group: "Repetition", step: 0.05 },
   { key: "presence_penalty", label: "Presence penalty", group: "Repetition", step: 0.05 },
-  { key: "num_batch", label: "Batch size (num_batch)", group: "Performance", step: 8 },
+  { key: "num_batch", label: "Batch size (num_batch)", group: "Performance", step: 8, integer: true, min: 0 },
   { key: "num_gpu", label: "GPU layers (num_gpu)", group: "Performance", step: 1, integer: true, min: 0 },
-  { key: "num_thread", label: "CPU threads (num_thread)", group: "Performance", step: 1 },
+  { key: "num_thread", label: "CPU threads (num_thread)", group: "Performance", step: 1, integer: true, min: 0 },
   { key: "seed", label: "Seed (blank = random)", group: "Reproducibility", step: 1, integer: true },
 ];
 
@@ -613,14 +623,15 @@ const NUMERIC_FIELDS: {
  *   - **Model doesn't support thinking** — toggle disabled with a
  *     "this model doesn't support thinking" explanation. Common case for
  *     non-reasoning models like llama3.x or mistral.
- *   - **Model supports thinking** — toggle live. Off-state means the user
- *     has explicitly disabled thinking; on-state means either an explicit
- *     pref or the model's natural default (Ollama's behaviour for
- *     thinking-capable models is to think unless told otherwise).
+ *   - **Model supports thinking** — toggle live. With no pref of its own it
+ *     shows the app-wide Thinking default (Settings → Features), which is
+ *     what a new chat sends: it used to read ON regardless, so with the
+ *     default off, flipping it "off" recorded a pref that changed nothing.
  *
- * The pref is stored in modelsStore (in-memory) and feeds into
- * `chatStore.readSessionParams` so all new chats with this model pick
- * it up. Per-chat overrides via the Parameter sidebar still win.
+ * The pref is stored in modelsStore (persisted to localStorage,
+ * `loach:model-think-prefs`) and feeds into `chatStore.readSessionParams`
+ * so all new chats with this model pick it up. Per-chat overrides via the
+ * Parameter sidebar still win.
  */
 function ThinkingSection({
   capabilities,
@@ -633,15 +644,16 @@ function ThinkingSection({
 }) {
   const loading = capabilities === null;
   const supports = !loading && capabilities.includes("thinking");
-  // When the user hasn't set a preference, the natural default for
-  // thinking-capable models is ON; for everything else we just show the
-  // toggle as off (and disabled).
-  const checked = pref ?? supports;
+  const thinkingDefault = useSettingsStore((s) => s.thinking_default);
+  // Without a preference of its own the model follows the app-wide Thinking
+  // default, as `readSessionParams` layers it; a model that can't think just
+  // shows the toggle off (and disabled).
+  const checked = pref ?? (supports && thinkingDefault);
   const hint = loading
     ? "Reading model capabilities…"
     : supports
       ? pref === undefined
-        ? "Using this model's default. Toggle to record an explicit preference for new chats."
+        ? "Following the app-wide Thinking default (Settings → Features). Toggle to set it for this model."
         : "Default for new chats with this model. Per-chat overrides still apply via the Parameters sidebar."
       : "This model doesn't list a thinking capability — flipping the toggle would have no effect.";
 
@@ -657,7 +669,7 @@ function ThinkingSection({
               type="button"
               onClick={() => onChange(null)}
               className="rounded-md px-2 py-0.5 text-[11px] font-medium text-foreground/55 transition-colors hover:bg-foreground/[0.06] hover:text-foreground"
-              title="Clear the override and follow the model's natural default"
+              title="Clear the override and follow the app-wide Thinking default"
             >
               Reset
             </button>
@@ -666,9 +678,7 @@ function ThinkingSection({
             checked={checked}
             disabled={!supports || loading}
             onCheckedChange={(next) => onChange(next)}
-            aria-label={
-              checked ? "Disable thinking for this model" : "Enable thinking for this model"
-            }
+            aria-label="Thinking for this model"
           />
         </div>
       </div>
@@ -801,7 +811,8 @@ function StopEditor({
 }) {
   const [draft, setDraft] = useState("");
   const add = () => {
-    const v = draft.trim();
+    // Typed as the chips show stops: `\n` for a newline (`escapeStop`).
+    const v = unescapeStop(draft.trim());
     if (!v) return;
     if (values.includes(v)) {
       setDraft("");
@@ -818,14 +829,14 @@ function StopEditor({
             key={`${v}-${idx}`}
             className="inline-flex items-center gap-1 rounded-full bg-foreground/[0.08] px-2.5 py-1 font-mono text-[11px] text-foreground/80"
           >
-            {v}
+            {escapeStop(v)}
             <button
               type="button"
               onClick={() =>
                 onChange(values.filter((_, i) => i !== idx))
               }
               className="text-foreground/50 hover:text-foreground"
-              aria-label={`Remove stop sequence ${v}`}
+              aria-label={`Remove stop sequence ${escapeStop(v)}`}
             >
               <X className="h-3 w-3" />
             </button>
@@ -862,7 +873,8 @@ function StopEditor({
       </div>
       <p className="mt-1 text-[10px] text-foreground/40">
         Each entry becomes a{" "}
-        <span className="font-mono">PARAMETER stop &quot;…&quot;</span> line.
+        <span className="font-mono">PARAMETER stop &quot;…&quot;</span> line. Type{" "}
+        <span className="font-mono">\n</span> for a new line.
       </p>
     </div>
   );

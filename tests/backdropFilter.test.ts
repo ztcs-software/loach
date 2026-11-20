@@ -15,7 +15,12 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 
 const stylesDir = fileURLToPath(new URL("../src/styles", import.meta.url));
-const builtAssets = fileURLToPath(new URL("../dist/assets", import.meta.url));
+// `dist` is the default build (the `safari13` target Linux and macOS ship);
+// CI also builds the Windows target (`chrome105`) into `dist-windows` — the
+// bundle the original regression shipped in.
+const builtAssetDirs = ["../dist/assets", "../dist-windows/assets"].map((p) =>
+  fileURLToPath(new URL(p, import.meta.url)),
+);
 
 describe("backdrop-filter is written unprefixed only", () => {
   for (const file of readdirSync(stylesDir).filter((f) => f.endsWith(".css"))) {
@@ -30,20 +35,22 @@ describe("backdrop-filter is written unprefixed only", () => {
   }
 });
 
-// The rule above guards the input; this guards what actually ships. CI runs
-// `npm run build` before `npm test`, so there it reads the minified CSS the
-// release bundles — a future minifier change that strips the unprefixed
+// The rule above guards the input; this guards what actually ships. CI
+// builds both targets before `npm test`, so there it reads the minified CSS
+// the release bundles — a future minifier change that strips the unprefixed
 // property again fails here even with clean sources. Skipped when there is
 // no build to read (a plain local `npm test`).
-const builtCss = existsSync(builtAssets)
-  ? readdirSync(builtAssets).filter((f) => f.endsWith(".css"))
-  : [];
+const builtCss = builtAssetDirs.flatMap((dir) =>
+  existsSync(dir)
+    ? readdirSync(dir)
+        .filter((f) => f.endsWith(".css"))
+        .map((f) => path.join(dir, f))
+    : [],
+);
 
 describe("the built CSS keeps the unprefixed backdrop-filter", () => {
   it.skipIf(builtCss.length === 0)("in every rule that blurs", () => {
-    const rules = builtCss.flatMap((f) =>
-      readFileSync(path.join(builtAssets, f), "utf8").split("}"),
-    );
+    const rules = builtCss.flatMap((f) => readFileSync(f, "utf8").split("}"));
     // Declarations, not mentions: `transition-property` lists the property
     // by name too.
     const unprefixed = /(^|[{;\s])backdrop-filter\s*:/;

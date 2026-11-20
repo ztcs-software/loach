@@ -44,41 +44,106 @@
       pin(window, name, undefined);
     }
 
+    // Everything below also runs after the page's own scripts, which share
+    // this window and can replace any built-in they reach: a method, a
+    // getter, an iterator, `Symbol.hasInstance`, `Function.prototype.call`.
+    // A watcher calling the node's `matches` let through every frame once
+    // the page had replaced it, and a wrapper going through `call` handed
+    // the native itself to a page that had replaced `call`. So what's needed
+    // is taken now, before any of the page runs, and only called via `apply`.
+    const apply = Reflect.apply;
+    const getter = (proto, name) => Object.getOwnPropertyDescriptor(proto, name).get;
+    const { matches, querySelectorAll, remove, attachShadow } = Element.prototype;
+    const nodeType = getter(Node.prototype, "nodeType");
+    const addedNodes = getter(MutationRecord.prototype, "addedNodes");
+    const listLength = getter(NodeList.prototype, "length");
+    const { item } = NodeList.prototype;
+    const { observe } = MutationObserver.prototype;
+    const { slice } = String.prototype;
+    const str = String;
+
     // A nested frame would bring fresh ones: a `srcdoc` or `javascript:`
     // frame runs its own script in a new window, and the CSP's frame-src
-    // stops neither. So frames go as soon as they're added — the observer
-    // runs as a microtask, while a frame's document arrives in a later task —
-    // in shadow roots too, which `attachShadow` now reports here.
+    // stops neither. So frames go as soon as they're added, in shadow roots
+    // too, which `attachShadow` now reports here. The observer runs as a
+    // microtask; a frame's first document (about:blank) is there at once,
+    // but the sandbox gives it an opaque origin of its own, out of this
+    // page's reach, and whatever the frame would run arrives in a later task.
     const FRAMES = "iframe, frame, object, embed";
-    const frameWatch = new MutationObserver((records) => {
-      for (const { addedNodes } of records) {
-        for (const node of addedNodes) {
-          if (!(node instanceof Element)) continue;
-          if (node.matches(FRAMES)) node.remove();
-          for (const frame of node.querySelectorAll(FRAMES)) frame.remove();
+    const removeFrames = (nodes) => {
+      for (let i = 0, n = apply(listLength, nodes, []); i < n; i++) {
+        const node = apply(item, nodes, [i]);
+        if (apply(nodeType, node, []) !== 1) continue; // not an element
+        if (apply(matches, node, [FRAMES])) apply(remove, node, []);
+        const inner = apply(querySelectorAll, node, [FRAMES]);
+        for (let j = 0, m = apply(listLength, inner, []); j < m; j++) {
+          apply(remove, apply(item, inner, [j]), []);
         }
       }
+    };
+    // `records` is an array the engine builds; reading its own indices
+    // involves nothing the page can replace.
+    const frameWatch = new MutationObserver((records) => {
+      for (let i = 0; i < records.length; i++) removeFrames(apply(addedNodes, records[i], []));
     });
-    const watch = (root) => frameWatch.observe(root, { childList: true, subtree: true });
-    const { attachShadow } = Element.prototype;
+    // No prototype, so a page can't add members to it through
+    // Object.prototype (`attributes: false` plus `attributeOldValue: true`
+    // made observe() throw, leaving a new shadow root unwatched).
+    const OPTIONS = { __proto__: null, childList: true, subtree: true };
+    const watch = (root) => apply(observe, frameWatch, [root, OPTIONS]);
     pin(Element.prototype, "attachShadow", function (init) {
-      const root = attachShadow.call(this, init);
+      // Never clonable: cloneNode would copy the root, and what's in it,
+      // into a new root nobody watches. Each field is read once into an
+      // object of our own, so the page's object can't put the flag back.
+      const root = apply(attachShadow, this, [{
+        __proto__: null,
+        mode: init?.mode,
+        delegatesFocus: init?.delegatesFocus,
+        slotAssignment: init?.slotAssignment,
+        serializable: init?.serializable,
+        customElementRegistry: init?.customElementRegistry,
+        clonable: false,
+      }]);
       watch(root);
       return root;
     });
     // A shadow root declared in markup doesn't pass through attachShadow,
     // and a closed one leaves no handle to watch. So the parser never gets
     // to make one: the attribute asking for it is renamed in everything
-    // this page or its scripts hand to the parser.
-    const noShadowRoots = (html) => String(html).replace(/shadowrootmode/gi, "data-$&");
+    // this page or its scripts hand to the parser. Matched character by
+    // character, ASCII case-insensitively like the tokenizer, since a regex
+    // or string method could be the page's own by now.
+    const NAME = "shadowrootmode";
+    const NAME_UPPER = "SHADOWROOTMODE";
+    const isNameAt = (s, i) => {
+      for (let j = 0; j < NAME.length; j++) {
+        if (s[i + j] !== NAME[j] && s[i + j] !== NAME_UPPER[j]) return false;
+      }
+      return true;
+    };
+    const noShadowRoots = (html) => {
+      const s = str(html);
+      let out = "";
+      let from = 0;
+      for (let i = 0; i < s.length; i++) {
+        if (!isNameAt(s, i)) continue;
+        out += apply(slice, s, [from, i]) + "data-";
+        from = i;
+      }
+      return out + apply(slice, s, [from]);
+    };
     for (const [obj, name] of [
       [Element.prototype, "setHTMLUnsafe"],
       [ShadowRoot.prototype, "setHTMLUnsafe"],
       [Document, "parseHTMLUnsafe"],
+      // The Sanitizer API's safe variants make one too once given a config.
+      [Element.prototype, "setHTML"],
+      [ShadowRoot.prototype, "setHTML"],
+      [Document, "parseHTML"],
     ]) {
       const parse = obj[name];
       if (parse) pin(obj, name, function (html, options) {
-        return parse.call(this, noShadowRoots(html), options);
+        return apply(parse, this, [noShadowRoots(html), options]);
       });
     }
     // Writes all feed one stream, so a name can also arrive split across
@@ -87,10 +152,18 @@
     for (const name of ["write", "writeln"]) {
       const write = Document.prototype[name];
       pin(Document.prototype, name, function (...text) {
-        let html = noShadowRoots(text.map(String).join(""));
-        if (/shadowrootmode/i.test(written + html.slice(0, 13))) html = " " + html;
-        written = (written + html).slice(-13);
-        return write.call(this, html);
+        let html = "";
+        for (let i = 0; i < text.length; i++) html += str(text[i]);
+        html = noShadowRoots(html);
+        const seam = written + apply(slice, html, [0, NAME.length - 1]);
+        for (let i = 0; i < seam.length; i++) {
+          if (isNameAt(seam, i)) {
+            html = " " + html;
+            break;
+          }
+        }
+        written = apply(slice, written + html, [1 - NAME.length]);
+        return apply(write, this, [html]);
       });
     }
 

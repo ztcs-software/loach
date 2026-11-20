@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   buildExtractorSystemPrompt,
+  clip,
   describesRequest,
   isDuplicate,
   looksLikeSecret,
@@ -8,6 +9,17 @@ import {
   parseExtractionJson,
   selectMemoriesForPrompt,
 } from "./memoryRules";
+
+// F2-01: a lone surrogate failed the extraction request's IPC, and the
+// turns waiting in it were dropped.
+describe("clip", () => {
+  it("never cuts between the halves of an emoji", () => {
+    expect(clip("a😀", 2)).toBe("a…");
+    expect(clip("ab😀", 3)).toBe("ab…");
+    expect(clip("a😀b", 3)).toBe("a😀…");
+    expect(clip("short", 10)).toBe("short");
+  });
+});
 
 describe("normalize", () => {
   it("lowercases, strips punctuation and collapses whitespace", () => {

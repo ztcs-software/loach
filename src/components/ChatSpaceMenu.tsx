@@ -96,7 +96,12 @@ export function ChatSpaceSubmenu({
       <DropdownMenuSubContent className="max-h-72 min-w-[180px] overflow-y-auto">
         {spaces.length === 0 && <DropdownMenuItem disabled>No Spaces yet</DropdownMenuItem>}
         {spaces.map((sp) => (
-          <DropdownMenuItem key={sp.id} onSelect={() => void move(sp.id)}>
+          <DropdownMenuItem
+            key={sp.id}
+            role="menuitemradio"
+            aria-checked={session.space_id === sp.id}
+            onSelect={() => void move(sp.id)}
+          >
             <span className="min-w-0 truncate">{sp.name}</span>
             {session.space_id === sp.id && <Check className="ml-auto h-3.5 w-3.5 shrink-0" />}
           </DropdownMenuItem>

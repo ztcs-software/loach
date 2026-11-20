@@ -71,8 +71,8 @@ import { ToastHost } from "@/components/ToastHost";
 import { ConfirmDialogHost } from "@/components/ConfirmDialog";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { Button } from "@/components/ui/button";
-import { SquarePen } from "lucide-react";
-import { resolveDefaultModelChoice, useChatStore } from "@/stores/chatStore";
+import { RefreshCw, SquarePen } from "lucide-react";
+import { installedIn, resolveDefaultModelChoice, useChatStore } from "@/stores/chatStore";
 import { useModelsStore } from "@/stores/modelsStore";
 import { useMcpStore } from "@/stores/mcpStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -89,13 +89,14 @@ import { useAutoLock } from "@/lib/autoLock";
 import { useCanvasStore } from "@/stores/canvasStore";
 import { usePrivateChatStore } from "@/stores/privateChatStore";
 import { cn } from "@/lib/utils";
-import { DEFAULT_PARAMS } from "@/types";
+import { defaultNumCtx } from "@/lib/modelParams";
 
 /** Set once the leftover-stream sweep has run for this page load. */
 let staleStreamsStopped = false;
 
 export default function App() {
   const hydrateSettings = useSettingsStore((s) => s.hydrate);
+  const hydrateOpenAIKey = useSettingsStore((s) => s.hydrateOpenAIKey);
   const hydrateChats = useChatStore((s) => s.hydrate);
   const hydrateSpaces = useSpaceStore((s) => s.hydrate);
   const hydrateSnippets = useSnippetStore((s) => s.hydrate);
@@ -148,6 +149,7 @@ export default function App() {
   // "No chat open" CTA for a loading skeleton so users with chats on disk
   // don't briefly see an empty-state message that tells them to create one.
   const chatsHydrated = useChatStore((s) => s.hydrated);
+  const chatsLoadError = useChatStore((s) => s.loadError);
 
   // Phase 1 — security probe. Pessimistically lock (so the chat UI never
   // flashes) and ask the backend whether a lock is configured. The store's
@@ -217,7 +219,7 @@ export default function App() {
   //
   // The hydrates are independent — except `hydrateModels`, whose listing
   // reads the provider URLs and the key flag from the settings store, so it
-  // waits for settings — and we fan the rest out in parallel. The prior
+  // waits for both — and we fan the rest out in parallel. The prior
   // sequential await chain was the dominant chunk of post-unlock latency,
   // since IPC round-trips stack additively. Parallelising collapses them
   // to the slowest single call (typically `hydrateModels`, which is
@@ -247,6 +249,9 @@ export default function App() {
     phase2Started.current = true;
 
     const settingsP = hydrateSettings();
+    // Apart from the settings, which used to wait for it: a keyring read can
+    // sit behind an OS prompt, and only the model listing below needs it.
+    const keyP = hydrateOpenAIKey();
     const chatsP = hydrateChats();
     const spacesP = hydrateSpaces();
     void hydrateSnippets();
@@ -258,10 +263,10 @@ export default function App() {
     void hydrateMcp();
     // `hydrateModels` is network-bound (Ollama /api/tags) — fire-and-forget
     // so its latency never blocks anything the user sees. It lists from the
-    // configured URLs, so it starts once settings land: started alongside
-    // them, it listed the defaults (localhost Ollama, no OpenAI) and stayed
-    // that way for anyone with a remote server or an API key.
-    void settingsP.then(() => hydrateModels());
+    // configured URLs and the key flag, so it starts once both land: started
+    // alongside them, it listed the defaults (localhost Ollama, no OpenAI)
+    // and stayed that way for anyone with a remote server or an API key.
+    void Promise.all([settingsP, keyP]).then(() => hydrateModels());
     // Memory-extraction turns still queued when the app last quit. Checked
     // against the chats and against each scope's memory switch — a Space's
     // or the global setting — so it waits for all three.
@@ -312,11 +317,12 @@ export default function App() {
         s.default_provider,
         s.default_model ?? "",
         useChatStore.getState().sessions,
+        installedIn(useModelsStore.getState().models),
       );
       if (resolved.provider === "ollama" && resolved.model) {
         // Resolve the runner-affecting params a fresh chat with this model
         // would send (num_ctx from the Modelfile defaults, else the app
-        // default; plus the global low-VRAM pin) so the warmed model isn't
+        // default capped at the model's maximum) so the warmed model isn't
         // reloaded the instant the user sends their first message.
         void useModelsStore
           .getState()
@@ -325,8 +331,11 @@ export default function App() {
             void ollamaPreloadModel(
               s.ollama_base_url,
               resolved.model,
-              md.num_ctx ?? DEFAULT_PARAMS.num_ctx,
-              s.low_vram_global ? true : md.low_vram,
+              md.num_ctx ??
+                defaultNumCtx(
+                  s.default_num_ctx,
+                  useModelsStore.getState().modelContextMax[resolved.model],
+                ),
               md.num_gpu,
             ).catch(() => {});
           })
@@ -337,6 +346,7 @@ export default function App() {
     securityHydrated,
     unlocked,
     hydrateSettings,
+    hydrateOpenAIKey,
     hydrateSpaces,
     hydrateSnippets,
     hydrateSnippetVars,
@@ -428,8 +438,9 @@ export default function App() {
             it's open so Tab can't walk focus out of the overlay into the
             regular chat's composer behind it — text typed there, unseen,
             would be sent to that chat, saved, and read by its memory
-            extractor. */}
-        <div className="flex min-h-0 flex-1" inert={privateChatOpen}>
+            extractor. The same while onboarding is up: a message typed
+            behind the wizard went out to a provider not yet set up. */}
+        <div className="flex min-h-0 flex-1" inert={privateChatOpen || showOnboarding}>
           <Sidebar />
           {/* Every boundary in this slot is keyed by what it shows. They all
               sit at the same position, so unkeyed React kept one instance
@@ -437,37 +448,37 @@ export default function App() {
               Space, model or chat the user moved to. */}
           {viewingSpaceId ? (
             <ErrorBoundary key={`space:${viewingSpaceId}`} name="Space">
-              <Suspense fallback={null}>
+              <Suspense fallback={<ViewLoading />}>
                 <SpaceView />
               </Suspense>
             </ErrorBoundary>
           ) : viewingModel ? (
             <ErrorBoundary key={`model:${viewingModel}`} name="Model details">
-              <Suspense fallback={null}>
+              <Suspense fallback={<ViewLoading />}>
                 <ModelsView />
               </Suspense>
             </ErrorBoundary>
           ) : sidebarTab === "spaces" ? (
             <ErrorBoundary key="spaces" name="Spaces library">
-              <Suspense fallback={null}>
+              <Suspense fallback={<ViewLoading />}>
                 <SpacesLibrary />
               </Suspense>
             </ErrorBoundary>
           ) : sidebarTab === "library" ? (
             <ErrorBoundary key="library" name="Library">
-              <Suspense fallback={null}>
+              <Suspense fallback={<ViewLoading />}>
                 <LibraryView />
               </Suspense>
             </ErrorBoundary>
           ) : sidebarTab === "snippets" ? (
             <ErrorBoundary key="snippets" name="Snippets library">
-              <Suspense fallback={null}>
+              <Suspense fallback={<ViewLoading />}>
                 <SnippetsLibrary />
               </Suspense>
             </ErrorBoundary>
           ) : sidebarTab === "models" ? (
             <ErrorBoundary key="models" name="Models library">
-              <Suspense fallback={null}>
+              <Suspense fallback={<ViewLoading />}>
                 <ModelsLibrary />
               </Suspense>
             </ErrorBoundary>
@@ -485,7 +496,13 @@ export default function App() {
                     // whether the user has zero chats or just chats that
                     // haven't loaded yet. The skeleton avoids telling them
                     // they have no chats when they actually do.
-                    chatsHydrated ? <NoChatState /> : <ChatLoadingSkeleton />
+                    !chatsHydrated ? (
+                      <ChatLoadingSkeleton />
+                    ) : chatsLoadError ? (
+                      <ChatLoadError message={chatsLoadError} />
+                    ) : (
+                      <NoChatState />
+                    )
                   ) : !transcriptLoaded ? (
                     // Session picked, transcript still in flight.
                     <ChatLoadingSkeleton />
@@ -632,13 +649,19 @@ const HERO_GREETINGS = [
   "What are we working on?",
 ];
 
-/**
- * Shown when the user has no active chat — typically because they just
- * deleted or archived their last one. Unlike HeroComposer (which still has
- * a working composer because a fresh empty session is already open), there
- * is no session to send into here, so we surface a single "New chat" CTA
- * that calls into the same `newSession` the sidebar uses.
- */
+/** The main pane while a view's code loads (a cold start, a click before
+ *  the idle prefetch): left blank, nothing said it was coming. */
+function ViewLoading() {
+  return (
+    <main className="flex min-w-0 flex-1 px-8 py-8" aria-busy aria-label="Loading">
+      <div className="mx-auto w-full max-w-6xl animate-pulse">
+        <div className="h-8 w-48 rounded-lg bg-foreground/[0.06]" />
+        <div className="mt-3 h-4 w-80 max-w-full rounded-full bg-foreground/[0.04]" />
+      </div>
+    </main>
+  );
+}
+
 /**
  * Centered, low-contrast "still loading" placeholder for the chat surface.
  * Shown for the ~100–300 ms window between unlock and `chatStore.hydrate()`
@@ -661,6 +684,13 @@ function ChatLoadingSkeleton() {
   );
 }
 
+/**
+ * Shown when the user has no active chat — typically because they just
+ * deleted or archived their last one. Unlike HeroComposer (which still has
+ * a working composer because a fresh empty session is already open), there
+ * is no session to send into here, so we surface a single "New chat" CTA
+ * that calls into the same `newSession` the sidebar uses.
+ */
 function NoChatState() {
   const newSession = useChatStore((s) => s.newSession);
   const start = () => void newSession({ spaceId: null });
@@ -682,9 +712,33 @@ function NoChatState() {
   );
 }
 
+/** In place of NoChatState when the chats couldn't be read. "No chat open"
+ *  passed for an empty install: a user who took their history for gone
+ *  started new chats on top of the failing database. */
+function ChatLoadError({ message }: { message: string }) {
+  const hydrate = useChatStore((s) => s.hydrate);
+  return (
+    <div className="flex flex-1 items-center justify-center px-6">
+      <div className="-mt-10 max-w-md text-center">
+        <h2 className="text-xl font-medium text-foreground/85">
+          Couldn't load your chats
+        </h2>
+        <p className="mt-2 text-sm text-foreground/55">{message}</p>
+        <Button onClick={() => void hydrate()} variant="outline" className="mt-5 gap-2 rounded-full px-5">
+          <RefreshCw className="h-4 w-4" />
+          Retry
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 function HeroComposer() {
   const insertDraft = useUIStore((s) => s.insertComposerDraft);
   const bgStyle = useSettingsStore((s) => s.background_style);
+  // No model to send to (setup skipped, nothing installed): say so and where
+  // to get one — "Ask anything" over a Send that did nothing was a dead end.
+  const noModel = useChatStore((s) => !s.sessions.find((x) => x.id === s.activeSessionId)?.model);
 
   // Pick a greeting once per mount so it stays stable while this hero is
   // visible but re-rolls on every fresh empty-state visit (new chat etc.).
@@ -706,9 +760,39 @@ function HeroComposer() {
           >
             {headingText}
           </h1>
-          <p className="mt-3 text-sm text-foreground/55">
-            Ask anything. Loach runs your local models privately and securely.
-          </p>
+          {noModel ? (
+            <div className="mt-3 flex flex-col items-center gap-3">
+              <p className="text-sm text-foreground/65">
+                No model yet — pick one above, download one, or connect a provider.
+              </p>
+              <div className="flex gap-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="rounded-full"
+                  onClick={() => {
+                    useSpaceStore.getState().setViewingSpace(null);
+                    useModelsStore.getState().setViewingModel(null);
+                    useUIStore.getState().setSidebarTab("models");
+                  }}
+                >
+                  Get a model
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="rounded-full"
+                  onClick={() => useUIStore.getState().openSettingsTab("providers")}
+                >
+                  Connect a provider
+                </Button>
+              </div>
+            </div>
+          ) : (
+            <p className="mt-3 text-sm text-foreground/55">
+              Ask anything. Loach runs your local models privately and securely.
+            </p>
+          )}
         </div>
         <ChatInput centered />
         <div className="mt-6 flex flex-wrap items-center justify-center gap-2">

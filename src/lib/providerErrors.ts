@@ -117,6 +117,43 @@ function matchNeedle(hay: string, needle: string): boolean {
   return hay.includes(needle);
 }
 
+/** A note Loach writes at the end of a reply for the user, in the line
+ *  format below — an error, an interrupted or cut-off reply — alone or
+ *  after a blank line. */
+const TRAILING_NOTE = /(?:^|\n\n)_⚠ [^\n]*_\s*$/;
+
+/** Appended to a reply the provider ended at the max-tokens limit (`done`
+ *  with `cut_off`), which otherwise passed for a finished answer. */
+export const CUT_OFF_NOTE =
+  "_⚠ Cut off at the Max Tokens limit — raise it in Parameters (Advanced view) for a longer reply._";
+
+/** Appended instead when the prompt and reply filled the context window
+ *  first (`cut_off: "context"`). Ollama reports that as the same `length`
+ *  stop, so it read as the Max Tokens note, and raising Max Tokens did
+ *  nothing. `tools`: the chat sends tool definitions, which go out with
+ *  every request and can take most of a small window on their own. An
+ *  OpenAI-compatible server ignores Loach's Context Length. */
+export function contextFullNote(opts: { provider: ProviderId; tools: boolean }): string {
+  const fix =
+    opts.provider === "ollama"
+      ? "raise Context Length in Parameters"
+      : "raise the model's context length on its server";
+  const tools = opts.tools ? ", or turn off tools you don't use in Settings → Tools" : "";
+  return `_⚠ Cut off: the context window is full — ${fix}${tools}._`;
+}
+
+/**
+ * An assistant turn as the model should get it back in the history: without
+ * the notes Loach added for the user. Replayed, a "_⚠ Couldn't reach Ollama_"
+ * read to the model as its own last answer, which it then apologised for, on
+ * every later turn. `""` when nothing else is left; callers drop that turn.
+ */
+export function replayableReply(content: string): string {
+  let out = content;
+  while (TRAILING_NOTE.test(out)) out = out.replace(TRAILING_NOTE, "");
+  return out.trimEnd();
+}
+
 /**
  * Build the `_⚠ … _` Markdown-italicised error line that ends up inside the
  * assistant message bubble. The line is always:

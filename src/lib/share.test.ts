@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildShareUrl, truncate } from "./share";
+import { buildShareUrl, trimsForShare, truncate } from "./share";
 import { wrapLines } from "./shareImage";
 
 describe("truncate", () => {
@@ -19,6 +19,15 @@ describe("truncate", () => {
     const out = truncate("😀".repeat(200), 270);
     expect(out.length).toBeLessThanOrEqual(270);
     expect(out).toBe(`${"😀".repeat(134)}…`);
+  });
+});
+
+// The dialog copies the whole text when the pre-fill is cut (F9-02).
+describe("trimsForShare", () => {
+  it("says when a network's pre-fill would be cut", () => {
+    expect(trimsForShare("x", "a".repeat(270))).toBe(false);
+    expect(trimsForShare("x", "a".repeat(271))).toBe(true);
+    expect(trimsForShare("reddit", "a".repeat(271))).toBe(false);
   });
 });
 

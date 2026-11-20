@@ -17,6 +17,7 @@
 //! `.notdef` boxes, and the tool result counts them so the model can tell
 //! the user.
 
+use super::{err};
 use base64::Engine;
 use printpdf::*;
 use serde::Deserialize;
@@ -62,6 +63,12 @@ const MAX_SPEC_BYTES: usize = 256 * 1024;
 /// flows on and `page_break` blocks add pages a 256 KiB spec could
 /// otherwise run into the thousands.
 const MAX_PAGES: usize = 200;
+/// Most columns a table may have. Equal-width columns on the 170 mm body
+/// are unreadable past about a dozen, and without a cap every row was drawn
+/// across the widest row's columns: a 50 KB spec of a few thousand empty
+/// cells per row built tens of millions of cells, gigabytes of drawing ops,
+/// long before the page cap tripped.
+const MAX_TABLE_COLS: usize = 16;
 
 pub fn tool_description() -> &'static str {
     "Create a PDF from a structured spec. Use this to produce a \
@@ -75,7 +82,7 @@ pub fn tool_description() -> &'static str {
      `horizontal_rule` (no fields), \
      `page_break` (force the next block onto a new page), \
      `table` (with `headers: [string]` and `rows: [[string]]` — equal \
-     column widths, no cell-wrap so keep cells short). \
+     column widths, no cell-wrap so keep cells short, at most 16 columns). \
      `title` is optional and becomes the filename (sanitised). \
      Unicode text (Latin, accents, common symbols) renders fine; glyphs \
      the bundled font lacks (e.g. Cyrillic, Greek, CJK, emoji) are \
@@ -146,10 +153,18 @@ pub fn input_schema() -> Value {
                 "type": "object",
                 "properties": {
                     "type": { "const": "table" },
-                    "headers": { "type": "array", "items": { "type": "string" } },
+                    "headers": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "maxItems": MAX_TABLE_COLS
+                    },
                     "rows": {
                         "type": "array",
-                        "items": { "type": "array", "items": { "type": "string" } }
+                        "items": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "maxItems": MAX_TABLE_COLS
+                        }
                     }
                 },
                 "required": ["type", "rows"],
@@ -683,6 +698,12 @@ fn render_table(
     if cols == 0 {
         return err_str("table has no columns — provide `headers` or non-empty `rows`");
     }
+    if cols > MAX_TABLE_COLS {
+        return Err(format!(
+            "table has {cols} columns; at most {MAX_TABLE_COLS} fit across a page — split it into \
+             several tables"
+        ));
+    }
     let col_width_mm = body_width_mm() / cols as f32;
     let cell_pad_mm: f32 = 1.2;
     let row_height_mm = BODY_LINE_HEIGHT_MM + cell_pad_mm * 2.0;
@@ -731,8 +752,15 @@ fn render_table_row(
         state.draw_line(x, top_y, x, bottom_y);
         // Cell text — truncated to col width (no wrap inside cells).
         let raw = cells.get(col).map(String::as_str).unwrap_or("");
+        // One line: a cell doesn't wrap, and a `\n`, a tab or another control
+        // character came out as an empty glyph box.
+        let flat = raw
+            .split(|c: char| c.is_whitespace() || c.is_control())
+            .filter(|w| !w.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
         let text = truncate_to_width(
-            &sanitise(raw, state.regular_font),
+            &sanitise(&flat, state.regular_font),
             col_width_mm - cell_pad_mm * 2.0_f32,
             state.font(bold),
             BODY_FONT_SIZE_PT,
@@ -926,14 +954,6 @@ fn is_windows_device_name(stem: &str) -> bool {
             ))
 }
 
-fn err(msg: impl Into<String>) -> McpCallResult {
-    McpCallResult {
-        content_text: msg.into(),
-        is_error: true,
-        ..Default::default()
-    }
-}
-
 fn err_str(msg: &str) -> Result<(), String> {
     Err(msg.to_string())
 }
@@ -1011,6 +1031,32 @@ mod tests {
         }));
         assert!(!r.is_error, "{}", r.content_text);
         assert_eq!(r.attachments.len(), 1);
+    }
+
+    /// A table is capped at MAX_TABLE_COLS columns, counted over its widest
+    /// row: thousands of empty cells per row cost gigabytes of drawing ops
+    /// before the page cap tripped (B6-01).
+    #[test]
+    fn tables_wider_than_the_cap_are_refused() {
+        let table = |headers: usize, widest: usize| {
+            dispatch(&json!({
+                "action": "create",
+                "pages": [{ "blocks": [{
+                    "type": "table",
+                    "headers": vec!["h"; headers],
+                    "rows": [vec![""; 1], vec![""; widest]]
+                }] }]
+            }))
+        };
+        assert!(!table(MAX_TABLE_COLS, MAX_TABLE_COLS).is_error);
+        let started = std::time::Instant::now();
+        for (headers, widest) in [(MAX_TABLE_COLS + 1, 1), (2, 8000)] {
+            let r = table(headers, widest);
+            assert!(r.is_error, "{headers}×{widest}");
+            assert!(r.content_text.contains(&format!("at most {MAX_TABLE_COLS}")), "{}", r.content_text);
+        }
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        assert!(tool_description().contains(&format!("at most {MAX_TABLE_COLS} columns")));
     }
 
     #[test]

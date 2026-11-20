@@ -227,6 +227,12 @@ export const COMMANDS: readonly CommandSpec[] = [
     group: "Tools & web",
   },
   {
+    name: "skill",
+    description: "Load a skill into this chat, or list skills",
+    usage: "[name]",
+    group: "Tools & web",
+  },
+  {
     name: "thinking",
     description: "Toggle the model's reasoning step (Ollama)",
     usage: "on|off",

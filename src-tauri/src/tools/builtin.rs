@@ -21,9 +21,10 @@ use crate::db::Database;
 use crate::mcp::{McpCallResult, McpToolDef};
 
 /// Hard ceiling on a single built-in tool call. Built-ins are pure CPU and
-/// should return in well under a second; this only exists so a pathological
-/// model-supplied input (e.g. a giant `diff_text`) can't pin a worker
-/// indefinitely. The workspace tools that change files are exempt — see
+/// should return in well under a second. The timeout frees the chat turn,
+/// not the thread: the blocking task runs on, memory and all, to the end —
+/// so every tool must bound its own work, as `diff_text` does with its
+/// deadline. The workspace tools that change files are exempt — see
 /// [`dispatch_builtin_guarded`].
 const BUILTIN_TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -35,7 +36,7 @@ pub const BUILTIN_SERVER_ID: &str = "__builtin__";
 /// `server_name` field on every built-in def — only shown in places like
 /// the assistant-bubble tool-call chip; the user sees "Loach" rather than
 /// "__builtin__".
-const SERVER_NAME: &str = "Loach";
+pub(crate) const SERVER_NAME: &str = "Loach";
 
 /// How a built-in is invoked.
 ///
@@ -259,6 +260,18 @@ pub fn dispatch_builtin(
             },
         },
     })
+}
+
+/// Whether the built-in `name` is switched off in the settings now. The
+/// catalogue is built when a turn starts; a tool switched off during it
+/// (Workspace files, say, while a reply reads the folder) mustn't keep
+/// running for the rest of the reply — as scripts, skills and MCP servers
+/// don't. `false` for a name that isn't a built-in.
+pub fn switched_off(db: &Database, name: &str) -> bool {
+    BUILTINS
+        .iter()
+        .find(|b| b.name == name)
+        .is_some_and(|b| db.get_setting(b.setting_key).ok().flatten().as_deref() != Some("true"))
 }
 
 /// Run a built-in tool with a panic boundary and a wall-clock timeout.

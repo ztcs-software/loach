@@ -11,6 +11,7 @@ import {
   listSpaceMemories,
   listSpaces,
   removeSpaceFile,
+  removeSpaceMemories,
   removeSpaceMemory,
   setSpaceFileEnabled,
   setSpaceImageScaling,
@@ -55,7 +56,6 @@ interface SpaceState {
   error: string | null;
 
   hydrate: () => Promise<void>;
-  selectSpace: (id: string | null) => void;
   createSpace: (
     name: string,
     description: string,
@@ -120,6 +120,8 @@ interface SpaceState {
   updateMemory: (id: string, spaceId: string, content: string) => Promise<boolean>;
   /** `false` when the memory was already gone. */
   removeMemory: (id: string, spaceId: string) => Promise<boolean>;
+  /** Many at once, in one write and one list update ("Clear all"). */
+  removeMemories: (ids: string[], spaceId: string) => Promise<number>;
 }
 
 /** Memory writes completed so far. A load compares it before and after
@@ -141,6 +143,17 @@ let contextWrites = 0;
 function invalidateSpaceContext(spaceId: string) {
   contextWrites++;
   dropCachedContext(spaceId);
+}
+
+/** For writes that leave the uploads alone (a memory, how sources are used,
+ *  image scaling): change the cached context in place instead of dropping
+ *  it. Dropped, the next send re-read every upload — tens of MB, before the
+ *  request was even built — after each fact the memory extractor saved. A
+ *  read already under way is still discarded, as it may predate the write. */
+function patchSpaceContext(spaceId: string, patch: (ctx: SpaceContext) => SpaceContext) {
+  contextWrites++;
+  const ctx = getCachedSpaceContext(spaceId);
+  if (ctx) setCachedSpaceContext(spaceId, patch(ctx));
 }
 
 /** Each Space's `updateSpace` calls, run one after another. A call fills the
@@ -175,10 +188,6 @@ export const useSpaceStore = create<SpaceState>((set, get) => ({
         error: e instanceof Error ? e.message : String(e),
       });
     }
-  },
-
-  selectSpace: (id) => {
-    set({ activeSpaceId: id });
   },
 
   createSpace: async (name, description, instructions) => {
@@ -317,7 +326,9 @@ export const useSpaceStore = create<SpaceState>((set, get) => ({
   },
 
   addFile: async (spaceId, name, mime, kind, data, size) => {
-    const existing = get().spaceFiles[spaceId] ?? [];
+    // Checked against the real list: with it not loaded yet (or its load
+    // failed) the cap counted 0 bytes, and a Space near 200 MB could pass it.
+    const existing = get().spaceFiles[spaceId] ?? (await get().loadSpaceFiles(spaceId));
     const used = existing.reduce((acc, f) => acc + f.size, 0);
     if (used + size > SPACE_BYTES_CAP) {
       throw new Error(
@@ -399,7 +410,7 @@ export const useSpaceStore = create<SpaceState>((set, get) => ({
       });
       return;
     }
-    invalidateSpaceContext(spaceId);
+    patchSpaceContext(spaceId, (c) => ({ ...c, space: { ...c.space, retrieval_mode: mode } }));
     set((s) => ({
       spaces: s.spaces.map((sp) => (sp.id === spaceId ? { ...sp, retrieval_mode: mode } : sp)),
     }));
@@ -417,7 +428,7 @@ export const useSpaceStore = create<SpaceState>((set, get) => ({
       });
       return;
     }
-    invalidateSpaceContext(spaceId);
+    patchSpaceContext(spaceId, (c) => ({ ...c, space: { ...c.space, image_scaling_json: json } }));
     set((s) => ({
       spaces: s.spaces.map((sp) => (sp.id === spaceId ? { ...sp, image_scaling_json: json } : sp)),
     }));
@@ -445,7 +456,7 @@ export const useSpaceStore = create<SpaceState>((set, get) => ({
       }
     }
     // No await since the context was read or found cached, and every memory
-    // write drops the cached copy — so these are current.
+    // write patches the cached copy — so these are current.
     const { memories } = ctx;
     set((s) => ({ spaceMemories: { ...s.spaceMemories, [spaceId]: memories } }));
     return ctx;
@@ -457,7 +468,10 @@ export const useSpaceStore = create<SpaceState>((set, get) => ({
   addMemory: async (args) => {
     const memory = await addSpaceMemory(args);
     memoryWrites++;
-    invalidateSpaceContext(args.space_id);
+    patchSpaceContext(args.space_id, (c) => ({
+      ...c,
+      memories: [...c.memories, memory].sort((a, b) => a.created_at - b.created_at),
+    }));
     set((s) => {
       const list = s.spaceMemories[args.space_id];
       if (!list) return s;
@@ -472,19 +486,16 @@ export const useSpaceStore = create<SpaceState>((set, get) => ({
     const trimmed = content.trim();
     const changed = await updateSpaceMemory({ id, space_id: spaceId, content: trimmed });
     memoryWrites++;
-    invalidateSpaceContext(spaceId);
     const now = Date.now();
+    const edit = (list: SpaceMemory[]) =>
+      changed
+        ? list.map((m) => (m.id === id ? { ...m, content: trimmed, updated_at: now } : m))
+        : list.filter((m) => m.id !== id);
+    patchSpaceContext(spaceId, (c) => ({ ...c, memories: edit(c.memories) }));
     set((s) => {
       const list = s.spaceMemories[spaceId];
       if (!list) return s;
-      return {
-        spaceMemories: {
-          ...s.spaceMemories,
-          [spaceId]: changed
-            ? list.map((m) => (m.id === id ? { ...m, content: trimmed, updated_at: now } : m))
-            : list.filter((m) => m.id !== id),
-        },
-      };
+      return { spaceMemories: { ...s.spaceMemories, [spaceId]: edit(list) } };
     });
     return changed;
   },
@@ -496,7 +507,7 @@ export const useSpaceStore = create<SpaceState>((set, get) => ({
   removeMemory: async (id, spaceId) => {
     const changed = await removeSpaceMemory({ id, space_id: spaceId });
     memoryWrites++;
-    invalidateSpaceContext(spaceId);
+    patchSpaceContext(spaceId, (c) => ({ ...c, memories: c.memories.filter((m) => m.id !== id) }));
     set((s) => {
       const list = s.spaceMemories[spaceId];
       if (!list) return s;
@@ -505,5 +516,20 @@ export const useSpaceStore = create<SpaceState>((set, get) => ({
       };
     });
     return changed;
+  },
+
+  removeMemories: async (ids, spaceId) => {
+    const removed = await removeSpaceMemories({ ids, space_id: spaceId });
+    memoryWrites++;
+    const gone = new Set(ids);
+    patchSpaceContext(spaceId, (c) => ({ ...c, memories: c.memories.filter((m) => !gone.has(m.id)) }));
+    set((s) => {
+      const list = s.spaceMemories[spaceId];
+      if (!list) return s;
+      return {
+        spaceMemories: { ...s.spaceMemories, [spaceId]: list.filter((m) => !gone.has(m.id)) },
+      };
+    });
+    return removed;
   },
 }));

@@ -21,21 +21,40 @@ const CJK = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hang
  * in (the first 2000 characters of) the sample.
  */
 export function charsPerToken(sample: string): number {
+  const head = sample.slice(0, 2000);
+  // One native scan settles the common case; the context bar runs this per
+  // message on every streaming flush.
+  if (!CJK.test(head)) return 4;
   let total = 0;
   let cjk = 0;
-  for (const ch of sample.slice(0, 2000)) {
+  for (const ch of head) {
     total += 1;
     if (CJK.test(ch)) cjk += 1;
   }
   return total === 0 ? 4 : 4 - (3 * cjk) / total;
 }
 
+/** Characters per token for tool definitions: JSON schemas, denser than
+ *  prose. Measured on Ollama (gemma4): 23 of Loach's tools, 26,935
+ *  characters, cost 7,154 prompt tokens — ~3.77 a token, where the prose
+ *  rate of 4 came out 6% short. */
+export const TOOL_CHARS_PER_TOKEN = 3.75;
+
 export interface ContextUsageBreakdown {
   systemPromptTokens: number;
-  /** The workspace's `LOACHFILE.md`, which the backend appends to the
-   *  system prompt on every turn. Counted on its own because it is the one
+  /** The tool definitions every request carries — built-ins, workspace
+   *  files, skills, MCP — which the backend adds on its own. With many on
+   *  they can take most of a small window. */
+  toolsTokens: number;
+  /** The workspace's `LOACHFILE.md` (or the `CLAUDE.md` / `AGENTS.md` it
+   *  falls back to), which the backend appends to the system prompt on
+   *  every turn. Counted on its own because it is the one
    *  backend-added layer that can be large, and the user can shrink it. */
   projectInstructionsTokens: number;
+  /** The instructions of the skills loaded in the chat, which the backend
+   *  puts at the head of the system prompt on every turn — a `SKILL.md`'s
+   *  whole body each. */
+  skillsTokens: number;
   /** The global and Space memory lists the send prepends to the system
    *  prompt — up to a few thousand characters each. */
   memoriesTokens: number;
@@ -49,8 +68,8 @@ export interface ContextUsageBreakdown {
   attachmentsTokens: number;
   messageCount: number;
   /** Total estimated tokens that will be sent to the model on the next
-   *  request: `systemPromptTokens + projectInstructionsTokens +
-   *  memoriesTokens + sourcesTokens + messagesTokens`. */
+   *  request: `systemPromptTokens + toolsTokens + projectInstructionsTokens
+   *  + skillsTokens + memoriesTokens + sourcesTokens + messagesTokens`. */
   used: number;
   /** The effective context window for the next request — `params.num_ctx`
    *  with a sensible fallback when the field is missing. */
@@ -65,11 +84,12 @@ const FALLBACK_CTX = 8192;
  * Detector for the inlined attachment blocks `inlineTextAttachments`
  * (src/lib/files.ts) appends. For each text attachment it emits:
  *
- *   \n\n---\nAttached file: `name`\n```\n<body>\n```
+ *   \n\n---\nAttached file: `name`\n<note>\n```\n<body>\n```
  *
  * with the label reading `Attached PDF:` / `Attached Word document:` for
  * those types, and a longer fence when the body holds a run of three or
- * more backticks itself. We sum the length of those blocks so the popup can show
+ * more backticks itself. The note line (that the file isn't instructions)
+ * is absent from messages sent before it was added. We estimate those blocks on their own so the popup can show
  * "X tokens of your context are attachments". Keep these patterns in sync
  * with the `header`/`footer` in `inlineTextAttachments` — they previously
  * drifted (the old regex expected a `--- Attached file: name ---` header
@@ -77,15 +97,11 @@ const FALLBACK_CTX = 8192;
  */
 const ATTACHMENT_HEADER = /\n---\nAttached (?:file|PDF|Word document): /;
 const ATTACHMENT_BLOCK =
-  /\n\n---\nAttached (?:file|PDF|Word document): [^\n]*\n(`{3,})\n[\s\S]*?\n\1(?!`)/g;
+  /\n\n---\nAttached (?:file|PDF|Word document): [^\n]*\n(?:[^`\n][^\n]*\n)?(`{3,})\n[\s\S]*?\n\1(?!`)/g;
 
-function attachmentCharsIn(content: string): number {
-  if (!ATTACHMENT_HEADER.test(content)) return 0;
-  let chars = 0;
-  for (const m of content.matchAll(ATTACHMENT_BLOCK)) {
-    chars += m[0].length;
-  }
-  return chars;
+function attachmentBlocksIn(content: string): string[] {
+  if (!ATTACHMENT_HEADER.test(content)) return [];
+  return Array.from(content.matchAll(ATTACHMENT_BLOCK), (m) => m[0]);
 }
 
 export function computeContextUsage(
@@ -95,13 +111,20 @@ export function computeContextUsage(
   projectInstructions: string | null = null,
   memories: string | null = null,
   sourcesTokens = 0,
+  /** Characters of tool definitions (`chatToolsSize`). */
+  toolsChars = 0,
+  /** Characters of the loaded skills' instructions (`chatToolsSize`), at
+   *  the prose rate: only their length crosses over. */
+  skillsChars = 0,
 ): ContextUsageBreakdown {
   const systemPromptTokens = estimateTokens(systemPrompt);
+  const toolsTokens = Math.ceil(toolsChars / TOOL_CHARS_PER_TOKEN);
   const projectInstructionsTokens = estimateTokens(projectInstructions);
+  const skillsTokens = Math.ceil(skillsChars / 4);
   const memoriesTokens = estimateTokens(memories);
 
-  let messageChars = 0;
-  let attachmentChars = 0;
+  let messagesTokens = 0;
+  let attachmentsTokens = 0;
   let nonSystemCount = 0;
   for (const m of messages) {
     // The chatHistory builder excludes role:"system" rows (sent via the
@@ -113,16 +136,30 @@ export function computeContextUsage(
     if (m.role === "system") continue;
     if (m.compacted_at != null) continue;
     nonSystemCount += 1;
-    messageChars += m.content.length;
+    // Each message, and each attached file apart from the prompt around it,
+    // is sized by its own script, so CJK text counts at about a token per
+    // character here too, as in the system prompt and sources.
+    let text = m.content;
     if (m.role === "user") {
-      attachmentChars += attachmentCharsIn(m.content);
+      const blocks = attachmentBlocksIn(text);
+      if (blocks.length > 0) {
+        const tokens = blocks.reduce((sum, block) => sum + estimateTokens(block), 0);
+        attachmentsTokens += tokens;
+        messagesTokens += tokens;
+        text = text.replace(ATTACHMENT_BLOCK, "");
+      }
     }
+    messagesTokens += estimateTokens(text);
   }
 
-  const messagesTokens = Math.ceil(messageChars / 4);
-  const attachmentsTokens = Math.ceil(attachmentChars / 4);
   const used =
-    systemPromptTokens + projectInstructionsTokens + memoriesTokens + sourcesTokens + messagesTokens;
+    systemPromptTokens +
+    toolsTokens +
+    projectInstructionsTokens +
+    skillsTokens +
+    memoriesTokens +
+    sourcesTokens +
+    messagesTokens;
   const total =
     typeof params.num_ctx === "number" && params.num_ctx > 0
       ? params.num_ctx
@@ -131,7 +168,9 @@ export function computeContextUsage(
 
   return {
     systemPromptTokens,
+    toolsTokens,
     projectInstructionsTokens,
+    skillsTokens,
     memoriesTokens,
     sourcesTokens,
     messagesTokens,

@@ -100,12 +100,13 @@ pub(super) struct ToolOutcome {
 /// Shared by both providers so the consent gate, the Stop handling and
 /// the result capping can't drift apart between them.
 ///
-/// Returns `None` when the stream was cancelled while waiting — for an
-/// answer or for the tool — in which case nothing has been emitted for
-/// this call beyond `ToolCall`, and the caller emits `Cancelled` and
-/// returns exactly as it did before. The one exception is a workspace tool
-/// that changes files: once dispatched it runs to the end whatever Stop
-/// does, so its `ToolResult` goes out first and the change is on record.
+/// Returns `None` when the stream was cancelled while waiting — on the
+/// disk reads for its card, for an answer or for the tool — in which case
+/// nothing has been emitted for this call beyond `ToolCall` (if even that),
+/// and the caller emits `Cancelled` and returns exactly as it did before.
+/// The one exception is a workspace tool that changes files: once
+/// dispatched it runs to the end whatever Stop does, so its `ToolResult`
+/// goes out first and the change is on record.
 pub(super) async fn execute_tool_call(
     ctx: &ToolCallCtx<'_>,
     call_id: &str,
@@ -116,22 +117,58 @@ pub(super) async fn execute_tool_call(
     // What a workspace tool that changes files is about to touch, read off
     // the disk once: for a write, whether it replaces a file and how big
     // that is (so the card can't pass an overwrite off as a new file), and
-    // for any of them whether it reaches into a `.git` directory.
+    // for any of them whether it reaches into a `.git` directory or a file
+    // read in as instructions (`touches_instructions`).
+    //
+    // Raced against Stop, like the call itself: on a network share these
+    // reads can stall for as long as the share takes to fail.
     let builtin = tool_def.server_id == crate::tools::builtin::BUILTIN_SERVER_ID;
     let (existing_bytes, in_git_dir) = match ctx.workspace_root {
         Some(root) if builtin && crate::tools::fs::requires_approval(tool_name) => {
             let (root, args) = (root.to_path_buf(), args.clone());
             let is_write = tool_name == crate::tools::fs::WRITE_FILE;
-            tokio::task::spawn_blocking(move || {
+            let skill_dirs: Vec<std::path::PathBuf> = tauri::Manager::try_state::<crate::AppState>(ctx.app)
+                .map(|s| s.skill_roots.dirs().map(|d| d.to_path_buf()).collect())
+                .unwrap_or_default();
+            let probe = tokio::task::spawn_blocking(move || {
                 let size = is_write
                     .then(|| crate::tools::fs::write_target_size(&root, &args))
                     .flatten();
-                (size, crate::tools::fs::touches_git_dir(&root, &args))
-            })
-            .await
-            .unwrap_or((None, false))
+                let always_ask = crate::tools::fs::touches_git_dir(&root, &args)
+                    || crate::tools::fs::touches_instructions(&root, &args, &skill_dirs);
+                (size, always_ask)
+            });
+            select! {
+                biased;
+                _ = ctx.cancel.notified() => return None,
+                r = probe => r.unwrap_or((None, false)),
+            }
         }
         _ => (None, false),
+    };
+    // A script's card shows the command Loach will actually run, and where,
+    // worked out by the same code that will run it. Scripts are asked about
+    // every time: a standing yes for either tool would cover any script with
+    // any arguments.
+    let every_time = builtin
+        && matches!(tool_name, crate::skills::RUN_SKILL_SCRIPT | crate::tools::run_script::TOOL_NAME);
+    let script_run = if every_time {
+        let (app, root, args) = (ctx.app.clone(), ctx.workspace_root.map(|p| p.to_path_buf()), args.clone());
+        let tool = tool_name.to_string();
+        let probe = tokio::task::spawn_blocking(move || {
+            if tool == crate::skills::RUN_SKILL_SCRIPT {
+                crate::skills::script_preview(&app, root.as_deref(), &args)
+            } else {
+                crate::tools::run_script::preview(root.as_deref(), &args)
+            }
+        });
+        select! {
+            biased;
+            _ = ctx.cancel.notified() => return None,
+            r = probe => r.ok().flatten(),
+        }
+    } else {
+        None
     };
     // A standing "Always allow" from earlier in this chat satisfies the
     // gate without re-prompting. Only built-ins are ever recorded in the
@@ -140,7 +177,8 @@ pub(super) async fn execute_tool_call(
     // the server id, so an MCP tool named like a built-in (`write_file`)
     // can't match a built-in's grant. It carries the folder too, so an
     // answer given to a turn still working in the chat's previous folder
-    // can't cover the next one; and it never covers `.git`.
+    // can't cover the next one; and it never covers `.git` or the files read
+    // in as instructions.
     let scope = ctx.workspace_root.map(|p| p.to_string_lossy()).unwrap_or_default();
     let already_granted = !in_git_dir
         && ctx.session_id.is_some_and(|sid| {
@@ -159,9 +197,11 @@ pub(super) async fn execute_tool_call(
             server_id: tool_def.server_id.clone(),
             server_name: tool_def.server_name.clone(),
             tool: tool_def.qualified_name.clone(),
+            tool_name: tool_def.name.clone(),
             arguments: args.clone(),
             approval_required,
             existing_bytes,
+            script_run: script_run.map(Box::new),
         },
     );
 
@@ -207,8 +247,9 @@ pub(super) async fn execute_tool_call(
                 // Built-ins have no server row to hang an allow-list on, so
                 // the grant is remembered in memory against this chat and
                 // folder. It covers the rest of the conversation and dies
-                // with the app.
-                if let Some(sid) = ctx.session_id {
+                // with the app. Never for a script (`every_time`): the card
+                // offers no such answer.
+                if let Some(sid) = ctx.session_id.filter(|_| !every_time) {
                     ctx.approvals.grant(sid, &scope, &tool_def.server_id, tool_name);
                 }
             }
@@ -234,13 +275,26 @@ pub(super) async fn execute_tool_call(
     // Honour cancellation while the tool runs — a slow MCP server (GitHub
     // at peak hours, a tool that does its own long fetch) shouldn't lock
     // the user into waiting once they hit Stop.
-    let dispatch = crate::mcp::dispatch_tool_call(
-        ctx.db,
-        &tool_def.server_id,
-        tool_name,
-        args,
-        ctx.workspace_root,
-    );
+    // The skill tools need the chat and Loach's skill folders, and
+    // `run_script` an async run, neither of which the MCP dispatcher
+    // carries. A script is raced against Stop like any other call: dropping
+    // it kills the process.
+    let dispatch = async {
+        if builtin && crate::skills::is_skill_tool(tool_name) {
+            Ok(crate::skills::dispatch(ctx.app, ctx.session_id, ctx.workspace_root, tool_name, args).await)
+        } else if builtin && tool_name == crate::tools::run_script::TOOL_NAME {
+            Ok(crate::tools::run_script::dispatch(ctx.db, ctx.workspace_root, args).await)
+        } else {
+            crate::mcp::dispatch_tool_call(
+                ctx.db,
+                &tool_def.server_id,
+                tool_name,
+                args,
+                ctx.workspace_root,
+            )
+            .await
+        }
+    };
     // A write, edit, move or delete isn't raced against Stop: its blocking
     // task can't be stopped once started (see `dispatch_builtin_guarded`),
     // so dropping it here only lost the record of a change that still
@@ -248,6 +302,12 @@ pub(super) async fn execute_tool_call(
     // a Stop pressed meanwhile — a stored permit — is honoured right after.
     let mutates = builtin && crate::tools::fs::requires_approval(tool_name);
     let outcome = if mutates {
+        // But a Stop pressed before it starts still counts — while the
+        // model's turn was ending, or with no card to wait on (a standing
+        // grant): nothing has touched the disk yet.
+        if ctx.cancel.notified().now_or_never().is_some() {
+            return None;
+        }
         dispatch.await
     } else {
         select! {
@@ -333,9 +393,54 @@ const MAX_ERROR_BODY_BYTES: usize = 4 * 1024;
 /// trickled the body held the turn open with it.
 const ERROR_BODY_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// `#[serde(default)]` that also takes an explicit `null` as the default —
+/// an empty list, an empty name. Some compat servers send
+/// `"tool_calls": null` on every frame; failing those frames dropped every
+/// token of the reply.
+pub(super) fn null_as_empty<'de, D, T>(d: D) -> std::result::Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
+}
+
+/// [`refuse_link_local_host`], raced against Stop. Its DNS lookup takes as
+/// long as an unreachable resolver makes it — 10 s or more on Windows — and
+/// a Stop pressed meanwhile did nothing until it returned. `None` when
+/// stopped.
+pub(super) async fn screen_host(base_url: &str, cancel: &Notify) -> Option<Result<(), String>> {
+    select! {
+        biased;
+        _ = cancel.notified() => None,
+        r = refuse_link_local_host(base_url) => Some(r),
+    }
+}
+
+/// The `ToolCall` that goes before the error result for a tool the model
+/// named but the catalogue lacks (its server switched off since, say), so
+/// the card shows the name and arguments it sent — the frontend otherwise
+/// drew a placeholder "(unknown)" with no arguments.
+pub(super) fn emit_unknown_tool_call(app: &AppHandle, channel: &str, id: &str, name: &str, arguments: Value) {
+    let _ = app.emit(
+        channel,
+        StreamEvent::ToolCall {
+            id: id.to_string(),
+            server_id: String::new(),
+            server_name: String::new(),
+            tool: name.to_string(),
+            tool_name: name.to_string(),
+            arguments,
+            approval_required: false,
+            existing_bytes: None,
+            script_run: None,
+        },
+    );
+}
+
 /// The start of a failed response's body, for an error message: at most
 /// [`MAX_ERROR_BODY_BYTES`] of it, read for at most [`ERROR_BODY_TIMEOUT`].
-pub(super) async fn error_body(resp: reqwest::Response) -> String {
+pub(crate) async fn error_body(resp: reqwest::Response) -> String {
     let mut stream = resp.bytes_stream();
     let mut raw: Vec<u8> = Vec::new();
     let _ = tokio::time::timeout(ERROR_BODY_TIMEOUT, async {
@@ -538,6 +643,16 @@ pub(crate) async fn refuse_link_local_host(base_url: &str) -> Result<(), String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// B4-06: a Stop pressed during the host screen ends it there.
+    #[tokio::test]
+    async fn the_host_screen_gives_way_to_stop() {
+        let cancel = Notify::new();
+        cancel.notify_one();
+        assert!(screen_host("https://stop-wins.invalid/v1", &cancel).await.is_none());
+        // Unstopped, it answers as before.
+        assert_eq!(screen_host("http://127.0.0.1:11434", &Notify::new()).await, Some(Ok(())));
+    }
 
     #[tokio::test]
     async fn refuse_link_local_rejects_aws_metadata_v4() {
@@ -819,11 +934,6 @@ pub struct GenerationParams {
     /// users whose model OOMs the GPU and need to dial offload down.
     #[serde(default)]
     pub num_gpu: Option<u32>,
-    /// Enable Ollama's low-VRAM mode. `Some(true)` opts in (smaller batches,
-    /// reduced KV cache); `None` / `Some(false)` follows Ollama's default
-    /// (off). Pairs with `num_gpu` for memory-constrained setups.
-    #[serde(default)]
-    pub low_vram: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

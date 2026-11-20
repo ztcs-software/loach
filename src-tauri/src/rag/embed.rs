@@ -184,10 +184,14 @@ async fn embed(
             .timeout(timeout)
             .json(&serde_json::json!({ "model": cfg.model, "input": inputs }));
         // Off the runtime — blocking OS-keyring read, as in the chat path.
-        let key = tokio::task::spawn_blocking(crate::secrets::get_openai_key)
+        // A keyring that can't be read counts as no key, as it does there
+        // and in model listing: on Linux without a Secret Service, failing
+        // here left a keyless LM Studio unable to embed anything — every
+        // search keyword-only — while chatting with it worked.
+        let key = tokio::task::spawn_blocking(|| crate::secrets::get_openai_key().ok().flatten())
             .await
-            .map_err(|e| e.to_string())?
-            .map_err(|e| e.to_string())?;
+            .ok()
+            .flatten();
         if let Some(key) = key.filter(|k| !k.is_empty()) {
             if crate::providers::openai::is_safe_for_bearer(&cfg.base_url) {
                 req = req.bearer_auth(key);
@@ -230,8 +234,11 @@ async fn embed(
 /// A short, readable reason from an error response (`{"error": "..."}` from
 /// Ollama, `{"error": {"message": ...}}` from OpenAI-style servers).
 async fn error_body(status: reqwest::StatusCode, resp: reqwest::Response) -> EmbedError {
-    let text = resp.text().await.unwrap_or_default();
-    let reason = serde_json::from_str::<serde_json::Value>(&text)
+    // Read capped (`providers::error_body`): a proxy's multi-MB HTML error
+    // page was buffered whole, and a JSON `error` of any length reached the
+    // Library status line in full.
+    let text = crate::providers::error_body(resp).await;
+    let reason: String = serde_json::from_str::<serde_json::Value>(&text)
         .ok()
         .and_then(|v| {
             let e = v.get("error")?;
@@ -239,7 +246,10 @@ async fn error_body(status: reqwest::StatusCode, resp: reqwest::Response) -> Emb
                 .map(str::to_string)
                 .or_else(|| e.get("message").and_then(|m| m.as_str()).map(str::to_string))
         })
-        .unwrap_or_else(|| text.chars().take(200).collect());
+        .unwrap_or(text)
+        .chars()
+        .take(200)
+        .collect();
     let reason = reason.trim();
     EmbedError {
         message: format!("HTTP {}: {}", status.as_u16(), reason),

@@ -21,6 +21,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { useConfirm } from "@/components/ConfirmDialog";
 import {
   connectionLabel,
+  redactArgs,
   inputFromView,
   useMcpStore,
   type McpServerView,
@@ -238,7 +239,7 @@ function ServerRow({
             setToggling(false);
           }
         }}
-        aria-label={server.enabled ? "Disable server" : "Enable server"}
+        aria-label={server.name}
       />
       <Button
         variant="ghost"
@@ -298,6 +299,11 @@ function unparsedKvLine(text: string, separators: string[]): string | null {
   return null;
 }
 
+/** The arguments field's lines, as `redactArgs` reads them. */
+function argsLines(text: string): string[] {
+  return text.split("\n").map((l) => l.trim());
+}
+
 function kvToLines(map: Record<string, string>, sep: string): string {
   return Object.entries(map)
     .map(([k, v]) => `${k}${sep}${v}`)
@@ -313,13 +319,17 @@ function SecretTextarea({
   value,
   onChange,
   placeholder,
+  initiallyShown = false,
 }: {
   id: string;
   value: string;
   onChange: (next: string) => void;
   placeholder: string;
+  /** Start shown although there's text — the arguments field does, unless
+   *  one of them looks like a secret. */
+  initiallyShown?: boolean;
 }) {
-  const [shown, setShown] = useState(!value);
+  const [shown, setShown] = useState(!value || initiallyShown);
   return (
     <div className="relative mt-1.5">
       <Textarea
@@ -524,12 +534,15 @@ function McpEditor({ initial, onCancel, onSaved }: EditorProps) {
 
           <div>
             <Label htmlFor="mcp-args">Arguments (one per line)</Label>
-            <Textarea
+            {/* Servers take secrets here too — a database URL with its
+                password, an `--api-key` — so it can be masked like headers
+                and env, and opens masked when one of its lines looks like
+                one. */}
+            <SecretTextarea
               id="mcp-args"
-              rows={3}
-              className="mt-1.5 resize-none font-mono text-xs"
               value={argsText}
-              onChange={(e) => setArgsText(e.target.value)}
+              onChange={setArgsText}
+              initiallyShown={redactArgs(argsLines(argsText)).join("\n") === argsLines(argsText).join("\n")}
               placeholder={"-y\n@modelcontextprotocol/server-filesystem\nC:\\Users\\you\\Documents"}
             />
             <p className="mt-1.5 text-[11px] text-foreground/50">
@@ -568,14 +581,14 @@ function McpEditor({ initial, onCancel, onSaved }: EditorProps) {
 
       <div className="flex items-center justify-between gap-4">
         <div>
-          <Label>Ask before each tool call</Label>
+          <Label htmlFor="mcp-ask-each-call">Ask before each tool call</Label>
           <p className="mt-1 text-[11px] text-foreground/50">
             Every call from this server shows what the model wants to run
             and waits for you. Turn this off only for servers whose tools
             can't do harm on their own.
           </p>
         </div>
-        <Switch
+        <Switch id="mcp-ask-each-call"
           checked={askEachCall}
           onCheckedChange={setAskEachCall}
           className="shrink-0"
@@ -617,17 +630,17 @@ function McpEditor({ initial, onCancel, onSaved }: EditorProps) {
 
       <div className="flex items-center justify-between gap-4">
         <div>
-          <Label>Enabled</Label>
+          <Label htmlFor="mcp-server-enabled">Enabled</Label>
           <p className="mt-1 text-[11px] text-foreground/50">
             Disabled servers stay in the config but don't surface to the
             model.
           </p>
         </div>
-        <Switch
+        <Switch id="mcp-server-enabled"
           checked={enabled}
           onCheckedChange={setEnabled}
           className="shrink-0"
-          aria-label={enabled ? "Disable server" : "Enable server"}
+          aria-label="Server enabled"
         />
       </div>
 
@@ -681,8 +694,10 @@ function TransportSwitch({
   onChange: (next: McpTransport) => void;
 }) {
   return (
+    // Toggle buttons in a group, not a radiogroup, which owes arrow-key
+    // roving focus (see ProviderStep's `ProviderSwitch`).
     <div
-      role="radiogroup"
+      role="group"
       aria-label="Transport"
       className="mt-1.5 grid grid-cols-2 gap-2 rounded-2xl border border-foreground/10 bg-foreground/[0.03] p-1"
     >
@@ -693,8 +708,7 @@ function TransportSwitch({
           <button
             key={opt.value}
             type="button"
-            role="radio"
-            aria-checked={selected}
+            aria-pressed={selected}
             onClick={() => onChange(opt.value)}
             className={cn(
               "flex items-center justify-center gap-1.5 rounded-xl px-3 py-2 text-[12px] font-medium transition-colors",

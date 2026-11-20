@@ -19,21 +19,33 @@ The macOS install / Gatekeeper-bypass instructions live in the top-level
 
 1. On your dev branch, when the work is ready to ship:
    - bump the version in `package.json`, `src-tauri/tauri.conf.json`,
-     `src-tauri/Cargo.toml`, and refresh `src-tauri/Cargo.lock`;
+     `src-tauri/Cargo.toml`, and refresh `src-tauri/Cargo.lock`
+     (`cargo update -p loach`) and `package-lock.json`
+     (`npm install --package-lock-only`) — `npm test` fails while any of
+     the five disagree;
    - create `releases/X.Y.Z.md` with user-facing notes (markdown is fine —
      headings, lists, links all render in both places).
 2. Merge the branch to `main`.
-3. The workflow detects the new version + matching notes file and starts the
-   build. If either is missing, the workflow silently skips — normal merges
-   don't trigger anything.
-4. When the build finishes, inspect the **draft** release on GitHub. Open
+3. The workflow detects the new version + matching notes file, tags the
+   commit `vX.Y.Z` and starts the build. If the notes file is missing or the
+   tag already exists, the workflow silently skips — normal merges don't
+   trigger anything. If the three version strings disagree, it fails
+   instead.
+4. Wait for every `build` leg and the `verify-updater-json` job after them
+   to go green (that job fails if a platform is missing from `latest.json`,
+   signed for another version, or the plain Linux key isn't the AppImage;
+   re-run the failed platform's leg). Then inspect the **draft** release on
+   GitHub and check its body matches `releases/X.Y.Z.md`. Open
    `latest.json` from the assets and check every platform entry points at the
    right artifact, each with a non-empty base64 `signature`. The `url`s are
    GitHub API asset links (`api.github.com/.../releases/assets/<id>`) that
    don't name the file, so read the artifact from the signature instead:
    base64-decode it (PowerShell:
    `[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($sig))`) and
-   check the `file:` field on its `trusted comment:` line:
+   check its `trusted comment:` line: it must end in `version:X.Y.Z`,
+   matching the top-level `version` (since Loach 1.6.0, installs reject an
+   update signed for another version — so never hand-edit `version`), and
+   its `file:` field names the artifact:
 
    | key | `file:` |
    | --- | --- |

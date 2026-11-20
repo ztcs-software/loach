@@ -57,12 +57,18 @@ jobs:
           set -euo pipefail
           PKG=$(node -p "require('./package.json').version")
           TAURI=$(node -p "require('./src-tauri/tauri.conf.json').version")
-          CARGO=$(grep -m1 '^version' src-tauri/Cargo.toml | sed -E 's/version = "(.*)"/\1/')
+          CARGO=$(grep -m1 '^version' src-tauri/Cargo.toml | sed -E 's/^version *= *"(.*)"/\1/')
 
           # Hard fail on version drift — that's a release-blocker bug, not a
           # "not a release" signal. The three files must agree before we ship.
           if [ "$PKG" != "$TAURI" ] || [ "$PKG" != "$CARGO" ]; then
             echo "::error::Version mismatch — package.json=$PKG, tauri.conf.json=$TAURI, Cargo.toml=$CARGO"
+            exit 1
+          fi
+
+          # Used in tags, file names and the steps below: only a version.
+          if ! [[ "$PKG" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::package.json version '$PKG' isn't a semver version"
             exit 1
           fi
 
@@ -77,7 +83,8 @@ jobs:
           fi
 
           # Soft skip when the tag already exists — keeps re-runs idempotent.
-          if git rev-parse "v$PKG" >/dev/null 2>&1; then
+          # A tag, not any ref: a branch named v1.2.3 skipped the release.
+          if git rev-parse -q --verify "refs/tags/v$PKG" >/dev/null; then
             echo "::notice::Tag v$PKG already exists — skipping."
             echo "should_release=false" >> "$GITHUB_OUTPUT"
             exit 0
@@ -88,9 +95,11 @@ jobs:
       - id: notes
         if: steps.gate.outputs.should_release == 'true'
         name: Read release notes
+        # Through the environment, not pasted into the script.
+        env:
+          VERSION: ${{ steps.gate.outputs.version }}
         run: |
           set -euo pipefail
-          VERSION="${{ steps.gate.outputs.version }}"
           {
             echo 'body<<RELEASE_NOTES_EOF'
             # printf %s\n guarantees a trailing newline even if the notes file
@@ -101,21 +110,31 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       # Push the tag before anything builds. The gate above keys on it, and
-      # nothing else creates it in time: tauri-action only drafts the release,
+      # nothing else creates it in time: `publish` only drafts the release,
       # and GitHub creates a draft's tag when the draft is published. Without
       # this, a push to main between the draft and Publish passed the gate
       # again and rebuilt the draft's assets from the newer commit.
       - name: Tag the release commit
         if: steps.gate.outputs.should_release == 'true'
+        env:
+          VERSION: ${{ steps.gate.outputs.version }}
         run: |
           set -euo pipefail
-          TAG="v${{ steps.gate.outputs.version }}"
+          TAG="v$VERSION"
           git tag "$TAG" "$GITHUB_SHA"
           git push origin "refs/tags/$TAG"
 
+  # Builds each platform's bundles — unsigned for the updater, and with no
+  # signing key anywhere in the job: every crate's build script and every npm
+  # dev dependency runs here, and one compromised among them could otherwise
+  # read the key that every install trusts, for good (the updater pubkey can
+  # never change). The bundles go to `publish` as artifacts, which signs them.
   build:
     needs: prepare
     if: needs.prepare.outputs.should_release == 'true'
+    # Nothing here writes to the repository or its releases.
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -132,14 +151,14 @@ jobs:
           - platform: ubuntu-24.04
             container: ubuntu:22.04
             args: '--bundles deb,appimage,rpm'
-          # Apple Silicon only — macos-14 is an M1 runner, so the target
+          # Apple Silicon only — macos-15 is an M1 runner, so the target
           # matches the host arch and no extra `rustup target add` is needed.
           # We're not signing with Apple (no Developer Program subscription);
           # signingIdentity: "-" in tauri.conf.json applies an ad-hoc signature
           # that satisfies the updater bundle's structural checks but not
           # Gatekeeper. Users must bypass Gatekeeper on first launch — see
           # README.md "Install on macOS".
-          - platform: macos-14
+          - platform: macos-15
             args: '--target aarch64-apple-darwin --bundles app,dmg'
 
     runs-on: ${{ matrix.platform }}
@@ -147,8 +166,8 @@ jobs:
     steps:
       # The bare ubuntu:22.04 image ships neither git nor curl, and this must
       # run *before* checkout: with no git present, actions/checkout quietly
-      # falls back to a tarball download and leaves no .git behind, which
-      # breaks tauri-action's tag creation. `safe.directory` because the
+      # falls back to a tarball download and leaves no .git behind. Curl is
+      # what the Rust toolchain installs with. `safe.directory` because the
       # container runs as root against a workspace owned by the runner user.
       - name: Bootstrap container
         if: matrix.container != ''
@@ -160,12 +179,8 @@ jobs:
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # Tauri-action needs full history to compute the right tag base
-          # for the auto-created tag. Matches `prepare`'s checkout.
-          fetch-depth: 0
-          # Nothing in this job pushes (tauri-action talks to the API with
-          # GITHUB_TOKEN), so don't leave the token in .git/config for
-          # `npm ci` install scripts and build scripts to find.
+          # Nothing in this job pushes, so don't leave the token in
+          # .git/config for `npm ci` install scripts and build scripts to find.
           persist-credentials: false
 
       # Runs as root inside the container, so no sudo. build-essential,
@@ -207,7 +222,7 @@ jobs:
       # `image`, `serde_with`, `time` set it at 1.88.
       #
       # Every action is pinned to a commit, not a tag: a moved tag would run
-      # new code in a job that holds the updater signing key.
+      # new code in a release build.
       - uses: dtolnay/rust-toolchain@7dcc700092a1a8b9c17ba0e140b4e34e93000946 # 1.90.0
         with:
           toolchain: 1.90.0
@@ -227,15 +242,13 @@ jobs:
       - run: npm ci
 
       # The frontend is built here, apart from `tauri build`, which would run
-      # it as its beforeBuildCommand with the updater signing key in the
-      # environment — where vite, its plugins and every other dev dependency
-      # could read it. The tauri-action step skips that hook (see its
+      # it as its beforeBuildCommand; the build step skips that hook (see its
       # `--config`). TAURI_ENV_PLATFORM is the one variable the CLI would
       # have set that vite.config.ts reads (it picks the build target).
       - name: Build the frontend
         run: npm run build
         env:
-          TAURI_ENV_PLATFORM: ${{ matrix.platform == 'windows-latest' && 'windows' || (matrix.platform == 'macos-14' && 'darwin' || 'linux') }}
+          TAURI_ENV_PLATFORM: ${{ matrix.platform == 'windows-latest' && 'windows' || (matrix.platform == 'macos-15' && 'darwin' || 'linux') }}
 
       # Signs the macOS app with a stable self-signed identity instead of the
       # ad-hoc one in tauri.conf.json, once the two MACOS_SIGNING_* secrets
@@ -272,7 +285,7 @@ jobs:
       # updater key — whoever holds it can sign an app the Keychain takes for
       # Loach — and keep it: a replacement costs every install another prompt.
       - name: Import macOS signing identity
-        if: matrix.platform == 'macos-14'
+        if: matrix.platform == 'macos-15'
         env:
           MACOS_SIGNING_CERTIFICATE: ${{ secrets.MACOS_SIGNING_CERTIFICATE }}
           MACOS_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_SIGNING_CERTIFICATE_PASSWORD }}
@@ -315,46 +328,210 @@ jobs:
           codesign -d -r- "$RUNNER_TEMP/probe"
           echo "APPLE_SIGNING_IDENTITY=$ID" >> "$GITHUB_ENV"
 
-      - uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
+      # prebuilt-frontend.conf.json empties beforeBuildCommand: the frontend
+      # was built in its own step. no-updater-signing.conf.json switches the
+      # bundler's updater signing off — on, it wants the key — and `publish`
+      # signs the same files instead. (Files, not inline JSON, so no shell or
+      # argument splitting can mangle their quotes. TAURI_CONFIG doesn't reach
+      # the build hooks.)
+      - name: Build the app
+        shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           # appimagetool mounts itself through FUSE, which a container does not
           # provide; this makes it self-extract instead. Harmless elsewhere.
           APPIMAGE_EXTRACT_AND_RUN: 1
-        with:
-          # The `prepare` job already pushed this tag at the commit being
-          # built. First matrix job to finish creates the release; subsequent
-          # jobs upload their assets to the same one.
-          tagName: v${{ needs.prepare.outputs.version }}
-          releaseName: 'Loach v${{ needs.prepare.outputs.version }}'
-          releaseBody: ${{ needs.prepare.outputs.release_body }}
-          releaseDraft: true
-          # Anything with a pre-release qualifier (e.g. `-alpha`, `-beta`,
-          # `-rc.1`) is flagged prerelease; bare `1.2.3` ships as stable.
-          prerelease: ${{ contains(needs.prepare.outputs.version, '-') }}
-          # Since v1 the `url`s in latest.json are API asset links
-          # (api.github.com/.../releases/assets/<id>), stable across the
-          # draft -> publish switch. Every shipped install (updater plugin
-          # 2.10.1+) downloads them fine: it sends Accept:
-          # application/octet-stream and follows the redirect to the file.
-          uploadUpdaterJson: true
-          # prebuilt-frontend.conf.json empties beforeBuildCommand: the
-          # frontend was built in its own step, without the signing key.
-          # (A file, not inline JSON, so no shell or argument splitting can
-          # mangle its quotes. TAURI_CONFIG doesn't reach the build hooks.)
-          # Cargo's build scripts still see the key — the bundler signs in
-          # this same `tauri build`.
-          args: ${{ matrix.args }} --config src-tauri/prebuilt-frontend.conf.json
+        run: >-
+          npm run tauri -- build ${{ matrix.args }}
+          --config src-tauri/prebuilt-frontend.conf.json
+          --config src-tauri/no-updater-signing.conf.json
 
-  # tauri-action merges each leg's entries into latest.json by downloading,
-  # editing and re-uploading it, so two legs finishing together can drop one
-  # platform's entries. Check the merged file once every leg is done: a gap
-  # fails here, loudly, instead of reaching installs as an update that never
-  # arrives. (The fix is re-running the build leg for the missing platform.)
-  verify-updater-json:
+      # The installers, under the names the release has always used. The
+      # updater installs the setup.exe, AppImage, deb and rpm themselves; on
+      # macOS it installs `<name>_<version>_aarch64.app.tar.gz`, which the
+      # bundler only packs while signing, so it's packed here the way the
+      # bundler packs it: the .app at the archive's root, without the
+      # AppleDouble files or xattr records macOS tar adds by default.
+      - name: Collect the bundles
+        shell: bash
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          shopt -s failglob
+          mkdir -p release-bundles
+          case "$PLATFORM" in
+            windows-latest)
+              cp src-tauri/target/release/bundle/nsis/*-setup.exe release-bundles/
+              ;;
+            ubuntu-24.04)
+              cp src-tauri/target/release/bundle/appimage/*.AppImage \
+                 src-tauri/target/release/bundle/deb/*.deb \
+                 src-tauri/target/release/bundle/rpm/*.rpm release-bundles/
+              ;;
+            macos-15)
+              bundle=src-tauri/target/aarch64-apple-darwin/release/bundle
+              cp "$bundle"/dmg/*.dmg release-bundles/
+              app=$(cd "$bundle/macos" && echo *.app)
+              COPYFILE_DISABLE=1 tar --no-mac-metadata --no-xattrs -czf \
+                "release-bundles/${app%.app}_${VERSION}_aarch64.app.tar.gz" -C "$bundle/macos" "$app"
+              ;;
+          esac
+          ls -l release-bundles
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: bundles-${{ matrix.platform }}
+          path: release-bundles/
+          if-no-files-found: error
+          # Long enough to re-run a failed `publish` (Re-run failed jobs).
+          retention-days: 7
+          # Installers and archives are compressed already.
+          compression-level: 0
+
+  # Signs what `build` made and drafts the release. The one job that holds
+  # the updater signing key, and it builds nothing — no `npm ci`, no cargo,
+  # no repository code: only the Tauri CLI, at the lockfile's version and
+  # hashes, installed without install scripts. `tauri signer sign
+  # --app-version` writes the same `version:` trusted comment the bundler did
+  # (`timestamp:…\tfile:…\tversion:…`), which updater plugin 2.13+ checks
+  # against latest.json.
+  publish:
     needs: [prepare, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      # Only the lockfile: it names the CLI's version and hashes.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: package-lock.json
+          sparse-checkout-cone-mode: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: bundles-*
+          path: release-bundles
+          merge-multiple: true
+
+      # npm checks each tarball against the registry's hash; this checks
+      # those hashes are the ones in the reviewed lockfile.
+      - name: Install the Tauri CLI
+        run: |
+          set -euo pipefail
+          LOCK="$GITHUB_WORKSPACE/package-lock.json"
+          CLI=$(jq -r '.packages["node_modules/@tauri-apps/cli"].version' "$LOCK")
+          mkdir -p "$RUNNER_TEMP/cli"
+          cd "$RUNNER_TEMP/cli"
+          npm install --no-save --ignore-scripts --no-audit --no-fund "@tauri-apps/cli@$CLI"
+          for p in @tauri-apps/cli @tauri-apps/cli-linux-x64-gnu; do
+            want=$(jq -r --arg p "node_modules/$p" '.packages[$p].integrity' "$LOCK")
+            got=$(jq -r --arg p "node_modules/$p" '.packages[$p].integrity' node_modules/.package-lock.json)
+            if [ "$want" != "$got" ]; then
+              echo "::error::$p installed as $got, but the lockfile has $want"
+              exit 1
+            fi
+          done
+          echo "TAURI_CLI=$RUNNER_TEMP/cli/node_modules/.bin/tauri" >> "$GITHUB_ENV"
+
+      - name: Sign the updater bundles
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          shopt -s failglob
+          for f in release-bundles/*-setup.exe release-bundles/*.AppImage release-bundles/*.deb \
+                   release-bundles/*.rpm release-bundles/*.app.tar.gz; do
+            "$TAURI_CLI" signer sign --app-version "$VERSION" "$f"
+          done
+
+      # The `prepare` job already pushed this tag at the commit built.
+      - name: Draft the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          NOTES: ${{ needs.prepare.outputs.release_body }}
+        run: |
+          set -euo pipefail
+          # inherit_errexit: a failure inside `$(one …)` or `$(entry …)`
+          # stops the step there, not at whatever runs next.
+          shopt -s failglob inherit_errexit
+          TAG="v$VERSION"
+          REPO="$GITHUB_REPOSITORY"
+          # A draft isn't reachable by tag. A re-run finds the one its first
+          # attempt made, and `--clobber` replaces what that one uploaded.
+          draft_id() {
+            local ids
+            ids=$(gh api "repos/$REPO/releases?per_page=100" --paginate \
+              --jq ".[] | select(.tag_name == \"$TAG\") | .id")
+            printf '%s' "${ids%%$'\n'*}"
+          }
+          ID=$(draft_id)
+          if [ -z "$ID" ]; then
+            flags=(--draft --verify-tag --title "Loach $TAG" --notes "$NOTES")
+            # A pre-release qualifier (`-alpha`, `-rc.1`) marks a prerelease;
+            # a bare `1.2.3` ships as stable.
+            if [[ "$VERSION" == *-* ]]; then
+              flags+=(--prerelease)
+            fi
+            gh release create "$TAG" --repo "$REPO" "${flags[@]}"
+            ID=$(draft_id)
+          fi
+          gh release upload "$TAG" --repo "$REPO" --clobber release-bundles/*
+
+          # latest.json, as tauri-action wrote it: each `url` is the asset's
+          # API link (api.github.com/.../releases/assets/<id>), stable across
+          # the draft -> publish switch. Every shipped install (updater plugin
+          # 2.10.1+) downloads those: it sends Accept: application/octet-stream
+          # and follows the redirect to the file.
+          ASSETS=$(gh api "repos/$REPO/releases/$ID/assets?per_page=100" --paginate)
+          one() {
+            # shellcheck disable=SC2206 # $1 is a glob, expanded on purpose
+            local found=(release-bundles/$1)
+            if [ "${#found[@]}" -ne 1 ]; then
+              echo "::error::expected one $1 bundle, found ${#found[@]}" >&2
+              exit 1
+            fi
+            printf '%s' "${found[0]}"
+          }
+          entry() {
+            local file name id
+            file=$(one "$1")
+            name=$(basename "$file")
+            id=$(jq -r --arg n "$name" '.[] | select(.name == $n) | .id' <<<"$ASSETS")
+            if [ -z "$id" ]; then
+              echo "::error::$name isn't on the release" >&2
+              exit 1
+            fi
+            jq -n --rawfile sig "$file.sig" --arg url "https://api.github.com/repos/$REPO/releases/assets/$id" \
+              '{signature: ($sig | gsub("\\s+$"; "")), url: $url}'
+          }
+          WIN=$(entry '*-setup.exe')
+          APPIMAGE=$(entry '*.AppImage')
+          DEB=$(entry '*.deb')
+          RPM=$(entry '*.rpm')
+          APP=$(entry '*.app.tar.gz')
+          jq -n --arg version "$VERSION" --arg notes "$NOTES" \
+            --arg pub_date "$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)" \
+            --argjson win "$WIN" --argjson appimage "$APPIMAGE" --argjson deb "$DEB" \
+            --argjson rpm "$RPM" --argjson app "$APP" \
+            '{version: $version, notes: $notes, pub_date: $pub_date, platforms: {
+              "windows-x86_64": $win, "windows-x86_64-nsis": $win,
+              "linux-x86_64": $appimage, "linux-x86_64-appimage": $appimage,
+              "linux-x86_64-deb": $deb, "linux-x86_64-rpm": $rpm,
+              "darwin-aarch64": $app, "darwin-aarch64-app": $app
+            }}' > latest.json
+          gh release upload "$TAG" --repo "$REPO" --clobber latest.json
+
+  # Re-reads the latest.json `publish` uploaded and checks it the way an
+  # install will: every platform there, each signed for this version, and
+  # the plain linux key on the AppImage. A gap fails here, loudly, instead of
+  # reaching installs as an update that never arrives.
+  verify-updater-json:
+    needs: [prepare, publish]
     runs-on: ubuntu-24.04
     steps:
       - name: Check latest.json lists every platform

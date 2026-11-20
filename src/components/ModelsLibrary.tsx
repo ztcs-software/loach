@@ -32,6 +32,7 @@ import { useUIStore } from "@/stores/uiStore";
 import { fullOllamaTag } from "@/lib/modelChoice";
 import { cn, formatBytes } from "@/lib/utils";
 import type { ModelInfo, ProviderId } from "@/types";
+import { PullProgress } from "./PullProgress";
 
 /**
  * Full-canvas browse-and-act surface for installed models. Mirrors
@@ -253,9 +254,8 @@ export function ModelsLibrary() {
                     if (!dest || !dest.trim()) return;
                     // A copy replaces whatever is under the tag already — the
                     // source itself included. A bare name is Ollama's `:latest`.
-                    const fullTag = (t: string) => (t.includes(":") ? t : `${t}:latest`);
                     if (
-                      ollamaModels.some((x) => fullTag(x.id) === fullTag(dest.trim())) &&
+                      ollamaModels.some((x) => fullOllamaTag(x.id) === fullOllamaTag(dest.trim())) &&
                       !(await confirm({
                         title: `Replace “${dest.trim()}”?`,
                         body: "A model with this tag already exists. Duplicating replaces it with this one.",
@@ -370,6 +370,11 @@ function ModelTile({
       aria-label={`Customize model: ${model.id}`}
       onClick={onCustomize}
       onKeyDown={(e) => {
+        // Only keys pressed on the tile itself. The "New chat" button, the
+        // menu trigger and the menu's items (through React's portal
+        // bubbling) all send their Enter here too, and it opened the editor
+        // in place of starting a chat — or alongside a Delete.
+        if (e.target !== e.currentTarget) return;
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
           onCustomize();
@@ -472,10 +477,6 @@ function RunChip({
   onCancel: () => void;
   onDismiss: () => void;
 }) {
-  const pct =
-    run.total > 0
-      ? Math.min(100, Math.round((run.completed / run.total) * 100))
-      : null;
   const verb = run.kind === "pull" ? "Pulling" : "Creating";
   const terminal = run.finished;
   return (
@@ -510,25 +511,16 @@ function RunChip({
           type="button"
           onClick={terminal === null ? onCancel : onDismiss}
           className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded text-foreground/45 transition-colors hover:bg-foreground/10 hover:text-foreground"
-          aria-label={terminal === null ? "Cancel" : "Dismiss"}
+          aria-label={`${terminal === null ? "Cancel" : "Dismiss"} ${run.target}`}
         >
           ✕
         </button>
       </div>
-      <div className="mt-1 truncate text-[11px] text-foreground/55">
+      {/* Truncated to one line: the whole of a long Ollama error on hover. */}
+      <div className="mt-1 truncate text-[11px] text-foreground/55" title={run.error ?? undefined}>
         {run.error ?? run.status}
       </div>
-      {terminal === null && (
-        <div className="mt-2 h-1 w-full overflow-hidden rounded-full bg-foreground/10">
-          <div
-            className={cn(
-              "h-full bg-primary transition-[width]",
-              pct === null && "w-1/3 animate-pulse",
-            )}
-            style={pct !== null ? { width: `${pct}%` } : undefined}
-          />
-        </div>
-      )}
+      {terminal === null && <PullProgress run={run} className="mt-2" />}
     </div>
   );
 }

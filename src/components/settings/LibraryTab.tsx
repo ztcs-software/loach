@@ -11,6 +11,8 @@ import { cn } from "@/lib/utils";
 import { useLibraryStore } from "@/stores/libraryStore";
 import { useModelsStore } from "@/stores/modelsStore";
 import { useSettingsStore } from "@/stores/settingsStore";
+import { useToastStore } from "@/stores/toastStore";
+import { logger } from "@/lib/logger";
 import type { ProviderId } from "@/types";
 import { SectionTitle } from "./shared";
 
@@ -42,6 +44,14 @@ function sameModel(a: string, b: string): boolean {
  * state of the retrieval index built over Library items and Space sources,
  * and how Library images are scaled.
  */
+function toastError(title: string, e: unknown) {
+  useToastStore.getState().push({
+    kind: "error",
+    title,
+    body: e instanceof Error ? e.message : String(e),
+  });
+}
+
 export function LibraryTab() {
   const provider = useSettingsStore((s) => s.embedding_provider);
   const model = useSettingsStore((s) => s.embedding_model);
@@ -62,7 +72,11 @@ export function LibraryTab() {
   // instead of waiting out its retry timer. Re-writing the setting wakes it.
   const wasPulling = useRef(false);
   useEffect(() => {
-    if (wasPulling.current && !livePull && model) void setSetting("embedding_model", model);
+    // Only a nudge — the indexer retries on its own timer — so a failure is
+    // logged, not shown.
+    if (wasPulling.current && !livePull && model) {
+      setSetting("embedding_model", model).catch((e) => logger.warn("couldn't wake the indexer", e));
+    }
     wasPulling.current = !!livePull;
   }, [livePull, model]);
 
@@ -76,7 +90,7 @@ export function LibraryTab() {
 
   const download = async (tag: string) => {
     await choose(tag);
-    await pullModel(tag);
+    await pullModel(tag).catch((e) => toastError(`Couldn't download ${tag}`, e));
   };
 
   const setProvider = async (p: ProviderId) => {
@@ -85,6 +99,10 @@ export function LibraryTab() {
     // briefly sent Library text to the new provider's endpoint under the
     // old provider's model name.
     await update("embedding_model", "");
+    // `update` reverts and toasts on a failed write instead of throwing: if
+    // the model didn't clear, switching now is the very leak the order
+    // prevents.
+    if (useSettingsStore.getState().embedding_model !== "") return;
     await update("embedding_provider", p);
   };
 
@@ -98,6 +116,11 @@ export function LibraryTab() {
     setRebuilding(true);
     try {
       await ragReindex();
+      // Reissued under the current key: re-read the per-item counts, or
+      // every item still reads as indexed (no busy edge if a pass was on).
+      void useLibraryStore.getState().refreshItems();
+    } catch (e) {
+      toastError("Couldn't rebuild the search index", e);
     } finally {
       setRebuilding(false);
     }
@@ -171,7 +194,9 @@ export function LibraryTab() {
                 size="sm"
                 variant="outline"
                 className="rounded-lg"
-                onClick={() => void setSetting("embedding_model", model)}
+                onClick={() =>
+                  void setSetting("embedding_model", model).catch((e) => toastError("Couldn't retry indexing", e))
+                }
               >
                 Retry
               </Button>
@@ -217,6 +242,7 @@ export function LibraryTab() {
             <button
               key={p}
               type="button"
+              aria-pressed={provider === p}
               onClick={() => void setProvider(p)}
               className={cn(
                 "rounded-[10px] px-3 py-1 text-xs font-medium transition-colors",
@@ -237,6 +263,7 @@ export function LibraryTab() {
           <Input
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
+            aria-label="Embedding model"
             placeholder={provider === "ollama" ? "e.g. embeddinggemma" : "e.g. text-embedding-3-small"}
             spellCheck={false}
             className="h-9"
@@ -261,7 +288,11 @@ export function LibraryTab() {
           <p className="flex items-center gap-2 text-xs text-amber-700 dark:text-amber-300">
             <AlertTriangle className="h-3.5 w-3.5" />
             {model} isn't installed in Ollama.
-            <button type="button" onClick={() => void pullModel(model)} className="underline underline-offset-2">
+            <button
+              type="button"
+              onClick={() => void pullModel(model).catch((e) => toastError(`Couldn't download ${model}`, e))}
+              className="underline underline-offset-2"
+            >
               Download it
             </button>
           </p>

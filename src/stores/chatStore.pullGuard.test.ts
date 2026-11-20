@@ -113,4 +113,28 @@ describe("sendUserMessage model-download guard", () => {
     useModelsStore.setState({ runs: { "run-1": livePull("llama3") } } as never);
     expect(await sendError()).toMatch(/still downloading/);
   });
+
+  // F7-06: a pull that failed (or was cancelled) left the chat on a tag that
+  // never landed, and the send went on to Ollama's 404.
+  describe("after the download failed", () => {
+    const failed: AdminProgress = { ...livePull("llama3:8b"), finished: "error", error: "disk full" };
+
+    it("blocks the send and says why", async () => {
+      setup({});
+      useModelsStore.setState({ runs: { "run-1": failed } } as never);
+      expect(await sendError()).toMatch(/didn't finish downloading \(disk full\)/);
+    });
+
+    it("reports a retry still running as downloading", async () => {
+      setup({});
+      useModelsStore.setState({ runs: { "run-1": failed, "run-2": livePull("llama3:8b") } } as never);
+      expect(await sendError()).toMatch(/still downloading/);
+    });
+
+    it("lets the send through once the model is installed after all", async () => {
+      setup({}, [installed("llama3:8b")]);
+      useModelsStore.setState({ runs: { "run-1": failed } } as never);
+      expect(await sendError()).not.toMatch(/didn't finish|still downloading/);
+    });
+  });
 });
