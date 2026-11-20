@@ -151,14 +151,14 @@ jobs:
           - platform: ubuntu-24.04
             container: ubuntu:22.04
             args: '--bundles deb,appimage,rpm'
-          # Apple Silicon only — macos-14 is an M1 runner, so the target
+          # Apple Silicon only — macos-15 is an M1 runner, so the target
           # matches the host arch and no extra `rustup target add` is needed.
           # We're not signing with Apple (no Developer Program subscription);
           # signingIdentity: "-" in tauri.conf.json applies an ad-hoc signature
           # that satisfies the updater bundle's structural checks but not
           # Gatekeeper. Users must bypass Gatekeeper on first launch — see
           # README.md "Install on macOS".
-          - platform: macos-14
+          - platform: macos-15
             args: '--target aarch64-apple-darwin --bundles app,dmg'
 
     runs-on: ${{ matrix.platform }}
@@ -248,7 +248,7 @@ jobs:
       - name: Build the frontend
         run: npm run build
         env:
-          TAURI_ENV_PLATFORM: ${{ matrix.platform == 'windows-latest' && 'windows' || (matrix.platform == 'macos-14' && 'darwin' || 'linux') }}
+          TAURI_ENV_PLATFORM: ${{ matrix.platform == 'windows-latest' && 'windows' || (matrix.platform == 'macos-15' && 'darwin' || 'linux') }}
 
       # Signs the macOS app with a stable self-signed identity instead of the
       # ad-hoc one in tauri.conf.json, once the two MACOS_SIGNING_* secrets
@@ -285,7 +285,7 @@ jobs:
       # updater key — whoever holds it can sign an app the Keychain takes for
       # Loach — and keep it: a replacement costs every install another prompt.
       - name: Import macOS signing identity
-        if: matrix.platform == 'macos-14'
+        if: matrix.platform == 'macos-15'
         env:
           MACOS_SIGNING_CERTIFICATE: ${{ secrets.MACOS_SIGNING_CERTIFICATE }}
           MACOS_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_SIGNING_CERTIFICATE_PASSWORD }}
@@ -369,7 +369,7 @@ jobs:
                  src-tauri/target/release/bundle/deb/*.deb \
                  src-tauri/target/release/bundle/rpm/*.rpm release-bundles/
               ;;
-            macos-14)
+            macos-15)
               bundle=src-tauri/target/aarch64-apple-darwin/release/bundle
               cp "$bundle"/dmg/*.dmg release-bundles/
               app=$(cd "$bundle/macos" && echo *.app)
