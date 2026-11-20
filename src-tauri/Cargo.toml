@@ -36,14 +36,14 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 
 # Storage
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.42", features = ["bundled"] }
 # r2d2 + r2d2_sqlite back the read-only connection pool. The writer still
 # goes through `Mutex<Connection>` so transactions keep their existing
 # semantics; the pool is purely an additive parallelism win for hot SELECT
 # paths (list_sessions, list_messages, list_space_*, get_*) that would
 # otherwise queue behind every other DB op including unrelated writes.
 r2d2 = "0.8"
-r2d2_sqlite = "0.35"
+r2d2_sqlite = "0.37"
 
 # Secrets
 keyring = { version = "4", default-features = false, features = ["v1"] }
@@ -71,7 +71,7 @@ open = { version = "5", features = ["shellexecute-on-windows"] }
 # tauri-plugin-dialog, whose builder can't make Cancel the default button
 # (see `commands::confirm_stdio_spawn`). Already in the tree through that
 # plugin, which also switches on the per-platform backend features.
-rfd = { version = "0.16", default-features = false }
+rfd = { version = "0.17", default-features = false }
 # The temporary folder code from `run_script` is saved and run in, removed
 # afterwards (`skills/script.rs`). Already in the tree through
 # tauri-plugin-updater; the test suites use it for scratch folders too.
